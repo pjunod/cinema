@@ -140,6 +140,12 @@ A Swift test in `clients/apple/Tests/` and a JVM test under `make
 android-test`, both reading `tests/playback/auto-quality-policy.json` and both
 driving a port of `decideRung`. One JSON, three runners.
 
+**Removed 2026-10-04.** The ports, both runners and the Rust reducer
+`decide_auto_transition` were deleted because no player ever called them
+([Remove native policy runners](../apple-builds/634-remove-native-policy-runners.md)).
+The fixture and its web runner remain; an adapter that ports the policy again
+brings its runner back with it.
+
 Design §3.6 explicitly allows this pure fixture/runner milestone before D3;
 §5.4's baseline dependency still applies to the adapters, not these runners.
 The current browser's `web_current` expectations remain authoritative where

@@ -384,7 +384,8 @@ player obeys, subtitles and overlays, layouts and themes.
 | File | Answers | |
 |---|---|---|
 | [Live TV cluster resource](apple-builds/537-live-tv-cluster-resource.md) | Apple build 193 durable cluster start intents and protocol negotiation; validation limits. | built |
-| [Native policy runners](apple-builds/634-native-policy-runners.md) | Apple 202 / Android 140 pure Auto-quality ports and shared JSON test runners; no native controller enablement or device acceptance. | open |
+| [Native policy runners](apple-builds/634-native-policy-runners.md) | Apple 202 / Android 140 pure Auto-quality ports and shared JSON test runners; no native controller enablement or device acceptance. Removed 2026-10-04 (next row). | done |
+| [Remove native policy runners](apple-builds/634-remove-native-policy-runners.md) | Why the uncalled Swift/Kotlin `decideRung` ports, their runners and the Rust `decide_auto_transition` reducer were deleted, and why the shared fixture stays. | built |
 | [Native seek completion deadline](apple-builds/473-native-seek-deadline.md) | Apple recovery for seeks that never complete, cancellation and late-callback ownership. | built |
 | [Live TV station startup](apple-builds/568-live-tv-session-url.md) | Apple build 189 repair for valid station URLs rejected as expired sessions; regression and delivery limits. | built |
 | [STATUS-HISTORY.md](clients/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
