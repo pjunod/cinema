@@ -22,11 +22,21 @@ final class Session: @unchecked Sendable {
         return (credentialOrigin, credentialToken)
     }
 
+    /// The signed-in session's watch-write floor, echoed only by `PlurxAPI`'s
+    /// verbs. Never by `authorize(_:)`: images, media, downloads, playback
+    /// control and client logs authorize through it too and must not carry it.
+    let readAfter = ReadAfterFloor()
+
     func setCredentials(origin: String, token: String?) {
         nodeLock.lock()
+        let changed = credentialOrigin != origin || credentialToken != token
         credentialOrigin = origin
         credentialToken = token
         nodeLock.unlock()
+        // After the write, never before: an API verb takes its read-after
+        // ticket before it reads the bearer, so a ticket naming the new
+        // generation can never ride a request carrying the old account's token.
+        if changed { readAfter.authorizationChanged() }
     }
 
     private let noticeLock = NSLock()

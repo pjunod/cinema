@@ -3046,12 +3046,8 @@ final class PlayerController: ObservableObject {
     private func acknowledgeClientEvidence(_ body: Data, receipt: String, header: String, deadline: Double) async -> Bool {
         let remaining = (deadline - ProcessInfo.processInfo.systemUptime) * 1000
         guard remaining.isFinite, remaining >= 1,
-              let url = Session.shared.url("/api/v1/client-log") else { return false }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        Session.shared.authorize(&request)
+              let request = Self.clientLogRequest(body: body),
+              let url = request.url else { return false }
         let frozenRequest = request
         let waitMs = Int(min(remaining, 250))
         return await withTaskGroup(of: Bool.self) { group in
@@ -9135,15 +9131,23 @@ final class PlayerController: ObservableObject {
         ))
     }
 
-    private func postClientLog<Payload: Encodable>(_ payload: Payload) {
-        guard let url = Session.shared.url("/api/v1/client-log"),
-              let body = try? JSONEncoder().encode(payload)
-        else { return }
+    /// One `/client-log` post. Bearer only: a log is not an API verb, so it
+    /// never echoes the session's read-after floor (`ReadAfterFloor`) and its
+    /// reply is never read for one.
+    nonisolated static func clientLogRequest(body: Data) -> URLRequest? {
+        guard let url = Session.shared.url("/api/v1/client-log") else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         Session.shared.authorize(&request)
+        return request
+    }
+
+    private func postClientLog<Payload: Encodable>(_ payload: Payload) {
+        guard let body = try? JSONEncoder().encode(payload),
+              let request = Self.clientLogRequest(body: body)
+        else { return }
         Task {
             _ = try? await URLSession.shared.data(for: request)
         }

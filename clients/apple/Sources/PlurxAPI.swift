@@ -71,6 +71,24 @@ private struct Refusal: Decodable {
 /// models stay idiomatic.
 struct PlurxAPI {
     let origin: String
+    /// Tests substitute a stubbed session for every one below; production
+    /// passes nil and each call keeps its own configuration.
+    private let transport: URLSession?
+    /// The session's watch-write floor. Only the API verbs echo and capture
+    /// it (`exchange(_:using:)`); see `ReadAfterFloor`.
+    private let readAfter: ReadAfterFloor
+
+    init(origin: String) {
+        self.init(origin: origin, transport: nil, readAfter: Session.shared.readAfter)
+    }
+
+    /// Injectable seam for the read-after wiring tests.
+    init(origin: String, transport: URLSession?, readAfter: ReadAfterFloor) {
+        self.origin = origin
+        self.transport = transport
+        self.readAfter = readAfter
+    }
+
     /// A cold embedded-subtitle extraction can require one full sequential
     /// read of a large MKV before the HLS session exists. Keep ordinary API
     /// calls brisk, but let this explicit playback-preparation action finish.
@@ -102,7 +120,7 @@ struct PlurxAPI {
         configuration.timeoutIntervalForResource = 5
         return URLSession(configuration: configuration)
     }()
-    private var session: URLSession { Self.waitingSession }
+    private var session: URLSession { transport ?? Self.waitingSession }
 
     private static let decoder: JSONDecoder = {
         let d = JSONDecoder()
@@ -123,9 +141,7 @@ struct PlurxAPI {
 
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
         guard let url = makeURL(path, query: query) else { throw APIError.badURL }
-        var req = URLRequest(url: url)
-        Session.shared.authorize(&req)
-        return try await run(req)
+        return try await run(URLRequest(url: url))
     }
 
     private func post<B: Encodable, T: Decodable>(
@@ -141,7 +157,6 @@ struct PlurxAPI {
            UUID(uuidString: receipt)?.uuidString.lowercased() == receipt {
             req.setValue(receipt, forHTTPHeaderField: "X-Plurx-Link-Receipt")
         }
-        Session.shared.authorize(&req)
         return try await run(req, using: session)
     }
 
@@ -149,22 +164,19 @@ struct PlurxAPI {
         guard let url = makeURL(path) else { throw APIError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        Session.shared.authorize(&req)
         return try await run(req)
     }
 
     private func put<B: Encodable, T: Decodable>(_ path: String, body: B) async throws -> T {
         var req = try jsonRequest(path, body: body)
         req.httpMethod = "PUT"
-        Session.shared.authorize(&req)
         return try await run(req)
     }
 
     private func putNoContent<B: Encodable>(_ path: String, body: B) async throws {
         var req = try jsonRequest(path, body: body)
         req.httpMethod = "PUT"
-        Session.shared.authorize(&req)
-        let (_, resp) = try await session.data(for: req)
+        let (_, resp) = try await exchange(req)
         try Self.check(resp)
     }
 
@@ -172,8 +184,7 @@ struct PlurxAPI {
         guard let url = makeURL(path, query: query) else { throw APIError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = "DELETE"
-        Session.shared.authorize(&req)
-        let (_, resp) = try await session.data(for: req)
+        let (_, resp) = try await exchange(req)
         try Self.check(resp)
     }
 
@@ -181,8 +192,7 @@ struct PlurxAPI {
         guard let url = makeURL(path) else { throw APIError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        Session.shared.authorize(&req)
-        let (_, resp) = try await session.data(for: req)
+        let (_, resp) = try await exchange(req)
         try Self.check(resp)
     }
 
@@ -190,20 +200,22 @@ struct PlurxAPI {
     ///
     /// This deliberately bypasses `Session.authorize`: a late request must not
     /// borrow a newer login's token or send the old token to a newly selected
-    /// server.
+    /// server. For the same reason it bypasses `exchange(_:using:)`: the token
+    /// may belong to no current session, so its request echoes nothing and its
+    /// reply — however late, with or without an index — never touches the
+    /// session's read-after floor.
     func logout(token: String) async throws {
         guard let url = makeURL("auth/logout") else { throw APIError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (_, resp) = try await Self.logoutSession.data(for: req)
+        let (_, resp) = try await (transport ?? Self.logoutSession).data(for: req)
         try Self.check(resp)
     }
 
     private func postNoContent<B: Encodable>(_ path: String, body: B) async throws {
-        var req = try jsonRequest(path, body: body)
-        Session.shared.authorize(&req)
-        let (_, resp) = try await session.data(for: req)
+        let req = try jsonRequest(path, body: body)
+        let (_, resp) = try await exchange(req)
         try Self.check(resp)
     }
 
@@ -220,13 +232,59 @@ struct PlurxAPI {
         return req
     }
 
+    /// One API verb's request and reply: the only place the read-after floor
+    /// is echoed or captured (`ReadAfterFloor`).
+    ///
+    /// The ticket is taken before the bearer is read — `Session.setCredentials`
+    /// writes the credential before it bumps the generation — so a reply is
+    /// only ever credited to the account whose token it was sent with. The
+    /// method and ticket travel with the reply, which `Self.check` cannot see,
+    /// and a transport error is observed here before it is rethrown unchanged.
+    /// Images, media, downloads, playback control, client logs and `logout`
+    /// never come through here.
+    private func exchange(
+        _ request: URLRequest,
+        using preferred: URLSession? = nil
+    ) async throws -> (Data, URLResponse) {
+        var request = request
+        let ticket = readAfter.ticket()
+        Session.shared.authorize(&request)
+        if let index = ticket.index {
+            request.setValue(String(index), forHTTPHeaderField: ReadAfterFloor.requestHeader)
+        }
+        let method = request.httpMethod ?? "GET"
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await (transport ?? preferred ?? Self.waitingSession).data(for: request) }
+        catch {
+            readAfter.transportFailed(method: method, ticket: ticket)
+            throw error
+        }
+        readAfter.observe(
+            reply: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: ReadAfterFloor.responseHeader),
+            method: method,
+            ticket: ticket
+        )
+        return (data, response)
+    }
+
+    /// An API verb, decoded. `serverInfo()` probes servers this session has
+    /// not trusted yet, so it alone sends neither bearer nor floor and
+    /// captures nothing (`echo: false`).
     private func run<T: Decodable>(
         _ req: URLRequest,
-        using session: URLSession? = nil
+        using session: URLSession? = nil,
+        echo: Bool = true
     ) async throws -> T {
         let data: Data
         let resp: URLResponse
-        do { (data, resp) = try await (session ?? self.session).data(for: req) }
+        do {
+            if echo {
+                (data, resp) = try await exchange(req, using: session)
+            } else {
+                (data, resp) = try await (transport ?? session ?? self.session).data(for: req)
+            }
+        }
         catch { throw Self.transportError(from: error) }
         try Self.check(resp, data: data)
         return try Self.decoder.decode(T.self, from: data)
@@ -305,7 +363,7 @@ struct PlurxAPI {
     /// endpoint. Never attach a saved bearer token while probing candidates.
     func serverInfo() async throws -> ServerInfo {
         guard let url = makeURL("server") else { throw APIError.badURL }
-        return try await run(URLRequest(url: url))
+        return try await run(URLRequest(url: url), echo: false)
     }
     /// The other ingresses this household's media may be retried through.
     /// Signed-in only, and deliberately not part of `serverInfo()`: that call
