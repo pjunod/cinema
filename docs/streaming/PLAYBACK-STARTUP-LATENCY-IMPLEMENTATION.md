@@ -35,7 +35,7 @@ The independent review and its dispositions belong in
 ### 1.1 The observed attempt
 
 The user reports a regression from roughly one second to ten seconds across
-clients. The inspected example is Safari on `nynuc`, resuming Shameless
+clients. The inspected example is Safari on `media1`, resuming Shameless
 S05E05, file 6456, at requested film time 2000 seconds. The server ran
 `38c917225` (`v0.3.0-5228-g38c917225`). The relevant publication sources are
 identical between that runtime revision and the planning checkout
@@ -83,7 +83,7 @@ starvation, disabled preparation, fleet-wide absence, or a broken scheduler.
 Neither an index on another node nor a queued job proves this node can serve
 the requested exact recipe. Inspect those states in M1.
 
-Private raw captures remain at `/private/tmp/plurx-startup-nynuc.log` and
+Private raw captures remain at `/private/tmp/plurx-startup-media1.log` and
 `/private/tmp/plurx-startup-history.log` on the investigating Mac. They contain
 private media paths and are temporary diagnostics, not repository fixtures.
 The sanitized event table and duration sequence above are the retained

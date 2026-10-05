@@ -42,6 +42,7 @@
             MediaSessionRequestClaim::Acquired { .. }
         ));
         let request = crate::transcode::SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
             candidate_context: None,
@@ -197,6 +198,7 @@ quality_catalog: None,
         let dir = crate::test_tempdir().expect("state dir");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
         let request = crate::transcode::SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
             candidate_context: None,
@@ -2990,6 +2992,12 @@ quality_catalog: None,
             block_budget: Duration::from_secs(8),
             materialize_budget: Duration::from_secs(30),
             blocked_get_cap: 64,
+            sdr_master_codecs: false,
+            index_cluster_cache: false,
+            hevc_unverified_copy: false,
+            live_recovery: true,
+            output_preparation: crate::vodserve::OutputPreparation::Off,
+            output_budget_bytes: 1 << 30,
         }, crate::vodserve::VodAttribution {
             user_name: &user.username,
             item_title: "Fixture",
@@ -3048,6 +3056,62 @@ quality_catalog: None,
         assert!(!vod.passive_presence(&id, &scope, &request.playback_id, &incarnation).await);
         assert!(segment_local_before(&state, &id, "seg00000.m4s", &RelayHeaders::default(), Instant::now() + Duration::from_secs(2)).await.is_err());
         assert_eq!(vod.active_sessions().await, 0);
+    }
+
+    /// S-10: a session's master shape is decided once, when it is created.
+    /// The public create reads `playback.sdr_master_codecs` with the rest of
+    /// its settings; flipping it afterwards changes the next session and never
+    /// this one, because resolving a presentation reads the value the session
+    /// recorded, not the store.
+    #[tokio::test]
+    async fn sdr_master_codecs_is_frozen_when_the_session_is_created() {
+        use plurx_core::playback::DesiredQuality;
+        let (state, user, file_id) = servable_state().await;
+        for (stored, created_with, flipped_to) in [("1", true, "0"), ("0", false, "1")] {
+            state
+                .store
+                .put_setting(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS, stored)
+                .await
+                .expect("set the switch before create");
+            let accepted = create(
+                crate::http::extract::AuthUser(user.clone()),
+                State(state.clone()),
+                AxPath(file_id),
+                HeaderMap::new(),
+                super::super::network::RemoteAddress(None),
+                Json(CreateSession {
+                    playback_id: format!("sdr-codecs-{stored}"),
+                    intent: Some(envelope(1, DesiredQuality::Original)),
+                    copy: Some(true),
+                    ..bare_create()
+                }),
+            )
+            .await
+            .expect("the create must be accepted");
+            let id = accepted.0.session_id.clone();
+            state
+                .store
+                .put_setting(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS, flipped_to)
+                .await
+                .expect("flip the switch after create");
+            let crate::transcode::HlsPresentationResolution::Ready(context, _, _) = state
+                .transcode
+                .hls_presentation_before(&id, Instant::now() + Duration::from_secs(5))
+                .await
+            else {
+                panic!("the created presentation resolves");
+            };
+            let facts = serde_json::to_value(
+                context.codec_facts.as_ref().expect("a created session freezes component facts"),
+            )
+            .expect("serializable facts");
+            assert_eq!(
+                facts.get("sdr_master_codecs").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                created_with,
+                "created with {stored:?}, then flipped to {flipped_to:?}: the session keeps \
+                 its create-time choice: {facts}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -358,7 +358,8 @@ parts. A recording with `gap_s > 0` finishes as `partial`, never `done`;
 a recording with 0 bytes on disk at finish is `failed`.
 
 **Drain, shutdown, fence.** Transports are sessions to the manager's
-lifecycle paths: `drain_before(generation)` (`live_tv.rs:2510`) cancels
+lifecycle paths: `drain_before(generation)` (`live_tv.rs:2510`; *historical —
+removed 2026-10-04 with the owner drain route, L-02 #537 cleanup*) cancels
 transports with `generation < drain_before` exactly as it cancels sessions;
 `shutdown()` (`:2530`) cancels all of them and waits under
 `SESSION_DRAIN_TIMEOUT`; and the fan-out checks
@@ -456,8 +457,10 @@ names.
 
 `dvr_loop`, each tick, in order — every step reads `config.generation`
 once at the top and passes it as the `fence_generation` of every
-conditional write, the discipline `start_local_inner` applies with
-`registry.min_generation` at `live_tv.rs:2185–2189`:
+conditional write, the discipline `start_local_inner` applied with
+`registry.min_generation` at `live_tv.rs:2185–2189` (*historical: that floor
+was removed 2026-10-04 with `drain_before`, its only writer; a live session now
+keeps its own `config_generation` and its fence ends it on a newer one*):
 
 1. **Recover** — rows in `recording` whose `recording_id` has no live sink
    in the registry (process restart, handoff, transport failure): if
@@ -507,7 +510,9 @@ airing has started → `expired`; when the guide is available, rows whose
 `DVR_MIN_USEFUL_S = 60`: an airing with less than a minute of capture left
 is not worth a tuner, a file and a library item.
 
-**Owner handoff.** `transition_from_owner_node_id`
+**Owner handoff** (*historical: #537 removed the configured owner, and
+`transition_from_owner_node_id` and `drain_before` were removed 2026-10-04
+with the L-02 #537 cleanup*). `transition_from_owner_node_id`
 (`live_tv.rs:160`) drives `drain_before` on the old owner, which cancels
 its transports (§3.5); their rows sit in `recording` with no worker until
 the new owner's first tick, whose step 1 reopens them as attempt `N+1`.

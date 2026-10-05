@@ -37,7 +37,7 @@ pub struct OpenFileLimit {
 /// nothing in the daemon raises it. systemd's `DefaultLimitNOFILESoft` is
 /// 1024 against a 524288 hard limit, and the fleet's containers inherit
 /// exactly that pair: `cat /proc/1/limits` inside the `plurxd` container read
-/// `Max open files  1024  524288` on nuc3, nuc4 and nynuc on 2026-09-23
+/// `Max open files  1024  524288` on lab3, lab4 and media1 on 2026-09-23
 /// (`docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md` §3.1).
 /// launchd's default for a LaunchAgent such as `deploy/com.plurx.plurxd.plist`
 /// is `256` soft against an unlimited hard limit, the lowest of any install

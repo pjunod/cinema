@@ -1,6 +1,9 @@
 # Service limits, child priorities and build hygiene — implementation plan
 
-**Status:** ready for review · **Executes:** §4.6 / F-build-4 / F-build-8 /
+**Status:** open — M1 partial, M2, M3, M5, M6 (release profile C), M7 PR 3 and
+M8 on `main` since 2026-10-04 (#793); M4, the busy-load readbacks and M7 PR 4
+open ·
+**Executes:** §4.6 / F-build-4 / F-build-8 /
 F-build-11 / F-build-13 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -193,7 +196,7 @@ measured exhaustion threshold" is why the table has those two columns.
 
 M1's measurement, as far as this session could take it. Every number below
 was read, not proposed. The hosts reachable from the executing session were
-**nuc3** (192.168.4.7), **nuc4** (192.168.4.8) and **nynuc** (192.168.5.236);
+**lab3** (10.42.4.7), **lab4** (10.42.4.8) and **media1** (10.42.5.236);
 no host named `media1` or `lab1` was reachable, and **every reading is idle**
 — see "What is still unobserved" below.
 
@@ -211,7 +214,7 @@ Max stack size            8388608              unlimited            bytes
 Max locked memory         8388608              8388608              bytes
 ```
 
-Identical on nuc3, nuc4 and nynuc. The pair is systemd's own default handed
+Identical on lab3, lab4 and media1. The pair is systemd's own default handed
 through Docker unchanged — `systemctl show -p DefaultLimitNOFILE
 -p DefaultLimitNOFILESoft` reads `524288` / `1024` on all three hosts — and
 `docker inspect plurxd` confirms nothing in the Compose file narrows or
@@ -222,7 +225,7 @@ $ ssh <host> 'docker inspect plurxd --format "Ulimits={{.HostConfig.Ulimits}} Pi
 Ulimits=[] PidsLimit=<nil> OomScoreAdj=0
 ```
 
-| Reading | nuc3 | nuc4 | nynuc | Command |
+| Reading | lab3 | lab4 | media1 | Command |
 |---|---|---|---|---|
 | `/proc/1/limits` open files (soft / hard) | 1024 / 524288 | 1024 / 524288 | 1024 / 524288 | `docker exec plurxd cat /proc/1/limits` |
 | pid 1 descriptors held (idle, two samples) | 45–46 | 56–61 | 46–47 | `docker exec plurxd sh -c 'ls /proc/1/fd \| wc -l'` |
@@ -247,7 +250,7 @@ Three things follow.
    deployment-file change and no peak-load number to justify, because it
    cannot lower anything.
 2. **`pids.max` is the host's slice default, not a decision.** It varies with
-   host RAM (37262 on the two NUCs, 74782 on nynuc) because systemd derives
+   host RAM (37262 on the two NUCs, 74782 on media1) because systemd derives
    `DefaultTasksMax` from the pid limit. A `pids_limit` in Compose would be
    the first deliberate value; §3.1's row still needs its peak number first.
 3. **The OOM killer has no preference to act on.** pid 1 sits at
@@ -347,7 +350,7 @@ The standing instruction at the head of this plan says that a step which
 seems to require changing the process-supervision contract must be stopped
 and flagged rather than decided by the executing session, and the work
 board's rule 4 says the same. §3.2 is such a step. It is flagged here and in
-[PR #457](http://192.168.4.7:3000/noirr/plurx/pulls/457); nothing in §3.2 or
+[PR #457](http://forge.lan:3000/noirr/plurx/pulls/457); nothing in §3.2 or
 its `OOMScoreAdjust` companion row in §3.1 is implemented.
 
 **The wiring §3.2 prescribes does not cover the tree.** §3.2 says to add the
@@ -433,7 +436,7 @@ reach non-ffmpeg children such as `find` at all. This PR does not take it.
 each closure, and the child runs every registered closure in registration
 order before `exec` ("multiple closures can be registered and they will be
 called in order of their registration"). tokio's `Command::pre_exec`
-delegates to std. This was checked on nuc3 with rustc 1.97.1: two closures
+delegates to std. This was checked on lab3 with rustc 1.97.1: two closures
 on one `Command` printed `first` then `second`. A second registration
 composes with `inherit_file_descriptors` and does not replace it. Two things
 follow for whichever seam is chosen:
@@ -471,7 +474,7 @@ What the next session needs, in order:
 
 ### 3.2.2 As built — one launcher, a class on every child (M3, 2026-09-25)
 
-[PR #518](http://192.168.4.7:3000/noirr/plurx/pulls/518), branch `plan/P-02-m3`. Where §3.2's sketch and the code
+[PR #518](http://forge.lan:3000/noirr/plurx/pulls/518), branch `plan/P-02-m3`. Where §3.2's sketch and the code
 differ, the code is right and the reason is here.
 
 **One launcher, and a spawn cannot skip the class.**
@@ -506,7 +509,7 @@ whether these values stay (§7 question 2).
 **The class is the caller's, not the child's.** The first build fixed one
 class per kind of child, so the probes and extractions a VOD start waits on
 ran at the background class whenever a start, not a warm-up, asked for them
-(the review of #518, [comment 4817](http://192.168.4.7:3000/noirr/plurx/pulls/518#issuecomment-4817), finding 1). Several of them have
+(the review of #518, [comment 4817](http://forge.lan:3000/noirr/plurx/pulls/518#issuecomment-4817), finding 1). Several of them have
 short deadlines, and under the load the classes exist for a slow probe
 becomes a refusal: `vod_source_rescan_required` for a file that is fine, a
 Profile 5 proof memoized as failed, a burn start answered "pending". A helper
@@ -651,7 +654,7 @@ always asked for `rlim_cur = rlim_max`. launchd gives a LaunchAgent such as
 limit, and macOS enforces `kern.maxfilesperproc` whatever the hard limit
 says. The review reasoned from `setrlimit(2)`'s COMPATIBILITY note that
 `rlim_cur = RLIM_INFINITY` is refused with `EINVAL`, leaving the daemon at 256
-with a WARN on every boot and the unit test red. On the lab Mac `mba`
+with a WARN on every boot and the unit test red. On the lab Mac `maca`
 (macOS 27.0; soft `256`, hard `unlimited`, `kern.maxfilesperproc` `122880`)
 that does **not** reproduce. `setrlimit` accepts the infinite soft limit,
 `getrlimit` reports it back, the kernel still stops the process at 122877
@@ -669,7 +672,7 @@ clamp is a pure function (`raised_soft_limit`), pinned on every host by
 `an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling`. The re-exec
 test, now `the_soft_limit_is_raised_as_far_as_the_platform_allows`, compares
 against `min(hard, sysctl -n kern.maxfilesperproc)` on macOS and against the
-hard limit elsewhere. On `mba` it fails when the Apple ceiling is removed
+hard limit elsewhere. On `maca` it fails when the Apple ceiling is removed
 and passes with it; the disposition comment on #457 has the output.
 
 The `LimitNOFILE` / `ulimits.nofile` row in §3.1 did **not** land with it, and
@@ -745,7 +748,7 @@ green on the shipped Jellyfin ffmpeg 8 build; that is M5's acceptance.
 **M5 fallback decision, 2026-09-29.** The versioned
 `pjunod/ansible` `github-runners/` role registers GitHub Actions runners,
 while Forgejo is this repository's CI control plane. A read-only check on
-`nynuc` found four active Forgejo runner units using independent
+`media1` found four active Forgejo runner units using independent
 `/opt/forgejo-runner*/.runner` registrations: all four expose
 `general`/`high-cpu`/`ubuntu-26.04`, none exposes `ffmpeg-8`; the host's
 `/usr/bin/ffmpeg` is distro 8.0.1, not the Jellyfin package. No versioned
@@ -795,8 +798,9 @@ overflow-checks = true      # PR 4: changes runtime behaviour (a wrapped counter
 
 No semicolons, no `strip = "debuginfo"` (assessment 18).
 
-**Pin landed 2026-09-23** (`claude-opus-5`); **the release profile is
-untouched.** `Dockerfile:9` and `:35` now read:
+**Pin landed 2026-09-23** (`claude-opus-5`); **the release profile was
+untouched on that date** (superseded — see the 2026-10-04 note at the end of
+this section). `Dockerfile:9` and `:35` now read:
 
 ```dockerfile
 FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
@@ -806,7 +810,7 @@ FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2
 Both are **index** digests (`application/vnd.oci.image.index.v1+json`), not
 per-platform manifest digests, because the image is built for amd64 and arm64
 from the same `FROM`. They were read with `docker buildx imagetools inspect`
-on nuc3 on 2026-09-23, and each was verified to be the SHA-256 of the
+on lab3 on 2026-09-23, and each was verified to be the SHA-256 of the
 manifest bytes `--raw` returns. `tests/operations/test_contracts.py`'s
 `test_dockerfile_base_images_are_pinned_by_digest` rejects any registry
 `FROM` in `Dockerfile` that carries no digest, and
@@ -839,6 +843,17 @@ CGU 16 vs 1, and lands the combination whose build-time cost Paul accepts;
 PR 4 records `make test-full` green and seven days of lab1 journal with no
 `attempt to add with overflow` panic. `panic = "unwind"` stays (review
 §4.6).
+
+**2026-10-04 note — profile C is the release profile.** The two paragraphs
+above describe the tree before M6's release-profile half. `Cargo.toml`'s
+`[profile.release]` now reads `lto = "thin"`, `debug = "line-tables-only"`,
+`strip = "none"`, `split-debuginfo = "packed"`, with the comment "Paul
+selected profile C on 2026-09-30". The `Dockerfile` build stage copies
+`plurxd.dwp` and `plurx-cluster-check.dwp` out of the release target and the
+runtime image installs both beside their executables in `/usr/local/bin`.
+`overflow-checks` is not set in the release profile, so PR 4 has not landed,
+and `lto`/`codegen-units` keep their thin/default values. This is on `main`
+since 2026-10-04 (#793), and every node runs an image built this way.
 
 ### 3.6 Fuzz targets
 
@@ -998,7 +1013,7 @@ Acceptance: §3.1's "observe first" column has media1 and lab1 values with a
 date.
 
 **Partial, 2026-09-23** (`claude-opus-5`). §3.1.1 records idle values for
-nuc3, nuc4 and nynuc with the command that produced each. No busy-evening
+lab3, lab4 and media1 with the command that produced each. No busy-evening
 sample and no host named media1 or lab1; the prompt above is unchanged and
 still has to be run.
 
@@ -1033,7 +1048,7 @@ $(pgrep ffmpeg); do cat /proc/$p/oom_score_adj; done` prints the child
 value and `/proc/$(pidof plurxd)/oom_score_adj` the daemon's; the segment
 cadence table before/after is in the PR.
 
-**Built 2026-09-25** (`claude-opus-5-5`, [PR #518](http://192.168.4.7:3000/noirr/plurx/pulls/518)), as §3.2.2
+**Built 2026-09-25** (`claude-opus-5-5`, [PR #518](http://forge.lan:3000/noirr/plurx/pulls/518)), as §3.2.2
 describes, after Paul's go. The acceptance test is
 `cargo test -p plurx-core process::priority`
 (`each_class_runs_its_child_at_the_class_nice_ionice_and_oom_score` reads
@@ -1058,7 +1073,7 @@ exists.
 **Not started (2026-09-25), with `OOMScoreAdjust=-500` added to it.** No
 node runs `deploy/plurxd.service` (§7 question 1), and every row's
 acceptance is a playback matrix or a GPU selection under the new unit on a
-lab VM, which a transient unit on nuc3 cannot stand in for; `TasksMax` also
+lab VM, which a transient unit on lab3 cannot stand in for; `TasksMax` also
 still lacks its observed peak. The steps are in the execution log.
 
 **Compose rows proposed, 2026-10-02 (claude-opus-5-5, for Paul to ratify;
@@ -1176,14 +1191,14 @@ authorization and the operator's existing Docker login, publish only the
 unique source-SHA tag:
 
 ```bash
-image="192.168.4.7:3000/noirr/plurx-ci:p02-m5-${source_sha}"
+image="forge.lan:3000/noirr/plurx-ci:p02-m5-${source_sha}"
 docker tag plurx-ci:m5-local "$image"
 docker push "$image"
 docker buildx imagetools inspect "$image" | sed -n '/^Digest:/p'
 ```
 
 Resolve the registry manifest digest from that output and put the
-`192.168.4.7:3000/noirr/plurx-ci@sha256:<digest>` reference into all five
+`forge.lan:3000/noirr/plurx-ci@sha256:<digest>` reference into all five
 jobs before pushing the workflow branch. A tag, local image ID, or Dockerfile
 base digest is **not** the published CI image digest. No workflow with the
 `M5_CI_IMAGE_DIGEST_REQUIRED` placeholder is pushable.
@@ -1231,7 +1246,7 @@ claude-fable-5-1) **and not shipped as written.** The hidden flag landed as
 the subcommand `plurxd diagnostic-panic` (a subcommand is the shape this CLI
 gives every action; `Command::DiagnosticPanic`, `#[command(hide = true)]`).
 Four profiles were built from the same tree (`4dd1cfcc`, identical in
-content to `c5ee15d8`, the same tree under its final history) on nuc3 with the pinned 1.97.1, 16 threads, thin LTO,
+content to `c5ee15d8`, the same tree under its final history) on lab3 with the pinned 1.97.1, 16 threads, thin LTO,
 `cargo build --release -p plurxd --bin plurxd` after `cargo clean`, and
 `RUST_BACKTRACE=1 plurxd diagnostic-panic` run on each binary:
 
@@ -1247,9 +1262,9 @@ whole difference is debug sections. The image delta is the binary delta:
 `Dockerfile` copies `plurxd` and `plurx-cluster-check` into a
 `debian:bookworm-slim` base and nothing else changes, so B's image grows by
 ~357 MB uncompressed and ~73 MB as a compressed layer; no `docker build` was
-run because nuc3's disk was at 95 % and the binary is the whole of the delta.
+run because lab3's disk was at 95 % and the binary is the whole of the delta.
 On the 2-CPU cloud host that measured A first (83 553 536 bytes, an 84 KiB
-path-string difference from nuc3's), the B compile of `plurxd` was killed at
+path-string difference from lab3's), the B compile of `plurxd` was killed at
 6 GB RSS by a ~7 GB cgroup where A's had taken 2.7 GB — line tables through
 thin LTO roughly double the linker's peak, a number the §5.7 table wants.
 
@@ -1486,7 +1501,7 @@ this is a Docker image ID, not an asserted OCI config digest. The public base
 index is `0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97`,
 its AMD64 child is `408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6`.
 The exact provisioning container is gone and production stayed healthy with
-zero restarts/readiness 200. Nynuc retains both provisioning receipts;
+zero restarts/readiness 200. Media1 retains both provisioning receipts;
 successful receipt SHA-256 is
 `070b832138823ee9313f06342973a8fd51fbaf113d1c6949bd113be0d6fd44b2`,
 package-manifest SHA-256 is
@@ -1515,7 +1530,7 @@ overflow/full-suite/seven-day acceptance. Those remain separate and open.
 Measured source is exactly `f523e097a5faf98aff36903308927f018468e8cb`, not
 any later documentation head. Its source-only archive SHA-256 is
 `484686532b50fa4a65e50a3c6bb1fb936008591887b5407da20c3aadcece2558`.
-The actual high-CPU runner **host** was nynuc, Intel Core Ultra 7 255H
+The actual high-CPU runner **host** was media1, Intel Core Ultra 7 255H
 (16 logical CPUs), Linux `7.0.0-31-generic`, native AMD64; this was not a
 Forgejo workflow job, CI unit acceptance or complete release qualification.
 The audited tooling image ID above and Rust 1.97.1 were used as UID:GID
@@ -1629,7 +1644,7 @@ in `tests.operations.test_evidence_workflows`; neither runs a fuzzer.
 
 **Post-merge receipt, 2026-10-01 — scoped M8 campaign acceptance satisfied.**
 The first actual manual fuzz-only run is
-[API run 3727 / UI run 3706](http://192.168.4.7:3000/noirr/plurx/actions/runs/3706)
+[API run 3727 / UI run 3706](http://forge.lan:3000/noirr/plurx/actions/runs/3706)
 on effort `d3dfbe2aeaea39f773a20cc08327bddaa74d7ea6`, with
 `fuzz_only=true` and `seed_pgs_crash=false`. All five jobs completed cleanly
 using `nightly-2026-08-01`. Deep, pacing and mutation suites were skipped,
@@ -1711,7 +1726,7 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
 
 1. **Which node is bare-metal, if any.** **Answered 2026-09-23, for the
    three reachable hosts: none.** `systemctl show plurxd -p LoadState`
-   returns `LoadState=not-found` on nuc3, nuc4 and nynuc, all of which run
+   returns `LoadState=not-found` on lab3, lab4 and media1, all of which run
    the container (§3.1.1). `deploy/plurxd.service` is an install path with
    no node behind it today, so M4's validation is a lab VM, as the question
    anticipated. Hosts outside those three are unchecked.
@@ -1739,7 +1754,10 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
    C. **Paul's call.**
    **Answered 2026-09-30:** Paul selected C. The dated implementation below
    supersedes the recommendation to ship D; the historical measurements stay
-   measurements of their named source, not of the new release tree.
+   measurements of their named source, not of the new release tree. Profile C
+   is recorded in `Cargo.toml`'s `[profile.release]` and has shipped in every
+   image since 2026-10-04 (#793), with the `.dwp` files installed beside the
+   executables.
 
 ---
 
@@ -1835,7 +1853,7 @@ configuration, deployment, playback or process-supervision contract changes.
 |---|---|---|---|---|---|
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M6 reproducible image and size; M4 Compose proposal | [#733](http://forge.lan:3000/noirr/plurx/pulls/733) (`opus/p02-repro-continuation`) | `9b45483e7` stamps `built_at` from `SOURCE_DATE_EPOCH` (else commit time, else clock) and every image build passes the commit time; two cold isolated builds then matched in every Rust binary, `.dwp` and binary layer, and differed only in ten build-time entries of the media runtime layer, which `9ed98a30c` removes. Two more cold builds of `9ed98a30c` were byte-identical OCI archives, manifest `sha256:60afe405…`, image ID `sha256:90e2a1d2…`; +564,722,968 B (+55.4 %) over production main, all binaries and debug files. `plurxd diagnostic-panic` on that image resolved file:line frames; the image is kept as `plurx-opus-lab:effort-9ed98a30c`. M4's Compose rows are proposed in §5.4 for Paul (documented only: production deploys this tracked Compose file). Still owed: §3.2's busy-load cadence and the M1/M3 readback with real transcodes, cross-day/arm64 rebuilds, and the publish path's timestamp rewrite (§5.6). |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M8 actual post-merge campaigns; M6 frozen-artifact backtrace | Evidence-only continuation; draft PR pending | All five bounded run3727 campaigns on exact effort `d3dfbe2a` completed; counts/log/ZIP identities in §5.8. Separate frozen `4f243a01` artifact resolved native file/line stack with expected exit101 and owned cleanup. Neither result closes whole P02 or current-main qualification. No fuzz or unit campaign repeated by this docs author. |
-| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M7 PR 3 measured — retain thin/16 | [#629](http://192.168.4.7:3000/noirr/plurx/pulls/629) draft | Exact `f523e097a` source, serial native AMD64 host matrix, no retry; §5.7 records all binary/receipt hashes and bounded guard ranges. All four passed; unchanged thin/16 retained for build cost only. Owned containers, scratch and tooling image removed; production healthy/restarts0. M7 PRs 2/4, M6 image acceptance, M5 credential prerequisite and M8 post-merge campaigns remain open. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M7 PR 3 measured — retain thin/16 | [#629](http://forge.lan:3000/noirr/plurx/pulls/629) draft | Exact `f523e097a` source, serial native AMD64 host matrix, no retry; §5.7 records all binary/receipt hashes and bounded guard ranges. All four passed; unchanged thin/16 retained for build cost only. Owned containers, scratch and tooling image removed; production healthy/restarts0. M7 PRs 2/4, M6 image acceptance, M5 credential prerequisite and M8 post-merge campaigns remain open. |
 
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
@@ -1845,20 +1863,20 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 (partial) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Idle limits read on nuc3, nuc4 and nynuc and recorded in §3.1.1 with their commands: `/proc/1/limits` open files **1024 soft / 524288 hard** on all three, `Ulimits=[] PidsLimit=<nil> OomScoreAdj=0`, `pids.max` = the host slice default, `memory.max` unset. `plurxd.service` is `LoadState=not-found` on all three, answering §7.1. **No busy-evening sample and no media1/lab1**; §5.1's prompt still has to be run. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 (§3.3 only) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | `plurx_core::process::rlimit::raise_open_file_limit` raises soft to hard and never touches hard; `run()` reports both values at `info`. Proof it is load-bearing: with the `setrlimit` call removed from the function, `cargo test -p plurx-core rlimit` fails `left: 256, right: 524288`; with the reporter's message and error arm reverted, both `cargo test -p plurxd open_file_limit` tests fail. The §3.1 `LimitNOFILE`/`ulimits` row deliberately did **not** land: the observed hard limit is already 524288, and the plan's 65536 would lower it. Post-deploy `/proc/1/limits` evidence outstanding. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (audit only) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | §3.4's audit run read-only; `ci.yml` unchanged. Five `ffmpeg-6` jobs listed; no test *requires* ffmpeg 6, but `transcode/tests/chunk_05.rs:1337` **skips** its ahead-window and suspend-resume assertions on a build that ignores `-readrate_initial_burst`, so moving every lane to 8 silently retires that coverage. Recorded as a decision M5 owes, not as a clean bill. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 (digest half) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Both `Dockerfile` bases pinned to their index digests, read on nuc3 and each verified against the SHA-256 of `imagetools inspect --raw`. `test_dockerfile_base_images_are_pinned_by_digest` fails on the unpinned Dockerfile (`[('rust:1-bookworm', 'build')] != []`) and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails with the workflow step removed. `scripts/image-base-drift` exits 1 on an unpinned base. The release profile is untouched; the drift step has not been observed on a runner. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — **flagged, not implemented** | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | §3.2.1. §3.2's prescribed wiring (each `Command::new(ffmpeg_bin())` site plus a grep test) does not reach the producers that carry realtime playback, which spawn through a value; the seam that does is `spawn_job_owned`, which the plan's standing instruction says to stop and flag rather than change. §3.2's realtime measurement is also unreachable from here, so the `OOMScoreAdjust` row stays out under §4's guardrail. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4, M7, M8 — not started | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | M4 needs a lab VM playback matrix and a GPU-selection check under the new unit; M7's three PRs are each gated on a measurement; M8's four fuzz targets need the nightly toolchain and generated corpora. None was attempted, and nothing in the branch pretends otherwise. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #457 (M2, M3 flag, M6) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Three findings, all addressed on the branch after merging main. (1) §3.2.1's claim that every child reaches `spawn_job_owned` was false. It has been re-surveyed across `plurx-core` and `plurxd`: eleven production sites spawn without it, including scan thumbnails, cover extraction, the encoder/decoder inventory, `media_pool.rs`'s `find`, the PGS ride-along self-test and the held decode-fact probes. Both M3 options now carry a migration list, and the decision stays open. `pre_exec` composition is answered: std runs every closure in registration order, checked on rustc 1.97.1. §2.2's "only `pre_exec`" claim is corrected to five. (2) The open-file raise now clamps to `kern.maxfilesperproc` on Apple targets. On `mba` (macOS 27.0) the review's `EINVAL` did not reproduce: the old code set and reported an infinite soft limit that the kernel does not enforce. `an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling` fails on Linux without the clamp, and `the_soft_limit_is_raised_as_far_as_the_platform_allows` fails on `mba` without the Apple ceiling (`9223372036854775807` vs `122880`). (3) The drift step is `if: ${{ !cancelled() }}`, and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails without it. M3 is still not implemented. |
-| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | Claim (second pass: M8, M6 release-profile half) | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | Branch `plan/P-02-2` from `f600d2823`. M3 stays on Paul's seam decision, M4 on the lab1 matrix, M5's lane and M7's PRs 2-4 untouched. |
-| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M8 (targets, seeds, nightly, contract) | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `d51a11d2`, then `6aa9bed2` after review: `fuzz/parsers/` with `fmp4_reader`, `rpu_rewrite`, `nfo_parse`, `epub_facts`; `scripts/fuzz-seeds` (13/16/20/17 seeds); `scripts/fuzz-campaign`; the `parser-fuzz` matrix job; `test_parser_fuzzers_are_bounded_seeded_artifacted_and_gating`. §3.6 "as built" records every departure from the table. 60 s runs clean on all four (see §5.8). |
-| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M8 finding: `dolby_vision` 3.4.0 | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `9024fd63`: `rpu_rewrite` found a ~25.8 GB `Vec::with_capacity` from an unbounded ue(v) (process abort), an `unimplemented!()` and an `unreachable!()` (task unwinds) inside 10 000 executions. Crate vendored at `vendor/dolby_vision` with refusals; fixtures `tests/playback/dv-p7-rpu-hostile-*.hex`; three tests in `dvconvert`, named as `Regression-Test:` lines on the pull request (P-03 phase B was switched on while this branch was open, so the ledger rows first written for these commits were withdrawn). After the patches: 900 s, 11.4 M executions, clean. |
-| 2026-09-25 | claude-opus (subagent adc9b30ebfcfc08d9) | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | Adversarial review | [#510 comment 4575](http://192.168.4.7:3000/noirr/plurx/pulls/510#issuecomment-4575) | 3 P1 (catalog lint, PGS job cost, input-scaled bounds), 5 P2, 8 P3. All folded: `ef4bdae7` (patches 4-5, `MAX_RPU_NAL_BYTES`, `vendor/bitvec_helpers` for two Exp-Golomb overflows; its test is the fourth `Regression-Test:` line on the pull request) and `6aa9bed2` (the `fuzz/parsers` split, catalog rows, campaign summary, seeds, audit-lock dedupe, test slices). Disposition on the PR. |
-| 2026-09-25 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M6 release-profile half — measured, profile not shipped | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `c5ee15d8` adds `plurxd diagnostic-panic`; four profiles built on nuc3 (§5.6 table): PR 1 as written is +427 % binary; `strip = "debuginfo"` is +36 % (+11.5 % gzipped) with named frames; packed split is 230 MiB + a 177 MiB `.dwp`. `Cargo.toml` keeps main's profile; which one ships is §7 question 6, Paul's. |
-| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — built (Paul 2026-09-25: go) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | §3.2.2. One launcher with a `ChildWork` on every call; realtime 5 / BE 4 / `+500`, background 15 / BE 7 / `+800`; the eleven §3.2.1 rows and three Windows-only probes migrated; the decode-fact probe registers its priority before its exec-from-`pre_exec`; a source census plus clippy `disallowed-methods` over every production spawn; `processes` on `/activity/detail`, admin `DELETE /activity/processes/{pid}` through a pidfd, the web Processes table and three `/metrics` families. Built on `origin/main` @ `448e803d`, apart from [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) (M6 profile measurement, M8); #510 merged while this was open and main was merged in after it, with conflicts in documents only. Each behavioural hunk was reverted and its test seen to fail: the `pre_exec` (three priority tests), the pidfd kill (the stop test times out), a spawn site put back to `cmd.spawn()` (the census names `metadata/local.rs:419`), the decode-facts `apply` (its order test), the `processes` field, the `/metrics` families and the DELETE route (the HTTP test, each at its own assertion), the painter line (the web suite), and the census's lexical path resolution (without it the census reads `vodencode_tests.rs`, `include!`d from a test chunk, as production). Gate results are in the PR body. **Outstanding, post-merge (GPT):** §3.2's measurement — on media1, with three concurrent transcodes, a 4K direct play and a DVR recording, `for p in $(pgrep ffmpeg); do echo $p $(awk '{print $19}' /proc/$p/stat) $(cat /proc/$p/oom_score_adj); done` inside the container (realtime children read 5 / 500, background 15 / 800, `/proc/1` its own), the Activity page's Processes table and `curl -s localhost:32400/metrics \| grep plurx_child_` (`plurx_child_priority_unapplied_total` 0 for both classes), then each session's `http_wait_count` and the journal's segment materialisation interval with the build before this PR and with this PR; if a copy-HLS or transcode producer that kept up now falls behind, report it — the values move, not the launcher. |
-| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — not started | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Not separable from its evidence: no node runs the unit, and each row's acceptance needs a lab VM's playback matrix or GPU selection under the new unit. `OOMScoreAdjust=-500` joins M4. **Steps (GPT, lab VM running `deploy/install`):** (1) at peak (two transcodes, a direct play, a DVR recording) record `systemctl show plurxd -p TasksCurrent -p MemoryCurrent` and `cat /proc/$(pidof plurxd)/oom_score_adj`; (2) add `TasksMax=4096` (only if the peak is ≤ 25 % of it), `PrivateTmp=true`, `ProtectKernelTunables=true`, `RestrictSUIDSGID=true`, `LockPersonality=true` and `OOMScoreAdjust=-500` to the unit, `systemctl daemon-reload && systemctl restart plurxd`; (3) paste `systemd-analyze security plurxd` before and after; (4) play direct, copy HLS, a transcode with burned text subtitles, record one DVR programme, and confirm the GPU probe still selects QSV/VAAPI; (5) confirm `/proc/$(pidof plurxd)/oom_score_adj` is -500 while every ffmpeg reads 500 or 800. Any row that breaks playback stays out and is recorded. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 (partial) | [#457](http://forge.lan:3000/noirr/plurx/pulls/457) | Idle limits read on lab3, lab4 and media1 and recorded in §3.1.1 with their commands: `/proc/1/limits` open files **1024 soft / 524288 hard** on all three, `Ulimits=[] PidsLimit=<nil> OomScoreAdj=0`, `pids.max` = the host slice default, `memory.max` unset. `plurxd.service` is `LoadState=not-found` on all three, answering §7.1. **No busy-evening sample and no media1/lab1**; §5.1's prompt still has to be run. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 (§3.3 only) | [#457](http://forge.lan:3000/noirr/plurx/pulls/457) | `plurx_core::process::rlimit::raise_open_file_limit` raises soft to hard and never touches hard; `run()` reports both values at `info`. Proof it is load-bearing: with the `setrlimit` call removed from the function, `cargo test -p plurx-core rlimit` fails `left: 256, right: 524288`; with the reporter's message and error arm reverted, both `cargo test -p plurxd open_file_limit` tests fail. The §3.1 `LimitNOFILE`/`ulimits` row deliberately did **not** land: the observed hard limit is already 524288, and the plan's 65536 would lower it. Post-deploy `/proc/1/limits` evidence outstanding. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (audit only) | [#457](http://forge.lan:3000/noirr/plurx/pulls/457) | §3.4's audit run read-only; `ci.yml` unchanged. Five `ffmpeg-6` jobs listed; no test *requires* ffmpeg 6, but `transcode/tests/chunk_05.rs:1337` **skips** its ahead-window and suspend-resume assertions on a build that ignores `-readrate_initial_burst`, so moving every lane to 8 silently retires that coverage. Recorded as a decision M5 owes, not as a clean bill. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 (digest half) | [#457](http://forge.lan:3000/noirr/plurx/pulls/457) | Both `Dockerfile` bases pinned to their index digests, read on lab3 and each verified against the SHA-256 of `imagetools inspect --raw`. `test_dockerfile_base_images_are_pinned_by_digest` fails on the unpinned Dockerfile (`[('rust:1-bookworm', 'build')] != []`) and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails with the workflow step removed. `scripts/image-base-drift` exits 1 on an unpinned base. The release profile is untouched; the drift step has not been observed on a runner. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — **flagged, not implemented** | [#457](http://forge.lan:3000/noirr/plurx/pulls/457) | §3.2.1. §3.2's prescribed wiring (each `Command::new(ffmpeg_bin())` site plus a grep test) does not reach the producers that carry realtime playback, which spawn through a value; the seam that does is `spawn_job_owned`, which the plan's standing instruction says to stop and flag rather than change. §3.2's realtime measurement is also unreachable from here, so the `OOMScoreAdjust` row stays out under §4's guardrail. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4, M7, M8 — not started | [#457](http://forge.lan:3000/noirr/plurx/pulls/457) | M4 needs a lab VM playback matrix and a GPU-selection check under the new unit; M7's three PRs are each gated on a measurement; M8's four fuzz targets need the nightly toolchain and generated corpora. None was attempted, and nothing in the branch pretends otherwise. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #457 (M2, M3 flag, M6) | [#457](http://forge.lan:3000/noirr/plurx/pulls/457) | Three findings, all addressed on the branch after merging main. (1) §3.2.1's claim that every child reaches `spawn_job_owned` was false. It has been re-surveyed across `plurx-core` and `plurxd`: eleven production sites spawn without it, including scan thumbnails, cover extraction, the encoder/decoder inventory, `media_pool.rs`'s `find`, the PGS ride-along self-test and the held decode-fact probes. Both M3 options now carry a migration list, and the decision stays open. `pre_exec` composition is answered: std runs every closure in registration order, checked on rustc 1.97.1. §2.2's "only `pre_exec`" claim is corrected to five. (2) The open-file raise now clamps to `kern.maxfilesperproc` on Apple targets. On `maca` (macOS 27.0) the review's `EINVAL` did not reproduce: the old code set and reported an infinite soft limit that the kernel does not enforce. `an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling` fails on Linux without the clamp, and `the_soft_limit_is_raised_as_far_as_the_platform_allows` fails on `maca` without the Apple ceiling (`9223372036854775807` vs `122880`). (3) The drift step is `if: ${{ !cancelled() }}`, and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails without it. M3 is still not implemented. |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | Claim (second pass: M8, M6 release-profile half) | [#510](http://forge.lan:3000/noirr/plurx/pulls/510) | Branch `plan/P-02-2` from `f600d2823`. M3 stays on Paul's seam decision, M4 on the lab1 matrix, M5's lane and M7's PRs 2-4 untouched. |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M8 (targets, seeds, nightly, contract) | [#510](http://forge.lan:3000/noirr/plurx/pulls/510) | `d51a11d2`, then `6aa9bed2` after review: `fuzz/parsers/` with `fmp4_reader`, `rpu_rewrite`, `nfo_parse`, `epub_facts`; `scripts/fuzz-seeds` (13/16/20/17 seeds); `scripts/fuzz-campaign`; the `parser-fuzz` matrix job; `test_parser_fuzzers_are_bounded_seeded_artifacted_and_gating`. §3.6 "as built" records every departure from the table. 60 s runs clean on all four (see §5.8). |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M8 finding: `dolby_vision` 3.4.0 | [#510](http://forge.lan:3000/noirr/plurx/pulls/510) | `9024fd63`: `rpu_rewrite` found a ~25.8 GB `Vec::with_capacity` from an unbounded ue(v) (process abort), an `unimplemented!()` and an `unreachable!()` (task unwinds) inside 10 000 executions. Crate vendored at `vendor/dolby_vision` with refusals; fixtures `tests/playback/dv-p7-rpu-hostile-*.hex`; three tests in `dvconvert`, named as `Regression-Test:` lines on the pull request (P-03 phase B was switched on while this branch was open, so the ledger rows first written for these commits were withdrawn). After the patches: 900 s, 11.4 M executions, clean. |
+| 2026-09-25 | claude-opus (subagent adc9b30ebfcfc08d9) | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | Adversarial review | [#510 comment 4575](http://forge.lan:3000/noirr/plurx/pulls/510#issuecomment-4575) | 3 P1 (catalog lint, PGS job cost, input-scaled bounds), 5 P2, 8 P3. All folded: `ef4bdae7` (patches 4-5, `MAX_RPU_NAL_BYTES`, `vendor/bitvec_helpers` for two Exp-Golomb overflows; its test is the fourth `Regression-Test:` line on the pull request) and `6aa9bed2` (the `fuzz/parsers` split, catalog rows, campaign summary, seeds, audit-lock dedupe, test slices). Disposition on the PR. |
+| 2026-09-25 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M6 release-profile half — measured, profile not shipped | [#510](http://forge.lan:3000/noirr/plurx/pulls/510) | `c5ee15d8` adds `plurxd diagnostic-panic`; four profiles built on lab3 (§5.6 table): PR 1 as written is +427 % binary; `strip = "debuginfo"` is +36 % (+11.5 % gzipped) with named frames; packed split is 230 MiB + a 177 MiB `.dwp`. `Cargo.toml` keeps main's profile; which one ships is §7 question 6, Paul's. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — built (Paul 2026-09-25: go) | [#518](http://forge.lan:3000/noirr/plurx/pulls/518) | §3.2.2. One launcher with a `ChildWork` on every call; realtime 5 / BE 4 / `+500`, background 15 / BE 7 / `+800`; the eleven §3.2.1 rows and three Windows-only probes migrated; the decode-fact probe registers its priority before its exec-from-`pre_exec`; a source census plus clippy `disallowed-methods` over every production spawn; `processes` on `/activity/detail`, admin `DELETE /activity/processes/{pid}` through a pidfd, the web Processes table and three `/metrics` families. Built on `origin/main` @ `448e803d`, apart from [#510](http://forge.lan:3000/noirr/plurx/pulls/510) (M6 profile measurement, M8); #510 merged while this was open and main was merged in after it, with conflicts in documents only. Each behavioural hunk was reverted and its test seen to fail: the `pre_exec` (three priority tests), the pidfd kill (the stop test times out), a spawn site put back to `cmd.spawn()` (the census names `metadata/local.rs:419`), the decode-facts `apply` (its order test), the `processes` field, the `/metrics` families and the DELETE route (the HTTP test, each at its own assertion), the painter line (the web suite), and the census's lexical path resolution (without it the census reads `vodencode_tests.rs`, `include!`d from a test chunk, as production). Gate results are in the PR body. **Outstanding, post-merge (GPT):** §3.2's measurement — on media1, with three concurrent transcodes, a 4K direct play and a DVR recording, `for p in $(pgrep ffmpeg); do echo $p $(awk '{print $19}' /proc/$p/stat) $(cat /proc/$p/oom_score_adj); done` inside the container (realtime children read 5 / 500, background 15 / 800, `/proc/1` its own), the Activity page's Processes table and `curl -s localhost:32400/metrics \| grep plurx_child_` (`plurx_child_priority_unapplied_total` 0 for both classes), then each session's `http_wait_count` and the journal's segment materialisation interval with the build before this PR and with this PR; if a copy-HLS or transcode producer that kept up now falls behind, report it — the values move, not the launcher. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — not started | [#518](http://forge.lan:3000/noirr/plurx/pulls/518) | Not separable from its evidence: no node runs the unit, and each row's acceptance needs a lab VM's playback matrix or GPU selection under the new unit. `OOMScoreAdjust=-500` joins M4. **Steps (GPT, lab VM running `deploy/install`):** (1) at peak (two transcodes, a direct play, a DVR recording) record `systemctl show plurxd -p TasksCurrent -p MemoryCurrent` and `cat /proc/$(pidof plurxd)/oom_score_adj`; (2) add `TasksMax=4096` (only if the peak is ≤ 25 % of it), `PrivateTmp=true`, `ProtectKernelTunables=true`, `RestrictSUIDSGID=true`, `LockPersonality=true` and `OOMScoreAdjust=-500` to the unit, `systemctl daemon-reload && systemctl restart plurxd`; (3) paste `systemd-analyze security plurxd` before and after; (4) play direct, copy HLS, a transcode with burned text subtitles, record one DVR programme, and confirm the GPU probe still selects QSV/VAAPI; (5) confirm `/proc/$(pidof plurxd)/oom_score_adj` is -500 while every ffmpeg reads 500 or 800. Any row that breaks playback stays out and is recorded. |
 | 2026-09-29 | gpt-6-sol | none:codex:2026-09-29 | M5 container fallback — source preparation | Draft PR pending CI image digest | Direct-Forgejo branch `codex/p02-m5-container-ci` prepares the pinned Dockerfile CI stage, five full-sweep jobs on Jellyfin ffmpeg 8, and the retained Ubuntu 24.04 fast-lane `make unit` coverage. No image build, registry publication, workflow push, or runner change has occurred. The workflow has an intentional non-runnable image placeholder until an isolated builder is approved, the image is smoke-checked, and its digest is resolved. Static contracts and the exact image evidence will be recorded before the draft PR. |
 | 2026-09-29 | gpt-6.1-sol | none:codex:2026-09-29 | M8 manual receipt path — source preparation | Same P-02 continuation; draft PR pending | The `fuzz_only` selector skips unrelated sweeps and keeps all five bounded campaigns. PGS records actual corpus growth; a missing execution count cannot claim clean acceptance. No dispatch occurred. The original local evidence remains scoped to the review-round tree; all five post-merge runner summaries remain pending (§5.8). |
-| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — review round ([comment 4817](http://192.168.4.7:3000/noirr/plurx/pulls/518#issuecomment-4817)) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Main @ `3c89ad2ee` merged in first (`76608b5ca`); conflicts in `subtitles.rs` (main's bounded playhead-window pipe kept, this branch's realtime class given to it), `process/mod.rs` (the `output_job_owned` audit), the ownership ledger (three counts measured by zeroing) and the board; the textually clean `/metrics` `format!` had 17 placeholders for 18 arguments and was given one. **Finding 1 (P1), fixed:** the class is now the caller's (§3.2.2's table). The VOD start's held source probe, its decode-fact probes, the Profile 5 pixel proof asked for by any session start or peer offer, the burn extraction a start joins, and the `/subs` extraction a viewer waits on are realtime; the pre-transcode pass, offline packages, the rate-control refresh and the HLS warm-up are background. `plurx_child_spawns_by_purpose_total{class,purpose}` reads each choice back. Revert-proved: each helper put back to its fixed background class (held probe, decode-fact collection, pixel probe, whole-track `.vtt`, burn extraction) and each caller's choice flipped (`SESSION_START_CLASS`, `BoundPlanCaller::decode_fact_work`, the `/subs` handler) fails its test — `an_empty_stored_track_starts_an_encoded_session_without_the_overlay`, `decode_fact_probes_take_the_class_of_the_caller_waiting_on_them`, `the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it`, `a_whole_track_extraction_runs_at_the_class_its_caller_passes`, `subtitle_extraction_is_cached_by_source_identity`; the counter itself, `every_spawn_is_counted_by_its_class_and_purpose`. **Not changed, recorded:** a joined single flight or a memoized proof keeps the class of the caller that started it (§3.2.2's known limit), and a Profile 5 proof that fails because it timed out is still memoized as failed until restart; the class change makes that timeout less likely under load but does not change the memo, which is a behaviour question for Paul rather than part of this finding. **Finding 2 (P2), fixed:** each `spikes/` workspace carries its own `clippy.toml`; `cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings` exits 0 with it and 101 without it, and `clippy_refuses_every_spawning_method_outside_tests` now fails when a spike workspace has none. **Post-merge (GPT), added to the measurement above:** after a VOD start, a Profile 5 start and a `/subs` request on media1, `curl -s localhost:32400/metrics \| grep plurx_child_spawns_by_purpose_total` shows `held source probe for a session start`, `decode-fact probe for a session start`, `Dolby Vision pixel probe`, `burned-subtitle track extraction` and `subtitle track a viewer turned on` under `class="realtime"`. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — review round ([comment 4817](http://forge.lan:3000/noirr/plurx/pulls/518#issuecomment-4817)) | [#518](http://forge.lan:3000/noirr/plurx/pulls/518) | Main @ `3c89ad2ee` merged in first (`76608b5ca`); conflicts in `subtitles.rs` (main's bounded playhead-window pipe kept, this branch's realtime class given to it), `process/mod.rs` (the `output_job_owned` audit), the ownership ledger (three counts measured by zeroing) and the board; the textually clean `/metrics` `format!` had 17 placeholders for 18 arguments and was given one. **Finding 1 (P1), fixed:** the class is now the caller's (§3.2.2's table). The VOD start's held source probe, its decode-fact probes, the Profile 5 pixel proof asked for by any session start or peer offer, the burn extraction a start joins, and the `/subs` extraction a viewer waits on are realtime; the pre-transcode pass, offline packages, the rate-control refresh and the HLS warm-up are background. `plurx_child_spawns_by_purpose_total{class,purpose}` reads each choice back. Revert-proved: each helper put back to its fixed background class (held probe, decode-fact collection, pixel probe, whole-track `.vtt`, burn extraction) and each caller's choice flipped (`SESSION_START_CLASS`, `BoundPlanCaller::decode_fact_work`, the `/subs` handler) fails its test — `an_empty_stored_track_starts_an_encoded_session_without_the_overlay`, `decode_fact_probes_take_the_class_of_the_caller_waiting_on_them`, `the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it`, `a_whole_track_extraction_runs_at_the_class_its_caller_passes`, `subtitle_extraction_is_cached_by_source_identity`; the counter itself, `every_spawn_is_counted_by_its_class_and_purpose`. **Not changed, recorded:** a joined single flight or a memoized proof keeps the class of the caller that started it (§3.2.2's known limit), and a Profile 5 proof that fails because it timed out is still memoized as failed until restart; the class change makes that timeout less likely under load but does not change the memo, which is a behaviour question for Paul rather than part of this finding. **Finding 2 (P2), fixed:** each `spikes/` workspace carries its own `clippy.toml`; `cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings` exits 0 with it and 101 without it, and `clippy_refuses_every_spawning_method_outside_tests` now fails when a spike workspace has none. **Post-merge (GPT), added to the measurement above:** after a VOD start, a Profile 5 start and a `/subs` request on media1, `curl -s localhost:32400/metrics \| grep plurx_child_spawns_by_purpose_total` shows `held source probe for a session start`, `decode-fact probe for a session start`, `Dolby Vision pixel probe`, `burned-subtitle track extraction` and `subtitle track a viewer turned on` under `class="realtime"`. |

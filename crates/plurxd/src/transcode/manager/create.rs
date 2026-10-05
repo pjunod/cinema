@@ -634,8 +634,15 @@ impl TranscodeManager {
             started
         } else {
             let vod_lookup_at = Instant::now();
+            // Read once here and handed down, so the fallback below decides
+            // from the same snapshot the VOD attempt was admitted under.
+            let vod_settings = self.vod_settings(req).await?;
+            let live_recovery_enabled = vod_settings
+                .as_ref()
+                .is_some_and(|settings| settings.live_recovery);
             let vod = self
                 .try_vod_session(
+                    vod_settings,
                     req,
                     recovery.user_id,
                     user_name,
@@ -664,7 +671,7 @@ impl TranscodeManager {
                     let live_recovery_reason = vod_refusal(&error)
                         .and_then(|(code, _)| LiveRecoveryReason::from_refusal(code));
                     if let Some(reason) = live_recovery_reason {
-                        if !req.vod_only && self.live_hls_recovery_enabled().await? {
+                        if !req.vod_only && live_recovery_enabled {
                             tracing::warn!(
                                 target: "plurxd::transcode",
                                 file_id = req.file_id,
@@ -785,6 +792,7 @@ impl TranscodeManager {
                     priority,
                     req.audio_claim.as_ref(),
                     req.audio_delivery.as_ref(),
+                    req.sdr_master_codecs,
                 )
                 .await
             }
@@ -811,6 +819,7 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.audio_delivery.as_ref(),
+                    req.sdr_master_codecs,
                 )
                 .await
             }
@@ -1571,12 +1580,12 @@ impl TranscodeManager {
                 "compatibility preview requires the server-owned passive VOD policy",
             ));
         }
-        if self.vod_settings(req).await?.is_none() {
+        let Some(settings) = self.vod_settings(req).await? else {
             return Err(vod_refusal_error(
                 "vod_disabled",
                 "VOD session creation is disabled on this server",
             ));
-        }
+        };
         let encoding = self.prepare_vod_encoding(req, file).await?;
         self.vod
             .preview_recipe(
@@ -1591,6 +1600,7 @@ impl TranscodeManager {
                     companion: None,
                 },
                 file,
+                &settings,
                 None,
             )
             .await
@@ -1600,6 +1610,7 @@ impl TranscodeManager {
     #[allow(clippy::too_many_arguments)]
     async fn try_vod_session(
         &self,
+        vod_settings: Option<crate::vodserve::VodSettings>,
         req: &SessionRequest,
         user_id: i64,
         user_name: &str,
@@ -1624,7 +1635,7 @@ impl TranscodeManager {
                 "this session must be reopened as a new VOD handle after owner takeover",
             ));
         }
-        let Some(settings) = self.vod_settings(req).await? else {
+        let Some(settings) = vod_settings else {
             return Err(vod_refusal_error(
                 "vod_disabled",
                 "VOD session creation is disabled on this server",
@@ -1767,7 +1778,10 @@ impl TranscodeManager {
         };
         // Complete-output queue publication is handed to the owned enqueue
         // worker once the session exists; it never runs on the start path.
+        // Only when the Developer switch admits this kind: a play must not
+        // queue a whole-title background job the operator never turned on.
         let output_enqueue = (complete_candidate_output
+            && settings.output_preparation.admits(encoding.is_some())
             && matches!(
                 &retained_capture,
                 crate::vodserve::RetainedOutputCapture::New
@@ -1933,6 +1947,17 @@ impl TranscodeManager {
                 plurx_core::store::keys::VOD_MATERIALIZE_BUDGET_SECS,
                 plurx_core::store::keys::CACHE_MAX_GB,
                 plurx_core::store::keys::VOD_BLOCKED_GET_CAP,
+                // Not admission policy, but read on this same create path:
+                // folding it in costs no extra Store read, and the session
+                // freezes it beside its block budget (S-10 Developer switch).
+                plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS,
+                // Read on every VOD create too, and once one statement at a
+                // time (D4): the cluster index gate, the HEVC copy proof
+                // switch, and the live-recovery fallback switch.
+                plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE,
+                plurx_core::store::keys::HEVC_UNVERIFIED_COPY,
+                plurx_core::store::keys::VOD_LIVE_RECOVERY,
+                plurx_core::store::keys::VOD_OUTPUT_PREPARATION,
             ])
             .await
             .map_err(|error| {
@@ -2022,12 +2047,34 @@ impl TranscodeManager {
                 .unwrap_or(DEFAULT_BLOCKED_GET_CAP),
             None => DEFAULT_BLOCKED_GET_CAP,
         };
+        let switch = |key: &str, absent: bool| {
+            plurx_core::store::stored_switch(read(key).map(String::as_str), absent)
+        };
         Ok(Some(crate::vodserve::VodSettings {
             working_set_bytes,
             completed_cache_bytes,
             block_budget: Duration::from_secs_f64(block_secs),
             materialize_budget: Duration::from_secs_f64(materialize_secs),
             blocked_get_cap,
+            // The create's own snapshot read when it carried one, so VOD and
+            // rolling freeze the same value; else this batch's. Missing is
+            // off: the pre-S-10 master with no SDR CODECS.
+            sdr_master_codecs: req.sdr_master_codecs.unwrap_or_else(|| {
+                plurx_core::store::stored_switch(
+                    read(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS).map(String::as_str),
+                    false,
+                )
+            }),
+            index_cluster_cache: switch(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, false),
+            hevc_unverified_copy: switch(plurx_core::store::keys::HEVC_UNVERIFIED_COPY, false),
+            live_recovery: switch(plurx_core::store::keys::VOD_LIVE_RECOVERY, true),
+            output_preparation: crate::vodserve::OutputPreparation::parse(
+                read(plurx_core::store::keys::VOD_OUTPUT_PREPARATION).map(String::as_str),
+            ),
+            output_budget_bytes: crate::cachekeep::cache_budget(
+                read(plurx_core::store::keys::CACHE_MAX_GB).map(String::as_str),
+            )
+            .unwrap_or(0),
         }))
     }
 

@@ -494,7 +494,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # simulated loss for a third of the grace. Test-only, bounded, and it decides
 # nothing about producers.
 # Effort and main union: 56 (effort) + 1 (main fence-grace test) = 57, measured on the merged source.
-expected_occurrences = 57
+# +4 for the D3 retention tests in transcode/tests/chunk_05.rs: each polls
+# every 25 ms, inside a 30 s `tokio::time::timeout`, for a link or a
+# publication the session under test is already producing. Test-only; they own
+# no producer and decide nothing.
+expected_occurrences = 61
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -847,7 +851,10 @@ pattern = "HlsPresentationResolution"
 # adds a worker; both retain the VOD response owner attached to those bytes.
 # S10 public wire: +1 read-only match on the actual public session context;
 # no mocked presentation or new response authority.
-expected_occurrences = 24
+# Architecture close-out (#814): +1 test-only match —
+# sdr_master_codecs_is_frozen_when_the_session_is_created reads the created
+# session's ready context; no new owner.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-executor-registration"
@@ -2615,7 +2622,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # for running Live TV (it awaits the shared `SessionGrace` in place and owns no
 # media); and one test helper spawns that real loop over a test fence.
 # Measured on the merge with main at 741: 741 + 2 = 743.
-expected_occurrences = 743
+# +1: the preparation capture test joins its spawn_blocking helper.
+expected_occurrences = 744
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3930,7 +3938,24 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # lets the stand-in exit with two bounded sleeps and joins the owner twice
 # under bounded waits. Test-only.
 # Measured on the merge with main at 1268: 1268 + (+20) = 1288.
-expected_occurrences = 1288
+# Architecture close-out (#814), measured on the merged tree: 1268 -> 1270.
+# Production -1: D6's single positive proof per Decision drops the second
+# route read in candidate_recovery and the `timeout_at` that bounded it.
+# Tests +3 in link_receipts (a bounded wait for the live-receipt claim, its
+# 2 ms poll, and a bounded wait on the detached ClientLog work barrier); the
+# Live TV orphan test's drain wait became a `timeout` on `cancel_and_wait`
+# (net zero). No task, watchdog or periodic timer is added.
+# +9 with the main-merge defects build: the eight test-only waits counted
+# under `all-async-sleeps` (four 30 s timeouts, four 25 ms sleeps), and one
+# 3 s `tokio::time::timeout` bounding the Developer readiness read of cluster
+# membership (http/developer.rs), like the other bounded readiness reads. No
+# production loop, schedule or watchdog: output-preparation draining and the
+# retained-headroom sample run on ticks that already existed.
+# Combined #810/#814: +2 from architecture close-out, +9 from output
+# containment and +1 test-only abandoned-link collection deadline.
+# Combined fence grace and close-out/preparation waits: 1288 + 12 = 1300.
+expected_occurrences = 1300
+
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4823,10 +4848,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 515 -> 517 (#806): two Axum `Response::status()` reads in the Jellyfin HLS
 # test, for the master and a child fetched through the standard-port app.
 # HTTP status codes on in-process oneshot responses; nothing is launched.
-# 517 -> 523 (#808 + #813): the facade gaps add five net status reads;
-# refusal logging adds one more. All inspect in-process HTTP responses,
-# and none launches a process or owns a producer.
-expected_occurrences = 523
+# +1: `state.membership.status()` in the Developer readiness read is a
+# membership observation the `.status(` shape matches, not a process launch.
+# +6: integrated Jellyfin admission, catalog and refusal response reads.
+expected_occurrences = 524
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

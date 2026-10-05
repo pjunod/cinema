@@ -3,7 +3,7 @@
 **Status:** M0 plans and cold/warm medians for both schemas, before and after
 this PR; the M7 read-pool bench; the §3.7 statistics trial · **Tool:**
 `012d8a3a3` (`query_plans` example, statement capture), bench `27f729521` ·
-**Base:** `main@0e2c3fd47` · **Captured:** 2026-09-24/25 on nuc3 (16 cores,
+**Base:** `main@0e2c3fd47` · **Captured:** 2026-09-24/25 on lab3 (16 cores,
 30 GiB, bundled SQLite 3.53.2) · **Plan:**
 [SQLITE-READ-PATH-AND-QUERY-PLANS.md](../../docs/cluster/SQLITE-READ-PATH-AND-QUERY-PLANS.md)
 
@@ -75,7 +75,7 @@ page's `watch_map`, `watch_rollups` for the shows on it,
 `continue_watching(24)`, `next_up(24)`) 256 times across 32 concurrent
 workers, users 1-5, while a writer upserts 50 files a second through the
 same store. One process per configuration, warmed by one untimed Home first;
-two rounds, interleaved (2, 4, 8, 2, 4, 8), on nuc3 at load average 3.6-4.6.
+two rounds, interleaved (2, 4, 8, 2, 4, 8), on lab3 at load average 3.6-4.6.
 
 | Read connections | Homes | Read p50 (ms) | Read p95 (ms) | Wall (s) | Writes | Write p50 (ms) | Write p99 (ms) | Peak RSS (MiB) |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|

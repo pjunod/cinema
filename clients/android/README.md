@@ -20,7 +20,19 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `146` — grouped library rows, a visible letter/year
+> Status: **v0.3.0**, build `148` — a display-mode wait that times out
+> withdraws its `preferredDisplayModeId` request while it still owns the
+> window, so a late HDMI switch cannot land mid-playback (needs
+> `display_mode_match` on; not yet observed on a television), and the
+> uncalled Auto-quality policy port and its JVM runner are deleted; released
+> continuous audio outputs are retired again (since build 145 they were kept
+> and could exhaust the 16-output bound).
+> Build `147` — a seek pressed while a prepared quality
+> handoff has switched but not yet rendered is held and runs once on its first
+> frame (or on the picture an Auto rollback restores) instead of being dropped
+> until the 8-second target deadline reopens; a rollback reopen lands at the
+> seek's destination, not the playhead. Not yet on a device.
+> Build `146` — grouped library rows, a visible letter/year
 > index, expanded groups with Retry, and landscape home-media cards. Focused
 > phone and TV emulator checks passed; physical-device acceptance is unmeasured.
 > Build `145` — continuous quality: manual and Auto
@@ -32,9 +44,14 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 > while preserving crossing limits, profiles and display grades. The bounded
 > contract is negotiated with the server; no evidence is truncated. Physical
 > TCL/Streamer acceptance remains outstanding.
-> Build `142` — newer 10/30-second directional seek controls
-> are preserved from current main; no physical production install is claimed.
-> Build `141` — buffer roles retain their existing ceilings
+> Build `143` — no Android source change; the number was claimed with the
+> server's bounded catalog discovery and canonical recipe dispatch
+> (`56e52c50e`).
+> Build `142` — the 10/30-second seek controls use directional arrow icons
+> (`4f25ab713`); no physical production install is claimed.
+> Build `141` was claimed twice: on main for the 10/30-second seek controls
+> (`bdff3314b`), and on the architecture effort (`1ffaae2a4`), where buffer
+> roles retain their existing ceilings
 > and clamp to the actual process heap; local diagnostics name the actual Coil
 > cache bound. Larger incumbent allocation and three-device memory/HDMI
 > qualification remain open. No physical production install is claimed.

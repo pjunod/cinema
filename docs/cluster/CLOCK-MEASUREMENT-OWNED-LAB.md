@@ -15,10 +15,10 @@ the physical hosts or waive the original acceptance.
 
 | Host | Private address | Daemon publications |
 |---|---|---|
-| nynuc | 192.168.5.236 | TCP 55420 / 55421 / 55422 |
-| m6 | 192.168.4.14 | TCP 55420 / 55421 / 55422 |
-| nuc4 | 192.168.4.8 | TCP 55420 / 55421 / 55422 |
-| nuc3 | 192.168.4.7 | TCP 55420 / 55421 / 55422 |
+| media1 | 10.42.5.236 | TCP 55420 / 55421 / 55422 |
+| lab6 | 10.42.4.14 | TCP 55420 / 55421 / 55422 |
+| lab4 | 10.42.4.8 | TCP 55420 / 55421 / 55422 |
+| lab3 | 10.42.4.7 | TCP 55420 / 55421 / 55422 |
 
 The controller binds published sockets only to those host addresses. The
 daemon binds `0.0.0.0` inside a new owner-labelled bridge on each host; a host
@@ -42,7 +42,7 @@ bounded private state exports (at most 1 GiB/node).
 At launch, all hosts must show available RAM ≥8 GiB, disk ≥10 GiB, load1 below
 half their CPU count, no swap traffic and bounded CPU/memory/I/O pressure.
 Active named action-job containers refuse admission. These are fresh checks,
-not a capacity reservation: the earlier nynuc observation had active builds
+not a capacity reservation: the earlier media1 observation had active builds
 and was unsuitable for idle measurement. Never stop a build or production
 service to manufacture an idle window.
 
@@ -61,13 +61,13 @@ a repository/SSH credential, to the authorized existing Linux compiler.
 The source receipt is explicitly **not built** and cannot be used as an
 artifact receipt for launch.
 
-Read-only inventory on 2026-10-01 found native AMD64 tooling on nynuc:
+Read-only inventory on 2026-10-01 found native AMD64 tooling on media1:
 `sha256:2b11dbc8dc7f2b59ce42e743b838e96711a133bf67a6f50880dbdf5973b7e961`.
 Its retained build history installs clang, cmake, nasm, ninja, pkg-config and
 time on the pinned Rust 1.97.1 image. The older P02 tooling image `858e143b…`
 is absent there. Reinspect the selected image before an authorized build;
 no new toolchain, package installation or duplicate tooling image is needed.
-The observed production runtime image on nynuc was
+The observed production runtime image on media1 was
 `sha256:15dde06b072c142a9f50b9168be6f0d6a83b843142ebcccd39bb90189eea6aae`.
 It is a reusable runtime layer, **not** the selected measurement binary.
 Never commit a production container or copy its config/environment/data.
@@ -149,10 +149,22 @@ inventories or changed bounds refuse start, recovery and cleanup validation.
 
 ```bash
 python3 scripts/k06-owned-lab.py plan /private/tmp/k06-observation-<nonce> \
-  --artifact /private/tmp/<approved-artifact-receipt>.json
+  --artifact /private/tmp/<approved-artifact-receipt>.json \
+  --fleet <private>/k06-lab.fleet.json
 python3 scripts/k06-owned-lab.py validate \
   /private/tmp/k06-observation-<nonce>/.active-cleanup.json
 ```
+
+The four hosts, their addresses, the SSH user, the network the lab daemons
+trust and the iperf3 sender/receiver pair are not in the controller: they come
+from a fleet file kept outside the repository (`--fleet`, or
+`PLURX_K06_FLEET`), shaped like
+[`scripts/k06-owned-lab.fleet.example.json`](../../scripts/k06-owned-lab.fleet.example.json)
+(`scripts/*.fleet.json` is git-ignored). `plan` refuses a fleet that is not
+exactly four private hosts inside its trusted network, then copies it into
+`.active-cleanup.json`, so every later action and the remote worker use that
+same roster. A manifest planned before the roster moved out of the source can
+still be validated, cleaned up and purged by passing `--fleet` to that action.
 
 These two commands have no remote side effects. `plan` generates a 256-bit
 nonce, fresh private output, `.owner` and durable `.active-cleanup.json` before
@@ -232,7 +244,7 @@ clock upper bounds must remain below 2,000 ms; uncertainty, Unknown, missing
 series, resets, discontinuities, swap/pressure or collection gaps fail closed.
 The actual failing metric row is written before its clock assessment.
 
-Load is one generated TCP stream from m6 to nuc4, private TCP 55423, using
+Load is one generated TCP stream from lab6 to lab4, private TCP 55423, using
 the installed iperf3: 60 seconds at 20 Mb/s, one-off receiver capped at
 22 Mb/s, wrapper deadlines 70/75 seconds and five-second termination grace.
 Each process has address-space 256 MiB · CPU-time 15 seconds · output 2 MiB ·

@@ -35,12 +35,19 @@ pub(crate) struct SessionBinding {
 /// Nonserializable live provenance; work after capture cannot renew its EOF.
 pub(crate) struct LiveLinkProof {
     binding: SessionBinding,
+    /// The playback the incumbent's route named when this proof was taken.
+    playback_id: String,
     completed: Instant,
     transfer: plurx_core::playback::candidate::NetworkTransferEvidence,
 }
 impl LiveLinkProof {
     pub(crate) fn incumbent_session(&self) -> &str {
         &self.binding.session
+    }
+    /// The incumbent route's playback, as validated by the read that minted
+    /// this proof — a caller that needs it does not read the route again.
+    pub(crate) fn playback_id(&self) -> &str {
+        &self.playback_id
     }
     pub(crate) fn transfer(
         &self,
@@ -195,7 +202,14 @@ pub(crate) fn advisory_deadline() -> tokio::time::Instant {
     crate::media_pool::create_advisory_deadline(ADVISORY_EVIDENCE_STAGE)
 }
 
-async fn network_priors_enabled(state: &AppState) -> bool {
+/// `playback.network_priors` decides only whether evidence is kept beyond the
+/// live attachment: the durable per-network rows (`network_priors`,
+/// `candidate_link_priors`) are written and read only while it is on. The
+/// in-memory receipts below are not network history — each is bound to one
+/// served attachment, dies with it, and expires after `NONCE_TTL` — so they
+/// prove a fresh transfer (and acknowledge a Link negative) with the setting
+/// either way (D6).
+pub(crate) async fn network_priors_enabled(state: &AppState) -> bool {
     state
         .store
         .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
@@ -247,9 +261,10 @@ impl SourceLinkIdentity {
         })
     }
 
-    /// The request's identity: inside a create the source is fenced once and
-    /// every later pre-start read of the same create reuses that fence;
-    /// outside one (or for another requester or file) this is [`Self::capture`].
+    /// The request's identity: inside a create — or a Decision run under
+    /// [`with_decision_source_link`] — the source is fenced once and every
+    /// later read of the same request reuses that fence; outside both (or for
+    /// another requester or file) this is [`Self::capture`].
     ///
     /// A check that must observe a source replaced DURING the create — the
     /// post-acceptance comparison, the staged registration — uses
@@ -260,8 +275,26 @@ impl SourceLinkIdentity {
         {
             return Some(identity);
         }
+        if let Some(identity) = DECISION_SOURCE_LINK
+            .try_with(|cell| {
+                cell.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .filter(|identity| identity.describes(network, file))
+                    .cloned()
+            })
+            .ok()
+            .flatten()
+        {
+            return Some(identity);
+        }
         let identity = Self::capture(network, file).await?;
         crate::media_pool::remember_create_source_link(&identity);
+        let _ = DECISION_SOURCE_LINK.try_with(|cell| {
+            *cell
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity.clone());
+        });
         Some(identity)
     }
 
@@ -296,6 +329,22 @@ impl SourceLinkIdentity {
             route,
         }
     }
+}
+
+tokio::task_local! {
+    /// A Decision's [`SourceLinkIdentity`], fenced once — the same reuse a
+    /// create gets from its startup budget (`media_pool::create_source_link`).
+    static DECISION_SOURCE_LINK: Mutex<Option<SourceLinkIdentity>>;
+}
+
+/// Run one Decision's advisory reads with ONE source fence between them:
+/// inside `work`, [`SourceLinkIdentity::for_request`] fences the source on its
+/// first call and every later call for the same requester and file reuses
+/// that identity, exactly as inside a create. Without it each live-proof,
+/// recovery-memory and negative-filter read of one Decision opened and
+/// `fstat`ed the source again.
+pub(crate) async fn with_decision_source_link<T>(work: impl std::future::Future<Output = T>) -> T {
+    DECISION_SOURCE_LINK.scope(Mutex::new(None), work).await
 }
 
 /// One candidate's binding. Fences the source each call, so a caller that
@@ -379,13 +428,33 @@ impl LinkReceipts {
     /// A native recovery may await one explicit negative acknowledgement;
     /// ordinary diagnostics remain detached. This never mints from a cause
     /// label, renews EOF or turns an absent proof into a playback error.
+    ///
+    /// What backs the acknowledgement depends on `playback.network_priors`:
+    ///
+    /// - **On:** the negative is folded into `candidate_link_priors` and only
+    ///   an exact durable readback of this immutable completion acknowledges
+    ///   it (unchanged). The acknowledgement also carries the attributed
+    ///   measured-Link verdict for this network's prior row, which the caller
+    ///   folds after answering.
+    /// - **Off:** nothing durable is written or read. The owner's in-memory
+    ///   receipt is the record: `Receipt::claim` marks this exact nonce
+    ///   negative once, and [`Self::current_negative_until`] re-proves that
+    ///   claim against the live attachment with its original EOF. That is
+    ///   the same exactly-once, never-refreshed property the durable readback
+    ///   gives, scoped to the attachment instead of to the network, and it is
+    ///   what lets a link stall downshift for a display-aware client whose
+    ///   operator never opted into network history.
+    ///
+    /// Either way the acknowledgement needs the receipt the owner issued, so
+    /// a session placed on a peer, or a client without an IPv4 identity, is
+    /// never acknowledged and keeps its ordinary unacknowledged reopen.
     pub(crate) async fn accept_negative_for_ack(
         &self,
         state: &AppState,
         network: &NetworkIdentity,
         session: Option<&str>,
         sample: &ClientLinkSample,
-    ) -> Option<String> {
+    ) -> Option<AcceptedLinkNegative> {
         if !sample.negative {
             return None;
         }
@@ -394,29 +463,30 @@ impl LinkReceipts {
         let deadline = advisory_deadline();
         tokio::time::timeout_at(deadline, async {
             let session = session?;
-            if !network_priors_enabled(state).await {
-                return None;
-            }
+            let priors = network_priors_enabled(state).await;
             let value = self.accept(state, network, Some(session), sample).await?;
-            state
-                .store
-                .observe_candidate_link(&value, crate::media_sessions::unix_ms())
-                .await
-                .ok()?;
-            // Ok(()) also covers a refused/no-op fold. Only an exact durable
-            // readback can acknowledge this immutable completion's negative.
-            let saved = state
-                .store
-                .candidate_link_prior(&value.binding)
-                .await
-                .ok()??;
-            if saved.binding != value.binding
-                || saved.body_bytes != value.body_bytes
-                || saved.body_duration_ms != value.body_duration_ms
-                || saved.completed_at_ms != value.completed_at_ms
-                || saved.negative_at_ms != Some(value.completed_at_ms)
-            {
-                return None;
+            if priors {
+                state
+                    .store
+                    .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                    .await
+                    .ok()?;
+                // Ok(()) also covers a refused/no-op fold. With priors on,
+                // only an exact durable readback can acknowledge this
+                // immutable completion's negative.
+                let saved = state
+                    .store
+                    .candidate_link_prior(&value.binding)
+                    .await
+                    .ok()??;
+                if saved.binding != value.binding
+                    || saved.body_bytes != value.body_bytes
+                    || saved.body_duration_ms != value.body_duration_ms
+                    || saved.completed_at_ms != value.completed_at_ms
+                    || saved.negative_at_ms != Some(value.completed_at_ms)
+                {
+                    return None;
+                }
             }
             let file = state.store.get_file(value.binding.file_id).await.ok()??;
             let route = state.store.media_session_route(session).await.ok()??;
@@ -436,7 +506,14 @@ impl LinkReceipts {
                 return None;
             }
             proof.transfer()?;
-            Some(sample.receipt.clone())
+            Some(AcceptedLinkNegative {
+                receipt: sample.receipt.clone(),
+                measured_prior: if priors {
+                    measured_link_prior(network, &value, sample, &route)
+                } else {
+                    None
+                },
+            })
         })
         .await
         .ok()
@@ -494,10 +571,9 @@ impl LinkReceipts {
         if proposed_owner != Some(state.node_id.as_str()) {
             return None;
         }
+        // No `playback.network_priors` check: this reads only the live
+        // receipt and the current route, never a stored prior (D6).
         tokio::time::timeout_at(deadline, async {
-            if !network_priors_enabled(state).await {
-                return None;
-            }
             let nonce = incumbent_receipt?;
             if nonce.len() != 36 || uuid::Uuid::parse_str(nonce).is_err() {
                 return None;
@@ -558,14 +634,19 @@ impl LinkReceipts {
             }
             // Async authority/source queries cannot refresh the original EOF.
             // Re-read this exact sample, never another receipt sharing a tuple.
-            self.exact_nonce_proof(nonce, &captured)
+            self.exact_nonce_proof(nonce, &captured, &current_route.playback_id)
         })
         .await
         .ok()
         .flatten()
     }
 
-    fn exact_nonce_proof(&self, nonce: &str, binding: &SessionBinding) -> Option<LiveLinkProof> {
+    fn exact_nonce_proof(
+        &self,
+        nonce: &str,
+        binding: &SessionBinding,
+        playback_id: &str,
+    ) -> Option<LiveLinkProof> {
         let rows = self.0.lock().ok()?;
         let row = rows.receipts.get(nonce)?;
         if &row.binding != binding {
@@ -575,6 +656,7 @@ impl LinkReceipts {
         let raw = row.raw.as_ref()?;
         let proof = LiveLinkProof {
             binding: binding.clone(),
+            playback_id: playback_id.to_owned(),
             completed,
             transfer: plurx_core::playback::candidate::NetworkTransferEvidence {
                 bytes: raw.bytes,
@@ -996,6 +1078,105 @@ impl LinkReceipts {
     }
 }
 
+/// An acknowledged Link negative: the nonce the client awaits in
+/// `X-Plurx-Link-Accepted`, and — with `playback.network_priors` on only —
+/// the attributed measured-Link verdict to fold into this network's prior.
+pub(crate) struct AcceptedLinkNegative {
+    pub(crate) receipt: String,
+    pub(crate) measured_prior: Option<plurx_core::domain::NetworkPriorObservation>,
+}
+
+/// The measured-Link prior observation for an acknowledged negative: the
+/// incumbent candidate's rung starved on this completed, unpaced, uncached
+/// body. The rung is read from the incumbent's own published response and
+/// must be the exact recipe the receipt was bound to; anything else is
+/// Unknown and records nothing. Because it carries a measured-Link proof, the
+/// store folds it into the attributed `link_*` pair only and never into the
+/// legacy starvation pair legacy Auto reads (`fold_prior`).
+fn measured_link_prior(
+    network: &NetworkIdentity,
+    value: &CandidateLinkObservation,
+    sample: &ClientLinkSample,
+    route: &MediaSessionRoute,
+) -> Option<plurx_core::domain::NetworkPriorObservation> {
+    use plurx_core::domain::{
+        CompletedNetworkTransfer, MeasuredLinkObservation, NetworkPriorObservation,
+    };
+    if route.response_json.len() > 1024 * 1024 {
+        return None;
+    }
+    let response: super::StartResponse = serde_json::from_str(&route.response_json).ok()?;
+    let id = response.quality_candidate_id?;
+    if response.session_id != route.session_id {
+        return None;
+    }
+    let mut matches = response
+        .quality_candidates?
+        .into_iter()
+        .filter(|candidate| candidate.id == id);
+    let candidate = matches.next()?;
+    if matches.next().is_some()
+        || !candidate.identity_matches()
+        || candidate.recipe_digest != value.binding.recipe_digest
+        || candidate.route != value.binding.route
+        || candidate.target_height == 0
+    {
+        return None;
+    }
+    let observed_at_ms = crate::media_sessions::unix_ms();
+    let measured = MeasuredLinkObservation::from_completed_transfer(
+        NetworkPriorCause::Link,
+        CompletedNetworkTransfer {
+            body_bytes: value.body_bytes,
+            body_duration_ms: u64::from(value.body_duration_ms),
+            completed_at_ms: value.completed_at_ms,
+            network_load: sample.network_load,
+            from_local_cache: sample.from_cache,
+            producer_paced: sample.producer_paced,
+        },
+        observed_at_ms,
+    )?;
+    Some(NetworkPriorObservation {
+        user_id: network.user_id?,
+        credential_generation: network.credential_generation.clone()?,
+        client_class: network.client_class.clone(),
+        network_fingerprint: network.network_fingerprint.clone(),
+        throughput_kbps: None,
+        starved_rung_height: Some(i64::from(candidate.target_height)),
+        observed_at_ms,
+        measured_link: Some(measured),
+    })
+}
+
+/// Cold-start consumer of the measured-Link verdict: a network whose prior
+/// says it starved at rung `H` on a completed transfer starts below `H`.
+///
+/// `prior` is `None` whenever `playback.network_priors` is off (see
+/// `network::stored_prior`), so this is the identity then. A catalog with
+/// nothing below `H` is returned unchanged: the verdict narrows Auto's
+/// choice, it never refuses playback. Legacy, unattributed starvation
+/// (`worst_rung_height`) is not consulted here — the candidate policy does
+/// not promote it (see `stream::prior_for_candidate_policy`).
+pub(crate) fn link_starved_catalog(
+    prior: Option<&plurx_core::domain::NetworkPrior>,
+    catalog: Vec<plurx_core::playback::candidate::QualityCandidate>,
+    now_ms: i64,
+) -> Vec<plurx_core::playback::candidate::QualityCandidate> {
+    let Some(starved) = prior.and_then(|prior| prior.active_link_starved_rung(now_ms)) else {
+        return catalog;
+    };
+    if !catalog
+        .iter()
+        .any(|candidate| i64::from(candidate.target_height) < starved)
+    {
+        return catalog;
+    }
+    catalog
+        .into_iter()
+        .filter(|candidate| i64::from(candidate.target_height) < starved)
+        .collect()
+}
+
 /// Exact negatives only; raw throughput cannot be compared to planned budgets.
 /// One candidate against a source identity the request already fenced: a
 /// single prior read, no filesystem work. Missing evidence is admissible.
@@ -1140,7 +1321,7 @@ pub(crate) async fn positive_catalog(
     let Some(network) = network else {
         return catalog;
     };
-    let Some(proof) = state
+    let proof = state
         .link_receipts
         .current_positive_until(
             state,
@@ -1151,8 +1332,22 @@ pub(crate) async fn positive_catalog(
             Some(&state.node_id),
             deadline,
         )
-        .await
-    else {
+        .await;
+    positive_catalog_with_proof(proof.as_ref(), catalog, measured)
+}
+
+/// [`positive_catalog`] for a caller that already holds this request's live
+/// positive proof — a Decision takes it once in
+/// [`super::candidate_recovery::decision_catalog`] and passes it here rather
+/// than proving the same receipt again. `None` keeps the catalog. The proof's
+/// freshness is still checked here, at the point of use
+/// ([`LiveLinkProof::transfer`]): holding it longer cannot renew its EOF.
+pub(crate) fn positive_catalog_with_proof(
+    proof: Option<&LiveLinkProof>,
+    catalog: Vec<plurx_core::playback::candidate::QualityCandidate>,
+    measured: Option<&[crate::vodserve::retained::MeasuredCandidateOutput]>,
+) -> Vec<plurx_core::playback::candidate::QualityCandidate> {
+    let Some(proof) = proof else {
         return catalog;
     };
     let (digest, route) = proof.incumbent_recipe();
@@ -1237,31 +1432,43 @@ mod tests {
 
     #[tokio::test]
     async fn a05_client_log_ack_header_is_exact_negative_only_and_never_batch_authority() {
-        client_log_ack_controls(false, false).await;
+        client_log_ack_controls(false, false, true).await;
     }
 
     #[tokio::test]
     async fn a05_client_log_ack_refuses_conflicting_durable_fold() {
-        client_log_ack_controls(true, false).await;
+        client_log_ack_controls(true, false, true).await;
     }
 
     #[tokio::test]
     async fn a05_client_log_ack_requires_exact_durable_completion_and_refuses_older_sample() {
-        client_log_ack_controls(false, true).await;
+        client_log_ack_controls(false, true, true).await;
     }
 
-    async fn client_log_ack_controls(conflicting_fold: bool, exact_fold: bool) {
+    /// D6: with `playback.network_priors` off a link stall is still
+    /// acknowledged — from the owner's live receipt — so the native client
+    /// downshifts instead of reopening the same quality, and nothing is kept
+    /// as per-network history.
+    #[tokio::test]
+    async fn d6_client_log_ack_without_network_priors_is_backed_by_the_live_receipt() {
+        client_log_ack_controls(false, false, false).await;
+    }
+
+    async fn client_log_ack_controls(conflicting_fold: bool, exact_fold: bool, priors_on: bool) {
         use axum::{extract::State, http::HeaderMap, Json};
         use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
+        use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let (state, user, file, _root) = actual_intake_state().await;
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-            .await
-            .expect("setting");
+        if priors_on {
+            state
+                .store
+                .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
+                .await
+                .expect("setting");
+        }
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let peer = "192.168.4.9:1234".parse().expect("socket");
+        let peer = "10.42.4.9:1234".parse().expect("socket");
         let mut network = crate::http::network::identity(&headers, Some(peer)).expect("namespace");
         network.user_id = Some(user.id);
         network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
@@ -1270,9 +1477,31 @@ mod tests {
             &user.password_hash,
         ));
         let now = crate::media_sessions::unix_ms();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        // The incumbent's published response names its candidate: the
+        // measured-Link verdict records that candidate's rung.
+        let incumbent = QualityCandidate {
+            id: CandidateId::for_recipe_digest([4; 32]),
+            recipe_digest: [4; 32],
+            route: CandidateRoute::Encode,
+            normalized_geometry: true,
+            width: 1920,
+            height: 1080,
+            target_height: 1080,
+            average_bps: Some(6_000_000),
+            peak_bps: Some(9_000_000),
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        };
+        let response = serde_json::json!({"session_id":session_id,"playlist_url":"owned.m3u8",
+            "duration_ms":12000,"start_seconds":0.0,"media_origin_ms":0,"height":1080,
+            "encoder":"fixture","vod":true,"ladder":[],
+            "quality_candidate_id":incumbent.id,"quality_candidates":[incumbent]});
         let activation = MediaSessionActivation {
             incarnation_id: uuid::Uuid::new_v4().to_string(),
-            session_id: uuid::Uuid::new_v4().to_string(),
+            session_id,
             user_id: user.id,
             playback_id: "http-ack-player".into(),
             recovery_epoch: String::new(),
@@ -1282,7 +1511,7 @@ mod tests {
             request_fingerprint: "a".repeat(64),
             owner_node_id: state.node_id.clone(),
             recipe_json: "{}".into(),
-            response_json: "{}".into(),
+            response_json: response.to_string(),
             publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
             now_ms: now,
@@ -1332,13 +1561,15 @@ mod tests {
             "session_id":session.session,"link_sample":{"receipt":nonce,"object_name":"seg00001.m4s","etag":"etag",
             "body_bytes":4096,"body_duration_ms":5000,"age_ms":0,"network_load":true,"from_cache":false,"producer_paced":false,
             "cause":"link","negative":false,"media_duration_ms":4000,"presenting":true,"stalled":true,"runway_ms":1000}});
-        let raw: ClientLinkSample =
-            serde_json::from_value(body["link_sample"].clone()).expect("sample");
-        assert!(state
-            .link_receipts
-            .accept(&state, &network, Some(&session.session), &raw)
-            .await
-            .is_some());
+        if priors_on {
+            let raw: ClientLinkSample =
+                serde_json::from_value(body["link_sample"].clone()).expect("sample");
+            assert!(state
+                .link_receipts
+                .accept(&state, &network, Some(&session.session), &raw)
+                .await
+                .is_some());
+        }
         async fn send(
             state: &AppState,
             user: &plurx_core::domain::User,
@@ -1358,6 +1589,42 @@ mod tests {
         let positive = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(positive.status(), 204);
         assert!(!positive.headers().contains_key("x-plurx-link-accepted"));
+        if !priors_on {
+            // D6's own claim: with priors off the ClientLog positive ALONE
+            // claims the owner's receipt — nothing above called `accept`.
+            // The claim runs detached, so wait for it (bounded) before the
+            // negative, which `Receipt::claim` refuses without a claimed
+            // positive. Re-adding the priors gate to that detached claim
+            // leaves `raw` empty and fails here.
+            let claimed = tokio::time::timeout(Duration::from_secs(10), async {
+                while !state.link_receipts.raw_claimed_for_test(&nonce) {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await;
+            assert!(
+                claimed.is_ok(),
+                "the ClientLog positive must claim the live receipt with priors off"
+            );
+        }
+        // The fresh-transfer (upgrade) proof reads only the live receipt, so
+        // it holds whether or not network priors are kept (D6).
+        assert!(
+            state
+                .link_receipts
+                .current_positive_until(
+                    &state,
+                    &network,
+                    &file,
+                    Some(&nonce),
+                    Some("http-ack-player"),
+                    Some(&state.node_id),
+                    advisory_deadline(),
+                )
+                .await
+                .is_some(),
+            "live positive proof regardless of playback.network_priors"
+        );
         body["link_sample"]["negative"] = true.into();
         if conflicting_fold {
             // The durable namespace key deliberately conflicts with this exact
@@ -1404,6 +1671,12 @@ mod tests {
             ]))
             .is_err()
         );
+        // Priors off: a barrier on every detached task this acknowledged
+        // request spawns, so "nothing durable" below is checked after any
+        // late write could have landed, not after a guessed number of yields.
+        let accepted_detached = (!priors_on).then(|| {
+            crate::http::system::notify_when_client_log_detached_work_finishes("actual ack")
+        });
         let accepted = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(accepted.status(), 204);
         assert_eq!(
@@ -1420,9 +1693,79 @@ mod tests {
                 .expect("nonce"),
             nonce
         );
+        let duplicate_detached = (!priors_on).then(|| {
+            crate::http::system::notify_when_client_log_detached_work_finishes("actual ack")
+        });
         let duplicate = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(duplicate.status(), 204);
         assert!(!duplicate.headers().contains_key("x-plurx-link-accepted"));
+        let generation = network
+            .credential_generation
+            .as_ref()
+            .expect("generation")
+            .as_str()
+            .to_owned();
+        if let Some(detached) = accepted_detached {
+            // Priors off: the acknowledgement above came from memory. Nothing
+            // per-network may exist — not the exact candidate row, not the
+            // coarse prior row — once every detached task of the acknowledged
+            // request and of the duplicate after it has run to completion.
+            for (what, barrier) in [
+                ("acknowledged", Some(detached)),
+                ("duplicate", duplicate_detached),
+            ] {
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    barrier.expect("barrier registered with priors off"),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("the {what} request's detached work finishes"))
+                .expect("the barrier fires when its last holder drops");
+            }
+            assert!(state
+                .store
+                .candidate_link_prior(&session.source)
+                .await
+                .expect("candidate read")
+                .is_none());
+            assert!(state
+                .store
+                .network_prior(
+                    &generation,
+                    &network.client_class,
+                    &network.network_fingerprint
+                )
+                .await
+                .expect("prior read")
+                .is_none());
+            return;
+        }
+        // Priors on: the acknowledged negative also feeds the network's
+        // attributed measured-Link verdict, folded after the answer.
+        let mut folded = None;
+        for _ in 0..1000 {
+            folded = state
+                .store
+                .network_prior(
+                    &generation,
+                    &network.client_class,
+                    &network.network_fingerprint,
+                )
+                .await
+                .expect("prior read")
+                .filter(|prior| prior.link_worst_rung_height.is_some());
+            if folded.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let folded = folded.expect("measured-Link prior persisted");
+        assert_eq!(folded.link_worst_rung_height, Some(1080));
+        assert_eq!(folded.link_starved_at_ms, Some(now));
+        assert_eq!(
+            folded.active_link_starved_rung(crate::media_sessions::unix_ms()),
+            Some(1080)
+        );
         if exact_fold {
             let saved = state
                 .store
@@ -1489,7 +1832,7 @@ mod tests {
             .expect("Auto");
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let remote = "192.168.4.9:1234".parse().expect("socket");
+        let remote = "10.42.4.9:1234".parse().expect("socket");
         let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(
             serde_json::json!({"v":2,"video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]})
         ).expect("actual request caps");
@@ -1525,6 +1868,7 @@ mod tests {
             &user.password_hash,
         ));
         let mut request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,
@@ -1883,7 +2227,7 @@ mod tests {
                 &user.password_hash,
             )),
             client_class: "web".into(),
-            network_fingerprint: "192.168.4.0/24".into(),
+            network_fingerprint: "10.42.4.0/24".into(),
         };
         let source = binding(&network, &file, [4; 32], CandidateRoute::Encode)
             .await
@@ -1965,7 +2309,8 @@ mod tests {
             state
                 .link_receipts
                 .accept_negative_for_ack(&state, &network, Some(&session.session), &sample)
-                .await,
+                .await
+                .map(|ack| ack.receipt),
             Some(nonce.clone())
         );
         assert!(
@@ -2095,7 +2440,7 @@ mod tests {
         .expect("caps");
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let remote = "10.42.4.9:1234".parse().expect("peer");
         let q = crate::http::stream::Caps {
             caps_v2: Some(caps),
             force: Some("original".into()),
@@ -2187,6 +2532,202 @@ mod tests {
             .any(|row| row.id == selected));
     }
 
+    #[test]
+    fn d6_link_starved_catalog_starts_below_the_measured_rung_and_never_empties() {
+        use plurx_core::domain::{NetworkPrior, NETWORK_PRIOR_STARVED_TTL_MS};
+        use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
+        let row = |height: u32| {
+            let digest = [height as u8; 32];
+            QualityCandidate {
+                id: CandidateId::for_recipe_digest(digest),
+                recipe_digest: digest,
+                route: CandidateRoute::Encode,
+                normalized_geometry: true,
+                width: height * 16 / 9,
+                height,
+                target_height: height,
+                average_bps: None,
+                peak_bps: None,
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                decoder_compatible: true,
+                complete_cache: false,
+                sustainable: true,
+            }
+        };
+        let catalog = vec![row(2160), row(1080), row(720), row(480)];
+        let heights = |rows: &[QualityCandidate]| {
+            rows.iter().map(|row| row.target_height).collect::<Vec<_>>()
+        };
+        let now = 10 * NETWORK_PRIOR_STARVED_TTL_MS;
+        let prior = NetworkPrior {
+            link_worst_rung_height: Some(1080),
+            link_starved_at_ms: Some(now - 1_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            heights(&link_starved_catalog(Some(&prior), catalog.clone(), now)),
+            [720, 480],
+            "a network that starved at 1080 starts below 1080"
+        );
+        assert_eq!(
+            heights(&link_starved_catalog(None, catalog.clone(), now)),
+            [2160, 1080, 720, 480],
+            "no prior (priors off, IPv6, cold) is the identity"
+        );
+        let expired = NetworkPrior {
+            link_starved_at_ms: Some(now - NETWORK_PRIOR_STARVED_TTL_MS - 1),
+            ..prior.clone()
+        };
+        assert_eq!(
+            heights(&link_starved_catalog(Some(&expired), catalog.clone(), now)),
+            [2160, 1080, 720, 480],
+            "an expired verdict is not believed"
+        );
+        let legacy = NetworkPrior {
+            worst_rung_height: Some(1080),
+            starved_at_ms: Some(now - 1_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            heights(&link_starved_catalog(Some(&legacy), catalog.clone(), now)),
+            [2160, 1080, 720, 480],
+            "unattributed legacy starvation is not promoted to the candidate policy"
+        );
+        let floor = NetworkPrior {
+            link_worst_rung_height: Some(480),
+            ..prior
+        };
+        assert_eq!(
+            heights(&link_starved_catalog(Some(&floor), catalog, now)),
+            [2160, 1080, 720, 480],
+            "nothing below the verdict narrows nothing: never a refusal"
+        );
+    }
+
+    /// D6 consumer: the measured-Link verdict (SQLite v93 pair) a priors-on
+    /// acknowledgement persists moves the cold Auto start below the starved
+    /// rung; with priors off the same row is not read.
+    #[tokio::test]
+    async fn d6_cold_auto_decision_starts_below_a_measured_link_starvation() {
+        use axum::{
+            extract::{Path, Query, State},
+            http::HeaderMap,
+        };
+        use plurx_core::domain::{
+            CompletedNetworkTransfer, MeasuredLinkObservation, NetworkPriorObservation,
+        };
+        let (state, user, file, _root) = actual_intake_state().await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
+            .await
+            .expect("Auto setting");
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
+            .await
+            .expect("prior setting");
+        let caps = serde_json::from_value(serde_json::json!({"v":2,
+            "video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]}))
+        .expect("caps");
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
+        let remote = "10.42.4.9:1234".parse().expect("peer");
+        let q = crate::http::stream::Caps {
+            caps_v2: Some(caps),
+            force: Some("auto".into()),
+            ..Default::default()
+        };
+        let decide = || {
+            crate::http::stream::decision(
+                crate::http::extract::AuthUser(user.clone()),
+                State(state.clone()),
+                Path(file.id),
+                Query(q.clone()),
+                headers.clone(),
+                crate::http::network::RemoteAddress(Some(remote)),
+            )
+        };
+        let selected_height = |decision: &crate::http::stream::DecisionResponse| {
+            let id = decision.quality_candidate_id?;
+            decision
+                .quality_candidates
+                .as_ref()?
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.target_height)
+        };
+        let cold = decide().await.expect("cold decision").0;
+        let starved = selected_height(&cold).expect("cold Auto selection");
+        assert!(
+            cold.quality_candidates
+                .as_ref()
+                .expect("catalog")
+                .iter()
+                .any(|row| row.target_height < starved),
+            "fixture offers a rung below the cold choice"
+        );
+        let network = crate::http::network::identity(&headers, Some(remote)).expect("network");
+        let generation = plurx_core::domain::CredentialGeneration::derive(
+            user.id,
+            user.created_at,
+            &user.password_hash,
+        );
+        let now = crate::media_sessions::unix_ms();
+        let measured = MeasuredLinkObservation::from_completed_transfer(
+            NetworkPriorCause::Link,
+            CompletedNetworkTransfer {
+                body_bytes: 4096,
+                body_duration_ms: 5000,
+                completed_at_ms: now,
+                network_load: Some(true),
+                from_local_cache: Some(false),
+                producer_paced: Some(false),
+            },
+            now,
+        )
+        .expect("typed completed-body proof");
+        state
+            .store
+            .observe_network_prior(&NetworkPriorObservation {
+                user_id: user.id,
+                credential_generation: generation,
+                client_class: network.client_class.clone(),
+                network_fingerprint: network.network_fingerprint.clone(),
+                throughput_kbps: None,
+                starved_rung_height: Some(i64::from(starved)),
+                observed_at_ms: now,
+                measured_link: Some(measured),
+            })
+            .await
+            .expect("measured-Link fold");
+        let below = decide().await.expect("decision with verdict").0;
+        assert_ne!(below.quality_candidate_id, cold.quality_candidate_id);
+        assert!(
+            selected_height(&below).is_none_or(|height| height < starved),
+            "cold Auto never picks the rung this network starved at, or above it"
+        );
+        assert!(
+            below
+                .quality_candidates
+                .as_ref()
+                .expect("public menu")
+                .iter()
+                .any(|row| row.target_height >= starved),
+            "the verdict narrows Auto only; the public menu is unchanged"
+        );
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "0")
+            .await
+            .expect("prior setting off");
+        let off = decide().await.expect("decision with priors off").0;
+        assert_eq!(
+            off.quality_candidate_id, cold.quality_candidate_id,
+            "priors off: the stored verdict is not consulted"
+        );
+    }
+
     #[tokio::test]
     async fn a05_real_intake_rechecks_retired_or_changed_owner_after_source_await_without_claim() {
         use plurx_core::domain::{
@@ -2240,7 +2781,7 @@ mod tests {
                     &user.password_hash,
                 )),
                 client_class: "web".into(),
-                network_fingerprint: "192.168.4.0/24".into(),
+                network_fingerprint: "10.42.4.0/24".into(),
             };
             let source = binding(&network, &file, [4; 32], CandidateRoute::Encode)
                 .await
@@ -2493,7 +3034,7 @@ mod tests {
             });
         }
         let mut proof = registry
-            .exact_nonce_proof(&first, &binding)
+            .exact_nonce_proof(&first, &binding, "player")
             .expect("exact proof");
         assert_eq!(proof.transfer().expect("fresh").elapsed_ms, 5000);
         assert_eq!(
@@ -2503,14 +3044,16 @@ mod tests {
         let mut other_attachment = binding.clone();
         other_attachment.incarnation = "another-installed-item".to_owned();
         assert!(registry
-            .exact_nonce_proof(&first, &other_attachment)
+            .exact_nonce_proof(&first, &other_attachment, "player")
             .is_none());
         proof.completed = Instant::now() - Duration::from_secs(16);
         assert!(
             proof.transfer().is_none(),
             "work after capture cannot renew EOF"
         );
-        assert!(registry.exact_nonce_proof(&second, &binding).is_some());
+        assert!(registry
+            .exact_nonce_proof(&second, &binding, "player")
+            .is_some());
         registry
             .0
             .lock()
@@ -2520,7 +3063,9 @@ mod tests {
             .expect("first")
             .completion = Some((Instant::now() - Duration::from_secs(16), 100_000));
         assert!(
-            registry.exact_nonce_proof(&first, &binding).is_none(),
+            registry
+                .exact_nonce_proof(&first, &binding, "player")
+                .is_none(),
             "fresh other body cannot replace requested nonce"
         );
     }
@@ -2768,7 +3313,7 @@ mod tests {
         let (_state, user, file, _root) = actual_intake_state().await;
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let remote = "10.42.4.9:1234".parse().expect("peer");
         let mut network = crate::http::network::identity(&headers, Some(remote)).expect("network");
         network.user_id = Some(user.id);
         network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
@@ -2836,7 +3381,7 @@ mod tests {
         .expect("caps");
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let remote = "10.42.4.9:1234".parse().expect("peer");
         let decision = crate::http::stream::decision(
             crate::http::extract::AuthUser(user.clone()),
             State(state.clone()),

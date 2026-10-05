@@ -65,7 +65,7 @@ const MAX_NEGATIVE_ENTRIES: usize = 128;
 /// first poll, and a cold one needs a full demux of the source. Extracting one
 /// PGS track from file 5208 — a 79.5 GB remux whose subtitle packets are
 /// interleaved across 116 minutes — read the entire file to produce 18,866
-/// bytes, measured at 402 s on m6, which is just the disk's read speed. No
+/// bytes, measured at 402 s on lab6, which is just the disk's read speed. No
 /// start budget can contain that, so a start must not spend its budget
 /// discovering it.
 ///

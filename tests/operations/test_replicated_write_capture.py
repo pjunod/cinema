@@ -16,8 +16,11 @@ import csv
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import struct
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -30,6 +33,10 @@ loader = importlib.machinery.SourceFileLoader("replicated_write_capture", str(SC
 spec = importlib.util.spec_from_loader(loader.name, loader)
 capture = importlib.util.module_from_spec(spec)
 loader.exec_module(capture)
+# The real roster is kept outside the repository; the shipped example has the
+# same shape with the public mirror's names, and every case below runs on it.
+FLEET = ROOT / "scripts" / "replicated-write-capture.fleet.example.json"
+capture.use_fleet(*capture.load_fleet(FLEET))
 
 HEADER = (
     "timestamp_utc\tepoch\tnode\turl\treachable\tbuild\tlocal_is_voter\tcommit_index\t"
@@ -368,6 +375,104 @@ class GateCase(unittest.TestCase):
                     row["node"], build, source)
             with self.assertRaises(FileExistsError):
                 capture.sample_after(owner, manifest, build, source, 1)
+
+
+class FleetCase(unittest.TestCase):
+    """The voters come from the fleet file; neither tool names the lab."""
+
+    def test_neither_tool_names_a_voter_or_address(self):
+        for path in (SCRIPT, SAMPLER):
+            text = path.read_text()
+            for node, url in capture.AFTER_URLS.items():
+                with self.subTest(path=path.name, node=node):
+                    self.assertNotIn(urlhost(url), text)
+                    self.assertNotIn(node, text)
+
+    def test_the_example_roster_is_the_three_voters_in_order(self):
+        nodes, urls = capture.load_fleet(FLEET)
+        self.assertEqual(len(nodes), 3)
+        self.assertEqual(list(urls), list(nodes))
+        self.assertTrue(all(url.endswith("/metrics") for url in urls.values()))
+
+    def test_a_malformed_fleet_is_refused(self):
+        good = json.loads(FLEET.read_text())
+        def voter(**change):
+            data = copy.deepcopy(good)
+            data["voters"][0].update(change)
+            return data
+        cases = {
+            "schema": dict(good, schema="k03-fleet-v0"),
+            "extra key": dict(good, note="x"),
+            "no voters": dict(good, voters=[]),
+            "duplicate node": dict(good, voters=[good["voters"][0], good["voters"][0]]),
+            "bad name": voter(node="a b"),
+            "not metrics": voter(metrics_url="http://h:1/other"),
+            "credentials in url": voter(metrics_url="http://u:p@h:1/metrics"),
+            "query": voter(metrics_url="http://h:1/metrics?x=1"),
+            "scheme": voter(metrics_url="file:///metrics"),
+            "extra voter key": voter(token="x"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fleet.json"
+            for label, data in cases.items():
+                path.write_text(json.dumps(data))
+                with self.subTest(label), self.assertRaises(ValueError):
+                    capture.load_fleet(path)
+
+    def test_commands_that_need_the_roster_refuse_without_one(self):
+        with mock.patch.dict(os.environ, {capture.FLEET_ENV: ""}), \
+                mock.patch("sys.stderr", io.StringIO()):
+            for argv in (["evaluate", "x.tsv"], ["roster"],
+                         ["sample-after", "--output-dir", "o", "--acquisition-manifest", "m",
+                          "--expected-build", "b", "--source-commit", "s", "--max-seconds", "1"]):
+                with self.subTest(argv=argv[0]), self.assertRaises(SystemExit):
+                    capture.main(argv)
+        with mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(capture.main(["roster", "--fleet", str(FLEET)]), 0)
+        self.assertEqual(out.getvalue().splitlines(),
+                         [f"{n}\t{u}" for n, u in capture.AFTER_URLS.items()])
+
+    def test_the_sampler_polls_every_fleet_voter_once_a_tick(self):
+        """One real tick of the shell sampler with curl and sleep stubbed."""
+        if shutil.which("bash") is None:
+            self.skipTest("bash unavailable")
+        body = "\n".join((
+            'plurx_build_info{version="0.3.0",build="b1"} 1', "plurx_cluster_local_is_voter 1",
+            "plurx_raft_commit_index 10", 'plurx_store_operations_total{class="authority_read",method="r"} 2',
+            'plurx_store_operations_total{class="write",method="w"} 3',
+            'plurx_raft_snapshot_seconds_count{operation="build"} 0', 'plurx_watched_outbox{status="pending"} 0',
+            "plurx_transcode_sessions_active 0", 'plurx_live_tv_sessions{state="starting"} 0',
+            'plurx_live_tv_sessions{state="active"} 0',
+            'plurx_cache_protected_entries{reason="active_playback"} 0', ""))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for script in (SCRIPT, SAMPLER):
+                shutil.copy2(script, root / script.name)
+            stubs = root / "bin"
+            stubs.mkdir()
+            (stubs / "body.prom").write_text(body)
+            (stubs / "curl").write_text(f'#!/bin/sh\ncat "{stubs}/body.prom"\n')
+            # The first sleep ends the run: one tick is the unit under test.
+            (stubs / "sleep").write_text("#!/bin/sh\nkill -TERM $PPID\n")
+            for stub in ("curl", "sleep"):
+                (stubs / stub).chmod(0o755)
+            env = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}", PLURX_K03_FLEET="")
+            refused = subprocess.run(["bash", str(root / SAMPLER.name)], env=env,
+                                     capture_output=True, timeout=30)
+            self.assertEqual(refused.returncode, 2)
+            self.assertFalse((root / "samples.tsv").exists())
+            subprocess.run(["bash", str(root / SAMPLER.name), "--fleet", str(FLEET)], env=env,
+                           capture_output=True, timeout=30)
+            with (root / "samples.tsv").open() as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertEqual([(r["node"], r["url"]) for r in rows], list(capture.AFTER_URLS.items()))
+            self.assertTrue(all(r["reachable"] == "1" and r["build"] == "b1" for r in rows))
+            self.assertIn("state=capturing", (root / "status.txt").read_text())
+            self.assertIn(f"on the {len(capture.NODES)} current voters", (root / "events.log").read_text())
+
+
+def urlhost(url: str) -> str:
+    return url.split("//", 1)[1].split("/", 1)[0]
 
 
 def wal(records: list[tuple[int, bytes]]) -> bytes:

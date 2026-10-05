@@ -2,7 +2,7 @@
 
 **Status:** open · **Updated:** 2026-09-25 · **Model:** gpt-6-astra ·
 **Session:** none:openai:2026-09-25 · **Branch:** codex/parallel-subtitle-ranges ·
-**PR:** [#517](http://192.168.4.7:3000/noirr/plurx/pulls/517)
+**PR:** [#517](http://forge.lan:3000/noirr/plurx/pulls/517)
 
 ## 1. Intended behavior
 
@@ -37,7 +37,7 @@ Pinned local Rust 1.97.1 was verified with `rustup run 1.97.1 rustc --version`;
 `rustup run 1.97.1 cargo check -p plurxd --all-targets --offline` passed on the
 unchanged base before Rust editing.
 
-A private synthetic 300-second Matroska fixture on nuc3 had one video stream
+A private synthetic 300-second Matroska fixture on lab3 had one video stream
 and text cues every ten seconds. The bounded command used input seek to 90 s,
 `-copyts`, and output bounds `-ss 100 -to 140`. It returned exactly cues at
 100, 110, 120 and 130 s. Temporary files were removed after each experiment.
@@ -131,7 +131,7 @@ instead of 420 s. The indexed path therefore never calls the first-cue
 normalizer. Its final command omits output `-ss` and filters absolute cues
 in Rust.
 
-A disposable container from the existing nuc3 image ran both Debian FFmpeg
+A disposable container from the existing lab3 image ran both Debian FFmpeg
 5.1.9 and Jellyfin 8.1.2, without starting the stopped service. The synthetic
 fixture used a 7.5-second output timestamp offset and two text tracks: one
 with near and sparse cues, one with only sparse cues. For both binaries,

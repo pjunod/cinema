@@ -2244,6 +2244,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
         Pipeline::Cpu,
     ));
     let req = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2308,20 +2309,9 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
     }
 }
 
-/// Batch admission settings must retain all limits and the explicit
-/// maintenance refusal; reducing Store reads cannot change the budgets.
-#[tokio::test]
-async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
-    use plurx_core::store::SqliteStore;
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let dir = crate::test_tempdir().expect("work");
-    let manager = TranscodeManager::new(
-        Arc::clone(&store),
-        dir.path().to_owned(),
-        EncoderCaps::default(),
-        Pipeline::Cpu,
-    );
-    let mut req = SessionRequest {
+fn snapshot_probe_request() -> SessionRequest {
+    SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2350,7 +2340,106 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
         presentation: Default::default(),
         block_budget_secs: None,
         transport: None,
-    };
+    }
+}
+
+/// Ruling 4: an unset `cache.max_gb` is the 50 GB budget for output
+/// preparation and rolling retention, while VOD rendition admission keeps
+/// its own unset = closed rule.
+#[tokio::test]
+async fn vod_admission_stays_closed_with_cache_budget_unset() {
+    use plurx_core::store::SqliteStore;
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        dir.path().to_owned(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    store
+        .put_setting(keys::VOD_PRESENTATION, "1")
+        .await
+        .expect("presentation");
+    let settings = manager
+        .vod_settings(&snapshot_probe_request())
+        .await
+        .expect("snapshot")
+        .expect("enabled");
+    assert_eq!(settings.completed_cache_bytes, 0, "unset keeps admission closed");
+    assert_eq!(settings.output_budget_bytes, 50 << 30, "unset is the 50 GB output budget");
+    assert_eq!(
+        settings.output_preparation,
+        crate::vodserve::OutputPreparation::Off,
+        "output preparation defaults off"
+    );
+    store.put_setting(keys::CACHE_MAX_GB, "0").await.expect("disable");
+    let settings = manager
+        .vod_settings(&snapshot_probe_request())
+        .await
+        .expect("snapshot")
+        .expect("enabled");
+    assert_eq!((settings.completed_cache_bytes, settings.output_budget_bytes), (0, 0));
+}
+
+/// D4: the VOD create path's switches come from its one settings batch, so
+/// creating a VOD session issues one settings statement for them.
+#[tokio::test]
+async fn vod_copy_create_reads_settings_once() {
+    use plurx_core::store::SqliteStore;
+    let sqlite = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let store: Arc<dyn Store> = sqlite.clone();
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        dir.path().to_owned(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    store
+        .put_settings(&[
+            (keys::VOD_PRESENTATION, "1"),
+            (keys::VOD_INDEX_CLUSTER_CACHE, "1"),
+            (keys::HEVC_UNVERIFIED_COPY, "1"),
+            (keys::VOD_LIVE_RECOVERY, "0"),
+        ])
+        .await
+        .expect("settings");
+    let _ = sqlite.take_settings_reads();
+    let settings = manager
+        .vod_settings(&snapshot_probe_request())
+        .await
+        .expect("snapshot")
+        .expect("enabled");
+    let reads = sqlite.take_settings_reads();
+    assert_eq!(reads.len(), 1, "one settings statement: {reads:?}");
+    for key in [
+        keys::VOD_INDEX_CLUSTER_CACHE,
+        keys::HEVC_UNVERIFIED_COPY,
+        keys::VOD_LIVE_RECOVERY,
+    ] {
+        assert!(reads[0].iter().any(|read| read == key), "{key} is in the batch: {reads:?}");
+    }
+    assert!(settings.index_cluster_cache && settings.hevc_unverified_copy);
+    assert!(!settings.live_recovery);
+}
+
+/// Batch admission settings must retain all limits and the explicit
+/// maintenance refusal; reducing Store reads cannot change the budgets.
+#[tokio::test]
+async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
+    use plurx_core::store::SqliteStore;
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        dir.path().to_owned(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let mut req = snapshot_probe_request();
+    // S-10: absent is off, carried in the same settings batch.
+    assert!(!manager.vod_settings(&req).await.expect("snapshot").expect("enabled").sdr_master_codecs);
     store
         .put_settings(&[
             (keys::VOD_PRESENTATION, "1"),
@@ -2359,6 +2448,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
             (keys::VOD_MATERIALIZE_BUDGET_SECS, "42"),
             (keys::CACHE_MAX_GB, "3"),
             (keys::VOD_BLOCKED_GET_CAP, "512"),
+            (keys::PLAYBACK_SDR_MASTER_CODECS, "1"),
         ])
         .await
         .expect("one settings update");
@@ -2373,6 +2463,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     assert_eq!(settings.block_budget, Duration::from_secs(12));
     assert_eq!(settings.materialize_budget, Duration::from_secs(42));
     assert_eq!(settings.blocked_get_cap, 512);
+    assert!(settings.sdr_master_codecs, "read in the same batch");
 
     store
         .put_settings(&[
@@ -2381,6 +2472,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
             (keys::VOD_MATERIALIZE_BUDGET_SECS, "999"),
             (keys::CACHE_MAX_GB, "invalid"),
             (keys::VOD_BLOCKED_GET_CAP, "999999"),
+            (keys::PLAYBACK_SDR_MASTER_CODECS, " OFF "),
         ])
         .await
         .expect("invalid and excessive budgets");
@@ -2395,6 +2487,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     assert_eq!(settings.block_budget, Duration::from_secs(2));
     assert_eq!(settings.materialize_budget, Duration::from_secs(300));
     assert_eq!(settings.blocked_get_cap, 4096);
+    assert!(!settings.sdr_master_codecs, "a hand-written OFF is off");
 
     store
         .put_setting(keys::VOD_PRESENTATION, " 0 ")
@@ -3477,6 +3570,7 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
 #[test]
 fn the_grade_is_part_of_a_request_identity() {
     let request = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -3503,6 +3597,7 @@ fn the_grade_is_part_of_a_request_identity() {
         transport: None,
     };
     let hdr10 = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,

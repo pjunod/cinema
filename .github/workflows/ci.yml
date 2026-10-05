@@ -1020,6 +1020,8 @@ jobs:
       # runs in a browser.
       - name: Run the playback-control reporter in a real browser
         run: make control-browser-check
+      - name: Test grouped library rows in a real browser
+        run: make library-rows-browser-check
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize

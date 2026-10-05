@@ -66,6 +66,7 @@
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
+                sdr_master_codecs: false,
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
@@ -116,6 +117,7 @@
                 kind: request("play-b", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
+                sdr_master_codecs: false,
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(replacement_touch),
@@ -2442,7 +2444,7 @@
         .await;
     }
 
-    /// Production (m6, f600d282): every quality change on a full encoder pool
+    /// Production (lab6, f600d282): every quality change on a full encoder pool
     /// logged `segment_pending` for the successor's init.mp4 and then
     /// `producer_failed`, and no successor ever spawned. The successor asks as
     /// `Speculative`, which registers no waiter, and a running predecessor
@@ -3098,6 +3100,7 @@
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_millis(1),
+                sdr_master_codecs: false,
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),

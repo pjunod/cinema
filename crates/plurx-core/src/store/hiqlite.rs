@@ -188,6 +188,13 @@ const QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_WATCH_SCHEMA_
 const QUALITY_LEDGER_SCHEMA_VERSION: i64 = 79;
 const QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE: i64 = QUALITY_CANCELLATION_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = QUALITY_LEDGER_SCHEMA_VERSION;
+// `store_contract.rs` rewinds a real cluster to marker 65 and replays the
+// offline-audio step from there; these are the composed ordinals it depends on.
+// A renumbering that moves either fails here, not in a contract lane no pull
+// request runs.
+const _: () = assert!(
+    ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION == 66 && OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE == 69
+);
 /// The marker the private-lineage bridge stamps: the end of the canonical
 /// union it builds (`schema_lineage::bridge_plan`'s `canonical_end`), not the
 /// binary's current schema. Steps after it are ordinary dispatcher steps.

@@ -11,6 +11,7 @@ describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
 
+
 ## 2026-09-24 · Live TV: direct play first, 5.1 stays 5.1
 
 **Branch `fix/live-tv-direct-play`, draft pull request; not merged, nothing
@@ -38,7 +39,7 @@ Record: [docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](LIVE-TV-DIRECT-PLAY
   commands, so stereo stays stereo, 7.1.4 folds to 5.1, unknown is decided by
   the first frame.
 - **Aspect ratio: not reproduced on the server.** Real 6.2 captures (704×480,
-  SAR 40:33, 480i) through the exact QSV, VAAPI and x264 producer chains on nynuc
+  SAR 40:33, 480i) through the exact QSV, VAAPI and x264 producer chains on media1
   all publish SAR 40:33 / DAR 16:9. `scripts/live-tv-hardware` now records the
   segment's SAR/DAR. Open until the client showing it is named.
 
@@ -48,10 +49,10 @@ as an audio track with no channels and never start, so Safari and Chrome sat
 black on 157.1. Fixed: the list is `5.1|stereo|mono`, the harness asserts a
 positive header channel count and gains `--surround`.
 
-Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on nuc3;
-`make apple-test` on mba (1330 cases); Android unit tests in the pinned image
+Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on lab3;
+`make apple-test` on maca (1330 cases); Android unit tests in the pinned image
 (745); `tests/web/live-tv.test.js`. Hardware, this branch's `plurxd` against
-the real tuner from nuc3: 6.2 encodes to `704×480 SAR 40:33 DAR 16:9`;
+the real tuner from lab3: 6.2 encodes to `704×480 SAR 40:33 DAR 16:9`;
 157.1 with a copy envelope comes back **copy/copy** — HEVC + the AC-3 5.1
 simulcast in MPEG-TS, no decoder running. One adversarial review pass, eight
 findings folded (Android now reads the HDMI sink's PCM channel count, described

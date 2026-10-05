@@ -3,7 +3,7 @@
   "status": "passed",
   "runtime_source_commit": "1cc9468936e3737a3e6993269cc18e06ace8e534",
   "base_main_commit": "3197d0c58c079e485667da20e949f7275cb92cb9",
-  "pull_request": "http://192.168.4.7:3000/noirr/plurx/pulls/766",
+  "pull_request": "http://forge.lan:3000/noirr/plurx/pulls/766",
   "workflow_authorization": "Owner replaced per-task tests, effort gates and full promotion qualification; retain pinned compile checks, one merge-ready adversarial review, normal hooks, fast-lane passes and only failed-check retries.",
   "evidence_interpretation": "Aggregate of retained per-check passes and source-bound repairs. Original failed runs remain failed; this is not a claim that one full CI run was green.",
   "qualification": {

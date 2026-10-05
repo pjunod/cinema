@@ -178,7 +178,7 @@ SHA-256 `18524ebe57824454cf9eb7e8ccc36dda035e0597fe74e1abea36616c2f00a1c9`.
 The harness restored the app to its normal launch after collecting the failure.
 No production queue or serving-fence rule was changed.
 
-DNS-SD discovered Google TV Streamer **Bedroom TV** at `192.168.4.108`.
+DNS-SD discovered Google TV Streamer **Bedroom TV** at `10.42.4.108`.
 The installed Android SDK reports no connected ADB devices or advertised ADB
 mDNS services; connecting its usual port 5555 failed. Cast discovery proves
 network presence, not a debugging connection. Wireless/network debugging or an

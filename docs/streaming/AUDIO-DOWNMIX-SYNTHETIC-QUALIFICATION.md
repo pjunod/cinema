@@ -37,7 +37,7 @@ It is a measured candidate, not a universal codec/content guarantee.
 
 ## Exact engine and isolation
 
-The host was `nynuc`, Linux x86_64. Read-only identification of its running
+The host was `media1`, Linux x86_64. Read-only identification of its running
 image preceded a new, isolated container from that exact local image:
 
 | Object | Identity |

@@ -117,9 +117,39 @@ impl TranscodeManager {
             .get_file_probe_json(file.id)
             .await
             .map_err(|error| format!("reading decoder planning facts: {error}"))?;
+        let facts = Self::planning_facts(file, stored_probe.as_deref())?;
+        self.resolve_movie_plan_with_facts(file, options, encoder, &facts, restrictions)
+    }
+
+    /// [`Self::resolve_movie_plan`] from the stored probe a caller already
+    /// read with the file (a rolling start reads both, and its settings, in
+    /// one statement).
+    pub(super) fn resolve_movie_plan_from_probe(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        stored_probe: Option<&str>,
+    ) -> Result<ResolvedTranscode, String> {
+        let facts = Self::planning_facts(file, stored_probe)?;
+        self.resolve_movie_plan_with_facts(
+            file,
+            options,
+            encoder,
+            &facts,
+            &AttemptRestrictions::none(),
+        )
+    }
+
+    /// Decoder planning facts from the stored probe, or from the catalog row
+    /// when there is none.
+    fn planning_facts(
+        file: &plurx_core::domain::MediaFile,
+        stored_probe: Option<&str>,
+    ) -> Result<DecodeFacts, String> {
         // One expression for both builds: a row without probe output plans
         // from what the scan recorded rather than refusing to play.
-        let probe: serde_json::Value = match stored_probe.as_deref() {
+        let probe: serde_json::Value = match stored_probe {
             Some(encoded) => serde_json::from_str(encoded)
                 .map_err(|error| format!("decoder planning facts are invalid: {error}"))?,
             None => Self::catalog_plan_probe(file),
@@ -143,7 +173,7 @@ impl TranscodeManager {
             Some(&catalog),
         )
         .map_err(|error| format!("decoder planning facts are incompatible: {error}"))?;
-        self.resolve_movie_plan_with_facts(file, options, encoder, &facts, restrictions)
+        Ok(facts)
     }
 
     pub(super) fn resolve_movie_plan_with_facts(
@@ -1054,6 +1084,27 @@ impl TranscodeManager {
         .unwrap_or(OutputGrade::Sdr)
     }
 
+    /// [`Self::grade_preview`] under an encoder preference the caller read.
+    pub(super) async fn grade_preview_with_preference(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        requested_hdr10: bool,
+        target_height: i64,
+        subtitle_burn: Option<i64>,
+        preference: &str,
+    ) -> OutputGrade {
+        self.encoder_and_grade_for_with_preference(
+            file,
+            requested_hdr10,
+            target_height,
+            subtitle_burn.is_some_and(|index| index >= 0),
+            preference,
+        )
+        .await
+        .map(|(_, grade)| grade)
+        .unwrap_or(OutputGrade::Sdr)
+    }
+
     /// Resolve grade and encoder together. The HDR filter and encoder are one
     /// measured route: choosing QSV through the ordinary SDR selector first
     /// could pair a PQ graph with H.264, while pinning every HDR request to
@@ -1349,7 +1400,7 @@ impl TranscodeManager {
         audio_index: Option<i64>,
         subtitle_burn: Option<plurx_core::transcode::SubtitleBurn>,
     ) -> TranscodeOptions {
-        self.options_for_effective_rate_control(
+        let options = self.options_for_effective_rate_control(
             encoder,
             file,
             target_height,
@@ -1363,6 +1414,17 @@ impl TranscodeManager {
             // Main10 PQ decoder, so they produce the SDR ladder — the rung
             // every client can take.
             OutputGrade::Sdr,
+        );
+        // Typed audio, through the one resolver a live rolling start uses and
+        // on the route the artifact is served through. Every current client
+        // sends audio sinks, so its lookup key carries the resolved delivery;
+        // an untyped producer key was one no client computes. The ffmpeg
+        // arguments are built from `options.audio`, so the bytes match the key.
+        self.rolling_start_audio_options(
+            file,
+            options,
+            Some(&plurx_core::playback::audio::canonical_producer_claim()),
+            None,
         )
     }
 
