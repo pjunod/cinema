@@ -2601,6 +2601,17 @@ pub async fn decision(
                 advisory,
             )
             .await;
+            // Cold start only: with an incumbent receipt the live transfer
+            // below is fresher evidence than a stored verdict.
+            let catalog = if super::hls::link_receipts::requested_receipt(&headers).is_none() {
+                super::hls::link_receipts::link_starved_catalog(
+                    network_prior.as_ref(),
+                    catalog,
+                    crate::media_sessions::unix_ms(),
+                )
+            } else {
+                catalog
+            };
             Some(
                 super::hls::link_receipts::positive_catalog(
                     &state,

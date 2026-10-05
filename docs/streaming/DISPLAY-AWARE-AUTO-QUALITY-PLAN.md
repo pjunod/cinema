@@ -1554,7 +1554,8 @@ A native Link recovery awaits an exact nonce acknowledgement within its
 original recovery budget, capped at 250 milliseconds, and rechecks the
 captured attachment and attempt afterward. The ClientLog intake emits
 `X-Plurx-Link-Accepted` only after the authenticated completed-body negative
-was actually accepted and durably folded. Unknown, positive or duplicate
+was actually accepted and, with `playback.network_priors` on, durably folded
+(amended by §9.17: with priors off the owner's live receipt backs it). Unknown, positive or duplicate
 claims remain ordinary 204 without that header. The immutable acknowledged
 nonce accompanies only its matching predecessor/candidate create; a newer
 sample cannot substitute for it. No acknowledgement renews the original EOF,
@@ -1603,3 +1604,60 @@ calls `resumeQualityBoundary`, which asks while playback runs and touches the
 media only for a picked route. A pause, seek, reattach, or an Auto change
 started during the ask supersedes it, and a picked route that fails before
 attachment retires its intent without a seek.
+
+### 9.17 Link acknowledgement and upgrade proof without network priors (2026-10-04 UTC)
+
+Defect D6 (main-merge review): every A-05 Link path returned early unless
+`playback.network_priors` was `"1"`, and that setting defaults off. With
+display-aware Auto on and priors off, the ClientLog intake never claimed a
+positive completed body, so a later Link negative had nothing to claim; the
+native recovery's 250 ms acknowledgement never arrived and the client reopened
+the same quality. The live incumbent proof (`current_positive_until`) refused
+too, so no prepared or warm Auto upgrade ever had Link evidence.
+
+**The invariant, amended.** An acknowledgement still needs this exact nonce's
+one negative claim, re-proved against the live attachment with its original
+EOF, and it is still never refreshed or repeated. What backs that claim now
+depends on the setting:
+
+- **Priors on (unchanged):** the negative folds into `candidate_link_priors`
+  and only an exact durable readback of the immutable completion acknowledges
+  it.
+- **Priors off:** nothing durable is written or read. The owner's in-memory
+  receipt is the record — `Receipt::claim` marks the nonce negative once and
+  `current_negative_until` re-proves it — scoped to the attachment, never to
+  the network, and gone with the receipt's 30-second lifetime. The durable
+  fold's refusal of an *older* completion for the same recipe has no
+  in-memory equivalent across distinct nonces; each nonce is still bounded by
+  its own 15-second EOF freshness and acknowledged at most once.
+
+`playback.network_priors` therefore means only what OPERATIONS.md says it
+means: whether per-network history (`network_priors`, `candidate_link_priors`)
+is kept and consulted. The live receipt is not history, so positive claims,
+the fresh-transfer upgrade proof (`current_positive_until`, which reads no
+stored prior) and the negative acknowledgement work with it off. Reads of
+retained negatives — Auto's `filter_catalog` and the unknown-original trial's
+`admissible_for` — stay behind the setting.
+
+**The measured-Link producer.** With priors on, an acknowledged negative also
+yields the attributed `MeasuredLinkObservation` §9.9 built storage for: the
+incumbent candidate's `target_height` (read from its own published response
+and required to be the exact receipt recipe) plus the completed body's server
+EOF. The ClientLog task folds it after answering, so the 250 ms wait never
+covers that write (`plurx_store_result{operation="observe_measured_link_prior"}`
+counts a failed fold). SQLite v93's `link_worst_rung_height` /
+`link_starved_at_ms` pair now has a writer; Hiqlite voters fold the same
+columns in their node-local telemetry sidecar (sidecar v11 onward), so no
+replicated migration was needed.
+
+**Its consumer.** A cold candidate Auto choice (create or Decision, no
+incumbent receipt) drops candidates at or above an active
+`active_link_starved_rung`, keeping the catalog whole when nothing lies
+below. Legacy unattributed starvation stays out of the candidate policy, and
+a warm choice keeps using the fresher live transfer.
+
+**Unchanged limits.** Receipts are registered only where the node that
+handled the create owns the session, and an IPv6 client has no network
+identity; neither is ever acknowledged or proved, and both keep the ordinary
+unacknowledged reopen. Physical shaped-network acceptance remains open.
+

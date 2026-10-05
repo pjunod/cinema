@@ -965,33 +965,34 @@ pub async fn client_log(
         let proof_state = state.clone();
         let proof_session = ev.session_id.clone();
         tokio::spawn(async move {
-            let enabled = proof_state
-                .store
-                .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+            // The claim itself is the owner's in-memory receipt and needs no
+            // opt-in: it is what later proves a fresh transfer (an upgrade)
+            // or backs a Link negative's acknowledgement (D6). Only keeping
+            // it as per-network history is `playback.network_priors`.
+            let Some(sample) = link_sample else {
+                return;
+            };
+            let Some(value) = proof_state
+                .link_receipts
+                .accept(&proof_state, &identity, proof_session.as_deref(), &sample)
                 .await
-                .ok()
-                .flatten()
-                .is_some_and(|value| value.trim() == "1");
-            if let Some(sample) = link_sample.filter(|_| enabled) {
-                if let Some(value) = proof_state
-                    .link_receipts
-                    .accept(&proof_state, &identity, proof_session.as_deref(), &sample)
-                    .await
-                {
-                    // A client-reported link sample is a prior, not a
-                    // record anything waits on: losing one costs a
-                    // slightly staler estimate, so the failure is counted
-                    // and rate-limit logged rather than propagated to a
-                    // detached task nobody joins.
-                    crate::store_result::observe(
-                        crate::store_result::Operation::ObserveCandidateLink,
-                        crate::store_result::Discard::BestEffort,
-                        proof_state
-                            .store
-                            .observe_candidate_link(&value, crate::media_sessions::unix_ms())
-                            .await,
-                    );
-                }
+            else {
+                return;
+            };
+            if super::hls::link_receipts::network_priors_enabled(&proof_state).await {
+                // A client-reported link sample is a prior, not a
+                // record anything waits on: losing one costs a
+                // slightly staler estimate, so the failure is counted
+                // and rate-limit logged rather than propagated to a
+                // detached task nobody joins.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ObserveCandidateLink,
+                    crate::store_result::Discard::BestEffort,
+                    proof_state
+                        .store
+                        .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                        .await,
+                );
             }
         });
     }
@@ -1016,10 +1017,24 @@ pub async fn client_log(
     let progressive_ambiguous = marker_placeholder
         .as_ref()
         .is_some_and(|(file_id, _)| state.streams.contains_delivery(user.id, *file_id));
+    // Priors on only: the acknowledged negative's attributed measured-Link
+    // verdict for this network. Folded after the answer, in the task below,
+    // so the native recovery's 250 ms wait never covers this write.
+    let (acknowledged_link, measured_link_prior) = match acknowledged_link {
+        Some(ack) => (Some(ack.receipt), ack.measured_prior),
+        None => (None, None),
+    };
     let transcode = Arc::clone(&state.transcode);
     let store = Arc::clone(&state.store);
     let user_id = user.id;
     tokio::spawn(async move {
+        if let Some(observation) = measured_link_prior {
+            crate::store_result::observe(
+                crate::store_result::Operation::ObserveMeasuredLinkPrior,
+                crate::store_result::Discard::BestEffort,
+                store.observe_network_prior(&observation).await,
+            );
+        }
         // The shipped clients send this historical placeholder without a
         // session id. Correlate it by authenticated user, file and delivery
         // method to exactly one VOD ledger; that ledger then waits for a

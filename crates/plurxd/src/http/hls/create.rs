@@ -1567,6 +1567,16 @@ async fn resolve_plan_with_continuous(
                     advisory,
                 )
                 .await;
+                if incumbent_receipt.is_none() {
+                    // Cold start: a network whose prior holds a measured
+                    // Link starvation at rung H starts below H. No prior
+                    // (priors off, IPv6, cold) leaves the catalog as is.
+                    catalog = link_receipts::link_starved_catalog(
+                        network_prior,
+                        catalog,
+                        crate::media_sessions::unix_ms(),
+                    );
+                }
                 if incumbent_receipt.is_some() && body.height != Some(1440) {
                     let measured = link_receipts::measured_outputs(
                         state,

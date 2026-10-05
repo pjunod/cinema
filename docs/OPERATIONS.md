@@ -3734,12 +3734,20 @@ curl -X PUT http://<server>:32400/api/v1/settings \
 ```
 
 Off is the default and off is exactly today's behavior: nothing is stored, no
-response gains a field, and Auto starts where it always did. On, plurx keeps
+response gains a field, and Auto starts where it always did. Off does not turn
+off display-aware Auto's live link evidence: the per-attachment receipts a
+session's owner issues still prove a fresh transfer for an upgrade and still
+acknowledge a link stall so the client steps down. Those receipts live in the
+owner's memory for at most 30 seconds and are never written anywhere. A session
+placed on a peer node, and any IPv6 client, gets no receipts at all. On, plurx keeps
 one row per `(user, client class, network fingerprint)` holding a sustained
 throughput estimate and the lowest ladder rung at which that network was seen
 to starve, and consults it when Auto picks a starting height. `/decision` and
 session-create then carry an additional `prior_kbps`; the fingerprint itself is
-never returned or logged.
+never returned or logged. Under display-aware Auto, a link stall the server
+acknowledged also records the rung that starved as completed-transfer evidence,
+kept apart from the older inferred verdict, and Auto's first choice on that
+network then starts below that rung for the same 7 days.
 
 What it stores is deliberately coarse and bounded. The client class is a broad
 family (`chrome`, `safari`, `edge`, `firefox`, `apple`, `android`, `other`)
