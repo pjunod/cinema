@@ -894,10 +894,11 @@ async fn activate_with_authority(
     let activation = activation.clone();
     let authority = authority.cloned();
     let receiver = receiver.cloned();
+    let now = crate::store::sharing::wall_clock_ms()?;
     store.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             if let Some(receiver) = receiver.as_ref() {
-                let Some(guard) = crate::store::sharing_receiver_sessions::receiver_activation_guard(receiver, &activation)? else { return Ok(None); };
+                let Some(guard) = crate::store::sharing_receiver_sessions::receiver_activation_guard(receiver, &activation, now)? else { return Ok(None); };
                 if !apply_receiver_statements(&tx, vec![guard])? { return Ok(None); }
             }
             let rebuilt=route_projection(&tx)?==PRINCIPAL_ROUTE_COLS;

@@ -1749,8 +1749,11 @@ async fn activate_with_authority(
             None => None,
         };
         if let Some(receiver) = receiver {
-            let Some(guard) =
-                super::sharing_receiver_sessions::receiver_activation_guard(receiver, activation)?
+            let Some(guard) = super::sharing_receiver_sessions::receiver_activation_guard(
+                receiver,
+                activation,
+                super::sharing::wall_clock_ms()?,
+            )?
             else {
                 return Ok(None);
             };
@@ -2087,8 +2090,11 @@ async fn activate_with_authority(
         statements.insert(0, source_statement(guard)?);
     }
     if let Some(receiver) = receiver {
-        let Some(guard) =
-            super::sharing_receiver_sessions::receiver_activation_guard(receiver, activation)?
+        let Some(guard) = super::sharing_receiver_sessions::receiver_activation_guard(
+            receiver,
+            activation,
+            super::sharing::wall_clock_ms()?,
+        )?
         else {
             return Ok(None);
         };

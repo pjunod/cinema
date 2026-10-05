@@ -22,7 +22,6 @@ use crate::{
     store::sharing_catalogue::ReceiverCatalogueScope,
 };
 use serde::Deserialize;
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// The same grace the generic session maintenance waits past an unrenewed
@@ -44,12 +43,7 @@ pub struct ReceiverOrphanPage {
 }
 
 fn now_ms() -> Result<i64, StoreError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .filter(|n| *n > 0)
-        .ok_or_else(invalid)
+    super::sharing::wall_clock_ms()
 }
 
 fn removed_prefix() -> String {
@@ -665,6 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn sharing_receiver_orphan_claim_requires_grace_exact_fence_and_remote_recipe() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let dir = tempfile::tempdir().expect("dir");
         for store in stores(dir.path()).await {
             let env = env(&store).await;
@@ -829,6 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn sharing_receiver_orphan_claim_is_exclusive_and_refuses_old_epoch_writers() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let dir = tempfile::tempdir().expect("dir");
         for store in stores(dir.path()).await {
             let env = env(&store).await;
@@ -932,6 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn sharing_receiver_orphan_claim_after_maintenance_ended_row() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let dir = tempfile::tempdir().expect("dir");
         for store in stores(dir.path()).await {
             let env = env(&store).await;
@@ -994,6 +991,7 @@ mod tests {
 
     #[tokio::test]
     async fn sharing_receiver_dispatch_record_is_fenced_by_claim() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let dir = tempfile::tempdir().expect("dir");
         for store in stores(dir.path()).await {
             let env = env(&store).await;
@@ -1127,6 +1125,7 @@ mod tests {
 
     #[tokio::test]
     async fn sharing_receiver_orphan_retirement_preserves_other_routes_and_replays_read_only() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let dir = tempfile::tempdir().expect("dir");
         for store in stores(dir.path()).await {
             let env = env(&store).await;
@@ -1220,6 +1219,7 @@ mod tests {
 
     #[tokio::test]
     async fn sharing_receiver_orphan_inventory_keyset_progress() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let dir = tempfile::tempdir().expect("dir");
         for store in stores(dir.path()).await {
             let env = env(&store).await;

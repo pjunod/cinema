@@ -16,15 +16,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_ms() -> Result<i64, StoreError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .filter(|n| *n > 0)
-        .ok_or_else(invalid)
+    super::sharing::wall_clock_ms()
 }
 fn policy_json_sql() -> String {
     let read = |key: &str| format!("(SELECT value FROM settings WHERE key='{key}')");
@@ -673,11 +667,14 @@ fn authority_predicate() -> String {
     format!("EXISTS(SELECT 1 FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=$1 AND u.id=$2 AND t.last_seen_at>=$5 AND {SCOPE} AND {SWITCH} AND NOT EXISTS(SELECT key,value FROM json_each({}) EXCEPT SELECT key,value FROM json_each($4)) AND NOT EXISTS(SELECT key,value FROM json_each($4) EXCEPT SELECT key,value FROM json_each({})))", policy_json_sql(), policy_json_sql())
 }
 
+/// `now` is the caller's single clock read for this write (see
+/// [`super::sharing::wall_clock_ms`]). SQLite evaluates the guard inside its
+/// blocking connection closure, so the read happens before that closure.
 pub(crate) fn receiver_activation_guard(
     authority: &ReceiverSessionWriteAuthority,
     activation: &MediaSessionActivation,
+    now: i64,
 ) -> Result<Option<Statement>, StoreError> {
-    let now = now_ms()?;
     if activation.principal
         != (PlaybackPrincipal::LocalUser {
             user_id: authority.intent.user_id,
@@ -770,6 +767,7 @@ mod tests {
     #[tokio::test]
     async fn sharing_receiver_activation_atomically_binds_full_remote_recipe_and_current_login_scope(
     ) {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let directory = tempfile::tempdir().expect("pooled receiver");
         for rebuilt in [false, true] {
             for pooled in [false, true] {
@@ -1136,6 +1134,7 @@ mod tests {
     }
     #[tokio::test]
     async fn sharing_receiver_source_binding_publication_and_renewal_are_guarded_and_exact() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         use crate::secrets::{CredentialKey, SharingSecretPurpose};
         use crate::sharing_receiver_sessions::{ReceiverSourceBinding, ReceiverSourceOwner};
         let directory = tempfile::tempdir().expect("receiver Source binding fixture");
@@ -1850,11 +1849,7 @@ mod tests {
                     .expect("delivery trigger fixture");
                 let delivery_renewal = crate::sharing_receiver_sessions::ReceiverSourceRenewal {
                     attachment: attachment.clone(),
-                    lease_expires_at_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .expect("clock")
-                        .as_millis() as i64
-                        + 30000,
+                    lease_expires_at_ms: now_ms().expect("clock") + 30000,
                 };
                 store.sharing_txn(vec![("CREATE TRIGGER delivery_ignore_deadline BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("renewal trigger fixture");
                 assert_eq!(
@@ -1886,10 +1881,7 @@ mod tests {
                     ReceiverSourceWrite::Applied
                 );
                 attachment.owner.lease_expires_at_ms = delivery_renewal.lease_expires_at_ms;
-                attachment.owner.now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("clock")
-                    .as_millis() as i64;
+                attachment.owner.now_ms = now_ms().expect("clock");
                 delivery.deadline_ms = delivery_renewal.lease_expires_at_ms;
                 assert_eq!(
                     store
