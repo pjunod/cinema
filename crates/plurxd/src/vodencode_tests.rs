@@ -633,7 +633,11 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let reserved = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await.expect("physical reservation CAS");
     assert_eq!(reserved.ledger.transactions[0].state, QualityState::Scheduled);
     assert!(!reserved.ledger.shared_audio_reserved().is_empty(), "same CAS pins verified AAC dependencies");
-    assert_eq!(schedule_store.quality_reserved_intervals(rung.rendition_id()).await.expect("durable video pins"), reserved.ledger.transactions[0].reserved);
+    // The store deduplicates physical dependencies by artifact id; the ledger
+    // keeps append order. Compare the exact pins in the store's key order.
+    let mut expected_pins = reserved.ledger.transactions[0].reserved.clone();
+    expected_pins.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+    assert_eq!(schedule_store.quality_reserved_intervals(rung.rendition_id()).await.expect("durable video pins"), expected_pins);
     let mut window = schedule.clone(); window.transition = None;
     window.window = Some(super::vod_serve_quality::QualityReadyWindow { transaction_id: transaction_id.clone(),
         frontier: super::vod_serve_quality::QualityAppendFrontier { timescale: rung.grid().numerator,
