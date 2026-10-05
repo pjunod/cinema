@@ -1476,8 +1476,12 @@ impl SharingJoinCapabilities {
 
 fn sharing_installed_marker_predicate(capability: &str) -> String {
     match capability {
+        // The census table is boot ownership that every startup creates
+        // (`begin_*_census`), never installed purpose material: a census-only
+        // shape is `InstallationState::Fresh`. Counting it here would demand
+        // purpose-key support from every joiner of any cluster that has booted.
         SHARING_PURPOSE_KEYS_CAPABILITY =>
-            "EXISTS (SELECT 1 FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_archive','sharing_purpose_key_installation','sharing_purpose_census_intents'))".to_owned(),
+            "EXISTS (SELECT 1 FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_archive','sharing_purpose_key_installation'))".to_owned(),
         SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY =>
             "EXISTS (SELECT 1 FROM sqlite_master WHERE name='item_identity_watermark')".to_owned(),
         SHARING_SESSION_PRINCIPAL_CAPABILITY =>
