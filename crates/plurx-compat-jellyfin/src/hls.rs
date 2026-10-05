@@ -397,7 +397,8 @@ mod tests {
         let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=750000,CODECS=\"avc1.64001f,mp4a.40.2\"\nindex.m3u8\n";
         let root = BASE.trim_start_matches("/jellyfin");
         assert_eq!(
-            rewrite_manifest(master, &Resource::Master, SESSION, root, None, false).expect("root mount"),
+            rewrite_manifest(master, &Resource::Master, SESSION, root, None, false)
+                .expect("root mount"),
             rewrite_manifest(master, &Resource::Master, SESSION, BASE, None, false)
                 .expect("jellyfin mount")
                 .replace(BASE, root)
