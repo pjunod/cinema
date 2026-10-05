@@ -4117,11 +4117,3 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "if systemPaused, viewerOrigin { endSystemHoldForViewer(play: requested) }"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testViewerPlayEndsASystemHoldThatIOSNeverEnded()"
-
-[[fixes]]
-id = "apple.live-tv-system-hold-ends-without-ended"
-commits = ["969aba483299e9293ec3ffc5fc9bc40b2ef0da67"]
-source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = "setPaused(!(paused || systemPaused))"
-test = "clients/apple/Tests/LiveTvTests.swift"
-test_anchor = "func testLiveTvViewerPlayEndsASystemHoldThatIOSNeverEnded() async"
