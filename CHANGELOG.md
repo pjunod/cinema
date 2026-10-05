@@ -34,7 +34,8 @@ bump may break compatibility and a **patch** bump never does.
     Developer → *Cluster clock guard* → *Enforce the cluster clock guard*
     (default off) decides
     whether an unbounded clock refuses session takeover, the expired-session
-    scan and membership changes; while off, the guard only counts what it
+    scan and membership changes (and turns `/readyz` 503 after two violating
+    rounds); while off, the guard only counts what it
     would have refused in `plurx_cluster_clock_advisory_refusals_total`, and
     `plurx_cluster_clock_enforced` says which mode a node is in. See
     docs/OPERATIONS.md.
@@ -129,9 +130,15 @@ bump may break compatibility and a **patch** bump never does.
     picture's rung, encoded AAC is pinned to 48 kHz, and a typed stereo
     encode of a 5.1 or 7.1 source uses a Lo/Ro fold with a −4 dBFS limiter.
     Progressive untyped, legacy untyped and Live TV audio are unchanged.
-  - **Master playlists say what the session delivers.** SDR masters now
-    carry `CODECS` once the video is proven (a boot-time AVC qualification
-    or the session's own `avc1` init) and the audio is known.
+  - **SDR master playlists can name their codecs — now off by default.**
+    #793 shipped SDR masters carrying `CODECS` once the video is proven (a
+    boot-time AVC qualification or the session's own `avc1` init) and the
+    audio is known. The 2026-10-04 close-out puts that behind Settings →
+    Developer → *Master playlist codecs* → *Print CODECS on SDR variants*
+    (`playback_sdr_master_codecs`), **default off**, until the Apple TV and
+    iPhone device check confirms every SDR variant is still offered; off
+    serves the SDR master every client has played. HDR and Dolby Vision
+    masters are unchanged either way. See docs/OPERATIONS.md.
   - **Raft snapshots are copied off the writer.** The snapshot cut stays on
     the writer; the copy runs beside it, behind a storage admission check
     (vendored hiqlite patch 22). No switch.

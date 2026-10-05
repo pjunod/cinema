@@ -34,14 +34,14 @@ first.
 - **The 2026-10-04 close-out PR, in progress as a draft.** One PR to
   `main` for the fixes no ruling waits on: K-06 (the clock roster stops
   counting learners, the removal fence's raw clock read, and a fresh 45 s
-  membership admission budget); a leader-restart grace for the progressive
-  remux owner; a Developer switch for SDR `CODECS` in master playlists,
-  default off; D6 — a link negative is acknowledged from the in-memory
+  membership admission budget); a Developer switch for SDR `CODECS` in
+  master playlists, default off; D6 — a link negative is acknowledged from the in-memory
   receipt when network priors are off; S-14's learner removal and voter leave
   on the shared `RemovalTransition`; L-02's #537 cleanup; the K-05
-  `watch_rollups` plan; D-01's matcher timeout reset (Android 145); the
+  `watch_rollups` plan; D-01's matcher timeout reset (Android 146); the
   hiqlite fork ledger rows and a test tying them to source; the host-name
-  scrub; and the Apple and Android unit suites green on current `main`. This
+  scrub; and the Apple and Android unit suites green on current `main`.
+  Progressive remux leader-restart grace: PR #807 (separate). This
   records change (work board, plan headers, clock docs, `API.md`,
   `CHANGELOG.md`, this page) is part of it.
 - **Rulings Paul owes** — each is written up with a recommendation in the
