@@ -102,6 +102,35 @@ class LiveTvGuideTest {
         }
     }
 
+    /**
+     * Reducer cases cannot see whether a screen draws what the reducer says.
+     * The logo rule once existed on the web alone and both native guides
+     * shipped without it, so the wiring is pinned too: every surface that
+     * names a station draws [LiveTvStationChip] with the guide's logo.
+     */
+    @Test
+    fun everyStationSurfaceDrawsTheGuideLogo() {
+        fun source(name: String): String = listOf(
+            java.io.File("app/src/main/java/tv/plurx/app/livetv/$name"),
+            java.io.File("src/main/java/tv/plurx/app/livetv/$name"),
+            java.io.File("clients/android/app/src/main/java/tv/plurx/app/livetv/$name"),
+        ).firstOrNull(java.io.File::isFile)?.readText() ?: error("$name source not found")
+        val guideUi = source("LiveTvGuideUi.kt")
+        val screen = source("LiveTvScreen.kt")
+        fun chips(text: String) = text.split("LiveTvStationChip(").size - 1
+        assertEquals("list row and grid header", 2, chips(guideUi.substringAfter("fun LiveTvChannelRow(")))
+        assertTrue("the grid header draws the row's logo", guideUi.contains("row.logo?.let { logo ->"))
+        assertTrue(
+            "browser row, focused details, picture badges and fullscreen overlay",
+            chips(screen) >= 5,
+        )
+        assertEquals(
+            "both channel lists pass the logo",
+            2,
+            screen.split("logo = controller.stationLogo(channel)").size - 1,
+        )
+    }
+
     /** The grid header draws the logo the layout carries, row by row. */
     @Test
     fun gridRowsCarryTheirStationLogo() {

@@ -121,8 +121,9 @@ object LiveTvGridMetrics {
             .coerceAtLeast(60.dp),
         rowHeight = televisionRowHeight,
         channelColumnWidth = televisionChannelColumnWidth,
-        stationChipWidth = 40.dp,
-        stationChipHeight = 26.dp,
+        // The 37 dp row leaves 21 dp inside the header button's padding.
+        stationChipWidth = 36.dp,
+        stationChipHeight = 20.dp,
         stationChipGap = 4.dp,
     )
 }
@@ -480,14 +481,20 @@ fun LiveTvGuideGrid(
                             horizontalArrangement = Arrangement.spacedBy(dimensions.stationChipGap),
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                         ) {
-                            LiveTvStationChip(
-                                name = row.channel.guide_name,
-                                logo = row.logo,
-                                width = dimensions.stationChipWidth,
-                                height = dimensions.stationChipHeight,
-                                style = type.badge,
-                                shape = RoundedCornerShape(5.dp),
-                            )
+                            // Only a station with artwork gives up header width to
+                            // a tile — the name column already says the callsign,
+                            // and the layout knows before any load.
+                            row.logo?.let { logo ->
+                                LiveTvStationChip(
+                                    name = row.channel.guide_name,
+                                    logo = logo,
+                                    width = dimensions.stationChipWidth,
+                                    height = dimensions.stationChipHeight,
+                                    style = type.badge,
+                                    shape = RoundedCornerShape(5.dp),
+                                    padding = 2.dp,
+                                )
+                            }
                             // Clipped at the column edge, as on the web.
                             Column(Modifier.weight(1f).clipToBounds()) {
                                 Text(row.channel.guide_number, style = type.secondary)

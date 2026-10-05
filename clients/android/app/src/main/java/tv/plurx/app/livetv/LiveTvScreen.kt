@@ -636,12 +636,30 @@ fun LiveTvScreen(
                             .background(Color(0x99000000), MaterialTheme.shapes.small)
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                     ) {
-                        Text(
-                            "● LIVE · ${state.watching?.guide_number.orEmpty()} " +
-                                state.watching?.guide_name.orEmpty(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            state.watching?.let { watching ->
+                                LiveTvStationChip(
+                                    name = watching.guide_name,
+                                    logo = controller.stationLogo(watching),
+                                    width = 36.dp,
+                                    height = 20.dp,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    shape = MaterialTheme.shapes.small,
+                                    background = Color(0x33FFFFFF),
+                                    textColor = Color.White,
+                                    padding = 2.dp,
+                                )
+                            }
+                            Text(
+                                "● LIVE · ${state.watching?.guide_number.orEmpty()} " +
+                                    state.watching?.guide_name.orEmpty(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                            )
+                        }
                         state.watching?.let { watching ->
                             dvrRecordingContext(dvrState, watching, controller.airing(watching, now).now, now)
                                 ?.let { Text("● $it", style = MaterialTheme.typography.labelSmall, color = Color.White) }
