@@ -418,7 +418,7 @@ function clusterClockCard(settings,readiness){
     ${devReq(readiness,"cluster_clock","coverage","Every voter reachable and observed","Every committed remote voter must answer a fresh authenticated probe. A learner that does not answer is reported but not required; a measured learner still counts, and promoting one needs its own bound.")}
     ${devReq(readiness,"cluster_clock","upper_bound","Worst observed offset within 2 s","Absolute offset plus uncertainty; an unknown member has no numeric offset.")}
     ${devReq(readiness,"cluster_clock","ntp","NTP running on every node","Check chronyd or systemd-timesyncd on each node; this server cannot see them.")}
-    ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down voter blocks takeover, the expiry scan and membership changes on every node until it returns or is removed. A down learner does not.")}
+    ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down voter blocks takeover, the expiry scan and membership changes on every node until it returns or is removed. A down learner blocks only the takeover of its own sessions, until it returns or is removed.")}
     <p class="hint">Requirements are advisory and never prevent saving, in either direction.</p>
     ${devGraduation("the identified measurement and enforcement releases have their fleet acceptance receipts.","the switch moves to Settings → Cluster.")}<div class="err" id="cluster-clock-error" role="alert"></div>${setCardFoot("saveClusterClockGuard")}`,{id:"cluster-clock-settings"});
 }

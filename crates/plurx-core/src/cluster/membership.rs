@@ -8464,7 +8464,7 @@ impl MembershipManager {
         }
         // Committed promotion and ambiguous-result reconciliation above are
         // ungated. Issuing a new proposal, even for a pending audit row, is not.
-        let admission = clock
+        let mut admission = clock
             .admit_promotion_for(target_raft_id, prepared_admission)
             .map_err(MembershipError::ClockUnbounded)?;
         let (attempt_id, new_attempt) = if let Some(existing) = existing {
@@ -8473,7 +8473,7 @@ impl MembershipManager {
             let attempt_id = uuid::Uuid::new_v4().to_string();
             let started_at = admission.now_ms();
             clock
-                .revalidate_promotion_for(target_raft_id, &admission)
+                .revalidate_promotion_for(target_raft_id, &mut admission)
                 .map_err(MembershipError::ClockUnbounded)?;
             let inserted = inner
                 .client
@@ -8549,7 +8549,7 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
-        if let Err(cause) = clock.revalidate_promotion_for(target_raft_id, &admission) {
+        if let Err(cause) = clock.revalidate_promotion_for(target_raft_id, &mut admission) {
             if new_attempt {
                 self.clear_learner_promotion(node_id, &attempt_id).await;
             }
@@ -9094,20 +9094,12 @@ impl MembershipManager {
         }
     }
 
-    /// The original removal budget ended. When the only evidence that could
-    /// have proved the target was a wall-age comparison the post-step capture
-    /// may not use, enforcement reports (and counts) the typed clock refusal.
     fn removal_budget_expired(
         &self,
         captured: &ClockRemovalCapture<'_>,
         clock_blocked: bool,
     ) -> MembershipError {
-        if clock_blocked {
-            if let Err(cause) = self.clock.refuse_unstable_wall_reachability(captured) {
-                return MembershipError::ClockUnbounded(cause);
-            }
-        }
-        MembershipError::RemovalPending("original removal proof deadline expired".into())
+        removal_budget_expired_error(&self.clock, captured, clock_blocked)
     }
 
     async fn prepare_reduction_reference(
@@ -11575,6 +11567,23 @@ enum ReductionEvidence {
     },
 }
 
+/// The original removal budget ended. When the only evidence that could have
+/// proved the target was a wall-age comparison the post-step capture may not
+/// use, enforcement reports (and counts) the typed clock refusal; otherwise,
+/// or with enforcement off, it is the plain deadline, counted nowhere.
+fn removal_budget_expired_error(
+    clock: &ClusterClockGuard,
+    captured: &ClockRemovalCapture<'_>,
+    clock_blocked: bool,
+) -> MembershipError {
+    if clock_blocked {
+        if let Err(cause) = clock.refuse_unstable_wall_reachability(captured) {
+            return MembershipError::ClockUnbounded(cause);
+        }
+    }
+    MembershipError::RemovalPending("original removal proof deadline expired".into())
+}
+
 /// Classify one poll. Wall-age unreachability is consulted through the clock
 /// guard's decision API (never the raw capture flag), so enforcement off
 /// admits it exactly like every other guarded decision and the counted
@@ -12503,10 +12512,28 @@ mod tests {
                         clock_blocked: true
                     }
                 ));
-                assert_eq!(
-                    guard.refuse_unstable_wall_reachability(&captured),
-                    Err(ClockRefusal::LocalDiscontinuity)
-                );
+                // The budget ends while the poll was clock-blocked: the
+                // caller sees the counted typed refusal, not a bare deadline.
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, true),
+                    MembershipError::ClockUnbounded(ClockRefusal::LocalDiscontinuity)
+                ));
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
+                // An unblocked budget end is the plain deadline, uncounted.
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, false),
+                    MembershipError::RemovalPending(_)
+                ));
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
+                // Enforcement turned off before the budget ended: the plain
+                // deadline, and no advisory refusal for a decision that was
+                // never admitted (review P3a).
+                guard.set_enforced(false);
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, true),
+                    MembershipError::RemovalPending(_)
+                ));
+                assert_eq!(counter(&guard, advisory, "local_discontinuity"), "0");
                 assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
             } else {
                 assert!(
@@ -12525,8 +12552,43 @@ mod tests {
                 );
                 assert_eq!(counter(&guard, advisory, "local_discontinuity"), "1");
                 assert_eq!(counter(&guard, refusals, "local_discontinuity"), "0");
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, true),
+                    MembershipError::RemovalPending(_)
+                ));
+                assert_eq!(counter(&guard, advisory, "local_discontinuity"), "1");
             }
         }
+
+        // The wait carries the poll's verdict to EVERY budget-expiry exit;
+        // dropping it would turn the typed refusal back into a bare deadline.
+        // The waiting loop needs a live Raft client, so its wiring is pinned
+        // from source while the decision itself is exercised above.
+        let source = include_str!("membership.rs");
+        let wait = method_body(source, "async fn wait_for_reduction_reference(");
+        assert!(wait.contains("let mut clock_blocked = false;"));
+        assert!(
+            wait.contains("clock_blocked: blocked,") && wait.contains("clock_blocked = blocked;")
+        );
+        assert_eq!(
+            wait.matches("self.removal_budget_expired(").count(),
+            wait.matches("self.removal_budget_expired(captured, clock_blocked)")
+                .count()
+        );
+        assert_eq!(
+            wait.matches("self.removal_budget_expired(captured, clock_blocked)")
+                .count(),
+            3,
+            "both budget checks and the poll timeout report the verdict"
+        );
+        assert!(!wait.contains("RemovalPending("), "no exit bypasses it");
+        let expired = method_body(source, "fn removal_budget_expired(");
+        assert!(
+            expired.contains("removal_budget_expired_error(&self.clock, captured, clock_blocked)")
+        );
+        let poll = method_body(source, "async fn prove_reduction_reference(");
+        assert!(poll.contains("ReductionEvidence::Pending { clock_blocked }"));
+        assert!(poll.contains("ReductionProofPoll::Pending { clock_blocked }"));
     }
 
     #[test]
@@ -14371,13 +14433,7 @@ mod tests {
             internal_peer_response_message("owner", "other-controller", &nonce, path, payload),
             internal_peer_response_message("owner", "controller", &other_nonce, path, payload),
             internal_peer_response_message("owner", "controller", &nonce, "/other", payload),
-            internal_peer_response_message(
-                "owner",
-                "controller",
-                &nonce,
-                path,
-                b"changed payload",
-            ),
+            internal_peer_response_message("owner", "controller", &nonce, path, b"changed payload"),
             internal_peer_auth_message("owner", "controller", 1, &nonce, "POST", path, payload),
         ] {
             assert!(verifier
@@ -17201,6 +17257,69 @@ mod tests {
         }
     }
 
+    /// S-14: each real removal binds the shared transition with its own path
+    /// and survivor proof. A learner removal reconciles member removal (the
+    /// learner leaves the member set); the voter paths reconcile the voter
+    /// change; only the self-leave bounds its final tombstone. Swapping any of
+    /// these would type-check, so the wiring is pinned from source.
+    #[test]
+    fn removal_call_sites_bind_their_own_path_and_reconcile() {
+        let source = include_str!("membership.rs");
+        for (signature, path, reconcile, finalize) in [
+            (
+                "async fn remove_learner_captured(",
+                "RemovalPath::Learner",
+                "|| reconcile_member_removal(&inner.secrets.api, target_raft_id, &membership_nodes)",
+                "|finalize_node| self.finalize_node_removal(finalize_node)",
+            ),
+            (
+                "async fn remove_voter_captured(",
+                "RemovalPath::Voter",
+                "|| reconcile_membership_change(&inner.secrets.api, target_raft_id, &membership_nodes)",
+                "|finalize_node| self.finalize_node_removal(finalize_node)",
+            ),
+            (
+                "async fn leave_voter_captured(",
+                "RemovalPath::SelfLeave",
+                "reconcile_membership_change(",
+                "finalize_self_leave_bounded(",
+            ),
+        ] {
+            let body = method_body(source, signature);
+            let dispatch = body
+                .split_once("dispatch_removal_outcome(")
+                .unwrap_or_else(|| panic!("{signature} dispatches its outcome"))
+                .1;
+            assert_eq!(
+                body.matches("dispatch_removal_outcome(").count(),
+                1,
+                "{signature}"
+            );
+            assert!(
+                dispatch.trim_start().starts_with(&format!("{path},")),
+                "{signature} binds {path}"
+            );
+            assert!(dispatch.contains(reconcile), "{signature} reconciles via {reconcile}");
+            assert!(dispatch.contains(finalize), "{signature} finalizes via {finalize}");
+            for other in [
+                "RemovalPath::Learner",
+                "RemovalPath::Voter",
+                "RemovalPath::SelfLeave",
+            ] {
+                assert_eq!(body.contains(other), other == path, "{signature}: {other}");
+            }
+        }
+        let learner = method_body(source, "async fn remove_learner_captured(");
+        assert!(!learner.contains("reconcile_membership_change("));
+        assert!(!learner.contains("finalize_self_leave_bounded("));
+        let voter = method_body(source, "async fn remove_voter_captured(");
+        assert!(!voter.contains("reconcile_member_removal("));
+        assert!(!voter.contains("finalize_self_leave_bounded("));
+        let leave = method_body(source, "async fn leave_voter_captured(");
+        assert!(!leave.contains("reconcile_member_removal("));
+        assert!(leave.contains("inner.identity.raft_id,"));
+    }
+
     /// A self-leave whose final tombstone write never completes still
     /// succeeds once `FINAL_TOMBSTONE_WAIT` elapses; one that completes is
     /// awaited. The pending-removal row, not the tombstone, is the fence.
@@ -17589,7 +17708,7 @@ mod tests {
                 // Coverage excuses an unobserved learner only while it holds
                 // no vote; promoting one requires its own bounded clock.
                 assert!(body.contains(".admit_promotion_for(target_raft_id, prepared_admission)"));
-                assert!(body.contains(".revalidate_promotion_for(target_raft_id, &admission)"));
+                assert!(body.contains(".revalidate_promotion_for(target_raft_id, &mut admission)"));
                 assert!(!body.contains(".admit_for(") && !body.contains(".revalidate_for("));
                 continue;
             }

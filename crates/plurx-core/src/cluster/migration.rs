@@ -3367,18 +3367,41 @@ async fn start_voter(
         learner_only: role.is_learner(),
         ..production_hiqlite_defaults(config)
     };
-    // Vendor startup, including a join that waits for its snapshot
-    // catch-up, is bounded exactly as it was before clock observation: by the
-    // vendor's own snapshot transfer/install timeouts, which the deploy
-    // startup budget already counts. It does not spend the membership
-    // admission budget, which starts only after the health wait below.
+    // Vendor startup, including a join that waits to become a replicated
+    // learner and its snapshot catch-up, has its OWN bound: the vendor's join
+    // retries and learner wait never give up by themselves (a joiner whose
+    // leader is unreachable, or whose admission an enforced clock guard keeps
+    // refusing, would otherwise hang silently). It does not spend the
+    // membership admission phase, which starts only after the health wait
+    // below; the deploy startup budget counts it as its own phase.
     let admission = Arc::new(super::membership::StartupMembershipAdmission::default());
-    let client = if observation_only {
-        hiqlite::start_node_for_clock_observation(node_config, admission.clone()).await
-    } else {
-        hiqlite::start_node_with_membership_admission(node_config, admission.clone()).await
-    }
-    .map_err(|error| StoreError::Database(format!("starting Hiqlite voter: {error}")))?;
+    let vendor_timeout = vendor_start_timeout(
+        config.cluster.snapshot_transfer_timeout_secs,
+        config.cluster.install_snapshot_timeout_secs,
+    );
+    let vendor_start = async {
+        if observation_only {
+            hiqlite::start_node_for_clock_observation(node_config, admission.clone()).await
+        } else {
+            hiqlite::start_node_with_membership_admission(node_config, admission.clone()).await
+        }
+    };
+    let client = match tokio::time::timeout(vendor_timeout, vendor_start).await {
+        Ok(started) => started
+            .map_err(|error| StoreError::Database(format!("starting Hiqlite voter: {error}")))?,
+        Err(_) => {
+            return Err(StoreError::Database(format!(
+                "Hiqlite {} did not finish starting (joining the cluster and its snapshot \
+                 catch-up) within {vendor_timeout:?}; check that the cluster leader is \
+                 reachable and admitting this node",
+                if role.is_learner() {
+                    "learner"
+                } else {
+                    "voter"
+                }
+            )))
+        }
+    };
     // No await between vendor Client handoff and cancellation-safe ownership.
     // Pre-Client constructor ownership remains the vendor's separate boundary.
     let pending_client = cleanup_lock.map(|lock| PendingStartupClient::new(client.clone(), lock));
@@ -3725,6 +3748,16 @@ fn install_snapshot_timeout_ms(seconds: u64) -> u64 {
     seconds
         .checked_mul(1_000)
         .expect("validated snapshot timeout seconds must fit milliseconds")
+}
+
+/// Vendor startup's own phase: one membership admission (the leader admitting
+/// the join, which an enforced clock guard may delay) plus one snapshot
+/// catch-up (the learner wait that follows). Separate from, and never spent
+/// by, the admission phase that starts after the health wait.
+#[cfg(feature = "hiqlite-store")]
+fn vendor_start_timeout(transfer_seconds: u64, install_seconds: u64) -> Duration {
+    MEMBERSHIP_ADMISSION_TIMEOUT
+        .saturating_add(snapshot_catchup_timeout(transfer_seconds, install_seconds))
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -5955,7 +5988,9 @@ mod tests {
     /// health wait and the startup catch-up must not spend the 45-second
     /// membership admission phase. The phase starts after the health wait,
     /// and the deadline promotion/activation honour is installed once, after
-    /// the catch-up, with only what the committed-member wait left.
+    /// the catch-up, with only what the committed-member wait left. Vendor
+    /// startup is nonetheless BOUNDED, by its own budget (review P2): the
+    /// vendor's join retries and learner wait never end by themselves.
     #[cfg(feature = "hiqlite-store")]
     #[test]
     fn k06_vendor_start_and_catchup_do_not_spend_the_admission_phase() {
@@ -6001,6 +6036,37 @@ mod tests {
             "vendor startup is not bounded by the admission phase"
         );
         assert!(!source.contains(concat!("with_startup", "_deadline(")));
+        // Its own budget: one admission plus one snapshot catch-up, computed
+        // before the vendor future and wrapping both start entry points.
+        assert_eq!(
+            vendor_start_timeout(600, 300),
+            MEMBERSHIP_ADMISSION_TIMEOUT + snapshot_catchup_timeout(600, 300)
+        );
+        assert_eq!(
+            vendor_start_timeout(600, 300),
+            Duration::from_secs(45 + 600 + 300 + 45)
+        );
+        let budget = start
+            .find("let vendor_timeout = vendor_start_timeout(")
+            .expect("vendor start budget");
+        let bounded = start
+            .find("tokio::time::timeout(vendor_timeout, vendor_start)")
+            .expect("vendor start is bounded");
+        let normal_start = start
+            .find("hiqlite::start_node_with_membership_admission(")
+            .expect("normal start");
+        assert!(budget < vendor_start && vendor_start < bounded);
+        assert!(normal_start < bounded && bounded < health);
+        assert_eq!(
+            start.matches("hiqlite::start_node_").count(),
+            2,
+            "no vendor start outside the bounded future"
+        );
+        let expiry = &start[bounded..health];
+        assert!(
+            expiry.contains("did not finish starting") && expiry.contains("return Err("),
+            "an expired vendor start fails startup with a clear error"
+        );
     }
 
     /// A readdressed voter has application rows that are older than its new

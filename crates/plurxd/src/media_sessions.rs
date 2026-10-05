@@ -338,13 +338,18 @@ impl TakeoverClockAdmission {
     }
 }
 
+/// `owner_node_id` is the route's current owner. Its lease expiry was written
+/// by its own clock, so the owner itself must be bounded: an unobserved
+/// learner that coverage excuses is never contested, and every revalidation of
+/// the ticket re-checks that owner.
 fn acquire_takeover_clock(
     clock: &Arc<ClusterClockGuard>,
+    owner_node_id: &str,
 ) -> Result<TakeoverClockAdmission, ClockRefusal> {
     // Capture before the serialized wall reading so this conservative local
     // lifetime cannot outlive the original fixed caller-bound claim.
     let origin = tokio::time::Instant::now();
-    let ticket = clock.acquire_owned_for(ClockDecision::Takeover)?;
+    let ticket = clock.acquire_owned_for_owner(ClockDecision::Takeover, owner_node_id)?;
     Ok(TakeoverClockAdmission {
         ticket,
         monotonic_expiry: origin
@@ -5107,13 +5112,29 @@ impl TakeoverGate {
     }
 }
 
+/// One clock-admitted inventory page. `cursor` follows the WHOLE page, so a
+/// route skipped for its owner's clock cannot pin the keyset scan; `None`
+/// means the page was empty and the next tick starts a fresh pass.
+#[derive(Debug)]
+struct ExpiryScanPage {
+    contestable: Vec<MediaSessionRoute>,
+    cursor: Option<MediaSessionTakeoverCursor>,
+}
+
 /// Contest expired session routes only after the separate replicated rollout
 /// switch is enabled. Every candidate independently proves source/pipeline
 /// eligibility; the Store CAS still admits exactly one successor epoch.
+///
+/// A route is contestable only when its OWNER's clock is bounded too: the
+/// lease expiry was written by the owner's clock, and coverage excuses an
+/// unobserved learner, which may own delegated sessions. Enforced, such a
+/// route is skipped (not expired, not taken over) until its owner is measured
+/// within the bound or leaves the roster; advisory, it is contested as before
+/// and the refusal is counted.
 async fn clock_guarded_expiry_scan<Q, F>(
     clock: &ClusterClockGuard,
     query: Q,
-) -> Result<Vec<MediaSessionRoute>, String>
+) -> Result<ExpiryScanPage, String>
 where
     Q: FnOnce(i64) -> F,
     F: Future<Output = Result<Vec<MediaSessionRoute>, StoreError>>,
@@ -5131,7 +5152,26 @@ where
     clock
         .revalidate_for(ClockDecision::ExpiryScan, &ticket)
         .map_err(|cause| format!("media-session expiry clock refused: {cause:?}"))?;
-    Ok(routes)
+    let cursor = routes.last().map(MediaSessionTakeoverCursor::from);
+    let contestable = routes
+        .into_iter()
+        .filter(|route| {
+            clock
+                .admit_owner_for(ClockDecision::ExpiryScan, &ticket, &route.owner_node_id)
+                .inspect_err(|cause| {
+                    tracing::debug!(
+                        owner = %route.owner_node_id,
+                        ?cause,
+                        "media-session expiry skipped: the owner's clock is not bounded"
+                    );
+                })
+                .is_ok()
+        })
+        .collect();
+    Ok(ExpiryScanPage {
+        contestable,
+        cursor,
+    })
 }
 
 pub(crate) async fn takeover_loop(state: AppState) {
@@ -5151,27 +5191,30 @@ pub(crate) async fn takeover_loop(state: AppState) {
             continue;
         }
         let clock = state.membership.clock_guard();
-        let routes = match clock_guarded_expiry_scan(&clock, |now_ms| {
+        let page = match clock_guarded_expiry_scan(&clock, |now_ms| {
             state
                 .store
                 .expired_media_sessions(now_ms, scan_cursor.clone(), TAKEOVER_BATCH)
         })
         .await
         {
-            Ok(routes) => routes,
+            Ok(page) => page,
             Err(error) => {
                 tracing::debug!(%error, "media-session takeover inventory unavailable");
                 continue;
             }
         };
-        if routes.is_empty() {
+        let Some(cursor) = page.cursor else {
             // Reaching the end starts a fresh oldest-first pass on the next
             // tick. This also revisits transient refusals without sacrificing
             // bounded progress through the current inventory.
             scan_cursor = None;
             continue;
-        }
-        scan_cursor = routes.last().map(MediaSessionTakeoverCursor::from);
+        };
+        // Past the whole page, including routes skipped for their owner's
+        // clock, so they cannot pin the scanner to one page.
+        scan_cursor = Some(cursor);
+        let routes = page.contestable;
         // A route stays expired-and-claimable until somebody's CAS lands, so
         // it reappears on every tick until then. Contesting it again while
         // this node's own attempt is still in flight buys nothing and costs an
@@ -5834,10 +5877,11 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
-    let clock = acquire_takeover_clock(&state.membership.clock_guard()).map_err(|cause| {
-        metric.outcome = TAKEOVER_SKIPPED;
-        format!("media-session takeover clock refused: {cause:?}")
-    })?;
+    let clock = acquire_takeover_clock(&state.membership.clock_guard(), &route.owner_node_id)
+        .map_err(|cause| {
+            metric.outcome = TAKEOVER_SKIPPED;
+            format!("media-session takeover clock refused: {cause:?}")
+        })?;
     let Some(takeover_slot) = try_admit_takeover_settlement() else {
         metric.outcome = TAKEOVER_SKIPPED;
         return Err("media-session takeover settlement capacity is full".to_owned());
@@ -6308,7 +6352,7 @@ mod tests {
             let clock = clock_fixture(offset);
             clock.set_enforced(false);
             assert!(
-                acquire_takeover_clock(&clock).is_ok(),
+                acquire_takeover_clock(&clock, "node-old").is_ok(),
                 "an unbounded or unknown clock never blocks takeover while off: {offset:?}"
             );
             let called = AtomicU64::new(0);
@@ -6342,6 +6386,160 @@ mod tests {
                 );
             }
         }
+    }
+
+    struct FixedClockMembership(plurx_core::cluster::clock::ClockMembershipIdentity);
+
+    impl plurx_core::cluster::clock::ClockMembershipSource for FixedClockMembership {
+        fn current(&self) -> Option<plurx_core::cluster::clock::ClockMembershipIdentity> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn clock_node(raft_id: u64) -> String {
+        format!("00000000-0000-0000-0000-{raft_id:012}")
+    }
+
+    /// Local node 1; voters 1-3; node 4 a committed learner. The listed raft
+    /// ids are measured within the bound, every other peer is Unknown.
+    fn learner_clock_fixture(bounded: &[u64], enforced: bool) -> Arc<ClusterClockGuard> {
+        use plurx_core::cluster::clock::{ClockMembershipIdentity, PeerClockOffset};
+        use plurx_core::cluster::membership::{ActivityPeer, ClockPeerRoster};
+        let identity = ClockMembershipIdentity {
+            local_node: 1,
+            log: (2, 1, 7),
+            members: [1, 2, 3, 4].into(),
+            voters: [1, 2, 3].into(),
+        };
+        let guard = Arc::new(ClusterClockGuard::with_membership_source(Arc::new(
+            FixedClockMembership(identity.clone()),
+        )));
+        guard.set_enforced(enforced);
+        let roster = ClockPeerRoster {
+            membership: Some(identity),
+            peers: [2, 3, 4]
+                .into_iter()
+                .map(|raft_id| ActivityPeer {
+                    node_id: clock_node(raft_id),
+                    raft_id,
+                    http_base: Some(format!("https://node{raft_id}:443")),
+                    reachable: true,
+                })
+                .collect(),
+        };
+        let round = guard
+            .roster_for_peer_directory(&roster)
+            .expect("exact directory");
+        assert!(guard.publish(
+            round,
+            roster
+                .peers
+                .iter()
+                .map(|peer| {
+                    let observation = if bounded.contains(&peer.raft_id) {
+                        PeerClockOffset::Bounded {
+                            offset_us: 0,
+                            uncertainty_us: 1_000,
+                            observed_at: Instant::now(),
+                        }
+                    } else {
+                        PeerClockOffset::Unknown
+                    };
+                    (peer.node_id.clone(), observation)
+                })
+                .collect(),
+        ));
+        guard
+    }
+
+    /// K-06 review P1. Every voter bounded, learner 4 unobserved: coverage
+    /// excuses the learner, but R1 is ITS lease, written by its clock. The
+    /// expiry scan contests only the voter's R2 and takeover of R1 is
+    /// refused; the cursor still passes R1 so it cannot pin the scanner.
+    /// Advisory mode contests both and counts what it would have refused.
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_skips_routes_owned_by_an_unobserved_learner() {
+        let learner_route = MediaSessionRoute {
+            owner_node_id: clock_node(4),
+            incarnation_id: "00000000-0000-4000-8000-0000000000b2".to_owned(),
+            ..media_route("owned-by-learner")
+        };
+        let voter_route = MediaSessionRoute {
+            owner_node_id: clock_node(2),
+            incarnation_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
+            ..media_route("owned-by-voter")
+        };
+        let page = || {
+            let routes = vec![voter_route.clone(), learner_route.clone()];
+            async move { Ok(routes) }
+        };
+
+        let clock = learner_clock_fixture(&[2, 3], true);
+        let scanned = clock_guarded_expiry_scan(&clock, |_| page())
+            .await
+            .expect("every voter is bounded");
+        assert_eq!(
+            scanned
+                .contestable
+                .iter()
+                .map(|route| route.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["owned-by-voter"],
+            "the unobserved learner's lease is not expired"
+        );
+        assert_eq!(
+            scanned.cursor,
+            Some(MediaSessionTakeoverCursor::from(&learner_route)),
+            "the cursor passes the skipped route"
+        );
+        assert_eq!(
+            acquire_takeover_clock(&clock, &learner_route.owner_node_id).err(),
+            Some(ClockRefusal::Unknown)
+        );
+        assert!(acquire_takeover_clock(&clock, &voter_route.owner_node_id).is_ok());
+        let metrics = clock.prometheus();
+        for decision in ["expiry_scan", "takeover"] {
+            assert!(
+                metrics.contains(&format!(
+                    "plurx_cluster_clock_refusals_total{{decision=\"{decision}\",cause=\"unknown\"}} 1\n"
+                )),
+                "{decision}: {metrics}"
+            );
+        }
+
+        // Measured within the bound, the learner's route is contested too.
+        let clock = learner_clock_fixture(&[2, 3, 4], true);
+        let scanned = clock_guarded_expiry_scan(&clock, |_| page())
+            .await
+            .expect("bounded");
+        assert_eq!(scanned.contestable.len(), 2);
+        assert!(acquire_takeover_clock(&clock, &learner_route.owner_node_id).is_ok());
+
+        // Advisory: contested as before, each would-be refusal counted.
+        let clock = learner_clock_fixture(&[2, 3], false);
+        let scanned = clock_guarded_expiry_scan(&clock, |_| page())
+            .await
+            .expect("advisory");
+        assert_eq!(scanned.contestable.len(), 2);
+        assert!(acquire_takeover_clock(&clock, &learner_route.owner_node_id).is_ok());
+        let metrics = clock.prometheus();
+        for decision in ["expiry_scan", "takeover"] {
+            assert!(
+                metrics.contains(&format!(
+                    "plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"unknown\"}} 1\n"
+                )) && metrics.contains(&format!(
+                    "plurx_cluster_clock_refusals_total{{decision=\"{decision}\",cause=\"unknown\"}} 0\n"
+                )),
+                "{decision}: {metrics}"
+            );
+        }
+
+        // An empty page ends the pass.
+        let clock = learner_clock_fixture(&[2, 3], true);
+        let scanned = clock_guarded_expiry_scan(&clock, |_| async { Ok(Vec::new()) })
+            .await
+            .expect("bounded");
+        assert!(scanned.contestable.is_empty() && scanned.cursor.is_none());
     }
 
     pub(super) fn valid_start_request() -> RemoteStartRequest {
@@ -8025,7 +8223,7 @@ mod tests {
             (Some((2_500_000, 1_000)), ClockRefusal::Offset),
         ] {
             assert_eq!(
-                acquire_takeover_clock(&clock_fixture(offset)).err(),
+                acquire_takeover_clock(&clock_fixture(offset), "node-old").err(),
                 Some(expected)
             );
         }
@@ -8033,11 +8231,11 @@ mod tests {
             Arc::new(ClusterClockGuard::new(false)),
             clock_fixture(Some((1_999_000, 1_000))),
         ] {
-            assert!(acquire_takeover_clock(&clock).is_ok());
+            assert!(acquire_takeover_clock(&clock, "node-old").is_ok());
         }
         for recovered in [false, true] {
             let guard = clock_fixture(Some((0, 1_000)));
-            let clock = acquire_takeover_clock(&guard).expect("original admission");
+            let clock = acquire_takeover_clock(&guard, "node-old").expect("original admission");
             let original_now = clock.ticket.now_ms();
             let events = Arc::new(StdMutex::new(Vec::new()));
             let io = ScriptedTakeoverIo::new(Arc::clone(&events));
@@ -8068,7 +8266,7 @@ mod tests {
     async fn takeover_clock_guard_preserves_original_24s_lease_and_publication_runway() {
         for preparation in [Duration::from_secs(8), Duration::from_secs(12)] {
             let guard = Arc::new(ClusterClockGuard::new(false));
-            let clock = acquire_takeover_clock(&guard).expect("standalone admission");
+            let clock = acquire_takeover_clock(&guard, "node-old").expect("standalone admission");
             let original_now = clock.ticket.now_ms();
             let original_monotonic_expiry = clock.monotonic_expiry;
             tokio::time::advance(preparation).await;
@@ -8115,7 +8313,7 @@ mod tests {
     async fn takeover_clock_guard_keeps_submitted_ambiguous_reconciliation_ungated() {
         for mode in ["error", "timeout"] {
             let guard = clock_fixture(Some((0, 1_000)));
-            let clock = acquire_takeover_clock(&guard).expect("original admission");
+            let clock = acquire_takeover_clock(&guard, "node-old").expect("original admission");
             let events = Arc::new(StdMutex::new(Vec::new()));
             let mut io = ScriptedTakeoverIo::new(Arc::clone(&events));
             io.fail_clock_on_initial_claim = Some(Arc::clone(&guard));

@@ -216,7 +216,8 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
                     "While enforced, one down or unreachable voter makes coverage unknown, \
                      which refuses session takeover, the expired-session scan and membership \
                      changes on every node (fenced removal of that member still works); a down \
-                     learner is reported but refuses nothing except its own promotion, and \
+                     learner is reported and refuses only its own promotion and the takeover \
+                     or expiry of the sessions it owns, until it returns or is removed; and \
                      two consecutive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms make /readyz \
                      answer 503. Startup is never refused. Now: {current}; \
                      plurx_cluster_clock_advisory_refusals_total counts what it would have \

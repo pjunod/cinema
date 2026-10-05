@@ -285,7 +285,8 @@ and enforcement itself are untouched; their ruling is separate):
    reported (`unobserved_learners`, `plurx_cluster_clock_unobserved_learners`,
    per-peer `observation_state`) but does not make the guard `Incomplete`, so
    a stopped learner no longer refuses takeover, the expiry scan and every
-   membership change on every node. Voters must still be bounded; a measured
+   membership change on every node (its OWN routes are still never contested;
+   see the review entry below). Voters must still be bounded; a measured
    learner above 2 s still refuses; fenced removal excuses only unobserved
    *learner* survivors; and `promote_learner` plus the leader-side Raft
    `Promote` admission require the promoted learner's own bound
@@ -308,16 +309,54 @@ and enforcement itself are untouched; their ruling is separate):
    observation path started one `MEMBERSHIP_ADMISSION_TIMEOUT` deadline before
    vendor startup and never renewed it, so join/snapshot catch-up, the health
    wait, admission, the startup catch-up, promotion and activation all shared
-   45 seconds. Vendor startup is again bounded only as before (its own
-   snapshot transfer/install timeouts, which `make
-   docker-startup-budget-check` counts); the admission phase starts after the
-   health wait exactly as on the non-observation path; and the deadline that
-   promotion and `finish_clock_observation` honour is installed once, after the
-   startup catch-up, carrying only what the committed-member wait left of the
-   45 seconds. It is still never replaced or replenished
+   45 seconds. Vendor startup now has its own phase,
+   `vendor_start_timeout` = one admission (45 s) plus one snapshot catch-up
+   (transfer + install + 45 s grace), on both start paths — the vendor's join
+   retries and its "replicated learner" wait never end by themselves, so a
+   joiner whose leader is unreachable, or whose join an enforced guard keeps
+   refusing, fails startup with a clear error instead of hanging. The
+   admission phase starts after the health wait exactly as on the
+   non-observation path; and the deadline that promotion and
+   `finish_clock_observation` honour is installed once, after the startup
+   catch-up, carrying only what the committed-member wait left of the 45
+   seconds. It is still never replaced or replenished
    (`install_startup_deadline` refuses a second install). This is the owner of
    "the 45-second startup budget" named in the causal-observation entry above.
-   Focused test: `k06_startup_deadline_is_installed_once_and_never_replenished`.
+   Focused tests: `k06_startup_deadline_is_installed_once_and_never_replenished`,
+   `k06_vendor_start_and_catchup_do_not_spend_the_admission_phase`.
+
+**2026-10-04 adversarial review of those fixes** (P1, P2, P3a–d):
+
+- *P1, lease owners.* The learner excuse is about votes; it stays for
+  membership changes and the surviving set of a fenced removal. Takeover and
+  the expiry scan spend a lease whose expiry the OWNER's clock wrote, and
+  learners own delegated sessions, so both now also require the route's owner
+  bounded (`owner_policy`: an owner in the proved roster needs a fresh bound;
+  an owner outside it is this node or removed; an unproved roster refuses).
+  Takeover acquires with `acquire_owned_for_owner` and re-checks the owner at
+  every revalidation; the expiry scan admits its page, then filters each
+  route with `admit_owner_for`, advancing its cursor past the skipped ones.
+  Enforced, an unobserved learner's routes are skipped until it is measured or
+  removed; advisory mode contests them and counts the refusal. Focused tests:
+  `k06_lease_owner_must_be_bounded_even_when_coverage_excuses_it`,
+  `takeover_clock_guard_skips_routes_owned_by_an_unobserved_learner`.
+- *P2, vendor start bounded.* See item 3.
+- *P3a.* `refuse_unstable_wall_reachability` counts only an enforced refusal;
+  with enforcement turned off before the removal budget ended, the operation
+  fails as a plain deadline and no advisory refusal is counted for it.
+- *P3b.* One promotion attempt counts at most one advisory refusal: the ticket
+  remembers that its admission (or an earlier re-check) counted, so
+  `revalidate_promotion_for` (now `&mut` ticket) does not count it again.
+  Focused test: `k06_one_promotion_attempt_counts_one_advisory_refusal`.
+- *P3c.* The budget-expiry decision is the free function
+  `removal_budget_expired_error`, exercised directly by
+  `k06_post_step_wall_reachability_is_decided_by_the_guard`, which also pins
+  that `wait_for_reduction_reference` carries the poll's `clock_blocked`
+  verdict to all three budget exits.
+- *P3d.* `k06_learner_role_needs_the_exact_applied_directory` adds the
+  production shape: membership watch bound, directory absent ⇒ every peer a
+  voter.
+- S-14 wiring pin: `removal_call_sites_bind_their_own_path_and_reconcile`.
 
 ### E0 interfaces — local policy without an irreversible operation
 

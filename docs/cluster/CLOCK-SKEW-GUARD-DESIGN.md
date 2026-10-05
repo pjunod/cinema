@@ -522,6 +522,20 @@ makes its clock a voter's clock, so promotion additionally requires that
 learner's own fresh bounded observation (§3.5). A node that is itself a
 learner applies the same rule: every voter is its peer and must be bounded.
 
+The excuse is about votes, so it covers membership changes and the surviving
+set of a fenced removal, never a lease. A learner owns delegated media
+sessions, and their lease expiry was written by its clock, so takeover and the
+expiry scan also require the route's **owner** to be bounded
+(`ClusterClockGuard::owner_policy`, through `acquire_owned_for_owner` for a
+takeover and `admit_owner_for` per route of an admitted expiry page). An
+unobserved or out-of-bound learner's routes are skipped — not expired, not
+taken over — until it is measured within the bound or leaves the committed
+roster (a removed node's renewals are refused by its removal fence). The
+takeover ticket re-checks the owner at every revalidation; the scan's keyset
+cursor still advances past a skipped route. An unproved roster refuses the
+owner check outright, because absence from it then proves nothing.
+Advisory mode contests such routes as before and counts the refusal.
+
 The policy types and one `Arc<ClusterClockGuard>` live in `plurx-core` so
 `MembershipManager`, media-session recovery and HTTP readiness consult the
 same local snapshot. The daemon owns transport and filtering and publishes one
@@ -626,10 +640,12 @@ Reasons, each row:
   protocol rollback. The exception never skips a fence, manufactures quorum,
   permits self-promotion, or turns a missing clock probe alone into proof that
   the target is unreachable.
-- **An unobserved learner refuses nothing but its own promotion.** The
-  amended §3.3 rule applies to every row: coverage, takeover, the expiry scan,
-  membership acquisition and the surviving set of a fenced removal excuse an
-  unobserved learner and never an unobserved voter. Learner promotion (the
+- **An unobserved learner refuses nothing but its own promotion and its own
+  leases.** The amended §3.3 rule applies to every row: coverage, takeover,
+  the expiry scan, membership acquisition and the surviving set of a fenced
+  removal excuse an unobserved learner and never an unobserved voter. Takeover
+  and the expiry scan still never contest a route that learner OWNS: its
+  lease expiry is its own clock's, so the owner must be bounded too. Learner promotion (the
   application `promote_learner` and the leader-side Raft `Promote`
   admission) also requires the promoted learner's own bounded observation, so
   startup promotion still waits for the leader to have measured the learner.
