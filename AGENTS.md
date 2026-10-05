@@ -34,8 +34,8 @@ scripts in one global scope, so served order is load order, and `export` /
 
 The repository is pushed to a public mirror, so hosts, LAN addresses, home
 directories and SSH users are written with neutral names: `media1`,
-`lab1`–`lab6`, `maca`/`macb`, `nas`, `10.42.x.y`, `forge.lan:3000`, `~` and
-`operator@`. `scripts/scrub-infra-names` holds the mapping and its context
+`lab1`–`lab6`, `maca`/`macb`, `nas`, `jump1`, `10.42.x.y`, `forge.lan:3000`,
+`~` and `operator@`. `scripts/scrub-infra-names` holds the mapping and its context
 rules; `--write` rewrites the tree, `--check` lists what is left, and
 `tests/operations/test_infra_names.py` runs the check in
 `make operations-check`. A literal that truly must stay goes in

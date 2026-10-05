@@ -86,6 +86,12 @@ class MappingTests(unittest.TestCase):
             "Ny" "nuc runner": "Media1 runner",
             "NY" "NUC-RUNNER.md": "MEDIA1-RUNNER.md",
             "QN" "AP NFS": "NAS NFS",
+            "the configured `bil" "ly` jump host": "the configured `jump1` jump host",
+            "ssh -J bil" "ly lab3": "ssh -J jump1 lab3",
+            # A slash alone is a path separator, not encoded data.
+            "logs/mb" "a/xcodebuild.log": "logs/maca/xcodebuild.log",
+            "ran on m" "6.": "ran on lab6.",
+            "mb" "p.local": "macb.local",
         }
         for old, new in cases.items():
             with self.subTest(old=old):
@@ -95,9 +101,23 @@ class MappingTests(unittest.TestCase):
         for text in ("fmp4", "m64", "combat", "mbar", "agent/m" "6-handoff",
                      "agent/m" "6-android-prepared-replacement", "codex/ffmpeg-scratch-m" "6",
                      "status-m" "6-close", "playback-caps-v2-m1..m" "6", "M6 handoff",
-                     "MBA laptop", "nuc5", "nuc" "34", "xm" "6", "m" "6x"):
+                     "MBA laptop", "nuc5", "nuc" "34", "xm" "6", "m" "6x",
+                     "Bil" "ly Elliot", "BIL" "LY", "hillbil" "ly", "bil" "lyjoe"):
             with self.subTest(text=text):
                 self.assertEqual(text, self.rewrite(text))
+
+    def test_short_names_inside_encoded_data_are_not_hosts(self) -> None:
+        base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" "/mb" "a/" "CAYAAAAfFcSJAAAADUlEQVR42mNk"
+        for text in (
+            'd="M12 2l1.5 3m' '6.5 0"',          # SVG relative moveto, decimal
+            'd="M0 0h2m' '6.25-1"',
+            "data:image/png;base64," + base64,  # slash-bounded inside base64
+            "AAAA+m" "6+BBBB",                   # plus-bounded
+            "QUJD+mb" "p=",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(text, self.rewrite(text))
+                self.assertEqual([], scrub.findings(text))
 
     def test_addresses_homes_and_ssh_users(self) -> None:
         cases = {

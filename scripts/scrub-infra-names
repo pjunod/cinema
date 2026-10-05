@@ -21,6 +21,7 @@ Mapping table
   host       m6                           lab6
   host       mba / mbp                    maca / macb
   host       qnap                         nas
+  host       billy (the SSH jump host)    jump1
   forge      192.168.4.7:3000             forge.lan:3000 (scheme, path kept)
   lan        192.168.4.x / 192.168.5.x    10.42.4.x / 10.42.5.x (last two
                                           octets kept)
@@ -34,9 +35,15 @@ Context rules, per pattern
 host      Whole tokens only: a letter or digit on either side is a different
           word (`fmp4`, `m64`, `combat`, `Lambda`, `mbaas`, `nuc5`, `nuc34`).
           nynuc, nuc1-4, rogg16 and qnap also match Title and UPPER case
-          (`Nynuc`, `QNAP`) and keep that case. m6, mba and mbp match
-          lowercase only: `M6` is the playback milestone and `MBA`/`MBP` are
-          laptop models. A lowercase `m6` is still the milestone where it sits
+          (`Nynuc`, `QNAP`) and keep that case. m6, mba, mbp and billy match
+          lowercase only: `M6` is the playback milestone, `MBA`/`MBP` are
+          laptop models and `Billy` is a person's name.
+          The three short names (m6, mba, mbp) are also not hosts inside
+          encoded data: after `+`, before `.` and a digit (`m6.5`, SVG path
+          data), or inside a base64-looking run — 32 or more characters of
+          `[A-Za-z0-9+/=]` holding an upper-case letter, a lower-case letter
+          and a digit. A slash alone does not exclude them, so a host path
+          like `media1/m6/lab4` still matches. A lowercase `m6` is still the milestone where it sits
           in a branch or range — after `.` (`m1..m6`), after `-` unless that
           is `gha-` (`dv-m6`, `status-m6-close`), or before `-<word>`
           (`agent/m6-handoff`) unless it is a runner (`gha-m6-general-03`) or
@@ -101,10 +108,17 @@ HOSTS = {
     "mba": "maca",
     "mbp": "macb",
     "qnap": "nas",
+    "billy": "jump1",
 }
-# Short names that are also ordinary abbreviations in upper/title case
-# (M6 the milestone, MBA/MBP the laptop models) match lowercase only.
-LOWERCASE_ONLY = {"m6", "mba", "mbp"}
+# Names that are also ordinary words or abbreviations in upper/title case
+# (M6 the milestone, MBA/MBP the laptop models, Billy a person) match
+# lowercase only.
+LOWERCASE_ONLY = {"m6", "mba", "mbp", "billy"}
+# Short enough to occur by chance inside encoded data (SVG path commands,
+# base64); see `_inside_encoded_data`.
+SHORT_NAMES = {"m6", "mba", "mbp"}
+BASE64_RUN = re.compile(r"[A-Za-z0-9+/=]+")
+BASE64_MIN_RUN = 32
 # `gha-m6-<role>` is a runner on the host; any other `m6-<word>` except the
 # `m6-pro` hardware label is a milestone branch name.
 RUNNER_ROLES = {"general", "apple", "android", "linux"}
@@ -139,9 +153,30 @@ HOST_PATTERN = re.compile(
     + r")(?![A-Za-z0-9])")
 
 
+def _inside_encoded_data(text: str, start: int, end: int) -> bool:
+    """Whether text[start:end] reads as part of SVG path data or base64."""
+    if text[start - 1:start] == "+":
+        return True
+    if text[end:end + 1] == "." and text[end + 1:end + 2].isdigit():
+        return True
+    left = start
+    while left > 0 and BASE64_RUN.match(text[left - 1]):
+        left -= 1
+    right = end
+    while right < len(text) and BASE64_RUN.match(text[right]):
+        right += 1
+    run = text[left:right]
+    return (len(run) >= BASE64_MIN_RUN
+            and any(c.isupper() for c in run)
+            and any(c.islower() for c in run)
+            and any(c.isdigit() for c in run))
+
+
 def _host(match: re.Match[str]) -> str | None:
     old = match.group(0)
     text, start, end = match.string, match.start(), match.end()
+    if old in SHORT_NAMES and _inside_encoded_data(text, start, end):
+        return None
     if old == "m6":
         # Milestone M6 in a branch or range: dv-m6-…, m1..m6. A branch like
         # agent/m6-handoff falls to the suffix test; `nynuc/m6/nuc4` is hosts.
