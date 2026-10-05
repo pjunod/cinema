@@ -874,7 +874,10 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
-                codec_facts: Some(FrozenHlsCodecFacts::encoded(plan)),
+                codec_facts: Some(
+                    FrozenHlsCodecFacts::encoded(plan)
+                        .with_sdr_master_codecs(owner.sdr_master_codecs),
+                ),
                 bandwidth: None,
                 file_id: file.id,
                 start_seconds: 0.0,

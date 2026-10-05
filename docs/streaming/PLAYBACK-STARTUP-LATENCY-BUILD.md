@@ -73,7 +73,7 @@ This is an independent clone of the configured remote. It contains only the
 planning work transferred by this chat, not the user's uncommitted changes.
 Execute every repository command with this explicit working directory.
 Do not edit, stage, switch branches, compile in, or store artifacts under
-`/Users/pjunod/code/plurx`. The dispatching agent removed its two prior
+`~/code/plurx`. The dispatching agent removed its two prior
 untracked planning documents and their two index rows from that checkout.
 
 The build clone is owned by this effort. Keep it until merge and transfer of
@@ -81,8 +81,8 @@ all retained evidence. Push commits to the draft PR regularly so temporary
 storage is not the only copy. Clean only resources this effort created.
 
 Read authentication from the existing local file
-`/Users/pjunod/code/plurx-agent/forgejo_token`. SSH uses the existing
-`/Users/pjunod/code/plurx-agent/.ssh-deploy-key`. Never print either value,
+`~/code/plurx-agent/forgejo_token`. SSH uses the existing
+`~/code/plurx-agent/.ssh-deploy-key`. Never print either value,
 embed credentials in a remote URL, commit them, or transfer them with source
 archives. Use Forgejo API headers through a client reading the token file.
 

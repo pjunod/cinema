@@ -415,6 +415,91 @@
         assert_eq!(resolve_height(&state, Some(&source), Some(&prior), false, Some(2160)).await, 2160);
     }
 
+    /// D6 at create: with the displayed aspect unknown, `resolve_plan` skips
+    /// `select_quality_candidate` and falls back to "the Encode candidate at
+    /// `height`". That height is resolved without the measured-Link verdict,
+    /// so it can be the very rung the verdict removed — and an exact lookup
+    /// in the narrowed catalog then answered
+    /// `candidate_encode_route_unavailable`. The verdict narrows Auto; it
+    /// never refuses playback. This drives the fallback exactly as create
+    /// wires it: the catalog `link_starved_catalog` narrowed, and the one it
+    /// narrowed from.
+    #[test]
+    fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing() {
+        use plurx_core::domain::{NetworkPrior, NETWORK_PRIOR_STARVED_TTL_MS};
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let row = |height: u32, route: CandidateRoute| {
+            let digest = [(height / 8) as u8 ^ route as u8; 32];
+            QualityCandidate {
+                id: CandidateId::for_recipe_digest(digest),
+                recipe_digest: digest,
+                route,
+                normalized_geometry: true,
+                width: height * 16 / 9,
+                height,
+                target_height: height,
+                average_bps: None,
+                peak_bps: None,
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                decoder_compatible: true,
+                complete_cache: false,
+                sustainable: true,
+            }
+        };
+        let offered = vec![
+            row(2160, CandidateRoute::Remux),
+            row(1080, CandidateRoute::Encode),
+            row(720, CandidateRoute::Encode),
+            row(480, CandidateRoute::Encode),
+        ];
+        let now = 10 * NETWORK_PRIOR_STARVED_TTL_MS;
+        let prior = NetworkPrior {
+            link_worst_rung_height: Some(1080),
+            link_starved_at_ms: Some(now - 1_000),
+            ..Default::default()
+        };
+        let narrowed = crate::http::hls::link_receipts::link_starved_catalog(Some(&prior), offered.clone(), now);
+        assert!(
+            narrowed.len() < offered.len(),
+            "fixture: the verdict must narrow the catalog"
+        );
+        // The pre-fix lookup: exact `height` in the narrowed catalog.
+        assert!(
+            auto_encode_fallback(&narrowed, None, 1080).is_none(),
+            "fixture: the starved rung is exactly what the exact lookup misses"
+        );
+        for height in [1080, 2160] {
+            let picked = auto_encode_fallback(&narrowed, Some(offered.as_slice()), height)
+                .expect("a narrowed Auto still plays");
+            assert_eq!(
+                (picked.target_height, picked.route),
+                (720, CandidateRoute::Encode),
+                "height {height} at or above the starved rung lands on the highest Encode rung below it"
+            );
+        }
+        assert_eq!(
+            auto_encode_fallback(&narrowed, Some(offered.as_slice()), 480)
+                .map(|picked| picked.target_height),
+            Some(480),
+            "a height the verdict left in place is taken as is"
+        );
+        // A catalog the verdict did not narrow keeps the exact lookup: no new
+        // rung is invented for a height the catalog never offered.
+        assert_eq!(
+            auto_encode_fallback(&offered, None, 1080).map(|picked| picked.target_height),
+            Some(1080)
+        );
+        assert!(auto_encode_fallback(&offered, None, 900).is_none());
+        // Nothing at or below `height` in the narrowed catalog: the
+        // un-narrowed one answers rather than a refusal.
+        let only_high = vec![row(720, CandidateRoute::Encode)];
+        let before = vec![row(1080, CandidateRoute::Encode), row(360, CandidateRoute::Encode)];
+        assert_eq!(
+            auto_encode_fallback(&only_high, Some(before.as_slice()), 480).map(|picked| picked.target_height),
+            Some(360)
+        );
+    }
+
     #[tokio::test]
     async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
@@ -1263,23 +1348,93 @@
         hls_context("avc1.640034,mp4a.40.2", None)
     }
 
+    /// With the session's frozen `playback.sdr_master_codecs` on, an SDR
+    /// master names only complete frozen components. The switch is set
+    /// explicitly on every context here: off is the default and is covered by
+    /// `sdr_master_codecs_off_restores_the_pre_s10_master_and_leaves_hdr_alone`.
     #[test]
     fn sdr_master_declares_only_complete_frozen_output_components() {
         let file = hls_file(vec![]);
         let mut context = sdr_context();
         assert!(!master_playlist(&file, None, &context).contains("CODECS="));
-        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, true, false);
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, true, false)
+            .with_sdr_master_codecs(true);
         facts.bind_output_avc_init("avc1.64001F".to_owned());
         context.codec_facts = Some(facts);
         assert!(!master_playlist(&file, None, &context).contains("CODECS="));
-        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false);
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false)
+            .with_sdr_master_codecs(true);
         facts.bind_output_avc_init("avc1.64001F".to_owned());
         context.codec_facts = Some(facts);
         let master = master_playlist(&file, None, &context);
         assert!(master.contains("CODECS=\"avc1.64001F\""), "{master}");
         assert!(!master.contains("mp4a.40.2"));
         assert!(!master.contains("VIDEO-RANGE="));
+        assert!(master.contains("#EXT-X-VERSION:7"), "an SDR CODECS never moves the version");
         assert_eq!(master.matches("#EXT-X-STREAM-INF:").count(), 1);
+    }
+
+    /// S-10's Developer switch, `playback.sdr_master_codecs`, default off.
+    ///
+    /// Off must be the master every client played before S-10: complete SDR
+    /// facts are still frozen, but no `CODECS` is printed, because AVPlayer
+    /// filters variants on it before fetching a byte and no device has
+    /// re-qualified the SDR string (HONEST-MASTER-PLAYLIST §2.5, §5.4). The
+    /// HDR/Dolby Vision branch never consults the switch: its master is
+    /// byte-identical either way.
+    #[test]
+    fn sdr_master_codecs_off_restores_the_pre_s10_master_and_leaves_hdr_alone() {
+        let file = hls_file(vec![]);
+        let complete = |enabled: bool| {
+            let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false)
+                .with_sdr_master_codecs(enabled);
+            facts.bind_output_avc_init("avc1.64001F".to_owned());
+            facts
+        };
+
+        // The pre-S-10 SDR master: no facts at all, so nothing to print.
+        let legacy = master_playlist(&file, None, &sdr_context());
+        let mut off = sdr_context();
+        off.codec_facts = Some(complete(false));
+        let off_master = master_playlist(&file, None, &off);
+        assert!(!off_master.contains("CODECS="), "{off_master}");
+        assert_eq!(off_master, legacy, "off is byte-for-byte the pre-S-10 master");
+        // Every diagnostic shape that may print CODECS agrees.
+        for diagnostic in ["video-only-codecs", "video-only-hdr"] {
+            let shaped = master_playlist_diagnostic(&file, None, &off, Some(diagnostic));
+            assert!(!shaped.contains("CODECS="), "{diagnostic}: {shaped}");
+        }
+
+        let mut on = sdr_context();
+        on.codec_facts = Some(complete(true));
+        let on_master = master_playlist(&file, None, &on);
+        assert!(on_master.contains(",CODECS=\"avc1.64001F\","), "{on_master}");
+        assert_eq!(
+            on_master.replace(",CODECS=\"avc1.64001F\"", ""),
+            legacy,
+            "on adds exactly one attribute and moves nothing else"
+        );
+
+        // HDR10 and Dolby Vision: identical with the switch on, off, or with
+        // no component facts at all.
+        for (codecs, supplemental) in [
+            ("hvc1.2.4.H120.90,mp4a.40.2", None),
+            ("hvc1.2.4.L150.B0,ec-3", Some("dvh1.08.10/db1p")),
+            ("dvh1.05.06,ec-3", None),
+        ] {
+            let bare = hls_context(codecs, supplemental);
+            let expected = master_playlist(&file, None, &bare);
+            assert!(expected.contains(&format!("CODECS=\"{codecs}\"")), "{expected}");
+            for enabled in [false, true] {
+                let mut context = bare.clone();
+                context.codec_facts = Some(complete(enabled));
+                assert_eq!(
+                    master_playlist(&file, None, &context),
+                    expected,
+                    "{codecs}: the HDR branch ignores sdr_master_codecs={enabled}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1863,6 +2018,17 @@
         // SDR — the source's `hdr` column alone is not permission to claim PQ
         // for a tone-mapped picture.
         let sdr = master_playlist(&file, None, &hls_context("avc1.640034,mp4a.40.2", None));
+        assert!(!sdr.contains("VIDEO-RANGE="), "{sdr}");
+        assert!(!sdr.contains("CODECS="), "{sdr}");
+        // The same omission holds for a session whose complete SDR facts were
+        // frozen with `playback.sdr_master_codecs` off — the default, and the
+        // pre-S-10 ruling until the device re-qualification is recorded.
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false)
+            .with_sdr_master_codecs(false);
+        facts.bind_output_avc_init("avc1.640028".to_owned());
+        let mut off = hls_context("avc1.640028", None);
+        off.codec_facts = Some(facts);
+        let sdr = master_playlist(&file, None, &off);
         assert!(!sdr.contains("VIDEO-RANGE="), "{sdr}");
         assert!(!sdr.contains("CODECS="), "{sdr}");
     }
@@ -3039,6 +3205,7 @@
         // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
         let source = staging_source(&fixture).await;
         let mut recipe = crate::transcode::SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
             candidate_context: None,

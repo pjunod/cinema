@@ -6613,10 +6613,11 @@ test("the Android policy module stays free of ExoPlayer and Android", () => {
 // ---------------------------------------------------------------------------
 // The shared Auto-quality policy fixture (A-04 / D1).
 //
-// `tests/playback/auto-quality-policy.json` is one file, read by three runners:
-// this one today, and a Swift and a JVM runner the build plan adds. It exists
-// so "the same policy" is a checkable claim rather than three codebases that
-// happen to spell 1.8 the same way this week.
+// `tests/playback/auto-quality-policy.json` is the policy as data. This is its
+// only runner: the Swift and JVM ports (#634) were deleted on 2026-10-04 because
+// no player called them. A native adapter that ports `decideRung` again reads
+// this file, so "the same policy" stays a checkable claim rather than three
+// codebases that happen to spell 1.8 the same way this week.
 //
 // The rule that makes it honest: a case may carry `web_current` beside
 // `expect` when the shipped browser and the design disagree. The runner then

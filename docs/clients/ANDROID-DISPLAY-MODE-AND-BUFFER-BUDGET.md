@@ -1,6 +1,6 @@
 # Android display-mode matching and buffer budget — implementation plan
 
-**Status:** M1–M3 built; M4 actual-heap containment implemented; M0 measured on the Google TV Streamer 2026-10-02; M4 larger allocation decided *not justified* (coordinator decision, awaiting Paul's review); M0 on the other televisions and the M5 HDMI matrix open · **Executes:** §2.9 / D1 / F-android-1 /
+**Status:** open — M1–M3 and M4 actual-heap containment on `main` since 2026-10-04 (#793); M0 measured on the Google TV Streamer 2026-10-02; M4 larger allocation decided *not justified* (no-build on buffer roles, coordinator decision, awaits Paul's ratification, see the 2026-10-04 relevance pass §2.15); the §5.6 matcher-timeout reset is built in the 2026-10-04 close-out PR (Android 146); M0 on the other televisions and the M5 HDMI matrix open · **Executes:** §2.9 / D1 / F-android-1 /
 F-android-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -156,7 +156,8 @@ with the collector's receipt; the numbers below are copied from it.
 and its `PlurxBufferBudget` log line), so the active formula was the legacy
 `(memoryClass/8).coerceAtMost(64)` = **48 MiB per pipeline**. On this device
 the clamp gives the same value (`Runtime.maxMemory()` = 384 MiB, /8 = 48 MiB,
-measured 2026-09-30), so the reading carries over to the effort branch.
+measured 2026-09-30), so the reading carries over to the effort branch, on
+`main` since 2026-10-04 (#793).
 
 | Column | Google TV Streamer |
 |---|---|
@@ -184,7 +185,8 @@ requested audio focus at `playWhenReady = true` and paused the incumbent
 within 3 ms; the incumbent sat frozen about 20 s, both players were released
 and a cold start followed. So the 146 MB "primed" PSS is one paused incumbent
 plus a successor that only created an audio decoder — not two healthy
-pipelines. That defect is already corrected on this effort branch
+pipelines. That defect is already corrected on the effort branch, on `main`
+since 2026-10-04 (#793)
 (`320535286`, pinned by `f646b9bdb`: `handlesAudioFocus(role)` is false for
 `PlayerRole.Successor` and focus moves with `handOverAudioFocus` at commit),
 but no installed build carries it yet. A valid primed reading needs the
@@ -612,6 +614,20 @@ owner-changed return the request must not be cleared blindly, since the new
 owner may have set its own. The `late` path (`onTracksChanged`, no source rate)
 switches mid-play by design and is not this gap.
 
+**Built 2026-10-04 (Android build 146).** `match` now withdraws the request —
+`preferredDisplayModeId = 0` — when a prepare-time wait times out and this owner
+is still current, and leaves it on the owner-changed return. A `late` wait
+(the `onTracksChanged` fallback above) never withdraws, matched or not: it is
+already mid-play by design, and a display that completes that switch after the
+2 s bound is doing what the late request asked for. The decision is
+`clearsDisplayModeRequestAfterWait(matched, stillOwner, late)`, pinned by
+`DisplayModeMatcherTest.timedOutPrepareWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow`
+and `DisplayModeMatcherTest.lateWaitNeverWithdrawsTheRequest`. The
+`playback_display_mode` detail now ends `withdrawn=true|false`, so telemetry
+records which waits cleared the request. M5 still has to observe it: with the
+setting on, a timed-out prepare-time switch should leave the mode unchanged
+through playback rather than change it after first frame.
+
 ---
 
 ## 6. Verification and rollout
@@ -710,14 +726,16 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | needs: run §5.1's ADB measurement prompt on Lenovo, Google TV, and Shield; no device values were inferred. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | `009b9068` / [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | `/decision` now preserves the exact source rational and Android parses it before prepare. Pinned Rust 1.97.1 focused regression and Android compile/`FrameRateTest` pass. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | `8b44b5d8` / [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | Pure same-resolution cadence policy plus fractional/nominal/resolution/current-mode JVM cases pass. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | `e4622cee` / [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | Finite and progressive/deinterlaced Live TV match before prepare with a 2 s bound; prepared successors do not switch while staged; release/stop resets; late Media3 fallback, bounded telemetry, replicated switch, and advisory Developer status are wired. Focused Rust setting/readiness/live-cadence regressions and Android compile/policy/settings tests pass. Physical HDMI outcomes remain unobserved. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 review fix | [#409 comment #3199](http://192.168.4.7:3000/noirr/plurx/pulls/409#issuecomment-3199) | A post-wait channel/window ownership fence and exact-session cleanup prevent delayed Live TV display matching from resurrecting or releasing the wrong tune. The advisory display-mode checkbox now uses the server's ordinary one-key settings shape rather than the unrelated Live TV generation CAS. Deterministic coroutine/lease regressions and the real server save regression pass. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | blocked by M0: no role-based allocation or `largeHeap` request was guessed; current sizing and instrumented behavior remain intact. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | needs: run both §6 physical-device prompts after M0/M4; no display, HDR, black-frame, PSS, or OOM result is claimed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#409](http://forge.lan:3000/noirr/plurx/pulls/409) | needs: run §5.1's ADB measurement prompt on Lenovo, Google TV, and Shield; no device values were inferred. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | `009b9068` / [#409](http://forge.lan:3000/noirr/plurx/pulls/409) | `/decision` now preserves the exact source rational and Android parses it before prepare. Pinned Rust 1.97.1 focused regression and Android compile/`FrameRateTest` pass. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | `8b44b5d8` / [#409](http://forge.lan:3000/noirr/plurx/pulls/409) | Pure same-resolution cadence policy plus fractional/nominal/resolution/current-mode JVM cases pass. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | `e4622cee` / [#409](http://forge.lan:3000/noirr/plurx/pulls/409) | Finite and progressive/deinterlaced Live TV match before prepare with a 2 s bound; prepared successors do not switch while staged; release/stop resets; late Media3 fallback, bounded telemetry, replicated switch, and advisory Developer status are wired. Focused Rust setting/readiness/live-cadence regressions and Android compile/policy/settings tests pass. Physical HDMI outcomes remain unobserved. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 review fix | [#409 comment #3199](http://forge.lan:3000/noirr/plurx/pulls/409#issuecomment-3199) | A post-wait channel/window ownership fence and exact-session cleanup prevent delayed Live TV display matching from resurrecting or releasing the wrong tune. The advisory display-mode checkbox now uses the server's ordinary one-key settings shape rather than the unrelated Live TV generation CAS. Deterministic coroutine/lease regressions and the real server save regression pass. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#409](http://forge.lan:3000/noirr/plurx/pulls/409) | blocked by M0: no role-based allocation or `largeHeap` request was guessed; current sizing and instrumented behavior remain intact. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#409](http://forge.lan:3000/noirr/plurx/pulls/409) | needs: run both §6 physical-device prompts after M0/M4; no display, HDR, black-frame, PSS, or OOM result is claimed. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M4 containment and supplementary measurement | `codex/d01-android-buffer-budget` into the architecture effort | Actual-granted-heap no-increase policy and role wiring; focused JVM4, Android lint/application/test compile, and isolated wireless Google TV allocator/provenance2 pass. Original larger incumbent allocation and three-TV M0/M5 remain open. |
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M0 (Google TV Streamer) | `opus/client-evidence` into the architecture effort | Production build 142 measured over adb: memoryClass 384 / large 512, PSS 63–158 MB, 48 MiB buffer, stalls 3 supply / 0 decode on about 20 Mb/s 2.4 GHz Wi-Fi; dated table in §2.3. Primed row invalid (successor audio-focus defect, corrected on the effort by `320535286`). TCL and Lenovo not reachable; the device-substitution ruling is Paul's. |
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M4 decision | `opus/client-evidence` | Coordinator decision for Paul's review: larger incumbent allocation not justified; granted-heap containment stays as M4 (§5.5). |
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M5 precondition | `opus/client-evidence` | `display_mode_match` is off on the fleet, so only the setting-OFF row is observed (Google TV stayed 2160p60). Matcher timeout leaves `preferredDisplayModeId` set (§5.6 note); M5 must watch for a late switch. |
+| 2026-10-04 | claude-opus-5-5 | https://claude.ai/code/session_01ENdV5pjk5WztKEXnKHy8YT | §5.6 timeout correction | `0acff727`, Android build 146 | On timeout with the owner still current the matcher sets `preferredDisplayModeId` back to 0; the owner-changed return does not clear. JVM regression `timedOutWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow` (four cases). Not compiled or run here (no Android SDK in this session); no device observation. |
+| 2026-10-04 | claude-opus-5-5 | https://claude.ai/code/session_01ENdV5pjk5WztKEXnKHy8YT | §5.6 review fix | close-out PR, Android build 146 | Adversarial review: the withdrawal also fired on the `late` (`onTracksChanged`) wait, which switches mid-play by design. The helper now takes `late` and never withdraws on that path; the test was renamed `timedOutPrepareWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow` and `lateWaitNeverWithdrawsTheRequest` added; telemetry detail gains `withdrawn=`. Not compiled or run here (no Android SDK in this session). |

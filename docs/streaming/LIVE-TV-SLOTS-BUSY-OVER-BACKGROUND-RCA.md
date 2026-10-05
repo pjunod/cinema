@@ -10,7 +10,7 @@ owner read 0.
 
 ## What actually refused the viewer
 
-The owner (nynuc) logged the refusal itself:
+The owner (media1) logged the refusal itself:
 
 ```
 Live TV session ended channel=6.1 reason="tuner_capacity"
@@ -30,7 +30,7 @@ claimable')`, and `claim_with_resolution_inner` treats every store error as
 an ambiguous, possibly-committed write: it polls `resolve_claim` every
 250 ms for the full 30 s job lease before giving up on that candidate.
 
-On nynuc the same eight zombie job ids came back on every candidate page.
+On media1 the same eight zombie job ids came back on every candidate page.
 The owner's log shows them being resolved at exact 30 s intervals —
 23:49:39, 23:50:09, … 00:07:50 — eight in a row, four minutes, with the
 software pool reserved for the whole walk and no ffmpeg running. The two
@@ -68,7 +68,7 @@ the ordinary paths cannot grow the shape; a boot-time legacy drain or a
 migration replay is the likeliest origin. The replicated backend's
 `StoreError` Display carries the trigger text — the owner's own log line
 `error=database error: Sqlite: subtitle demand no longer claimable` came from
-nynuc's hiqlite store.
+media1's hiqlite store.
 
 ### 3. A live start that waited out background work was refused
 
@@ -189,7 +189,7 @@ this from real tuner exhaustion.
   checkpoint-and-kill runs past five seconds counts as an overrun.
 - Live TV HTTP: `encoder_capacity` code, 503, `retry: later`, preserved
   through the ingress relay.
-- Fleet: after deploy, `plurx_transcode_background_overrun_total` on nynuc
+- Fleet: after deploy, `plurx_transcode_background_overrun_total` on media1
   is expected to move while the subtitle backfill still has zombie rows to
   retire on first contact, then settle at a constant. The eight zombie ids
   from the 2026-09-27 log should stop appearing in `docker logs` within one

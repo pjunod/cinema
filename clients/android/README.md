@@ -20,7 +20,14 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `147` — a seek pressed while a prepared quality
+> Status: **v0.3.0**, build `148` — a display-mode wait that times out
+> withdraws its `preferredDisplayModeId` request while it still owns the
+> window, so a late HDMI switch cannot land mid-playback (needs
+> `display_mode_match` on; not yet observed on a television), and the
+> uncalled Auto-quality policy port and its JVM runner are deleted; released
+> continuous audio outputs are retired again (since build 145 they were kept
+> and could exhaust the 16-output bound).
+> Build `147` — a seek pressed while a prepared quality
 > handoff has switched but not yet rendered is held and runs once on its first
 > frame (or on the picture an Auto rollback restores) instead of being dropped
 > until the 8-second target deadline reopens; a rollback reopen lands at the

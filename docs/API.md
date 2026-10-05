@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 304
+One binary serves everything on one port (`:32400` by default). plurx has 303
 routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -349,7 +349,10 @@ Fields: `name`, `version` (bare semver, which is what clients compare), `build`
 (git description), `built_at`, `instance_id`, `node_id`,
 `cluster_advertisement`, `uptime_seconds`, `setup_required`, `android_app`,
 `playback_auto_abr`, `display_mode_match` (the replicated Android-TV cadence
-switch; missing storage is `false`).
+switch; missing storage is `false`). Also `decoder_compaction_contract`,
+`display_aware_auto_protocol` (always `"route-v1"` on this build) and
+`playback_display_aware_auto` (the Developer switch; missing storage is
+`false`) — see §7.4.
 
 ### 4.2 `POST /api/v1/setup`
 
@@ -469,6 +472,15 @@ allows new HEVC copy starts without configuration proof, including rolling and
 progressive playback. It can restore known color corruption. Saving it never
 depends on readiness; `hevc_header_trace_available` is a read-only nullable
 boolean reporting this node’s FFmpeg capability for the Developer advice.
+
+`playback_sdr_master_codecs` is an admin-writable boolean (default `false`,
+store key `playback.sdr_master_codecs`). On, an SDR HLS master variant
+carries `CODECS` when the session's frozen video and audio facts are both
+complete; off is the pre-S-10 master, which carries no `CODECS` on SDR
+variants. HDR and Dolby Vision variants are the same either way. The value is
+fixed when a session is created; a session rebuilt after an owner takeover or
+VOD resurrection reads the current value. Saving it never depends on the Developer
+readiness row (`sdr_master_codecs` → `sdr_codecs_device_requalification`).
 
 Live-TV settings are a separate transaction with their own generation
 compare-and-swap, and mixing them into a request with any non-Live-TV field is
@@ -1217,6 +1229,93 @@ both shapes route through one translation and must agree.
 Session creation can hydrate an exact shared artifact; otherwise it retains
 the rolling first-play fallback while enabled shared preparation queues the
 missing source/recipe work. It does not wait for a full-file index pass.
+
+### 7.4 Display-aware Auto (`route-v1`)
+
+Behind two Developer switches that both default off:
+`playback.display_aware_auto` (*Fit Auto to display*) and `playback.auto_abr`
+(*Adaptive Auto quality*). The protocol came with #669; the typed recovery
+consumers and link acknowledgements came with the architecture effort (#793,
+2026-10-04). This section lists what the server accepts and returns and the
+file that owns each field. Native recovery on this protocol has no device
+qualification; the design is
+[DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md).
+
+- **Advertisement.** `GET /api/v1/server` (§4.1) carries
+  `display_aware_auto_protocol: "route-v1"` and the two switches as
+  `playback_display_aware_auto` and `playback_auto_abr`
+  (`crates/plurxd/src/http/system.rs`; a stored value of exactly `1` is on).
+  The native clients enter their recovery paths only when both switches are
+  on and the protocol is `route-v1`.
+- **Capabilities.** The v2 capabilities document (§7.1) may carry the
+  display's `presentation_target` (`DisplayCaps`) and `audio_sinks`
+  (`DeviceCaps`; at most 16 entries), in
+  `crates/plurx-core/src/playback/caps.rs`. A presentation target describes
+  the display; it grants no codec capability.
+- **Decision and session responses.** `DecisionResponse`
+  (`crates/plurxd/src/http/stream.rs`) and the session-create `StartResponse`
+  (`crates/plurxd/src/http/hls/session_guard.rs`) may carry
+  `display_aware_auto_protocol`, `quality_candidate_id` and
+  `quality_candidates` (`QualityCandidate`,
+  `crates/plurx-core/src/playback/candidate.rs`); all three are omitted when
+  absent. Create sets the protocol only when a quality owner was negotiated
+  (`crates/plurxd/src/http/hls/create.rs`).
+- **Session create (§9).** An Auto ask for one candidate is
+  `intent.selection.quality = {"mode":"auto","candidate_id":…}`. While
+  `playback.display_aware_auto` is off, a create that names a `candidate_id`
+  is refused `400 candidate_route_disabled`. A typed recovery names its
+  predecessor with `previous_session_id` and `reopen_reason`, one of `stall`,
+  `link`, `encode`, `decode`, `hold` or `authority` (`ReopenReason`,
+  `crates/plurxd/src/transcode/session_request.rs`; an unknown value is
+  refused). `stall` is the legacy untyped reopen. For the other five the
+  server tries to authenticate the cause against the incumbent candidate
+  (`authenticate_cause`, `crates/plurxd/src/http/hls/candidate_recovery.rs`):
+  `link` needs a fresh negative link proof for that incumbent, `encode` live
+  producer pressure, `decode` accepted decoder evidence, and `hold` and
+  `authority` must not change the candidate. A cause that cannot be
+  authenticated is logged and the create proceeds as an ordinary reopen — a
+  typed cause never refuses a reopen. Only `decode` changes later candidate
+  admission (durable decoder-rejection memory); the other recorded causes are
+  logged at debug level and change nothing.
+- **Link receipts.** A complete `200` media-segment response
+  (`seg*.m4s` / `seg*.ts`) for a bound session may carry
+  `X-Plurx-Link-Receipt` (a UUID nonce, valid 30 s) and
+  `X-Plurx-Link-Media-Duration-Ms`
+  (`crates/plurxd/src/http/hls/segment.rs`). The client may echo one nonce
+  back as the request header `X-Plurx-Link-Receipt` on a create; a missing,
+  duplicated or malformed header is treated as no receipt
+  (`requested_receipt`, `crates/plurxd/src/http/hls/link_receipts.rs`).
+- **Samples on `POST /api/v1/client-log` (§5.5).** Two optional objects,
+  each refusing unknown fields:
+  - `link_sample` (`ClientLinkSample`, `link_receipts.rs`): `receipt`,
+    `object_name`, `etag`, `body_bytes`, `body_duration_ms`, `age_ms`,
+    `network_load`, `from_cache`, `producer_paced`, `cause` (`link`,
+    `encode`, `decode`, `hold` or `authority`), `negative`,
+    `media_duration_ms`, `presenting`, `stalled`, `runway_ms`. A positive
+    sample claims the owner's live receipt whatever the setting, and is also
+    folded into network priors while `playback.network_priors` is on. A
+    negative sample is acknowledged with the response header
+    `X-Plurx-Link-Accepted: <nonce>` only when it names a session and the
+    server accepts it for the receipt the owner issued. With priors on the
+    negative is folded durably and acknowledged after an exact readback of
+    that fold; with priors off nothing durable is written and the owner's
+    live receipt backs the acknowledgement. A session placed on a peer and an
+    IPv6 client still get no receipts, so they are never acknowledged.
+    Anything else gets the ordinary `204` with no header.
+  - `candidate_recovery` (`ClientRecoverySample`,
+    `crates/plurxd/src/http/hls/candidate_recovery.rs`): `cause`, `event_id`
+    (a UUID), `candidate_id`, `recipe_digest`, `age_ms` (at most 15 s),
+    `decoder_failed`, `rendered_elapsed_ms`, `position_progress_ms`,
+    `dropped_frames`, `runway_ms`. Only `cause: "decode"` is accepted, and
+    only with `decoder_failed` or sustained dropped frames (at least 6 over
+    4 s of rendering with 2 s of progress and 10 s of runway) on the
+    incumbent candidate. An accepted sample is acknowledged with
+    `X-Plurx-Recovery-Accepted: <event_id>`.
+- **Control exchange (§10).** `selection.quality` may be
+  `{"mode":"auto","candidate_id":…}` (`QualitySelection`,
+  `crates/plurxd/src/playback_control.rs`), and `capabilities` may carry
+  `presentation_target` and `decoder_caps: {revision, video[]}`
+  (`DynamicCapabilities`); a missing value keeps the previous exchange's.
 
 ---
 
@@ -2559,6 +2658,20 @@ The refusal is enforced again at start, not only in the lineup: a start
 re-fetches the lineup forced, so it never rides the stale projection, and a
 protected channel is 415 `drm_unsupported`.
 
+**Legacy settings fields.** `PUT /api/v1/settings` still accepts
+`live_tv_owner_node_id` and `live_tv_fenced_owner` from the single-owner model
+#537 replaced, and ignores their values. Shipped Apple and Android clients send
+`live_tv_owner_node_id` with every tuner-configuration save. Neither sends
+`live_tv_fenced_owner`: both still define the change (`FencedOwner` in
+`LiveTvApi.kt`, `.fencedOwner` in `LiveTv.swift`) but no production path
+constructs it, so it is accepted only so an older or third-party client that
+does send it is not refused. They still count as a Live TV
+save, so they need `live_tv_config_generation` and bump it even when nothing
+else changes. `GET /api/v1/settings` keeps `live_tv_owner_node_id` (always the
+answering node) and `live_tv_transition_from_owner_node_id` /
+`live_tv_transition_drain_before` (always `""` / `0`) for clients that decode
+them.
+
 ### 17.4 Session status separates source, delivery and reception
 
 `GET /api/v1/live-tv/sessions/{capability}/status` returns
@@ -3225,7 +3338,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | Method | Path | Body limit | What it does |
 |---|---|---|---|
 | GET | `/_internal/v1/activity-snapshot` | — | Node-local delivery snapshot |
-| GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. Measurement only, with no takeover, membership or readiness consequence. |
+| GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. The route itself only measures; since 2026-10-04 (#793) the observations it supplies feed the cluster clock guard, which refuses takeover, the expired-session scan, membership changes and readiness only while the Developer switch `cluster.clock_guard_enforced` is on (default off; see OPERATIONS.md). |
 | GET | `/api/v1/internal/cluster/operations-status` | — | This node's own operations status, for the aggregate |
 | POST | `/api/v1/internal/auth/cache-revocation` | 256 B | Propagates one credential-revocation phase |
 | GET | `/internal/v1/media/snapshot` | — | This node's media-pool snapshot |
@@ -3241,7 +3354,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/_internal/v1/live-tv/guide` | 16 KiB | The owner's cached programme guide, relayed verbatim. Deliberately not gated on the Live TV protocol capability: an owner that predates the guide answers 404 and the ingress renders "no guide yet" rather than taking Live TV down across a mixed fleet |
 | POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |
 | POST | `/_internal/v1/live-tv/resource` | 16 KiB | Fetches a playlist, segment or status for an owned capability |
-| POST | `/_internal/v1/live-tv/stop`, `/_internal/v1/live-tv/drain` | 16 KiB | Releases a capability; drains below a generation |
+| POST | `/_internal/v1/live-tv/stop` | 16 KiB | Releases a capability. (The single-owner model's generation drain beside it was removed on 2026-10-04: since #537 nothing sent it.) |
 | POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume`, `/_internal/v1/live-tv/start-state` | 1 KiB | Retires a viewer's public start id on the owner, hands back the session it still owns, or reports what became of it. Three paths rather than one with a mode flag: `resume` selects a session, cancels the others and fences an id it has never seen, and a status read may do none of that. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |
 | POST | `/internal/cluster/media/sessions/start`, `/internal/cluster/media/sessions/activate` | 96 / 128 KiB | Starts and confirms a remote media session |
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |

@@ -37,6 +37,17 @@ class ContinuousAudioOutputsTest {
         assertTrue(outputs.isReleased(owner))
         assertTrue(outputs.collectReleased().isEmpty())
     }
+    @Test fun releasingManyOutputsRetiresEveryOneOfThem() {
+        val outputs = ContinuousAudioOutputs()
+        val owners = List(4) { Any() }
+        var released = false
+        owners.forEach { owner -> repeat(4) { outputs.allocated(Any(), owner) { released } } }
+        released = true
+        assertEquals(owners.size, outputs.collectReleased().size)
+        owners.forEach { assertTrue(outputs.isReleased(it)) }
+        repeat(16) { outputs.allocated(Any(), Any()) { false } }
+    }
+
     @Test fun pendingResourcesRemainBoundedUntilTheirStateConfirmsRelease() {
         val outputs = ContinuousAudioOutputs()
         val owner = Any()

@@ -341,12 +341,24 @@ impl VodServe {
     /// touch the sliding TTL; the HTTP response commit does that after every
     /// playlist and init-object check succeeds.
     pub async fn hls_facts(&self, session_id: &str) -> Option<VodHlsFacts> {
-        let publication = self.session_rendition(session_id).await?;
-        let rendition = match publication.result {
-            Ok((rendition, _, _)) => rendition,
-            _ => return None,
+        // One registry read for the rendition, its owner and the session's
+        // frozen master choice, so all three describe the same incarnation.
+        // Same answers as `session_rendition`: a tombstoned or rendition-less
+        // session has no facts.
+        let (rendition, owner, sdr_master_codecs) = {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(session_id)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            (
+                session.live_rendition().map(Arc::clone)?,
+                session.response_owner(),
+                session.sdr_master_codecs,
+            )
         };
         Some(VodHlsFacts {
+            sdr_master_codecs,
             file: rendition.recipe.file.clone(),
             audio_index: rendition.recipe.audio_index,
             aac: rendition.recipe.aac,
@@ -354,7 +366,7 @@ impl VodServe {
             preserve_dolby_vision: rendition.recipe.video.preserves_dolby_vision(),
             convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
             encoding: rendition.recipe.encoding.clone(),
-            response_owner: publication.owner,
+            response_owner: owner,
         })
     }
 

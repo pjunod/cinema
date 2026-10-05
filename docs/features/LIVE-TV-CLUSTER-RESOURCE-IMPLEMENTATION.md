@@ -1,6 +1,6 @@
 # Live TV cluster resource — remove the device's permanent node owner
 
-**Status:** implementation in progress; adversarial design review complete ·
+**Status:** built — merged as #537; adversarial design review complete ·
 **Written:** 2026-09-25 · **Source inspected:** `bafeb08766ce057634f3fab0850cdd9e03507a98`
 plus the working tree · **Requested by:** Paul
 

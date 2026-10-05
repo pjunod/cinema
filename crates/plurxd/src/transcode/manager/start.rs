@@ -110,6 +110,7 @@ impl TranscodeManager {
         self.publish_ahead_limits(limits);
         limits
     }
+
     /// The rolling producer owns route-specific initial negotiation. A retained
     /// producer answer is already authoritative, even if catalog facts changed.
     pub(super) fn rolling_start_audio_options(
@@ -183,6 +184,7 @@ impl TranscodeManager {
             Priority::Live,
             None,
             None,
+            None,
         )
         .await
     }
@@ -220,6 +222,7 @@ impl TranscodeManager {
             None,
             Priority::Live,
             Some(claim),
+            None,
             None,
         )
         .await
@@ -627,6 +630,7 @@ impl TranscodeManager {
         priority: Priority,
         audio_claim: Option<&plurx_core::playback::audio::AudioClaim>,
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+        sdr_master_codecs: Option<bool>,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
         // Cluster replacements are provisional until their durable pointer CAS
@@ -735,6 +739,15 @@ impl TranscodeManager {
         }
         let plan =
             self.resolve_movie_plan_from_probe(&file, &opts, encoder, probe_json.as_deref())?;
+        // Freeze the master shape from the same settings read as the plan.
+        let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
+            plurx_core::store::stored_switch(
+                settings
+                    .get(keys::PLAYBACK_SDR_MASTER_CODECS)
+                    .map(String::as_str),
+                false,
+            )
+        });
         if takeover.is_none() {
             if let Some(info) = self
                 .serve_cached(
@@ -747,6 +760,7 @@ impl TranscodeManager {
                         supersession_user,
                         playback_id,
                         automatic,
+                        sdr_master_codecs,
                     },
                 )
                 .await
@@ -839,7 +853,10 @@ impl TranscodeManager {
                         let frozen = FrozenHlsPresentation::from_contract(
                             file.clone(),
                             HlsContext {
-                                codec_facts: Some(FrozenHlsCodecFacts::encoded(&retained_plan)),
+                                codec_facts: Some(
+                                    FrozenHlsCodecFacts::encoded(&retained_plan)
+                                        .with_sdr_master_codecs(sdr_master_codecs),
+                                ),
                                 bandwidth: None,
                                 file_id,
                                 start_seconds,
@@ -914,6 +931,7 @@ impl TranscodeManager {
                                 supersession_user,
                                 playback_id,
                                 automatic,
+                                sdr_master_codecs,
                             },
                         )
                         .await
@@ -1155,7 +1173,9 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
-                codec_facts: Some(FrozenHlsCodecFacts::encoded(&plan)),
+                codec_facts: Some(
+                    FrozenHlsCodecFacts::encoded(&plan).with_sdr_master_codecs(sdr_master_codecs),
+                ),
                 bandwidth: None,
                 file_id,
                 start_seconds,
@@ -1698,6 +1718,7 @@ impl TranscodeManager {
             playback_id,
             false,
             None,
+            None,
         )
         .await
     }
@@ -1718,6 +1739,7 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
+        sdr_master_codecs: Option<bool>,
     ) -> Result<StartInfo, String> {
         // One Store read for the file, its probe and its settings (D4).
         let RollingStartInputs {
@@ -1967,14 +1989,27 @@ impl TranscodeManager {
             preserve_dolby_vision: served.preserve_dolby_vision,
             convert_dolby_vision: served.convert_dolby_vision,
         };
+        // Frozen with the rest of the presentation: this session's master
+        // keeps one shape whatever the setting does later.
+        let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
+            plurx_core::store::stored_switch(
+                settings
+                    .get(keys::PLAYBACK_SDR_MASTER_CODECS)
+                    .map(String::as_str),
+                false,
+            )
+        });
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
-                codec_facts: Some(FrozenHlsCodecFacts::audio(
-                    audio_delivery,
-                    !file.audio_streams.is_empty(),
-                    served.transcode_audio,
-                )),
+                codec_facts: Some(
+                    FrozenHlsCodecFacts::audio(
+                        audio_delivery,
+                        !file.audio_streams.is_empty(),
+                        served.transcode_audio,
+                    )
+                    .with_sdr_master_codecs(sdr_master_codecs),
+                ),
                 bandwidth: None,
                 file_id,
                 start_seconds,

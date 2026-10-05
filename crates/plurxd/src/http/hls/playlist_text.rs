@@ -292,10 +292,18 @@ fn master_playlist_with_shape(
             }
         }
     } else if shape.codecs {
+        // SDR (S-10). Before S-10 this branch did not exist and SDR variants
+        // carried no CODECS at all — the shape AVPlayer, Media3 and hls.js
+        // were qualified against. AVPlayer filters variants on CODECS before
+        // it fetches a byte, so a wrong string silently removes the rung.
+        // Printing therefore needs both complete frozen component facts and
+        // the session's frozen `playback.sdr_master_codecs` choice (Settings
+        // → Developer, default off), read once when the session was created.
+        // The HDR branch above is untouched by that switch.
         if let Some(codecs) = context
             .codec_facts
             .as_ref()
-            .and_then(crate::transcode::FrozenHlsCodecFacts::complete_sdr_codecs)
+            .and_then(crate::transcode::FrozenHlsCodecFacts::sdr_master_codecs)
         {
             out.push_str(&format!(",CODECS=\"{}\"", quoted(&codecs)));
         }

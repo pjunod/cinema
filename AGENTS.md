@@ -30,6 +30,19 @@ that table, all in one commit; three tests fail otherwise. They are plain
 scripts in one global scope, so served order is load order, and `export` /
 `import` / `module.exports` do not belong in any of them.
 
+## The public mirror names no real infrastructure
+
+The repository is pushed to a public mirror, so hosts, LAN addresses, home
+directories and SSH users are written with neutral names: `media1`,
+`lab1`–`lab6`, `maca`/`macb`, `nas`, `jump1`, `10.42.x.y`, `forge.lan:3000`,
+`~` and `operator@`. `scripts/scrub-infra-names` holds the mapping and its context
+rules; `--write` rewrites the tree, `--check` lists what is left, and
+`tests/operations/test_infra_names.py` runs the check in
+`make operations-check`. A literal that truly must stay goes in
+`scripts/scrub-infra-names.allow.toml` with its reason. Tools that need the
+real lab take it from a git-ignored `scripts/*.fleet.json` (or a path given
+on the command line) shaped like the committed `*.fleet.example.json`.
+
 ## Optional features and the Developer tab
 
 There are no feature gates. An optional or unfinished feature gets an
@@ -73,9 +86,13 @@ test failures, or denied lints.
 - Integrate a multi-task project on one temporary `effort/<project>` branch.
 - Base each reviewable task branch on the current effort and open its pull
   request back into that effort.
-- Treat `Effort development gate` as blocking. It proves policy, formatting,
-  static web contracts, and affected Rust/Apple/Android compilation; it does
-  not make the branch releasable.
+- Dispatch `Effort development gate` by hand before merging a task into the
+  effort, and do not merge on a red run. `.github/workflows/effort-ci.yml`
+  runs only on `workflow_dispatch`: nothing fires it on a task pull request,
+  so it gates a merge only when someone runs it first. It proves policy,
+  formatting, static web contracts, and affected Rust/Apple/Android
+  compilation; it does not run the Rust, Apple or Android unit suites and
+  does not make the branch releasable.
 - Run the smallest focused regression for changed behavior locally and record
   that command in the task pull request. The effort workflow deliberately
   defers the full suites.

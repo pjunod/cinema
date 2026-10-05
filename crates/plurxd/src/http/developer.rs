@@ -115,6 +115,18 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
     let snapshot = guard.snapshot();
     let would_refuse = guard.check_evidence().err();
     let peers = snapshot.peers.len();
+    let learners = snapshot.unobserved_learners;
+    // Unobserved learners are reported but never required: a non-voting
+    // member's stopped clock does not refuse any guarded decision.
+    let learner_note = if learners == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {learners} unobserved learner(s) reported but not required (no vote; \
+             a measured learner still counts, and promotion needs its own bound)"
+        )
+    };
+    let measured = peers.saturating_sub(learners);
     let (coverage_status, coverage, worst) = match snapshot.state {
         ClusterClockState::NoPeers => (
             RequirementStatus::Met,
@@ -123,8 +135,10 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
         ),
         ClusterClockState::Bounded { worst_abs_upper_us } => (
             RequirementStatus::Met,
-            format!("{peers} / {peers} committed remote members reachable and bounded"),
-            Some(worst_abs_upper_us),
+            format!(
+                "{measured} / {peers} committed remote members reachable and bounded{learner_note}"
+            ),
+            (measured > 0).then_some(worst_abs_upper_us),
         ),
         ClusterClockState::Incomplete {
             unknown_peers,
@@ -133,10 +147,10 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
             RequirementStatus::Unmet,
             format!(
                 "{} / {peers} committed remote members bounded; {unknown_peers} unreachable, \
-                 unanswered or roster unproved",
-                peers.saturating_sub(unknown_peers)
+                 unanswered or roster unproved{learner_note}",
+                peers.saturating_sub(unknown_peers + learners)
             ),
-            (peers > unknown_peers).then_some(worst_abs_upper_us),
+            (peers > unknown_peers + learners).then_some(worst_abs_upper_us),
         ),
     };
     let limit_us = CLOCK_OFFSET_REFUSAL_MS * 1_000;
@@ -171,7 +185,7 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
         requirements: vec![
             DeveloperRequirement {
                 id: "coverage",
-                title: "Every member reachable and observed",
+                title: "Every voter reachable and observed",
                 status: coverage_status,
                 evidence: coverage,
             },
@@ -199,9 +213,11 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
                     RequirementStatus::Unmet
                 },
                 evidence: format!(
-                    "While enforced, one down or unreachable member makes coverage unknown, \
+                    "While enforced, one down or unreachable voter makes coverage unknown, \
                      which refuses session takeover, the expired-session scan and membership \
-                     changes on every node (fenced removal of that member still works), and \
+                     changes on every node (fenced removal of that member still works); a down \
+                     learner is reported and refuses only its own promotion and the takeover \
+                     or expiry of the sessions it owns, until it returns or is removed; and \
                      two consecutive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms make /readyz \
                      answer 503. Startup is never refused. Now: {current}; \
                      plurx_cluster_clock_advisory_refusals_total counts what it would have \
@@ -306,6 +322,13 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         false,
     );
+    // Missing is off, exactly as the session-create reads parse it.
+    let sdr_master_codecs_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
+            .map(String::as_str),
+        false,
+    );
     let clock_guard_enforced = plurx_core::store::stored_switch(
         settings
             .get(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
@@ -369,6 +392,7 @@ pub(crate) async fn readiness(
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(prepared_handoff_on),
+            sdr_master_codecs(sdr_master_codecs_on),
             content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
@@ -2056,6 +2080,33 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
         enabled: Some(advertised),
         setting: Some("playback_control_protocol_v1"),
         requirements: vec![reporters],
+    }
+}
+
+/// S-10's SDR master `CODECS`. The switch is the whole decision; its one row
+/// says what nobody has measured yet and never refuses the save. It is
+/// `unknown` by construction — no observation this daemon can make proves it:
+/// whether AVPlayer still offers every SDR variant once the master names its
+/// codecs is a physical-device result, and a daemon that served such a master
+/// has no way to see a rung the player silently dropped before fetching it.
+fn sdr_master_codecs(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "sdr_master_codecs",
+        title: "CODECS on SDR master playlists",
+        enabled: Some(enabled),
+        setting: Some("playback_sdr_master_codecs"),
+        requirements: vec![DeveloperRequirement {
+            id: "sdr_codecs_device_requalification",
+            title: "Apple TV and iPhone keep every SDR variant with CODECS printed",
+            status: RequirementStatus::Unknown,
+            evidence: "Not recorded: the S-10 device re-qualification \
+                       (HONEST-MASTER-PLAYLIST \u{a7}5.4) is a physical-device result this \
+                       daemon cannot read, and a variant AVPlayer drops on CODECS is never \
+                       fetched, so no server counter can see it. Advisory only. The value is \
+                       fixed when a session is created; a session rebuilt after an owner \
+                       takeover or VOD resurrection reads the current value."
+                .to_owned(),
+        }],
     }
 }
 

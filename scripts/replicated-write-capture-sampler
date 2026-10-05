@@ -1,29 +1,48 @@
 #!/usr/bin/env bash
 # K-03 M0 replicated-write sampler (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE.md §5.1).
-# Read-only: unauthenticated GET /metrics on the three voters every 60 s; it
+# Read-only: unauthenticated GET /metrics on every voter every 60 s; it
 # deploys nothing. Evaluate its samples.tsv with scripts/replicated-write-capture.
+#
+#   replicated-write-capture-sampler --fleet FLEET.json
+#   replicated-write-capture-sampler --after --fleet FLEET.json <sample-after options>
+#
+# The voters and their metrics URLs come from the fleet file (or
+# PLURX_K03_FLEET), kept outside the repository: the public mirror never names
+# the real lab. scripts/replicated-write-capture.fleet.example.json has the shape.
 set -uo pipefail
 
 capture_dir=$(cd "$(dirname "$0")" && pwd)
 # Opt-in AFTER uses its own create-only, expiring owner. The default M0
-# sampler below is byte-for-byte unchanged, including its historical schema.
+# sampler below keeps its historical samples.tsv schema unchanged.
 if [[ ${1:-} == --after ]]; then
   shift
   exec python3 "$capture_dir/replicated-write-capture" sample-after "$@"
 fi
+fleet=${PLURX_K03_FLEET:-}
+if [[ ${1:-} == --fleet ]]; then
+  fleet=${2:-}
+  shift 2 || true
+fi
+if [[ -z $fleet || $# -ne 0 ]]; then
+  echo "usage: $0 --fleet FLEET.json   (or set PLURX_K03_FLEET)" >&2
+  exit 2
+fi
+# One validation for both tools: the evaluator's own fleet reader.
+if ! roster=$(python3 "$capture_dir/replicated-write-capture" roster --fleet "$fleet"); then
+  exit 2
+fi
+nodes=()
+urls=()
+while IFS=$'\t' read -r node url; do
+  nodes+=("$node")
+  urls+=("$url")
+done <<< "$roster"
 samples="$capture_dir/samples.tsv"
 events="$capture_dir/events.log"
 status_file="$capture_dir/status.txt"
 interval_seconds=60
 # Paul set the M0 gate to 12 hours on 2026-09-25 (it was 24).
 required_idle_seconds=43200
-
-nodes=(nuc4 m6 nynuc)
-urls=(
-  "http://192.168.4.8:32400/metrics"
-  "http://192.168.4.14:32400/metrics"
-  "http://192.168.5.236:32400/metrics"
-)
 
 metric_value() {
   local body=$1
@@ -53,7 +72,7 @@ write_status() {
 if [[ ! -s $samples ]]; then
   printf 'timestamp_utc\tepoch\tnode\turl\treachable\tbuild\tlocal_is_voter\tcommit_index\tauthority_reads\twrites\tsnapshot_builds\tpending_outbox\ttranscode_active\tlive_tv_starting\tlive_tv_active\tactive_playback_entries\n' > "$samples"
 fi
-printf '%s waiting for a continuous %s-hour idle window on the three current voters\n' "$(date -u +%FT%TZ)" "$((required_idle_seconds / 3600))" >> "$events"
+printf '%s waiting for a continuous %s-hour idle window on the %s current voters\n' "$(date -u +%FT%TZ)" "$((required_idle_seconds / 3600))" "${#nodes[@]}" >> "$events"
 
 window_start_epoch=0
 window_start_iso=none
@@ -73,7 +92,7 @@ while true; do
   current_writes=()
   current_snapshots=()
 
-  for index in 0 1 2; do
+  for index in "${!nodes[@]}"; do
     node=${nodes[$index]}
     url=${urls[$index]}
     if ! body=$(curl -fsS --connect-timeout 3 --max-time 10 "$url" 2>/dev/null); then
@@ -116,7 +135,7 @@ while true; do
 
   if (( window_start_epoch > 0 )); then
     if [[ $sample_builds != "$window_builds" ]]; then sample_valid=0; fi
-    for index in 0 1 2; do
+    for index in "${!nodes[@]}"; do
       if (( ${current_commit[$index]:-0} < ${previous_commit[$index]:-0} )); then sample_valid=0; fi
       if (( ${current_authority[$index]:-0} < ${previous_authority[$index]:-0} )); then sample_valid=0; fi
       if (( ${current_writes[$index]:-0} < ${previous_writes[$index]:-0} )); then sample_valid=0; fi
@@ -144,7 +163,7 @@ while true; do
       window_builds=$sample_builds
       printf '%s started continuous idle window on %s\n' "$now_iso" "$sample_builds" >> "$events"
     fi
-    for index in 0 1 2; do
+    for index in "${!nodes[@]}"; do
       previous_commit[$index]=${current_commit[$index]}
       previous_authority[$index]=${current_authority[$index]}
       previous_writes[$index]=${current_writes[$index]}

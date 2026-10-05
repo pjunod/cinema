@@ -1989,10 +1989,16 @@ pub mod keys {
     /// Nothing reads an index yet; a file without one keeps today's
     /// presentation, so this job is invisible to every client either way.
     pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
+    /// Replicated Developer-tab override for K-04 bounded local catalogue
+    /// reads. Effective default is ON: a missing or unrecognised value falls
+    /// back through `stored_switch(value, default)` to the node's
+    /// `cluster.bounded_replica_reads` config seed (`true` unless
+    /// `PLURX_CLUSTER_BOUNDED_REPLICA_READS` says otherwise); only an explicit
+    /// "0"/"false"/"no"/"off" turns it off.
+    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     /// Content-addressed cluster coordination for VOD indexes. Missing/zero is
     /// off so an upgrade never starts full-library reads without the operator's
     /// topology measurement and explicit opt-in.
-    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     pub const VOD_INDEX_CLUSTER_CACHE: &str = "playback.vod_index_cluster_cache";
     /// Durable analysis retry budget. The settings API constrains this to a
     /// small positive range so an operator can tune slow media without making
@@ -2049,6 +2055,14 @@ pub mod keys {
     /// Operator override for HEVC copy without configuration/source proof.
     /// Off by default. Readiness is advisory and never prevents saving it.
     pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";
+    /// Print `CODECS` on SDR (`avc1`) HLS master variants when the session's
+    /// frozen component facts are complete (S-10, HONEST-MASTER-PLAYLIST).
+    /// Missing and every off spelling are off, which is the pre-S-10 master:
+    /// AVPlayer filters variants on `CODECS` before it fetches a byte, and no
+    /// device has re-qualified the SDR string yet. HDR/Dolby Vision variants
+    /// are unaffected either way. Read once per session at create, so one
+    /// session's master never changes shape.
+    pub const PLAYBACK_SDR_MASTER_CODECS: &str = "playback.sdr_master_codecs";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.

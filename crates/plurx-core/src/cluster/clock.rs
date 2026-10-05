@@ -817,6 +817,463 @@ mod tests {
             Err(ClockRefusal::GenerationChanged)
         );
     }
+
+    #[cfg(feature = "hiqlite-store")]
+    struct FixedMembership(ClockMembershipIdentity);
+
+    #[cfg(feature = "hiqlite-store")]
+    impl ClockMembershipSource for FixedMembership {
+        fn current(&self) -> Option<ClockMembershipIdentity> {
+            Some(self.0.clone())
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    fn peer_uuid(raft_id: u64) -> String {
+        format!("00000000-0000-0000-0000-{raft_id:012}")
+    }
+
+    /// An enforced guard bound to an applied membership with the given local
+    /// node, members and voters, and an exact directory of every remote member.
+    #[cfg(feature = "hiqlite-store")]
+    fn membership_guard(
+        local_node: u64,
+        members: &[u64],
+        voters: &[u64],
+    ) -> (ClusterClockGuard, super::super::membership::ClockPeerRoster) {
+        let identity = ClockMembershipIdentity {
+            local_node,
+            log: (2, 1, 7),
+            members: members.iter().copied().collect(),
+            voters: voters.iter().copied().collect(),
+        };
+        let guard =
+            ClusterClockGuard::with_membership_source(Arc::new(FixedMembership(identity.clone())));
+        guard.set_enforced(true);
+        let roster = super::super::membership::ClockPeerRoster {
+            membership: Some(identity),
+            peers: members
+                .iter()
+                .filter(|raft_id| **raft_id != local_node)
+                .map(|raft_id| super::super::membership::ActivityPeer {
+                    node_id: peer_uuid(*raft_id),
+                    raft_id: *raft_id,
+                    http_base: Some(format!("https://node{raft_id}:443")),
+                    reachable: true,
+                })
+                .collect(),
+        };
+        (guard, roster)
+    }
+
+    /// Publish one complete round: the listed raft ids get the given offset,
+    /// every other remote member is Unknown.
+    #[cfg(feature = "hiqlite-store")]
+    fn publish_round(
+        guard: &ClusterClockGuard,
+        roster: &super::super::membership::ClockPeerRoster,
+        bounded: &[(u64, i64)],
+    ) {
+        let round = guard
+            .roster_for_peer_directory(roster)
+            .expect("exact directory");
+        let observations = roster
+            .peers
+            .iter()
+            .map(|peer| {
+                let observation = bounded
+                    .iter()
+                    .find(|(raft_id, _)| *raft_id == peer.raft_id)
+                    .map_or(PeerClockOffset::Unknown, |(_, offset_us)| {
+                        PeerClockOffset::Bounded {
+                            offset_us: *offset_us,
+                            uncertainty_us: 1_000,
+                            observed_at: Instant::now(),
+                        }
+                    });
+                (peer.node_id.clone(), observation)
+            })
+            .collect();
+        assert!(guard.publish(round, observations));
+    }
+
+    /// K-06 learner rule. A stopped learner (non-voting member) has no
+    /// observation; it must not refuse takeover, the expiry scan or a
+    /// membership change on any node while every voter is bounded. An
+    /// unobserved voter still refuses, a MEASURED learner beyond the bound
+    /// still refuses (it may own delegated media leases those decisions
+    /// spend), and promoting a learner requires that learner's own bound.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_stopped_learner_admits_when_voters_bounded_but_unobserved_voter_refuses() {
+        let (guard, roster) = membership_guard(1, &[1, 2, 3, 4], &[1, 2, 3]);
+        publish_round(&guard, &roster, &[(2, 0), (3, 0)]);
+        let snapshot = guard.snapshot();
+        assert_eq!(
+            snapshot.state,
+            ClusterClockState::Bounded {
+                worst_abs_upper_us: 1_000
+            }
+        );
+        assert_eq!(snapshot.unobserved_learners, 1);
+        assert!(guard.acquire_for(ClockDecision::Takeover).is_ok());
+        assert!(guard.acquire_for(ClockDecision::ExpiryScan).is_ok());
+        assert!(guard
+            .admit_for(ClockDecision::MembershipChange, guard.acquire())
+            .is_ok());
+        let metrics = guard.prometheus();
+        assert!(metrics.contains("plurx_cluster_clock_unobserved_learners 1\n"));
+        assert!(metrics.contains(&format!(
+            "plurx_cluster_clock_observation_state{{peer=\"{}\",state=\"unknown\"}} 1\n",
+            peer_uuid(4)
+        )));
+        assert!(
+            metrics
+                .lines()
+                .filter(|line| line.starts_with("plurx_cluster_clock_refusals_total{"))
+                .all(|line| line.ends_with(" 0")),
+            "nothing refused: {metrics}"
+        );
+
+        // Promoting the unobserved learner makes it a voter: refused.
+        assert_eq!(
+            guard.admit_promotion_for(4, guard.acquire()).err(),
+            Some(ClockRefusal::Unknown)
+        );
+
+        // An unobserved VOTER is still Incomplete, whatever the learner says.
+        publish_round(&guard, &roster, &[(2, 0), (4, 0)]);
+        assert_eq!(
+            guard.snapshot().state,
+            ClusterClockState::Incomplete {
+                unknown_peers: 1,
+                worst_abs_upper_us: 1_000
+            }
+        );
+        assert_eq!(guard.snapshot().unobserved_learners, 0);
+        assert_eq!(
+            guard.acquire_for(ClockDecision::Takeover).err(),
+            Some(ClockRefusal::Unknown)
+        );
+        assert_eq!(
+            guard
+                .admit_for(ClockDecision::MembershipChange, guard.acquire())
+                .err(),
+            Some(ClockRefusal::Unknown)
+        );
+
+        // A measured learner beyond the bound refuses like any member.
+        publish_round(&guard, &roster, &[(2, 0), (3, 0), (4, 2_500_000)]);
+        assert_eq!(
+            guard.acquire_for(ClockDecision::Takeover).err(),
+            Some(ClockRefusal::Offset)
+        );
+
+        // A bounded learner may be promoted; the ticket is re-checked against
+        // the same target before submission.
+        publish_round(&guard, &roster, &[(2, 0), (3, 0), (4, 0)]);
+        let mut promotion = guard
+            .admit_promotion_for(4, guard.acquire())
+            .expect("bounded learner promotion");
+        assert_eq!(guard.revalidate_promotion_for(4, &mut promotion), Ok(()));
+        publish_round(&guard, &roster, &[(2, 0), (3, 0)]);
+        assert!(guard.acquire().is_ok(), "the learner alone is excused");
+        assert_eq!(
+            guard.revalidate_promotion_for(4, &mut promotion),
+            Err(ClockRefusal::Unknown),
+            "but not as a promotion target"
+        );
+        assert_eq!(
+            guard.admit_promotion_for(9, guard.acquire()).err(),
+            Some(ClockRefusal::Unknown),
+            "an unmapped target is never bounded"
+        );
+    }
+
+    /// The local node may itself be a learner (it runs takeover for its own
+    /// delegated sessions). Every voter is still its peer and must be
+    /// bounded; another unobserved learner is excused; and promoting ITSELF
+    /// needs only its own continuity, which the ticket already proves.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_local_learner_requires_every_voter_and_excuses_other_learners() {
+        let (guard, roster) = membership_guard(4, &[1, 2, 3, 4, 5], &[1, 2, 3]);
+        publish_round(&guard, &roster, &[(1, 0), (2, 0), (3, 0)]);
+        assert_eq!(guard.snapshot().unobserved_learners, 1);
+        assert!(guard.acquire_for(ClockDecision::Takeover).is_ok());
+        assert!(guard.admit_promotion_for(4, guard.acquire()).is_ok());
+        assert_eq!(
+            guard.admit_promotion_for(5, guard.acquire()).err(),
+            Some(ClockRefusal::Unknown)
+        );
+        publish_round(&guard, &roster, &[(1, 0), (3, 0)]);
+        assert_eq!(
+            guard.acquire_for(ClockDecision::Takeover).err(),
+            Some(ClockRefusal::Unknown),
+            "an unobserved voter refuses even a learner's own decisions"
+        );
+        assert_eq!(
+            guard.admit_promotion_for(4, guard.acquire()).err(),
+            Some(ClockRefusal::Unknown)
+        );
+    }
+
+    /// The learner role is proved only from the exact applied directory bound
+    /// to the membership watch. Without it every peer counts as a voter, so
+    /// the exemption can never be reached by a directory-less roster.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_learner_role_needs_the_exact_applied_directory() {
+        let (guard, roster) = membership_guard(1, &[1, 2, 3], &[1, 2]);
+        publish_round(&guard, &roster, &[(2, 0)]);
+        let inner = guard.inner.lock().expect("clock state lock");
+        assert!(ClusterClockGuard::is_learner_peer(
+            inner.membership.as_ref(),
+            inner.peer_directory.as_ref(),
+            &peer_uuid(3)
+        ));
+        assert!(!ClusterClockGuard::is_learner_peer(
+            inner.membership.as_ref(),
+            inner.peer_directory.as_ref(),
+            &peer_uuid(2)
+        ));
+        assert!(
+            !ClusterClockGuard::is_learner_peer(inner.membership.as_ref(), None, &peer_uuid(3)),
+            "no exact directory: every peer is treated as a voter"
+        );
+        drop(inner);
+        // A generic (directory-less) roster cannot prove a role: Unknown refuses.
+        let generic = enforced();
+        let ticket = generic.roster(&[peer_uuid(3)]);
+        assert!(generic.publish(
+            ticket,
+            BTreeMap::from([(peer_uuid(3), PeerClockOffset::Unknown)])
+        ));
+        assert_eq!(generic.snapshot().unobserved_learners, 0);
+        assert_eq!(generic.acquire().err(), Some(ClockRefusal::Unknown));
+
+        // The production shape with the directory missing: the applied
+        // membership watch IS bound (and names peer 3 a learner), but the
+        // round was installed without the exact peer directory. The role is
+        // then unproved and peer 3 counts as a voter.
+        let identity = ClockMembershipIdentity {
+            local_node: 1,
+            log: (2, 1, 7),
+            members: BTreeSet::from([1, 2, 3]),
+            voters: BTreeSet::from([1, 2]),
+        };
+        let sourced =
+            ClusterClockGuard::with_membership_source(Arc::new(FixedMembership(identity.clone())));
+        sourced.set_enforced(true);
+        let round = sourced
+            .roster_for_membership(&[peer_uuid(2), peer_uuid(3)], Some(&identity))
+            .expect("applied membership without a directory");
+        assert!(sourced.publish(
+            round,
+            BTreeMap::from([
+                (
+                    peer_uuid(2),
+                    PeerClockOffset::Bounded {
+                        offset_us: 0,
+                        uncertainty_us: 1_000,
+                        observed_at: Instant::now(),
+                    },
+                ),
+                (peer_uuid(3), PeerClockOffset::Unknown),
+            ])
+        ));
+        {
+            let inner = sourced.inner.lock().expect("clock state lock");
+            assert!(inner.membership.is_some() && inner.peer_directory.is_none());
+            assert!(!ClusterClockGuard::is_learner_peer(
+                inner.membership.as_ref(),
+                inner.peer_directory.as_ref(),
+                &peer_uuid(3)
+            ));
+        }
+        assert_eq!(sourced.snapshot().unobserved_learners, 0);
+        assert_eq!(
+            sourced.snapshot().state,
+            ClusterClockState::Incomplete {
+                unknown_peers: 1,
+                worst_abs_upper_us: 1_000
+            }
+        );
+        assert_eq!(sourced.acquire().err(), Some(ClockRefusal::Unknown));
+        assert_eq!(
+            sourced.acquire_for(ClockDecision::Takeover).err(),
+            Some(ClockRefusal::Unknown)
+        );
+    }
+
+    fn counted(guard: &ClusterClockGuard, family: &str, decision: &str, cause: &str) -> u64 {
+        let prefix = format!("{family}{{decision=\"{decision}\",cause=\"{cause}\"}} ");
+        guard
+            .prometheus()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+            .expect("closed metric vocabulary")
+            .parse()
+            .expect("counter value")
+    }
+
+    /// K-06 review P1. Coverage excuses an unobserved learner, but a learner
+    /// owns delegated media sessions whose lease expiry its own clock wrote.
+    /// Takeover and the expiry scan therefore need the route's OWNER bounded:
+    /// an unobserved learner's routes are not contested (enforced) until it is
+    /// measured within the bound or leaves the roster, while a voter's routes
+    /// are. Advisory mode contests both and counts the owner refusal.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_lease_owner_must_be_bounded_even_when_coverage_excuses_it() {
+        let refusals = "plurx_cluster_clock_refusals_total";
+        let advisory = "plurx_cluster_clock_advisory_refusals_total";
+        let (guard, roster) = membership_guard(1, &[1, 2, 3, 4], &[1, 2, 3]);
+        let guard = Arc::new(guard);
+        publish_round(&guard, &roster, &[(2, 0), (3, 0)]);
+        let learner = peer_uuid(4);
+        let voter = peer_uuid(2);
+
+        // The page as a whole is admitted: every voter is bounded.
+        let page = guard
+            .acquire_for(ClockDecision::ExpiryScan)
+            .expect("voters bounded");
+        assert_eq!(
+            guard.admit_owner_for(ClockDecision::ExpiryScan, &page, &learner),
+            Err(ClockRefusal::Unknown),
+            "an unobserved learner's lease is not expired"
+        );
+        assert_eq!(
+            guard.admit_owner_for(ClockDecision::ExpiryScan, &page, &voter),
+            Ok(())
+        );
+        assert_eq!(
+            guard.admit_owner_for(ClockDecision::ExpiryScan, &page, "not-a-member"),
+            Ok(()),
+            "an owner outside the proved roster is this node or a removed member"
+        );
+        assert_eq!(
+            guard
+                .acquire_owned_for_owner(ClockDecision::Takeover, &learner)
+                .err(),
+            Some(ClockRefusal::Unknown),
+            "an unobserved learner's route is not taken over"
+        );
+        let voter_takeover = guard
+            .acquire_owned_for_owner(ClockDecision::Takeover, &voter)
+            .expect("bounded voter owner");
+        assert_eq!(voter_takeover.revalidate(), Ok(()));
+        assert_eq!(counted(&guard, refusals, "expiry_scan", "unknown"), 1);
+        assert_eq!(counted(&guard, refusals, "takeover", "unknown"), 1);
+
+        // Measured within the bound, the learner's routes are contestable;
+        // the owner is re-checked on every revalidation of the takeover.
+        publish_round(&guard, &roster, &[(2, 0), (3, 0), (4, 0)]);
+        let learner_takeover = guard
+            .acquire_owned_for_owner(ClockDecision::Takeover, &learner)
+            .expect("bounded learner owner");
+        publish_round(&guard, &roster, &[(2, 0), (3, 0)]);
+        assert_eq!(
+            learner_takeover.revalidate(),
+            Err(ClockRefusal::Unknown),
+            "the owner went unobserved before submission"
+        );
+        assert_eq!(voter_takeover.revalidate(), Ok(()));
+        // A measured learner above the bound refuses coverage itself.
+        publish_round(&guard, &roster, &[(2, 0), (3, 0), (4, 2_500_000)]);
+        assert_eq!(
+            guard.acquire_for(ClockDecision::ExpiryScan).err(),
+            Some(ClockRefusal::Offset)
+        );
+
+        // An unproved roster proves nothing about absence.
+        publish_round(&guard, &roster, &[(2, 0), (3, 0)]);
+        let page = guard
+            .acquire_for(ClockDecision::ExpiryScan)
+            .expect("bounded");
+        guard.roster_failed();
+        assert_eq!(
+            guard.admit_owner_for(ClockDecision::ExpiryScan, &page, "not-a-member"),
+            Err(ClockRefusal::Unknown)
+        );
+
+        // Advisory: contested as before, the refusal counted.
+        publish_round(&guard, &roster, &[(2, 0), (3, 0)]);
+        guard.set_enforced(false);
+        let page = guard
+            .acquire_for(ClockDecision::ExpiryScan)
+            .expect("bounded");
+        let before = counted(&guard, advisory, "expiry_scan", "unknown");
+        assert_eq!(
+            guard.admit_owner_for(ClockDecision::ExpiryScan, &page, &learner),
+            Ok(())
+        );
+        assert_eq!(
+            counted(&guard, advisory, "expiry_scan", "unknown"),
+            before + 1
+        );
+        assert!(guard
+            .acquire_owned_for_owner(ClockDecision::Takeover, &learner)
+            .is_ok());
+        assert_eq!(counted(&guard, advisory, "takeover", "unknown"), 1);
+
+        // Once the learner leaves the committed roster, its routes are
+        // contestable: its renewals are fenced by its removal.
+        let (removed, roster) = membership_guard(1, &[1, 2, 3], &[1, 2, 3]);
+        publish_round(&removed, &roster, &[(2, 0), (3, 0)]);
+        let page = removed
+            .acquire_for(ClockDecision::ExpiryScan)
+            .expect("bounded");
+        assert_eq!(
+            removed.admit_owner_for(ClockDecision::ExpiryScan, &page, &learner),
+            Ok(())
+        );
+    }
+
+    /// K-06 review P3(b). One promotion attempt counts at most one advisory
+    /// refusal, however many pre-submission re-checks it crosses; enforced,
+    /// the first refusal is counted and ends the attempt.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_one_promotion_attempt_counts_one_advisory_refusal() {
+        let advisory = "plurx_cluster_clock_advisory_refusals_total";
+        let refusals = "plurx_cluster_clock_refusals_total";
+        let (guard, roster) = membership_guard(1, &[1, 2, 3, 4], &[1, 2, 3]);
+        guard.set_enforced(false);
+        publish_round(&guard, &roster, &[(2, 0), (3, 0)]);
+        // Refused at admission: counted there, never again for this attempt.
+        let mut attempt = guard
+            .admit_promotion_for(4, guard.acquire())
+            .expect("advisory admits");
+        assert_eq!(counted(&guard, advisory, "membership_change", "unknown"), 1);
+        assert_eq!(guard.revalidate_promotion_for(4, &mut attempt), Ok(()));
+        assert_eq!(guard.revalidate_promotion_for(4, &mut attempt), Ok(()));
+        assert_eq!(counted(&guard, advisory, "membership_change", "unknown"), 1);
+
+        // Admitted cleanly, then refused at both re-checks: counted once.
+        publish_round(&guard, &roster, &[(2, 0), (3, 0), (4, 0)]);
+        let mut attempt = guard
+            .admit_promotion_for(4, guard.acquire())
+            .expect("bounded learner");
+        publish_round(&guard, &roster, &[(2, 0), (3, 0)]);
+        assert_eq!(guard.revalidate_promotion_for(4, &mut attempt), Ok(()));
+        assert_eq!(guard.revalidate_promotion_for(4, &mut attempt), Ok(()));
+        assert_eq!(counted(&guard, advisory, "membership_change", "unknown"), 2);
+
+        // Enforced, the refusal is counted and ends the attempt.
+        guard.set_enforced(true);
+        publish_round(&guard, &roster, &[(2, 0), (3, 0), (4, 0)]);
+        let mut attempt = guard
+            .admit_promotion_for(4, guard.acquire())
+            .expect("bounded learner");
+        publish_round(&guard, &roster, &[(2, 0), (3, 0)]);
+        assert_eq!(
+            guard.revalidate_promotion_for(4, &mut attempt),
+            Err(ClockRefusal::Unknown)
+        );
+        assert_eq!(counted(&guard, refusals, "membership_change", "unknown"), 1);
+        assert_eq!(counted(&guard, advisory, "membership_change", "unknown"), 2);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -918,6 +1375,9 @@ pub struct ClockAcquisitionTicket<'guard> {
     guard: &'guard ClusterClockGuard,
     decision: ClockDecisionTicket,
     admission_generation: u64,
+    /// Set once this attempt's advisory refusal has been counted, so a later
+    /// re-check of the same attempt does not count it again.
+    advisory_counted: bool,
 }
 
 /// Original node-local observation for a reduction, not admission by itself.
@@ -989,6 +1449,9 @@ pub struct OwnedClockAcquisitionTicket {
     decision: ClockDecisionTicket,
     admission_generation: u64,
     consumer: ClockDecision,
+    /// The node whose lease this decision spends, re-checked on every
+    /// revalidation (see [`ClusterClockGuard::acquire_owned_for_owner`]).
+    owner: Option<String>,
 }
 
 impl OwnedClockAcquisitionTicket {
@@ -1000,14 +1463,18 @@ impl OwnedClockAcquisitionTicket {
     /// Only before initial submission. An already submitted, commit-unknown
     /// proposal must continue its exact reconciliation without this admission.
     pub fn revalidate(&self) -> Result<(), ClockRefusal> {
-        self.guard.revalidate_for(
-            self.consumer,
-            &ClockAcquisitionTicket {
-                guard: &self.guard,
-                decision: self.decision,
-                admission_generation: self.admission_generation,
-            },
-        )
+        let ticket = ClockAcquisitionTicket {
+            guard: &self.guard,
+            decision: self.decision,
+            admission_generation: self.admission_generation,
+            advisory_counted: false,
+        };
+        let strict = self.guard.revalidate_strict_with(&ticket, |inner| {
+            self.owner.as_deref().map_or(Ok(()), |owner| {
+                ClusterClockGuard::owner_policy(inner, owner)
+            })
+        });
+        self.guard.decide(Some(self.consumer), strict)
     }
 }
 
@@ -1028,6 +1495,13 @@ impl ClockReadiness {
 pub struct ClockSnapshot {
     pub state: ClusterClockState,
     pub peers: BTreeMap<String, PeerClockOffset>,
+    /// Committed non-voting learners in `peers` with no usable observation.
+    /// They are reported here and in the per-peer state gauge, but they do
+    /// not make `state` Incomplete: a learner holds no vote, so a stopped or
+    /// unanswering one must not refuse every node's guarded decisions. A
+    /// learner that IS measured still contributes its upper bound, and a
+    /// promotion of a learner still requires that learner to be bounded.
+    pub unobserved_learners: usize,
     pub clock_generation: u64,
     pub state_generation: u64,
     pub discontinuities: u64,
@@ -1091,6 +1565,7 @@ impl ClusterClockGuard {
                         ClusterClockState::NoPeers
                     },
                     peers: BTreeMap::new(),
+                    unobserved_learners: 0,
                     clock_generation: 0,
                     state_generation: 0,
                     discontinuities: 0,
@@ -1188,6 +1663,14 @@ impl ClusterClockGuard {
     /// One serialized continuity/state read: the ticket for the current
     /// generations plus whether the strict policy admits it.
     fn capture(&self) -> (ClockAcquisitionTicket<'_>, Result<(), ClockRefusal>) {
+        self.capture_with(|_| Ok(()))
+    }
+
+    /// `capture` plus a decision-specific check read under the SAME lock.
+    fn capture_with(
+        &self,
+        also: impl FnOnce(&ClockInner) -> Result<(), ClockRefusal>,
+    ) -> (ClockAcquisitionTicket<'_>, Result<(), ClockRefusal>) {
         let mut inner = self
             .inner
             .lock()
@@ -1197,7 +1680,7 @@ impl ClusterClockGuard {
         let before = Instant::now();
         let decision = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
         let strict = if decision.clock_generation == generation {
-            Self::acquisition_policy(&inner)
+            Self::acquisition_policy(&inner).and_then(|()| also(&inner))
         } else {
             Err(ClockRefusal::LocalDiscontinuity)
         };
@@ -1206,6 +1689,7 @@ impl ClusterClockGuard {
                 guard: self,
                 decision,
                 admission_generation: inner.admission_generation,
+                advisory_counted: false,
             },
             strict,
         )
@@ -1390,25 +1874,25 @@ impl ClusterClockGuard {
                 if node_id == &reference.target_node_id {
                     continue;
                 }
-                let PeerClockOffset::Bounded {
-                    offset_us,
-                    uncertainty_us,
-                    observed_at,
-                } = observation
-                else {
+                let fresh = match observation {
+                    PeerClockOffset::Bounded { observed_at, .. } => now
+                        .checked_duration_since(*observed_at)
+                        .is_some_and(|age| age <= CLOCK_OBSERVATION_MAX_AGE),
+                    PeerClockOffset::Unknown => false,
+                };
+                let Some(upper) = Self::upper_bound(observation).filter(|_| fresh) else {
+                    // The coverage rule: an unobserved surviving learner
+                    // holds no vote and does not refuse the reduction. An
+                    // unrelated unobserved VOTER is never excused.
+                    if Self::is_learner_peer(
+                        captured.membership.as_ref(),
+                        captured.directory.as_ref(),
+                        node_id,
+                    ) {
+                        continue;
+                    }
                     return Err(ClockRefusal::Unknown);
                 };
-                if *uncertainty_us < 0
-                    || !now
-                        .checked_duration_since(*observed_at)
-                        .is_some_and(|age| age <= CLOCK_OBSERVATION_MAX_AGE)
-                {
-                    return Err(ClockRefusal::Unknown);
-                }
-                let upper = offset_us
-                    .checked_abs()
-                    .and_then(|offset| offset.checked_add(*uncertainty_us))
-                    .ok_or(ClockRefusal::Unknown)?;
                 if upper > CLOCK_OFFSET_REFUSAL_MS * 1_000 {
                     return Err(ClockRefusal::Offset);
                 }
@@ -1416,6 +1900,51 @@ impl ClusterClockGuard {
             Ok(())
         })();
         self.decide(Some(ClockDecision::MembershipChange), result)
+    }
+
+    /// Whether this original capture may use a wall-age `last_seen_at`
+    /// comparison as authoritative-unreachable target evidence. Inside the
+    /// post-step stabilization window the strict answer is
+    /// `LocalDiscontinuity`; while enforcement is off it admits, exactly as
+    /// every other consumer does. Uncounted: the counted boundary is
+    /// `admit_fenced_removal`, which re-checks this same fact, so an advisory
+    /// admission is counted there once rather than once per poll.
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn admit_wall_reachability(
+        &self,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<(), ClockRefusal> {
+        self.decide(None, Self::wall_reachability_strict(captured))
+    }
+
+    /// Counted final refusal for an original removal budget that ended while
+    /// the only available target evidence was a wall-age comparison the
+    /// capture may not use. Admits and counts nothing, advisory or not, if
+    /// enforcement was turned off meanwhile or the capture is stable: the
+    /// operation then fails as the plain deadline it is, and an advisory
+    /// refusal for it would count a decision nobody admitted.
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn refuse_unstable_wall_reachability(
+        &self,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<(), ClockRefusal> {
+        match Self::wall_reachability_strict(captured) {
+            Err(cause) if self.is_enforced() => {
+                self.refusals[ClockDecision::MembershipChange.index()][cause.index()]
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(cause)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    fn wall_reachability_strict(captured: &ClockRemovalCapture<'_>) -> Result<(), ClockRefusal> {
+        if captured.permits_wall_reachability() {
+            Ok(())
+        } else {
+            Err(ClockRefusal::LocalDiscontinuity)
+        }
     }
 
     /// Close both generation races after awaited preparation. This is a local
@@ -1429,6 +1958,16 @@ impl ClusterClockGuard {
     /// continuity, unchanged admission generation, and the CURRENT policy.
     /// A completed measurement round alone never invalidates the ticket.
     fn revalidate_strict(&self, ticket: &ClockAcquisitionTicket<'_>) -> Result<(), ClockRefusal> {
+        self.revalidate_strict_with(ticket, |_| Ok(()))
+    }
+
+    /// `revalidate_strict` plus a decision-specific check read under the SAME
+    /// serialized state, so the two cannot describe different generations.
+    fn revalidate_strict_with(
+        &self,
+        ticket: &ClockAcquisitionTicket<'_>,
+        also: impl FnOnce(&ClockInner) -> Result<(), ClockRefusal>,
+    ) -> Result<(), ClockRefusal> {
         if !std::ptr::eq(self, ticket.guard) {
             return Err(ClockRefusal::GenerationChanged);
         }
@@ -1445,7 +1984,74 @@ impl ClusterClockGuard {
         if inner.admission_generation != ticket.admission_generation {
             return Err(ClockRefusal::GenerationChanged);
         }
-        Self::acquisition_policy(&inner)
+        Self::acquisition_policy(&inner)?;
+        also(&inner)
+    }
+
+    /// A learner's clock is excused from coverage only while it holds no
+    /// vote. Promotion makes it a voter, so the promoted node itself must
+    /// have a fresh bounded observation (or be this node, whose continuity
+    /// the ticket already proves). An unmapped target is Unknown.
+    fn promotion_target_policy(inner: &ClockInner, target_raft: u64) -> Result<(), ClockRefusal> {
+        let membership = inner.membership.as_ref().ok_or(ClockRefusal::Unknown)?;
+        if target_raft == membership.local_node {
+            return Ok(());
+        }
+        let directory = inner.peer_directory.as_ref().ok_or(ClockRefusal::Unknown)?;
+        let (node_id, _) = directory
+            .iter()
+            .find(|(_, (raft_id, _))| *raft_id == target_raft)
+            .ok_or(ClockRefusal::Unknown)?;
+        // `continuity` has already expired stale samples to Unknown.
+        let upper = inner
+            .snapshot
+            .peers
+            .get(node_id)
+            .and_then(Self::upper_bound)
+            .ok_or(ClockRefusal::Unknown)?;
+        if upper > CLOCK_OFFSET_REFUSAL_MS * 1_000 {
+            return Err(ClockRefusal::Offset);
+        }
+        Ok(())
+    }
+
+    /// `admit_for(MembershipChange, ..)` for promoting one learner to voter:
+    /// the ordinary policy plus a bounded observation of that learner, read
+    /// under one lock. Same original-refusal and advisory semantics.
+    pub fn admit_promotion_for<'guard>(
+        &'guard self,
+        target_raft: u64,
+        prepared: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
+    ) -> Result<ClockAcquisitionTicket<'guard>, ClockRefusal> {
+        let strict = match &prepared {
+            Ok(ticket) => self.revalidate_strict_with(ticket, |inner| {
+                Self::promotion_target_policy(inner, target_raft)
+            }),
+            Err(cause) => Err(*cause),
+        };
+        self.admit_decided(ClockDecision::MembershipChange, prepared, strict)
+    }
+
+    /// Re-check before submitting a promotion, counting a real refusal.
+    /// One promotion attempt counts at most one ADVISORY refusal: the ticket
+    /// remembers that its admission (or an earlier re-check) already counted
+    /// one, so the attempt's later re-checks admit without counting again.
+    /// An enforced refusal is always counted; it ends the attempt.
+    pub fn revalidate_promotion_for(
+        &self,
+        target_raft: u64,
+        ticket: &mut ClockAcquisitionTicket<'_>,
+    ) -> Result<(), ClockRefusal> {
+        let strict = self.revalidate_strict_with(ticket, |inner| {
+            Self::promotion_target_policy(inner, target_raft)
+        });
+        if strict.is_err() && ticket.advisory_counted && !self.is_enforced() {
+            return Ok(());
+        }
+        let refused = strict.is_err();
+        let result = self.decide(Some(ClockDecision::MembershipChange), strict);
+        ticket.advisory_counted |= refused;
+        result
     }
 
     /// Actual consumer entry only; pure policy inspection remains uncounted.
@@ -1463,13 +2069,26 @@ impl ClusterClockGuard {
             Ok(ticket) => self.revalidate_strict(ticket),
             Err(cause) => Err(*cause),
         };
+        self.admit_decided(decision, prepared, strict)
+    }
+
+    fn admit_decided<'guard>(
+        &'guard self,
+        decision: ClockDecision,
+        prepared: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
+        strict: Result<(), ClockRefusal>,
+    ) -> Result<ClockAcquisitionTicket<'guard>, ClockRefusal> {
         let admitted = strict.is_ok();
         self.decide(Some(decision), strict)?;
         match prepared {
             Ok(ticket) if admitted => Ok(ticket),
             // Advisory admission: bind the operation to current generations
-            // so one stale capture is not re-counted at every later check.
-            _ => Ok(self.capture().0),
+            // so one stale capture is not re-counted at every later check,
+            // and remember that this attempt's advisory refusal is counted.
+            _ => Ok(ClockAcquisitionTicket {
+                advisory_counted: true,
+                ..self.capture().0
+            }),
         }
     }
 
@@ -1493,7 +2112,77 @@ impl ClusterClockGuard {
             decision: ticket.decision,
             admission_generation: ticket.admission_generation,
             consumer,
+            owner: None,
         })
+    }
+
+    /// `acquire_owned_for` for a decision that spends one node's lease
+    /// (takeover of a route that `owner_node_id` holds). Besides the ordinary
+    /// policy, the owner itself must be bounded: see [`Self::owner_policy`].
+    /// The owner is re-checked by every `revalidate` of the returned ticket.
+    pub fn acquire_owned_for_owner(
+        self: &Arc<Self>,
+        consumer: ClockDecision,
+        owner_node_id: &str,
+    ) -> Result<OwnedClockAcquisitionTicket, ClockRefusal> {
+        let (ticket, strict) = self.capture_with(|inner| Self::owner_policy(inner, owner_node_id));
+        self.decide(Some(consumer), strict)?;
+        Ok(OwnedClockAcquisitionTicket {
+            guard: Arc::clone(self),
+            decision: ticket.decision,
+            admission_generation: ticket.admission_generation,
+            consumer,
+            owner: Some(owner_node_id.to_owned()),
+        })
+    }
+
+    /// Per-route owner check for a decision already admitted as a whole (the
+    /// expiry scan's page): may this caller spend the lease `owner_node_id`
+    /// holds? Reads the CURRENT evidence, so a membership change or an owner
+    /// that has since gone unobserved refuses. Counted per call under
+    /// `decision`; advisory mode admits and counts, exactly like the page.
+    pub fn admit_owner_for(
+        &self,
+        decision: ClockDecision,
+        ticket: &ClockAcquisitionTicket<'_>,
+        owner_node_id: &str,
+    ) -> Result<(), ClockRefusal> {
+        let strict = if std::ptr::eq(self, ticket.guard) {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.refresh_membership(&mut inner);
+            Self::expire(&mut inner, Instant::now());
+            Self::recompute(&mut inner);
+            Self::owner_policy(&inner, owner_node_id)
+        } else {
+            Err(ClockRefusal::GenerationChanged)
+        };
+        self.decide(Some(decision), strict)
+    }
+
+    /// A lease's expiry was written by its owner's clock, so a decision that
+    /// spends it (takeover, the expiry scan) needs the OWNER bounded, not just
+    /// coverage. Coverage excuses an unobserved learner because it holds no
+    /// vote, but a learner owns delegated media sessions: an unobserved (or
+    /// out-of-bound) owner is never contested, until it is measured within
+    /// the bound or leaves the committed roster. An owner absent from the
+    /// proved roster is this node or not a member of the membership this node
+    /// applied (a removed node, whose renewals the removal fence refuses).
+    /// An unproved roster refuses: absence then proves nothing.
+    fn owner_policy(inner: &ClockInner, owner_node_id: &str) -> Result<(), ClockRefusal> {
+        if !inner.roster_proved {
+            return Err(ClockRefusal::Unknown);
+        }
+        let Some(observation) = inner.snapshot.peers.get(owner_node_id) else {
+            return Ok(());
+        };
+        match Self::upper_bound(observation) {
+            None => Err(ClockRefusal::Unknown),
+            Some(upper) if upper > CLOCK_OFFSET_REFUSAL_MS * 1_000 => Err(ClockRefusal::Offset),
+            Some(_) => Ok(()),
+        }
     }
 
     /// Preserve the original caller time across awaits, counting only a real
@@ -1589,27 +2278,59 @@ impl ClusterClockGuard {
         }
     }
 
+    /// A committed non-voting learner: its exact applied-directory Raft id is
+    /// a member and not a voter. Without an exact peer directory bound to the
+    /// applied membership watch the role cannot be proved, so every peer is
+    /// treated as a voter and fails closed.
+    fn is_learner_peer(
+        membership: Option<&ClockMembershipIdentity>,
+        directory: Option<&BTreeMap<String, (u64, String)>>,
+        node_id: &str,
+    ) -> bool {
+        let (Some(membership), Some(directory)) = (membership, directory) else {
+            return false;
+        };
+        directory.get(node_id).is_some_and(|(raft_id, _)| {
+            membership.members.contains(raft_id) && !membership.voters.contains(raft_id)
+        })
+    }
+
+    /// `|offset| + uncertainty` of a usable observation; None is Unknown.
+    fn upper_bound(observation: &PeerClockOffset) -> Option<i64> {
+        match observation {
+            PeerClockOffset::Unknown => None,
+            PeerClockOffset::Bounded {
+                offset_us,
+                uncertainty_us,
+                ..
+            } => offset_us
+                .checked_abs()
+                .and_then(|value| value.checked_add(*uncertainty_us))
+                .filter(|_| *uncertainty_us >= 0),
+        }
+    }
+
     fn recompute(inner: &mut ClockInner) {
         let mut unknown = 0;
+        let mut unobserved_learners = 0;
         let mut worst = 0;
-        for peer in inner.snapshot.peers.values() {
-            match peer {
-                PeerClockOffset::Unknown => unknown += 1,
-                PeerClockOffset::Bounded {
-                    offset_us,
-                    uncertainty_us,
-                    ..
-                } => {
-                    match offset_us
-                        .checked_abs()
-                        .and_then(|value| value.checked_add(*uncertainty_us))
-                    {
-                        Some(value) if *uncertainty_us >= 0 => worst = worst.max(value),
-                        _ => unknown += 1,
-                    }
+        for (node_id, peer) in &inner.snapshot.peers {
+            match Self::upper_bound(peer) {
+                Some(value) => worst = worst.max(value),
+                // An unobserved learner is reported, not coverage: it holds
+                // no vote, and a measured learner still counts in `worst`.
+                None if Self::is_learner_peer(
+                    inner.membership.as_ref(),
+                    inner.peer_directory.as_ref(),
+                    node_id,
+                ) =>
+                {
+                    unobserved_learners += 1;
                 }
+                None => unknown += 1,
             }
         }
+        inner.snapshot.unobserved_learners = unobserved_learners;
         inner.snapshot.state = if !inner.roster_proved || unknown > 0 {
             ClusterClockState::Incomplete {
                 unknown_peers: unknown.max(usize::from(!inner.roster_proved)),
@@ -1877,6 +2598,19 @@ impl ClusterClockGuard {
         inner.snapshot.clone()
     }
 
+    /// Shift the fixed continuity anchor so the next serialized read observes
+    /// a local wall-clock step, as the in-module fixtures do directly.
+    #[cfg(all(test, feature = "hiqlite-store"))]
+    pub(crate) fn simulate_wall_step_for_test(&self, step_ms: i64) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(anchor) = inner.anchor_wall_ms.as_mut() {
+            *anchor += step_ms;
+        }
+    }
+
     #[cfg(feature = "hiqlite-store")]
     pub(crate) fn record_authority_read(&self) {
         self.authority_reads.fetch_add(1, Ordering::Relaxed);
@@ -1904,6 +2638,7 @@ impl ClusterClockGuard {
                 out.push_str(&format!("plurx_cluster_clock_offset_seconds{{peer=\"{peer}\"}} {}\nplurx_cluster_clock_offset_uncertainty_seconds{{peer=\"{peer}\"}} {}\n", *offset_us as f64 / 1_000_000.0, *uncertainty_us as f64 / 1_000_000.0));
             }
         }
+        out.push_str(&format!("# HELP plurx_cluster_clock_unobserved_learners Committed non-voting learners with no usable observation; reported, not required for coverage.\n# TYPE plurx_cluster_clock_unobserved_learners gauge\nplurx_cluster_clock_unobserved_learners {}\n", snapshot.unobserved_learners));
         out.push_str(&format!("# HELP plurx_cluster_clock_discontinuities_total Local wall/monotonic discontinuities observed.\n# TYPE plurx_cluster_clock_discontinuities_total counter\nplurx_cluster_clock_discontinuities_total {}\n# HELP plurx_cluster_clock_unknown_rounds_total Completed failed or incomplete observation rounds.\n# TYPE plurx_cluster_clock_unknown_rounds_total counter\nplurx_cluster_clock_unknown_rounds_total {}\n# HELP plurx_cluster_clock_authority_reads_total Consistent authority reads attributable to inbound clock requests.\n# TYPE plurx_cluster_clock_authority_reads_total counter\nplurx_cluster_clock_authority_reads_total {}\n# HELP plurx_cluster_clock_refusals_total Decisions refused because the clock could not be bounded (measurement-only emits zero).\n# TYPE plurx_cluster_clock_refusals_total counter\n", snapshot.discontinuities, snapshot.unknown_rounds, self.authority_reads.load(Ordering::Relaxed)));
         for decision in ClockDecision::ALL {
             for cause in ClockRefusal::ALL {

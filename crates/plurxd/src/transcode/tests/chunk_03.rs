@@ -1712,7 +1712,7 @@
     /// finds the producer one segment short. The clock then publishes only the
     /// next segment, the producer may run just one segment further, and every
     /// later cycle is short again: 2 s published per 16 s while the viewer's
-    /// runway drains (seen live on nuc4 as `production_ahead 16/16` with
+    /// runway drains (seen live on lab4 as `production_ahead 16/16` with
     /// 14-15 s stalls). The producer must instead be allowed to reach the
     /// media the next publication will ask for.
     #[tokio::test(start_paused = true)]

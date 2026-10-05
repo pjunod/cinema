@@ -27,7 +27,7 @@ finds 57 idle windows. **One meets the 12-hour gate:**
 
 | Window | Length | Samples | Largest gap | Builds | Ended by |
 |---|---|---|---|---|---|
-| 2026-09-22T03:36:36Z – 19:39:03Z | **16.04 h** | 956 | 62 s | nuc4 `3052-g882862e88`; m6, nynuc `3225-g5c48ed5ab` | build change |
+| 2026-09-22T03:36:36Z – 19:39:03Z | **16.04 h** | 956 | 62 s | lab4 `3052-g882862e88`; lab6, media1 `3225-g5c48ed5ab` | build change |
 | 2026-09-23T05:45:09Z – 17:12:31Z | 11.46 h | 682 | 61 s | three builds | build change |
 | 2026-09-24T05:01:04Z – 15:39:52Z | 10.65 h | 634 | 61 s | `3649-g99d4abf8c` | build change |
 
@@ -43,9 +43,9 @@ to a day.
 
 | Voter | Proposals (commit index) | Store writes | Authority reads | Snapshot builds |
 |---|---|---|---|---|
-| nuc4 | 603,211 → **902,513/day** (10.45/s) | 192,961 → 288,705/day (3.34/s) | 728,919 → 1,090,595/day (12.62/s) | 61 → 91/day |
-| m6 | 603,210 → 902,512/day | 195,071 → 291,862/day (3.38/s) | 710,544 → 1,063,103/day (12.30/s) | 61 → 91/day |
-| nynuc | 603,210 → 902,512/day | 196,516 → 294,024/day (3.40/s) | 713,348 → 1,067,298/day (12.35/s) | 61 → 91/day |
+| lab4 | 603,211 → **902,513/day** (10.45/s) | 192,961 → 288,705/day (3.34/s) | 728,919 → 1,090,595/day (12.62/s) | 61 → 91/day |
+| lab6 | 603,210 → 902,512/day | 195,071 → 291,862/day (3.38/s) | 710,544 → 1,063,103/day (12.30/s) | 61 → 91/day |
+| media1 | 603,210 → 902,512/day | 196,516 → 294,024/day (3.40/s) | 713,348 → 1,067,298/day (12.35/s) | 61 → 91/day |
 
 The commit index is the cluster's, so the three voters agree on it:
 **902,512 proposals a day on an idle fleet**. The per-process write counters
@@ -56,7 +56,7 @@ voter, against the ~26 the plan attributed to the outbox alone.
 ## 3. Who writes the replicated log
 
 The metrics have no per-statement label, so the attribution was taken from
-the log itself: a read-only copy of the learner `nuc3`'s hiqlite WAL
+the log itself: a read-only copy of the learner `lab3`'s hiqlite WAL
 (`/srv/plurx/hiqlite/logs/*.wal`), classified by
 `scripts/replicated-write-capture attribute`. The sample is **25,170
 contiguous log entries** (ids 20,730,865 – 20,756,034), about 07:07 – 07:53Z

@@ -1,0 +1,108 @@
+# Every Rust source under src/, classified against the crates.io
+# `hiqlite` 0.14.0 package (whitespace-insensitive, 2026-10-04).
+# tests/operations/test_hiqlite_patch_ledger.py reads this file; its
+# ForkSourceManifestCase docstring explains what each table guarantees.
+
+# Carry Plurx changes; each must be named by a PLURX-PATCH.md row bullet.
+patched = [
+    "src/app_state.rs",
+    "src/backup.rs",
+    "src/client/backup.rs",
+    "src/client/batch.rs",
+    "src/client/cache.rs",
+    "src/client/create.rs",
+    "src/client/dlock.rs",
+    "src/client/execute.rs",
+    "src/client/helpers.rs",
+    "src/client/listen_notify.rs",
+    "src/client/mgmt.rs",
+    "src/client/migrate.rs",
+    "src/client/mod.rs",
+    "src/client/query.rs",
+    "src/client/rate_limit.rs",
+    "src/client/shutdown_handle.rs",
+    "src/client/stream.rs",
+    "src/client/transaction.rs",
+    "src/config.rs",
+    "src/config_toml.rs",
+    "src/dashboard/query.rs",
+    "src/error.rs",
+    "src/helpers.rs",
+    "src/http_client.rs",
+    "src/lib.rs",
+    "src/membership_admission.rs",
+    "src/network/api.rs",
+    "src/network/frame_io.rs",
+    "src/network/handshake.rs",
+    "src/network/management.rs",
+    "src/network/mod.rs",
+    "src/network/raft_client.rs",
+    "src/network/raft_server.rs",
+    "src/network/snapshot_executor.rs",
+    "src/network/web_socket_connect.rs",
+    "src/query/rows.rs",
+    "src/reduction.rs",
+    "src/server/proxy/stream.rs",
+    "src/snapshot_admission.rs",
+    "src/snapshot_metrics.rs",
+    "src/split_brain_check.rs",
+    "src/start.rs",
+    "src/startup_cleanup.rs",
+    "src/store/mod.rs",
+    "src/store/state_machine/sqlite/snapshot_builder.rs",
+    "src/store/state_machine/sqlite/state_machine.rs",
+    "src/store/state_machine/sqlite/writer.rs",
+    "src/tls.rs",
+]
+
+# Carry Plurx changes no row owns yet. A disclosed gap that may only shrink.
+[unledgered]
+"src/transport_status.rs" = "bounded snapshot transport observations; needs its own policy row"
+
+# Differ from upstream by rustfmt/import order only. Pinned so that an edit
+# fails unless the same change edits the pin. Re-pinning passes the test, so
+# a reviewer must treat any digest change below as a possible unledgered
+# patch: a real change moves the file to `patched` and a row names it.
+[formatting]
+"src/dashboard/handlers.rs" = "ce13cc383980f0ab114282f4cf36535bf8fd654371c802b0e9498c8628a45f81"
+"src/dashboard/middleware.rs" = "62725255005a76bc43530aad10635d3a78930c520d464bf465b39cb1ee4db2d8"
+"src/dashboard/mod.rs" = "56ea7e94e2b98e57b02ce33a96befccab589d9909eccf58ebdefc0416cadceea"
+"src/dashboard/session.rs" = "e331b97f360fd7ec83144b14e1ab3428e2ca9fd40e3919582f92ba196247c65d"
+"src/dashboard/static_files.rs" = "706864cb5277c1a7781fb6e6c1f8678eabf27c9d43cf1ae11e4555feb47769eb"
+"src/network/challenge_response.rs" = "5b40dc3d381336dd3266bd2eb0cdd1b8fc3b42e21038134d623c29ae40a8ebfb"
+"src/s3.rs" = "14fc4aee8679934518449e8a2d6cd4d469fa546dbfaf27a03216b873724d92b4"
+"src/server/password.rs" = "283f923a605f1231e05c13f49065313871325b212a54279e5a7902d84de0ab55"
+"src/server/proxy/state.rs" = "c6be46038c5272688fa3dfdba2ce799a83ea319f5e22f507a9aa0160f543672a"
+"src/store/logs/memory.rs" = "722807d80a1a2def460f22391c05d65bcb8e8656b4b4140be176dd83972553a3"
+"src/store/state_machine/memory/mod.rs" = "693c3695fcc4643d5ae0215e2552dbab531d62504eae51ab6a54e27b30b5e9b2"
+"src/store/state_machine/memory/state_machine.rs" = "f4a0a05b604f694c0f0808130612d26e94d63883bdb32301a1fe62ca3b4dc439"
+"src/store/state_machine/sqlite/mod.rs" = "7df2f8f0fa5ba7e14237b3c87aa4efc71bbf0bea0d7776decc9b020a64cf82e9"
+"src/store/state_machine/sqlite/transaction_env.rs" = "661a5a8a098b98a9df4a7771db8262ef380d0313e15e0795806ae886d24011ab"
+"src/store/state_machine/sqlite/transaction_variable.rs" = "d7ed874e203121929b92b730f39c0d9b3009ddafddb65ea368898e2f5b16ec11"
+
+# Identical to upstream. Pinned for the same reason.
+[upstream]
+"src/dashboard/password.rs" = "aa5484a2f0ea89e8df418a6fdc822d644b6d7ec42e6491e90b098de8bf6c6a29"
+"src/dashboard/table.rs" = "33319fde3f6ae70cc8da73e77767e02795cb8abe7d879156ee8be89f5933f4cd"
+"src/init.rs" = "94f93bd1cb879b0e838900ac97ceb8c301005d5c387285645ea5fe29670841ef"
+"src/macros.rs" = "abc8c2e6c656c0a6d7ae08576782fc8b175adbec9c38f6dfd3ebe135f3886480"
+"src/main.rs" = "f7445e86891246edbc5d17cbeaaae21dc6504b34dc0cefba78b8157a38e0cf48"
+"src/migration.rs" = "254887da3668a6b70c8ee3e791b9a16cd2e830e149b3afda98de7ab77dcf121f"
+"src/query/cust_types.rs" = "8730957c068150e046814b544a3f28605c41149707506afb47be24ad890be968"
+"src/query/mod.rs" = "34b206195642a48588f14fece579bf0ffa556dd4681ddea7aaac9c811eb69d40"
+"src/server/args.rs" = "4c0da35dca2d69532f6ea3757fb57dffc527ded518611ef0b318634e5958daa8"
+"src/server/cache.rs" = "89de47c40b8825b8cf2bf4638d56e4adda5023624cd600fedfa66d8a805b6f42"
+"src/server/config.rs" = "e5ea631c70d0d891a9de7f1c490d25994f9bc3b94cc852e9f5b0adcbfc4eaeed"
+"src/server/logging.rs" = "fd8a76b068cbb0523f4b41ae32d40c55ab1aa157908cc6d76f2b88c4d9e1ab6c"
+"src/server/mod.rs" = "d90b9ec3828eabd3ff87d54bb3071c8dc6b3f9421a3e2eb8598e8f5647b520de"
+"src/server/proxy/config.rs" = "3c6787657948168be48490aaf117b6b0b4c31b7a6400a67bbff1bf10bd193edd"
+"src/server/proxy/handlers.rs" = "80cb83225e3b13e665ee74a9f8867b7989053965e68cb5de01905f2a703c8ce1"
+"src/server/proxy/mod.rs" = "25ea0368a8d1b7e53f43ee95f6990e81e2f77090ae9ab2e68bff4e307bdcb4fb"
+"src/server/proxy/notify.rs" = "f82c633249a0317991874d36052746589b4dbe4b896ad172a54f26257d0d2d18"
+"src/store/logs/mod.rs" = "32e7afb7c77eb0df83ef96af181adcb6880be1d18b53d1b8fb6c13ecefcdde66"
+"src/store/state_machine/memory/cache_ttl_handler.rs" = "411f9bcbfa014111910a9b693d222b1579e8ce840078d02127bd7d5f910d7255"
+"src/store/state_machine/memory/dlock_handler.rs" = "3040a5122089fdc6c43a51e66abdc2df73b64968d3411195ea39bf8bb403775c"
+"src/store/state_machine/memory/kv_handler.rs" = "fc1bb9eac7e0195a8a391e70edd8956464fb5c9b70e3b8ff8fb8de2a122b1a1b"
+"src/store/state_machine/memory/notify_handler.rs" = "eb6a453b53efddd1c03d43a3783499516eabcccbb5bc7cfabf7a5b6430230bae"
+"src/store/state_machine/mod.rs" = "3be4f7c8b176c81c10780f5169df7639152695893211de056434ceb4e83bce71"
+"src/store/state_machine/sqlite/param.rs" = "12143470854564eed1795fc1bdd5555aaa05f7b9bccc336bcdbcf0e5ae436d55"

@@ -851,7 +851,10 @@ pattern = "HlsPresentationResolution"
 # adds a worker; both retain the VOD response owner attached to those bytes.
 # S10 public wire: +1 read-only match on the actual public session context;
 # no mocked presentation or new response authority.
-expected_occurrences = 24
+# Architecture close-out (#814): +1 test-only match —
+# sdr_master_codecs_is_frozen_when_the_session_is_created reads the created
+# session's ready context; no new owner.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-executor-registration"
@@ -3901,15 +3904,22 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Effort and main union: 1225 (effort) + 4 (main serving-fence loop and tests) = 1229, measured on the merged source.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
+# Architecture close-out (#814), measured on the merged tree: 1268 -> 1270.
+# Production -1: D6's single positive proof per Decision drops the second
+# route read in candidate_recovery and the `timeout_at` that bounded it.
+# Tests +3 in link_receipts (a bounded wait for the live-receipt claim, its
+# 2 ms poll, and a bounded wait on the detached ClientLog work barrier); the
+# Live TV orphan test's drain wait became a `timeout` on `cancel_and_wait`
+# (net zero). No task, watchdog or periodic timer is added.
 # +9 with the main-merge defects build: the eight test-only waits counted
 # under `all-async-sleeps` (four 30 s timeouts, four 25 ms sleeps), and one
 # 3 s `tokio::time::timeout` bounding the Developer readiness read of cluster
 # membership (http/developer.rs), like the other bounded readiness reads. No
 # production loop, schedule or watchdog: output-preparation draining and the
 # retained-headroom sample run on ticks that already existed.
-# 1277 -> 1278: one test-only deadline waits for abandoned links to be
-# collected after their in-flight capture settles; no production owner added.
-expected_occurrences = 1278
+# Combined #810/#814: +2 from architecture close-out, +9 from output
+# containment and +1 test-only abandoned-link collection deadline.
+expected_occurrences = 1280
 
 [[module_structures]]
 id = "bare-time-constructor"

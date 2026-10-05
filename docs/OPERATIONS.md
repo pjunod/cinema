@@ -615,7 +615,7 @@ costs:
   entry, and a snapshot taken afterwards carries them, so a learner or a
   restored voter receives them with the snapshot.
 - **The build holds that voter's state-machine writer** for its duration.
-  Measured on the 75,600-item K-05 fixture on nuc3: about 60 ms for all three
+  Measured on the 75,600-item K-05 fixture on lab3: about 60 ms for all three
   (median of five, 63 ms cold and 59 ms warm; the evidence file has the
   per-statement numbers). It grows with the
   item count (a sort of the indexed rows, n log n), so a library ten times
@@ -1571,7 +1571,7 @@ scripts/cluster-page-latency \
   --scenario healthy \
   --target-role follower \
   --voter-count 3 \
-  --hardware-label m6-pro \
+  --hardware-label lab6-pro \
   --storage-label nvme \
   --network-label lan-ethernet
 ```
@@ -2306,7 +2306,18 @@ production TOML. A resolved command-line `--config` path takes precedence over
 and their sources, validates that the chunk budget does not exceed the transfer
 budget, and exits before any Compose replacement unless the health start period
 it is about to apply covers the two sequential stages plus all three named
-startup phases.
+startup phases. Each phase is spent once: vendor startup (including a join's
+snapshot catch-up) and the startup catch-up do not spend the 45-second
+membership admission phase, which begins after the health wait and is shared
+by the committed-member wait, promotion and activation. Vendor startup has its
+own ceiling — one admission (45 s) plus one snapshot catch-up (transfer +
+install + 45 s) — because the vendor's join retries never give up by
+themselves: a joiner whose leader is unreachable, or whose join an enforced
+clock guard keeps refusing, fails startup with "did not finish starting
+(joining the cluster and its snapshot catch-up) within …" instead of hanging.
+That ceiling is a failure bound, not an expected duration; the start period
+above budgets the path a join actually takes, where its one snapshot transfer
+happens once.
 
 If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
 `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS`,
@@ -2347,10 +2358,47 @@ uncertainty and per-peer `observation_state` on `/metrics`; numeric gauges
 are absent for Unknown peers. Compare `abs(offset) + uncertainty` with the
 fixed 2,000 ms relative contract, retain the discontinuity and Unknown-round
 counters, and report `plurx_cluster_clock_authority_reads_total` to measure
-inbound probe authorization cost. This observation changes no acquisition or
-readiness decision and does not replace the absolute 250 ms discipline rule.
+inbound probe authorization cost. It does not replace the absolute 250 ms discipline rule; with the clock
+guard enforced it does decide acquisition (see the enforcement plan).
+Learners are probed like any member, but an unobserved learner is counted in
+`plurx_cluster_clock_unobserved_learners` instead of making coverage
+incomplete: with the clock guard enforced, a stopped learner does not refuse
+takeover, the expired-session scan or membership changes, while a stopped
+voter still does. The learner's OWN sessions are the exception: their lease
+expiry was written by its clock, so takeover and the expiry scan skip every
+route an unobserved learner owns (enforced; advisory contests and counts it)
+until it is measured within the bound or removed — removing a dead learner is
+what frees its sessions for takeover. A learner that is measured above the
+bound still refuses, and promoting a learner requires its own bounded
+observation, so measure it before promoting.
 See [the measurement handoff](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md)
 for the identified one-hour idle and sixty-second loaded receipt still owed.
+
+Since 2026-10-04 (#793) the observation feeds a clock guard. Settings →
+Developer → *Cluster clock guard* → *Enforce the cluster clock guard* (the
+replicated setting `cluster.clock_guard_enforced`, default off) decides
+whether it refuses anything; each node re-reads the setting every 10
+seconds, and a node whose read fails keeps its current mode. **Off** (the
+default): every guarded decision is admitted and `/readyz` ignores the
+clock. **On**: session
+takeover, the expired-session scan and membership changes are refused while
+the clock roster is not fully observed or an offset is outside the 2,000 ms
+bound, and `/readyz` answers 503 `clock unbounded` after two consecutive
+violating rounds; startup is never refused. Fenced removal of the member that
+is down still works. Whether this switch stays awaits Paul's ruling; see the
+[enforcement plan](cluster/CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md)'s
+2026-10-04 note. These series say which mode a node is in and what it did:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `plurx_cluster_clock_enforced` | gauge | — | 1 when this node's guard refuses decisions, 0 when it is advisory only. Compare across nodes: the setting is applied per node. |
+| `plurx_cluster_clock_refusals_total` | counter | `decision`, `cause` | Decisions the guard refused while enforcing. |
+| `plurx_cluster_clock_advisory_refusals_total` | counter | `decision`, `cause` | Decisions the guard would have refused while enforcement was off, and admitted anyway. Non-zero means turning the switch on would have refused that work. |
+
+`decision` is `takeover`, `membership_change` or `expiry_scan`; `cause` is
+`offset`, `unknown`, `local_discontinuity` or `generation_changed`. Every
+combination is emitted, at zero when nothing happened, and both counters are
+process-lifetime.
 
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
@@ -3178,6 +3226,33 @@ in production. A green `make check` says the playlist is syntactically what was
 intended; it does not say AVPlayer will accept it. Treat an unobserved rung as
 untested, and turn it back off if the device does not visibly improve.
 
+### SDR `CODECS` on the master (Developer switch)
+
+**Settings → Developer → Master playlist codecs → *Print CODECS on SDR
+variants*** (`playback.sdr_master_codecs`, API field
+`playback_sdr_master_codecs`) is **off by default**. Off serves the pre-S-10
+master: SDR (`avc1`) variants carry no `CODECS`, which is the shape every
+client has played. On, an SDR variant names its exact `avc1.PPCCLL` string (and
+its audio component) whenever the session's frozen facts are complete — the
+same information HDR masters already carry. HDR10 and Dolby Vision variants
+are identical either way.
+
+It is a switch rather than a default because AVPlayer filters variants on
+`CODECS` before it fetches a byte: a string tvOS or iOS dislikes removes the
+rung silently, and no server counter can see a request that was never made.
+The value is fixed when a session is created (taken from the create's own
+planning-snapshot read, so it costs no extra Store read), so a running
+session's master never changes shape; a session rebuilt after an owner
+takeover or VOD resurrection reads the current value. Flip it, then start a
+**new** playback to observe the effect. The Developer row "Apple TV and iPhone
+keep every SDR variant with CODECS printed" is advisory and reads `unknown`
+until the
+device check in
+[HONEST-MASTER-PLAYLIST §5.4](streaming/HONEST-MASTER-PLAYLIST.md#54-m4--re-qualify-the-sdr-ruling-on-the-named-devices-then-print-codecs)
+is recorded; it never refuses the save. If an SDR title stops offering a
+quality or fails at item preparation on Apple hardware with the switch on,
+turn it off and start playback again.
+
 ## Ports
 
 | Port | Proto | Purpose |
@@ -3726,12 +3801,20 @@ curl -X PUT http://<server>:32400/api/v1/settings \
 ```
 
 Off is the default and off is exactly today's behavior: nothing is stored, no
-response gains a field, and Auto starts where it always did. On, plurx keeps
+response gains a field, and Auto starts where it always did. Off does not turn
+off display-aware Auto's live link evidence: the per-attachment receipts a
+session's owner issues still prove a fresh transfer for an upgrade and still
+acknowledge a link stall so the client steps down. Those receipts live in the
+owner's memory for at most 30 seconds and are never written anywhere. A session
+placed on a peer node, and any IPv6 client, gets no receipts at all. On, plurx keeps
 one row per `(user, client class, network fingerprint)` holding a sustained
 throughput estimate and the lowest ladder rung at which that network was seen
 to starve, and consults it when Auto picks a starting height. `/decision` and
 session-create then carry an additional `prior_kbps`; the fingerprint itself is
-never returned or logged.
+never returned or logged. Under display-aware Auto, a link stall the server
+acknowledged also records the rung that starved as completed-transfer evidence,
+kept apart from the older inferred verdict, and Auto's first choice on that
+network then starts below that rung for the same 7 days.
 
 What it stores is deliberately coarse and bounded. The client class is a broad
 family (`chrome`, `safari`, `edge`, `firefox`, `apple`, `android`, `other`)
@@ -3810,9 +3893,9 @@ logged `requested_mode="bitrate"` and a family default flip would not reach it.
 Return such a cluster to the defaults with the clear below.
 
 Read-only census at deployed revision `882862e8` on 2026-09-21 found QSV
-selected on `nynuc`, `nuc4` and `nuc3`, and VA-API selected on `m6`. The fresh
+selected on `media1`, `lab4` and `lab3`, and VA-API selected on `lab6`. The fresh
 process counters were zero for QSV, VA-API, software, NVENC and VideoToolbox
-on every node (m6 had three copy sessions and one VOD session). This does not
+on every node (lab6 had three copy sessions and one VOD session). This does not
 qualify a default: QSV and software still need separate n2 corpus captures;
 VA-API now has a selectable node but needs a non-zero week and its own n2
 comparison; NVENC is unusable on the four Linux daemons; VideoToolbox has no
@@ -5017,11 +5100,10 @@ HOST=http://localhost:32400
 curl -s -H "Authorization: Bearer $TOKEN" $HOST/api/v1/settings \
   | python3 -c 'import json,sys; s=json.load(sys.stdin); print({k:v for k,v in s.items() if k.startswith("live_tv")})'
 
-# 2. Configure the device. The owner is a node id from /api/v1/server.
+# 2. Configure the device.
 curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"live_tv_config_generation":0,
        "live_tv_device_ipv4":"10.42.4.20",
-       "live_tv_owner_node_id":"<node id of the machine next to the tuner>",
        "live_tv_max_sessions":2,
        "live_tv_output_height":720}' \
   $HOST/api/v1/settings
@@ -5220,18 +5302,18 @@ the tuner's truth and a relaying node's `relay_bytes` is how much it carried.
 
 ### Moving the owner
 
-The owner is a setting, not an election, and there is no timeout-based takeover.
-That is deliberate: elapsed time cannot prove somebody else's FFmpeg process
-closed a tuner socket, and guessing wrong means two processes fighting over one
-piece of hardware.
-
-- **Owner is alive:** change `live_tv_owner_node_id`. The old owner drains, the
-  drain is signed and confirmed, and the change lands.
-- **Owner is gone for good:** disable Live TV, then re-enable with an explicit
-  attestation — `live_tv_fenced_owner` carrying the original
-  `owner_node_id`, the `drain_before_generation` cutoff, and
-  `stopped_and_restart_prevented: true`. You are signing that the old machine
-  is stopped and cannot come back. If it can, do not send this.
+There is nothing to move. Since #537 the tuner is a cluster resource: there is
+no configured owner node, no owner drain and no fenced-owner attestation. The
+settings fields of the old single-owner model, `live_tv_owner_node_id` and
+`live_tv_fenced_owner`, are still accepted and ignored. Shipped Apple and
+Android clients send `live_tv_owner_node_id` with every tuner-configuration
+save; no shipped client sends `live_tv_fenced_owner` (both define it, nothing
+constructs it), which stays accepted so an older or third-party client that
+does is not refused. Neither value is read: the settings response's
+`live_tv_owner_node_id` is always the answering node, and
+`live_tv_transition_from_owner_node_id` / `live_tv_transition_drain_before` are
+always `""` / `0`. A save that carries only those fields (and the generation)
+still counts as a Live TV save and bumps `live_tv_config_generation`.
 
 Reconfiguration is always possible **while disabled**. Losing the owner ends
 the live session that was in flight; viewers see a named refusal and start

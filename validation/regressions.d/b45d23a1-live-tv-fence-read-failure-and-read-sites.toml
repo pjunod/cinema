@@ -22,7 +22,7 @@ t=0 observation in place (`Arc::ptr_eq`, so neither clearing nor re-publishing
 it as new passes), that `site="observer"` counted 1 ok and 9 then 11 failed
 reads, that the session's fence passes at t=9 s in `grace`, ends at t=11 s
 with `owner_unavailable` naming the replicated settings and not the tuner, and
-that the first good read afterwards validates `fresh` again. Proved on nuc3 on
+that the first good read afterwards validates `fresh` again. Proved on lab3 on
 2026-09-24: re-applying the reviewer's mutant
 (`self.fence.latest.send_replace(None)` in the `Err` arm) fails it at the
 "a failed read keeps the last observation rather than clearing it" expect.

@@ -15,16 +15,16 @@ The §5.1 acceptance compares builds. It asks for the same node, the same flags
 and generated fixtures, before and after the change. It does not ask for a
 production library. That settled where to run it:
 
-- **nuc4 could not supply the "before" side.** Its `plurxd` container runs
+- **lab4 could not supply the "before" side.** Its `plurxd` container runs
   image revision `99d4abf8c80c2c78cd32c7978186a4c64b136ed0`
   (`org.opencontainers.image.revision`, created 2026-09-24T03:47Z). The M1
   code (`ed98c6abc`, `be3c082d4`, merged through `6683eaa4a` / #454) is an
-  ancestor of it, so nuc4 already runs the "after" build. It is also a
+  ancestor of it, so lab4 already runs the "after" build. It is also a
   production node with viewers, and nothing in the protocol can control that.
-  The only things run against nuc4 were `docker ps`, `docker inspect` and two
+  The only things run against lab4 were `docker ps`, `docker inspect` and two
   unauthenticated `curl`s to 404 paths, all read-only. No stream was started
   there and no token was created there.
-- **The comparison ran on nuc3 instead.** Three release builds of one tree
+- **The comparison ran on lab3 instead.** Three release builds of one tree
   (`886fc8bd4`) differ in a single line,
   `MEDIA_BODY_READ_BUFFER` in `crates/plurxd/src/media_sessions.rs`:
   `4 * 1024` (the before side), `128 * 1024` (the Decision 1 fallback) and
@@ -43,7 +43,7 @@ production library. That settled where to run it:
 
 | Field | Value |
 |---|---|
-| Host | nuc3: Intel Core i5-1240P (12 cores, 16 threads), 31 GiB RAM, kernel 7.0.0-31, ext4 on LVM |
+| Host | lab3: Intel Core i5-1240P (12 cores, 16 threads), 31 GiB RAM, kernel 7.0.0-31, ext4 on LVM |
 | Host load | Shared build host. Other agents' test loops ran throughout, and the 1-minute load average at the start of each variant was 1.1 to 8.7 (in the raw table). This is **not** the "nothing else running" lab4 condition §5.1 names. Each trial rotates the variant order to spread drift, and there are three trials. |
 | Server | Loopback `127.0.0.1:39400`, fresh data dir, one Home library, `PLURX_LOG=warn`, glibc allocator (plurxd sets no `global_allocator`) |
 | Client | curl 8.18.0 on the same host, over loopback |
@@ -67,7 +67,7 @@ production library. That settled where to run it:
   (`photos::serve`, which calls `serve_file_range`). The harness uses that,
   and this PR updates §5.1.
 - **HLS: one untimed pass first, then the 200 timed GETs.** The session is a
-  software x264 tone-map transcode on nuc3 (`encoder: software (x264)`,
+  software x264 tone-map transcode on lab3 (`encoder: software (x264)`,
   `vod: true`, 23 segments of about 5 MB each at 2 s). If the loop started on
   a cold session, its first pass would time ffmpeg, not the body path. The
   harness fetches every segment once and records that pass separately (about
@@ -1057,7 +1057,7 @@ git status --short
 
 ```bash
 #!/bin/bash
-# S-02 Decision 1 A/B on nuc3, same method as the 2026-09-24 M1 measurement
+# S-02 Decision 1 A/B on lab3, same method as the 2026-09-24 M1 measurement
 # (docs/evidence/media-body-buffers-m1-measurement-2026-09-24.md, bench.sh):
 # fresh plurxd per group, clear_refs + VmHWM, 3 trials in rotated order.
 # Additions: group B also records peak established server-side connections
@@ -1156,7 +1156,7 @@ echo DONE
 ```
 
 The token was the throwaway server's own `/setup` admin token. It and the
-data dir were deleted after the runs. Nothing ran against nuc4 or any other
+data dir were deleted after the runs. Nothing ran against lab4 or any other
 production node.
 
 ## Packet count follow-up (2026-09-24, #487 review)

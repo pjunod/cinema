@@ -404,6 +404,15 @@ pub(crate) async fn auto_catalog(
 /// A Decision has no playback identity in its public intent. Only its exact
 /// installed-incumbent receipt may identify the lifetime to read; absent live
 /// proof keeps the ordinary catalog, never borrows a namespace's latest player.
+///
+/// Also returns the Decision's live positive proof, so the warm-Auto
+/// narrowing after it ([`super::link_receipts::positive_catalog_with_proof`])
+/// reuses this proof instead of proving the same receipt a third time. The
+/// proof is taken once to find the incumbent, and once more after the
+/// recovery-memory reads as the re-check that the memory still belongs to
+/// that incumbent; the returned proof is the later of the two, or the first
+/// when nothing after it ran. The playback comes from the proof's own
+/// validated route read rather than a separate one.
 pub(crate) async fn decision_catalog(
     state: &AppState,
     network: Option<&NetworkIdentity>,
@@ -411,9 +420,12 @@ pub(crate) async fn decision_catalog(
     nonce: Option<&str>,
     catalog: Vec<QualityCandidate>,
     deadline: tokio::time::Instant,
-) -> Vec<QualityCandidate> {
+) -> (
+    Vec<QualityCandidate>,
+    Option<super::link_receipts::LiveLinkProof>,
+) {
     let Some(network) = network else {
-        return catalog;
+        return (catalog, None);
     };
     let Some(proof) = state
         .link_receipts
@@ -428,24 +440,17 @@ pub(crate) async fn decision_catalog(
         )
         .await
     else {
-        return catalog;
-    };
-    let Ok(Ok(Some(route))) = tokio::time::timeout_at(
-        deadline,
-        state.store.media_session_route(proof.incumbent_session()),
-    )
-    .await
-    else {
-        return catalog;
+        return (catalog, None);
     };
     if proof.transfer().is_none() {
-        return catalog;
+        return (catalog, Some(proof));
     }
+    let playback = proof.playback_id().to_owned();
     let filtered = auto_catalog(
         state,
         Some(network),
         file,
-        &route.playback_id,
+        &playback,
         catalog.clone(),
         deadline,
     )
@@ -457,18 +462,18 @@ pub(crate) async fn decision_catalog(
             network,
             file,
             nonce,
-            Some(&route.playback_id),
+            Some(&playback),
             Some(&state.node_id),
             deadline,
         )
         .await
     else {
-        return catalog;
+        return (catalog, None);
     };
     if current.incumbent_session() != proof.incumbent_session() {
-        return catalog;
+        return (catalog, Some(current));
     }
-    filtered
+    (filtered, Some(current))
 }
 
 /// Missing/legacy/remote facts are Unknown, not an ordinary playback refusal.

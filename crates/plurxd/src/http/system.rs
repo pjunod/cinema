@@ -872,6 +872,41 @@ pub(super) fn pause_next_client_log_after_capture(
     (captured_rx, release_tx)
 }
 
+#[cfg(test)]
+static CLIENT_LOG_DETACHED_HOOK: std::sync::Mutex<
+    Option<(&'static str, tokio::sync::oneshot::Sender<()>)>,
+> = std::sync::Mutex::new(None);
+
+/// Fires its sender when the last holder drops it: the handler and every
+/// detached task it spawned for one client-log request.
+#[cfg(test)]
+struct ClientLogDetachedDone(Option<tokio::sync::oneshot::Sender<()>>);
+
+#[cfg(test)]
+impl Drop for ClientLogDetachedDone {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            let _ = done.send(());
+        }
+    }
+}
+
+/// Resolves once the next client-log request whose message is `message` has
+/// returned AND every detached task it spawned (the link-sample claim, the
+/// measured-Link fold, the playback-event emit) has finished. A test that
+/// asserts something durable was *not* written awaits this instead of
+/// yielding and hoping, so a late write is caught rather than raced.
+#[cfg(test)]
+pub(super) fn notify_when_client_log_detached_work_finishes(
+    message: &'static str,
+) -> tokio::sync::oneshot::Receiver<()> {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    *CLIENT_LOG_DETACHED_HOOK
+        .lock()
+        .expect("client-log detached hook lock") = Some((message, done_tx));
+    done_rx
+}
+
 /// POST /api/v1/client-log — any signed-in user. Records one browser playback
 /// error into the server log ring so it surfaces in `Settings → Logs`. Bounded
 /// by per-field clipping and by a global rate limit (this is diagnostics, not an
@@ -895,6 +930,21 @@ pub async fn client_log(
         return StatusCode::NO_CONTENT.into_response();
     };
     let line = client_log_line(&ev, suppressed);
+    #[cfg(test)]
+    let detached_done = {
+        let mut hook = CLIENT_LOG_DETACHED_HOOK
+            .lock()
+            .expect("client-log detached hook lock");
+        if hook
+            .as_ref()
+            .is_some_and(|(message, _)| *message == ev.message)
+        {
+            hook.take()
+                .map(|(_, done)| Arc::new(ClientLogDetachedDone(Some(done))))
+        } else {
+            None
+        }
+    };
 
     // Both WARN and ERROR clear the default `info` filter, so either shows in
     // the admin log without the operator touching PLURX_LOG.
@@ -964,34 +1014,39 @@ pub async fn client_log(
     if let Some(identity) = network.clone().filter(|_| link_sample.is_some()) {
         let proof_state = state.clone();
         let proof_session = ev.session_id.clone();
+        #[cfg(test)]
+        let detached_done = detached_done.clone();
         tokio::spawn(async move {
-            let enabled = proof_state
-                .store
-                .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+            #[cfg(test)]
+            let _detached_done = detached_done;
+            // The claim itself is the owner's in-memory receipt and needs no
+            // opt-in: it is what later proves a fresh transfer (an upgrade)
+            // or backs a Link negative's acknowledgement (D6). Only keeping
+            // it as per-network history is `playback.network_priors`.
+            let Some(sample) = link_sample else {
+                return;
+            };
+            let Some(value) = proof_state
+                .link_receipts
+                .accept(&proof_state, &identity, proof_session.as_deref(), &sample)
                 .await
-                .ok()
-                .flatten()
-                .is_some_and(|value| value.trim() == "1");
-            if let Some(sample) = link_sample.filter(|_| enabled) {
-                if let Some(value) = proof_state
-                    .link_receipts
-                    .accept(&proof_state, &identity, proof_session.as_deref(), &sample)
-                    .await
-                {
-                    // A client-reported link sample is a prior, not a
-                    // record anything waits on: losing one costs a
-                    // slightly staler estimate, so the failure is counted
-                    // and rate-limit logged rather than propagated to a
-                    // detached task nobody joins.
-                    crate::store_result::observe(
-                        crate::store_result::Operation::ObserveCandidateLink,
-                        crate::store_result::Discard::BestEffort,
-                        proof_state
-                            .store
-                            .observe_candidate_link(&value, crate::media_sessions::unix_ms())
-                            .await,
-                    );
-                }
+            else {
+                return;
+            };
+            if super::hls::link_receipts::network_priors_enabled(&proof_state).await {
+                // A client-reported link sample is a prior, not a
+                // record anything waits on: losing one costs a
+                // slightly staler estimate, so the failure is counted
+                // and rate-limit logged rather than propagated to a
+                // detached task nobody joins.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ObserveCandidateLink,
+                    crate::store_result::Discard::BestEffort,
+                    proof_state
+                        .store
+                        .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                        .await,
+                );
             }
         });
     }
@@ -1016,10 +1071,28 @@ pub async fn client_log(
     let progressive_ambiguous = marker_placeholder
         .as_ref()
         .is_some_and(|(file_id, _)| state.streams.contains_delivery(user.id, *file_id));
+    // Priors on only: the acknowledged negative's attributed measured-Link
+    // verdict for this network. Folded after the answer, in the task below,
+    // so the native recovery's 250 ms wait never covers this write.
+    let (acknowledged_link, measured_link_prior) = match acknowledged_link {
+        Some(ack) => (Some(ack.receipt), ack.measured_prior),
+        None => (None, None),
+    };
     let transcode = Arc::clone(&state.transcode);
     let store = Arc::clone(&state.store);
     let user_id = user.id;
+    #[cfg(test)]
+    let emit_done = detached_done.clone();
     tokio::spawn(async move {
+        #[cfg(test)]
+        let _detached_done = emit_done;
+        if let Some(observation) = measured_link_prior {
+            crate::store_result::observe(
+                crate::store_result::Operation::ObserveMeasuredLinkPrior,
+                crate::store_result::Discard::BestEffort,
+                store.observe_network_prior(&observation).await,
+            );
+        }
         // The shipped clients send this historical placeholder without a
         // session id. Correlate it by authenticated user, file and delivery
         // method to exactly one VOD ledger; that ledger then waits for a
@@ -1792,6 +1865,9 @@ pub struct SettingsDto {
     pub live_tv_max_output_height: u16,
     pub live_tv_deinterlace_output: String,
     pub live_tv_config_generation: i64,
+    /// Legacy owner-handoff barrier from the single-owner model #537
+    /// replaced. Nothing sets or reads it any more; it is always `""` / `0`
+    /// and stays in the response only because older clients decode it.
     pub live_tv_transition_from_owner_node_id: String,
     pub live_tv_transition_drain_before: i64,
     pub live_tv_guide_source: String,
@@ -1905,6 +1981,11 @@ pub struct SettingsDto {
     pub decoder_health_qualified_artifacts: bool,
     /// Explicit operator override, applied to new copy starts.
     pub hevc_unverified_copy: bool,
+    /// Print `CODECS` on SDR HLS master variants (S-10). Off by default, which
+    /// is the pre-S-10 master. Fixed when a session is created; a session
+    /// rebuilt after an owner takeover or VOD resurrection reads the current
+    /// value. Developer readiness is advisory only.
+    pub playback_sdr_master_codecs: bool,
     /// Advisory engine observation, never used to authorize a settings save.
     pub hevc_header_trace_available: Option<bool>,
     /// What this node measured about itself, and the identity it therefore
@@ -2309,8 +2390,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         live_tv_max_output_height: live_tv.max_output_height,
         live_tv_deinterlace_output: live_tv.deinterlace_output.as_str().to_owned(),
         live_tv_config_generation: live_tv.generation,
-        live_tv_transition_from_owner_node_id: live_tv.transition_from_owner_node_id,
-        live_tv_transition_drain_before: live_tv.transition_drain_before,
+        live_tv_transition_from_owner_node_id: String::new(),
+        live_tv_transition_drain_before: 0,
         live_tv_guide_source: live_tv.guide_source.as_str().to_owned(),
         live_tv_xmltv_url: live_tv.xmltv_url,
         live_tv_guide_hours: live_tv.guide_hours,
@@ -2378,6 +2459,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         decoder_health_qualified_artifacts: decoder_health_requested,
         hevc_unverified_copy: plurx_core::store::stored_switch(
             setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),
+            false,
+        ),
+        playback_sdr_master_codecs: plurx_core::store::stored_switch(
+            setting(keys::PLAYBACK_SDR_MASTER_CODECS).as_deref(),
             false,
         ),
         hevc_header_trace_available: crate::ffmpeg::hevc_header_trace_available().await,
@@ -2614,6 +2699,8 @@ pub struct UpdateSettings {
     /// while disabled, run readiness, then enable in a separate request.
     pub live_tv_enabled: Option<bool>,
     pub live_tv_device_ipv4: Option<String>,
+    /// Legacy; accepted and ignored since #537 (the owner is always the
+    /// node that answers). See `update_settings`.
     pub live_tv_owner_node_id: Option<String>,
     pub live_tv_max_sessions: Option<u8>,
     pub live_tv_output_height: Option<u16>,
@@ -2647,7 +2734,8 @@ pub struct UpdateSettings {
     pub backup_destination: Option<String>,
     pub backup_schedule_utc: Option<String>,
     pub backup_keep: Option<i64>,
-    /// Explicit admin attestation, never an automatic timeout override.
+    /// Legacy single-owner attestation (`{node_id, …}`), still sent by shipped
+    /// native clients. Accepted and ignored since #537; see `update_settings`.
     pub live_tv_fenced_owner: Option<serde_json::Value>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
     pub tmdb_api_key: Option<String>,
@@ -2670,6 +2758,7 @@ pub struct UpdateSettings {
     pub automatic_decoder_recovery: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
     pub hevc_unverified_copy: Option<bool>,
+    pub playback_sdr_master_codecs: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
@@ -2799,14 +2888,10 @@ fn live_tv_setting_values(config: &crate::live_tv::LiveTvConfig) -> Vec<(&'stati
             keys::LIVE_TV_MAX_OUTPUT_HEIGHT,
             config.max_output_height.to_string(),
         ),
-        (
-            keys::LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID,
-            config.transition_from_owner_node_id.clone(),
-        ),
-        (
-            keys::LIVE_TV_TRANSITION_DRAIN_BEFORE,
-            config.transition_drain_before.to_string(),
-        ),
+        // The retired handoff barrier is still written as "no handoff" so a
+        // binary from before #537 that reads it in a mixed cluster sees none.
+        (keys::LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID, String::new()),
+        (keys::LIVE_TV_TRANSITION_DRAIN_BEFORE, "0".to_owned()),
         (
             keys::LIVE_TV_CONFIG_GENERATION,
             config.generation.to_string(),
@@ -2842,6 +2927,7 @@ impl UpdateSettings {
             || self.automatic_decoder_recovery.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
             || self.hevc_unverified_copy.is_some()
+            || self.playback_sdr_master_codecs.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.vod_working_set_bytes.is_some()
@@ -2949,6 +3035,23 @@ pub async fn update_settings(
             )));
         }
     }
+    // `live_tv_owner_node_id` and `live_tv_fenced_owner` are legacy fields of
+    // the single-owner model #537 replaced; both are accepted and ignored: the
+    // owner is always this node's id and the attestation is never read.
+    // Shipped Apple and Android clients send `live_tv_owner_node_id` with every
+    // tuner-configuration save, beside real Live TV fields. No shipped client
+    // sends `live_tv_fenced_owner`: both still define the change (`FencedOwner`
+    // in LiveTvApi.kt, `.fencedOwner` in LiveTv.swift) but no production path
+    // constructs it, so it stays accepted only so an older or third-party
+    // client that does send it is not refused (pinned by
+    // `live_tv_legacy_fenced_owner_attestation_is_still_accepted_and_ignored`).
+    // Both still count as a Live TV save here, so a request carrying only them
+    // (plus `live_tv_config_generation`) is a generation-CAS save that changes
+    // nothing else and bumps the generation (pinned by
+    // `live_tv_legacy_owner_metadata_never_requires_physical_fence_recovery`,
+    // which saves the owner alone). Left as-is deliberately: narrowing the set
+    // would change only what a lone legacy save does, and it would stop
+    // requiring the generation for it.
     let live_tv_requested = req.live_tv_enabled.is_some()
         || req.live_tv_device_ipv4.is_some()
         || req.live_tv_owner_node_id.is_some()
@@ -2998,8 +3101,6 @@ pub async fn update_settings(
             .map(str::trim)
             .unwrap_or(&current.xmltv_url)
             .to_owned();
-        let transition_from_owner_node_id = String::new();
-        let transition_drain_before = 0;
         let next_generation = current
             .generation
             .checked_add(1)
@@ -3021,8 +3122,6 @@ pub async fn update_settings(
             // Readiness runs against the still-current owner tuple. The CAS
             // publishes the increment only after every precondition passes.
             generation: current.generation,
-            transition_from_owner_node_id,
-            transition_drain_before,
         };
         candidate
             .validate_static()
@@ -3814,6 +3913,15 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::HEVC_UNVERIFIED_COPY, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.playback_sdr_master_codecs {
+        // Saved unconditionally: the device re-qualification row on the
+        // Developer card is advice, not a precondition. New sessions read the
+        // value at create; running sessions keep the master they started with.
+        state
+            .store
+            .put_setting(keys::PLAYBACK_SDR_MASTER_CODECS, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.decoder_health_qualified_artifacts {

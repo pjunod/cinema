@@ -1161,6 +1161,7 @@ use crate::queue_fixture::QueueFixture;
                     supersession_user: r#"["username","paul"]"#,
                     playback_id: "pb-1",
                     automatic: true,
+                    sdr_master_codecs: false,
                 },
             )
         };
@@ -2513,6 +2514,7 @@ use crate::queue_fixture::QueueFixture;
                     supersession_user: r#"["username","paul"]"#,
                     playback_id: "pb-1",
                     automatic: true,
+                    sdr_master_codecs: false,
                 },
             )
             .await

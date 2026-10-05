@@ -1230,6 +1230,7 @@ impl VodServe {
                 }),
             supersession_user: attribution.supersession_user.to_owned(),
             block_budget: settings.block_budget,
+            sdr_master_codecs: settings.sdr_master_codecs,
             lifecycle: Arc::clone(&lifecycle),
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),

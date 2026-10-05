@@ -792,6 +792,7 @@ impl TranscodeManager {
                     priority,
                     req.audio_claim.as_ref(),
                     req.audio_delivery.as_ref(),
+                    req.sdr_master_codecs,
                 )
                 .await
             }
@@ -818,6 +819,7 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.audio_delivery.as_ref(),
+                    req.sdr_master_codecs,
                 )
                 .await
             }
@@ -1945,6 +1947,10 @@ impl TranscodeManager {
                 plurx_core::store::keys::VOD_MATERIALIZE_BUDGET_SECS,
                 plurx_core::store::keys::CACHE_MAX_GB,
                 plurx_core::store::keys::VOD_BLOCKED_GET_CAP,
+                // Not admission policy, but read on this same create path:
+                // folding it in costs no extra Store read, and the session
+                // freezes it beside its block budget (S-10 Developer switch).
+                plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS,
                 // Read on every VOD create too, and once one statement at a
                 // time (D4): the cluster index gate, the HEVC copy proof
                 // switch, and the live-recovery fallback switch.
@@ -2050,6 +2056,15 @@ impl TranscodeManager {
             block_budget: Duration::from_secs_f64(block_secs),
             materialize_budget: Duration::from_secs_f64(materialize_secs),
             blocked_get_cap,
+            // The create's own snapshot read when it carried one, so VOD and
+            // rolling freeze the same value; else this batch's. Missing is
+            // off: the pre-S-10 master with no SDR CODECS.
+            sdr_master_codecs: req.sdr_master_codecs.unwrap_or_else(|| {
+                plurx_core::store::stored_switch(
+                    read(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS).map(String::as_str),
+                    false,
+                )
+            }),
             index_cluster_cache: switch(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, false),
             hevc_unverified_copy: switch(plurx_core::store::keys::HEVC_UNVERIFIED_COPY, false),
             live_recovery: switch(plurx_core::store::keys::VOD_LIVE_RECOVERY, true),

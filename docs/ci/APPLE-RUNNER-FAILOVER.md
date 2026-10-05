@@ -10,7 +10,7 @@ This document owns Apple runner preference, outage detection and installation.
 
 | Role | Forgejo runner | Host | Account | Toolchain |
 |---|---|---|---|---|
-| Primary | `gha-maca-apple-01` | M4 MacBook Air, `192.168.5.115` | `githubrunner` | Xcode 27.0, `27A266a` |
+| Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Xcode 27.0, `27A266a` |
 | Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.0, `27A266a` |
 
 Both carry `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and `xcode-27`.
@@ -57,7 +57,7 @@ the interrupted run still follows Forgejo's own failure/retry policy.
 
 Install `plurx-apple-primary-health` as root-owned mode `0755` in
 `/usr/local/bin` on the M4. Its existing launchd service retains the historical
-label `org.forgejo.actions.runner.plurx.gha-mba-apple-01` even though the runner
+label `org.forgejo.actions.runner.plurx.gha-maca-apple-01` even though the runner
 display name is `gha-maca-apple-01`.
 
 On the M3, stop any directly launched Forgejo daemon and its Homebrew service

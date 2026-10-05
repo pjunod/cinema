@@ -1,7 +1,8 @@
 # Clock enforcement — consume proved observations before acquiring authority
 
-**Status:** open — E0 pure policy in preparation; active consumers unclaimed;
-measurement evidence pending · **Executes:** K-06 enforcement handoff ·
+**Status:** open — E0 policy and active consumers on `main` since 2026-10-04
+(#793) behind Developer switch `cluster.clock_guard_enforced`, default off;
+measurement evidence pending (see the 2026-10-04 note in §1) · **Executes:** K-06 enforcement handoff ·
 **Written:** 2026-09-30 · **Source baseline:** effort `f319fa779`.
 
 Companion to [the accepted design](CLOCK-SKEW-GUARD-DESIGN.md) and the
@@ -24,6 +25,38 @@ contract, automatic observation, and separate enforcement release. Developer
 facts remain read-only and advisory. Enforcement still waits for the merged
 measurement release and its identified fleet receipt; that substantive evidence
 dependency is unchanged. No rollout or clock-step authorization is implied.
+
+**2026-10-04 note — what `main` carries.** The claim boundary above was not
+followed in that order: the enforcement consumers landed on `main` with the
+effort as `4cfd1bdd1` (#793) on 2026-10-04, before the identified measurement
+receipt, and behind a Developer switch instead of as a separate no-switch
+release. Earlier statements in this plan that no consumer is connected
+describe the source they were written against. On `main`:
+
+- **Consumers.** Session takeover
+  (`acquire_takeover_clock`, `crates/plurxd/src/media_sessions.rs:346`); the
+  expired-session scan (`acquire_for` / `revalidate_for(ClockDecision::ExpiryScan)`,
+  `media_sessions.rs:4912, 4922`); membership changes through
+  `admit_for(ClockDecision::MembershipChange, …)` at five call sites in
+  `crates/plurx-core/src/cluster/membership.rs`; fenced removal
+  (`admit_fenced_removal`, `crates/plurx-core/src/cluster/clock.rs:1359`); and
+  `/readyz`, which answers 503 `clock unbounded` after two consecutive
+  violating rounds (`clock_readiness_failure`, `crates/plurxd/src/http/mod.rs`).
+- **The switch.** Developer → *Cluster clock guard* → *Enforce the cluster clock
+  guard*, the
+  replicated setting `cluster.clock_guard_enforced`, default off. Each node
+  re-reads it every 10 s (`crates/plurxd/src/clock_offset.rs`); a failed read
+  keeps the node's current mode. While off, every guarded decision is
+  admitted and `/readyz` ignores the clock; would-be refusals are counted in
+  `plurx_cluster_clock_advisory_refusals_total`. Startup is always advisory.
+  The switch contradicts the design's §3.8 and awaits Paul's ruling (see the
+  2026-10-04 relevance pass §2.2).
+- **Being corrected.** The 2026-10-04 close-out PR changes three behaviours
+  that apply with the switch on or off: which members the clock roster
+  counts, the clock read in the removal fence, and the membership admission
+  budget on the staged startup path. Its own edits to this plan describe them.
+- **Evidence.** No runtime clock series and no fleet receipt; the NTP point
+  offsets on the work board are the only clock readings.
 
 ## 2. Current entry points — inspect all irreversible boundaries again
 
@@ -225,8 +258,9 @@ activation deadline findings remain open; draft source is not qualified.
 
 **2026-10-02 review64 R3 source repair:** readiness checks original expiry
 before accepting a safe guard. Final activation binds its clock ticket to
-the exact deadline installed before vendor startup; the public finishing
-boundary cannot substitute a later deadline. Schema, heartbeat, signing-key,
+the exact deadline installed once by startup (before vendor startup at the
+time; since 2026-10-04 after vendor startup and catch-up, see below); the
+public finishing boundary cannot substitute a later deadline. Schema, heartbeat, signing-key,
 HTTP and marker pre-submission checks carry both facts. Phase expiry is a
 startup error, not an invented clock refusal or an extension of clock age.
 Submitted writes are still awaited through actual completion, without an
@@ -243,6 +277,86 @@ awaited preparatory schema reads. Ordinary `open_or_migrate` is unchanged;
 already-submitted transaction settlement never calls the admission callback.
 Static source checks and a new callback control do not replace the owed
 actual delayed-transaction proof.
+
+**2026-10-04 K-06 findings, fixed on Paul's "fix them"** (the enforce switch
+and enforcement itself are untouched; their ruling is separate):
+
+1. *Learners no longer block coverage.* An unobserved committed learner is
+   reported (`unobserved_learners`, `plurx_cluster_clock_unobserved_learners`,
+   per-peer `observation_state`) but does not make the guard `Incomplete`, so
+   a stopped learner no longer refuses takeover, the expiry scan and every
+   membership change on every node (its OWN routes are still never contested;
+   see the review entry below). Voters must still be bounded; a measured
+   learner above 2 s still refuses; fenced removal excuses only unobserved
+   *learner* survivors; and `promote_learner` plus the leader-side Raft
+   `Promote` admission require the promoted learner's own bound
+   (`admit_promotion_for` / `revalidate_promotion_for`). The role comes only
+   from the exact applied directory. Focused tests:
+   `k06_stopped_learner_admits_when_voters_bounded_but_unobserved_voter_refuses`,
+   `k06_local_learner_requires_every_voter_and_excuses_other_learners`,
+   `k06_learner_role_needs_the_exact_applied_directory`,
+   `k06_fenced_removal_excuses_an_unobserved_surviving_learner_only`.
+2. *Post-step wall reachability goes through the guard.* The reduction proof
+   read `permits_wall_reachability()` directly, so after a local step even an
+   advisory node waited out its 15-second budget and failed with "original
+   removal proof deadline expired". It now asks `admit_wall_reachability`
+   (advisory admits; the advisory refusal is counted once at
+   `admit_fenced_removal`). Enforced, it keeps polling for TargetApplied and,
+   if the budget ends blocked on that evidence, returns the counted typed
+   `LocalDiscontinuity` refusal. Focused test:
+   `k06_post_step_wall_reachability_is_decided_by_the_guard`.
+3. *Vendor start and catch-up no longer spend the admission budget.* The
+   observation path started one `MEMBERSHIP_ADMISSION_TIMEOUT` deadline before
+   vendor startup and never renewed it, so join/snapshot catch-up, the health
+   wait, admission, the startup catch-up, promotion and activation all shared
+   45 seconds. Vendor startup now has its own phase,
+   `vendor_start_timeout` = one admission (45 s) plus one snapshot catch-up
+   (transfer + install + 45 s grace), on both start paths — the vendor's join
+   retries and its "replicated learner" wait never end by themselves, so a
+   joiner whose leader is unreachable, or whose join an enforced guard keeps
+   refusing, fails startup with a clear error instead of hanging. The
+   admission phase starts after the health wait exactly as on the
+   non-observation path; and the deadline that promotion and
+   `finish_clock_observation` honour is installed once, after the startup
+   catch-up, carrying only what the committed-member wait left of the 45
+   seconds. It is still never replaced or replenished
+   (`install_startup_deadline` refuses a second install). This is the owner of
+   "the 45-second startup budget" named in the causal-observation entry above.
+   Focused tests: `k06_startup_deadline_is_installed_once_and_never_replenished`,
+   `k06_vendor_start_and_catchup_do_not_spend_the_admission_phase`.
+
+**2026-10-04 adversarial review of those fixes** (P1, P2, P3a–d):
+
+- *P1, lease owners.* The learner excuse is about votes; it stays for
+  membership changes and the surviving set of a fenced removal. Takeover and
+  the expiry scan spend a lease whose expiry the OWNER's clock wrote, and
+  learners own delegated sessions, so both now also require the route's owner
+  bounded (`owner_policy`: an owner in the proved roster needs a fresh bound;
+  an owner outside it is this node or removed; an unproved roster refuses).
+  Takeover acquires with `acquire_owned_for_owner` and re-checks the owner at
+  every revalidation; the expiry scan admits its page, then filters each
+  route with `admit_owner_for`, advancing its cursor past the skipped ones.
+  Enforced, an unobserved learner's routes are skipped until it is measured or
+  removed; advisory mode contests them and counts the refusal. Focused tests:
+  `k06_lease_owner_must_be_bounded_even_when_coverage_excuses_it`,
+  `takeover_clock_guard_skips_routes_owned_by_an_unobserved_learner`.
+- *P2, vendor start bounded.* See item 3.
+- *P3a.* `refuse_unstable_wall_reachability` counts only an enforced refusal;
+  with enforcement turned off before the removal budget ended, the operation
+  fails as a plain deadline and no advisory refusal is counted for it.
+- *P3b.* One promotion attempt counts at most one advisory refusal: the ticket
+  remembers that its admission (or an earlier re-check) counted, so
+  `revalidate_promotion_for` (now `&mut` ticket) does not count it again.
+  Focused test: `k06_one_promotion_attempt_counts_one_advisory_refusal`.
+- *P3c.* The budget-expiry decision is the free function
+  `removal_budget_expired_error`, exercised directly by
+  `k06_post_step_wall_reachability_is_decided_by_the_guard`, which also pins
+  that `wait_for_reduction_reference` carries the poll's `clock_blocked`
+  verdict to all three budget exits.
+- *P3d.* `k06_learner_role_needs_the_exact_applied_directory` adds the
+  production shape: membership watch bound, directory absent ⇒ every peer a
+  voter.
+- S-14 wiring pin: `removal_call_sites_bind_their_own_path_and_reconcile`.
 
 ### E0 interfaces — local policy without an irreversible operation
 

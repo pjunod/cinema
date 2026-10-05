@@ -3020,7 +3020,7 @@
             "kind": "request",
             "time": 1790981657131,
             "method": "GET",
-            "path": "/jellyfin/Videos/fc3cc6f82c0c950052a840c8fbe32a66/http://192.168.4.143:18097/jellyfin/__j0native/media.m3u8?mediaToken=%3Credacted%3E",
+            "path": "/jellyfin/Videos/fc3cc6f82c0c950052a840c8fbe32a66/http://10.42.4.143:18097/jellyfin/__j0native/media.m3u8?mediaToken=%3Credacted%3E",
             "credential_carriers": [
               "authorization"
             ]

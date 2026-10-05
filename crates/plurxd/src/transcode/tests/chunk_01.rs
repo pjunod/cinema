@@ -2244,6 +2244,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
         Pipeline::Cpu,
     ));
     let req = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2310,6 +2311,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
 
 fn snapshot_probe_request() -> SessionRequest {
     SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2436,6 +2438,8 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
         Pipeline::Cpu,
     );
     let mut req = snapshot_probe_request();
+    // S-10: absent is off, carried in the same settings batch.
+    assert!(!manager.vod_settings(&req).await.expect("snapshot").expect("enabled").sdr_master_codecs);
     store
         .put_settings(&[
             (keys::VOD_PRESENTATION, "1"),
@@ -2444,6 +2448,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
             (keys::VOD_MATERIALIZE_BUDGET_SECS, "42"),
             (keys::CACHE_MAX_GB, "3"),
             (keys::VOD_BLOCKED_GET_CAP, "512"),
+            (keys::PLAYBACK_SDR_MASTER_CODECS, "1"),
         ])
         .await
         .expect("one settings update");
@@ -2458,6 +2463,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     assert_eq!(settings.block_budget, Duration::from_secs(12));
     assert_eq!(settings.materialize_budget, Duration::from_secs(42));
     assert_eq!(settings.blocked_get_cap, 512);
+    assert!(settings.sdr_master_codecs, "read in the same batch");
 
     store
         .put_settings(&[
@@ -2466,6 +2472,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
             (keys::VOD_MATERIALIZE_BUDGET_SECS, "999"),
             (keys::CACHE_MAX_GB, "invalid"),
             (keys::VOD_BLOCKED_GET_CAP, "999999"),
+            (keys::PLAYBACK_SDR_MASTER_CODECS, " OFF "),
         ])
         .await
         .expect("invalid and excessive budgets");
@@ -2480,6 +2487,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     assert_eq!(settings.block_budget, Duration::from_secs(2));
     assert_eq!(settings.materialize_budget, Duration::from_secs(300));
     assert_eq!(settings.blocked_get_cap, 4096);
+    assert!(!settings.sdr_master_codecs, "a hand-written OFF is off");
 
     store
         .put_setting(keys::VOD_PRESENTATION, " 0 ")
@@ -3562,6 +3570,7 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
 #[test]
 fn the_grade_is_part_of_a_request_identity() {
     let request = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -3588,6 +3597,7 @@ fn the_grade_is_part_of_a_request_identity() {
         transport: None,
     };
     let hdr10 = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
