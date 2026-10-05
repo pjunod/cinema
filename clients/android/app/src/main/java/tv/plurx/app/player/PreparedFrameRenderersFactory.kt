@@ -1,4 +1,7 @@
-@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@file:androidx.annotation.OptIn(
+    androidx.media3.common.util.UnstableApi::class,
+    androidx.media3.common.util.ExperimentalApi::class,
+)
 @file:Suppress("DEPRECATION")
 
 package tv.plurx.app.player

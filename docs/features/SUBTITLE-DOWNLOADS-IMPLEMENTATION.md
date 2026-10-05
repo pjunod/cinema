@@ -85,7 +85,7 @@ regressions, pinned compilation, formatting and Clippy before pushing.
 ## 5. Local verification
 
 All Rust commands used the repository-pinned Rust 1.97.1. The build cache was
-reused with `--target-dir /Users/pjunod/code/plurx/target`; tests used `--offline`.
+reused with `--target-dir ~/code/plurx/target`; tests used `--offline`.
 
 | Command | Result |
 |---|---|

@@ -1095,9 +1095,9 @@ captured media and physical devices establish continuity.
 ## 11. Builder handoff — begin with evidence, then deliver the effort
 
 The requested implementation model is **GPT-6.1 Sol**. Use the independent clone
-`/Users/pjunod/code/plurx-agent/continuous-quality`, which contains this
+`~/code/plurx-agent/continuous-quality`, which contains this
 reviewed plan and has its own Git metadata. Do not write to the user's
-`/Users/pjunod/code/plurx` checkout, its shared target directory, or the other
+`~/code/plurx` checkout, its shared target directory, or the other
 session's clone. Create `effort/continuous-quality` with this planning commit;
 refresh authoritative main and integrate upstream at §1.2's boundary. Do not
 build on an unrelated task branch or modify its untracked files. Read the repository instructions and
@@ -2422,7 +2422,7 @@ only a self-contained Linux ELF. The macOS FFprobe is not that artifact; no
 identity or geometry check was relaxed. The failed receipt is retained as
 `target/playback-lab/reports/continuous-chrome-partial-macos-probe.json`.
 
-The documented deploy key authorizes `pjunod` on nuc3. An isolated temporary
+The documented deploy key authorizes `pjunod` on lab3. An isolated temporary
 source extraction there receives `git archive` of committed `cd9bb38ad`, never
 Git history or repository credentials. Its verified compiler is Rust 1.97.1
 `8bab26f4f`. A static FFprobe is copied from the existing daemon image through
@@ -2705,7 +2705,7 @@ out-of-family height and audio changes retain the legacy path.
 Apple's final layer-readiness wait also uses the original remaining overlap,
 rather than another fresh four-second allowance. Pinned all-target source
 compilation and iOS production/test compilation passed. Exact-tree replay
-remains required. Source transfer to nuc3 is pending explicit destination
+remains required. Source transfer to lab3 is pending explicit destination
 authorization requested after automatic approval review rejected it; no new
 private source was sent there. Unit execution stays deferred until final review.
 
@@ -2970,7 +2970,7 @@ final fast lane. Native loader and ownership integration remain unfinished.
 
 The native UI tool confirmed on October 2 that the Mac is locked and could
 not unlock it automatically. Safari qualification is pending a manual unlock.
-The isolated nuc3 source transfer remains pending explicit destination
+The isolated lab3 source transfer remains pending explicit destination
 authorization following automatic approval rejection. Independent native
 source work continues while those qualification paths are unavailable.
 
@@ -3431,7 +3431,7 @@ invalid rate and overflow; production and test sources compile without unit
 execution.
 
 The human explicitly approved committed-source transfer to
-pjunod@192.168.4.7 under /tmp/plurx-cq-cd9bb38ad/, without .git or credentials.
+operator@10.42.4.7 under /tmp/plurx-cq-cd9bb38ad/, without .git or credentials.
 That resolves the earlier destination-authorization rejection. The next Linux
 qualification build uses this committed tree; older runtime receipts remain
 failed or unqualified and are not reused as current evidence.
@@ -5614,7 +5614,7 @@ No units or final review ran.
 Exact executable `3c5e6d93b` PASSED
 `continuous-chrome-3c5e6d93b-targeted-owner-retry2`. This is the repeat
 of the failed explicit Retry case, not a rerun of unit suites. Three logical
-voters share one physical nuc3 host. Initial creation runs through B and
+voters share one physical lab3 host. Initial creation runs through B and
 quality ingress through A; the healthy initial 1080p→720p switch retains
 its exact route and presentation pipeline.
 
@@ -6466,10 +6466,10 @@ physical-device data was changed.
 ### 10.222 Handoff — unfinished work at the human's request (2026-10-03)
 
 **State:** implementation and qualification are incomplete. Draft
-[PR #774](http://192.168.4.7:3000/noirr/plurx/pulls/774) holds the single
+[PR #774](http://forge.lan:3000/noirr/plurx/pulls/774) holds the single
 CQ0–CQ8 batch. Latest implementation is `ff87c371dc97a7a3958e8772cb516482192b777f`
 on `codex/continuous-quality-cq0`, pushed from the independent clone at
-`/Users/pjunod/code/plurx-agent/continuous-quality`. Main `342521018` was
+`~/code/plurx-agent/continuous-quality`. Main `342521018` was
 integrated and had no new commits at the last fetch. There are 224 statically
 resolved regression fields. **No unit test has executed; the final
 adversarial review has not started.** Historical passing runs do not qualify
@@ -6570,15 +6570,15 @@ supervisor confirms retirement; no qualification runtime remains active.
 
 **Working locations and commands:**
 
-- Never use `/Users/pjunod/code/plurx`, even though it is the default cwd.
+- Never use `~/code/plurx`, even though it is the default cwd.
   Every command must set the independent clone or an owned temporary cwd.
-- Token file: `/Users/pjunod/code/plurx-agent/forgejo_token`; never print it.
-  Forgejo is `http://192.168.4.7:3000/noirr/plurx`; origin is
-  `ssh://git@192.168.4.7:222/noirr/plurx.git`. Established normal Git auth
+- Token file: `~/code/plurx-agent/forgejo_token`; never print it.
+  Forgejo is `http://forge.lan:3000/noirr/plurx`; origin is
+  `ssh://git@10.42.4.7:222/noirr/plurx.git`. Established normal Git auth
   works. Do not substitute the deploy key for Git's working authentication.
-- Deploy key: `/Users/pjunod/code/plurx-agent/.ssh-deploy-key`.
+- Deploy key: `~/code/plurx-agent/.ssh-deploy-key`.
   Explicitly approved source-only destination:
-  `pjunod@192.168.4.7:/tmp/plurx-cq-cd9bb38ad/`.
+  `operator@10.42.4.7:/tmp/plurx-cq-cd9bb38ad/`.
   Use committed `git archive` source only, never `.git` or repository
   credentials. Do not change production services/global networking.
 - `/private/tmp/plurx-cq-approved-linux-build.sh` runs the exact-HEAD pinned
@@ -6589,8 +6589,8 @@ supervisor confirms retirement; no qualification runtime remains active.
   It checks catalog, formatting, all-target Clippy and served JavaScript
   syntax, without units. Do not edit tracked files while the hook runs.
 - Android compile-only/assembly environment: JDK
-  `/Users/pjunod/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home`,
-  SDK `/Users/pjunod/Library/Android/sdk`, Gradle home
+  `~/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home`,
+  SDK `~/Library/Android/sdk`, Gradle home
   `clients/android/.gradle-validation`. Run `clients/android/gradlew -p
   clients/android --no-daemon :app:compileDebugKotlin
   :app:compileDebugUnitTestKotlin :app:assembleDebug` with those environment
@@ -6632,7 +6632,7 @@ must not land. No production service/network or user repository was changed.
 
 ### 10.223 Android 409 Capacity: replay receipts were a hidden rate limit
 
-**Cause, measured.** The run resumed on nuc3 with an owned API 36 x86_64
+**Cause, measured.** The run resumed on lab3 with an owned API 36 x86_64
 emulator (Docker, KVM, adb 5041 / console 5580) against an owned isolated
 backend built from `ff87c371d`. A read-only ledger monitor sampled the
 replicated `continuous_quality_ledgers` row every two seconds. With the
@@ -6694,7 +6694,7 @@ receipt, a 9–17 KB ledger and zero refusals; the server's rolling disposed
 list held at its 128-entry window. A following Auto→manual 720p choice could
 not be judged: the lab daemon's single-node replicated store timed out for
 several seconds (`slow leader quorum watermark proof`, 4.4 s; 503 on
-`/status` and `quality-schedule`) while nuc3 also carried another session's
+`/status` and `quality-schedule`) while lab3 also carried another session's
 heavy compile and lab, so the client reopened. That run is a host-overload
 failure, not a switch result; Android manual/Auto switching stays unqualified.
 Evidence: `target/playback-lab/reports/continuous-android-d1641-cumulative-receipts.tgz`.
@@ -6703,7 +6703,7 @@ Evidence: `target/playback-lab/reports/continuous-android-d1641-cumulative-recei
 
 The handoff asked whether the uncapped decoder and filter threads (27–30
 threads per video producer, against `-threads 2`/`3` for x264) explain the
-Firefox callback gaps. A controlled nuc3 experiment encoded the same 40 s of
+Firefox callback gaps. A controlled lab3 experiment encoded the same 40 s of
 the clocked fixture to 720p with the producer's filter chain and x264 at
 `-threads 3`, sampling per-thread CPU time from `/proc`:
 
@@ -6774,7 +6774,7 @@ now link samples (`autoLinkMediaSegment`); shared AAC objects stay excluded as
 too small to measure a link, as do playlists and initialization maps.
 Authored regression: `AutoLinkMediaSegmentTest.kt::continuousVideoSegmentsAreLinkSamplesLikeOrdinarySegments`.
 
-**Host note.** nuc3's root filesystem reached 100% during this work: the
+**Host note.** lab3's root filesystem reached 100% during this work: the
 default `dev` profile with full debug information grew this session's cargo
 target to 19 GB while another session also wrote there. The target, old
 binaries and lab runtimes were removed (37 GB free afterwards), and builds

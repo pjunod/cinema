@@ -63,7 +63,7 @@ xcodebuild -version
 xcrun simctl list devices available              # Record usable iOS/tvOS destinations.
 ```
 
-The authoring checkout at `/Users/pjunod/code/plurx` contains unrelated Rust,
+The authoring checkout at `~/code/plurx` contains unrelated Rust,
 Android and documentation changes. Transfer no lockfile, Android back-button
 work, credentials or repository-wide diff from it. No Rust change is planned.
 If one becomes necessary, establish and verify the pinned 1.97.1 compiler

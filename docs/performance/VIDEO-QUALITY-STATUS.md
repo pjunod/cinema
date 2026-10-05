@@ -1,6 +1,6 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** implementation and qualification complete; [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) records landing and cleanup · **Updated:** 2026-10-03
+**Status:** implementation and qualification complete; [PR #766](http://forge.lan:3000/noirr/plurx/pulls/766) records landing and cleanup · **Updated:** 2026-10-03
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
@@ -17,14 +17,14 @@ effort only. Whole-suite unit repair remains with the separate process.
 | Work | Current state | Cause and architectural direction |
 |---|---|---|
 | Independent workspace | Isolated | Direct Forgejo clones only; no borrowed Git objects or access to Paul's checkout. Final landing and workspace cleanup are recorded in PR #766. |
-| Consolidated branch | Qualified for landing | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`; main `3197d0c58` integrated as `408297c01`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
+| Consolidated branch | Qualified for landing | [PR #766](http://forge.lan:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`; main `3197d0c58` integrated as `408297c01`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
 | Old per-task CI | Stopped | Encoder run 3936 passed; still-running C1/HDR runs 3938/3942 were cancelled after the workflow override. No additional per-task test campaigns. |
 | Content-aware runtime C2 | Integrated `8fd3bba7d` + `e56c80274` | Bounded measurements in existing durable producers, persisted source/recipe identities, offline snapshots and a packaged static scorer. Retained-HLS can reuse a completed measured artifact; misses preserve live policy. Modern immutable VOD is separate. |
 | Next episode | Implemented `f632af81d` | Warm one successor metadata page during the final 30 seconds, cancel with the existing playback lifecycle, and retain a fresh authoritative decision at Play. Preparation and extracted player-owner regressions passed; hook passed. |
 | HLS acknowledgement batching | Implemented; four delivery/accounting regressions passed | Current pump allocates and schedules a separate channel acknowledgement for every 4 KiB despite 128 KiB storage reads; preserve the 4 KiB proof while reducing coordination, rather than weakening accounting. |
 | Apply encoder calibration (2) | Retain baseline | QSV Q22 failed all six quality comparisons; no default change is justified. |
 | VOD B-frames (6) | Integrated `6a9599295` and Developer controls | Strict decode/presentation-grid publication, signed offsets and optional software x264 recipe; compile and hook passed. Native FFmpeg 6 and 9 proofs pass, including exact AAC ownership across restarted segments; physical-client evidence remains outstanding. |
-| Broader HDR (3) | Implemented `5a8356329` | Plain HDR10 VAAPI Main10 at 1080p with P010 upload and its own graph proof. Compile/hook and isolated m6 continuous-PQ output qualification passed; hard-edge image and client limits remain recorded below. |
+| Broader HDR (3) | Implemented `5a8356329` | Plain HDR10 VAAPI Main10 at 1080p with P010 upload and its own graph proof. Compile/hook and isolated lab6 continuous-PQ output qualification passed; hard-edge image and client limits remain recorded below. |
 | Cold start (4) | Integrated `133be1706` | One sealed full source collection serves verification and decoder planning. Existing 5-second verification and 10-second refinement budgets remain separate; all three source-sharing/refinement regressions passed and count one stream probe instead of two. PR #745 is integrated. |
 
 The agent's first pinned Rust 1.97.1 compile check in the independent clone
@@ -56,13 +56,13 @@ were addressed in `827023fd2` (application-owned probe metadata) and
 | Check | Result and precise scope |
 |---|---|
 | Native content samples | Passed one test: three windows × four recipes, metrics, source identity and scratch cleanup. The fixture now assigns actual BT.709 frame metadata and reads its emitted probe. Production checks remain strict. [Receipt](../evidence/video-quality-2026-10-03/native-content-proof-fixed.json). |
-| Shipping scorer | Actual Docker runtime-assets stage passed on idle nuc3 in 398 s with 2 CPUs / 3 GiB, including static ELF closure and built-in VMAF model smoke. The first build exposed the missing C++ runtime link; `555c7defb` fixes it. [Receipt](../evidence/video-quality-2026-10-03/scorer/qualification.json). |
-| VAAPI HDR graph | Continuous neutral PQ ramp passed on idle m6: 96 frames at 1920×1080/24, exact timestamps, Main10/PQ/BT.2020/limited range and complete decode. Actual `hvc1.2.4.H120.B0` equals the declaration. Mean luma error 0.531 and maximum 2 ten-bit codes; 1.960 s encode for 4 s content (2.04× in this synthetic capture). [Receipt](../evidence/video-quality-2026-10-03/vaapi-qualification.json). |
+| Shipping scorer | Actual Docker runtime-assets stage passed on idle lab3 in 398 s with 2 CPUs / 3 GiB, including static ELF closure and built-in VMAF model smoke. The first build exposed the missing C++ runtime link; `555c7defb` fixes it. [Receipt](../evidence/video-quality-2026-10-03/scorer/qualification.json). |
+| VAAPI HDR graph | Continuous neutral PQ ramp passed on idle lab6: 96 frames at 1920×1080/24, exact timestamps, Main10/PQ/BT.2020/limited range and complete decode. Actual `hvc1.2.4.H120.B0` equals the declaration. Mean luma error 0.531 and maximum 2 ten-bit codes; 1.960 s encode for 4 s content (2.04× in this synthetic capture). [Receipt](../evidence/video-quality-2026-10-03/vaapi-qualification.json). |
 | Developer settings | 36/36 passed, once after review; this changed suite is outside fast lane. Both saved choices remain independent of readiness. [Receipt](../evidence/video-quality-2026-10-03/settings-sections.json). |
-| Fast-lane preflight | [Run 3969](http://192.168.4.7:3000/noirr/plurx/actions/runs/3969) passed scope, history and regression fields. Retain 249 validation methods and 604 operations methods; four validation inventories and one operations inventory passed targeted repairs. Nine environment-dependent operations methods passed on Linux in [run 3972](http://192.168.4.7:3000/noirr/plurx/actions/runs/3972). Original failed results remain recorded. |
+| Fast-lane preflight | [Run 3969](http://forge.lan:3000/noirr/plurx/actions/runs/3969) passed scope, history and regression fields. Retain 249 validation methods and 604 operations methods; four validation inventories and one operations inventory passed targeted repairs. Nine environment-dependent operations methods passed on Linux in [run 3972](http://forge.lan:3000/noirr/plurx/actions/runs/3972). Original failed results remain recorded. |
 | Player contracts | All seven preflight commands are covered by retained passing checks and focused repaired harness checks. Current-main policy passed 203 assertions; control passed five manual groups and the prepared-buffer case. Twenty-two unchanged native-HLS cases retain matching-main CI evidence. [Receipt](../evidence/video-quality-2026-10-03/web-preflight-repair.json). |
-| Rust continuation | Retained 4,863 passing tests; all eight failures now have targeted passing results. Store inventory and the new three-backend contract, probe negative-control and VAAPI fixture repairs passed individually. The AAC partition fix passed packet conservation and native FFmpeg 9 splicing. All four unchanged scheduler tests, the original B-frame failure under FFmpeg 6 and both previously unrun restart checks passed in [run 3979](http://192.168.4.7:3000/noirr/plurx/actions/runs/3979), pinned to `1cc946893`. [Selective receipt](../evidence/video-quality-2026-10-03/selective-rust-41557-receipt.json). |
-| Windows compilation | Passed on final runtime `1cc946893` in [run 3984, job 41591](http://192.168.4.7:3000/noirr/plurx/actions/runs/3984). The original attempt against `bd24f2767` also passed. Final-source job 41558 lost its runner before timeout; the [failed receipt](../evidence/video-quality-2026-10-03/selective-windows-41558-receipt.json) remains recorded. Only Windows was retried on an online baremetal runner, with the same source, container, toolchain and compile command. No runner service changed. |
+| Rust continuation | Retained 4,863 passing tests; all eight failures now have targeted passing results. Store inventory and the new three-backend contract, probe negative-control and VAAPI fixture repairs passed individually. The AAC partition fix passed packet conservation and native FFmpeg 9 splicing. All four unchanged scheduler tests, the original B-frame failure under FFmpeg 6 and both previously unrun restart checks passed in [run 3979](http://forge.lan:3000/noirr/plurx/actions/runs/3979), pinned to `1cc946893`. [Selective receipt](../evidence/video-quality-2026-10-03/selective-rust-41557-receipt.json). |
+| Windows compilation | Passed on final runtime `1cc946893` in [run 3984, job 41591](http://forge.lan:3000/noirr/plurx/actions/runs/3984). The original attempt against `bd24f2767` also passed. Final-source job 41558 lost its runner before timeout; the [failed receipt](../evidence/video-quality-2026-10-03/selective-windows-41558-receipt.json) remains recorded. Only Windows was retried on an online baremetal runner, with the same source, container, toolchain and compile command. No runner service changed. |
 | Web continuation | Syntax, 13 media/layout tests and generated jsconfig passed. Two new checkbox typing diagnostics were corrected without runtime changes or a baseline increase; only the failed type check and previously unrun typedef check were then executed and passed. [Receipt](../evidence/video-quality-2026-10-03/continuation-receipt.json). |
 
 The [combined qualification receipt](../evidence/video-quality-2026-10-03/batch-qualification.json)
@@ -107,7 +107,7 @@ qualifies signal preservation only and does not establish sharp-edge quality,
 gamut/skin fidelity, Dolby processing, 4K, subtitle burn, physical displays or
 the full client matrix. Original failures and exact commands are retained.
 
-The scorer builder/image/containers/volumes and m6 container/media/control
+The scorer builder/image/containers/volumes and lab6 container/media/control
 scratch are removed. No production settings, queues or deployments changed.
 The batch keeps B-frames and measured per-title encoding in Developer pending
 their stated broader evidence; readiness cannot veto either saved choice.
@@ -118,9 +118,9 @@ their stated broader evidence; readiness cannot veto either saved choice.
 |---|---|
 | Planning base | Forgejo main `4fa50b79e4b3b196797a9b7a1a7a4abd2184ea43` |
 | Planning branch | `codex/video-quality-program` |
-| Documentation PR | [#758](http://192.168.4.7:3000/noirr/plurx/pulls/758) merged as `cfb52bf402e603523f6fd5b3d71b6ffa2c751565`; one adversarial review, two P2 ambiguities addressed; exact-head Main promotion gate passed in [run 3923](http://192.168.4.7:3000/noirr/plurx/actions/runs/3923) |
+| Documentation PR | [#758](http://forge.lan:3000/noirr/plurx/pulls/758) merged as `cfb52bf402e603523f6fd5b3d71b6ffa2c751565`; one adversarial review, two P2 ambiguities addressed; exact-head Main promotion gate passed in [run 3923](http://forge.lan:3000/noirr/plurx/actions/runs/3923) |
 | Effort branch | `effort/video-quality`, published from `cfb52bf40` after the plan merged |
-| Compiler | `/Users/pjunod/.cargo/bin/rustc`: `1.97.1 (8bab26f4f 2026-07-14)` |
+| Compiler | `~/.cargo/bin/rustc`: `1.97.1 (8bab26f4f 2026-07-14)` |
 | Compiler-loop baseline | `cargo check -p plurx-core --lib --locked --offline` passed on planning base; package-only baseline reported pre-existing unused-item warnings. Pinned workspace Clippy and tracked hook passed. |
 | Original checkout | Left untouched, including pre-existing uncommitted documents |
 | Production changes | None |
@@ -129,18 +129,18 @@ their stated broader evidence; readiness cannot veto either saved choice.
 
 | Lane | Owner | State | Evidence / next action |
 |---|---|---|---|
-| A: encoder calibration | `/root/encoder_calibration` | E1 implemented; [PR #762](http://192.168.4.7:3000/noirr/plurx/pulls/762) open into effort | Commit `1942cf0ca`; production-argument exporter and six-fixture QSV screen. 13 focused tests, 56 existing bench tests and tracked hook passed. QSV quality 22 fails the benefit gate; bitrate mode retained. |
-| B: content-aware encoding | `/root/content_aware` | C1 implemented; [PR #760](http://192.168.4.7:3000/noirr/plurx/pulls/760) open into effort | Initial commit `162418ab1` passed 13 local tests; Linux preflight exposed a same-timestamp source rewrite. Fix commit `d7e96b12c` requires final source rehash; 14 local tests, refreshed real smokes and the tracked hook passed. C2 durable/runtime integration remains unstarted. |
-| C: HDR-to-SDR images | `/root/hdr_calibration` | Implemented; [PR #761](http://192.168.4.7:3000/noirr/plurx/pulls/761) open into effort | Commit `f68e6cd0a`; four authored neutral PQ/HLG cases × three variants × eight frames inspected. Three focused tests and tracked hook passed. Complements existing S11 scorer. |
+| A: encoder calibration | `/root/encoder_calibration` | E1 implemented; [PR #762](http://forge.lan:3000/noirr/plurx/pulls/762) open into effort | Commit `1942cf0ca`; production-argument exporter and six-fixture QSV screen. 13 focused tests, 56 existing bench tests and tracked hook passed. QSV quality 22 fails the benefit gate; bitrate mode retained. |
+| B: content-aware encoding | `/root/content_aware` | C1 implemented; [PR #760](http://forge.lan:3000/noirr/plurx/pulls/760) open into effort | Initial commit `162418ab1` passed 13 local tests; Linux preflight exposed a same-timestamp source rewrite. Fix commit `d7e96b12c` requires final source rehash; 14 local tests, refreshed real smokes and the tracked hook passed. C2 durable/runtime integration remains unstarted. |
+| C: HDR-to-SDR images | `/root/hdr_calibration` | Implemented; [PR #761](http://forge.lan:3000/noirr/plurx/pulls/761) open into effort | Commit `f68e6cd0a`; four authored neutral PQ/HLG cases × three variants × eight frames inspected. Three focused tests and tracked hook passed. Complements existing S11 scorer. |
 
 These rows record the original lane state before consolidation. PRs #760,
 #761 and #762 are now closed with their implementation retained in #766;
 the current execution table above supersedes their gate and queue states.
 
 Coordinator owns docs, index, validation catalogue and shared integrations.
-Encoder lane reserved nynuc, but the immediate pre-run check found one active
-viewer and skipped all calibration there. The reservation moved to idle nuc4
-for one isolated QSV workload, with cancellation when playback appears. HDR lane reserves nuc3 for one CPU-only process/container
+Encoder lane reserved media1, but the immediate pre-run check found one active
+viewer and skipped all calibration there. The reservation moved to idle lab4
+for one isolated QSV workload, with cancellation when playback appears. HDR lane reserves lab3 for one CPU-only process/container
 (1 CPU, 1 GiB) after the same idle check. Local Docker queries timed out, so
 no daemon restart was attempted. Content-aware smoke runs locally with bounded
 scratch. Shared Cargo checks serialize with incremental compilation disabled;
@@ -148,10 +148,10 @@ the coordinator removed only this task's disposable incremental cache after an
 ENOSPC hook failure, then reran the hook successfully.
 
 Required effort gates were dispatched for content-aware
-[run 3931](http://192.168.4.7:3000/noirr/plurx/actions/runs/3931), HDR
-[run 3933](http://192.168.4.7:3000/noirr/plurx/actions/runs/3933), and the
+[run 3931](http://forge.lan:3000/noirr/plurx/actions/runs/3931), HDR
+[run 3933](http://forge.lan:3000/noirr/plurx/actions/runs/3933), and the
 encoder's corrected metadata commit
-[run 3936](http://192.168.4.7:3000/noirr/plurx/actions/runs/3936).
+[run 3936](http://forge.lan:3000/noirr/plurx/actions/runs/3936).
 The first C1 run caught the source-rewrite regression described above. Its
 fix reproduces identical stat metadata with changed bytes and requires a final
 SHA256 match within the original deadline before recommending anything. An
@@ -159,7 +159,7 @@ optional direct Linux source transfer was rejected by automatic approval
 review because it lacked explicit payload/destination authorization; no such
 transfer or direct Linux test ran. Normal repository CI supplies Linux
 verification; the corrected C1 candidate is running in
-[run 3938](http://192.168.4.7:3000/noirr/plurx/actions/runs/3938). HDR
+[run 3938](http://forge.lan:3000/noirr/plurx/actions/runs/3938). HDR
 preflight, Rust, web, Apple and Android checks passed, but Windows setup could not resolve
 its pinned `dtolnay/rust-toolchain` action revision
 `4716b85f2fac3e324e64fa2810f6b5c3905760a5`, before compiling any project code.
@@ -174,7 +174,7 @@ effort or main, and no runner/action pin was changed to bypass the failure.
 | 2 | Apply qualified encoder policies / retain measured baseline | Retain bitrate: QSV Q22 failed every fixture quality comparison. No justified default change. |
 | 5 | HLS acknowledgement batching | Implemented in `157f31ab9`; 128 KiB coordination with unchanged 4 KiB proof. Hook and all four delivery/accounting regressions passed. |
 | 6 | VOD B-frames | Implemented `6a9599295`; Settings → Developer controls integrated. FFmpeg 6 and 9 server proofs passed, including restarted AAC ownership; broader physical-client evidence remains outstanding. |
-| 3 | Broader codec/HDR output | Implemented plain HDR10 VAAPI Main10 at 1080p; m6 continuous-PQ signal qualification passed; broader image/client evidence remains outstanding. Does not extend Dolby processing or HDR subtitle burn. |
+| 3 | Broader codec/HDR output | Implemented plain HDR10 VAAPI Main10 at 1080p; lab6 continuous-PQ signal qualification passed; broader image/client evidence remains outstanding. Does not extend Dolby processing or HDR subtitle burn. |
 | 4 | Remaining cold-start latency | Integrated `133be1706` after PR #745: one authoritative held-source collection removes the second stream FFprobe launch. Compile checks and all three source-sharing/refinement regressions passed. |
 
 ## 4. Evidence interpretation
@@ -256,7 +256,7 @@ and [runtime/cleanup receipt](../evidence/video-quality-2026-10-02/hdr/runtime-c
 retain exact graphs, source/tool hashes, decoded frame metadata, measurements
 and container outcome. The current graph is checked against the Rust production
 template, and source MaxCLL presence/value is validated before measurement.
-The isolated nuc3 run used the installed Jellyfin FFmpeg 8.1.3 image, one CPU,
+The isolated lab3 run used the installed Jellyfin FFmpeg 8.1.3 image, one CPU,
 1 GiB RAM, no network or GPU, a 40-second command timeout and a 240-second
 controller budget. The calibration command completed successfully and its container was removed.
 
@@ -290,7 +290,7 @@ The [complete six-fixture screen](../evidence/video-quality-2026-10-02/encoder/q
 embeds all input reports and their hashes, exact encoder/export/source/corpus/
 scorer/model identities, capture argv, decoded frame counts and individual
 measurements. Captures used the installed Jellyfin FFmpeg 8.1.3 encoder on
-idle nuc4, production VBR/QVBR arguments with quality 22, two software threads,
+idle lab4, production VBR/QVBR arguments with quality 22, two software threads,
 and one isolated encode at a time. Scoring used local libvmaf model
 `vmaf_v0.6.1`. The exact isolated runtime limits and build identities are in
 the reports; no replicated setting or production stream was changed.

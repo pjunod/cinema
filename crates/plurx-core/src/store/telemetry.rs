@@ -284,6 +284,14 @@ fn fold_prior(
     observation: &NetworkPriorObservation,
 ) -> Result<NetworkPrior, StoreError> {
     let transaction = conn;
+    // An observation that carries a measured-Link proof is a measured-Link
+    // fold: it writes the attributed `link_*` pair (when the proof is fresh)
+    // and leaves the legacy `worst_rung_height`/`starved_at_ms` pair exactly
+    // as it was. Otherwise an acknowledged Link negative would also cap the
+    // legacy Auto policy for the verdict's whole TTL — including after the
+    // display-aware policy that asked for it is switched off. Legacy client
+    // telemetry never carries a proof, so it folds the legacy pair as before.
+    let measured_link_fold = observation.measured_link.is_some();
     let link = observation.measured_link.as_ref().filter(|proof| {
         proof.fresh_at(observation.observed_at_ms)
             && observation
@@ -316,6 +324,7 @@ fn fold_prior(
                  ELSE (network_priors.sustained_kbps * 3 + excluded.sustained_kbps + 2) / 4
              END,
              worst_rung_height = CASE
+                 WHEN ?11 THEN network_priors.worst_rung_height
                  WHEN network_priors.starved_at_ms IS NULL
                       OR excluded.updated_at_ms - network_priors.starved_at_ms > ?8
                      THEN excluded.worst_rung_height
@@ -323,6 +332,7 @@ fn fold_prior(
                  ELSE min(network_priors.worst_rung_height, excluded.worst_rung_height)
              END,
              starved_at_ms = CASE
+                 WHEN ?11 THEN network_priors.starved_at_ms
                  WHEN excluded.starved_at_ms IS NOT NULL THEN excluded.starved_at_ms
                  WHEN network_priors.starved_at_ms IS NULL
                       OR excluded.updated_at_ms - network_priors.starved_at_ms > ?8
@@ -361,11 +371,15 @@ fn fold_prior(
             observation.client_class,
             observation.network_fingerprint,
             observation.throughput_kbps.map(i64::from),
-            observation.starved_rung_height,
+            // A new row from a measured-Link fold starts with no legacy pair.
+            observation
+                .starved_rung_height
+                .filter(|_| !measured_link_fold),
             observation.observed_at_ms,
             NETWORK_PRIOR_STARVED_TTL_MS,
             link.and(observation.starved_rung_height),
             link.map(|proof| proof.completed_at_ms()),
+            measured_link_fold,
         ],
     )?;
     transaction.execute(
@@ -972,18 +986,23 @@ mod tests {
             .observe_prior(sample.clone())
             .await
             .expect("fold measured Link");
+        // A measured-Link fold leaves the legacy pair exactly as it was:
+        // not min'ed, not re-stamped.
         assert_eq!(measured.worst_rung_height, Some(720));
+        assert_eq!(measured.starved_at_ms, Some(100_000));
         assert_eq!(measured.active_link_starved_rung(110_000), Some(1080));
         assert_eq!(measured.link_starved_at_ms, Some(105_000));
         // Reusing the same proof after its transfer freshness expires cannot
-        // refresh the measured pair, even though legacy telemetry still folds.
+        // refresh the measured pair — and, carrying a proof, it is still a
+        // measured-Link fold, so it does not fold into the legacy pair either.
         sample.observed_at_ms = 121_000;
         sample.starved_rung_height = Some(480);
         let stale = sidecar
             .observe_prior(sample.clone())
             .await
             .expect("fold stale proof");
-        assert_eq!(stale.worst_rung_height, Some(480));
+        assert_eq!(stale.worst_rung_height, Some(720));
+        assert_eq!(stale.starved_at_ms, Some(100_000));
         assert_eq!(stale.link_worst_rung_height, Some(1080));
         assert_eq!(stale.link_starved_at_ms, Some(105_000));
         let mut out_of_order = sample.clone();
@@ -1042,6 +1061,73 @@ mod tests {
             .expect("read retained Link")
             .expect("retained prior");
         assert_eq!(retained, renewed);
+    }
+
+    /// D6 (§9.17): the acknowledged-Link-negative observation — the only
+    /// producer of a measured-Link proof, which carries no throughput — folds
+    /// the attributed `link_*` pair alone. It must not seed or lower the
+    /// legacy starvation pair, or a display-aware acknowledgement would cap
+    /// legacy Auto for a week after display-aware is switched off.
+    #[tokio::test]
+    async fn d6_measured_link_fold_writes_only_the_link_pair() {
+        use crate::domain::{CompletedNetworkTransfer, MeasuredLinkObservation, NetworkPriorCause};
+        let root = tempfile::tempdir().expect("root");
+        let sidecar =
+            NodeLocalTelemetry::open(&root.path().join("telemetry.db")).expect("open sidecar");
+        let link_only = |network: &str, rung: i64, at_ms: i64| {
+            let mut sample = observation(network, None, Some(rung), at_ms);
+            sample.measured_link = MeasuredLinkObservation::from_completed_transfer(
+                NetworkPriorCause::Link,
+                CompletedNetworkTransfer {
+                    body_bytes: 1_000_000,
+                    body_duration_ms: 5_000,
+                    completed_at_ms: at_ms - 1_000,
+                    network_load: Some(true),
+                    from_local_cache: Some(false),
+                    producer_paced: Some(false),
+                },
+                at_ms,
+            );
+            assert!(sample.measured_link.is_some(), "fixture: fresh proof");
+            sample
+        };
+        // A fresh row: only the link pair exists.
+        let cold = sidecar
+            .observe_prior(link_only("cold", 1080, 200_000))
+            .await
+            .expect("fold measured Link on a new row");
+        assert_eq!(cold.active_link_starved_rung(200_000), Some(1080));
+        assert_eq!(cold.link_starved_at_ms, Some(199_000));
+        assert_eq!(cold.worst_rung_height, None);
+        assert_eq!(cold.starved_at_ms, None);
+        assert_eq!(cold.active_starved_rung(200_000), None);
+        assert_eq!(cold.sample_count, 0);
+        // An existing legacy verdict is neither lowered nor re-stamped.
+        let legacy = sidecar
+            .observe_prior(observation("warm", Some(8_000), Some(1440), 300_000))
+            .await
+            .expect("fold legacy");
+        assert_eq!(legacy.active_starved_rung(300_000), Some(1440));
+        let warm = sidecar
+            .observe_prior(link_only("warm", 720, 310_000))
+            .await
+            .expect("fold measured Link over a legacy verdict");
+        assert_eq!(warm.active_link_starved_rung(310_000), Some(720));
+        assert_eq!(warm.worst_rung_height, Some(1440));
+        assert_eq!(warm.starved_at_ms, Some(300_000));
+        assert_eq!(warm.sustained_kbps, legacy.sustained_kbps);
+        assert_eq!(warm.sample_count, legacy.sample_count);
+        // Even an expired legacy verdict is left for legacy telemetry to
+        // retire: this fold does not touch the pair at all.
+        let late = 300_001 + NETWORK_PRIOR_STARVED_TTL_MS;
+        let after_expiry = sidecar
+            .observe_prior(link_only("warm", 480, late))
+            .await
+            .expect("fold measured Link after the legacy verdict expired");
+        assert_eq!(after_expiry.worst_rung_height, Some(1440));
+        assert_eq!(after_expiry.starved_at_ms, Some(300_000));
+        assert_eq!(after_expiry.active_starved_rung(late), None);
+        assert_eq!(after_expiry.active_link_starved_rung(late), Some(480));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (delivery architecture) and
 [PLAYBACK-TESTING.md](../PLAYBACK-TESTING.md) (playback validation). This is the
-review packet for [PR #358](http://192.168.4.7:3000/noirr/plurx/pulls/358),
+review packet for [PR #358](http://forge.lan:3000/noirr/plurx/pulls/358),
 branch `codex/wicked-native-progress`. It describes the final net change,
 including the buffering and Fable follow-ups. The PR remains unmerged; nothing has been deployed. Review the diagnosis independently of the proposed code.
 
@@ -73,7 +73,7 @@ it. Historical commits remain in the branch, so review the net diff against
 ## 3. Controlled playback tests isolate registration timing
 
 The reproduced environment was Safari 27.0, build `22625.1.29.11.27`, using
-the web UI on `nynuc:32400`. Reference film G is library file 120, using native copy
+the web UI on `media1:32400`. Reference film G is library file 120, using native copy
 HLS with 4K Dolby Vision P7-to-P8 delivery. The controlled resume position
 was 566.055 seconds. The server remained at build
 `1e530d32c87df15a2d2ded10b46c185c07cdb832` throughout these trials.
@@ -237,7 +237,7 @@ node tests/playback/web-control.test.js       # Callback lifecycle and control r
 node tests/playback/web-policy.test.js        # Playback policy regressions
 node --test tests/playback/seek-control.test.js # Seek control regressions
 make history-check                           # Corrective-history evidence mapping
-CARGO_TARGET_DIR=/Users/pjunod/code/plurx/target CARGO_NET_OFFLINE=true \
+CARGO_TARGET_DIR=~/code/plurx/target CARGO_NET_OFFLINE=true \
   make precommit-check CARGO='rustup run 1.97.1 cargo'
 git diff 2b9146233 --check                     # Patch whitespace validation
 ```

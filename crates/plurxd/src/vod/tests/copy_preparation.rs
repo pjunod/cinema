@@ -389,3 +389,207 @@ async fn prepared_copy_consumer(control: u8) {
     serve.end("incumbent", Terminal::Deleted).await;
     active.finish().await;
 }
+
+// ---- D2 (main-merge defects 2026-10-04): an executor, a switch, a drain ----
+
+/// A queued copy preparation row for `target`, enqueued directly: the drain
+/// and the claim filter never look past the row.
+async fn d2_queue_copy_row(store: &Arc<dyn Store>, file: &MediaFile, target: &str, tag: &str) -> String {
+    use plurx_core::store::background_jobs::*;
+    let intent = CopyOutputIntent {
+        target_node_id: target.into(), audio_index: None, audio_offset_ms: 0, audio_claim: None,
+        audio_delivery: plurx_core::playback::audio::AudioDelivery {
+            action: plurx_core::playback::audio::AudioAction::None, downmix: None, reason: "no_audio".into(),
+        }, aac: true, preserve_dolby_vision: false, convert_dolby_vision: false,
+        hdr10_requested: false, grade: plurx_core::transcode::OutputGrade::Sdr, normalized_geometry: true, profile: None,
+        width: 640, height: 360, video_identity: "a".repeat(64), pipeline_identity: "b".repeat(64),
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = crate::media_sessions::unix_ms();
+    let dedupe = format!("copy-{tag}");
+    assert!(matches!(store.enqueue_job(EnqueueJob {
+        id: id.clone(), payload: JobPayload::CopyOutputPrepare {
+            copy_output_version: 1, file_id: file.id, source_generation: "g".repeat(16),
+            source_size: file.size, source_mtime: file.mtime, source_object_version: "g".repeat(16),
+            policy_generation: "copy:1".into(), intent, scratch_bytes: 64 << 20,
+            candidate_catalog: None, reason: "recent_demand".into(),
+        }, dedupe_key: dedupe.clone(), priority: 1, not_before_ms: now, now_ms: now,
+        request: JobRequest {
+            scope: "copy".into(), request_id: dedupe, request_digest: "c".repeat(64),
+            consumer_kind: "copy_output".into(), consumer_ref: file.id.to_string(),
+            target_node_id: Some(target.into()), deadline_ms: None, retain_identity: false,
+        },
+    }).await.expect("enqueue"), EnqueueOutcome::Accepted { .. }));
+    id
+}
+
+async fn d2_store_with_file() -> (Arc<dyn Store>, MediaFile, tempfile::TempDir) {
+    let base = crate::test_tempdir().expect("d2");
+    let path = base.path().join("source.mkv");
+    std::fs::copy(fixture_file().path, &path).expect("owned source");
+    let file = media_file_at(path, 12_000);
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let library = store.create_library(&plurx_core::domain::NewLibrary {
+        name: "d2".into(), kind: plurx_core::domain::LibraryKind::Movies,
+        paths: vec![base.path().to_owned()], anime: false,
+    }).await.expect("library");
+    let item = store.insert_item(&plurx_core::domain::NewItem {
+        library_id: library.id, kind: plurx_core::domain::ItemKind::Movie,
+        parent_id: None, title: "d2".into(), year: None, season_number: None, episode_number: None,
+    }).await.expect("item");
+    let probe = plurx_core::domain::ProbeResult {
+        duration_ms: file.duration_ms, container: file.container.clone(),
+        video_codec: file.video_codec.clone(), width: file.width, height: file.height,
+        ..Default::default()
+    };
+    assert_eq!(store.upsert_file(item, &file.path.to_string_lossy(), file.size, file.mtime, &probe)
+        .await.expect("file"), file.id);
+    (store, file, base)
+}
+
+async fn d2_job_state(store: &Arc<dyn Store>, id: &str) -> plurx_core::store::background_jobs::JobState {
+    store.background_job(id).await.expect("job").expect("row").state
+}
+
+#[tokio::test]
+async fn disabled_queued_rows_are_cancelled_without_a_claim() {
+    use plurx_core::store::background_jobs::JobState;
+    let (store, file, base) = d2_store_with_file().await;
+    // Schedule off, no capacity, and a target node that does not exist: a
+    // claim could never take this row. The drain still cancels it.
+    let id = d2_queue_copy_row(&store, &file, "absent-node", "absent").await;
+    let jobs = Arc::new(crate::state::JobManager::new(Arc::clone(&store), base.path().join("art")));
+    assert_eq!(jobs.drain_disabled_output_preparation(crate::vodserve::OutputPreparation::Off).await, 1);
+    assert_eq!(d2_job_state(&store, &id).await, JobState::Cancelled);
+    // A second node (or tick) finds nothing left.
+    assert_eq!(jobs.drain_disabled_output_preparation(crate::vodserve::OutputPreparation::Off).await, 0);
+    // An admitted kind is left alone.
+    let kept = d2_queue_copy_row(&store, &file, "absent-node", "kept").await;
+    assert_eq!(jobs.drain_disabled_output_preparation(crate::vodserve::OutputPreparation::Copy).await, 0);
+    assert_eq!(d2_job_state(&store, &kept).await, JobState::Queued);
+}
+
+#[tokio::test]
+async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
+    use plurx_core::store::background_jobs::*;
+    let (store, file, base) = d2_store_with_file().await;
+    let jobs = Arc::new(crate::state::JobManager::new(Arc::clone(&store), base.path().join("art")));
+    // The drain lists the row as queued; a node claims it in the window
+    // between that list and the drain's cancel. The hook is that window.
+    let token = Arc::new(std::sync::Mutex::new(None));
+    let claim_in_window = |job_id: String| {
+        let store = Arc::clone(&store);
+        let token = Arc::clone(&token);
+        async move {
+            let queued = store.background_job(&job_id).await.expect("job").expect("row");
+            assert_eq!(queued.state, JobState::Queued, "the drain listed it as queued");
+            let now = crate::media_sessions::unix_ms();
+            match store.claim_job(ClaimJob {
+                job_id, expected_revision: queued.revision, node_id: "test-local".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(), claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::CopyOutputPrepare, payload_version: 1, now_ms: now, dispatched_at_ms: now,
+            }).await.expect("claim") {
+                ClaimOutcome::Claimed { job } => {
+                    *token.lock().expect("token slot") = job.token;
+                }
+                other => panic!("claim {other:?}"),
+            }
+        }
+    };
+    // Executor alive: the drain's cancel lands on a running row, which goes
+    // to cancelling, and its owner settles the cancel.
+    let live = d2_queue_copy_row(&store, &file, "test-local", "live").await;
+    assert_eq!(
+        jobs.drain_disabled_output_preparation_with(
+            crate::vodserve::OutputPreparation::Off, &claim_in_window).await,
+        1,
+        "the row claimed between list and cancel is still cancelled"
+    );
+    assert_eq!(d2_job_state(&store, &live).await, JobState::Cancelling,
+        "a row claimed during the drain goes to cancelling, never back to queued");
+    let claimed = token.lock().expect("token slot").take().expect("claimed in the window");
+    let active = crate::background_jobs::ActiveBackgroundJob::start(
+        Arc::clone(&store), Arc::new(CopyPreparationAuthority), claimed,
+        tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
+    ).expect("owner");
+    active.fence().settle(JobSettlement::Cancel).await.expect("owner settles the cancel");
+    active.finish().await;
+    assert_eq!(d2_job_state(&store, &live).await, JobState::Cancelled);
+    // Executor gone: the same race, and store upkeep settles at lease expiry.
+    let orphaned = d2_queue_copy_row(&store, &file, "test-local", "orphaned").await;
+    let now = crate::media_sessions::unix_ms();
+    assert_eq!(
+        jobs.drain_disabled_output_preparation_with(
+            crate::vodserve::OutputPreparation::Off, &claim_in_window).await,
+        1
+    );
+    let _ = token.lock().expect("token slot").take().expect("claimed in the window");
+    assert_eq!(d2_job_state(&store, &orphaned).await, JobState::Cancelling);
+    store.maintain_jobs(now + 24 * 60 * 60 * 1_000).await.expect("upkeep");
+    assert_ne!(d2_job_state(&store, &orphaned).await, JobState::Cancelling,
+        "a cancelling row whose executor is gone settles at lease expiry");
+}
+
+#[tokio::test]
+async fn claim_pretranscode_honors_allowed_kinds() {
+    use plurx_core::store::background_jobs::JobKind;
+    let (store, file, base) = d2_store_with_file().await;
+    d2_queue_copy_row(&store, &file, "test-local", "allowed").await;
+    let manager = crate::transcode::TranscodeManager::new(
+        Arc::clone(&store), base.path().join("work"),
+        plurx_core::transcode::EncoderCaps::default(), plurx_core::transcode::Pipeline::Cpu,
+    ).with_cache(base.path().join("cache"), "d2-test".into(), "test-local".into());
+    let mut capabilities = manager.pretranscode_capabilities();
+    capabilities.scratch_bytes = i64::MAX;
+    let claim = |allowed: &'static [JobKind]| {
+        let store = Arc::clone(&store);
+        let manager = &manager;
+        let capabilities = capabilities.clone();
+        async move {
+            crate::background_jobs::claim_pretranscode(
+                store, Arc::new(CopyPreparationAuthority), manager, "test-local",
+                allowed, &capabilities, i64::MAX, i64::MAX, &[],
+            ).await.expect("claim pass")
+        }
+    };
+    assert!(claim(&[JobKind::TranscodePrepare]).await.is_none(),
+        "the speculative lane never takes a viewer-demand row");
+    // An output lane whose retained registry is full does not claim either.
+    let full = crate::background_jobs::claim_pretranscode(
+        Arc::clone(&store), Arc::new(CopyPreparationAuthority), &manager, "test-local",
+        &[JobKind::CopyOutputPrepare], &capabilities, i64::MAX, 0, &[],
+    ).await.expect("claim pass");
+    assert!(full.is_none(), "output rows are bounded by the retained registry's remainder");
+    match claim(&[JobKind::CopyOutputPrepare]).await {
+        Some(crate::background_jobs::PreparationClaim::Copy(_, active, _)) => active.finish().await,
+        _ => panic!("the copy lane claims its row"),
+    }
+}
+
+#[tokio::test]
+async fn output_prepare_rows_carry_a_deadline() {
+    use plurx_core::store::background_jobs::*;
+    let (store, file, base) = d2_store_with_file().await;
+    let manager = crate::transcode::TranscodeManager::new(
+        Arc::clone(&store), base.path().join("work"),
+        plurx_core::transcode::EncoderCaps::default(), plurx_core::transcode::Pipeline::Cpu,
+    ).with_cache(base.path().join("cache"), "d2-deadline".into(), "test-local".into());
+    let mut manual = request("deadline", 0.0);
+    manual.audio_claim = Some(plurx_core::playback::audio::AudioClaim {
+        decoders: vec!["aac".into()], sinks: vec![],
+    });
+    manual.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(
+        None, &manual.audio_claim.as_ref().expect("claim").profile(),
+        plurx_core::playback::audio::AudioRoute::Progressive, 0,
+    ));
+    manager.enqueue_copy_output(&manual, &file, &settings()).await.expect("enqueue");
+    let job = store.list_jobs(JobQuery { node_id: None, state: Some(JobState::Queued),
+        kind: Some(JobKind::CopyOutputPrepare), after_id: None, limit: 10,
+    }).await.expect("jobs").jobs.pop().expect("queued row");
+    // Past the request retention window, viewer demand has expired: upkeep
+    // retires the row instead of leaving it to hold a slot forever.
+    let now = crate::media_sessions::unix_ms();
+    store.maintain_jobs(now + REQUEST_RETENTION_MS + 60_000).await.expect("upkeep");
+    assert_ne!(d2_job_state(&store, &job.id).await, JobState::Queued,
+        "an output preparation row nothing executes expires");
+}

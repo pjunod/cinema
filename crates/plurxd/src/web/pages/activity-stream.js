@@ -284,6 +284,14 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
        <p class="hint" style="margin:8px 0 0">Encoding ahead of time so the first press of play is instant. It gives the
        hardware up the moment somebody starts a stream, and stops for good after the current title if you ask it to.</p></div>`
     : `<div class="empty">Not pre-transcoding anything. A pass runs on the schedule in Settings and picks from Continue&nbsp;Watching, Next&nbsp;Up and Recently&nbsp;Added.</div>`;
+  // Rolling output this node retains or is collecting (vod.rolling_retention).
+  // The registries are process-private, so the list is this node's only and
+  // the heading says so; each row has a Stop that releases its links.
+  const retained=Array.isArray(d.retained_output)?d.retained_output:[];
+  const retainedNode=d.retained_output_node?((nodeNames&&nodeNames[d.retained_output_node])||d.retained_output_node):"this node";
+  const retainedRows=retained.map(r=>`<tr><td><b>${esc(r.title||"(unknown)")}</b></td>
+      <td>${esc(r.state)}${r.attached?' <span class="muted">· being read</span>':""}</td><td>${fmtBytes(r.bytes)||"0 B"}</td>
+      <td style="text-align:right">${ME&&ME.is_admin&&r.state!=="releasing"?`<button class="ghost sm"${r.attached?' disabled title="A session is reading this output"':""} onclick="stopRetainedOutput(${esc(JSON.stringify(r.nonce))})">Stop</button>`:''}</td></tr>`).join("");
   const offline=d.offline||[];
   const offlineRows=offline.map(ow=>{
     const title=ow.item_id
@@ -311,6 +319,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     ${section("recordings",`Recording activity · ${recording.length} active`,dvrActivityRows(recording,nodeNames,dvrState),!!DVR_PAGE.selectedId)}
     ${d.analysis?section("analysis","Content analysis",analysisSummaryCard(d.analysis,"activity")+analysisLiveProgress(d.analysis,nodeNames)):""}
     ${p?`<h2 class="section">Preparing media</h2>${produce}`:""}
+    ${retained.length?`<h2 class="section">Retained rolling output · ${esc(retainedNode)} only</h2><table><thead><tr><th>Title</th><th>State</th><th>On disk</th><th></th></tr></thead><tbody>${retainedRows}</tbody></table>`:""}
     ${offline.length
       ? `<h2 class="section">Offline downloads</h2>`:""}
     ${offline.length
@@ -483,6 +492,10 @@ async function stopProcess(pid,purpose){
 
 async function stopSession(id){
   try{ await api(`/activity/sessions/${id}`,{method:"DELETE"}); toast("Stream stopped"); renderActivityBody(); }
+  catch(e){ toast(e.message); }
+}
+async function stopRetainedOutput(nonce){
+  try{ const r=await api(`/activity/retained/${encodeURIComponent(nonce)}`,{method:"DELETE"}); toast(r.note||"Released"); renderActivityBody(); }
   catch(e){ toast(e.message); }
 }
 async function stopProducer(){

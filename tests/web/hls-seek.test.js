@@ -21,6 +21,27 @@ function library({mse=true,mms=true}={}){
 }
 function media(){const v=new Events();Object.assign(v,{seeking:false,src:'',currentTime:0,readyState:4,paused:true,
   removeAttribute(){},getAttribute(){return null;},querySelectorAll(){return [];},appendChild(){},load(){}});return v;}
+// The vendored file is the only authority on which hls.js ships. The notices
+// are a redistribution claim about it, and "the bundled <version>" in shipped
+// prose is a claim too; 1.6.16 -> 1.6.19 moved the file and none of them.
+test('every statement of the bundled hls.js version is the vendored one',()=>{
+  const {Hls}=library();const version=Hls.version;
+  assert.match(version,/^\d+\.\d+\.\d+$/);
+  const notices=fs.readFileSync('THIRD-PARTY-NOTICES.md','utf8');
+  const row=notices.split('\n').find(line=>line.startsWith('| [hls.js]('));
+  assert.ok(row,'THIRD-PARTY-NOTICES.md lists hls.js');
+  assert.equal(row.split('|')[2].trim(),version,'the notices row names the vendored hls.js version');
+  const stated=new Map();
+  const web='crates/plurxd/src/web';
+  const files=['THIRD-PARTY-NOTICES.md','crates/plurxd/src/http/developer.rs','scripts/subtitle-readiness-browser-check']
+    .concat(fs.readdirSync(web,{recursive:true}).filter(f=>f.endsWith('.js')&&!f.endsWith('hls.min.js')).map(f=>`${web}/${f}`));
+  for(const file of files){
+    const text=fs.readFileSync(file,'utf8').replace(/\s+/g,' ');
+    for(const m of text.matchAll(/(?:bundled(?: hls\.js)?|minifier\. hls\.js) (\d+\.\d+\.\d+)/g))
+      if(m[1]!==version)stated.set(file,m[1]);
+  }
+  assert.deepEqual([...stated],[],`these call a version other than ${version} the bundled hls.js`);
+});
 test('bundled MMS resumes seeking and fences late endstreaming per attachment',()=>{
   const {Hls}=library({mse:false});assert.equal(Hls.version,'1.6.19');
   const incumbent=new Hls({enableWorker:false,preferManagedMediaSource:false});

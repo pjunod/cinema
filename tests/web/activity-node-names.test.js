@@ -519,11 +519,11 @@ test("durable owners, attempts and repair destinations use roster names", () => 
     lease_expires_ms:now+30000,observed_at_ms:now};
   Object.assign(painter.durable,{observed:now,rows:[job],repairs:[{kind:"subtitle",target_node_id:"owner-id",phase:"copying",age_ms:1000}],
     detail:{job,waiters:[],attempts:[{node_id:"owner-id",started_at_ms:now-120000,outcome:null}]}});
-  const html=paint(snapshot({node_hostnames:{"owner-id":"m6"}}));
-  assert.match(html, /title="owner-id">m6<\/span>/);
-  assert.match(html, /<td>m6<\/td><td>copying/);
+  const html=paint(snapshot({node_hostnames:{"owner-id":"lab6"}}));
+  assert.match(html, /title="owner-id">lab6<\/span>/);
+  assert.match(html, /<td>lab6<\/td><td>copying/);
   painter.view.inspector={kind:"job",id:"job"};painter.view.detailTab="history";
-  assert.match(painter.inspect(), /m6<\/b> · running[\s\S]*2 min elapsed/);painter.view.inspector=null;
+  assert.match(painter.inspect(), /lab6<\/b> · running[\s\S]*2 min elapsed/);painter.view.inspector=null;
   assert.match(html, /Since requested/);
   assert.match(html, /23h 47m/);
   assert.doesNotMatch(html, /1427 min/);
@@ -539,12 +539,12 @@ test("expired durable leases do not masquerade as live executions", () => {
     lease_expires_ms:now-3600000,observed_at_ms:now};
   Object.assign(painter.durable,{observed:now,rows:[job],detail:{job,waiters:[],
     attempts:[{node_id:"owner-id",started_at_ms:job.lease_expires_ms-120000,outcome:null}]}});
-  const html=paint(snapshot({node_hostnames:{"owner-id":"<m6>"}}));
+  const html=paint(snapshot({node_hostnames:{"owner-id":"<lab6>"}}));
   assert.match(html, /Lease expired · awaiting recovery/);
   assert.match(html, /previous owner/);
   painter.view.inspector={kind:"job",id:"expired"};painter.view.detailTab="history";
-  assert.match(painter.inspect(), /&lt;m6&gt;<\/b> · lease expired[\s\S]*2 min elapsed/);painter.view.inspector=null;
-  assert.doesNotMatch(html, /<m6>/);
+  assert.match(painter.inspect(), /&lt;lab6&gt;<\/b> · lease expired[\s\S]*2 min elapsed/);painter.view.inspector=null;
+  assert.doesNotMatch(html, /<lab6>/);
   Object.assign(painter.durable,{rows:[],detail:null});
 });
 
@@ -555,7 +555,7 @@ function refreshingQueue(q,api){
     const document={getElementById:()=>null};
     function closeActivityInspector(){DURABLE_ACTIVITY.selectedId=null;}
     const ACTIVITY_VIEW={inspector:{kind:"job",id:"job"},detailTab:"history"};
-    const ACTIVITY_SNAPSHOT={node_hostnames:{node:"m6"}};
+    const ACTIVITY_SNAPSHOT={node_hostnames:{node:"lab6"}};
     function paintDurableActivity(){}
     ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
     return {page:pageDurableJobs,previous:previousDurableJobs,resize:resizeDurableJobs,filter:filterDurableJobs,refresh:refreshDurableActivity,reset:()=>{resetActivityWork();PAGE_RENDER_GENERATION++;},html:()=>activityInspectorHtml()};
@@ -574,7 +574,7 @@ test("bounded queue refresh updates the open attempt when execution completes", 
   });
   await runner.refresh(true);
   assert.deepEqual(calls,["/cluster/jobs?state=running&limit=20","/cluster/jobs/job"]);
-  assert.match(runner.html(), /m6<\/b> · succeeded[\s\S]*2 min elapsed/);
+  assert.match(runner.html(), /lab6<\/b> · succeeded[\s\S]*2 min elapsed/);
   assert.doesNotMatch(runner.html(), /this attempt|awaiting recovery/);
 });
 test("a late detail refresh cannot reopen closed or replace newly selected details", async () => {

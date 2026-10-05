@@ -1,6 +1,6 @@
 # Jellyfin compatibility — measured build progress and remaining gates
 
-**Status:** open · J0–J3 integrated; J4 service work complete pending integration; physical client matrix deferred · **Updated:** 2026-10-04 EDT.
+**Status:** open · J0–J4 on `main`; J5 protocol completion built (§13); physical client matrix (J6) open · **Updated:** 2026-10-04 EDT.
 
 Companion to [the reviewed build contract](JELLYFIN-COMPATIBILITY-BUILD.md)
 (what must be built and proved) — this records execution and evidence. The
@@ -10,13 +10,13 @@ acceptance.
 
 ## 1. Contract publication — the real gate ran before merge
 
-[PR #744](http://192.168.4.7:3000/noirr/plurx/pulls/744) published the reviewed
+[PR #744](http://forge.lan:3000/noirr/plurx/pulls/744) published the reviewed
 contract. Its earlier runs were skipped because their event payloads carried
 `draft: true`; making the PR ready had not produced a new eligible run.
 Closing and reopening the ready PR triggered the existing fast lane without
 changing the reviewed source or workflow.
 
-[Run 3881](http://192.168.4.7:3000/noirr/plurx/actions/runs/3881) passed scope,
+[Run 3881](http://forge.lan:3000/noirr/plurx/actions/runs/3881) passed scope,
 policy/contract preflight and **Main promotion gate** on head `b3ff464b9` and
 base `9a719fcb7`. Unaffected compiler jobs were skipped by the docs-only
 scope. The gate checked that both refs remained current. PR #744 then merged
@@ -209,7 +209,7 @@ The scratch encoder was restored and the isolated daemon stopped afterward.
 
 ## 3. Compiler loop — available before Rust changes
 
-The local toolchain resolves through `/Users/pjunod/.cargo/bin` with
+The local toolchain resolves through `~/.cargo/bin` with
 `RUSTUP_TOOLCHAIN=1.97.1`; `rustc --version` reported
 `rustc 1.97.1 (8bab26f4f 2026-07-14)`. All-target `cargo check -p plurxd
 --all-targets --locked` passed on the reviewed publication source before any
@@ -434,15 +434,15 @@ assertion changed. The new candidate still requires its complete effort gate.
 
 ## 9. J0 integrated; J1 foundations under verification
 
-[Effort run 3947](http://192.168.4.7:3000/noirr/plurx/actions/runs/3947)
+[Effort run 3947](http://forge.lan:3000/noirr/plurx/actions/runs/3947)
 passed every required lane on `adf0d5e89`: policy/contracts, Rust, Windows,
 web, Apple, Android and the aggregate Effort development gate.
-[PR #747](http://192.168.4.7:3000/noirr/plurx/pulls/747) merged into the effort
+[PR #747](http://forge.lan:3000/noirr/plurx/pulls/747) merged into the effort
 as `0331f5686`, retaining all thirteen checked regression fields in the landing
 message. This closes the J0 integration failures described above. It does not
 qualify the remaining physical Infuse recovery or the production facade.
 
-[PR #763](http://192.168.4.7:3000/noirr/plurx/pulls/763) consolidates the J1
+[PR #763](http://forge.lan:3000/noirr/plurx/pulls/763) consolidates the J1
 [protocol forms](JELLYFIN-PROTOCOL-FOUNDATION.md),
 [durable identities](JELLYFIN-DURABLE-IDENTITIES.md),
 [shared services](JELLYFIN-SHARED-SERVICES.md) and
@@ -461,9 +461,9 @@ its availability does not block implementation or the J1 integration gate.
 
 ## 10. J0–J3 integrated; J4 negotiation underway
 
-[Effort run 3963](http://192.168.4.7:3000/noirr/plurx/actions/runs/3963)
+[Effort run 3963](http://forge.lan:3000/noirr/plurx/actions/runs/3963)
 passes all eight required jobs on J1 head `0e4318355`.
-[PR #763](http://192.168.4.7:3000/noirr/plurx/pulls/763) merged as `d3719303e`
+[PR #763](http://forge.lan:3000/noirr/plurx/pulls/763) merged as `d3719303e`
 with exactly `0331f5686` and `0e4318355` as parents and all 36 checked
 regression references in the landing message. The earlier run's Windows
 failure occurred while fetching the pinned toolchain action, before source
@@ -496,8 +496,8 @@ The Android TV's previously authorized address is currently unreachable. The
 Apple TV remains deferred and untouched under Paul's instruction; these device
 checks do not block implementation or automated compilation.
 
-[Effort run 3983](http://192.168.4.7:3000/noirr/plurx/actions/runs/3983)
-passed all eight jobs on J2 head `5a5514b7f`. [PR #772](http://192.168.4.7:3000/noirr/plurx/pulls/772)
+[Effort run 3983](http://forge.lan:3000/noirr/plurx/actions/runs/3983)
+passed all eight jobs on J2 head `5a5514b7f`. [PR #772](http://forge.lan:3000/noirr/plurx/pulls/772)
 merged as `e5d17b1c8` with the eighteen checked regression references in its
 landing message. The full local web check passed without increasing the
 TypeScript ratchet. Artwork remains authenticated pending the direct decision.
@@ -520,10 +520,10 @@ also pass. These results do not qualify either physical client,
 J4/J5 transport completion, or release promotion.
 
 
-[PR #779](http://192.168.4.7:3000/noirr/plurx/pulls/779) merged J3 as
+[PR #779](http://forge.lan:3000/noirr/plurx/pulls/779) merged J3 as
 `13568fbf36b415f111d922c33faf90fdcbd54c83`, with parents `e5d17b1c8` and
 `a7d45e149` and all 22 checked regression references in the landing message.
-[Effort run 4018](http://192.168.4.7:3000/noirr/plurx/actions/runs/4018)
+[Effort run 4018](http://forge.lan:3000/noirr/plurx/actions/runs/4018)
 passed all eight jobs. The exact J1 history erratum records its earlier landing
 whose subject omitted the PR number; it does not weaken the history audit.
 
@@ -551,7 +551,7 @@ to every non-excluded source; the regression covers that bypass. Accepting a
 protocol wildcard never fills in HDR/DV claims in the native planner.
 
 
-The profile slice merged through [PR #780](http://192.168.4.7:3000/noirr/plurx/pulls/780)
+The profile slice merged through [PR #780](http://forge.lan:3000/noirr/plurx/pulls/780)
 as `7a4e56b86071b856703ea357218f75ce229f026a` after all eight jobs passed
 on head `687c83602`. Its landing contains the ten checked regression fields.
 
@@ -578,10 +578,10 @@ inventories pass. Workspace/all-target Clippy passes on pinned Rust 1.97.1.
 These automated results do not count as physical client qualification.
 
 
-[PR #781](http://192.168.4.7:3000/noirr/plurx/pulls/781) merged the ancillary
+[PR #781](http://forge.lan:3000/noirr/plurx/pulls/781) merged the ancillary
 slice as `e5c6e9d34aad7d382bd4985c055c98ec87dd9131`, with parents
 `7a4e56b86` and `fa16201f3`. All eight jobs passed in
-[effort run 4023](http://192.168.4.7:3000/noirr/plurx/actions/runs/4023), and
+[effort run 4023](http://forge.lan:3000/noirr/plurx/actions/runs/4023), and
 its landing preserves all seven checked regression references.
 
 The next J4 slice keeps native player identity stable for an authenticated
@@ -612,7 +612,7 @@ remaining VOD transport work are not included in these results.
 
 The supersession slice landed in PR #782 at `acbce39ee`, with exact parents
 `e5c6e9d34` and `a37ade039`. All eight jobs passed in
-[effort run 4025](http://192.168.4.7:3000/noirr/plurx/actions/runs/4025), and
+[effort run 4025](http://forge.lan:3000/noirr/plurx/actions/runs/4025), and
 its landing preserves all nine checked regression references.
 
 The next native watch slice admits a ready, leased native incarnation only
@@ -633,7 +633,7 @@ watch admission; they do not qualify an HLS adapter or a physical client.
 
 The native watch slice landed in PR #783 at `5f27b2905`, with exact parents
 `acbce39ee` and `9414e6f86`. All eight jobs passed in
-[effort run 4027](http://192.168.4.7:3000/noirr/plurx/actions/runs/4027),
+[effort run 4027](http://forge.lan:3000/noirr/plurx/actions/runs/4027),
 and the landing preserves both checked regression references.
 
 The next admission slice reserves `jellyfin:<PlaySessionId>` native request
@@ -657,7 +657,7 @@ qualification is claimed by these receipts.
 
 The native admission slice landed in PR #784 at `e8ff688f10`, with exact
 parents `5f27b2905` and `18719c68d`. All eight jobs passed in
-[effort run 4030](http://192.168.4.7:3000/noirr/plurx/actions/runs/4030),
+[effort run 4030](http://forge.lan:3000/noirr/plurx/actions/runs/4030),
 and the landing preserves its checked regression reference.
 
 The next transport slice translates one closed transcode tuple at a time,
@@ -696,7 +696,7 @@ encoded/HEVC and physical-client qualification are still open.
 
 The native HLS slice landed in PR #785 at `d373716f4`, preserving all sixteen
 checked regression references. All eight jobs passed in
-[effort run 4032](http://192.168.4.7:3000/noirr/plurx/actions/runs/4032).
+[effort run 4032](http://forge.lan:3000/noirr/plurx/actions/runs/4032).
 
 The shared-start slice waits on the exact native incarnation already claimed
 by the same request, then accepts its exact active compatibility binding when
@@ -718,7 +718,7 @@ and the physical client matrix remain open. Apple TV testing stays deferred.
 
 The shared-start slice landed in PR #786 at `235e1c44d`, with exact parents
 `d373716f4` and `111c24b8d` and the same tree as the tested head. All eight
-jobs passed in [effort run 4034](http://192.168.4.7:3000/noirr/plurx/actions/runs/4034);
+jobs passed in [effort run 4034](http://forge.lan:3000/noirr/plurx/actions/runs/4034);
 the landing preserves all three checked regression references. All 28 local
 Jellyfin service tests, 17 documentation/API/identity/ownership contracts,
 workspace/all-target Clippy and the normal commit hooks passed on Rust 1.97.1.
@@ -746,7 +746,7 @@ deferred.
 PR #787 merged as `b138ae619` with parents `235e1c44d` and `1a2b6499d`, the
 tested head's exact tree and its three checked regression references, after
 all eight jobs passed in
-[effort run 4039](http://192.168.4.7:3000/noirr/plurx/actions/runs/4039).
+[effort run 4039](http://forge.lan:3000/noirr/plurx/actions/runs/4039).
 
 ## 11. J4 completion — access, lifecycle and the remaining service matrix
 
@@ -887,6 +887,75 @@ these paths, so on Plurx's port a client would have requested
 `/jellyfin/jellyfin/Videos/...`. Both are now client-base-relative, and HLS
 manifest children follow the mount the client used.
 
-A learner node (nuc3 today) answers facade requests with 503
+A learner node (lab3 today) answers facade requests with 503
 `learner_route_ineligible`, as it does native server requests: a learner serves
 only bounded catalogue reads and node-local media. Use a voter's address.
+
+**Libraries could not be opened.** With the address given in full, Infuse
+connected, but selecting any library failed, and adding the share in library
+mode, or with advanced options set, failed outright. The catalog parser
+accepted only a whitelist narrower than Jellyfin's contract and answered
+everything else with 400:
+- item kinds other than Movie, Series, Season, Episode and CollectionFolder;
+- orders other than seven sort keys;
+- any `Limit` above 500;
+- any `SeriesId` or `SeasonId`.
+
+It also answered a request without `Limit` with 100 rows where Jellyfin returns
+all. Those requests now narrow or degrade the way Jellyfin's do (API §24).
+Refused facade requests are now logged with their path and query, so the next
+gap names itself in the server log.
+
+## 13. J5 — the facade gaps from the main merge review
+
+The 2026-10-04 main-week merge review (§4 of that project document, read at
+`b5e39b8bb`) reported six gaps. Re-verified on `724c8b37`, with the upstream rules read from
+Jellyfin 10.11.11 (`SubtitleController`, `StreamBuilder.GetSubtitleProfile`,
+`MediaInfoHelper`, `SubtitleEncoder.FilterEvents`) and Jellyfin Android TV
+0.19.10 (`VideoManager`, `PlaybackControllerHelper`, its device profile and the
+SDK URL builder). Re-verifying turned up four defects on the same flows, so they
+are fixed here too.
+
+| Gap | Cause | Fix |
+|---|---|---|
+| Sidecar subtitles 404 | Only Jellyfin's legacy four-segment route existed. Both clients request `…/Subtitles/{index}/{startTicks}/Stream.{format}` (Infuse builds it from the codec; Android TV takes it from `DeliveryUrl`) | The five-segment route, plus the four-segment one with a query start. `vtt`/`webvtt`/`srt`/`subrip`. A start applies Jellyfin's cue window (`FilterEvents`) to the native extraction |
+| No `DeliveryUrl`, so Android TV shows no subtitles | PlaybackInfo never decided a subtitle delivery. Android TV only side-loads `External` tracks and treats a missing method as off | Each subtitle stream gets `DeliveryMethod` from the client's `SubtitleProfiles` by Jellyfin's rule order, restricted to what Plurx produces; `External` gets `DeliveryUrl`. A selected track that needs a burn makes the play a transcode. HLS masters carry renditions only for tracks that resolve to `Hls` (both pinned clients resolve to `External`) |
+| Returned URLs doubled the base path | `TranscodingUrl`/`DirectStreamUrl` began `/jellyfin/`; both clients prefix their configured address, which already ends in `/jellyfin` | URLs are relative to the configured base, as Jellyfin's are |
+| Android TV HLS and subtitles could not authenticate | Its media requests carry no header, only the URL's `ApiKey` (J0 trace); returned URLs and manifest children carried none | Returned URLs and every manifest child carry the presented compatibility login as `ApiKey`. **Decision for review**, see below |
+| Infuse HLS entry refused | Infuse lower-cases the first letter of each query key; the entry parsed `MediaSourceId`/`PlaySessionId` case-sensitively | Case-insensitive, like the direct route |
+| Infuse could not negotiate | Its normal PlaybackInfo carries `DirectPlayProtocols: ["Http"]`, which the facade refused as an unknown constraint (400), and declares no `DirectPlayProfiles`, so it could never be direct. Infuse static-streams the file anyway (J0: it did so even when Jellyfin answered with a transcode) | `DirectPlayProtocols` is accepted (Jellyfin's names only). Direct play over HTTP with no `DirectPlayProfiles` is the client choosing static delivery: negotiated as a direct play with its link, and no subtitle choice turns it into a transcode |
+| Infuse direct play refused | Infuse requests `/Videos/{id}/stream?MediaSourceId=…&Static=true` with its login and no `PlaySessionId`; the route required one | The login's newest pending or active direct negotiation of exactly that source (new Store read on both backends; contract §7.3 allows an unambiguous binding of the authenticated login) |
+| `System/Info/Public` advertised the Plurx build | Fixed by #803 before this work; pinned by `jellyfin_connection_catalog_…` | Authenticated `System/Info` now also names the Plurx build in `PackageName` (§8.3: compatibility version separate from build) |
+| Nine contract routes missing | Not built | `Users/Public` (always `[]`), authenticated `System/Info`, `Sessions/Capabilities[/Full]` (validated, not stored: nothing reads them), `Sessions/Playing/Ping`, `DELETE Videos/ActiveEncodings` (one named play, binding kept for the final Stopped), `Search/Hints`, `UserPlayedItems/{id}`, `Items/{id}/Download` (`403 download_not_offered`) |
+| Every request a linearizable switch read | The gate and the handler each read the switch | One read, by the gate; the handler uses its snapshot |
+| Leader restart (merge review: fails Jellyfin media on every node) | Not a separate exposure: during authority loss the serving gate answers `/jellyfin` with 503 and `Retry-After` before any store read, as it does native media, and an HLS play is a native session under #798's grace | No new grace. A regression drives a fence loss and recovery mid-play and checks the 503 and the same play answering afterwards; that the native session outlives a short loss is the serving fence's own tested property |
+| No metrics | Not built | `plurx_jellyfin_requests_total{route,outcome}`: route template or `unmatched`, a closed outcome set |
+| Docs | Not written | CLIENTS, FEATURES, OPERATIONS, PLAYBACK, API, SECURITY |
+
+**Adversarial review (one pass on the whole PR).** No blocker. Fixed: ASS and
+other styled text counted as non-text (it now follows the extractor: anything
+not bitmap is text, so ASS is a converted sidecar, not a burn); a client with
+no `SubtitleProfiles` lost the manifest renditions its output declared (that
+declaration now stands in for an `Hls` entry); a cue out of order before the
+start could wrap its time (dropped or clamped now); a mixed profile could list
+a track both as sidecar and rendition (once the master carries renditions,
+every text track is reported as one); `ActiveEncodings` re-released ended
+plays; the metrics test could pass on another test's request (a delta now);
+the leader-restart test claimed more than it proves (reworded). Added tests:
+another login's play id is 404 on `Ping` and `ActiveEncodings`, and after
+`ActiveEncodings` on an HLS play the final `Stopped` still commits.
+
+**Not built: `RandomSeriesItems`.** §2 names it in prose, but no retained trace
+shows the request. A guessed route would be a band-aid; the metrics now show
+any unmatched route the device check hits.
+
+**Decision for review — `ApiKey` in returned URLs.** The facade previously
+kept credentials out of URLs. Android TV cannot authenticate HLS or subtitle
+requests without one. Jellyfin puts the user's access token there; so does the
+facade now, the compatibility login only (refused everywhere outside
+`/jellyfin`), returned only to the caller that presented it, and omitted from
+request logs. A per-play capability would be tighter but needs new storage;
+it stays open as hardening (SECURITY.md).
+
+Still open (J6): the physical Infuse and Android TV matrix on this candidate,
+HDR/Dolby Vision, the multipage corpus, and the SDR HEVC High-tier master case.

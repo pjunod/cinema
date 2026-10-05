@@ -2358,7 +2358,7 @@
         req.vod_only = true;
         req.passive_vod = true;
         req.request_id = Some("compatibility-preview-attempt".into());
-        serve.preview_recipe((&req).into(), &file, None).await
+        serve.preview_recipe((&req).into(), &file, &settings(), None).await
             .expect("the indexed copy is predictable without allocation");
         assert!(serve.shared.sessions.lock().await.is_empty());
         assert!(serve.shared.renditions.lock().await.is_empty());
@@ -2369,7 +2369,7 @@
         assert_eq!(serve.shared.completed_cache.load(std::sync::atomic::Ordering::Acquire), 0);
 
         req.kind = SessionKind::Transcode { height: 720 };
-        let error = serve.preview_recipe((&req).into(), &file, None).await
+        let error = serve.preview_recipe((&req).into(), &file, &settings(), None).await
             .expect_err("an unresolved encoded recipe must fail during negotiation");
         assert_eq!(crate::transcode::vod_refusal(&error).expect("typed refusal").0,
             "vod_recipe_unresolved");
@@ -2535,12 +2535,15 @@
             .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "1")
             .await
             .expect("enable shared preparation");
+        let mut enabled = settings();
+        enabled.index_cluster_cache = true;
+        enabled.output_preparation = crate::vodserve::OutputPreparation::Copy;
         for session in ["first", "retry"] {
             let refused = serve
                 .try_create(
                     &req,
                     &file,
-                    &settings(),
+                    &enabled,
                     VodAttribution {
                         user_name: "viewer",
                         item_title: "Cold source",
@@ -2639,6 +2642,7 @@
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
+                sdr_master_codecs: false,
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
@@ -2777,6 +2781,7 @@
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
+                sdr_master_codecs: false,
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),

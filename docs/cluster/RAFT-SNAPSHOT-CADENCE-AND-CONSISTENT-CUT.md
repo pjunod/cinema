@@ -1,7 +1,10 @@
 # Raft snapshot cadence and the consistent cut — measure, then move the copy off the writer without moving the cut
 
-**Status:** in progress — correctness/default plumbing implemented on a task
-branch; fleet threshold tuning and release qualification remain open
+**Status:** open — M0–M3 on `main` since 2026-10-04 (#793): fork patch 22
+(writer-fixed cut, off-writer copy) and storage admission run on every voter,
+with no switch, by design. Paul accepted the shipped path on 2026-10-04 and
+declined a 24-hour undisturbed readout; what remains is to observe one real
+snapshot on production data
 · **Executes:** S2, S5, F-sc-2, F-sc-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -478,8 +481,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 instrumentation | [#427](http://192.168.4.7:3000/noirr/plurx/pulls/427) | Four fixed-label filesystem gauges are sampled by the existing passive local-Raft tick without Store or network access; direct node status and the Cluster page carry the database byte count. Rust 1.97.1 compiled `plurx-core`, `plurxd`, and `plurx-cluster-check`; the focused filesystem, Prometheus, and web contracts passed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 fleet readout | [#427](http://192.168.4.7:3000/noirr/plurx/pulls/427) | Blocked, not estimated: this execution host could not resolve the plan's `media1`/`lab1`–`lab3` aliases; SSH to the documented current addresses for media1, lab3, lab4, and lab6 timed out, and the configured `billy` jump host could not reach their HTTP listeners. No voter was restarted. M1, M3, and therefore M2 remain unchanged until every current voter supplies the 24-hour B/E/S/W readout and an authorized follower restart supplies A. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 instrumentation | [#427](http://forge.lan:3000/noirr/plurx/pulls/427) | Four fixed-label filesystem gauges are sampled by the existing passive local-Raft tick without Store or network access; direct node status and the Cluster page carry the database byte count. Rust 1.97.1 compiled `plurx-core`, `plurxd`, and `plurx-cluster-check`; the focused filesystem, Prometheus, and web contracts passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 fleet readout | [#427](http://forge.lan:3000/noirr/plurx/pulls/427) | Blocked, not estimated: this execution host could not resolve the plan's `media1`/`lab1`–`lab3` aliases; SSH to the documented current addresses for media1, lab3, lab4, and lab6 timed out, and the configured `jump1` jump host could not reach their HTTP listeners. No voter was restarted. M1, M3, and therefore M2 remain unchanged until every current voter supplies the 24-hour B/E/S/W readout and an authorized follower restart supplies A. |
 
 ### Historical execution boundary — 2026-09-21
 

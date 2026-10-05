@@ -1321,6 +1321,62 @@ fn render_background_overruns(out: &mut String) {
     );
 }
 
+/// Queued output-preparation rows cancelled because `vod.output_preparation`
+/// no longer admits their kind, by kind.
+pub(crate) const OUTPUT_PREPARATION_DRAIN_KINDS: [&str; 2] =
+    ["copy_output_prepare", "encoded_output_prepare"];
+
+static OUTPUT_PREPARATION_DRAINS: [AtomicU64; OUTPUT_PREPARATION_DRAIN_KINDS.len()] =
+    [const { AtomicU64::new(0) }; OUTPUT_PREPARATION_DRAIN_KINDS.len()];
+
+pub(crate) fn record_output_preparation_drained(kind: plurx_core::store::background_jobs::JobKind) {
+    use plurx_core::store::background_jobs::JobKind;
+    let index = match kind {
+        JobKind::CopyOutputPrepare => 0,
+        JobKind::EncodedOutputPrepare => 1,
+        _ => return,
+    };
+    OUTPUT_PREPARATION_DRAINS[index].fetch_add(1, Ordering::Relaxed);
+}
+
+fn render_output_preparation_drains(out: &mut String) {
+    render_counters(
+        out,
+        "plurx_output_preparation_drained_total",
+        "Queued complete-output preparation rows cancelled because vod.output_preparation no longer admits their kind (reason output_preparation_disabled).",
+        "kind",
+        &OUTPUT_PREPARATION_DRAIN_KINDS,
+        &OUTPUT_PREPARATION_DRAINS,
+    );
+}
+
+/// Why a rolling start skipped its retained-output lookup instead of failing
+/// Play, in index order. The lookup is optional: a miss starts a producer.
+pub(crate) const ROLLING_RETAINED_LOOKUP_SKIP_REASONS: [&str; 1] = ["plan_error"];
+
+static ROLLING_RETAINED_LOOKUP_SKIPS: [AtomicU64; ROLLING_RETAINED_LOOKUP_SKIP_REASONS.len()] =
+    [const { AtomicU64::new(0) }; ROLLING_RETAINED_LOOKUP_SKIP_REASONS.len()];
+
+pub(crate) fn record_rolling_retained_lookup_skipped(reason: &str) {
+    if let Some(index) = ROLLING_RETAINED_LOOKUP_SKIP_REASONS
+        .iter()
+        .position(|label| *label == reason)
+    {
+        ROLLING_RETAINED_LOOKUP_SKIPS[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn render_rolling_retained_lookup_skips(out: &mut String) {
+    render_counters(
+        out,
+        "plurx_rolling_retained_lookup_skipped_total",
+        "Rolling starts that skipped the optional retained-output lookup instead of failing Play, by reason.",
+        "reason",
+        &ROLLING_RETAINED_LOOKUP_SKIP_REASONS,
+        &ROLLING_RETAINED_LOOKUP_SKIPS,
+    );
+}
+
 /// Why a started session's complete-output preparation was not handed to
 /// [`crate::transcode::TranscodeManager::output_enqueue_loop`], in index order.
 pub(crate) const OUTPUT_ENQUEUE_DROP_REASONS: [&str; 2] = ["queue_full", "worker_stopped"];
@@ -2111,6 +2167,8 @@ pub fn prometheus() -> String {
     metrics.push_str(&SUBTITLE_SOURCE_METRICS.render());
     metrics.push_str(&START_OUTCOME_COUNTERS.render());
     render_background_overruns(&mut metrics);
+    render_rolling_retained_lookup_skips(&mut metrics);
+    render_output_preparation_drains(&mut metrics);
     render_output_enqueue_drops(&mut metrics);
     metrics
 }

@@ -1,6 +1,6 @@
 # The hiqlite fork and what it drags in — decide the ownership, then cut the graph
 
-**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 one accepted mechanism, nine generic rows pending as of 2026-09-30 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
+**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://forge.lan:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 one accepted mechanism, nine generic rows pending as of 2026-09-30 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
 F-build-ops-codehealth-5, -6, -7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -413,7 +413,7 @@ edge is an upstream defect and every downstream user of hiqlite without
 ### 3.4 Take `s3-simple` out of the workspace graph, and scope its override to the fork
 
 **Corrected 2026-09-22 after the sole adversarial review of
-[#432](http://192.168.4.7:3000/noirr/plurx/pulls/432).** This section
+[#432](http://forge.lan:3000/noirr/plurx/pulls/432).** This section
 originally said "delete `vendor/s3-simple`". Deleting the directory outright
 was wrong, and the reason is the clause the section itself calls
 load-bearing.
@@ -522,7 +522,7 @@ than a dependency cut and belongs in a security plan, not this one.
 `tls-rustls-no-provider` alone exposes all four is the first thing M3 must
 compile, not assume.
 
-**Option A taken, 2026-09-24 (M3, [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503)).** Re-verified at build time,
+**Option A taken, 2026-09-24 (M3, [#503](http://forge.lan:3000/noirr/plurx/pulls/503)).** Re-verified at build time,
 with two corrections. *There were three routes to `aws-lc-rs`, not two.* With
 `tls-rustls` and `prefer-post-quantum` gone, `cargo tree -e features -i
 aws-lc-rs` still reached it through `tokio-rustls` feature `default` — 0.26's
@@ -565,7 +565,7 @@ identical, because the embedding is a function of the ids and a divergence
 would silently change search results. If they diverge on any input, (a) does
 not land and (b) and (c) still can.
 
-**Build-time correction, 2026-09-24 (M4, [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503)): (a) cannot land as
+**Build-time correction, 2026-09-24 (M4, [#503](http://forge.lan:3000/noirr/plurx/pulls/503)): (a) cannot land as
 written.** `candle-core` 0.11.0, the newest release, declares `tokenizers`
 with `features = ["onig"]` unconditionally on every non-wasm target, and
 `tokenizers` 0.22.2 uses `onig` whenever that feature is on (its
@@ -628,7 +628,7 @@ when its inputs change — then (b) and (c) are not worth their complexity and
 the milestone stops after (a). That decision is data, not preference, and
 M0 produces the data before M5 is written.
 
-**Decision (2026-09-26, [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558), numbers in §5.1's "As measured"): (b) and (c) are not taken.**
+**Decision (2026-09-26, [#558](http://forge.lan:3000/noirr/plurx/pulls/558), numbers in §5.1's "As measured"): (b) and (c) are not taken.**
 The saving is small where the gate spends time, and (c) spends it back:
 
 - *The gate's own command does not get faster.* A cold
@@ -686,7 +686,7 @@ pool.install(|| model.forward(&input))
 internal `par_iter` runs on this pool and the global pool is never built.
 `rayon` becomes a direct dependency of `plurxd`, gated by the same feature.
 
-**As built (2026-09-26, [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558)).** `on_embed_pool` in
+**As built (2026-09-26, [#558](http://forge.lan:3000/noirr/plurx/pulls/558)).** `on_embed_pool` in
 [semantic.rs](../../crates/plurxd/src/library_search/semantic.rs) wraps the
 whole of `Encoder::embed` (tokenize and forward). Two things were checked in
 candle 0.11.0's source first. Its CPU matmul passes gemm
@@ -716,7 +716,7 @@ PLURX_TEST_MINILM_DIR=<verified model dir> cargo test --locked -p plurxd \
   embed_thread_scaling -- --ignored --nocapture
 ```
 
-Milliseconds per text on nuc3 (16 CPUs). "Two keep" is the 2-thread
+Milliseconds per text on lab3 (16 CPUs). "Two keep" is the 2-thread
 throughput as a fraction of the best size in the same run:
 
 | Run | Load average | 1 | 2 | 4 | 8 | 16 | Two keep |
@@ -809,19 +809,19 @@ runner:
 Acceptance: the table exists in this document with six numbers and the
 runner's identity, and the M5 decision in §3.7(c) cites it.
 
-**As measured (2026-09-26, [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558)).** Taken on the fast Rust gate's own
+**As measured (2026-09-26, [#558](http://forge.lan:3000/noirr/plurx/pulls/558)).** Taken on the fast Rust gate's own
 runner class and container rather than by the prompt below, through the
 dispatch-only [`k08-build-measure.yml`](../../.github/workflows/k08-build-measure.yml)
 running [`scripts/k08-build-measure`](../../scripts/k08-build-measure).
-Runner: `gha-nynuc-general-01`…`04` are four runners on one host, `nynuc`
+Runner: `gha-media1-general-01`…`04` are four runners on one host, `media1`
 (`nproc` 16), with labels `self-hosted, Linux, X64, lab, general, high-cpu`
 and container `ubuntu:24.04`; rustc 1.97.1. *Cold* is a fresh target
 directory with the registry already fetched, and *warm* is the same command
-repeated at once. Run [3272](http://192.168.4.7:3000/noirr/plurx/actions/runs/3272) measured
+repeated at once. Run [3272](http://forge.lan:3000/noirr/plurx/actions/runs/3272) measured
 `eb7e3b061` (main `abb6fe647` plus the workflow). Run
-[3278](http://192.168.4.7:3000/noirr/plurx/actions/runs/3278) measured the lean probe `73acf4feb` (§3.7(c)
+[3278](http://forge.lan:3000/noirr/plurx/actions/runs/3278) measured the lean probe `73acf4feb` (§3.7(c)
 decision) and the shipped configuration again in the same job. Other
-fast-lane runs were active on nynuc during both, so the four runners were
+fast-lane runs were active on media1 during both, so the four runners were
 sharing 16 cores. The same configuration's plurxd check took 82.4 s in one
 run and 103.1 s in the other, so read any difference under about 20 s as
 noise. plurxd has no default features, so on `main` item 3's
@@ -980,7 +980,7 @@ met by two parts instead:
 §3.7(b), (c) and (d), only if M0's numbers justify (b) and M4 passed for
 (a).
 
-**As built (2026-09-26, [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558)):** (d) only. M0's numbers decline (b)
+**As built (2026-09-26, [#558](http://forge.lan:3000/noirr/plurx/pulls/558)):** (d) only. M0's numbers decline (b)
 and (c) (§3.7(c) decision), and (a) was already blocked by candle, so there
 is no feature, no second lane configuration and no Dockerfile change.
 Acceptance for what landed: `inference_runs_on_its_own_bounded_pool` shows
@@ -1040,7 +1040,7 @@ of the above.
 Acceptance: every `generic bug` row in the three ledgers has a URL, and this
 document's Execution log records which were accepted, rejected or ignored.
 
-**M6 reconciliation, 2026-09-30 ([#642](http://192.168.4.7:3000/noirr/plurx/pulls/642)).**
+**M6 reconciliation, 2026-09-30 ([#642](http://forge.lan:3000/noirr/plurx/pulls/642)).**
 The current ledgers contain ten generic rows: Hiqlite 1, 8, 9, 10, 11, 17
 and 19, plus WAL 1, 2 and 3. One has a verified accepted mechanism; nine
 still say `pending M6`. The nine-row statements in §5.8 and the September 21
@@ -1218,29 +1218,29 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Claimed K-08 from `9deb58a2`; opened the whole-plan draft before implementation. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: cold/warm workspace and lean-lane timings plus target size on the normal lab runner; not replaced with source-only VM measurements. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 · `a94c71a9e` | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Root graph no longer contains `s3-simple`, `quinn`, or `aws-lc-sys = 0.39.1`; duplicate rows 47 → 43. All seven optional-feature combinations preserve S3 exactly when `backup`/`s3` requires it. Rust 1.97.1 checks cover the shipped core and optional backup fork configurations. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 · `5c87d1895` | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Named Paul Junod as owner; recorded 16 + 3 patch kinds/drop conditions; added drift contracts and dependency bans. `cargo-deny` 0.20.2 reports bans/licenses green and rejects the base graph's banned 0.39.1 version. Generic upstream URLs remain pending M6. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: ring-provider assertion plus three-voter transport evidence. Both surviving aws-lc routes are mapped and deliberately unchanged. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: lab library snapshot and exact onig/fancy-regex token-id comparison. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: M0 cost and M4 equivalence results. No speculative build/runtime gate was added. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M6 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: public upstream issue/PR coordination for nine generic bugs; the ledgers expose `pending M6` until real URLs exist. |
-| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review fix | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Sole-review P1: the advertised `backup`/`s3` graph still resolved registry `s3-simple` 0.8.0, `quick-xml` 0.39.4 and `aws-lc-sys` 0.39.1. Retained `vendor/s3-simple` with the quick-xml 0.41 bump plus removal of its four unreferenced aws-lc/quinn edges, and moved the override into `vendor/hiqlite/Cargo.toml`'s own `[patch.crates-io]`. Fork lock now resolves `quick-xml` 0.41.0 through the path copy, one `aws-lc-sys` (0.42.0), no `quinn`. `ForkBackupGraphPolicyCase` pins it and fails on the pre-fix tree. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | claim | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | Second pass claimed from `0e2c3fd47` on `plan/K-08-2` for the server-side remainder (M3, M4, and what M5 the evidence licenses). |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 · `204af802c` | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | §3.6 option A taken. Three routes cut in `vendor/hiqlite/Cargo.toml` (the third, `tokio-rustls` defaults, found at build time); ledger patch 20. `cargo tree -i aws-lc-rs` and `-i aws-lc-sys` match nothing; duplicate rows stay 43 (M1 had already removed the second `aws-lc-sys`); lock 510 → 504 packages. `installed_provider_is_ring`, `rustls_single_provider` and `hiqlite_tls_provider` green; restoring the pre-M3 manifest makes `rustls_single_provider` panic ("rustls could not pick a provider on its own") and `RingOnlyProviderGraphCase` fail on both the lock and the manifest. THIRD-PARTY-NOTICES loses the six rows, `deny.toml` loses `CC0-1.0`. Gate exit codes are in the PR body. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 · `f0a3747bd` | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | `tokenizer_backends_agree` (ignored; `PLURX_TEST_MINILM_DIR`): pinned tokenizer has no regex-backed component; 143 fixture inputs / 2094 ids recorded on `onig` in `testdata/tokenizer_corpus.ids`, and a standalone tokenizers 0.22.2 build on `fancy-regex` (no `onig_sys` in its graph) produced byte-identical ids. A changed recorded id fails the test at the first divergence. (a) itself is blocked by `candle-core` 0.11.0's unconditional `tokenizers/onig` (§3.7(a) correction). Optional corroboration, not a gate: the lab-corpus run below. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | needs: M0. (a) cannot land (see M4); onig leaves only with (b). (b), (c) and (d) wait on M0's cost numbers per §3.7(c); no speculative feature, gate or setting was added. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | needs: the §5.1 GPT prompt run on a fast-lane runner (`gha-nynuc-general-01`…`04`, labels `self-hosted, Linux, X64, lab, general, high-cpu`) at the PR head; the nuc3 build host is not that runner and was under load from concurrent builds. M5 cites the numbers. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | unchanged: needs public upstream issues/PRs for the generic rows (owner). Patch 20 is `plurx policy` and has no upstream row. |
-| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 4628](http://192.168.4.7:3000/noirr/plurx/pulls/503#issuecomment-4628)) | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | Three P2 findings, all taken. (1) The M4 two-backend run had used an uncommitted scratch crate, and the in-tree test's doc comment claimed a comparison it cannot make. The harness is now `spikes/tokenizer-backends` + `make tokenizer-backends` (§5.5 "As built"), and the programmatic inputs moved to a file both include. It reproduced the result: onig and fancy-regex identical over 143 inputs / 2094 ids, no `onig_sys` in the fancy-regex graph; one changed recorded id makes it exit non-zero. (2) THIRD-PARTY-NOTICES §4 summary and crate counts recomputed from `cargo metadata` (496 after merging main), and the `deny.toml` aws-lc comment rewritten. `LicenseNoticesCase` now holds the summary and every stated count to the full list. (3) `vendor/hiqlite/PLURX-PATCH.md`'s removal rule now separates the eight upstream-retirable rows from the twelve `plurx policy` rows, which only an owner decision retires. `test_the_removal_condition_can_be_met` pins it. The ARCHITECTURE §9 risk row's stale "Sixteen" count was corrected with it. |
-| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | claim | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | Third pass claimed from `abb6fe647` on `plan/K-08-3` for M0 and M5 (b)-(d). |
-| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 · runs [3272](http://192.168.4.7:3000/noirr/plurx/actions/runs/3272), [3278](http://192.168.4.7:3000/noirr/plurx/actions/runs/3278) | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | Measured on `gha-nynuc-general` (host `nynuc`, 16 CPUs, shared with concurrent fast-lane runs) by the dispatch-only `k08-build-measure.yml`, which has no push, pull_request or schedule trigger and is not a required check. Shipped: 43 duplicate rows, cold workspace check 110.7 s / 102.6 s, warm 0.9 s / 0.2 s, plurxd check 82.4 s / 103.1 s, 836M; `CARGO_BUILD_JOBS=1` 318.4 s. The candle/tokenizers subtree is 8.7% of summed unit time and off the critical path. Table in §5.1. |
-| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (d) · `65334fed8` | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | `on_embed_pool`: inference runs on two named `plurx-embed` threads through `install`; the global pool is never built. `inference_runs_on_its_own_bounded_pool` passes, and fails with the pool bypassed (`current_num_threads()` is not 2). `embed_thread_scaling`: 45.5 / 37.0 / 34.8 / 34.7 / 36.1 ms per text at 1 / 2 / 4 / 8 / 16 threads. `rg build_global crates/` is empty. Fleet check: the (d) GPT prompt in §5.6. |
-| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (b), (c) | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | Declined on M0's numbers (§3.7(c) decision): cold workspace check 102.6 s shipped vs 101.6 s lean, warm-cache plurxd rebuild 82.1 s vs 85.9 s, and (c)'s required second check would make the lane do more work, not less. Lean probe `73acf4feb` was measurement only; its branch is deleted. `onig` stays until candle stops forcing it. |
-| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | Unchanged: needs public upstream issues/PRs for the generic rows (owner). |
-| 2026-09-27 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 5513](http://192.168.4.7:3000/noirr/plurx/pulls/558#issuecomment-5513)) | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | One P2, taken. The M5 (d) row's thread-scaling numbers were measured at opt-level 3 applied outside the tree, and a plain run of the committed test (opt-level 0) gives 802 / 360 / 225 / 166 / 129 ms per text, which argues for more threads. The exact command (`--config 'profile.dev.package."*".opt-level=3'`) is now in the test's doc comment and ignore reason and in §3.7(d), and it was rerun that way four times on the merged head: two threads keep 74% to 86% of the best throughput, not 94%. `EMBED_THREADS = 2` is now described as a chosen CPU bound whose cost is measured (3.5 to 6 ms per text), not a near-optimum. No code behaviour changed. |
-| 2026-09-30 | gpt-6.1-sol | agent:/root/k08_upstream_receipt_sol61 | M6 accepted-mechanism receipt | [#642](http://192.168.4.7:3000/noirr/plurx/pulls/642) | Claim checkpoint `2e01577d4` from exact effort base `b952246a97375909b396e0ef4588a8d138578286`. WAL 2 links accepted upstream PR 357 and released source; stronger local durability and all drop conditions remain. Ten generic rows reconcile to one verified accepted mechanism and nine pending exact matches/submissions. No upstream reproduction, public write, upgrade, patch removal or fleet acceptance. Original authors/history retained; root coordinator manages the sole independent review and exact-current Effort gate/integration. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | [#432](http://forge.lan:3000/noirr/plurx/pulls/432) | Claimed K-08 from `9deb58a2`; opened the whole-plan draft before implementation. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#432](http://forge.lan:3000/noirr/plurx/pulls/432) | needs: cold/warm workspace and lean-lane timings plus target size on the normal lab runner; not replaced with source-only VM measurements. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 · `a94c71a9e` | [#432](http://forge.lan:3000/noirr/plurx/pulls/432) | Root graph no longer contains `s3-simple`, `quinn`, or `aws-lc-sys = 0.39.1`; duplicate rows 47 → 43. All seven optional-feature combinations preserve S3 exactly when `backup`/`s3` requires it. Rust 1.97.1 checks cover the shipped core and optional backup fork configurations. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 · `5c87d1895` | [#432](http://forge.lan:3000/noirr/plurx/pulls/432) | Named Paul Junod as owner; recorded 16 + 3 patch kinds/drop conditions; added drift contracts and dependency bans. `cargo-deny` 0.20.2 reports bans/licenses green and rejects the base graph's banned 0.39.1 version. Generic upstream URLs remain pending M6. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [#432](http://forge.lan:3000/noirr/plurx/pulls/432) | needs: ring-provider assertion plus three-voter transport evidence. Both surviving aws-lc routes are mapped and deliberately unchanged. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#432](http://forge.lan:3000/noirr/plurx/pulls/432) | needs: lab library snapshot and exact onig/fancy-regex token-id comparison. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#432](http://forge.lan:3000/noirr/plurx/pulls/432) | needs: M0 cost and M4 equivalence results. No speculative build/runtime gate was added. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M6 | [#432](http://forge.lan:3000/noirr/plurx/pulls/432) | needs: public upstream issue/PR coordination for nine generic bugs; the ledgers expose `pending M6` until real URLs exist. |
+| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review fix | [#432](http://forge.lan:3000/noirr/plurx/pulls/432) | Sole-review P1: the advertised `backup`/`s3` graph still resolved registry `s3-simple` 0.8.0, `quick-xml` 0.39.4 and `aws-lc-sys` 0.39.1. Retained `vendor/s3-simple` with the quick-xml 0.41 bump plus removal of its four unreferenced aws-lc/quinn edges, and moved the override into `vendor/hiqlite/Cargo.toml`'s own `[patch.crates-io]`. Fork lock now resolves `quick-xml` 0.41.0 through the path copy, one `aws-lc-sys` (0.42.0), no `quinn`. `ForkBackupGraphPolicyCase` pins it and fails on the pre-fix tree. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | claim | [#503](http://forge.lan:3000/noirr/plurx/pulls/503) | Second pass claimed from `0e2c3fd47` on `plan/K-08-2` for the server-side remainder (M3, M4, and what M5 the evidence licenses). |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 · `204af802c` | [#503](http://forge.lan:3000/noirr/plurx/pulls/503) | §3.6 option A taken. Three routes cut in `vendor/hiqlite/Cargo.toml` (the third, `tokio-rustls` defaults, found at build time); ledger patch 20. `cargo tree -i aws-lc-rs` and `-i aws-lc-sys` match nothing; duplicate rows stay 43 (M1 had already removed the second `aws-lc-sys`); lock 510 → 504 packages. `installed_provider_is_ring`, `rustls_single_provider` and `hiqlite_tls_provider` green; restoring the pre-M3 manifest makes `rustls_single_provider` panic ("rustls could not pick a provider on its own") and `RingOnlyProviderGraphCase` fail on both the lock and the manifest. THIRD-PARTY-NOTICES loses the six rows, `deny.toml` loses `CC0-1.0`. Gate exit codes are in the PR body. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 · `f0a3747bd` | [#503](http://forge.lan:3000/noirr/plurx/pulls/503) | `tokenizer_backends_agree` (ignored; `PLURX_TEST_MINILM_DIR`): pinned tokenizer has no regex-backed component; 143 fixture inputs / 2094 ids recorded on `onig` in `testdata/tokenizer_corpus.ids`, and a standalone tokenizers 0.22.2 build on `fancy-regex` (no `onig_sys` in its graph) produced byte-identical ids. A changed recorded id fails the test at the first divergence. (a) itself is blocked by `candle-core` 0.11.0's unconditional `tokenizers/onig` (§3.7(a) correction). Optional corroboration, not a gate: the lab-corpus run below. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 | [#503](http://forge.lan:3000/noirr/plurx/pulls/503) | needs: M0. (a) cannot land (see M4); onig leaves only with (b). (b), (c) and (d) wait on M0's cost numbers per §3.7(c); no speculative feature, gate or setting was added. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 | [#503](http://forge.lan:3000/noirr/plurx/pulls/503) | needs: the §5.1 GPT prompt run on a fast-lane runner (`gha-media1-general-01`…`04`, labels `self-hosted, Linux, X64, lab, general, high-cpu`) at the PR head; the lab3 build host is not that runner and was under load from concurrent builds. M5 cites the numbers. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#503](http://forge.lan:3000/noirr/plurx/pulls/503) | unchanged: needs public upstream issues/PRs for the generic rows (owner). Patch 20 is `plurx policy` and has no upstream row. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 4628](http://forge.lan:3000/noirr/plurx/pulls/503#issuecomment-4628)) | [#503](http://forge.lan:3000/noirr/plurx/pulls/503) | Three P2 findings, all taken. (1) The M4 two-backend run had used an uncommitted scratch crate, and the in-tree test's doc comment claimed a comparison it cannot make. The harness is now `spikes/tokenizer-backends` + `make tokenizer-backends` (§5.5 "As built"), and the programmatic inputs moved to a file both include. It reproduced the result: onig and fancy-regex identical over 143 inputs / 2094 ids, no `onig_sys` in the fancy-regex graph; one changed recorded id makes it exit non-zero. (2) THIRD-PARTY-NOTICES §4 summary and crate counts recomputed from `cargo metadata` (496 after merging main), and the `deny.toml` aws-lc comment rewritten. `LicenseNoticesCase` now holds the summary and every stated count to the full list. (3) `vendor/hiqlite/PLURX-PATCH.md`'s removal rule now separates the eight upstream-retirable rows from the twelve `plurx policy` rows, which only an owner decision retires. `test_the_removal_condition_can_be_met` pins it. The ARCHITECTURE §9 risk row's stale "Sixteen" count was corrected with it. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | claim | [#558](http://forge.lan:3000/noirr/plurx/pulls/558) | Third pass claimed from `abb6fe647` on `plan/K-08-3` for M0 and M5 (b)-(d). |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 · runs [3272](http://forge.lan:3000/noirr/plurx/actions/runs/3272), [3278](http://forge.lan:3000/noirr/plurx/actions/runs/3278) | [#558](http://forge.lan:3000/noirr/plurx/pulls/558) | Measured on `gha-media1-general` (host `media1`, 16 CPUs, shared with concurrent fast-lane runs) by the dispatch-only `k08-build-measure.yml`, which has no push, pull_request or schedule trigger and is not a required check. Shipped: 43 duplicate rows, cold workspace check 110.7 s / 102.6 s, warm 0.9 s / 0.2 s, plurxd check 82.4 s / 103.1 s, 836M; `CARGO_BUILD_JOBS=1` 318.4 s. The candle/tokenizers subtree is 8.7% of summed unit time and off the critical path. Table in §5.1. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (d) · `65334fed8` | [#558](http://forge.lan:3000/noirr/plurx/pulls/558) | `on_embed_pool`: inference runs on two named `plurx-embed` threads through `install`; the global pool is never built. `inference_runs_on_its_own_bounded_pool` passes, and fails with the pool bypassed (`current_num_threads()` is not 2). `embed_thread_scaling`: 45.5 / 37.0 / 34.8 / 34.7 / 36.1 ms per text at 1 / 2 / 4 / 8 / 16 threads. `rg build_global crates/` is empty. Fleet check: the (d) GPT prompt in §5.6. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (b), (c) | [#558](http://forge.lan:3000/noirr/plurx/pulls/558) | Declined on M0's numbers (§3.7(c) decision): cold workspace check 102.6 s shipped vs 101.6 s lean, warm-cache plurxd rebuild 82.1 s vs 85.9 s, and (c)'s required second check would make the lane do more work, not less. Lean probe `73acf4feb` was measurement only; its branch is deleted. `onig` stays until candle stops forcing it. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#558](http://forge.lan:3000/noirr/plurx/pulls/558) | Unchanged: needs public upstream issues/PRs for the generic rows (owner). |
+| 2026-09-27 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 5513](http://forge.lan:3000/noirr/plurx/pulls/558#issuecomment-5513)) | [#558](http://forge.lan:3000/noirr/plurx/pulls/558) | One P2, taken. The M5 (d) row's thread-scaling numbers were measured at opt-level 3 applied outside the tree, and a plain run of the committed test (opt-level 0) gives 802 / 360 / 225 / 166 / 129 ms per text, which argues for more threads. The exact command (`--config 'profile.dev.package."*".opt-level=3'`) is now in the test's doc comment and ignore reason and in §3.7(d), and it was rerun that way four times on the merged head: two threads keep 74% to 86% of the best throughput, not 94%. `EMBED_THREADS = 2` is now described as a chosen CPU bound whose cost is measured (3.5 to 6 ms per text), not a near-optimum. No code behaviour changed. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k08_upstream_receipt_sol61 | M6 accepted-mechanism receipt | [#642](http://forge.lan:3000/noirr/plurx/pulls/642) | Claim checkpoint `2e01577d4` from exact effort base `b952246a97375909b396e0ef4588a8d138578286`. WAL 2 links accepted upstream PR 357 and released source; stronger local durability and all drop conditions remain. Ten generic rows reconcile to one verified accepted mechanism and nine pending exact matches/submissions. No upstream reproduction, public write, upgrade, patch removal or fleet acceptance. Original authors/history retained; root coordinator manages the sole independent review and exact-current Effort gate/integration. |
 | 2026-10-03 | gpt-6.1-sol | agent:/root/union_independent_review_sol61 | M6 evidence-only preparation | not submitted | Isolated source branch from current effort `74b73a9b1f24537a6f96b36f61467f85a6edb9ae`; §5.7 and two ledger receipts record accepted partial Hiqlite 1 / WAL 3 fixes and correct the unexecuted Hiqlite 17 extraction oracle without changing backup↔S3. All counts, pending rows, kinds, drop conditions and earlier receipts remain. No Rust, compiler, test, runtime, AUTO, public submission, upgrade or patch removal; independent review and exact-source documentation checks remain unexecuted. |
 
 M4 lab-corpus corroboration (optional; the structural result already covers
@@ -1251,11 +1251,11 @@ GPT prompt (fleet): On media1, list every library section through the
 Plex-compatible API (GET /library/sections, then /library/sections/<id>/all
 with an admin X-Plex-Token), and write the non-empty `title`, `summary` and
 `tagline` attribute values of every item, one per line with embedded newlines
-replaced by spaces, to a UTF-8 file. Copy it to nuc3 as
+replaced by spaces, to a UTF-8 file. Copy it to lab3 as
 ~/work/k08-library-corpus.txt and report its line count. Nothing else.
 ```
 
-Then, from a checkout on nuc3:
+Then, from a checkout on lab3:
 `make tokenizer-backends PLURX_TEST_MINILM_DIR=<dir holding the pinned tokenizer.json> PLURX_TEST_TOKENIZER_CORPUS=$HOME/work/k08-library-corpus.txt`.
 It runs both backends over the fixture plus that file and exits non-zero on
 any divergence. (The 2026-09-24 M4 run used an uncommitted scratch crate,

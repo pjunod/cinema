@@ -297,7 +297,7 @@ regression was added, and physical Android TV double-press acceptance is
 included above. Fable reviewed the original five-test patch; the additional
 animation test was added after that review.
 
-An adversarial agent review of [PR #523](http://192.168.4.7:3000/noirr/plurx/pulls/523)
+An adversarial agent review of [PR #523](http://forge.lan:3000/noirr/plurx/pulls/523)
 found no actionable issues in the recovered final patch, including the
 animation regression and Media3 opt-in. Merge, published APK, and physical
 device acceptance remain pending.

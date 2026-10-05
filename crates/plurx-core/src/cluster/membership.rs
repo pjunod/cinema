@@ -2019,7 +2019,10 @@ impl ClockMembershipSource for hiqlite::LocalDbRaftMetrics {
 pub struct StartupMembershipAdmission {
     source: Arc<StartupClockMembershipSource>,
     clock: Arc<ClusterClockGuard>,
-    startup_deadline: Option<tokio::time::Instant>,
+    /// The admission/promotion/activation phase deadline. Installed exactly
+    /// once, after vendor startup, the health wait and snapshot catch-up have
+    /// returned, so none of those consume it; never replaced afterwards.
+    startup_deadline: OnceLock<tokio::time::Instant>,
     /// Bound exactly once after construction; never retains the manager/client
     /// cycle or borrows another installed node's removal authority.
     removal_owner: OnceLock<Weak<ReplicatedMembership>>,
@@ -2044,7 +2047,7 @@ impl Default for StartupMembershipAdmission {
         Self {
             clock: Arc::new(ClusterClockGuard::with_membership_source(source.clone())),
             source,
-            startup_deadline: None,
+            startup_deadline: OnceLock::new(),
             removal_owner: OnceLock::new(),
             #[cfg(test)]
             activation_capture_pause: StartupSettlementPause {
@@ -2057,17 +2060,20 @@ impl Default for StartupMembershipAdmission {
 }
 
 impl StartupMembershipAdmission {
-    #[must_use]
-    pub fn with_startup_deadline(deadline: tokio::time::Instant) -> Self {
-        Self {
-            startup_deadline: Some(deadline),
-            ..Self::default()
-        }
+    /// Install the original phase deadline. It is set exactly once: a second
+    /// install is refused rather than replenishing an expired phase.
+    pub fn install_startup_deadline(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), MembershipError> {
+        self.startup_deadline.set(deadline).map_err(|_| {
+            MembershipError::Internal("startup phase deadline was already installed".into())
+        })
     }
 
     #[must_use]
     pub fn startup_deadline(&self) -> Option<tokio::time::Instant> {
-        self.startup_deadline
+        self.startup_deadline.get().copied()
     }
 
     #[must_use]
@@ -2079,6 +2085,9 @@ impl StartupMembershipAdmission {
 struct PreparedStartupMembershipAdmission<'guard> {
     clock: &'guard ClusterClockGuard,
     original: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
+    /// A promotion makes this learner a voter, so its own clock must be
+    /// bounded; coverage excuses only learners that stay learners.
+    promote_target: Option<u64>,
 }
 
 struct PreparedReductionAdmission<'guard> {
@@ -2144,12 +2153,14 @@ impl hiqlite::membership_admission::PreparedMembershipAdmission
     for PreparedStartupMembershipAdmission<'_>
 {
     fn redeem(&self) -> Result<(), hiqlite::Error> {
-        self.clock
-            .admit_for(ClockDecision::MembershipChange, self.original)
-            .map(|_| ())
-            .map_err(|error| {
-                hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
-            })
+        match self.promote_target {
+            Some(target) => self.clock.admit_promotion_for(target, self.original),
+            None => self
+                .clock
+                .admit_for(ClockDecision::MembershipChange, self.original),
+        }
+        .map(|_| ())
+        .map_err(|error| hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into()))
     }
 }
 
@@ -2180,9 +2191,16 @@ impl hiqlite::membership_admission::MembershipAdmission for StartupMembershipAdm
                 proof: None,
             });
         }
+        let promote_target = match operation {
+            hiqlite::membership_admission::MembershipAcquisition::Promote { node_id } => {
+                Some(node_id)
+            }
+            _ => None,
+        };
         Box::new(PreparedStartupMembershipAdmission {
             clock: &self.clock,
             original: self.clock.acquire(),
+            promote_target,
         })
     }
 
@@ -8446,8 +8464,8 @@ impl MembershipManager {
         }
         // Committed promotion and ambiguous-result reconciliation above are
         // ungated. Issuing a new proposal, even for a pending audit row, is not.
-        let admission = clock
-            .admit_for(ClockDecision::MembershipChange, prepared_admission)
+        let mut admission = clock
+            .admit_promotion_for(target_raft_id, prepared_admission)
             .map_err(MembershipError::ClockUnbounded)?;
         let (attempt_id, new_attempt) = if let Some(existing) = existing {
             (existing.attempt_id, false)
@@ -8455,7 +8473,7 @@ impl MembershipManager {
             let attempt_id = uuid::Uuid::new_v4().to_string();
             let started_at = admission.now_ms();
             clock
-                .revalidate_for(ClockDecision::MembershipChange, &admission)
+                .revalidate_promotion_for(target_raft_id, &mut admission)
                 .map_err(MembershipError::ClockUnbounded)?;
             let inserted = inner
                 .client
@@ -8531,7 +8549,7 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
-        if let Err(cause) = clock.revalidate_for(ClockDecision::MembershipChange, &admission) {
+        if let Err(cause) = clock.revalidate_promotion_for(target_raft_id, &mut admission) {
             if new_attempt {
                 self.clear_learner_promotion(node_id, &attempt_id).await;
             }
@@ -8835,33 +8853,18 @@ impl MembershipManager {
                 )
                 .await);
         }
-        match request_learner_removal(&leader.addr_api, &inner.secrets.api, &reference).await {
-            Ok(()) => {}
-            Err(MembershipChangeFailure::Rejected(error)) => {
-                return Err(self
-                    .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
-                    .await);
-            }
-            Err(MembershipChangeFailure::Ambiguous(error)) => {
-                match reconcile_member_removal(
-                    &inner.secrets.api,
-                    target_raft_id,
-                    &membership_nodes,
-                )
-                .await
-                {
-                    MembershipChangeOutcome::Removed => {
-                        tracing::warn!(%error, %node_id, "learner removal committed after an ambiguous HTTP result");
-                    }
-                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
-                        return Err(MembershipError::RemovalPending(format!(
-                            "learner removal outcome is indeterminate after {error}"
-                        )));
-                    }
-                }
-            }
-        }
-        self.finalize_node_removal(node_id).await;
+        dispatch_removal_outcome(
+            RemovalPath::Learner,
+            node_id,
+            &removal_attempt,
+            request_learner_removal(&leader.addr_api, &inner.secrets.api, &reference).await,
+            |rollback_node, rollback_attempt, error| {
+                self.rollback_node_removal_after_failure(rollback_node, rollback_attempt, error)
+            },
+            || reconcile_member_removal(&inner.secrets.api, target_raft_id, &membership_nodes),
+            |finalize_node| self.finalize_node_removal(finalize_node),
+        )
+        .await?;
         tracing::info!(
             %node_id,
             requeued = resolved.requeued,
@@ -8982,7 +8985,7 @@ impl MembershipManager {
         &self,
         reference: &hiqlite::ReductionFenceReference,
         captured: &ClockRemovalCapture<'_>,
-    ) -> Result<Option<AppliedRemovalFence>, MembershipError> {
+    ) -> Result<ReductionProofPoll, MembershipError> {
         if !reference.has_valid_shape() {
             return Err(MembershipError::RemovalPending(
                 "invalid reduction reference".into(),
@@ -9031,23 +9034,28 @@ impl MembershipManager {
                 &inner.identity.node_id,
             )
             .map_err(MembershipError::ClockUnbounded)?;
-        let evidence = if row
+        let applied = row
             .last_applied_index
             .and_then(|index| u64::try_from(index).ok())
-            .is_some_and(|index| index >= reference.barrier_index)
-        {
-            RemovalFenceEvidence::TargetApplied
-        } else if captured.permits_wall_reachability()
-            && !node_is_reachable(captured.now_ms(), row.last_seen_at)
-        {
-            RemovalFenceEvidence::AuthoritativeUnreachable
-        } else {
-            return Ok(None);
-        };
-        Ok(Some(AppliedRemovalFence {
-            reference: frozen,
-            evidence,
-        }))
+            .is_some_and(|index| index >= reference.barrier_index);
+        Ok(
+            match reduction_fence_evidence(
+                &self.clock,
+                captured,
+                applied,
+                node_is_reachable(captured.now_ms(), row.last_seen_at),
+            ) {
+                ReductionEvidence::Proved(evidence) => {
+                    ReductionProofPoll::Proved(AppliedRemovalFence {
+                        reference: frozen,
+                        evidence,
+                    })
+                }
+                ReductionEvidence::Pending { clock_blocked } => {
+                    ReductionProofPoll::Pending { clock_blocked }
+                }
+            },
+        )
     }
 
     async fn wait_for_reduction_reference(
@@ -9055,30 +9063,43 @@ impl MembershipManager {
         reference: &hiqlite::ReductionFenceReference,
         captured: &ClockRemovalCapture<'_>,
     ) -> Result<AppliedRemovalFence, MembershipError> {
+        // Whether the last poll found the target stale by wall age but could
+        // not use it (post-step stabilization, enforced). Waiting continues,
+        // because a live target can still prove TargetApplied; if the budget
+        // ends first, that is a typed clock refusal, not a bare timeout.
+        let mut clock_blocked = false;
         loop {
-            let remaining = captured.remaining_removal_budget().ok_or_else(|| {
-                MembershipError::RemovalPending("original removal proof deadline expired".into())
-            })?;
+            let Some(remaining) = captured.remaining_removal_budget() else {
+                return Err(self.removal_budget_expired(captured, clock_blocked));
+            };
             match tokio::time::timeout(
                 remaining,
                 self.prove_reduction_reference(reference, captured),
             )
             .await
             {
-                Ok(Ok(Some(proof))) => return Ok(proof),
-                Ok(Ok(None)) => {}
-                Ok(Err(error)) => return Err(error),
-                Err(_) => {
-                    return Err(MembershipError::RemovalPending(
-                        "original removal proof deadline expired".into(),
-                    ))
+                Ok(Ok(ReductionProofPoll::Proved(proof))) => return Ok(proof),
+                Ok(Ok(ReductionProofPoll::Pending {
+                    clock_blocked: blocked,
+                })) => {
+                    clock_blocked = blocked;
                 }
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Err(self.removal_budget_expired(captured, clock_blocked)),
             }
-            let remaining = captured.remaining_removal_budget().ok_or_else(|| {
-                MembershipError::RemovalPending("original removal proof deadline expired".into())
-            })?;
+            let Some(remaining) = captured.remaining_removal_budget() else {
+                return Err(self.removal_budget_expired(captured, clock_blocked));
+            };
             tokio::time::sleep(remaining.min(Duration::from_millis(250))).await;
         }
+    }
+
+    fn removal_budget_expired(
+        &self,
+        captured: &ClockRemovalCapture<'_>,
+        clock_blocked: bool,
+    ) -> MembershipError {
+        removal_budget_expired_error(&self.clock, captured, clock_blocked)
     }
 
     async fn prepare_reduction_reference(
@@ -9091,19 +9112,20 @@ impl MembershipManager {
         let remaining = captured.remaining_removal_budget().ok_or_else(|| {
             MembershipError::RemovalPending("original removal proof deadline expired".into())
         })?;
-        tokio::time::timeout(remaining, async {
-            let reference = self
-                .freeze_reduction_reference(node_id, raft_id, attempt_id, captured)
-                .await?;
-            let proof = self
-                .wait_for_reduction_reference(&reference, captured)
-                .await?;
-            Ok((reference, proof))
-        })
+        // Both halves spend the same original budget. The wait bounds itself
+        // against it, so its expiry can still name a typed clock refusal.
+        let reference = tokio::time::timeout(
+            remaining,
+            self.freeze_reduction_reference(node_id, raft_id, attempt_id, captured),
+        )
         .await
         .map_err(|_| {
             MembershipError::RemovalPending("original removal proof deadline expired".into())
-        })?
+        })??;
+        let proof = self
+            .wait_for_reduction_reference(&reference, captured)
+            .await?;
+        Ok((reference, proof))
     }
 
     pub async fn remove_voter(&self, node_id: &str) -> Result<MembershipStatus, MembershipError> {
@@ -9223,7 +9245,8 @@ impl MembershipManager {
                 )
                 .await);
         }
-        dispatch_voter_removal_outcome(
+        dispatch_removal_outcome(
+            RemovalPath::Voter,
             node_id,
             &removal_attempt,
             request_voter_removal(&leader.addr_api, &inner.secrets.api, &reference).await,
@@ -9429,44 +9452,29 @@ impl MembershipManager {
                 )
                 .await);
         }
-        match request_voter_removal(&commit_leader_api, &inner.secrets.api, &reference).await {
-            Ok(()) => {}
-            Err(MembershipChangeFailure::Rejected(removal_error)) => {
-                return Err(self
-                    .rollback_node_removal_after_failure(&node_id, &removal_attempt, removal_error)
-                    .await);
-            }
-            Err(MembershipChangeFailure::Ambiguous(removal_error)) => {
-                match reconcile_membership_change(
+        dispatch_removal_outcome(
+            RemovalPath::SelfLeave,
+            &node_id,
+            &removal_attempt,
+            request_voter_removal(&commit_leader_api, &inner.secrets.api, &reference).await,
+            |rollback_node, rollback_attempt, error| {
+                self.rollback_node_removal_after_failure(rollback_node, rollback_attempt, error)
+            },
+            || {
+                reconcile_membership_change(
                     &inner.secrets.api,
                     inner.identity.raft_id,
                     &membership_nodes,
                 )
-                .await
-                {
-                    MembershipChangeOutcome::Removed => {
-                        tracing::warn!(%removal_error, %node_id, "self-removal committed after an ambiguous HTTP result");
-                    }
-                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
-                        return Err(MembershipError::Internal(format!(
-                            "self-removal outcome is indeterminate after {removal_error}; this voter remains fenced"
-                        )));
-                    }
-                }
-            }
-        }
-        if tokio::time::timeout(FINAL_TOMBSTONE_WAIT, self.finalize_node_removal(&node_id))
-            .await
-            .is_err()
-        {
-            // The pending-removal row is already the authoritative durable
-            // fence. Do not keep a committed nonmember serving while a final
-            // convenience tombstone write waits on the surviving quorum.
-            tracing::warn!(
-                %node_id,
-                "committed self-removal is draining before final tombstone materialization"
-            );
-        }
+            },
+            |finalize_node| {
+                finalize_self_leave_bounded(
+                    finalize_node,
+                    self.finalize_node_removal(finalize_node),
+                )
+            },
+        )
+        .await?;
         tracing::info!(
             %node_id,
             requeued = resolved.requeued,
@@ -10824,11 +10832,86 @@ where
     .await
 }
 
-/// The production outcome consumer. Effects remain manager-owned operations;
-/// the pure step cannot inspect fresh rows, clear another attempt, or interpret
-/// an ambiguous send as a definite failure. The wrapper adds no I/O, task or
-/// suspension beyond polling those same manager-owned effect futures.
-async fn dispatch_voter_removal_outcome<'a, R, RF, C, CF, F, FF>(
+/// Which removal consumes the shared [`lifecycle::RemovalTransition`]. The
+/// three paths share the state machine (rollback a rejected proposal, finalize
+/// an accepted one, reconcile survivors on an ambiguous one and finalize only
+/// on their proof) and differ only in what an unproven outcome means to the
+/// caller, which each path has always answered differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemovalPath {
+    /// `remove_voter`: an operator removes another voter.
+    Voter,
+    /// `remove_learner`: the draining removal of a non-voting learner.
+    Learner,
+    /// `leave_node` on a voter: this process removes itself.
+    SelfLeave,
+}
+
+impl RemovalPath {
+    /// The caller-visible result when survivors cannot prove the removal.
+    /// A learner removal answers `RemovalPending` (HTTP 409
+    /// `membership_removal_pending`); the voter paths answer `Internal`.
+    fn indeterminate(self, error: &MembershipError) -> MembershipError {
+        match self {
+            Self::Voter => MembershipError::Internal(format!(
+                "voter removal outcome is indeterminate after {error}; the target remains fenced"
+            )),
+            Self::Learner => MembershipError::RemovalPending(format!(
+                "learner removal outcome is indeterminate after {error}"
+            )),
+            Self::SelfLeave => MembershipError::Internal(format!(
+                "self-removal outcome is indeterminate after {error}; this voter remains fenced"
+            )),
+        }
+    }
+
+    fn committed_after_ambiguous(self, error: &MembershipError, node_id: &str) {
+        match self {
+            Self::Voter => {
+                tracing::warn!(removal_error = %error, %node_id, "voter removal committed after an ambiguous HTTP result")
+            }
+            Self::Learner => {
+                tracing::warn!(%error, %node_id, "learner removal committed after an ambiguous HTTP result")
+            }
+            Self::SelfLeave => {
+                tracing::warn!(removal_error = %error, %node_id, "self-removal committed after an ambiguous HTTP result")
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Voter => "voter",
+            Self::Learner => "learner",
+            Self::SelfLeave => "self",
+        }
+    }
+}
+
+/// A committed self-leave does not keep serving as a nonmember while the final
+/// convenience tombstone waits on the surviving quorum: the pending-removal
+/// row is already the authoritative durable fence, so the write is bounded by
+/// [`FINAL_TOMBSTONE_WAIT`] and the leave still succeeds when it runs out.
+async fn finalize_self_leave_bounded(node_id: &str, finalize: impl Future<Output = ()>) {
+    if tokio::time::timeout(FINAL_TOMBSTONE_WAIT, finalize)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            %node_id,
+            "committed self-removal is draining before final tombstone materialization"
+        );
+    }
+}
+
+/// The production outcome consumer for every removal path. Effects remain
+/// manager-owned operations; the pure step cannot inspect fresh rows, clear
+/// another attempt, or interpret an ambiguous send as a definite failure. The
+/// wrapper adds no I/O, task or suspension beyond polling those same
+/// manager-owned effect futures. `reconcile` and `finalize` are the path's
+/// own survivor proof and tombstone write; `path` maps an unproven outcome.
+async fn dispatch_removal_outcome<'a, R, RF, C, CF, F, FF>(
+    path: RemovalPath,
     node_id: &'a str,
     attempt_id: &'a str,
     proposal: Result<(), MembershipChangeFailure>,
@@ -10867,18 +10950,17 @@ where
             let outcome = reconcile().await;
             let next = transition.survivors(outcome == MembershipChangeOutcome::Removed);
             if next.is_some_and(|next| next.effect == RemovalEffect::FinalizeTombstone) {
-                tracing::warn!(removal_error = %error, %node_id, "voter removal committed after an ambiguous HTTP result");
+                path.committed_after_ambiguous(&error, node_id);
                 finalize(transition.node_id).await;
                 Ok(())
             } else {
-                Err(MembershipError::Internal(format!(
-                    "voter removal outcome is indeterminate after {error}; the target remains fenced"
-                )))
+                Err(path.indeterminate(&error))
             }
         }
-        _ => Err(MembershipError::Internal(
-            "invalid voter removal transition".to_owned(),
-        )),
+        _ => Err(MembershipError::Internal(format!(
+            "invalid {} removal transition",
+            path.label()
+        ))),
     }
 }
 
@@ -11468,6 +11550,64 @@ pub(super) struct AppliedRemovalFence {
 enum RemovalFenceEvidence {
     TargetApplied,
     AuthoritativeUnreachable,
+}
+
+/// One poll of an exact durable reduction reference.
+pub(super) enum ReductionProofPoll {
+    Proved(AppliedRemovalFence),
+    Pending { clock_blocked: bool },
+}
+
+enum ReductionEvidence {
+    Proved(RemovalFenceEvidence),
+    /// `clock_blocked`: the target is stale by wall age, but the original
+    /// post-step capture may not use that comparison and enforcement is on.
+    Pending {
+        clock_blocked: bool,
+    },
+}
+
+/// The original removal budget ended. When the only evidence that could have
+/// proved the target was a wall-age comparison the post-step capture may not
+/// use, enforcement reports (and counts) the typed clock refusal; otherwise,
+/// or with enforcement off, it is the plain deadline, counted nowhere.
+fn removal_budget_expired_error(
+    clock: &ClusterClockGuard,
+    captured: &ClockRemovalCapture<'_>,
+    clock_blocked: bool,
+) -> MembershipError {
+    if clock_blocked {
+        if let Err(cause) = clock.refuse_unstable_wall_reachability(captured) {
+            return MembershipError::ClockUnbounded(cause);
+        }
+    }
+    MembershipError::RemovalPending("original removal proof deadline expired".into())
+}
+
+/// Classify one poll. Wall-age unreachability is consulted through the clock
+/// guard's decision API (never the raw capture flag), so enforcement off
+/// admits it exactly like every other guarded decision and the counted
+/// boundary, `admit_fenced_removal`, records the advisory refusal once.
+fn reduction_fence_evidence(
+    clock: &ClusterClockGuard,
+    captured: &ClockRemovalCapture<'_>,
+    target_applied: bool,
+    wall_reachable: bool,
+) -> ReductionEvidence {
+    if target_applied {
+        return ReductionEvidence::Proved(RemovalFenceEvidence::TargetApplied);
+    }
+    if wall_reachable {
+        return ReductionEvidence::Pending {
+            clock_blocked: false,
+        };
+    }
+    match clock.admit_wall_reachability(captured) {
+        Ok(()) => ReductionEvidence::Proved(RemovalFenceEvidence::AuthoritativeUnreachable),
+        Err(_) => ReductionEvidence::Pending {
+            clock_blocked: true,
+        },
+    }
 }
 
 impl AppliedRemovalFence {
@@ -12203,6 +12343,268 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        reduction_fence_evidence, ActivityPeer, AppliedRemovalFence, ClockMembershipIdentity,
+        ClockMembershipSource, ClockPeerRoster, ClockRefusal, ClusterClockGuard, ReductionEvidence,
+        RemovalFenceEvidence,
+    };
+    use crate::cluster::clock::PeerClockOffset;
+
+    struct FixedClockMembership(ClockMembershipIdentity);
+
+    impl ClockMembershipSource for FixedClockMembership {
+        fn current(&self) -> Option<ClockMembershipIdentity> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn clock_node(raft_id: u64) -> String {
+        format!("00000000-0000-0000-0000-{raft_id:012}")
+    }
+
+    /// Local node 1; `voters` vote, every other member is a learner. The
+    /// returned roster is the exact directory of every remote member.
+    fn clock_fixture(
+        members: &[u64],
+        voters: &[u64],
+        enforced: bool,
+    ) -> (ClusterClockGuard, ClockPeerRoster) {
+        let identity = ClockMembershipIdentity {
+            local_node: 1,
+            log: (2, 1, 7),
+            members: members.iter().copied().collect(),
+            voters: voters.iter().copied().collect(),
+        };
+        let guard = ClusterClockGuard::with_membership_source(std::sync::Arc::new(
+            FixedClockMembership(identity.clone()),
+        ));
+        guard.set_enforced(enforced);
+        let roster = ClockPeerRoster {
+            membership: Some(identity),
+            peers: members
+                .iter()
+                .filter(|raft_id| **raft_id != 1)
+                .map(|raft_id| ActivityPeer {
+                    node_id: clock_node(*raft_id),
+                    raft_id: *raft_id,
+                    http_base: Some(format!("https://node{raft_id}:443")),
+                    reachable: true,
+                })
+                .collect(),
+        };
+        (guard, roster)
+    }
+
+    fn publish_clock_round(guard: &ClusterClockGuard, roster: &ClockPeerRoster, bounded: &[u64]) {
+        let round = guard
+            .roster_for_peer_directory(roster)
+            .expect("exact directory");
+        let observations = roster
+            .peers
+            .iter()
+            .map(|peer| {
+                let observation = if bounded.contains(&peer.raft_id) {
+                    PeerClockOffset::Bounded {
+                        offset_us: 0,
+                        uncertainty_us: 1_000,
+                        observed_at: std::time::Instant::now(),
+                    }
+                } else {
+                    PeerClockOffset::Unknown
+                };
+                (peer.node_id.clone(), observation)
+            })
+            .collect();
+        assert!(guard.publish(round, observations));
+    }
+
+    fn removal_fence(target: u64, evidence: RemovalFenceEvidence) -> AppliedRemovalFence {
+        AppliedRemovalFence {
+            reference: hiqlite::ReductionFenceReference {
+                version: 1,
+                target_node_id: clock_node(target),
+                target_raft_id: target,
+                attempt_id: "00000000-0000-0000-0000-000000000099".into(),
+                barrier_index: 7,
+            },
+            evidence,
+        }
+    }
+
+    fn counter(guard: &ClusterClockGuard, family: &str, cause: &str) -> String {
+        let prefix = format!("{family}{{decision=\"membership_change\",cause=\"{cause}\"}} ");
+        guard
+            .prometheus()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+            .expect("closed metric vocabulary")
+    }
+
+    /// Fenced removal of a voter with a stopped learner elsewhere in the
+    /// cluster: the unobserved surviving learner is excused (it holds no
+    /// vote), an unobserved surviving VOTER still refuses.
+    #[test]
+    fn k06_fenced_removal_excuses_an_unobserved_surviving_learner_only() {
+        let (guard, roster) = clock_fixture(&[1, 2, 3, 4], &[1, 2, 3], true);
+        publish_clock_round(&guard, &roster, &[3]);
+        let captured = guard.capture_removal_raft(2).expect("exact capture");
+        assert_eq!(
+            guard.admit_fenced_removal(
+                &captured,
+                &removal_fence(2, RemovalFenceEvidence::TargetApplied)
+            ),
+            Ok(()),
+            "target 2 excluded, voter 3 bounded, learner 4 unobserved"
+        );
+        drop(captured);
+        publish_clock_round(&guard, &roster, &[4]);
+        let captured = guard.capture_removal_raft(2).expect("exact capture");
+        assert_eq!(
+            guard.admit_fenced_removal(
+                &captured,
+                &removal_fence(2, RemovalFenceEvidence::TargetApplied)
+            ),
+            Err(ClockRefusal::Unknown),
+            "an unobserved surviving voter is never excused"
+        );
+    }
+
+    /// K-06 finding 2. After a local wall step the original capture may not
+    /// use a wall-age `last_seen_at` comparison. That decision goes through
+    /// the guard: advisory mode admits the authoritative-unreachable proof
+    /// (counting ONE advisory refusal at the counted boundary), enforced mode
+    /// keeps waiting for TargetApplied and, if the budget ends, reports the
+    /// typed counted refusal instead of a bare deadline.
+    #[test]
+    fn k06_post_step_wall_reachability_is_decided_by_the_guard() {
+        for enforced in [false, true] {
+            let (guard, roster) = clock_fixture(&[1, 2, 3], &[1, 2, 3], enforced);
+            publish_clock_round(&guard, &roster, &[2, 3]);
+            guard.simulate_wall_step_for_test(15_000);
+            // The step invalidates evidence; a later complete round restores
+            // coverage, but the 30 s stabilization window still holds.
+            publish_clock_round(&guard, &roster, &[2, 3]);
+            let captured = guard.capture_removal_raft(2).expect("bounded capture");
+            assert!(!captured.permits_wall_reachability());
+            let advisory = "plurx_cluster_clock_advisory_refusals_total";
+            let refusals = "plurx_cluster_clock_refusals_total";
+
+            // A live target is still provable either way; a wall-reachable
+            // target is simply not yet proved, never clock-blocked.
+            assert!(matches!(
+                reduction_fence_evidence(&guard, &captured, true, false),
+                ReductionEvidence::Proved(RemovalFenceEvidence::TargetApplied)
+            ));
+            assert!(matches!(
+                reduction_fence_evidence(&guard, &captured, false, true),
+                ReductionEvidence::Pending {
+                    clock_blocked: false
+                }
+            ));
+
+            let stale = reduction_fence_evidence(&guard, &captured, false, false);
+            assert_eq!(counter(&guard, advisory, "local_discontinuity"), "0");
+            assert_eq!(counter(&guard, refusals, "local_discontinuity"), "0");
+            if enforced {
+                assert!(matches!(
+                    stale,
+                    ReductionEvidence::Pending {
+                        clock_blocked: true
+                    }
+                ));
+                // The budget ends while the poll was clock-blocked: the
+                // caller sees the counted typed refusal, not a bare deadline.
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, true),
+                    MembershipError::ClockUnbounded(ClockRefusal::LocalDiscontinuity)
+                ));
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
+                // An unblocked budget end is the plain deadline, uncounted.
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, false),
+                    MembershipError::RemovalPending(_)
+                ));
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
+                // Enforcement turned off before the budget ended: the plain
+                // deadline, and no advisory refusal for a decision that was
+                // never admitted (review P3a).
+                guard.set_enforced(false);
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, true),
+                    MembershipError::RemovalPending(_)
+                ));
+                assert_eq!(counter(&guard, advisory, "local_discontinuity"), "0");
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
+            } else {
+                assert!(
+                    matches!(
+                        stale,
+                        ReductionEvidence::Proved(RemovalFenceEvidence::AuthoritativeUnreachable)
+                    ),
+                    "advisory mode must not strand the removal until its budget expires"
+                );
+                assert_eq!(
+                    guard.admit_fenced_removal(
+                        &captured,
+                        &removal_fence(2, RemovalFenceEvidence::AuthoritativeUnreachable)
+                    ),
+                    Ok(())
+                );
+                assert_eq!(counter(&guard, advisory, "local_discontinuity"), "1");
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "0");
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, true),
+                    MembershipError::RemovalPending(_)
+                ));
+                assert_eq!(counter(&guard, advisory, "local_discontinuity"), "1");
+            }
+        }
+
+        // The wait carries the poll's verdict to EVERY budget-expiry exit;
+        // dropping it would turn the typed refusal back into a bare deadline.
+        // The waiting loop needs a live Raft client, so its wiring is pinned
+        // from source while the decision itself is exercised above.
+        let source = include_str!("membership.rs");
+        let wait = method_body(source, "async fn wait_for_reduction_reference(");
+        assert!(wait.contains("let mut clock_blocked = false;"));
+        assert!(
+            wait.contains("clock_blocked: blocked,") && wait.contains("clock_blocked = blocked;")
+        );
+        assert_eq!(
+            wait.matches("self.removal_budget_expired(").count(),
+            wait.matches("self.removal_budget_expired(captured, clock_blocked)")
+                .count()
+        );
+        assert_eq!(
+            wait.matches("self.removal_budget_expired(captured, clock_blocked)")
+                .count(),
+            3,
+            "both budget checks and the poll timeout report the verdict"
+        );
+        assert!(!wait.contains("RemovalPending("), "no exit bypasses it");
+        let expired = method_body(source, "fn removal_budget_expired(");
+        assert!(
+            expired.contains("removal_budget_expired_error(&self.clock, captured, clock_blocked)")
+        );
+        let poll = method_body(source, "async fn prove_reduction_reference(");
+        assert!(poll.contains("ReductionEvidence::Pending { clock_blocked }"));
+        assert!(poll.contains("ReductionProofPoll::Pending { clock_blocked }"));
+    }
+
+    #[test]
+    fn k06_startup_deadline_is_installed_once_and_never_replenished() {
+        let admission = super::StartupMembershipAdmission::default();
+        assert_eq!(admission.startup_deadline(), None);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(45);
+        admission
+            .install_startup_deadline(deadline)
+            .expect("first install");
+        assert!(admission
+            .install_startup_deadline(deadline + std::time::Duration::from_secs(45))
+            .is_err());
+        assert_eq!(admission.startup_deadline(), Some(deadline));
+    }
+
     #[test]
     fn k06_reduction_binding_refuses_zero_stale_and_foreign_identity_without_borrowing() {
         use super::{
@@ -14014,11 +14416,11 @@ mod tests {
     }
 
     #[test]
-    fn live_tv_drain_response_signature_binds_each_exchange_field_and_domain() {
+    fn internal_peer_response_signature_binds_each_exchange_field_and_domain() {
         let key = ActivitySigningKey::from_seed_hex(&"42".repeat(32)).expect("fixture signing key");
         let nonce = uuid::Uuid::new_v4().to_string();
         let other_nonce = uuid::Uuid::new_v4().to_string();
-        let path = "/_internal/v1/live-tv/drain";
+        let path = "/_internal/v1/live-tv/start-state";
         let payload = br#"["owner","controller","nonce",7,2]"#;
         let message = internal_peer_response_message("owner", "controller", &nonce, path, payload)
             .expect("message");
@@ -14031,13 +14433,7 @@ mod tests {
             internal_peer_response_message("owner", "other-controller", &nonce, path, payload),
             internal_peer_response_message("owner", "controller", &other_nonce, path, payload),
             internal_peer_response_message("owner", "controller", &nonce, "/other", payload),
-            internal_peer_response_message(
-                "owner",
-                "controller",
-                &nonce,
-                path,
-                b"changed cutoff or count",
-            ),
+            internal_peer_response_message("owner", "controller", &nonce, path, b"changed payload"),
             internal_peer_auth_message("owner", "controller", 1, &nonce, "POST", path, payload),
         ] {
             assert!(verifier
@@ -16749,94 +17145,207 @@ mod tests {
     #[tokio::test]
     async fn removal_transition_preserves_proposal_outcomes() {
         use lifecycle::{RemovalEffect, RemovalProposalOutcome, RemovalTransition};
-        for (proposal_kind, survivor, expected) in [
-            (
-                RemovalProposalOutcome::Rejected,
-                MembershipChangeOutcome::Indeterminate,
-                vec!["rollback:node-a:attempt-a"],
-            ),
-            (
-                RemovalProposalOutcome::Accepted,
-                MembershipChangeOutcome::Indeterminate,
-                vec!["finalize:node-a"],
-            ),
-            (
-                RemovalProposalOutcome::Ambiguous,
-                MembershipChangeOutcome::Removed,
-                vec!["reconcile", "finalize:node-a"],
-            ),
-            (
-                RemovalProposalOutcome::Ambiguous,
-                MembershipChangeOutcome::Indeterminate,
-                vec!["reconcile"],
-            ),
-            (
-                RemovalProposalOutcome::Ambiguous,
-                MembershipChangeOutcome::Promoted,
-                vec!["reconcile"],
-            ),
+        for path in [
+            RemovalPath::Voter,
+            RemovalPath::Learner,
+            RemovalPath::SelfLeave,
         ] {
-            let events = Mutex::new(Vec::<String>::new());
-            let events = &events;
-            let error = MembershipError::Internal("original proposal error".to_owned());
-            let proposal = match proposal_kind {
-                RemovalProposalOutcome::Accepted => Ok(()),
-                RemovalProposalOutcome::Rejected => Err(MembershipChangeFailure::Rejected(error)),
-                RemovalProposalOutcome::Ambiguous => Err(MembershipChangeFailure::Ambiguous(error)),
-            };
-            let result = dispatch_voter_removal_outcome(
-                "node-a",
-                "attempt-a",
-                proposal,
-                |node, attempt, error| async move {
-                    events
-                        .lock()
-                        .expect("events")
-                        .push(format!("rollback:{node}:{attempt}"));
-                    error
-                },
-                || async move {
-                    events.lock().expect("events").push("reconcile".to_owned());
-                    survivor
-                },
-                |node| async move {
-                    events
-                        .lock()
-                        .expect("events")
-                        .push(format!("finalize:{node}"));
-                },
-            )
-            .await;
-            assert_eq!(*events.lock().expect("events"), expected);
-            match proposal_kind {
-                RemovalProposalOutcome::Accepted => assert!(result.is_ok()),
-                RemovalProposalOutcome::Rejected => assert!(
-                    matches!(result, Err(MembershipError::Internal(ref message)) if message == "original proposal error")
+            for (proposal_kind, survivor, expected) in [
+                (
+                    RemovalProposalOutcome::Rejected,
+                    MembershipChangeOutcome::Indeterminate,
+                    vec!["rollback:node-a:attempt-a"],
                 ),
-                RemovalProposalOutcome::Ambiguous
-                    if survivor == MembershipChangeOutcome::Removed =>
-                {
-                    assert!(result.is_ok())
+                (
+                    RemovalProposalOutcome::Accepted,
+                    MembershipChangeOutcome::Indeterminate,
+                    vec!["finalize:node-a"],
+                ),
+                (
+                    RemovalProposalOutcome::Ambiguous,
+                    MembershipChangeOutcome::Removed,
+                    vec!["reconcile", "finalize:node-a"],
+                ),
+                (
+                    RemovalProposalOutcome::Ambiguous,
+                    MembershipChangeOutcome::Indeterminate,
+                    vec!["reconcile"],
+                ),
+                (
+                    RemovalProposalOutcome::Ambiguous,
+                    MembershipChangeOutcome::Promoted,
+                    vec!["reconcile"],
+                ),
+            ] {
+                let events = Mutex::new(Vec::<String>::new());
+                let events = &events;
+                let error = MembershipError::Internal("original proposal error".to_owned());
+                let proposal = match proposal_kind {
+                    RemovalProposalOutcome::Accepted => Ok(()),
+                    RemovalProposalOutcome::Rejected => {
+                        Err(MembershipChangeFailure::Rejected(error))
+                    }
+                    RemovalProposalOutcome::Ambiguous => {
+                        Err(MembershipChangeFailure::Ambiguous(error))
+                    }
+                };
+                let result = dispatch_removal_outcome(
+                    path,
+                    "node-a",
+                    "attempt-a",
+                    proposal,
+                    |node, attempt, error| async move {
+                        events
+                            .lock()
+                            .expect("events")
+                            .push(format!("rollback:{node}:{attempt}"));
+                        error
+                    },
+                    || async move {
+                        events.lock().expect("events").push("reconcile".to_owned());
+                        survivor
+                    },
+                    |node| async move {
+                        events
+                            .lock()
+                            .expect("events")
+                            .push(format!("finalize:{node}"));
+                    },
+                )
+                .await;
+                assert_eq!(*events.lock().expect("events"), expected);
+                match proposal_kind {
+                    RemovalProposalOutcome::Accepted => assert!(result.is_ok()),
+                    RemovalProposalOutcome::Rejected => assert!(
+                        matches!(result, Err(MembershipError::Internal(ref message)) if message == "original proposal error")
+                    ),
+                    RemovalProposalOutcome::Ambiguous
+                        if survivor == MembershipChangeOutcome::Removed =>
+                    {
+                        assert!(result.is_ok())
+                    }
+                    // Each path keeps the answer it gave before the paths shared
+                    // the transition: a learner removal is 409 pending, a voter
+                    // removal and a self-leave are internal errors.
+                    RemovalProposalOutcome::Ambiguous => match path {
+                        RemovalPath::Voter => assert!(
+                            matches!(result, Err(MembershipError::Internal(ref message)) if message == "voter removal outcome is indeterminate after cluster membership operation failed: original proposal error; the target remains fenced")
+                        ),
+                        RemovalPath::Learner => assert!(
+                            matches!(result, Err(MembershipError::RemovalPending(ref message)) if message == "learner removal outcome is indeterminate after cluster membership operation failed: original proposal error")
+                        ),
+                        RemovalPath::SelfLeave => assert!(
+                            matches!(result, Err(MembershipError::Internal(ref message)) if message == "self-removal outcome is indeterminate after cluster membership operation failed: original proposal error; this voter remains fenced")
+                        ),
+                    },
                 }
-                RemovalProposalOutcome::Ambiguous => assert!(
-                    matches!(result, Err(MembershipError::Internal(ref message)) if message == "voter removal outcome is indeterminate after cluster membership operation failed: original proposal error; the target remains fenced")
-                ),
-            }
-            let transition = RemovalTransition::proposal("node-a", "attempt-a", proposal_kind);
-            assert_eq!(
-                (transition.node_id, transition.attempt_id),
-                ("node-a", "attempt-a")
-            );
-            if proposal_kind == RemovalProposalOutcome::Ambiguous {
-                assert_eq!(transition.effect, RemovalEffect::ReconcileSurvivors);
+                let transition = RemovalTransition::proposal("node-a", "attempt-a", proposal_kind);
                 assert_eq!(
-                    transition.survivors(false).expect("proof pending").effect,
-                    RemovalEffect::RetainFence
+                    (transition.node_id, transition.attempt_id),
+                    ("node-a", "attempt-a")
                 );
-            } else {
-                assert!(transition.survivors(true).is_none());
+                if proposal_kind == RemovalProposalOutcome::Ambiguous {
+                    assert_eq!(transition.effect, RemovalEffect::ReconcileSurvivors);
+                    assert_eq!(
+                        transition.survivors(false).expect("proof pending").effect,
+                        RemovalEffect::RetainFence
+                    );
+                } else {
+                    assert!(transition.survivors(true).is_none());
+                }
             }
         }
+    }
+
+    /// S-14: each real removal binds the shared transition with its own path
+    /// and survivor proof. A learner removal reconciles member removal (the
+    /// learner leaves the member set); the voter paths reconcile the voter
+    /// change; only the self-leave bounds its final tombstone. Swapping any of
+    /// these would type-check, so the wiring is pinned from source.
+    #[test]
+    fn removal_call_sites_bind_their_own_path_and_reconcile() {
+        let source = include_str!("membership.rs");
+        for (signature, path, reconcile, finalize) in [
+            (
+                "async fn remove_learner_captured(",
+                "RemovalPath::Learner",
+                "|| reconcile_member_removal(&inner.secrets.api, target_raft_id, &membership_nodes)",
+                "|finalize_node| self.finalize_node_removal(finalize_node)",
+            ),
+            (
+                "async fn remove_voter_captured(",
+                "RemovalPath::Voter",
+                "|| reconcile_membership_change(&inner.secrets.api, target_raft_id, &membership_nodes)",
+                "|finalize_node| self.finalize_node_removal(finalize_node)",
+            ),
+            (
+                "async fn leave_voter_captured(",
+                "RemovalPath::SelfLeave",
+                "reconcile_membership_change(",
+                "finalize_self_leave_bounded(",
+            ),
+        ] {
+            let body = method_body(source, signature);
+            let dispatch = body
+                .split_once("dispatch_removal_outcome(")
+                .unwrap_or_else(|| panic!("{signature} dispatches its outcome"))
+                .1;
+            assert_eq!(
+                body.matches("dispatch_removal_outcome(").count(),
+                1,
+                "{signature}"
+            );
+            assert!(
+                dispatch.trim_start().starts_with(&format!("{path},")),
+                "{signature} binds {path}"
+            );
+            assert!(dispatch.contains(reconcile), "{signature} reconciles via {reconcile}");
+            assert!(dispatch.contains(finalize), "{signature} finalizes via {finalize}");
+            for other in [
+                "RemovalPath::Learner",
+                "RemovalPath::Voter",
+                "RemovalPath::SelfLeave",
+            ] {
+                assert_eq!(body.contains(other), other == path, "{signature}: {other}");
+            }
+        }
+        let learner = method_body(source, "async fn remove_learner_captured(");
+        assert!(!learner.contains("reconcile_membership_change("));
+        assert!(!learner.contains("finalize_self_leave_bounded("));
+        let voter = method_body(source, "async fn remove_voter_captured(");
+        assert!(!voter.contains("reconcile_member_removal("));
+        assert!(!voter.contains("finalize_self_leave_bounded("));
+        let leave = method_body(source, "async fn leave_voter_captured(");
+        assert!(!leave.contains("reconcile_member_removal("));
+        assert!(leave.contains("inner.identity.raft_id,"));
+    }
+
+    /// A self-leave whose final tombstone write never completes still
+    /// succeeds once `FINAL_TOMBSTONE_WAIT` elapses; one that completes is
+    /// awaited. The pending-removal row, not the tombstone, is the fence.
+    #[tokio::test(start_paused = true)]
+    async fn self_leave_finalize_is_bounded_and_succeeds_on_timeout() {
+        let started = tokio::time::Instant::now();
+        let result = dispatch_removal_outcome(
+            RemovalPath::SelfLeave,
+            "node-a",
+            "attempt-a",
+            Ok(()),
+            |_, _, error| async move { error },
+            || async { MembershipChangeOutcome::Indeterminate },
+            |node| finalize_self_leave_bounded(node, std::future::pending::<()>()),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(started.elapsed(), FINAL_TOMBSTONE_WAIT);
+
+        let finalized = AtomicBool::new(false);
+        let finalized = &finalized;
+        finalize_self_leave_bounded("node-a", async move {
+            finalized.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(finalized.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -17195,6 +17704,14 @@ mod tests {
                     .expect("entry capture")
                     < body.find(".await").expect("awaited preparation")
             );
+            if signature == "pub async fn promote_learner(" {
+                // Coverage excuses an unobserved learner only while it holds
+                // no vote; promoting one requires its own bounded clock.
+                assert!(body.contains(".admit_promotion_for(target_raft_id, prepared_admission)"));
+                assert!(body.contains(".revalidate_promotion_for(target_raft_id, &mut admission)"));
+                assert!(!body.contains(".admit_for(") && !body.contains(".revalidate_for("));
+                continue;
+            }
             assert!(
                 body.contains(".admit_for(ClockDecision::MembershipChange, prepared_admission)")
             );
@@ -17220,7 +17737,9 @@ mod tests {
             promotion
                 .find("reconcile_promotion_change(")
                 .expect("reconcile")
-                < promotion.find(".admit_for(").expect("new authority")
+                < promotion
+                    .find(".admit_promotion_for(")
+                    .expect("new authority")
         );
         assert!(promotion.contains("let started_at = admission.now_ms();"));
         let activation = method_body(source, "pub async fn activate_learner_protocol(");

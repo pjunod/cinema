@@ -744,7 +744,9 @@ impl Drop for SegmentDelivery {
 /// the URL, so one session capability can never be used to read another file.
 ///
 /// HDR retains its established diagnostic declaration. SDR declarations
-/// require complete frozen component facts, not a guessed codec string.
+/// require complete frozen component facts, not a guessed codec string, and
+/// the session's frozen `playback.sdr_master_codecs` choice (see
+/// `FrozenHlsCodecFacts::sdr_master_codecs`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HlsContext {
     /// A versioned resolved output budget; absence preserves legacy metadata.
@@ -771,6 +773,18 @@ pub(crate) struct FrozenHlsCodecFacts {
     audio: CodecAudioFact,
     #[serde(skip_serializing_if = "Option::is_none")]
     retained_output: Option<RetainedOutputFacts>,
+    /// Settings → Developer `playback.sdr_master_codecs`, read once when the
+    /// session was created and never again. Off (the default) is the pre-S-10
+    /// master: complete SDR facts are still recorded, but not printed, because
+    /// AVPlayer drops a variant whose `CODECS` it dislikes before fetching a
+    /// byte and no device has re-qualified the SDR string.
+    ///
+    /// Serialized only when on, so the presentation fingerprint of every
+    /// session created with the switch off is byte-for-byte what it was
+    /// before the switch existed, and a session that prints `CODECS` seals a
+    /// different master contract from one that does not.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    sdr_master_codecs: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -850,11 +864,20 @@ impl FrozenHlsCodecFacts {
             video: None,
             audio,
             retained_output: None,
+            sdr_master_codecs: false,
         }
     }
 
     pub(crate) fn with_retained_output(mut self, facts: Option<RetainedOutputFacts>) -> Self {
         self.retained_output = facts;
+        self
+    }
+
+    /// Bind the session's frozen `playback.sdr_master_codecs` choice. Called
+    /// only where a session is created (or, for VOD, from the value the
+    /// session recorded at create), never from a per-request settings read.
+    pub(crate) fn with_sdr_master_codecs(mut self, enabled: bool) -> Self {
+        self.sdr_master_codecs = enabled;
         self
     }
 
@@ -879,6 +902,16 @@ impl FrozenHlsCodecFacts {
             CodecAudioFact::ResolvedOutput(audio) => Some(format!("{video},{audio}")),
             CodecAudioFact::LegacyAacEncode => Some(format!("{video},mp4a.40.2")),
         }
+    }
+
+    /// What an SDR master variant prints: the complete component string, and
+    /// only when this session was created with `playback.sdr_master_codecs`
+    /// on. `None` keeps the pre-S-10 master, which carried no SDR `CODECS`.
+    pub(crate) fn sdr_master_codecs(&self) -> Option<String> {
+        if !self.sdr_master_codecs {
+            return None;
+        }
+        self.complete_sdr_codecs()
     }
 }
 
@@ -986,6 +1019,43 @@ mod frozen_codec_tests {
             serde_json::to_string(&legacy).expect("serializable legacy facts"),
             serde_json::to_string(&absent).expect("serializable absent audio")
         );
+    }
+
+    /// `playback.sdr_master_codecs` decides whether complete SDR facts are
+    /// printed, never whether they are complete. Off must also leave the
+    /// serialized facts — and so every off session's presentation
+    /// fingerprint — exactly as they were before the switch existed.
+    #[test]
+    fn sdr_master_codecs_switch_gates_printing_and_only_moves_the_fingerprint_when_on() {
+        let mut facts = FrozenHlsCodecFacts::audio(None, false, false);
+        facts.bind_output_avc_init("avc1.64001F".to_owned());
+        let before = serde_json::to_string(&facts).expect("serializable facts");
+        assert!(!before.contains("sdr_master_codecs"), "{before}");
+        assert_eq!(facts.complete_sdr_codecs().as_deref(), Some("avc1.64001F"));
+        assert_eq!(
+            facts.sdr_master_codecs(),
+            None,
+            "off is the pre-S-10 master"
+        );
+
+        let off = facts.clone().with_sdr_master_codecs(false);
+        assert_eq!(
+            serde_json::to_string(&off).expect("serializable facts"),
+            before
+        );
+        let on = facts.with_sdr_master_codecs(true);
+        assert_eq!(on.sdr_master_codecs().as_deref(), Some("avc1.64001F"));
+        assert_ne!(
+            serde_json::to_string(&on).expect("serializable facts"),
+            before,
+            "a session that prints CODECS seals a different master contract"
+        );
+
+        // On never invents a component: incomplete facts still print nothing.
+        let mut unknown_audio =
+            FrozenHlsCodecFacts::audio(None, true, false).with_sdr_master_codecs(true);
+        unknown_audio.bind_output_avc_init("avc1.64001F".to_owned());
+        assert_eq!(unknown_audio.sdr_master_codecs(), None);
     }
 }
 

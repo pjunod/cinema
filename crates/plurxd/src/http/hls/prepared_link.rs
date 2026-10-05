@@ -205,7 +205,12 @@ impl AcceptedObservation {
                 PreparedAdmission::QualifiedOutput(cost)
             }
             None if unknown_original_trial(candidate, request) => {
-                if !super::link_receipts::admissible_for(state, &identity, candidate).await {
+                // A retained negative is per-network history: consulted only
+                // while `playback.network_priors` keeps it (D6). The live
+                // incumbent proof above needs no such setting.
+                if super::link_receipts::network_priors_enabled(state).await
+                    && !super::link_receipts::admissible_for(state, &identity, candidate).await
+                {
                     return None;
                 }
                 PreparedAdmission::UnknownOriginalTrial(Instant::now() + Duration::from_secs(15))

@@ -43,7 +43,7 @@ each, and are why the movie would not play.
 
 ### 2.1 Three attempts, two different failures, one cause
 
-`docker logs plurxd` on **m6** (`192.168.4.14`, build
+`docker logs plurxd` on **lab6** (`10.42.4.14`, build
 `v0.3.0-3135-g9deb58a2e`), times UTC. The container has since been recreated,
 so these lines are the only copy.
 
@@ -86,7 +86,7 @@ behind anything. It hit the same wall on its own.
 
 ### 2.2 The measurement
 
-File 5208, from the store on m6:
+File 5208, from the store on lab6:
 
 ```
 id    | size            | duration_ms | width | height | video_codec
@@ -503,17 +503,17 @@ equivalent.
 The Google TV Streamer ran Android client `0.3.0` (versionCode `119`) against
 server build `v0.3.0-3649-g99d4abf8c`. *Casino* (file `5226`) is HDR10 with
 English SDH PGS at subtitle index `0`. Playback time advanced and a forward
-seek reached 15:02, but no cue appeared. On nynuc the overlay preparation
+seek reached 15:02, but no cue appeared. On media1 the overlay preparation
 ended after 584,654 ms with `PGS safety limit exceeded: normalized RGBA
 output exceeds 268435456 bytes`. Cue timing, placement, and backward-seek
 acceptance were therefore not reached. A protected-video screenshot cannot
 establish visible picture or HDR output, so those observations remain open.
 
 On the TCL tablet, *Casino* started immediately and playback advanced, but
-the first m6 extraction timed out after 600,001 ms. The tablet's Playback info
+the first lab6 extraction timed out after 600,001 ms. The tablet's Playback info
 reported `HDR → SDR`, 3840×2160 source to 1920×1080 playback, `Transcode ·
 VA-API · 1080p`, and `PGS overlay · unavailable`. It cannot establish the
-required HDR/direct-or-remux result. After the m6 index pass stored all seven
+required HDR/direct-or-remux result. After the lab6 index pass stored all seven
 PGS tracks for file `5226` (472 MB, one file), a second preparation served a
 stored track and failed after 610 ms on the same aggregate RGBA limit. The
 stored subtitle path is working; the normalizer limit is the remaining failure
@@ -521,7 +521,7 @@ for this title.
 
 On iPhone 17 Pro Max, *Bad Boys: Ride or Die* (file `5208`, Dolby Vision
 Profile 8, forced PGS index `2`) played at 3840×2160 with a remux decision,
-Dolby Vision rendering, and no buffering interruptions. Nynuc's cold PGS
+Dolby Vision rendering, and no buffering interruptions. Media1's cold PGS
 preparation timed out after 600,002 ms, so no DV PGS cue was validated. A
 separate SDR control, *The Good Son* (file `6641`), prepared its stored PGS
 track in 2,330 ms and visibly drew a centered cue on the iPhone. That proves
@@ -574,10 +574,10 @@ Stored-track readiness was met on all four nodes in the 2026-09-24 snapshot:
 
 | Node | Startup self-test | Cache filesystem | Free / required margin | Stored tracks | Ride |
 |---|---|---|---|---|---|
-| m6 | 78 ms, met | ext4 | 189.1 / 8.8 GiB | 472 MB, one file | None |
-| nynuc | 74 ms, met | ext4 | 72.3 / 10.3 GiB | 13 MB, one file | None |
-| nuc4 | 101 ms, met | ext4 | 65.1 / 9.3 GiB | 4.0 GB, 39 files | *Life* running |
-| nuc3 | 77 ms, met | ext4 | 28.7 / 6.4 GiB | Zero directories | None |
+| lab6 | 78 ms, met | ext4 | 189.1 / 8.8 GiB | 472 MB, one file | None |
+| media1 | 74 ms, met | ext4 | 72.3 / 10.3 GiB | 13 MB, one file | None |
+| lab4 | 101 ms, met | ext4 | 65.1 / 9.3 GiB | 4.0 GB, 39 files | *Life* running |
+| lab3 | 77 ms, met | ext4 | 28.7 / 6.4 GiB | Zero directories | None |
 
 The plan's M4/M5 acceptance asks for an "executed compatibility matrix" and a
 "complete physical validation matrix". Those are ceremony for this feature. A
@@ -649,7 +649,7 @@ is worth weighing:
 > with changes, folded in as **v3.1** below — exact `framecrc` arithmetic, a
 > complete verdict table, a latch that can actually retry, publish ordering, the
 > MPEG-TS exclusion v3 had dropped, and an off switch that also stops the
-> consumers. Every experiment cited was run on nuc3 against synthetic sources
+> consumers. Every experiment cited was run on lab3 against synthetic sources
 > muxed with `-copyts`, so cue times survive.
 
 ### 6.1 The finding that motivates it

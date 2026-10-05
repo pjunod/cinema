@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -18,8 +19,16 @@ import sys
 import time
 import urllib.request
 
-HOSTS = [("nynuc", "192.168.5.236"), ("m6", "192.168.4.14"),
-         ("nuc4", "192.168.4.8"), ("nuc3", "192.168.4.7")]
+# The four hosts, their addresses, the SSH user, the network the lab daemons
+# trust and the iperf3 load pair come from a fleet file kept outside the
+# repository (`--fleet`, or PLURX_K06_FLEET); the public mirror never names the
+# real lab. `plan` copies the fleet into the owned manifest, so every later
+# action and the remote worker read the same roster.
+# scripts/k06-owned-lab.fleet.example.json has the shape, with mirror names.
+FLEET_SCHEMA = "k06-fleet-v1"
+FLEET_ENV = "PLURX_K06_FLEET"
+HOST_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+SSH_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 LABEL = "tv.plurx.k06-owner"
 RAW_LIMIT = 64 * 1024 * 1024
 HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -30,6 +39,55 @@ TMPFS = {"/tmp": "rw,nosuid,nodev,noexec,size=128m",
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def validate_fleet(fleet):
+    require(isinstance(fleet, dict) and set(fleet) == {"schema", "ssh_user", "trusted_network", "hosts", "load"}
+            and fleet["schema"] == FLEET_SCHEMA, "fleet fields must be exact (" + FLEET_SCHEMA + ")")
+    require(isinstance(fleet["ssh_user"], str) and SSH_USER.fullmatch(fleet["ssh_user"]), "unsafe SSH user")
+    try:
+        require(isinstance(fleet["trusted_network"], str), "trusted network must be a CIDR string")
+        network = ipaddress.IPv4Network(fleet["trusted_network"])
+    except ValueError as error:
+        raise ValueError("invalid trusted network") from error
+    hosts = fleet["hosts"]
+    require(isinstance(hosts, list) and len(hosts) == 4, "exact four-host scope required")
+    for host in hosts:
+        require(isinstance(host, dict) and set(host) == {"host", "ip"}
+                and isinstance(host["host"], str) and HOST_NAME.fullmatch(host["host"])
+                and isinstance(host["ip"], str), "fleet host must be an exact {host, ip} record")
+        try:
+            address = ipaddress.IPv4Address(host["ip"])
+        except ValueError as error:
+            raise ValueError("invalid host address") from error
+        require(str(address) == host["ip"] and address.is_private and address in network,
+                "host address outside the trusted private network")
+    require(len({h["host"] for h in hosts}) == 4 and len({h["ip"] for h in hosts}) == 4,
+            "duplicate fleet host or address")
+    load = fleet["load"]
+    names = {h["host"] for h in hosts}
+    require(isinstance(load, dict) and set(load) == {"sender", "receiver"}
+            and load["sender"] in names and load["receiver"] in names
+            and load["sender"] != load["receiver"], "load pair must be two distinct fleet hosts")
+    return fleet
+
+
+def read_fleet(path):
+    require(path is not None, "fleet file required (--fleet or " + FLEET_ENV + ")")
+    path = Path(path)
+    require(path.is_file() and path.stat().st_size <= 16 * 1024, "bounded regular fleet file required")
+    return validate_fleet(json.loads(path.read_text()))
+
+
+def fleet_hosts(fleet):
+    return [(h["host"], h["ip"]) for h in fleet["hosts"]]
+
+
+def load_pair(fleet):
+    """(sender, sender ip, receiver, receiver ip) of the one generated stream."""
+    ips = dict(fleet_hosts(fleet))
+    sender, receiver = fleet["load"]["sender"], fleet["load"]["receiver"]
+    return sender, ips[sender], receiver, ips[receiver]
 
 
 def private_write(path, value):
@@ -73,7 +131,8 @@ def validate_manifest(m):
     require(labels.get("org.opencontainers.image.revision") == artifact["source"]
             and labels.get("tv.plurx.k06-source-tree") == artifact["tree"],
             "canonical image configuration source/tree mismatch")
-    require([(n["host"], n["ip"]) for n in m["nodes"]] == HOSTS, "exact four-host scope required")
+    fleet = validate_fleet(m.get("fleet"))
+    require([(n["host"], n["ip"]) for n in m["nodes"]] == fleet_hosts(fleet), "exact four-host scope required")
     for n in m["nodes"]:
         stem = "plurx-k06-measure." + m["owner"] + "-" + n["host"]
         require(n["root"] == "/var/tmp/" + stem, "unsafe remote path")
@@ -126,7 +185,7 @@ def resolve_image(artifact, retained=None):
     return found.pop()
 
 
-def load_manifest(path):
+def load_manifest(path, fleet=None):
     require(path.is_absolute() and ".." not in path.parts, "absolute manifest path required")
     require(all(not p.is_symlink() for p in [path, *path.parents]), "symlink manifest path refused")
     require(path.name == ".active-cleanup.json", "exact cleanup manifest filename required")
@@ -136,7 +195,11 @@ def load_manifest(path):
                 "private controller ownership required")
         require(stat.S_ISDIR(s.st_mode) if p == path.parent else stat.S_ISREG(s.st_mode), "unsafe manifest entry type")
     require(path.stat().st_size < 1024 * 1024, "manifest byte cap")
-    m = validate_manifest(json.loads(path.read_text()))
+    m = json.loads(path.read_text())
+    if "fleet" not in m and fleet is not None:
+        # A manifest planned before the roster moved out of the source.
+        m["fleet"] = fleet
+    m = validate_manifest(m)
     fd = os.open(path.parent / ".owner", os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd) as stream:
         require(stream.read(65) == m["owner"] + "\n", "owner mismatch")
@@ -164,12 +227,12 @@ def daemon_args(m, n, uid, gid):
             "--config", "/data/plurx.toml", "run"]
 
 
-def config(n, joining):
+def config(n, joining, fleet):
     return (f'[server]\nname = "k06-{n["host"]}"\nbind = "0.0.0.0:55420"\n'
             '[storage]\ndata_dir = "/data/state"\n[cluster]\n'
             'raft_bind = "0.0.0.0:55421"\napi_bind = "0.0.0.0:55422"\n'
             f'advertise_host = "{n["ip"]}"\njoin_url = "http://{n["ip"]}:55420"\n'
-            f'artwork_url = "http://{n["ip"]}:55420"\ntrusted_network = "192.168.0.0/16"\n'
+            f'artwork_url = "http://{n["ip"]}:55420"\ntrusted_network = "{fleet["trusted_network"]}"\n'
             + ('join_token_file = "/data/join.token"\n' if joining else ''))
 
 
@@ -243,7 +306,7 @@ def remote(path, m, n, action, payload=None):
     request = json.dumps({"manifest": m, "node": n, "action": action, "payload": payload})
     wrapper = "import sys,json; source=json.loads(sys.stdin.readline()); exec(compile(source,'k06-worker','exec'))"
     args = ["ssh", "-T", "-i", str(path), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-            "-o", "ConnectionAttempts=1", "pjunod@" + n["ip"],
+            "-o", "ConnectionAttempts=1", m["fleet"]["ssh_user"] + "@" + n["ip"],
             "python3 -c " + shlex.quote(wrapper) + " --worker"]
     import tempfile
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as stderr:
@@ -380,14 +443,20 @@ def process_identity(pid):
             "argv_sha256": hashlib.sha256((proc / "cmdline").read_bytes()).hexdigest()}
 
 
-def start_load(root, host):
-    receiver = host == "nuc4"
-    require(host in ("m6", "nuc4"), "load host outside exact pair")
+def load_args(host, fleet):
+    sender, sender_ip, receiver_host, receiver_ip = load_pair(fleet)
+    receiver = host == receiver_host
+    require(host in (sender, receiver_host), "load host outside exact pair")
     args = ["timeout", "-k", "5s", "75s" if receiver else "70s", "nice", "-n", "10", "iperf3"]
-    args += (["-s", "-1", "-B", "192.168.4.8", "-p", "55423", "--server-max-duration", "60",
+    args += (["-s", "-1", "-B", receiver_ip, "-p", "55423", "--server-max-duration", "60",
               "--server-bitrate-limit", "22M", "-J"] if receiver else
-             ["-c", "192.168.4.8", "-B", "192.168.4.14", "-p", "55423", "-t", "60", "-b", "20M",
+             ["-c", receiver_ip, "-B", sender_ip, "-p", "55423", "-t", "60", "-b", "20M",
               "--connect-timeout", "3000", "-J"])
+    return args
+
+
+def start_load(root, host, fleet):
+    args = load_args(host, fleet)
     caps = {"RLIMIT_AS": 256 * 1024**2, "RLIMIT_CPU": 15, "RLIMIT_FSIZE": 2 * 1024**2,
             "RLIMIT_NPROC": 256, "RLIMIT_NOFILE": 64}
     fd = os.open(root / "load.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -440,7 +509,7 @@ def worker(request):
         return {"claimed": True}
     root = root_check(n, m)
     if action == "load-start":
-        return {"load_process": start_load(root, n["host"])}
+        return {"load_process": start_load(root, n["host"], m["fleet"])}
     if action == "load-result":
         deadline = time.monotonic() + 10
         while True:
@@ -520,7 +589,7 @@ def worker(request):
         resolve_image(m["artifact"], n.get("docker_image_id"))
         require(n.get("docker_image_id"), "create lacks persisted node image identity")
         owner_check(inspect("network", n["network_id"]), m)
-        for filename, data in (("plurx.toml", config(n, bool(payload))), ("join.token", payload or "")):
+        for filename, data in (("plurx.toml", config(n, bool(payload), m["fleet"])), ("join.token", payload or "")):
             fd = os.open(root / filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "w") as stream:
                 stream.write(data)
@@ -683,12 +752,13 @@ def observe(m, key, token, output, seconds, cadence):
     m["last_runtime"] = cached
 
 
-def check_load(result, host):
+def check_load(result, host, fleet):
     require("error" not in result and result.get("connected"), "failed or unsolicited load")
     connection = result["connected"][0]
-    local, peer = ("192.168.4.14", "192.168.4.8") if host == "m6" else ("192.168.4.8", "192.168.4.14")
+    sender, sender_ip, _, receiver_ip = load_pair(fleet)
+    local, peer = (sender_ip, receiver_ip) if host == sender else (receiver_ip, sender_ip)
     require(connection["local_host"] == local and connection["remote_host"] == peer, "load peer mismatch")
-    summary = result["end"]["sum_sent" if host == "m6" else "sum_received"]
+    summary = result["end"]["sum_sent" if host == sender else "sum_received"]
     require(59 <= summary["seconds"] <= 62 and 100_000_000 <= summary["bytes"] <= 180_000_000
             and 18_000_000 <= summary["bits_per_second"] <= 22_000_000, "short/unbounded/wrong-rate load")
 
@@ -733,7 +803,7 @@ def summarize(path, m):
         rows = [json.loads(line) for line in raw.read_text().splitlines()]
         window = {"samples": len(rows), "expected_samples": expected, "complete": len(rows) == expected,
                   "raw_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(), "nodes": {}}
-        for host, _ in HOSTS:
+        for host, _ in fleet_hosts(m["fleet"]):
             samples = [n for r in rows for n in r["nodes"] if n["host"] == host]
             distributions = {"abs_offset_seconds": [], "uncertainty_seconds": [], "abs_upper_seconds": []}
             for sample_row in samples:
@@ -776,6 +846,9 @@ def main():
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--ssh-key", type=Path)
     parser.add_argument("--authorized-window", help="separate coordinator authorization receipt; never a product gate")
+    parser.add_argument("--fleet", type=Path, default=os.environ.get(FLEET_ENV) or None,
+                        help="lab roster JSON (" + FLEET_SCHEMA + "), kept outside the repository; "
+                             "default $" + FLEET_ENV + ". Required by plan; later actions read it from the manifest")
     args = parser.parse_args()
     if args.action == "source":
         require(args.repo is not None, "owned clone path required")
@@ -783,16 +856,18 @@ def main():
         return
     if args.action == "plan":
         require(args.artifact is not None, "identified artifact receipt required")
+        fleet = read_fleet(args.fleet)  # before creating anything
         require(args.path.is_absolute() and not args.path.exists() and ".." not in args.path.parts,
                 "fresh absolute output required")
         require(all(not p.is_symlink() for p in args.path.parents), "symlink output ancestor")
         args.path.mkdir(mode=0o700)
         owner = secrets.token_hex(32)
         m = {"schema": 1, "owner": owner, "artifact": json.loads(args.artifact.read_text()), "phase": "planned",
+             "fleet": fleet,
              "nodes": [{"host": host, "ip": ip, "root": "/var/tmp/plurx-k06-measure." + owner + "-" + host,
                         "name": "plurx-k06-measure." + owner + "-" + host,
                         "network_name": "plurx-k06-measure." + owner + "-" + host + "-net"}
-                       for host, ip in HOSTS]}
+                       for host, ip in fleet_hosts(fleet)]}
         validate_manifest(m)
         fd = os.open(args.path / ".owner", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as stream:
@@ -800,7 +875,7 @@ def main():
         private_write(args.path / ".active-cleanup.json", m)
         print("planned only; no remote operation")
         return
-    m = load_manifest(args.path)
+    m = load_manifest(args.path, read_fleet(args.fleet) if args.fleet else None)
     if args.action == "validate":
         print("valid owned manifest; no remote operation")
         return
@@ -855,7 +930,9 @@ def main():
     elif args.action == "load":
         require(m["phase"] == "idle-collected-load-not-executed", "complete idle window required first")
         token = json.loads((args.path.parent / ".lab-admin.json").read_text())["token"]
-        pair = [m["nodes"][2], m["nodes"][1]]
+        sender, _, receiver, _ = load_pair(m["fleet"])
+        by_host = {n["host"]: n for n in m["nodes"]}
+        pair = [by_host[receiver], by_host[sender]]  # the server listens first
         for n in pair:
             n.update(remote(args.ssh_key, m, n, "load-start"))
             private_write(args.path, m)
@@ -863,7 +940,7 @@ def main():
         for n in pair:
             n.update(remote(args.ssh_key, m, n, "load-result"))
             private_write(args.path, m)
-            check_load(n["load_result"], n["host"])
+            check_load(n["load_result"], n["host"], m["fleet"])
         m["phase"] = "collected-not-qualified"
         private_write(args.path, m)
     else:

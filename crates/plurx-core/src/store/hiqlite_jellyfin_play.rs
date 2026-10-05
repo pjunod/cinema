@@ -125,6 +125,32 @@ impl JellyfinPlayStore for HiqliteAuthStore {
             .map(jp::RawPlay::decode)
             .transpose()
     }
+    async fn jellyfin_current_direct_play(
+        &self,
+        scope: &JellyfinPlayScope,
+        item_wire_id: &str,
+        file_wire_id: &str,
+    ) -> Result<Option<JellyfinPlay>, StoreError> {
+        jp::validate_source(scope, item_wire_id, file_wire_id)?;
+        self.client()
+            // authority: a direct request without a play id must resolve the play Stop, supersession and renegotiation last committed.
+            .query_consistent_map::<jp::RawPlay, _>(
+                jp::READ_CURRENT_DIRECT,
+                params!(
+                    scope.user_id,
+                    &scope.token_digest,
+                    &scope.device_digest,
+                    scope.client_family.as_str(),
+                    item_wire_id,
+                    file_wire_id
+                ),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(jp::RawPlay::decode)
+            .transpose()
+    }
     async fn jellyfin_plays_superseded_by(
         &self,
         play_id: &str,

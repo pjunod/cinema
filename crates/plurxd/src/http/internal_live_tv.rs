@@ -4,15 +4,13 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
 use super::peer_transport::exact_auth_from_headers;
 use crate::live_tv::{
-    LiveTvActivateRequest, LiveTvDrainAck, LiveTvDrainRequest, LiveTvResourceRequest,
-    LiveTvResumeRequest, LiveTvRetireRequest, LiveTvStartRequest, LiveTvStartRequestV2,
-    LiveTvStartStateRequest, LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH, DRAIN_PATH,
-    GUIDE_PATH, RESOURCE_PATH, RESUME_PATH, RETIRE_PATH, SNAPSHOT_PATH, START_PATH,
-    START_STATE_PATH, START_V2_PATH, STOP_PATH,
+    LiveTvActivateRequest, LiveTvResourceRequest, LiveTvResumeRequest, LiveTvRetireRequest,
+    LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStartStateRequest, LiveTvStopRequest,
+    SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, RESOURCE_PATH, RESUME_PATH, RETIRE_PATH,
+    SNAPSHOT_PATH, START_PATH, START_STATE_PATH, START_V2_PATH, STOP_PATH,
 };
 use crate::state::AppState;
 
@@ -315,50 +313,6 @@ pub(crate) async fn start_state(
         .live_tv
         .start_state_local(request.user_id, &request.request_id);
     signed_json_response(&state, &headers, START_STATE_PATH, StatusCode::OK, &answer)
-}
-
-pub(crate) async fn drain(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let request =
-        serde_json::from_slice::<LiveTvDrainRequest>(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let signer = authorize_voter(&state, &headers, &body, DRAIN_PATH, None).await?;
-    if request.expected_owner_node_id != state.node_id {
-        return Err(StatusCode::CONFLICT);
-    }
-    if request.target_node_id != signer
-        || request.drain_before_generation < 0
-        || uuid::Uuid::parse_str(&request.request_nonce).is_err()
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let config = state.live_tv.config().await.map_err(error_status)?;
-    if request.drain_before_generation > config.generation {
-        return Err(StatusCode::CONFLICT);
-    }
-    let drained = state
-        .live_tv
-        .drain_before(request.drain_before_generation)
-        .await
-        .map_err(error_status)?;
-    let mut ack = LiveTvDrainAck {
-        owner_node_id: state.node_id.clone(),
-        target_node_id: signer.clone(),
-        request_nonce: request.request_nonce,
-        drained_before_generation: request.drain_before_generation,
-        drained,
-        signature: String::new(),
-    };
-    let payload = ack.signing_payload().map_err(error_status)?;
-    ack.signature = state
-        .membership
-        .sign_internal_peer_response(&signer, &ack.request_nonce, DRAIN_PATH, &payload)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok(Json(
-        serde_json::to_value(ack).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    ))
 }
 
 async fn require_start_authority(state: &AppState) -> Result<(), StatusCode> {

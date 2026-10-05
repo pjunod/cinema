@@ -39,7 +39,7 @@ class ContinuousQualityMediaTest {
             "ledger" to JsonObject(requireNotNull(response.obj("ledger")) + ("transactions" to JsonArray(listOf(target))))))
     })
 
-    @Test fun immutableInitializationAndExactReservedBytesAreRequiredBeforeExtraction() = runBlocking {
+    @Test fun immutableInitializationAndExactReservedBytesAreRequiredBeforeExtraction() = runBlocking<Unit> {
         val protocol = protocol()
         val media = ContinuousQualityMedia("https://owned.invalid", parent + "quality-schedule", family, protocol)
         val initial = requireNotNull(media.resource("https://owned.invalid${parent}video/$rendition/init/${ContinuousQualityMedia.digest(init)}.mp4"))
@@ -65,7 +65,7 @@ class ContinuousQualityMediaTest {
         assertThrows(IOException::class.java) { media.resource("https://owned.invalid${parent}video/$rendition/segment/99999999999999999999.m4s") }
     }
 
-    @Test fun aDisposedPinAndAnOverflowedVideoFrontierCannotAuthorizeBytes() = runBlocking {
+    @Test fun aDisposedPinAndAnOverflowedVideoFrontierCannotAuthorizeBytes() = runBlocking<Unit> {
         val protocol = protocol(disposed = true)
         protocol.transition(transaction, operation())
         val media = ContinuousQualityMedia("https://owned.invalid", parent + "quality-schedule", family, protocol)

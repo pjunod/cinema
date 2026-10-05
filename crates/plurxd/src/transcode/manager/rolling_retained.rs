@@ -2,11 +2,16 @@
 use super::*;
 
 impl TranscodeManager {
+    #[allow(clippy::too_many_arguments)] // one session's complete retention admission
     pub(super) async fn begin_rolling_retention(
         &self,
         production: Option<&Arc<crate::rolling_provenance::RollingProduction>>,
         duration_ms: Option<i64>,
         source_bytes: i64,
+        budget: Option<u64>,
+        session_dir: &std::path::Path,
+        file_id: i64,
+        item_title: &str,
     ) -> Option<Arc<crate::vodserve::retained::RollingCollection>> {
         let duration_ms = u64::try_from(duration_ms?).ok()?;
         if duration_ms == 0 {
@@ -18,7 +23,7 @@ impl TranscodeManager {
         if lifetime_ms > 24 * 60 * 60 * 1000 {
             return None;
         }
-        let budget = self.rolling_retained_budget().await?;
+        let budget = budget?;
         // Reserve the same bounded allocation the complete-output VOD path
         // queues with (twice the source plus 64 MiB generation headroom), not
         // the whole remaining budget: a collection lives as long as its
@@ -29,12 +34,17 @@ impl TranscodeManager {
             .checked_mul(2)?
             .checked_add(64 * 1024 * 1024)?
             .min(budget);
+        let production = production?;
         self.vod
             .begin_rolling_collection(
-                Arc::clone(production?),
+                Arc::clone(production),
                 budget,
                 estimate,
                 Instant::now().checked_add(Duration::from_millis(lifetime_ms))?,
+                Arc::clone(self.scratch_ledger.headroom()),
+                session_dir,
+                file_id,
+                item_title,
             )
             .await
     }

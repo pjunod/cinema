@@ -4106,11 +4106,35 @@ test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "continuous family upgrades use the enforced family budget and the family's own objects"
 
 [[fixes]]
+id = "android.display-mode-timeout-withdraws-the-request"
+commits = ["42f93dd2c893596de0934857a8f8418ca92ddd9b", "fb724005eb87a1a3f625db28dacfc899763adf09"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/DisplayModeMatcher.kt"
+source_anchor = "internal fun clearsDisplayModeRequestAfterWait(matched: Boolean, stillOwner: Boolean, late: Boolean): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/DisplayModeMatcherTest.kt"
+test_anchor = "@Test fun timedOutPrepareWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow()"
+
+[[fixes]]
+id = "android.continuous-audio-outputs-retire-every-released-output"
+commits = ["5ab6affcf2ea0f9ce2f89d2a84be79fe81a3d811"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAudioOutputs.kt"
+source_anchor = ".map { it.key to it.value.owner }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousAudioOutputsTest.kt"
+test_anchor = "@Test fun releasingManyOutputsRetiresEveryOneOfThem()"
+
+[[fixes]]
+id = "android.seek-during-a-prepared-switch-is-held-not-dropped"
+commits = ["8ed4a3b821ccff4d2e2c515d18124b2348d6c8f6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class SeekDeferredBehindSwitch {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun seekDeferredBehindASwitchRunsExactlyOnceAndOnlyWhileCurrent()"
+
 # iOS does not promise an `.ended` for every `.began`. A hold raised on
 # `.began` that only `.ended` could clear stayed up for an hour over a picture
 # the viewer had resumed (iPad Pro, 2026-10-04), with the stall monitor off.
 # The viewer's press, and film actually playing, now end it, and a `.began`
 # while the viewer has already paused holds nothing.
+[[fixes]]
 id = "apple.system-hold-ends-without-ended"
 commits = ["969aba483299e9293ec3ffc5fc9bc40b2ef0da67"]
 source = "clients/apple/Sources/PlayerController.swift"

@@ -622,18 +622,18 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `07796d70` | Routed all store slices; selector moved from hiqlite 3/16 + SQLite 7/24 outside `cluster_auth` to 0/16 + 0/24. Directory-derived regression passed. Historical cost remains 3 extra cluster lanes among 19 touching commits in 30 days. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `6e1554ed` | Added 24-file SQLite census, gap/mixed-spelling/local-arity checks, pinned 91 unchecked variants, fixed two real gaps, and exposed the fixed-cardinality pre-I/O refusal counter. Fourteen focused census tests and the counter regression passed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `3ebc50be`, findings `d56ccea6` | Classified all 42 discarded results: 35 best-effort, 5 lost-work, 2 cancelled. The semantic guard covers direct, nested and wrapper Store calls; every operation/severity failure cell is counted and bounded-logged. The actual named no-holder transition passed on in-memory SQLite, file SQLite and three-voter Hiqlite; the daemon arm passed its SQLite regression. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `8cfd50a5` | One typed parameter order now renders both `next_up` dialects; equivalence/validator, SQLite behavior, and backend-neutral watch-contract regressions passed. Measured patch: +119/-61, net +58; the pinned unchecked arity set fell from 91 to 90. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / this commit | Decision: keep the safe pilot, do not spread or revert. A future spread needs a shape inventory and net reduction across at least three unlike methods. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#411](http://forge.lan:3000/noirr/plurx/pulls/411) / `07796d70` | Routed all store slices; selector moved from hiqlite 3/16 + SQLite 7/24 outside `cluster_auth` to 0/16 + 0/24. Directory-derived regression passed. Historical cost remains 3 extra cluster lanes among 19 touching commits in 30 days. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#411](http://forge.lan:3000/noirr/plurx/pulls/411) / `6e1554ed` | Added 24-file SQLite census, gap/mixed-spelling/local-arity checks, pinned 91 unchecked variants, fixed two real gaps, and exposed the fixed-cardinality pre-I/O refusal counter. Fourteen focused census tests and the counter regression passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#411](http://forge.lan:3000/noirr/plurx/pulls/411) / `3ebc50be`, findings `d56ccea6` | Classified all 42 discarded results: 35 best-effort, 5 lost-work, 2 cancelled. The semantic guard covers direct, nested and wrapper Store calls; every operation/severity failure cell is counted and bounded-logged. The actual named no-holder transition passed on in-memory SQLite, file SQLite and three-voter Hiqlite; the daemon arm passed its SQLite regression. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#411](http://forge.lan:3000/noirr/plurx/pulls/411) / `8cfd50a5` | One typed parameter order now renders both `next_up` dialects; equivalence/validator, SQLite behavior, and backend-neutral watch-contract regressions passed. Measured patch: +119/-61, net +58; the pinned unchecked arity set fell from 91 to 90. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#411](http://forge.lan:3000/noirr/plurx/pulls/411) / this commit | Decision: keep the safe pilot, do not spread or revert. A future spread needs a shape inventory and net reduction across at least three unlike methods. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/p02_registry_pull_audit_sol61 | §7.1 post-merge receipt | `codex/k07-first-ten-receipt` into `effort/architecture-review-2026-09-20` | Coordinator-authorized objective evidence continuation under board rule 7; original milestone authors/history retained. Exact first-ten source replay below answers the marginal median lane-set question. M0–M4 acceptance is already recorded; K-07 is done effective on this receipt's reviewed, gated landing. No runtime saving, ten executed jobs, fleet evidence or main promotion is claimed. |
 
 ### First-ten PR lane-set receipt — 2026-09-30
 
 Section 7 question 1 asks whether adding the ten paths changes the **median
 PR lane set**, not job duration. M0 `07796d70f24103368cbfbe6c443b8ecf4e15c6c2`
-landed in [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) as
+landed in [#411](http://forge.lan:3000/noirr/plurx/pulls/411) as
 `58e7526038761bae1825c98cec82b26130c2880d`, 2026-09-21 08:37:50 UTC.
 The cohort is the first ten subsequent **main PR landings**, in first-parent
 order, not PR-number order or ten later convenient successful runs. Selected
@@ -686,9 +686,9 @@ M0 addition. This cohort establishes no broader future-cost claim.
 `18555d62bf147684abe96f1017d59c3d07f9261a` records M0–M4 proof, the real
 no-holder seam on SQLite/file SQLite/three-voter Hiqlite, watch parity,
 placeholder and discarded-result checks. Sole review
-[3227](http://192.168.4.7:3000/noirr/plurx/pulls/411#issuecomment-3227) is
-addressed by [3246](http://192.168.4.7:3000/noirr/plurx/pulls/411#issuecomment-3246).
-Retained [gate 2457](http://192.168.4.7:3000/noirr/plurx/actions/runs/2457)
+[3227](http://forge.lan:3000/noirr/plurx/pulls/411#issuecomment-3227) is
+addressed by [3246](http://forge.lan:3000/noirr/plurx/pulls/411#issuecomment-3246).
+Retained [gate 2457](http://forge.lan:3000/noirr/plurx/actions/runs/2457)
 (API run 2475) succeeded on that exact head: scope, preflight, Rust, Windows
 and Main promotion gate. The body truthfully records no broad **local** unit
 sweep under the coordinator's instruction; historical gate and named proof
@@ -696,9 +696,9 @@ are not replaced by a new test claim here. M4's two-statement stay decision
 and +119/−61 cost remain above. Section 6 requires no fleet/device milestone.
 
 **Execution limits, separate from §7.1:** #437's retained exact-head run
-(API 2580 / [UI 2562](http://192.168.4.7:3000/noirr/plurx/actions/runs/2562))
+(API 2580 / [UI 2562](http://forge.lan:3000/noirr/plurx/actions/runs/2562))
 is entirely skipped, so its replay is not observed execution. #436's run
-(API 2553 / [UI 2535](http://192.168.4.7:3000/noirr/plurx/actions/runs/2535))
+(API 2553 / [UI 2535](http://forge.lan:3000/noirr/plurx/actions/runs/2535))
 reports contradictory start/stop/duration fields versus its Rust log
 timestamps. Job API records lack timing endpoints. No ten-PR runtime-cost
 median or causal time saving is claimed or required to answer §7.1.

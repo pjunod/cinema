@@ -25,7 +25,7 @@ requires a Home library's `?sort=resolution` response to be sorted under the
 client's comparator applied to the keys it returned, with the photo carrying
 no `resolution`. Restoring the old height-for-every-kind clause fails all three
 (the replay puts 32, 31 first; the HTTP test puts the photo first); that revert
-was run on nuc3 on 2026-09-24. Run
+was run on lab3 on 2026-09-24. Run
 `cargo test -p plurx-core item_sort_order`,
 `cargo test -p plurx-core --test store_contract library_sort` and
 `cargo test -p plurxd library_resolution_sort`.

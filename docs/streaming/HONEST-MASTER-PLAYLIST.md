@@ -1,6 +1,6 @@
 # Honest master playlist — say what this session delivers, not what the file is
 
-**Status:** M1–M2 landed; M3 implementation in progress, fleet/device acceptance open · **Executes:** Q7 / F-stream-14 / A11 /
+**Status:** open — M1–M5 code on `main` since 2026-10-04 (#793); M3–M6 fleet/device acceptance open; SDR `CODECS` printing is behind the Developer switch `playback.sdr_master_codecs`, **default off** (2026-10-04, [below](#the-sdr-codecs-developer-switch)) until the §5.4 device re-qualification is recorded · **Executes:** Q7 / F-stream-14 / A11 /
 F-apple-11 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -728,7 +728,10 @@ The copied codec name `aac` alone does not prove AAC-LC rather than HE-AAC;
 without a frozen output AudioSpecificConfig it remains incomplete. Resolved
 AAC encoding retains the native encoder's established output contract.
 HDR declarations, variant topology and prepared-owner identity are retained.
-There is no runtime gate or temporary diagnostic switch.
+There is no temporary diagnostic switch. **Superseded 2026-10-04:** printing
+SDR `CODECS` now waits behind the Developer switch described in
+[The SDR `CODECS` Developer switch](#the-sdr-codecs-developer-switch), default
+off, so the unqualified string does not reach a device by default.
 
 The required qualification run uses
 `master_playlist_diagnostic`'s existing shapes
@@ -1011,10 +1014,67 @@ fleet.
    full transcodes publish MPEG-TS and do not. Treating every `avc1` context as
    init-derived would turn a truthful static fallback into a permanent pending
    playlist on the MPEG-TS path.
-3. **No advisory switch is added.** M1 and M2 make existing declarations more
-   exact. M3–M6 are withheld until their required observations exist, so a
-   Developer setting would expose an unqualified contract rather than useful
-   readiness information.
+3. **No advisory switch is added for M1–M3, M5 or M6.** M1 and M2 make
+   existing declarations more exact. M3, M5 and M6 are withheld until their
+   required observations exist, so a Developer setting would expose an
+   unqualified contract rather than useful readiness information. **M4's SDR
+   `CODECS` is the exception (2026-10-04):** it was integrated before the
+   device run under the 2026-10-01 ordering ruling, so it ships behind
+   `playback.sdr_master_codecs`, default off — see below.
+
+### The SDR `CODECS` Developer switch
+
+Decided 2026-10-04 (Paul's assumed ruling, recorded for confirmation). The
+SDR arm of `master_playlist_with_shape` (`playlist_text.rs`, the
+`else if shape.codecs` branch) prints `CODECS` only when both hold:
+
+- the session's `FrozenHlsCodecFacts` are complete (`complete_sdr_codecs`,
+  unchanged), and
+- the session was **created** with Settings → Developer
+  `playback.sdr_master_codecs` on (`FrozenHlsCodecFacts::sdr_master_codecs`).
+
+Off — the default and every unrecognised stored spelling — is exactly the
+pre-S-10 master: SDR variants carry no `CODECS`, the version stays 7, and the
+complete facts are still frozen (and still drive bandwidth and identity).
+The HDR/Dolby Vision branch never reads the switch; its `VIDEO-RANGE`,
+`CODECS` and `SUPPLEMENTAL-CODECS` are what they were before S-10.
+
+**Fixed when the session is created.** The HTTP create reads the switch in
+the planning snapshot it already takes (`QUALITY_PLANNING_KEYS`) and carries
+it on the request (`SessionRequest::sdr_master_codecs`, never serialized);
+the session stores it in its codec facts, never read per playlist request. A
+session rebuilt after an owner takeover or VOD resurrection has no create
+behind it and reads the current value:
+
+| Path | Where it is read | Where it is kept |
+|---|---|---|
+| VOD (encoded and copy) | the create's snapshot value; without one, `TranscodeManager::vod_settings`' existing settings batch — no extra Store read either way | `vod::Session::sdr_master_codecs`, beside `block_budget`; returned by `VodServe::hls_facts` |
+| Rolling transcode, cached, retained | the create's snapshot value; `sdr_master_codecs_switch` reads the Store only when the request carries none (takeover, a request rebuilt from its recipe) | `FrozenHlsPresentation.context.codec_facts` |
+| Rolling copy | same, in `start_copy_with_audio_offset` | same |
+
+Carrying the key in `QUALITY_PLANNING_KEYS` does not move planning bindings:
+`PlanningBinding` digests the file, probe and reorder policy, not settings,
+and every `playback.*` write already advances the playback-input generation
+whether or not a snapshot reads the key. The switch is serialized into the
+facts only when on, so every off session's presentation fingerprint is
+byte-for-byte unchanged and an on session seals a different master contract.
+
+One limit: a VOD session **resurrected** from its durable recipe (idle reap
+or owner takeover), and a rolling session taken over by a new owner, is a new
+incarnation and reads the switch's current value, exactly as it re-reads its
+block budget. Carrying the value in `RemoteStartRequest`
+would be a durable-format change on a `deny_unknown_fields` struct that an
+older node in a mixed-version cluster would refuse to parse. AVPlayer reads
+the master once per item, so this only matters if a client re-fetches the
+master of a resurrected handle after the switch was flipped.
+
+Readiness (`GET /api/v1/developer/readiness`, item `sdr_master_codecs`) has
+one advisory row, `sdr_codecs_device_requalification`, which is
+`unknown` by construction: no observation this daemon can make proves it. The card's graduation line: it leaves
+Developer when the Apple TV and iPhone device check confirms every SDR
+variant is still offered; then the default becomes on and the switch is
+removed (with `FrozenHlsCodecFacts::sdr_master_codecs` collapsing back into
+`complete_sdr_codecs`).
 
 ---
 
@@ -1318,11 +1378,12 @@ compatibility and fleet qualification remain open.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-04 | claude-opus-5-5 | session_018v5UHLRMwraYsWVcGK7bA3 | Containment of the main merge (D2, D3) | pending | Output preparation and rolling retention become Developer switches, default off (`vod.output_preparation`, `vod.rolling_retention`). Preparation runs on the pre-transcode worker without the speculative schedule; disabled kinds are drained by cancel-only passes; rows carry a seven-day deadline; Activity Stop cancels. Retention gains a disk free-space guard (unused grants counted), prompt `abandon()`, a whole-queue time-budgeted collector, same-filesystem refusal, ENOSPC shedding, and Activity rows with Stop. See OPERATIONS "Complete-output preparation and rolling retention". |
 | 2026-10-02 | gpt-6.1-sol | agent:/root/k06_pr725_adversarial_sol61 | M5 public Create and fetched-wire development control | pending independent review | One genuinely new ignored method passed once on exact frozen `574e88dea` /tree `8bd154b8` (parent effort `102669d27`), under the admitted Darwin FFmpeg9.0.1 watchdog. Actual public HTTP Create and GETs, exact retained source/audio tuple, independently calculated mux rates, immutable first masters, public DELETE and listener reuse asserted; external terminal zero and owned-session absence proved. One input/one media segment is not shipping Linux8.1.3, variable-window/corpus, unseen-tail, whole-film, native/device or fleet qualification. Current composition/compiler/static/gate and a different independent reviewer remain required; no successful replay. |
-| 2026-10-02 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M5 rolling/PUT retained consumers | [#706](http://192.168.4.7:3000/noirr/plurx/pulls/706) | Optional successful commit hardlinks share existing namespace/count/allowance/cleanup; original verified completion and exact process-private source/recipe/engine binding precede a compatible NEW attachment. Five original focused successes retain historical source attribution; five new review59 controls passed once, including real integrity/producer-admission and post-await refusal controls. Same sole review59 disposition remains required. No restart/telemetry authority, old-owner rebinding, unseen-tail or physical qualification claim. |
+| 2026-10-02 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M5 rolling/PUT retained consumers | [#706](http://forge.lan:3000/noirr/plurx/pulls/706) | Optional successful commit hardlinks share existing namespace/count/allowance/cleanup; original verified completion and exact process-private source/recipe/engine binding precede a compatible NEW attachment. Five original focused successes retain historical source attribution; five new review59 controls passed once, including real integrity/producer-admission and post-await refusal controls. Same sole review59 disposition remains required. No restart/telemetry authority, old-owner rebinding, unseen-tail or physical qualification claim. |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M3 claim | pending draft | Own clone `plurx-s10-m3-sol61`, branch `codex/s10-m3-encoder-qualification`, original actual effort `903201a24`; pinned Rust 1.97.1 baseline passed before Rust edits. M1/M2, output-codec and audio contracts retained; no M4/M5 or fleet/device acceptance claim. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Bounded `avcC` parsing, fMP4 normalization, MPEG-TS bypass and attempt-media classification passed focused tests. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M6 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | needs: fleet encoder/SPS qualification, named-device SDR `CODECS` re-qualification, measured corpus peak/average/overhead, and Apple-panel before/after observations. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review [#3318](http://192.168.4.7:3000/noirr/plurx/pulls/419#issuecomment-3318) | `9ca2cb23` | Resolved all four findings: structural selected-track `stsd`/`avcC` identity with decoy/duplicate/typed-refusal tests; coherent encoded-VOD no-upscale/unprobed geometry; cadence-safe proposed levels with 23.976/29.97/59.94/60 evidence; copy/remux/prepared-successor fragment-index peak contract. Pinned 1.97.1 focused AVC (4), fMP4 AVC (2), MPEG-TS (1), VOD geometry (2), affected Clippy, rustfmt, docs index and diff check green; no broad unit. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://forge.lan:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://forge.lan:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#419](http://forge.lan:3000/noirr/plurx/pulls/419) | Bounded `avcC` parsing, fMP4 normalization, MPEG-TS bypass and attempt-media classification passed focused tests. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M6 | [#419](http://forge.lan:3000/noirr/plurx/pulls/419) | needs: fleet encoder/SPS qualification, named-device SDR `CODECS` re-qualification, measured corpus peak/average/overhead, and Apple-panel before/after observations. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review [#3318](http://forge.lan:3000/noirr/plurx/pulls/419#issuecomment-3318) | `9ca2cb23` | Resolved all four findings: structural selected-track `stsd`/`avcC` identity with decoy/duplicate/typed-refusal tests; coherent encoded-VOD no-upscale/unprobed geometry; cadence-safe proposed levels with 23.976/29.97/59.94/60 evidence; copy/remux/prepared-successor fragment-index peak contract. Pinned 1.97.1 focused AVC (4), fMP4 AVC (2), MPEG-TS (1), VOD geometry (2), affected Clippy, rustfmt, docs index and diff check green; no broad unit. |

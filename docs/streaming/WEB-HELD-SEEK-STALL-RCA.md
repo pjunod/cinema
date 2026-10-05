@@ -533,7 +533,7 @@ regression mappings; the mappings are now part of the promotion candidate.
 
 **Original base:** `a5454c40` · **Current main merged:** `7cdbdd1a`
 **Branch:** `codex/tron-held-seek-recovery`
-**PR:** [Forgejo #361](http://192.168.4.7:3000/noirr/plurx/pulls/361)
+**PR:** [Forgejo #361](http://forge.lan:3000/noirr/plurx/pulls/361)
 **Working clone:** agent-owned Forgejo clone; the user's checkout is untouched
 
 - [x] Original incident and independent review incorporated.

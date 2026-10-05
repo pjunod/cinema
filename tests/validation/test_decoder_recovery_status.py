@@ -535,7 +535,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertIn("pub(crate) fn legacy_ordinal_facts(", daemon_facts)
         consumers = {
-            "plan.rs": ("resolve_restricted_movie_plan", "vaapi_hdr10_source_fits"),
+            # `planning_facts` is the one selection both the restricted plan and a
+            # rolling start (`resolve_movie_plan_from_probe`) build from.
+            "plan.rs": ("planning_facts", "vaapi_hdr10_source_fits"),
             "candidates.rs": ("quality_facts_from_probe",),
         }
         self.assertEqual(

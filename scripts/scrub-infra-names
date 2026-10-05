@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+"""Rewrite real infrastructure names out of the tracked tree, or refuse them.
+
+The repository is mirrored publicly, and the owner decided (PR #332) that it
+never names the real lab. Hosts, LAN addresses, home directories and SSH users
+are written with neutral names instead. This script owns that mapping:
+
+  scripts/scrub-infra-names --check   list file:line for every hit outside the
+                                      allowlist; exit 1 if there is any
+  scripts/scrub-infra-names --write   rewrite the tree in place (idempotent),
+                                      then list whatever it could not rewrite
+
+Mapping table
+-------------
+
+  rule       old                          new
+  ---------  ---------------------------  ---------------------------------
+  host       nynuc                        media1
+  host       nuc1 nuc2 nuc3 nuc4          lab1 lab2 lab3 lab4
+  host       rogg16                       lab5
+  host       m6                           lab6
+  host       mba / mbp                    maca / macb
+  host       qnap                         nas
+  host       billy (the SSH jump host)    jump1
+  forge      192.168.4.7:3000             forge.lan:3000 (scheme, path kept)
+  lan        192.168.4.x / 192.168.5.x    10.42.4.x / 10.42.5.x (last two
+                                          octets kept)
+  home       /Users/pjunod, /home/pjunod  ~
+  ssh-user   pjunod@                      operator@
+  retired    cinemarr (any case)          reported only, never rewritten
+
+Context rules, per pattern
+--------------------------
+
+host      Whole tokens only: a letter or digit on either side is a different
+          word (`fmp4`, `m64`, `combat`, `Lambda`, `mbaas`, `nuc5`, `nuc34`).
+          nynuc, nuc1-4, rogg16 and qnap also match Title and UPPER case
+          (`Nynuc`, `QNAP`) and keep that case. m6, mba, mbp and billy match
+          lowercase only: `M6` is the playback milestone, `MBA`/`MBP` are
+          laptop models and `Billy` is a person's name.
+          The three short names (m6, mba, mbp) are also not hosts inside
+          encoded data: after `+`, before `.` and a digit (`m6.5`, SVG path
+          data), or inside a base64-looking run — 32 or more characters of
+          `[A-Za-z0-9+/=]` holding an upper-case letter, a lower-case letter
+          and a digit. A slash alone does not exclude them, so a host path
+          like `media1/m6/lab4` still matches. A lowercase `m6` is still the milestone where it sits
+          in a branch or range — after `.` (`m1..m6`), after `-` unless that
+          is `gha-` (`dv-m6`, `status-m6-close`), or before `-<word>`
+          (`agent/m6-handoff`) unless it is a runner (`gha-m6-general-03`) or
+          the `m6-pro` hardware label. Runner names follow the host
+          (`gha-mba-apple-01` -> `gha-maca-apple-01`): the owner renamed the
+          real runners to match.
+forge     The Forgejo box only on its web port 3000, not followed by a digit;
+          the same address on any other port (`:32400`) is a plain LAN rule.
+lan       Only 192.168.4. and 192.168.5. followed by an octet, `x`, `*`, `<`
+          or `{` (templates), and not preceded by a digit or dot. 192.168.1.x
+          client sign-in placeholders and every other private range stay.
+home      The exact directory, not a longer name (`/Users/pjunodx`).
+ssh-user  `pjunod@` not preceded by a word character; the bare account name
+          (the GitHub owner in `pjunod/plurx`) is public and stays.
+
+Exceptions
+----------
+
+scripts/scrub-infra-names.allow.toml lists the files that must keep a real
+literal, each with its reason: content-addressed receipts whose sha256 is
+recorded elsewhere (rewriting breaks the recorded digest), configuration
+installed verbatim on a real machine, and this script's own mapping table.
+An entry may name the rules it exempts; without `rules` it exempts all of
+them. Release inputs (clients/apple/Sources, clients/android/app/src/main)
+are never rewritten by --write, because a change there forces a client
+version bump: a hit there is reported, and --check fails on it until it is
+fixed in a deliberate client change or allowlisted with the reason
+"release input; rides next client build". Before rewriting any file, --write
+also refuses one whose current sha256 appears anywhere in the tree, so a new
+pinned receipt is reported rather than silently broken. vendor/ is skipped.
+
+tests/operations/test_infra_names.py runs `scan()` over the tracked tree in
+`make operations-check`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import bisect
+import fnmatch
+import hashlib
+import os
+import re
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# Old host → neutral host. Case variants (Nynuc, NYNUC) map to the same case.
+HOSTS = {
+    "nynuc": "media1",
+    "nuc1": "lab1",
+    "nuc2": "lab2",
+    "nuc3": "lab3",
+    "nuc4": "lab4",
+    "rogg16": "lab5",
+    "m6": "lab6",
+    "mba": "maca",
+    "mbp": "macb",
+    "qnap": "nas",
+    "billy": "jump1",
+}
+# Names that are also ordinary words or abbreviations in upper/title case
+# (M6 the milestone, MBA/MBP the laptop models, Billy a person) match
+# lowercase only.
+LOWERCASE_ONLY = {"m6", "mba", "mbp", "billy"}
+# Short enough to occur by chance inside encoded data (SVG path commands,
+# base64); see `_inside_encoded_data`.
+SHORT_NAMES = {"m6", "mba", "mbp"}
+BASE64_RUN = re.compile(r"[A-Za-z0-9+/=]+")
+BASE64_MIN_RUN = 32
+# `gha-m6-<role>` is a runner on the host; any other `m6-<word>` except the
+# `m6-pro` hardware label is a milestone branch name.
+RUNNER_ROLES = {"general", "apple", "android", "linux"}
+
+# Release inputs: a change here forces a client version bump, so the rewrite
+# reports hits instead of making them. The check still refuses them.
+RELEASE_INPUTS = ("clients/apple/Sources/*", "clients/android/app/src/main/*")
+SKIP_PREFIXES = ("vendor/",)
+
+
+@dataclass(frozen=True)
+class Rule:
+    name: str
+    pattern: re.Pattern[str]
+    replace: Callable[[re.Match[str]], str | None]  # None leaves the match
+
+
+def _host_variants() -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for old, new in HOSTS.items():
+        pairs.append((old, new))
+        if old not in LOWERCASE_ONLY:
+            pairs.append((old.capitalize(), new.capitalize()))
+            pairs.append((old.upper(), new.upper()))
+    return pairs
+
+
+HOST_MAP = dict(_host_variants())
+HOST_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    + "|".join(re.escape(old) for old in sorted(HOST_MAP, key=len, reverse=True))
+    + r")(?![A-Za-z0-9])")
+
+
+def _inside_encoded_data(text: str, start: int, end: int) -> bool:
+    """Whether text[start:end] reads as part of SVG path data or base64."""
+    if text[start - 1:start] == "+":
+        return True
+    if text[end:end + 1] == "." and text[end + 1:end + 2].isdigit():
+        return True
+    left = start
+    while left > 0 and BASE64_RUN.match(text[left - 1]):
+        left -= 1
+    right = end
+    while right < len(text) and BASE64_RUN.match(text[right]):
+        right += 1
+    run = text[left:right]
+    return (len(run) >= BASE64_MIN_RUN
+            and any(c.isupper() for c in run)
+            and any(c.islower() for c in run)
+            and any(c.isdigit() for c in run))
+
+
+def _host(match: re.Match[str]) -> str | None:
+    old = match.group(0)
+    text, start, end = match.string, match.start(), match.end()
+    if old in SHORT_NAMES and _inside_encoded_data(text, start, end):
+        return None
+    if old == "m6":
+        # Milestone M6 in a branch or range: dv-m6-…, m1..m6. A branch like
+        # agent/m6-handoff falls to the suffix test; `nynuc/m6/nuc4` is hosts.
+        before = text[start - 1:start]
+        if before == ".":
+            return None
+        if before == "-" and text[max(0, start - 4):start] != "gha-":
+            return None
+        if text[end:end + 1] == "-":
+            # Only a runner (gha-m6-<role>) or the hardware label (m6-pro);
+            # agent/m6-android-… is a milestone branch, not the host.
+            word = re.match(r"[A-Za-z]+", text[end + 1:end + 20])
+            word = word.group(0) if word else ""
+            runner = text[max(0, start - 4):start] == "gha-" and word in RUNNER_ROLES
+            if not runner and word != "pro":
+                return None
+    return HOST_MAP[old]
+
+
+def _rules() -> list[Rule]:
+    rules = [
+        # The Forgejo box on its web port: keep any scheme and the path.
+        Rule("forge",
+             re.compile(r"(?<![\d.])192\.168\.4\.7:3000(?!\d)"),
+             lambda m: "forge.lan:3000"),
+        Rule("lan",
+             re.compile(r"(?<![\d.])192\.168\.([45])\.(?=[\dxX*<{])"),
+             lambda m: "10.42." + m.group(1) + "."),
+        Rule("home",
+             re.compile(r"/(?:Users|home)/pjunod(?![A-Za-z0-9_.-])"),
+             lambda m: "~"),
+        Rule("ssh-user",
+             re.compile(r"(?<![A-Za-z0-9_.-])pjunod@"),
+             lambda m: "operator@"),
+    ]
+    rules.append(Rule("host", HOST_PATTERN, _host))
+    return rules
+
+
+RULES = _rules()
+# Cheap first pass: a file with none of these substrings cannot hit any rule.
+PREFILTER = re.compile("|".join(
+    [re.escape(old) for old in HOST_MAP]
+    + [r"192\.168\.[45]\.", r"/Users/pjunod", r"/home/pjunod", r"pjunod@", r"(?i:cinemarr)"]))
+# Reported only: never rewritten, because each occurrence needs a person.
+REPORT_ONLY = [Rule("retired-name", re.compile(r"cinemarr", re.IGNORECASE), lambda m: None)]
+
+
+ALLOWLIST_FILE = Path(__file__).resolve().with_name("scrub-infra-names.allow.toml")
+ALL_RULES = "*"
+
+
+def load_allowlist(path: Path = ALLOWLIST_FILE) -> dict[str, tuple[frozenset[str], str]]:
+    """path glob -> (exempt rule names, or {"*"} for all; reason)."""
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    unknown = set(data) - {"allow"}
+    if unknown:
+        raise ValueError(f"{path.name}: unknown top-level keys {sorted(unknown)}")
+    known_rules = {rule.name for rule in RULES + REPORT_ONLY}
+    out: dict[str, tuple[frozenset[str], str]] = {}
+    for entry in data.get("allow", []):
+        extra = set(entry) - {"path", "rules", "reason"}
+        glob, reason = entry.get("path"), entry.get("reason")
+        if extra or not isinstance(glob, str) or not glob:
+            raise ValueError(f"{path.name}: bad entry {entry!r}")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"{path.name}: {glob} has no reason")
+        if glob in out:
+            raise ValueError(f"{path.name}: {glob} listed twice")
+        rules = entry.get("rules")
+        if rules is None:
+            exempt = frozenset({ALL_RULES})
+        else:
+            exempt = frozenset(rules)
+            if not exempt or not exempt <= known_rules:
+                raise ValueError(f"{path.name}: {glob} names unknown rules "
+                                 f"{sorted(exempt - known_rules)}")
+        out[glob] = (exempt, reason)
+    return out
+
+
+
+
+def rewrite(text: str, skip: frozenset[str] = frozenset()) -> tuple[str, int]:
+    """Apply every rule not in `skip`; return the new text and the count."""
+    count = 0
+    if not PREFILTER.search(text):
+        return text, 0
+    for rule in RULES:
+        if rule.name in skip:
+            continue
+
+        def sub(match: re.Match[str], rule: Rule = rule) -> str:
+            nonlocal count
+            new = rule.replace(match)
+            if new is None:
+                return match.group(0)
+            count += 1
+            return new
+        text = rule.pattern.sub(sub, text)
+    return text, count
+
+
+def findings(text: str) -> list[tuple[int, str, str]]:
+    """(line, rule, matched text) for every live hit, including report-only."""
+    hits = []
+    if not PREFILTER.search(text):
+        return hits
+    starts = [0] + [m.end() for m in re.finditer("\n", text)]
+    for rule in RULES + REPORT_ONLY:
+        for match in rule.pattern.finditer(text):
+            if rule in REPORT_ONLY or rule.replace(match) is not None:
+                line = bisect.bisect_right(starts, match.start())
+                hits.append((line, rule.name, match.group(0)))
+    return sorted(hits)
+
+
+def _matches(path: str, globs: Iterable[str]) -> str | None:
+    for glob in globs:
+        if fnmatch.fnmatchcase(path, glob):
+            return glob
+    return None
+
+
+def tracked_files(root: Path) -> list[str]:
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+                             check=True, capture_output=True).stdout
+        return [p for p in out.decode().split("\0") if p]
+    except (OSError, subprocess.CalledProcessError):
+        files = []
+        for base, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in (".git", "target", "node_modules")]
+            files += [os.path.relpath(os.path.join(base, n), root) for n in names]
+        return sorted(files)
+
+
+def candidate_files(root: Path, files: list[str]) -> set[str]:
+    """Files that can hold a hit; `git grep` does the bulk read at C speed."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "grep", "-lzIP", PREFILTER.pattern, "--", "."],
+            capture_output=True)
+    except OSError:
+        return set(files)
+    if proc.returncode == 1:  # git grep: nothing matched
+        return set()
+    if proc.returncode != 0:  # no repository, no PCRE: read everything
+        return set(files)
+    return {p for p in proc.stdout.decode().split("\0") if p}
+
+
+def read_text(path: Path) -> str | None:
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if b"\0" in raw[:8192]:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+@dataclass
+class Violation:
+    path: str
+    line: int
+    rule: str
+    text: str
+
+    def __str__(self) -> str:
+        return f"{self.path}:{self.line}: {self.rule}: {self.text}"
+
+
+def _exemption(rel: str, allow: dict[str, tuple[frozenset[str], str]]) -> frozenset[str]:
+    """Rule names exempt for this path ({"*"} means every rule)."""
+    exempt: set[str] = set()
+    for glob, (rules, _reason) in allow.items():
+        if fnmatch.fnmatchcase(rel, glob):
+            exempt |= rules
+    return frozenset(exempt)
+
+
+def scan(root: Path = ROOT, allow: dict | None = None) -> list[Violation]:
+    """Every hit in the tracked tree outside the allowlist, paths included."""
+    allow = load_allowlist() if allow is None else allow
+    out: list[Violation] = []
+    files = tracked_files(root)
+    candidates = candidate_files(root, files)
+    for rel in files:
+        if rel.startswith(SKIP_PREFIXES):
+            continue
+        exempt = _exemption(rel, allow)
+        if ALL_RULES in exempt:
+            continue
+        for _line, rule, text in findings(rel):
+            if rule not in exempt:
+                out.append(Violation(rel, 0, rule + " (path)", text))
+        if rel not in candidates:
+            continue
+        text = read_text(root / rel)
+        if text is None:
+            continue
+        for line, rule, hit in findings(text):
+            if rule not in exempt:
+                out.append(Violation(rel, line, rule, hit))
+    return out
+
+
+def _pinned_digests(root: Path, files: list[str]) -> set[str]:
+    corpus = []
+    for rel in files:
+        if rel.startswith(SKIP_PREFIXES):
+            continue
+        text = read_text(root / rel)
+        if text is not None:
+            corpus.append(text)
+    return set(re.findall(r"[0-9a-f]{64}", "\n".join(corpus)))
+
+
+def write(root: Path = ROOT, allow: dict | None = None) -> int:
+    """Rewrite every file and path that can be; report the rest. Exit 1 if
+    any hit is left, so a scripted sweep notices what needs a person."""
+    allow = load_allowlist() if allow is None else allow
+    files = tracked_files(root)
+    pinned = _pinned_digests(root, files)
+    changed = refused = 0
+    renames: list[tuple[str, str]] = []
+    for rel in files:
+        if rel.startswith(SKIP_PREFIXES):
+            continue
+        exempt = _exemption(rel, allow)
+        if ALL_RULES in exempt:
+            continue
+        path = root / rel
+        text = read_text(path)
+        if text is not None:
+            new, count = rewrite(text, exempt)
+            if count:
+                if _matches(rel, RELEASE_INPUTS):
+                    print(f"RELEASE INPUT, not rewritten: {rel} ({count})")
+                    refused += 1
+                elif hashlib.sha256(path.read_bytes()).hexdigest() in pinned:
+                    print(f"PINNED (its sha256 is recorded in the tree), not rewritten: {rel}")
+                    refused += 1
+                else:
+                    path.write_text(new, encoding="utf-8")
+                    print(f"{count:5d}  {rel}")
+                    changed += 1
+        new_rel, count = rewrite(rel, exempt)
+        if count and not _matches(rel, RELEASE_INPUTS):
+            renames.append((rel, new_rel))
+    for old, new in renames:
+        (root / new).parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "-C", str(root), "mv", old, new], check=True)
+        print(f"renamed  {old} -> {new}")
+    remaining = scan(root, allow)
+    for v in remaining:
+        print(f"LEFT  {v}")
+    print(f"{changed} files rewritten, {len(renames)} renamed, {refused} refused, "
+          f"{len(remaining)} hits left")
+    return 1 if remaining else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        epilog="Mapping, context rules and exceptions: see the module docstring.")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true",
+                      help="list file:line for every hit and exit 1 if any")
+    mode.add_argument("--write", action="store_true",
+                      help="rewrite the tree in place, then report what is left")
+    parser.add_argument("--root", type=Path, default=ROOT,
+                        help="repository to work on (default: this checkout)")
+    parser.add_argument("--allowlist", type=Path, default=ALLOWLIST_FILE,
+                        help="exceptions file (default: %(default)s)")
+    args = parser.parse_args(argv)
+    allow = load_allowlist(args.allowlist)
+    if args.write:
+        return write(args.root, allow)
+    violations = scan(args.root, allow)
+    for v in violations:
+        print(v)
+    if violations:
+        print(f"{len(violations)} real infrastructure name(s); run "
+              "scripts/scrub-infra-names --write, or allowlist a literal that "
+              "must stay in scripts/scrub-infra-names.allow.toml", file=sys.stderr)
+    return 1 if violations else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

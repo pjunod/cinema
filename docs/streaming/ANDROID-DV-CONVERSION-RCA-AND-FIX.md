@@ -78,7 +78,7 @@ branch; there is no evidence that DV has never worked on any Android path.
 
 ### 2.1 Revisions and collection limits
 
-The serving node was identified from the decision and client events as `m6`.
+The serving node was identified from the decision and client events as `lab6`.
 Its running container label reported revision
 `a2d9c2fb7b26e142a39b70da8cc0e57bbbdf878a` and image ID
 `sha256:10690297399a20bedee58f165b672d20605dbb449dd4bc8d66f00723b571d125`.
@@ -86,7 +86,7 @@ The source inspection used checkout
 `a603b4e26647ab0aa71564e7f4a5d624f9a87ff0`.
 
 Fable's supplied review was **APPROVE WITH CHANGES**, verified against its
-clone at `535f95d2`, deployed `m6`, read-only store/log observations, Media3
+clone at `535f95d2`, deployed `lab6`, read-only store/log observations, Media3
 1.10.1 and FFmpeg 7.1. This revision rechecks the implicated local builders,
 the live segmenter and the upstream sources. Fable's additional index and
 240-hour log observations are attributed in §3.2; they were not independently
@@ -101,9 +101,9 @@ base. The APK reports version `0.3.0`, build `107`; its source revision was
 not extracted, so build 107 is not independently proven byte-identical to
 the inspected Android sources.
 
-The initial node inspected was `nynuc`. Its recent Profile 8 decisions belonged
+The initial node inspected was `media1`. Its recent Profile 8 decisions belonged
 to another title and are **not** incident evidence. The matching decision and
-client events below came from `m6`.
+client events below came from `lab6`.
 
 Evidence collection was read-only: server logs and SQLite opened with
 `mode=ro`, plus paired wireless ADB dumps. No playback restart, app install,
@@ -264,7 +264,7 @@ sets strictness and is a separate regression case.
 
 Fable reports no converting fragment index for file `5418`: the read-only
 store had a legacy artifact and one non-legacy identity, identified as the
-stripped variant; no local artifact was recorded on `m6`. This is a dated
+stripped variant; no local artifact was recorded on `lab6`. This is a dated
 review observation, not a permanent property. Recheck the exact converting
 identity at acceptance, rather than infer availability from artifact count.
 
@@ -282,7 +282,7 @@ compatibility ID 1 through
 That machinery exists; a request flag alone does not prove it ran successfully.
 
 Fable found zero conversion-start log lines in the inspected 240 hours on
-`m6`, `nynuc` and `nuc4`. This establishes **no production evidence found in
+`lab6`, `media1` and `lab4`. This establishes **no production evidence found in
 that window**, not that conversion has never run anywhere. Treat the device
 acceptance as the first evidenced production exercise available to this
 review. A converter refusal is a failed run, even if create returned P8.
