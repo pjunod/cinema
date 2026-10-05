@@ -776,6 +776,7 @@ impl TranscodeManager {
                                 refusal = reason.label(),
                                 "VOD prerequisite unavailable; using temporary live-HLS recovery"
                             );
+                            self.hooks.get().before_vod_fallback_start().await;
                             let started = self
                                 .start_live_recovery_session(
                                     req,
