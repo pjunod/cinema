@@ -4,6 +4,24 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## A leader restart no longer ends progressive or Live TV playback
+
+**[PR #807](http://192.168.4.7:3000/noirr/plurx/pulls/807), branch `fix/progressive-fence-grace`; not deployed.**
+Paul's standing rule is that a quorum leader restart must not interrupt
+playback. #798 gave the rolling registry a 5 s serving-fence grace; two more
+owners of running playback still treated any fence generation bump as final,
+even after authority came back. The progressive `stream.mp4` remux owner
+killed ffmpeg and ended the response, with no respawn, on every node. On the
+Live TV owner, the session observer, tuner fan-out, lease loop and request
+fence ended every session, shared transport and recording, and requests
+during the blip answered 410. Both now use #798's policy, moved beside the
+fence as `serving_fence::SessionGrace`. Brief losses keep the work, and
+nothing is published while authority is lost. Live TV requests answer a
+retryable 503. Sustained losses end the work within one grace, as before.
+RCA: `docs/streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md` finding 6.
+Still owed: the GPT leader-restart check under live progressive, rolling and
+Live TV playback, before and after deploy.
+
 ## 2026-10-04: the architecture effort is on `main`; the close-out is a draft PR
 
 **All four nodes were deployed to `b5e39b8bb` on 2026-10-04; later `main`
@@ -246,77 +264,6 @@ not the RPU. Round two: approve with changes, applied.
 Next: Paul's call on the DV plan's Decision 1 and the stall guard's §8; the
 DV plan's M0 evidence step needs the media.
 
-## P-02 M3: a priority class for every child process
-
-**Branch `plan/P-02-m3`, draft pull request; not merged, nothing deployed.**
-Paul's go of 2026-09-25: every child starts through one launcher, playback,
-VOD and Live TV as realtime (nice 5) and scans, probes and extraction as
-background (nice 15), with Activity → Processes and a pidfd-safe Stop for
-admins, and `/metrics` counts children by class. A source census and
-clippy's `disallowed-methods` keep every spawn on the launcher. After the
-review (comment 4817) the class is the caller's: the probes and extractions
-a session start or a viewer's `/subs` request waits on (held source probe,
-decode-fact probes, the Profile 5 pixel proof, burn and text-track
-extraction) run realtime, the same work from warm-ups, offline packages and
-the pre-transcode pass background, and `/metrics` counts spawns by class and
-purpose; each `spikes/` workspace has its own `clippy.toml`. Outstanding:
-the realtime cadence measurement on a busy media host (post-merge), and M4
-(unit hardening plus `OOMScoreAdjust=-500`), whose steps are written.
-Record: §3.2.2 of [the P-02 plan](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md).
-
-## P-02: four parser fuzz targets, one of which found a way to abort plurxd; the release profile measured
-
-**Branch `plan/P-02-2`, [PR #510](http://forge.lan:3000/noirr/plurx/pulls/510), merged 2026-09-25; not yet deployed.**
-The second pass of
-[SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md)
-took the buildable remainder that needs no lab host and no decision of
-Paul's. **M8:** the four fuzz targets of §3.6 (`fmp4_reader`, `rpu_rewrite`,
-`nfo_parse`, `epub_facts`) in their own package `fuzz/parsers/`, each with a
-generated seed corpus (`scripts/fuzz-seeds`), a nightly `parser-fuzz`
-matrix job on the PGS campaign's budget, and `scripts/fuzz-campaign` writing
-executions and corpus growth into each job's summary so a target that stops
-finding edges shows.
-
-`rpu_rewrite` found, within its first ten thousand executions, one way for
-a Dolby Vision RPU to take the daemon down and two to unwind the converting
-task, all in `dolby_vision` 3.4.0: an allocation sized from an unbounded
-ue(v) count (a ~25.8 GB `Vec::with_capacity` from eight changed bytes of the
-real Profile 7 fixture, which aborts the process), an `unimplemented!()` two
-bits from any valid RPU, and an `unreachable!()` on any level 8/9/10 block
-with an unlisted length. The parser runs inside `plurxd` on every sample of
-a converted disc remux. The crate is now vendored under
-`vendor/dolby_vision` with refusals in place of those
-([PLURX-PATCH.md](vendor/dolby_vision/PLURX-PATCH.md); five patches after
-the adversarial review), its bit reader `bitvec_helpers` beside it for two
-Exp-Golomb overflows, `dvconvert` refuses any RPU over 64 KiB before
-parsing, each fuzz input is a fixture with a test in `dvconvert`, and
-refusals report the parse error's whole chain rather than "CM v4.0".
-
-**M6's release-profile half, measured on lab3 and not shipped:** PR 1 as
-written (`debug = "line-tables-only"`, `strip = "none"`) makes `plurxd` a
-420 MiB binary (+427 %) for a fully symbolicated backtrace; `strip =
-"debuginfo"` gives named frames without lines at +36 % (+11.5 % gzipped);
-packed split debuginfo is 230 MiB plus a 177 MiB `.dwp`. `plurxd
-diagnostic-panic` (hidden) is the check; `Cargo.toml` keeps main's profile
-and **which one ships is Paul's** (plan §7 Q6). M3 stays blocked on Paul's
-spawn-seam decision, M4 on the lab1 matrix. Board row P-02 records it.
-## Watch view: menus and Playback info escape the picture; the picture goes under the header
-
-**Branch `fix/watch-popovers-escape-picture`, pull request open as a draft;
-not merged, nothing deployed.** Paul's report of 2026-09-24 on the new web
-watch view: the Playback info readout ran past the bottom of the picture and
-was cut off there, the subtitle menu ran past its top so half of it could not
-be chosen, and scrolling the page slid the picture over the main navigation.
-One cause: the slot player's host was fixed at z-index 90 with a clip-path to
-its own box. It now sits under the page's chrome (z-index 10) and clips
-nothing; `positionMenu` / `positionStats` bound each popover to the viewport
-minus the stuck chrome (`watchPopoverBounds`) and re-run on every scroll
-frame. Record: [docs/clients/WATCH-VIEW-LAYOUT.md](docs/clients/WATCH-VIEW-LAYOUT.md)
-(“The picture under the page; the menus and the readout over it”). Browser
-acceptance extended with a thirty-track menu, the Diagnostics readout and a
-scrolled-under-the-header check; passes on fine and coarse pointers.
-Native clients untouched.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28
@@ -324,6 +271,9 @@ and 2026-10-04 into the status history of their subject folder. One row per sect
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-24 | Watch view: menus and Playback info escape the picture; the picture goes under the header | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
+| 2026-09-25 | P-02: four parser fuzz targets, one of which found a way to abort plurxd; the release profile measured | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
+| 2026-09-25 | P-02 M3: a priority class for every child process | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-24 | Live TV: direct play first, 5.1 stays 5.1 | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-25 | P-03: the regression ledger stops growing, and releases get a weekly cadence | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-22 | PGS subtitles stopped blocking the start path | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |

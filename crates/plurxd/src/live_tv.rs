@@ -246,7 +246,8 @@ const FENCE_OBSERVATION_FRESH_MAX_AGE: Duration =
 /// Longer than one authority-read retry budget — two `STORE_TIMEOUT` attempts
 /// 100 ms apart, or a 5 s quorum-recovery budget, so ~6.1 s at worst — so a
 /// leader failover does not end healthy streams. The serving fence ends the
-/// session independently on quorum loss, so this bound is never the only one.
+/// session independently on quorum loss that outlasts the session grace
+/// (`LiveTvAuthority`), so this bound is never the only one.
 ///
 /// Ten seconds is the repository owner's decision of 2026-09-23, recorded in
 /// the architecture review work board. It is a policy bound sized against the
@@ -1666,7 +1667,9 @@ struct TransportSeat<'a> {
     channel_id: &'a str,
     device_id: &'a str,
     address: Ipv4Addr,
-    serving_generation: u64,
+    /// The authority's running floor when this viewer was admitted: a
+    /// transport opened under any generation at or above it is still running.
+    running_floor: u64,
 }
 
 enum ViewerAdmission {
@@ -1774,7 +1777,9 @@ impl LiveTvRegistry {
     /// free a tuner, or be refused (plan L-03 §3.4, as corrected in §2.4).
     ///
     /// A join needs the same channel, the same device (id and address) and a
-    /// transport opened under the owner's current serving generation. It does
+    /// transport the owner's serving authority still keeps running (opened
+    /// under the current generation, or before a loss that recovered inside
+    /// the session grace). It does
     /// *not* need the same configuration generation: the decision recorded in
     /// §2.4 D7, since the transport carries raw tuner bytes and every other
     /// generation-scoped setting is applied by the joiner's own FFmpeg.
@@ -1793,7 +1798,7 @@ impl LiveTvRegistry {
             // re-probes the live edge before it plans (§2.4 D1, D5), so the
             // facts one start saw never decide every later viewer.
             let shareable = transport.same_tuner(seat.device_id, seat.address)
-                && transport.owner_serving_generation == seat.serving_generation;
+                && transport.owner_serving_generation >= seat.running_floor;
             if !shareable {
                 // Never a second transport for one key. One nothing wants is
                 // about to retire, so wait for it; one still in use is not
@@ -3403,12 +3408,148 @@ impl FenceObserver {
     }
 }
 
+/// Live TV's view of serving authority.
+///
+/// Admissions and commits use the fence exactly (an admission takes its
+/// generation from [`Self::admit`]; the ingress commit checks the fence
+/// itself): a start, an ingress commit or a recording admitted under a
+/// generation that has since moved on refuses itself, as before.
+///
+/// Work that is already running — a viewer's session, a shared tuner
+/// transport, the recording sinks on it — is not an admission. It asks
+/// [`Self::running`], which stays true through a loss of serving authority
+/// that recovers within [`crate::serving_fence::SERVING_FENCE_SESSION_GRACE`]
+/// (summed over one outage, the policy the rolling registry and the
+/// progressive remux owner use), and it hands a client nothing unless
+/// [`Self::is_ready`]: every playlist and segment request answers a retryable
+/// `serving_fenced` while authority is lost. Before this, every check compared
+/// the admission generation with the current one, and generations only rise,
+/// so the second or two of lost quorum a leader restart costs every voter
+/// ended every Live TV session, transport and recording on the owner.
+///
+/// Keeping running work through the grace leaves single ownership where it
+/// already lived, in the replicated resource ledger: a replacement owner can
+/// claim a capture or an ingest only after this owner's 30 s lease
+/// (`live_tv_resource::LEASE_MS`, renewed every five seconds) has lapsed, so
+/// at least twenty seconds of lease remain when the grace runs out.
+///
+/// One loop decides ([`Self::serving_fence_loop`]): when a loss outlasts the
+/// grace it raises `running_floor` to the loss generation, and everything
+/// admitted before that loss stops at its next check (25 ms for a session,
+/// one tuner chunk for a transport). The loop is spawned once in `main.rs`;
+/// the owner ledger pins that spawn, because without the loop running work
+/// would outlive a sustained loss.
+#[derive(Clone)]
+pub(crate) struct LiveTvAuthority {
+    serving: crate::serving_fence::ServingAuthority,
+    /// The lowest admission generation whose running work may continue.
+    running_floor: Arc<AtomicU64>,
+}
+
+impl LiveTvAuthority {
+    pub(crate) fn new(serving: crate::serving_fence::ServingAuthority) -> Self {
+        Self {
+            serving,
+            running_floor: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn always_ready() -> Self {
+        Self::new(crate::serving_fence::ServingAuthority::always_ready())
+    }
+
+    /// The generation a new admission is made under, while authority is held.
+    pub(crate) fn admit(&self) -> Option<u64> {
+        self.serving.admit()
+    }
+
+    /// Serving authority is held right now.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.serving.state().ready
+    }
+
+    /// Running work admitted under `admitted_generation` may continue. It may
+    /// publish to a client only while [`Self::is_ready`] as well.
+    pub(crate) fn running(&self, admitted_generation: u64) -> bool {
+        admitted_generation >= self.running_floor.load(Ordering::Acquire)
+    }
+
+    /// Running and authoritative now: what a first publication requires.
+    pub(crate) fn serving(&self, admitted_generation: u64) -> bool {
+        self.running(admitted_generation) && self.is_ready()
+    }
+
+    /// End all running work admitted before `generation`. Monotonic.
+    pub(crate) fn end_running_before(&self, generation: u64) -> bool {
+        self.running_floor.fetch_max(generation, Ordering::AcqRel) < generation
+    }
+
+    /// Resolve every loss of serving authority through the shared session
+    /// grace, and end running Live TV work only when a loss outlasts it.
+    pub(crate) async fn serving_fence_loop(
+        self,
+        mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    ) {
+        let mut grace = crate::serving_fence::SessionGrace::default();
+        let mut resolved = serving.borrow_and_update().loss_generation;
+        loop {
+            let state = *serving.borrow_and_update();
+            if state.authority_lost_since(resolved) {
+                match grace.resolve_loss(&mut serving).await {
+                    crate::serving_fence::LossOutcome::Recovered {
+                        outage,
+                        budget_spent,
+                    } => {
+                        resolved = serving.borrow_and_update().loss_generation;
+                        tracing::info!(
+                            outage_ms = u64::try_from(outage.as_millis()).unwrap_or(u64::MAX),
+                            outage_budget_spent_ms =
+                                u64::try_from(budget_spent.as_millis()).unwrap_or(u64::MAX),
+                            loss_generation = resolved,
+                            "serving authority returned within the session grace; running Live TV kept"
+                        );
+                    }
+                    crate::serving_fence::LossOutcome::Expired => {
+                        let generation = serving.borrow_and_update().loss_generation;
+                        if self.end_running_before(generation) {
+                            tracing::warn!(
+                                loss_generation = generation,
+                                grace_ms = u64::try_from(
+                                    crate::serving_fence::SERVING_FENCE_SESSION_GRACE.as_millis()
+                                )
+                                .unwrap_or(u64::MAX),
+                                "serving authority not regained within the session grace; running Live TV ended"
+                            );
+                        }
+                        // `resolved` stays where it was. Until authority is
+                        // seen back, every observation goes through
+                        // `resolve_loss` again with a fresh budget, so work
+                        // admitted in a ready window this loop never saw (a
+                        // recovery and a new loss coalesced into one
+                        // notification) is still ended within one grace.
+                    }
+                    crate::serving_fence::LossOutcome::Closed => {
+                        self.end_running_before(u64::MAX);
+                        return;
+                    }
+                }
+                continue;
+            }
+            if serving.changed().await.is_err() {
+                self.end_running_before(u64::MAX);
+                return;
+            }
+        }
+    }
+}
+
 pub(crate) struct LiveTvManager {
     store: Arc<dyn Store>,
     client: Result<reqwest::Client, String>,
     system: Arc<SystemInfo>,
     transcode: Arc<crate::transcode::TranscodeManager>,
-    serving: crate::serving_fence::ServingAuthority,
+    serving: LiveTvAuthority,
     node_id: String,
     scratch_root: PathBuf,
     cache: SnapshotCache,
@@ -3472,6 +3613,11 @@ pub(crate) struct LiveTvManager {
 }
 
 impl LiveTvManager {
+    /// Live TV's serving authority, for the loop that resolves its losses.
+    pub(crate) fn authority(&self) -> LiveTvAuthority {
+        self.serving.clone()
+    }
+
     pub(crate) fn new(
         store: Arc<dyn Store>,
         system: Arc<SystemInfo>,
@@ -3495,7 +3641,7 @@ impl LiveTvManager {
                 .map_err(|error| error.to_string()),
             system,
             transcode,
-            serving,
+            serving: LiveTvAuthority::new(serving),
             node_id,
             scratch_root,
             cache: SnapshotCache::with_wake(lineup_wake),
@@ -4118,7 +4264,7 @@ impl LiveTvManager {
             channel_id: &request.channel_id,
             device_id: &device_id,
             address,
-            serving_generation,
+            running_floor: self.serving.running_floor.load(Ordering::Acquire),
         };
         // Plan L-02 §3.3: facts this owner probed on this channel, under this
         // configuration and device, still inside their expiry, from which
@@ -4303,8 +4449,14 @@ impl LiveTvManager {
         self.resource_session_fence(&session).await?;
         let config = self.config().await?;
         validate_start_config(&config, &session.request, &self.node_id)?;
-        if !self.serving.is_current(session.owner_serving_generation) {
+        if !self.serving.running(session.owner_serving_generation) {
             session.cancel.cancel();
+            return Err(LiveTvError::OwnerUnavailable(
+                crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+            ));
+        }
+        if !self.serving.is_ready() {
+            // Inside the session grace: the session stays, the client retries.
             return Err(LiveTvError::OwnerUnavailable(
                 crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
             ));
@@ -7006,9 +7158,11 @@ async fn run_live_session_inner(
                 }
             }
         };
+        // Running work: a loss that recovers inside the session grace keeps
+        // the session; one that outlasts it raises the running floor.
         let authority_lost = async {
             loop {
-                if !serving.is_current(session.owner_serving_generation) {
+                if !serving.running(session.owner_serving_generation) {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -7186,7 +7340,7 @@ async fn ensure_session_fence(
     manager: &LiveTvManager,
     session: &LiveTvSession,
 ) -> Result<(), LiveTvError> {
-    if !manager.serving.is_current(session.owner_serving_generation) {
+    if !manager.serving.serving(session.owner_serving_generation) {
         return Err(LiveTvError::OwnerUnavailable(
             crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
         ));
@@ -7210,10 +7364,16 @@ async fn ensure_session_fence_from_observation(
     manager: &LiveTvManager,
     session: &LiveTvSession,
 ) -> Result<(), LiveTvError> {
-    if !manager.serving.is_current(session.owner_serving_generation) {
+    if !manager.serving.running(session.owner_serving_generation) {
         return Err(LiveTvError::OwnerUnavailable(
             crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
         ));
+    }
+    if !manager.serving.is_ready() {
+        // Inside the session grace nothing is served, and the authority's
+        // loop ends the session if the loss outlasts it; the ledger and
+        // settings checks resume once authority is back.
+        return Ok(());
     }
     let observation = manager.fence.validated()?;
     validate_start_config(&observation.config, &session.request, &manager.node_id)?;
@@ -9679,6 +9839,18 @@ mod tests {
     }
 
     fn test_manager_with_system(root: &Path, system: SystemInfo) -> Arc<LiveTvManager> {
+        test_manager_with(
+            root,
+            system,
+            crate::serving_fence::ServingAuthority::always_ready(),
+        )
+    }
+
+    fn test_manager_with(
+        root: &Path,
+        system: SystemInfo,
+        serving: crate::serving_fence::ServingAuthority,
+    ) -> Arc<LiveTvManager> {
         use plurx_core::store::SqliteStore;
         use plurx_core::transcode::{EncoderCaps, Pipeline};
 
@@ -9693,11 +9865,221 @@ mod tests {
             store,
             Arc::new(system),
             transcode,
-            crate::serving_fence::ServingAuthority::always_ready(),
+            serving,
             "node-a".into(),
             root.join("live-tv"),
             root.join("live-tv-guide"),
         )
+    }
+
+    /// Live TV's authority with its real loop over a fence the test drives.
+    fn live_tv_authority_under_test() -> (
+        crate::serving_fence::ServingFence,
+        LiveTvAuthority,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let authority = LiveTvAuthority::new(fence.authority());
+        let task = tokio::spawn(authority.clone().serving_fence_loop(fence.subscribe()));
+        (fence, authority, task)
+    }
+
+    async fn wait_until_not_running(authority: &LiveTvAuthority, generation: u64, why: &str) {
+        tokio::time::timeout(
+            crate::serving_fence::SERVING_FENCE_SESSION_GRACE + Duration::from_secs(10),
+            async {
+                while authority.running(generation) {
+                    tokio::task::yield_now().await;
+                }
+            },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{why}"));
+    }
+
+    /// The 2026-10-04 shape on the Live TV owner: a leader restart costs it
+    /// its serving authority for a second or two. Running sessions,
+    /// transports and recordings must outlive a loss that recovers inside
+    /// the grace, although the generation they were admitted under is gone.
+    /// Shutting the fence down still ends them.
+    #[tokio::test]
+    async fn live_tv_running_work_survives_a_brief_serving_loss() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (fence, authority, task) = live_tv_authority_under_test();
+        let admitted = authority.admit().expect("authority at start");
+        fence.validation_set_ready(false).await;
+        tokio::task::yield_now().await;
+        tokio::time::sleep(grace / 4).await;
+        fence.validation_set_ready(true).await;
+        tokio::time::sleep(grace + grace / 2).await;
+        assert!(
+            authority.running(admitted),
+            "a loss inside the grace must not end running Live TV"
+        );
+        assert!(
+            !fence.authority().is_current(admitted),
+            "admissions still see the generation move"
+        );
+        drop(fence);
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the loop exits with its fence")
+            .expect("Live TV fence loop");
+        assert!(!authority.running(admitted), "shutdown ends running work");
+    }
+
+    /// The fence's safety property: a loss that outlasts the grace ends
+    /// running Live TV, and not before the grace; work admitted after
+    /// authority returns runs.
+    #[tokio::test]
+    async fn live_tv_running_work_ends_after_a_sustained_serving_loss() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (fence, authority, _task) = live_tv_authority_under_test();
+        let admitted = authority.admit().expect("authority at start");
+        let lost_at = std::time::Instant::now();
+        fence.validation_set_ready(false).await;
+        wait_until_not_running(
+            &authority,
+            admitted,
+            "a sustained loss must end running Live TV",
+        )
+        .await;
+        assert!(
+            lost_at.elapsed() >= grace,
+            "ended after {:?}, before the {grace:?} grace",
+            lost_at.elapsed()
+        );
+        fence.validation_set_ready(true).await;
+        let readmitted = authority.admit().expect("authority is back");
+        assert!(
+            authority.running(readmitted),
+            "new work runs once authority returns"
+        );
+    }
+
+    /// Recovery, then further losses before the quorum has been stable for a
+    /// grace: one budget, so a flapping quorum still ends running work.
+    #[tokio::test]
+    async fn live_tv_losses_after_a_recovery_share_one_grace() {
+        let slice = crate::serving_fence::SERVING_FENCE_SESSION_GRACE / 3;
+        let (fence, authority, _task) = live_tv_authority_under_test();
+        let admitted = authority.admit().expect("authority at start");
+        for _ in 0..4 {
+            fence.validation_set_ready(false).await;
+            tokio::time::sleep(slice).await;
+            fence.validation_set_ready(true).await;
+            tokio::task::yield_now().await;
+        }
+        wait_until_not_running(
+            &authority,
+            admitted,
+            "losses summing past the grace must end running Live TV",
+        )
+        .await;
+    }
+
+    /// A loss and recovery published before the loop runs leave only a new
+    /// generation with authority restored. Running work continues; a
+    /// sustained loss after it still ends it, and ends work admitted under the
+    /// new generation too.
+    #[tokio::test]
+    async fn live_tv_running_work_survives_a_generation_bump_with_authority_back() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (fence, authority, _task) = live_tv_authority_under_test();
+        let admitted = authority.admit().expect("authority at start");
+        // Let the loop take generation zero as resolved, so the coalesced
+        // loss and recovery below reach it as a bare generation bump.
+        tokio::task::yield_now().await;
+        fence.validation_set_ready(false).await;
+        fence.validation_set_ready(true).await;
+        tokio::time::sleep(grace + grace / 2).await;
+        assert!(
+            authority.running(admitted),
+            "a generation bump alone ends nothing"
+        );
+        let later = authority.admit().expect("authority is back");
+        assert!(later > admitted && authority.running(later));
+        fence.validation_set_ready(false).await;
+        wait_until_not_running(&authority, later, "a sustained loss ends later work").await;
+        assert!(!authority.running(admitted), "and the earlier work with it");
+    }
+
+    /// Shutdown while authority is lost does not wait out the grace.
+    #[tokio::test]
+    async fn live_tv_running_work_ends_when_the_fence_closes_during_a_loss() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (fence, authority, task) = live_tv_authority_under_test();
+        let admitted = authority.admit().expect("authority at start");
+        fence.validation_set_ready(false).await;
+        tokio::task::yield_now().await;
+        drop(fence);
+        tokio::time::timeout(grace / 2, task)
+            .await
+            .expect("a closed fence ends the loop without waiting for the grace")
+            .expect("Live TV fence loop");
+        assert!(!authority.running(admitted));
+    }
+
+    /// The running session's own fence, through a loss inside the grace and
+    /// one that outlasts it: kept and answered retryably first, ended after.
+    #[tokio::test]
+    async fn a_loss_inside_the_grace_keeps_the_session_and_refuses_requests_retryably() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let root = crate::test_tempdir().expect("scratch root");
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let manager = test_manager_with(root.path(), SystemInfo::default(), fence.authority());
+        seed_test_config(&manager).await;
+        let session = test_session(root.path().join("live-tv-serving-grace"), 1);
+        manager
+            .resource_start(&session.request, &session.device_id, 4)
+            .await
+            .expect("fixture admission");
+        manager.observe_fence().await;
+        ensure_session_fence_from_observation(&manager, &session)
+            .await
+            .expect("a healthy session passes its fence");
+
+        fence.validation_set_ready(false).await;
+        ensure_session_fence_from_observation(&manager, &session)
+            .await
+            .expect("a loss inside the grace must not end a running session");
+        assert!(
+            matches!(
+                manager.resource_session_fence(&session).await,
+                Err(LiveTvError::OwnerUnavailable(_))
+            ),
+            "a request during the loss is refused retryably, not as an expired capability"
+        );
+
+        fence.validation_set_ready(true).await;
+        ensure_session_fence_from_observation(&manager, &session)
+            .await
+            .expect("authority back: the session continues past the generation bump");
+        manager
+            .resource_session_fence(&session)
+            .await
+            .expect("requests are served again");
+
+        fence.validation_set_ready(false).await;
+        assert!(
+            manager
+                .authority()
+                .end_running_before(fence.authority().state().loss_generation),
+            "the grace ran out: the authority's loop raises the running floor"
+        );
+        assert!(matches!(
+            ensure_session_fence_from_observation(&manager, &session).await,
+            Err(LiveTvError::OwnerUnavailable(_))
+        ));
+        assert!(matches!(
+            manager.resource_session_fence(&session).await,
+            Err(LiveTvError::CapabilityExpired(_))
+        ));
     }
 
     fn test_encode_delivery(height: u16) -> LiveDeliveryPlan {
@@ -10362,7 +10744,7 @@ mod tests {
             channel_id,
             device_id: "fixture-device",
             address: Ipv4Addr::new(10, 42, 1, 20),
-            serving_generation: 0,
+            running_floor: 0,
         }
     }
 

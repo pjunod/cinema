@@ -1082,7 +1082,18 @@ pattern = "ServingAuthority"
 # E3: one shared-ingest body carries the existing serving authority; it owns no task.
 # PR #537 current-main integration: measured after replacing the temporary
 # owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
-expected_occurrences = 36
+# 35 -> 26 with Live TV's serving grace: Live TV now holds a `LiveTvAuthority`
+# that wraps the same projection (adding a reader of the running floor, not a
+# second authority). -14: LiveTvManager's field, the `run_transport` and
+# `pump_tuner_fanout` parameters, the ten `live_tv::dvr::tests` fixtures that
+# now build `LiveTvAuthority::always_ready()`, and the always-ready argument
+# in `test_manager_with_system`'s `LiveTvManager::new` call. +5: the
+# wrapper's field, its constructor parameter, its test-only `always_ready`,
+# the `test_manager_with` fixture parameter that lets a Live TV test drive a
+# real `ServingFence`, and `test_manager_with_system`'s always-ready argument
+# in its new position.
+# Measured on the merge with main at 36: 36 + (-9) = 27.
+expected_occurrences = 27
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -2603,11 +2614,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # shutdown cancels its token at the same moment as the main listener's, and
 # `drain()` awaits the handle before progress is flushed; Drop cancels on the
 # error paths. It owns no producer, process or timer.
-# +1 for `capture_racing_abandon_leaves_no_link` (chunk_05.rs): a
-# `spawn_blocking` that waits for the paused capture to reach its link, joined
-# by the test. The cache-produce tick's existing `tokio::spawn` is unchanged in
-# count (its argument now names the preparation lanes).
-expected_occurrences = 742
+# Merged with main's architecture review (#793): main's count plus the
+# effort's reviewed sites, measured on the merged tree.
+# 731 -> 733 with Live TV's serving grace: main.rs spawns
+# `LiveTvAuthority::serving_fence_loop` beside the guide refresh loop, the one
+# owner that decides when a loss of serving authority has outlasted the grace
+# for running Live TV (it awaits the shared `SessionGrace` in place and owns no
+# media); and one test helper spawns that real loop over a test fence.
+# Measured on the merge with main at 741: 741 + 2 = 743.
+# +1: the preparation capture test joins its spawn_blocking helper.
+expected_occurrences = 744
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3904,6 +3920,24 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Effort and main union: 1225 (effort) + 4 (main serving-fence loop and tests) = 1229, measured on the merged source.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
+# Merged with main's architecture review (#793): main's count plus the
+# effort's reviewed sites, measured on the merged tree.
+# 1237 -> 1246 with the progressive serving-fence grace. Production is net
+# zero: the outage-grace `tokio::time::timeout` moves from
+# `TranscodeManager::serving_fence_loop` into `serving_fence::SessionGrace`,
+# which that loop and each progressive remux owner now share; the remux owner
+# awaits it in place on its own task, adding no timer task. +9 test-only in
+# http/stream.rs: the five remux-owner tests and the body test add four
+# bounded sleeps that hold a loss or wait past the grace and six bounded
+# waits that assert rather than hang, replacing the old owner test's one wait.
+# 1246 -> 1253 with Live TV's serving grace, all test-only in live_tv.rs: four
+# bounded sleeps that hold a loss or wait past the grace and three bounded
+# waits (the not-running poll, the loop join, the closed-fence join). The
+# production loop awaits `SessionGrace`, whose one timeout is counted above.
+# 1253 -> 1257: `remux_owner_still_decides_for_the_body_after_a_natural_exit`
+# lets the stand-in exit with two bounded sleeps and joins the owner twice
+# under bounded waits. Test-only.
+# Measured on the merge with main at 1268: 1268 + (+20) = 1288.
 # Architecture close-out (#814), measured on the merged tree: 1268 -> 1270.
 # Production -1: D6's single positive proof per Decision drops the second
 # route read in candidate_recovery and the `timeout_at` that bounded it.
@@ -3919,7 +3953,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # retained-headroom sample run on ticks that already existed.
 # Combined #810/#814: +2 from architecture close-out, +9 from output
 # containment and +1 test-only abandoned-link collection deadline.
-expected_occurrences = 1280
+# Combined fence grace and close-out/preparation waits: 1288 + 12 = 1300.
+expected_occurrences = 1300
+
 
 [[module_structures]]
 id = "bare-time-constructor"
