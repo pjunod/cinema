@@ -4117,3 +4117,15 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "if systemPaused, viewerOrigin { endSystemHoldForViewer(play: requested) }"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testViewerPlayEndsASystemHoldThatIOSNeverEnded()"
+
+[[fixes]]
+# Apple TV, 2026-10-04: the screensaver came on over Live TV, fullscreen and in
+# the guide. No Apple stack owned display wake; AVPlayer's implicit assertion
+# does not survive the picture moving between surfaces. One app-level owner of
+# isIdleTimerDisabled now holds it from each stack's AVPlayer transport state.
+id = "apple.display-wake-owned-by-the-app"
+commits = ["75c84f37a3342dfca2617707dfaeef4ce896696c"]
+source = "clients/apple/Sources/PlaybackPlatformIntegration.swift"
+source_anchor = "static let shared = DisplayWakeOwner { UIApplication.shared.isIdleTimerDisabled = $0 }"
+test = "clients/apple/Tests/DisplayWakeTests.swift"
+test_anchor = "func testTheClaimFollowsItsPlayersTransportState() async"
