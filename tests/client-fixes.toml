@@ -4112,3 +4112,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/DisplayModeMatch
 source_anchor = "internal fun clearsDisplayModeRequestAfterWait(matched: Boolean, stillOwner: Boolean, late: Boolean): Boolean ="
 test = "clients/android/app/src/test/java/tv/plurx/app/player/DisplayModeMatcherTest.kt"
 test_anchor = "@Test fun timedOutPrepareWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow()"
+
+[[fixes]]
+id = "android.continuous-audio-outputs-retire-every-released-output"
+commits = ["5ab6affcf2ea0f9ce2f89d2a84be79fe81a3d811"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAudioOutputs.kt"
+source_anchor = ".map { it.key to it.value.owner }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousAudioOutputsTest.kt"
+test_anchor = "@Test fun releasingManyOutputsRetiresEveryOneOfThem()"

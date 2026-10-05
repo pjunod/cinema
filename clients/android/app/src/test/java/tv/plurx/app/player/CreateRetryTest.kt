@@ -77,6 +77,10 @@ class CreateRetryTest {
         val codes = row.getValue("codes").jsonArray.map { it.jsonPrimitive.content }
         assertTrue("the contract row names at least one code", codes.isNotEmpty())
         assertEquals(codes.toSet(), CreateRetry.codes)
+        // Pinned by name as well: `clients.transcode-capacity-pending-is-a-not-yet-answer`
+        // in tests/client-fixes.toml anchors on it, and a contract edit that
+        // dropped the code would otherwise pass this test silently.
+        assertTrue("transcode_capacity_pending" in CreateRetry.codes)
     }
 
     @Test

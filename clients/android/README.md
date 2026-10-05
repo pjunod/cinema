@@ -24,7 +24,9 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 > withdraws its `preferredDisplayModeId` request while it still owns the
 > window, so a late HDMI switch cannot land mid-playback (needs
 > `display_mode_match` on; not yet observed on a television), and the
-> uncalled Auto-quality policy port and its JVM runner are deleted.
+> uncalled Auto-quality policy port and its JVM runner are deleted; released
+> continuous audio outputs are retired again (since build 145 they were kept
+> and could exhaust the 16-output bound).
 > Build `145` — continuous quality: manual and Auto
 > quality changes adapt inside the one player, with owned outputs and release
 > fences around a prepared replacement, on top of current main's recovery
