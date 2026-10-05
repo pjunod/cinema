@@ -1,6 +1,8 @@
 # Native Auto-quality policy runners — source only
 
-**Status:** 2026-09-30 — draft A05 M2; no native playback enablement or device acceptance.
+**Status:** open — A05 M2, on `main` since 2026-10-04 (#793) in Apple build
+206; no native playback enablement or device acceptance; the ports are
+deleted in the 2026-10-04 close-out PR.
 
 Build: 206
 Issue: #634
@@ -14,9 +16,19 @@ Adding a deliberately wrong case to the same JSON failed all three at the
 named height assertion; the restored fixture passed again.
 
 No existing player controller calls these ports. No timer, bandwidth adapter,
-setting, frame instrumentation or reopen reason is changed. Apple 202 and
-Android 140 are changed-source build bookkeeping with unchanged version 0.3.0,
-not signed releases, installed products, D3 measurements or physical acceptance.
+setting, frame instrumentation or reopen reason is changed. The change was
+first claimed as Apple 202 / Android 140. It reached `main` with the
+architecture effort (#793, 2026-10-04), and `main` has held Apple build 206
+and Android versionCode 144 since, at version 0.3.0; build 206 is the
+effort's counter and carries every Apple change on `main` at that point, not
+this change alone. It is not a signed release, an installed product, a D3
+measurement or physical acceptance. This change's own
+`AutoQualityPolicyTests.testSharedAutoQualityFixture` failed in the
+2026-10-02 simulator run of the effort branch at `6f6466ebc`
+([APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md §6.1](../clients/APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md));
+no run on `main` is recorded. The ports are deleted in the 2026-10-04
+close-out PR, since nothing in production calls them.
+
 Design §3.6 explicitly permits these pure runners before D3; adapters remain
 subject to the design's own measured-baseline dependency.
 

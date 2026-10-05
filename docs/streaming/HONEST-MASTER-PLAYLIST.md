@@ -1,6 +1,6 @@
 # Honest master playlist — say what this session delivers, not what the file is
 
-**Status:** M1–M2 landed; M3 implementation in progress, fleet/device acceptance open; SDR `CODECS` printing is behind the Developer switch `playback.sdr_master_codecs`, **default off** (2026-10-04, [below](#the-sdr-codecs-developer-switch)) until the §5.4 device re-qualification is recorded · **Executes:** Q7 / F-stream-14 / A11 /
+**Status:** open — M1–M5 code on `main` since 2026-10-04 (#793); M3–M6 fleet/device acceptance open; SDR `CODECS` printing is behind the Developer switch `playback.sdr_master_codecs`, **default off** (2026-10-04, [below](#the-sdr-codecs-developer-switch)) until the §5.4 device re-qualification is recorded · **Executes:** Q7 / F-stream-14 / A11 /
 F-apple-11 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`

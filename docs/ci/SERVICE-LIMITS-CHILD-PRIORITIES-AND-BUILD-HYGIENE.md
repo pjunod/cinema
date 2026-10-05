@@ -1,6 +1,9 @@
 # Service limits, child priorities and build hygiene — implementation plan
 
-**Status:** ready for review · **Executes:** §4.6 / F-build-4 / F-build-8 /
+**Status:** open — M1 partial, M2, M3, M5, M6 (release profile C), M7 PR 3 and
+M8 on `main` since 2026-10-04 (#793); M4, the busy-load readbacks and M7 PR 4
+open ·
+**Executes:** §4.6 / F-build-4 / F-build-8 /
 F-build-11 / F-build-13 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -795,8 +798,9 @@ overflow-checks = true      # PR 4: changes runtime behaviour (a wrapped counter
 
 No semicolons, no `strip = "debuginfo"` (assessment 18).
 
-**Pin landed 2026-09-23** (`claude-opus-5`); **the release profile is
-untouched.** `Dockerfile:9` and `:35` now read:
+**Pin landed 2026-09-23** (`claude-opus-5`); **the release profile was
+untouched on that date** (superseded — see the 2026-10-04 note at the end of
+this section). `Dockerfile:9` and `:35` now read:
 
 ```dockerfile
 FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
@@ -839,6 +843,17 @@ CGU 16 vs 1, and lands the combination whose build-time cost Paul accepts;
 PR 4 records `make test-full` green and seven days of lab1 journal with no
 `attempt to add with overflow` panic. `panic = "unwind"` stays (review
 §4.6).
+
+**2026-10-04 note — profile C is the release profile.** The two paragraphs
+above describe the tree before M6's release-profile half. `Cargo.toml`'s
+`[profile.release]` now reads `lto = "thin"`, `debug = "line-tables-only"`,
+`strip = "none"`, `split-debuginfo = "packed"`, with the comment "Paul
+selected profile C on 2026-09-30". The `Dockerfile` build stage copies
+`plurxd.dwp` and `plurx-cluster-check.dwp` out of the release target and the
+runtime image installs both beside their executables in `/usr/local/bin`.
+`overflow-checks` is not set in the release profile, so PR 4 has not landed,
+and `lto`/`codegen-units` keep their thin/default values. This is on `main`
+since 2026-10-04 (#793), and every node runs an image built this way.
 
 ### 3.6 Fuzz targets
 
@@ -1739,7 +1754,10 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
    C. **Paul's call.**
    **Answered 2026-09-30:** Paul selected C. The dated implementation below
    supersedes the recommendation to ship D; the historical measurements stay
-   measurements of their named source, not of the new release tree.
+   measurements of their named source, not of the new release tree. Profile C
+   is recorded in `Cargo.toml`'s `[profile.release]` and has shipped in every
+   image since 2026-10-04 (#793), with the `.dwp` files installed beside the
+   executables.
 
 ---
 

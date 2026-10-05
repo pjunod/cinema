@@ -1,6 +1,6 @@
 # Auth hardening — queue the fence instead of refusing it, and bound what a stranger can try
 
-**Status:** in execution — the sign-in expiry **option** (§3.4.1), which supersedes the M4 decision, is open in draft [PR #486](http://192.168.4.7:3000/noirr/plurx/pulls/486); M1–M3 and the M4 decision merged via [PR #433](http://192.168.4.7:3000/noirr/plurx/pulls/433) · **Executes:** C7 and C8 from
+**Status:** open — M1–M3, the M4 decision ([PR #433](http://forge.lan:3000/noirr/plurx/pulls/433)) and the sign-in expiry **option** (§3.4.1) are on `main` since 2026-10-04 (#793); sign-ins expire after 90 idle days by default; each client's recovery from `session_expired` on a device is open · **Executes:** C7 and C8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment correction 1 and rows C7, F-core-8, C8, F-core-9 in
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))

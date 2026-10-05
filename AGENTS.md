@@ -73,9 +73,13 @@ test failures, or denied lints.
 - Integrate a multi-task project on one temporary `effort/<project>` branch.
 - Base each reviewable task branch on the current effort and open its pull
   request back into that effort.
-- Treat `Effort development gate` as blocking. It proves policy, formatting,
-  static web contracts, and affected Rust/Apple/Android compilation; it does
-  not make the branch releasable.
+- Dispatch `Effort development gate` by hand before merging a task into the
+  effort, and do not merge on a red run. `.github/workflows/effort-ci.yml`
+  runs only on `workflow_dispatch`: nothing fires it on a task pull request,
+  so it gates a merge only when someone runs it first. It proves policy,
+  formatting, static web contracts, and affected Rust/Apple/Android
+  compilation; it does not run the Rust, Apple or Android unit suites and
+  does not make the branch releasable.
 - Run the smallest focused regression for changed behavior locally and record
   that command in the task pull request. The effort workflow deliberately
   defers the full suites.

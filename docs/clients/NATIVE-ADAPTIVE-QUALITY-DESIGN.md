@@ -1,7 +1,7 @@
 # Native adaptive quality — one policy, three players, five kinds of evidence
 
-**Status:** open — D1, D2, D4 and D5 are on branch `plan/A-04`; D3's
-shaped-network traces are pending on every platform (§6's prompts)
+**Status:** open — D1, D2, D4 and D5 on `main` since 2026-10-04 (#793);
+D3's shaped-network traces are pending on every platform (§6's prompts)
 · **Executes:** §3.8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`

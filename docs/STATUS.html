@@ -103,6 +103,19 @@
     <div class="tile"><div class="v">M2 import ✓</div><div class="l">bounded migration proof · cluster activation next</div></div>
   </div>
 
+  <!-- ══════════ Architecture effort on main ══════════ -->
+  <section>
+    <h2>Architecture effort on <code>main</code> <span class="chip prog">🚧 landed, rulings and evidence owed</span> <span class="ev">STATUS.md · ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md · updated 2026-10-04</span></h2>
+    <p class="blurb"><code>main</code> is <code>1c8ee9acb</code>. All four nodes were deployed to <code>b5e39b8bb</code> on 2026-10-04; #802 is not deployed yet. Rolling back is not a revert: the SQLite and replicated migrations from the effort and #797 have run on every node.</p>
+    <ul class="items">
+      <li class="done-item"><span class="m done">✓ #793 merged</span><span class="t"><b>Architecture-review effort, <code>4cfd1bdd1</code> (2026-10-04).</b> Landed whole, before the planned relevance check; not device- or fleet-qualified. On by default with it: sign-ins expire after 90 idle days, bounded replica reads, the corrected CPU tone-map chain, the typed stereo downmix (Lo/Ro fold and −4 dBFS limiter), SDR <code>CODECS</code> in master playlists, the off-writer Raft snapshot copy, and the profile C release build with packed <code>.dwp</code> debug info. Behind Developer switches, default off: cluster clock guard enforcement and display-aware Auto. Corrected per-plan states are on the <a href="reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md">work board</a>.</span></li>
+      <li class="done-item"><span class="m done">✓ #797 merged</span><span class="t"><b>Jellyfin client compatibility facade, <code>b5e39b8bb</code>.</b> Off by default (Developer → <i>Allow Jellyfin clients</i>); physical client qualification owed.</span></li>
+      <li class="done-item"><span class="m done">✓ #802 merged</span><span class="t"><b>Web: Play after a long pause no longer pulls the picture back a second, <code>1c8ee9acb</code>.</b> Needs a server deploy and a browser check.</span></li>
+      <li><span class="m partial">◐ in progress</span><span class="t"><b>The 2026-10-04 close-out PR (draft).</b> K-06 fixes (learner roster, removal clock read, admission budget), a leader-restart grace for the progressive remux owner, a Developer switch for SDR <code>CODECS</code> (default off), the D6 link-negative acknowledgement without network priors, S-14 / L-02 / K-05 / D-01 fixes, the hiqlite fork ledger, the host-name scrub, the Apple and Android unit suites green on <code>main</code>, and this records update.</span></li>
+      <li><span class="m you">👤 Paul</span><span class="t"><b>Open rulings</b>, each written up with a recommendation in the 2026-10-04 relevance pass: the pre-effort tag on <code>1f0a91c9e</code>; the K-06 enforce switch; SDR <code>CODECS</code> before device checks; the A-05 runners and SQLite v93 link columns; S-06 / S-11 against #766; the Plex facade; the K-04 switch; K-05's <code>watch_rollups</code>; W-02's TVs; P-02 M4; effort lanes and machinery; and the decisions taken on Paul's behalf (S-02, S-09, D-01, A-03, S-14, S-08).</span></li>
+    </ul>
+  </section>
+
   <!-- ══════════ Phases 0–2 ══════════ -->
   <section>
     <h2>Phases 0–2 — the old-Plex kernel <span class="chip done">✓ complete</span> <span class="ev">exit criteria verified per phase</span></h2>

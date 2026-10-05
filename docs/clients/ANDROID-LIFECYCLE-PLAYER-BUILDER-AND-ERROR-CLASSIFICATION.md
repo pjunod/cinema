@@ -1,6 +1,8 @@
 # Android lifecycle, one player builder, and error classification — implementation plan
 
-**Status:** ready for review · **Executes:** D2 / D3 / D4 / D7 /
+**Status:** open — M1–M5 and M7–M9 code on `main` since 2026-10-04 (#793); the
+device matrix and the M6 failover JVM cases open ·
+**Executes:** D2 / D3 / D4 / D7 /
 F-android-3 / F-android-4 / F-android-5 / F-android-9 / F-android-13 /
 F-android-14 / F-android-15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)

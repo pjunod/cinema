@@ -1,6 +1,6 @@
 # Android display-mode matching and buffer budget — implementation plan
 
-**Status:** M1–M3 built; M4 actual-heap containment implemented; M0 measured on the Google TV Streamer 2026-10-02; M4 larger allocation decided *not justified* (coordinator decision, awaiting Paul's review); M0 on the other televisions and the M5 HDMI matrix open · **Executes:** §2.9 / D1 / F-android-1 /
+**Status:** open — M1–M3 and M4 actual-heap containment on `main` since 2026-10-04 (#793); M0 measured on the Google TV Streamer 2026-10-02; M4 larger allocation decided *not justified* (no-build on buffer roles, coordinator decision, awaits Paul's ratification, see the 2026-10-04 relevance pass §2.15); the §5.6 matcher-timeout reset is built in the 2026-10-04 close-out PR (Android 145); M0 on the other televisions and the M5 HDMI matrix open · **Executes:** §2.9 / D1 / F-android-1 /
 F-android-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -156,7 +156,8 @@ with the collector's receipt; the numbers below are copied from it.
 and its `PlurxBufferBudget` log line), so the active formula was the legacy
 `(memoryClass/8).coerceAtMost(64)` = **48 MiB per pipeline**. On this device
 the clamp gives the same value (`Runtime.maxMemory()` = 384 MiB, /8 = 48 MiB,
-measured 2026-09-30), so the reading carries over to the effort branch.
+measured 2026-09-30), so the reading carries over to the effort branch, on
+`main` since 2026-10-04 (#793).
 
 | Column | Google TV Streamer |
 |---|---|
@@ -184,7 +185,8 @@ requested audio focus at `playWhenReady = true` and paused the incumbent
 within 3 ms; the incumbent sat frozen about 20 s, both players were released
 and a cold start followed. So the 146 MB "primed" PSS is one paused incumbent
 plus a successor that only created an audio decoder — not two healthy
-pipelines. That defect is already corrected on this effort branch
+pipelines. That defect is already corrected on the effort branch, on `main`
+since 2026-10-04 (#793)
 (`320535286`, pinned by `f646b9bdb`: `handlesAudioFocus(role)` is false for
 `PlayerRole.Successor` and focus moves with `handOverAudioFocus` at commit),
 but no installed build carries it yet. A valid primed reading needs the

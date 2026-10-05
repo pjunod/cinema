@@ -1,11 +1,15 @@
 # Media body buffers — size the read, then, separately, the acknowledgement
 
-**Status:** M1 merged. §5.1 before/after measured 2026-09-24 (§5.1.1).
-Decision 1 taken on Paul's behalf and his to overturn: the shared read is
-128 KiB, and `TCP_NODELAY` is set on accepted connections, which removed the
-HLS p50 regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6).
-M2 implemented on the architecture effort 2026-09-30 and on main in PR #766;
-combined-source integration and controlled runtime acceptance pending ·
+**Status:** open — M1 and M2 (`ResidentBatch`) on `main` since 2026-10-04
+(#793). §5.1 before/after measured 2026-09-24 (§5.1.1). Decision 1 taken on
+Paul's behalf and his to overturn: the shared read is 128 KiB, and
+`TCP_NODELAY` is set on accepted connections, which removed the HLS p50
+regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6); both
+await Paul's ratification (see the 2026-10-04 relevance pass §2.15). The
+controlled acceptance and the packet-rate check are owed: the 2026-10-03
+controlled cell failed 151.6 s into the run, during the software 2160p
+first-segment warm-up (`502 producer_failed` at the 30 s materialisation
+deadline), and was not re-run ·
 **Executes:** §2.4, C1, F-core-1, F-stream-8, §5.1 item 3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @

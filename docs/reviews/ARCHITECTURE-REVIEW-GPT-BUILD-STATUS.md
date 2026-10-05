@@ -1,6 +1,15 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 16:09 UTC · **Audited main:** `b5649e55d9826500dbbc92160e0374e7a1bc6021`
+**Status:** superseded by the
+[work board](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) · **Updated:**
+2026-09-28 16:09 UTC · **Audited main:** `b5649e55d9826500dbbc92160e0374e7a1bc6021`
+
+**Superseded, 2026-10-04:** this page last audited `main` on 2026-09-28; its
+one later entry is dated 2026-09-30. The effort it tracks landed on `main` as
+`4cfd1bdd1` (#793) on 2026-10-04. The
+[work board](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) is the current
+status for every plan; the entries below are a historical record and are not
+kept current.
 
 ## Current work
 

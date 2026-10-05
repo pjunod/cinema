@@ -1,6 +1,6 @@
 # Bounded replica reads rollout — a consistency-policy change, one route at a time
 
-**Status:** M0–M3, the web echo, and the normal default merged; M4 watch failure coverage and named lab/rolling-upgrade acceptance remain open · **Executes:** S1, F-sc-1, F-core-4 from
+**Status:** open — M0–M4, the web echo, and the on-by-default setting (the `config.rs` seed is `true`) on `main` since 2026-10-04 (#793), switched on before the lab readout; Apple and Android send no `X-Plurx-Read-After`; the named lab readout and rolling-upgrade acceptance remain open; recommendation: remove the switch after the lab readout (see the 2026-10-04 relevance pass §2.9) · **Executes:** S1, F-sc-1, F-core-4 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -30,6 +30,14 @@ paused/partitioned-follower proof, rolling-upgrade observation, or fleet
 acceptance. Earlier “not built” and default-false entries below record the
 M2–M3 state at their dated snapshots. The E1 build record is
 [DURABLE-WORK-QUEUE-STATUS.md](DURABLE-WORK-QUEUE-STATUS.md).
+
+**2026-10-04 correction — the key's doc comment.** On `main` at
+`1c8ee9acb` the doc comment above `keys::BOUNDED_REPLICA_READS` in
+`crates/plurx-core/src/store/mod.rs` is a misplaced VOD-index comment: it
+says missing or zero is off, while the effective default is on
+(`bounded_replica_reads: true` in `crates/plurx-core/src/config.rs`). The
+2026-10-04 close-out PR replaces the comment; the behaviour described in this
+plan is the `config.rs` default.
 
 **Correction to the review:** none on the facts. Two clarifications the
 plan depends on. First, `search_items` is already a local read on hiqlite

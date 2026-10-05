@@ -1,6 +1,9 @@
 # Live TV session fence, peer transport and start — one settings read per node, one HTTP client per node, no fixed wait on a warm channel, and no zombie in the registry
 
-**Status:** ready for review · **Executes:** L2 / F-ltv-2, L3 / F-ltv-3,
+**Status:** open — M1–M4 on `main` since 2026-10-04 (#793), written for the
+single-owner model #537 replaced; leader restart with live sessions is
+unverified; the server-side #537 cleanup is in the 2026-10-04 close-out PR ·
+**Executes:** L2 / F-ltv-2, L3 / F-ltv-3,
 L6 / F-ltv-6 and L9 / F-ltv-11, F-ltv-12, F-ltv-14 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Against:** `main` @ `88a3957a`

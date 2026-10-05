@@ -1,6 +1,9 @@
 # Clock-skew guard — measure the offset, bound it, and refuse the dangerous side
 
-**Status:** open — original design accepted; measurement implementation claimed · **Executes:** S9 / F-sc-10 from
+**Status:** open — original design accepted; measurement and enforcement
+on `main` since 2026-10-04 (#793), enforcement behind a Developer switch this
+design does not allow (see the §3.8 note); runtime evidence open ·
+**Executes:** S9 / F-sc-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Revised:** 2026-09-21 against `main` @
 `9deb58a2`
@@ -767,6 +770,23 @@ Developer settings. `/readyz` remains the machine-facing signal described in
 §3.5; the page only explains it. Rollback of enforcement is a reviewed binary
 rollback or corrective release, not a setting flip that can leave voters on
 different safety policies.
+
+**2026-10-04 note — what `main` carries, contrary to this section.** The
+design above is unchanged; this note records the code on `main` since
+`4cfd1bdd1` (#793). `main` has a Developer switch, *Enforce the cluster clock
+guard* on the *Cluster clock guard* card, stored as the replicated setting `cluster.clock_guard_enforced`
+(`crates/plurx-core/src/store/mod.rs`, read with `stored_switch(.., false)`,
+so missing is off). Each node applies it to its own guard from a 10-second
+poll of that row (`CLOCK_ENFORCEMENT_REFRESH` and `apply_stored_enforcement`
+in `crates/plurxd/src/clock_offset.rs`); a node whose read fails keeps its
+current mode, so voters can run different policies for up to one poll or
+longer — the state this section rules out. While it is off, every guarded
+decision is admitted and what would have been refused is counted in
+`plurx_cluster_clock_advisory_refusals_total`; while it is on, the guard
+refuses takeover, the expired-session scan and membership changes when the
+roster is not fully observed or an offset exceeds the bound. Whether the switch stays, or
+enforcement is removed until the measurement evidence exists, awaits Paul's
+ruling (see the 2026-10-04 relevance pass §2.2).
 
 No recipe identity, cache digest or manifest changes: nothing here enters a
 transcode recipe or a cache key.

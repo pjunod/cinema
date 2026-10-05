@@ -1,7 +1,10 @@
 # Raft snapshot cadence and the consistent cut — measure, then move the copy off the writer without moving the cut
 
-**Status:** in progress — correctness/default plumbing implemented on a task
-branch; fleet threshold tuning and release qualification remain open
+**Status:** open — M0–M3 on `main` since 2026-10-04 (#793): fork patch 22
+(writer-fixed cut, off-writer copy) and storage admission run on every voter,
+with no switch, by design. Paul accepted the shipped path on 2026-10-04 and
+declined a 24-hour undisturbed readout; what remains is to observe one real
+snapshot on production data
 · **Executes:** S2, S5, F-sc-2, F-sc-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`

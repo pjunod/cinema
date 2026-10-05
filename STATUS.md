@@ -1,8 +1,65 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-28 · Kept current by the working agent in the same
+**Updated:** 2026-10-04 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## 2026-10-04: the architecture effort is on `main`; fleet on `b5e39b8bb`
+
+**`main` is `1c8ee9acb`. All four nodes were deployed to `b5e39b8bb` on
+2026-10-04; `1c8ee9acb` (#802) is not deployed yet.**
+
+- **#793 — architecture-review effort, merged as `4cfd1bdd1`.** The branch
+  `effort/architecture-review-2026-09-20` landed whole, without the
+  pre-merge relevance check that was planned. It is not yet device- or
+  fleet-qualified; the 2026-10-04 relevance pass lists the rulings Paul owes
+  and the evidence still owed, and the
+  [work board](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) has
+  the corrected row states. On by default with it: sign-ins expire after 90
+  idle days; the Lo/Ro fold and −4 dBFS limiter on typed stereo encodes; the
+  corrected CPU tone-map chain; SDR `CODECS` in master playlists; bounded
+  replica reads; the off-writer Raft snapshot copy; and the profile C release
+  build with packed `.dwp` debug info. Behind Developer switches, default
+  off: cluster clock guard enforcement and display-aware Auto. Rolling back
+  is not a revert: SQLite and replicated migrations from the effort and #797
+  have run on every node.
+- **#797 — Jellyfin client compatibility facade, merged as `b5e39b8bb`.** Off
+  by default (Developer → *Allow Jellyfin clients*); physical client
+  qualification is still owed.
+- **#802 — web: Play after a long pause no longer pulls the picture back a
+  second, merged as `1c8ee9acb`.** A pause of 60 s or more is an Auto quality
+  boundary; the web player now asks for the route before seeking, and a
+  retained route leaves the position alone. Web only; needs a server deploy
+  and a browser check.
+- **The 2026-10-04 close-out PR, in progress as a draft.** One PR to
+  `main` for the fixes no ruling waits on: K-06 (the clock roster stops
+  counting learners, the removal fence's raw clock read, and a fresh 45 s
+  membership admission budget); a leader-restart grace for the progressive
+  remux owner; a Developer switch for SDR `CODECS` in master playlists,
+  default off; D6 — a link negative is acknowledged from the in-memory
+  receipt when network priors are off; S-14's learner removal and voter leave
+  on the shared `RemovalTransition`; L-02's #537 cleanup; the K-05
+  `watch_rollups` plan; D-01's matcher timeout reset (Android 145); the
+  hiqlite fork ledger rows and a test tying them to source; the host-name
+  scrub; and the Apple and Android unit suites green on current `main`. This
+  records change (work board, plan headers, clock docs, `API.md`,
+  `CHANGELOG.md`, this page) is part of it.
+- **Rulings Paul owes** — each is written up with a recommendation in the
+  2026-10-04 relevance pass (an agent-side project document, not a file in
+  this tree): tag `1f0a91c9e` as the pre-effort release; K-06 keep the
+  enforce switch or remove enforcement until measured; S-10 whether SDR
+  `CODECS` stays on before devices are re-checked; A-05 the orphan runners
+  and SQLite v93 link columns; S-06 and S-11 close on #766's Video Quality
+  Program; C-07 whether the Plex facade survives; K-04 remove the
+  replica-reads switch after the lab readout; K-05 fix the `watch_rollups`
+  regression; W-02 waive LG webOS and Fire TV; P-02 M4's systemd half;
+  effort lanes (`make unit` on effort PRs, or no more effort branches); which
+  effort machinery is kept; and the decisions taken on Paul's behalf (S-02
+  Decisions 1 and 6, S-09's copy rule, D-01's buffer-role no-build and
+  device substitutions, A-03's acceptance bar, S-14's D-M7/D-M8, S-08's
+  deinterlace bars). K-02's snapshot path was accepted on 2026-10-04, and
+  A-04's switch location is already settled (Developer now, Playback at
+  graduation).
 
 ## Content analysis stopped: the queue's receipt bound is the next cliff after #608
 
@@ -270,28 +327,14 @@ simulcast in MPEG-TS, no decoder running. One adversarial review pass, eight
 findings folded (Android now reads the HDMI sink's PCM channel count, described
 tracks never win, `und` is no language, the track is mapped by PID).
 
-## P-03: the regression ledger stops growing, and releases get a weekly cadence
-
-**Merged by #489 (`995b60f3e`); phase B switched on 2026-09-25 by branch
-`ci/p03-enforce` with Paul's approval** — the boundary is `448e803da`, and a
-corrective pull request now needs a resolving `Regression-Test:` line.
-Executes [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
-under Paul's two 2026-09-23 decisions. Built: the `Regression-Test:` field
-(checked before merge in the tree the merge will produce), the landing-commit
-audit that replaces new `validation/regressions.d/` fragments past a boundary
-commit, `scripts/release-cut`, and a Monday release-readiness run that tags a
-merged release only from a green gate. The boundary is set (phase B); the
-first weekly tag still waits for `publish_main` to have a trigger (P-01). This page is now the
-newest sections plus an index; older sections moved verbatim into each
-folder's `STATUS-HISTORY.md`. The execution log in the plan is the record.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27 and 2026-09-28
-into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28
+and 2026-10-04 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-25 | P-03: the regression ledger stops growing, and releases get a weekly cadence | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-22 | PGS subtitles stopped blocking the start path | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
 | 2026-09-22 | The full Rust suite and the release build are clean again | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-22 | Resume stopped working on every client — reproduced, half fixed | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |

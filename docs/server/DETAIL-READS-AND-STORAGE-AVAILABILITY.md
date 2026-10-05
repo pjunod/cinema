@@ -1,6 +1,9 @@
 # Detail reads and storage availability — a badge that never unpacks an index, and an availability answer that carries its age
 
-**Status:** implementation in progress · **Executes:** C14 (§3.3.3) from
+**Status:** open — M1, M2 and M3 on `main` since 2026-10-04 (#793); M2
+landed without the M1 backfill receipt this plan requires first; that
+receipt, the unmount test and page latency are open ·
+**Executes:** C14 (§3.3.3) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
 

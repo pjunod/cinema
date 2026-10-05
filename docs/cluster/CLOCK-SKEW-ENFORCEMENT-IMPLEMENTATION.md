@@ -1,7 +1,8 @@
 # Clock enforcement — consume proved observations before acquiring authority
 
-**Status:** open — E0 pure policy in preparation; active consumers unclaimed;
-measurement evidence pending · **Executes:** K-06 enforcement handoff ·
+**Status:** open — E0 policy and active consumers on `main` since 2026-10-04
+(#793) behind Developer switch `cluster.clock_guard_enforced`, default off;
+measurement evidence pending (see the 2026-10-04 note in §1) · **Executes:** K-06 enforcement handoff ·
 **Written:** 2026-09-30 · **Source baseline:** effort `f319fa779`.
 
 Companion to [the accepted design](CLOCK-SKEW-GUARD-DESIGN.md) and the
@@ -24,6 +25,38 @@ contract, automatic observation, and separate enforcement release. Developer
 facts remain read-only and advisory. Enforcement still waits for the merged
 measurement release and its identified fleet receipt; that substantive evidence
 dependency is unchanged. No rollout or clock-step authorization is implied.
+
+**2026-10-04 note — what `main` carries.** The claim boundary above was not
+followed in that order: the enforcement consumers landed on `main` with the
+effort as `4cfd1bdd1` (#793) on 2026-10-04, before the identified measurement
+receipt, and behind a Developer switch instead of as a separate no-switch
+release. Earlier statements in this plan that no consumer is connected
+describe the source they were written against. On `main`:
+
+- **Consumers.** Session takeover
+  (`acquire_takeover_clock`, `crates/plurxd/src/media_sessions.rs:346`); the
+  expired-session scan (`acquire_for` / `revalidate_for(ClockDecision::ExpiryScan)`,
+  `media_sessions.rs:4912, 4922`); membership changes through
+  `admit_for(ClockDecision::MembershipChange, …)` at five call sites in
+  `crates/plurx-core/src/cluster/membership.rs`; fenced removal
+  (`admit_fenced_removal`, `crates/plurx-core/src/cluster/clock.rs:1359`); and
+  `/readyz`, which answers 503 `clock unbounded` after two consecutive
+  violating rounds (`clock_readiness_failure`, `crates/plurxd/src/http/mod.rs`).
+- **The switch.** Developer → *Cluster clock guard* → *Enforce the cluster clock
+  guard*, the
+  replicated setting `cluster.clock_guard_enforced`, default off. Each node
+  re-reads it every 10 s (`crates/plurxd/src/clock_offset.rs`); a failed read
+  keeps the node's current mode. While off, every guarded decision is
+  admitted and `/readyz` ignores the clock; would-be refusals are counted in
+  `plurx_cluster_clock_advisory_refusals_total`. Startup is always advisory.
+  The switch contradicts the design's §3.8 and awaits Paul's ruling (see the
+  2026-10-04 relevance pass §2.2).
+- **Being corrected.** The 2026-10-04 close-out PR changes three behaviours
+  that apply with the switch on or off: which members the clock roster
+  counts, the clock read in the removal fence, and the membership admission
+  budget on the staged startup path. Its own edits to this plan describe them.
+- **Evidence.** No runtime clock series and no fleet receipt; the NTP point
+  offsets on the work board are the only clock readings.
 
 ## 2. Current entry points — inspect all irreversible boundaries again
 

@@ -2350,8 +2350,8 @@ uncertainty and per-peer `observation_state` on `/metrics`; numeric gauges
 are absent for Unknown peers. Compare `abs(offset) + uncertainty` with the
 fixed 2,000 ms relative contract, retain the discontinuity and Unknown-round
 counters, and report `plurx_cluster_clock_authority_reads_total` to measure
-inbound probe authorization cost. This observation changes no acquisition or
-readiness decision and does not replace the absolute 250 ms discipline rule.
+inbound probe authorization cost. It does not replace the absolute 250 ms discipline rule; with the clock
+guard enforced it does decide acquisition (see the enforcement plan).
 Learners are probed like any member, but an unobserved learner is counted in
 `plurx_cluster_clock_unobserved_learners` instead of making coverage
 incomplete: with the clock guard enforced, a stopped learner does not refuse
@@ -2361,6 +2361,32 @@ and promoting a learner requires its own bounded observation, so measure it
 before promoting.
 See [the measurement handoff](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md)
 for the identified one-hour idle and sixty-second loaded receipt still owed.
+
+Since 2026-10-04 (#793) the observation feeds a clock guard. Settings →
+Developer → *Cluster clock guard* → *Enforce the cluster clock guard* (the
+replicated setting `cluster.clock_guard_enforced`, default off) decides
+whether it refuses anything; each node re-reads the setting every 10
+seconds, and a node whose read fails keeps its current mode. **Off** (the
+default): every guarded decision is admitted and `/readyz` ignores the
+clock. **On**: session
+takeover, the expired-session scan and membership changes are refused while
+the clock roster is not fully observed or an offset is outside the 2,000 ms
+bound, and `/readyz` answers 503 `clock unbounded` after two consecutive
+violating rounds; startup is never refused. Fenced removal of the member that
+is down still works. Whether this switch stays awaits Paul's ruling; see the
+[enforcement plan](cluster/CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md)'s
+2026-10-04 note. These series say which mode a node is in and what it did:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `plurx_cluster_clock_enforced` | gauge | — | 1 when this node's guard refuses decisions, 0 when it is advisory only. Compare across nodes: the setting is applied per node. |
+| `plurx_cluster_clock_refusals_total` | counter | `decision`, `cause` | Decisions the guard refused while enforcing. |
+| `plurx_cluster_clock_advisory_refusals_total` | counter | `decision`, `cause` | Decisions the guard would have refused while enforcement was off, and admitted anyway. Non-zero means turning the switch on would have refused that work. |
+
+`decision` is `takeover`, `membership_change` or `expiry_scan`; `cause` is
+`offset`, `unknown`, `local_discontinuity` or `generation_changed`. Every
+combination is emitted, at zero when nothing happened, and both counters are
+process-lifetime.
 
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set

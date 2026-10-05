@@ -1,6 +1,6 @@
 # Regression ledger, text contracts and release tags — what the process buys, and what it costs
 
-**Status:** in execution — M1-M4, M6 and M7's buildable half on `plan/P-03` ([PR #485](http://192.168.4.7:3000/noirr/plurx/pulls/485), draft, 2026-09-24); M5 refused by its own protocol · **Executes:** §4.4 / §4.5 / F-hist-8 / F-hist-9 /
+**Status:** open — M1-M4, M6 and M7's buildable half on `main` since 2026-10-04 (#793); M5 refused by its own protocol; the first release tag is open, and whether to tag the last pre-effort commit awaits Paul's ruling (see the 2026-10-04 relevance pass §2.1) · **Executes:** §4.4 / §4.5 / F-hist-8 / F-hist-9 /
 F-build-9 / F-build-15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`

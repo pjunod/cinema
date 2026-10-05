@@ -1,7 +1,12 @@
 # Native adaptive quality — the build plan
 
-**Status:** 2026-09-30 — M0 merged in effort via #618; M2 pure runners merged via #634;
-M1 and M3–M4 open · **Executes:**
+**Status:** open — superseded by the 2026-09-30 display-aware override; M0
+(#618), the M2 pure runners (#634) and the typed recovery consumers on `main`
+since 2026-10-04 (#793); the runners have no production caller and are
+deleted in the 2026-10-04 close-out PR; native recovery runs only while the
+Developer switches `playback.display_aware_auto` and `playback.auto_abr` are
+both on (both default off); physical qualification open (see the 2026-10-04
+relevance pass §2.5) · **Executes:**
 [NATIVE-ADAPTIVE-QUALITY-DESIGN.md](NATIVE-ADAPTIVE-QUALITY-DESIGN.md)'s D4
 · **Written:** 2026-09-23 against `main` @ `8839cc72`
 

@@ -1,8 +1,10 @@
 # Replicated write-rate hygiene — stop proposing no-ops every second on every voter
 
-**Status:** in progress — M0 done at Paul's 12-hour gate
-([readout](REPLICATED-WRITE-RATE-HYGIENE-M0.md)); M1–M3 built on `plan/K-03`
-(#405); the M4 after-measurement needs a fleet deploy ·
+**Status:** open — M0 done at Paul's 12-hour gate
+([readout](REPLICATED-WRITE-RATE-HYGIENE-M0.md)); M1–M3 (#405) and the M4
+tooling on `main` since 2026-10-04 (#793); the M4 after-measurement on the
+fleet is owed; the 2026-10-04 close-out PR moves the observer's node list
+into a git-ignored fleet file ·
 **Executes:** S3, F-sc-3 and the takeover-loop
 audit from S3's row in
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)

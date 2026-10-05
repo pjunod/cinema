@@ -1,6 +1,6 @@
 # Apple PlayerController attempt and observation — nine epochs made explicit, one item observer, polls that keep their deadlines
 
-**Status:** 5.1–5.6 code merged; three of this plan's own `AttemptScopesTests` fail on the effort branch (§6.1, 2026-10-02); physical acceptance open · **Executes:** A3, A4, A6, A7 and
+**Status:** open — 5.1–5.6 code on `main` since 2026-10-04 (#793); three of this plan's own `AttemptScopesTests` failed on the effort branch (§6.1, 2026-10-02) and the suite has not been recorded as run on `main`; physical acceptance open · **Executes:** A3, A4, A6, A7 and
 F-apple-3, F-apple-4, F-apple-6, F-apple-7, F-apple-9, F-apple-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -464,7 +464,8 @@ tvOS 26.5 runtimes) against a plain source copy of
 iOS: **742 tests, 735 passed, 7 failed**. tvOS: **726 tests, 719 passed, 7
 failed**. The same seven failed on both platforms and failed again when rerun
 alone, so they are deterministic and pre-existing on the effort branch (the
-run carried no Apple source change):
+run carried no Apple source change). The effort branch landed on `main` as
+#793 on 2026-10-04; no run of this suite on `main` is recorded here:
 
 - `AttemptScopesTests` — `testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid`,
   `testEveryMigratedFenceRefusesAContinuationAcrossAViewerPause`,

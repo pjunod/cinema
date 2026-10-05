@@ -698,8 +698,10 @@ All four carry the same release signing certificate and none is
 every device) is gone. 142 matched the built counter on the day. **Partial
 against §5.9's bar:** the TCL 9445X, the Lenovo TB322FC and the Xiaomi were not
 visible to adb, so "every device in the role's inventory" is not yet met. The
-source counter is still 142 on this effort branch; the next client build bumps
-it, and that rollout must recheck every device against the new number.
+source counter was still 142 on the effort branch that day. The effort
+landed on `main` as #793 on 2026-10-04, and `main` carried versionCode 144 on
+that date, so the rollout of 144 or later must recheck every device against
+the new number.
 
 **Observation, not a bar: a leftover test package.** `tv.plurx.app.test` — the
 debug instrumentation APK — is listed by Backup Manager on the Google TV (its

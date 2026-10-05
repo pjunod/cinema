@@ -1,6 +1,8 @@
 # Observability baseline — RED metrics on matched routes, logs a machine can read, and a release-evidence metric set with owners
 
-**Status:** ready for review · **Executes:** C10 / F-core-12 /
+**Status:** open — M1–M5 on `main` since 2026-10-04 (#793); one hour of real
+use, JSON log mode and device deltas open ·
+**Executes:** C10 / F-core-12 /
 F-build-ops-codehealth-12 and the §4.9 release-evidence list from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment rows C10, F-core-12, F-build-ops-codehealth-12 in

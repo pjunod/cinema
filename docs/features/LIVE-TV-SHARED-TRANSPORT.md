@@ -1,6 +1,8 @@
 # Live TV shared transport — one tuner per channel however many are watching, and captions only once they are proven
 
-**Status:** ready for review · **Executes:** L4 / F-ltv-4 (design) and the
+**Status:** open — M1–M4 code on `main` since 2026-10-04 (#793); the capacity
+offer and caption matrix open ·
+**Executes:** L4 / F-ltv-4 (design) and the
 closed-captions half of Q9 / L7 / F-ltv-8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Against:** `main` @ `88a3957a` · **Re-verified:** 2026-09-24 @ `886fc8bd` (§2.4)

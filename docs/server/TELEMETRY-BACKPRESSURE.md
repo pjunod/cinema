@@ -1,6 +1,8 @@
 # Telemetry backpressure — one bounded queue, one supervised writer, and counters that survive retention being off
 
-**Status:** ready for review · **Executes:** C15 (§3.3.4) from
+**Status:** open — M1–M4 on `main` since 2026-10-04 (#793); slow-sidecar and
+restart timings open ·
+**Executes:** C15 (§3.3.4) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
 

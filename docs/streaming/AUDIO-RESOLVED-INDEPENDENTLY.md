@@ -1,7 +1,10 @@
 # Audio resolved independently — the picture's rung stops deciding the sound
 
-**Status:** partial implementation; synthetic subset measured 2026-09-30,
-real-content/device evidence open · **Executes:** Q5 / §3.1.2 / F-stream-5 from
+**Status:** open — M1–M5 on `main` since 2026-10-04 (#793); the Lo/Ro fold
+and −4 dBFS limiter apply to typed stereo encodes (not progressive untyped,
+legacy untyped or Live TV); synthetic subset measured 2026-09-30; listening
+notes and device routes owed; Decision 6 (the copy rule) awaits Paul's
+ratification (see the 2026-10-04 relevance pass §2.15) · **Executes:** Q5 / §3.1.2 / F-stream-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
