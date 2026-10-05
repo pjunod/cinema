@@ -721,8 +721,11 @@ mod tests {
     /// control: with these statistics it skip-scans every item through
     /// `idx_items_library_kind`, which is what made it 3x slower, so this test
     /// fails if the statistics stop provoking the regression as well as if a
-    /// pin is removed. The replicated statements are planned on the standalone
-    /// schema, whose `items` and `watch_state` indexes are the same ones.
+    /// pin is removed. The replicated statements are planned twice: on the
+    /// standalone schema, and on a bare connection loaded with the replicated
+    /// `CATALOG_SCHEMA` itself, so an `idx_items_parent` renamed or dropped
+    /// there (the pins name it with `INDEXED BY`) fails here rather than on a
+    /// voter.
     #[tokio::test]
     async fn watch_rollup_plans_do_not_depend_on_statistics() {
         let store = SqliteStore::open_in_memory().expect("open");
@@ -764,21 +767,7 @@ mod tests {
 
         store
             .with_conn(|conn| {
-                conn.execute_batch(
-                    "ANALYZE;
-                     DELETE FROM sqlite_stat1;
-                     INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES
-                         ('items', 'idx_items_book_work', '0 0'),
-                         ('items', 'idx_items_missing_artwork', '75600 401'),
-                         ('items', 'idx_items_added', '75600 1'),
-                         ('items', 'idx_items_parent', '75600 23'),
-                         ('items', 'idx_items_library_kind', '75600 401 401'),
-                         ('files', 'idx_files_item', '100000 2'),
-                         ('files', 'sqlite_autoindex_files_1', '100000 1'),
-                         ('watch_state', 'idx_watch_updated', '35000 401 1'),
-                         ('watch_state', 'sqlite_autoindex_watch_state_1', '35000 401 1');
-                     ANALYZE sqlite_schema;",
-                )?;
+                conn.execute_batch(WATCH_ROLLUP_FIXTURE_STATISTICS)?;
                 Ok(())
             })
             .await
@@ -795,7 +784,87 @@ mod tests {
         let with = plans_of(&store, statements).await;
 
         assert_eq!(without, with, "a watch-rollup plan changed with statistics");
-        for (name, plan) in &with {
+        assert_watch_rollup_plans_pinned(&with);
+
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let replicated = [
+                (
+                    "replicated-schema watch_rollups",
+                    crate::store::hiqlite_media::watch_rollups_sql(),
+                ),
+                (
+                    "replicated-schema watch_rollup",
+                    crate::store::hiqlite_media::watch_rollup_sql(),
+                ),
+                (
+                    "replicated-schema watch_summary",
+                    crate::store::hiqlite_media::watch_summary_sql(),
+                ),
+            ];
+            let conn = rusqlite::Connection::open_in_memory().expect("open");
+            conn.execute_batch(crate::store::hiqlite_catalog::CATALOG_SCHEMA)
+                .expect("install the replicated catalogue schema");
+            let without = conn_plans_of(&conn, &replicated);
+            conn.execute_batch(WATCH_ROLLUP_FIXTURE_STATISTICS)
+                .expect("load the fixture's statistics");
+            let with = conn_plans_of(&conn, &replicated);
+            assert_eq!(
+                without, with,
+                "a replicated watch-rollup plan changed with statistics"
+            );
+            assert_watch_rollup_plans_pinned(&with);
+        }
+    }
+
+    /// The K-05 fixture's `sqlite_stat1` (see
+    /// `benchmarks/evidence/query-plans-012d8a3a.md`).
+    const WATCH_ROLLUP_FIXTURE_STATISTICS: &str = "ANALYZE;
+         DELETE FROM sqlite_stat1;
+         INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES
+             ('items', 'idx_items_book_work', '0 0'),
+             ('items', 'idx_items_missing_artwork', '75600 401'),
+             ('items', 'idx_items_added', '75600 1'),
+             ('items', 'idx_items_parent', '75600 23'),
+             ('items', 'idx_items_library_kind', '75600 401 401'),
+             ('files', 'idx_files_item', '100000 2'),
+             ('files', 'sqlite_autoindex_files_1', '100000 1'),
+             ('watch_state', 'idx_watch_updated', '35000 401 1'),
+             ('watch_state', 'sqlite_autoindex_watch_state_1', '35000 401 1');
+         ANALYZE sqlite_schema;";
+
+    /// [`plans_of`] on a bare connection. Preparing fails, and so does the
+    /// test, when an `INDEXED BY` pin names an index the schema lacks.
+    #[cfg(feature = "hiqlite-store")]
+    fn conn_plans_of(
+        conn: &rusqlite::Connection,
+        statements: &[(&'static str, String)],
+    ) -> Vec<(&'static str, Vec<String>)> {
+        statements
+            .iter()
+            .map(|(name, sql)| {
+                let mut stmt = conn
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .unwrap_or_else(|error| panic!("{name} does not plan: {error}"));
+                let params = (0..stmt.parameter_count())
+                    .map(|_| 1_i64)
+                    .collect::<Vec<_>>();
+                let details = stmt
+                    .query_map(rusqlite::params_from_iter(params), |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+                    .unwrap_or_else(|error| panic!("{name} plan: {error}"));
+                (*name, details)
+            })
+            .collect()
+    }
+
+    /// Every pinned rollup drives from the requested trees through
+    /// `idx_items_parent` and the `items` primary key, never through
+    /// `idx_items_library_kind` or an automatic index.
+    fn assert_watch_rollup_plans_pinned(plans: &[(&'static str, Vec<String>)]) {
+        for (name, plan) in plans {
             assert!(
                 plan.iter()
                     .any(|line| line

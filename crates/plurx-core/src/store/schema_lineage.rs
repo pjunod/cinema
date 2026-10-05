@@ -18,8 +18,8 @@
 //! dispatchers — `SqliteStore::migrate` (`store/sqlite/mod.rs`, where
 //! `bridge_sqlite` is called today) and `HiqliteAuthStore::migrate_schema`
 //! (`store/hiqlite.rs`, where `bridge_private_lineage` is called today) —
-//! must keep refusing any marker in 88..=96 / 66..=72 before the ordinary
-//! chain runs. Private effort markers never exceed 93 / 69 and only the
+//! must then refuse any marker in 88..=96 / 66..=72 before the ordinary
+//! chain runs (today they bridge the recognised shapes instead). Private effort markers never exceed 93 / 69 and only the
 //! published chain or this bridge stamps the canonical end, so without that
 //! refusal a private-lineage backup restored later would be misread as a
 //! canonical database at the same ordinal and migrated as one.
