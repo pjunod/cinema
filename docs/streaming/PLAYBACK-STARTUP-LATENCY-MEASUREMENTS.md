@@ -86,7 +86,11 @@ repair is added; no live claims or production queues were reset.
 
 ## Generated transport experiment — incomplete captures retained
 
-`scripts/playback-startup-lab` serves generated H.264/AAC fMP4 with a fixed
+*The 16-second-object mode described here was replaced on 2026-10-05 by the
+target/bootstrap lab in the [last section](#startup-lab-arms--target-and-bootstrap-a-m0);
+these captures remain as recorded.*
+
+`scripts/playback-startup-lab` served generated H.264/AAC fMP4 with a fixed
 16-second target. It uses the repository's shipped hls.js library or native
 Safari's video element, without an accelerated client reload loop. Its
 completed inventory grows at the specified production ratio; segment-bearing
@@ -426,3 +430,62 @@ creates new work. No existing terminal rows are reset by this repair.
 Regression: `playback_contention_timeouts_do_not_exhaust_analysis_attempts`.
 Transient Store observations still fail closed; tolerating errors would need
 a separately bounded interest-liveness contract.
+
+## Startup lab arms — target and bootstrap (A-M0)
+
+A-M0 of [the startup and tone-map handoff](STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)
+rebuilt `scripts/playback-startup-lab` around two independent parameters: the
+advertised `#EXT-X-TARGETDURATION` (also the publication cadence) and the
+bootstrap, the media present when the first playlist is released. Any pair is
+accepted when the target is a whole number from the 2 s segment to 20 s and
+the bootstrap is a whole number of segments from 2 × target to the 124 s
+reserve maximum; the handoff's arms are named `control` (16 / 48), `a`
+(8 / 24), `b` (8 / 32), `c` (6 / 18) and `d` (4 / 12). The September
+16-second-object mode and its `runway`/`lead` parameters are gone; nothing in
+the tree called them.
+
+| Step | Command |
+|---|---|
+| Media, once (about 40 minutes of 2 s closed-GOP H.264/AAC fMP4, roughly three minutes to encode) | `scripts/playback-startup-lab --generate-media ~/plurx-startup-lab/media` |
+| Serve (`--bind 0.0.0.0` for an Apple TV on the LAN) | `scripts/playback-startup-lab --media-dir ~/plurx-startup-lab/media --evidence-dir ~/plurx-startup-lab/receipts` |
+| Run | open `http://127.0.0.1:8765/`, pick an arm and a player; the page runs one player per growth rate (1.05×, 1×, 2×) for 30 minutes after each first frame |
+| Decide | `scripts/playback-startup-lab --summarize ~/plurx-startup-lab/receipts` |
+| Inspect an arm's schedule | `scripts/playback-startup-lab --plan --arm a --rate 1.05 --position-lag 3` |
+
+The model: the first playlist is held until `3 s + bootstrap / 8`; after it,
+produced media grows at the rate times real time and a snapshot is due every
+target. Each snapshot publishes every completed segment up to 48 s ahead of
+the viewer's reported position (today's steady reserve), never fewer than one
+new segment, and removes segments more than 30 s behind the viewer. Production
+stops 124 s ahead. `EXT-X-START:TIME-OFFSET=0`, no playlist type, the media
+sequence is the first retained segment — the shape `served_live_playlist`
+produces. The hls.js page uses the shipped `hls.min.js` with the transcode
+buffer targets `constructHls` gives it (60 s forward, 30 s back).
+
+Each run writes one compact JSON receipt: arm, target, bootstrap, rate,
+transport, derived player, user agent, the model's constants, the clean rule,
+every playlist response (time, media sequence, segment count, end, changed)
+and every client event and 1 s sample. TTFF is measured from the first
+playlist response, mapping the page clock onto the server clock by the
+smallest report delay. The rule, stated in every receipt: a run is clean with
+a first frame and no stall (`waiting` after 0.5 s of advance), freeze (2 s
+without advance while playing), position jump (more than 1 s beyond wall time
+between samples, or 0.5 s back), buffer deficit (under 2 s buffered ahead
+before ENDLIST) or fatal error. Paused or media-exhausted runs without a
+failure are not counted; a failure always counts. The summariser groups by
+arm × player × rate and refuses to decide until both target-8 arms have a
+counted run at every rate in Safari native and in hls.js; then it writes
+exactly one of the handoff's three decisions. Commit `decision.json` and a
+gzipped tarball of the receipts under `docs/evidence/startup-lab-arms-<date>/`.
+
+`tests/playback/native-hls-browser-fixture.py` takes the same arm with
+`--target`, `--bootstrap` and `--rate` and plays it through the shipped web
+startup path; without them it keeps its 16 s threshold sweep.
+
+A 60-second container smoke of arm `a` in headless Chromium with hls.js ran on
+2026-10-05: first frame 314–379 ms after the first playlist at all three rates,
+no stall, jump or deficit, reloads every 2–4 s while unchanged and a new
+snapshot every 8 s, the 2× published lead capped at 48 s and the window
+sliding behind the playhead. That Chromium has no H.264, so the smoke used
+VP9/Opus media of the same layout; it proves the server and receipts, not any
+arm. Safari and the Apple TV runs are the measurement.
