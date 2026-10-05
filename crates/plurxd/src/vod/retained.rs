@@ -175,6 +175,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
         .expect("init");
     serve.shared.retained_artifacts.collect(temp.path()).await;
     let mut request = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         vod_only: false,
         passive_vod: false,
@@ -1660,6 +1661,7 @@ mod tests {
             .expect("source");
         let file = crate::vodserve::tests::media_file_at(source_path, 10_000);
         let request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,
@@ -2211,6 +2213,7 @@ mod tests {
             sustainable: true,
         };
         let request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,

@@ -477,8 +477,8 @@ store key `playback.sdr_master_codecs`). On, an SDR HLS master variant
 carries `CODECS` when the session's frozen video and audio facts are both
 complete; off is the pre-S-10 master, which carries no `CODECS` on SDR
 variants. HDR and Dolby Vision variants are the same either way. The value is
-read once when a session is created and kept for that session, so a save
-affects new sessions only. Saving it never depends on the Developer
+fixed when a session is created; a session rebuilt after an owner takeover or
+VOD resurrection reads the current value. Saving it never depends on the Developer
 readiness row (`sdr_master_codecs` → `sdr_codecs_device_requalification`).
 
 Live-TV settings are a separate transaction with their own generation
@@ -1264,14 +1264,16 @@ qualification; the design is
     `network_load`, `from_cache`, `producer_paced`, `cause` (`link`,
     `encode`, `decode`, `hold` or `authority`), `negative`,
     `media_duration_ms`, `presenting`, `stalled`, `runway_ms`. A positive
-    sample is folded into network priors only while `playback.network_priors`
-    is on. A negative sample is acknowledged with the response header
-    `X-Plurx-Link-Accepted: <nonce>` only when it names a session, the server
-    accepts it and folds it durably — which on this build also requires
-    `playback.network_priors` on (the 2026-10-04 close-out PR removes that
-    requirement). Anything else gets the ordinary `204` with no header, so
-    with priors off a native Link recovery never receives its
-    acknowledgement.
+    sample claims the owner's live receipt whatever the setting, and is also
+    folded into network priors while `playback.network_priors` is on. A
+    negative sample is acknowledged with the response header
+    `X-Plurx-Link-Accepted: <nonce>` only when it names a session and the
+    server accepts it for the receipt the owner issued. With priors on the
+    negative is folded durably and acknowledged after an exact readback of
+    that fold; with priors off nothing durable is written and the owner's
+    live receipt backs the acknowledgement. A session placed on a peer and an
+    IPv6 client still get no receipts, so they are never acknowledged.
+    Anything else gets the ordinary `204` with no header.
   - `candidate_recovery` (`ClientRecoverySample`,
     `crates/plurxd/src/http/hls/candidate_recovery.rs`): `cause`, `event_id`
     (a UUID), `candidate_id`, `recipe_digest`, `age_ms` (at most 15 s),

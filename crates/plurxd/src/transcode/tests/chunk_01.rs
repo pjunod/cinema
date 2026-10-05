@@ -2244,6 +2244,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
         Pipeline::Cpu,
     ));
     let req = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2322,6 +2323,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
         Pipeline::Cpu,
     );
     let mut req = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -3490,6 +3492,7 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
 #[test]
 fn the_grade_is_part_of_a_request_identity() {
     let request = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -3516,6 +3519,7 @@ fn the_grade_is_part_of_a_request_identity() {
         transport: None,
     };
     let hdr10 = SessionRequest {
+        sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,

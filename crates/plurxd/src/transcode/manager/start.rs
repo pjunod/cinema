@@ -17,12 +17,20 @@ impl TranscodeManager {
     }
 
     /// Settings → Developer `playback.sdr_master_codecs` for a rolling
-    /// session being created now. Read once per rolling start — this path has
-    /// no settings batch to fold it into (VOD reads it in `vod_settings`) —
-    /// and frozen into the session's codec facts, so no playlist request
-    /// reads it. A failed read is off: the pre-S-10 master, which every
-    /// client has already played, is the safe shape to fall back to.
-    pub(super) async fn sdr_master_codecs_switch(&self) -> bool {
+    /// session being started now, frozen into the session's codec facts so
+    /// no playlist request reads it.
+    ///
+    /// `frozen` is the value the HTTP create already read from its planning
+    /// snapshot (`SessionRequest::sdr_master_codecs`); a start that has one
+    /// pays no Store read here. Only a start with no create behind it — an
+    /// owner takeover or a request rebuilt from its durable recipe — reads
+    /// the switch's current value. A failed read is off: the pre-S-10 master,
+    /// which every client has already played, is the safe shape to fall back
+    /// to.
+    pub(super) async fn sdr_master_codecs_switch(&self, frozen: Option<bool>) -> bool {
+        if let Some(frozen) = frozen {
+            return frozen;
+        }
         match self
             .store
             .get_setting(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
@@ -110,6 +118,7 @@ impl TranscodeManager {
             false,
             None,
             Priority::Live,
+            None,
             None,
             None,
         )
@@ -497,6 +506,7 @@ impl TranscodeManager {
         priority: Priority,
         audio_claim: Option<&plurx_core::playback::audio::AudioClaim>,
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+        sdr_master_codecs: Option<bool>,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
         // Cluster replacements are provisional until their durable pointer CAS
@@ -586,7 +596,7 @@ impl TranscodeManager {
         let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
         // Frozen for every presentation this start can produce — cached,
         // retained or freshly encoded — so the session's master has one shape.
-        let sdr_master_codecs = self.sdr_master_codecs_switch().await;
+        let sdr_master_codecs = self.sdr_master_codecs_switch(sdr_master_codecs).await;
         if takeover.is_none() {
             if let Some(info) = self
                 .serve_cached(
@@ -1535,6 +1545,7 @@ impl TranscodeManager {
             playback_id,
             false,
             None,
+            None,
         )
         .await
     }
@@ -1555,6 +1566,7 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
+        sdr_master_codecs: Option<bool>,
     ) -> Result<StartInfo, String> {
         let mut file = self
             .store
@@ -1802,7 +1814,7 @@ impl TranscodeManager {
         };
         // Frozen with the rest of the presentation: this session's master
         // keeps one shape whatever the setting does later.
-        let sdr_master_codecs = self.sdr_master_codecs_switch().await;
+        let sdr_master_codecs = self.sdr_master_codecs_switch(sdr_master_codecs).await;
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {

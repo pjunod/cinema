@@ -1650,11 +1650,33 @@ counts a failed fold). SQLite v93's `link_worst_rung_height` /
 columns in their node-local telemetry sidecar (sidecar v11 onward), so no
 replicated migration was needed.
 
+**It writes only the attributed pair.** An observation that carries a
+`MeasuredLinkObservation` is a measured-Link fold: `fold_prior` writes
+`link_worst_rung_height` / `link_starved_at_ms` (when the proof is fresh) and
+leaves the legacy `worst_rung_height` / `starved_at_ms` pair exactly as it was
+— not seeded on a new row, not lowered, not re-stamped, not retired. Before
+this, the same `starved_rung_height` also folded into the legacy pair, so one
+display-aware acknowledgement capped *legacy* Auto
+(`active_starved_rung`) for the verdict's seven-day TTL, including after
+display-aware Auto was switched off. Legacy client telemetry never carries a
+proof and folds the legacy pair as before.
+
 **Its consumer.** A cold candidate Auto choice (create or Decision, no
 incumbent receipt) drops candidates at or above an active
 `active_link_starved_rung`, keeping the catalog whole when nothing lies
 below. Legacy unattributed starvation stays out of the candidate policy, and
-a warm choice keeps using the fresher live transfer.
+a warm choice keeps using the fresher live transfer. When the displayed aspect
+is unknown, create's fallback is "the Encode candidate at the resolved
+height" — a height resolved without the verdict, which can be the starved
+rung itself. With the catalog narrowed, that fallback takes the highest Encode
+candidate at or below the height instead (and, only if the narrowed catalog
+has none, the same choice from the catalog before narrowing), so the verdict
+narrows Auto and never becomes a `candidate_encode_route_unavailable` refusal.
+
+A Decision proves the incumbent's live transfer once to find it and once more
+after its recovery-memory reads, and the warm-Auto narrowing reuses that
+proof rather than proving the receipt a third time; the Decision's advisory
+reads share one source fence, as a create's do.
 
 **Unchanged limits.** Receipts are registered only where the node that
 handled the create owns the session, and an IPv6 client has no network

@@ -656,7 +656,7 @@ async function saveVodReorder(btn){
 function sdrMasterCodecsCard(settings,readiness){
   const on=!!settings.playback_sdr_master_codecs;
   return setCard(`${cardHead("CODECS on SDR master playlists","Name the exact H.264 and audio codecs on SDR HLS masters, as HDR masters already do.",`<span class="pill${on?" warn":""}">${on?"Enabled":"Off"}</span>`)}
-    ${togRow("sdr-master-codecs","Print CODECS on SDR variants","Applies to playback sessions started after saving; a running session keeps the master it started with. Only complete codec facts are printed, and HDR and Dolby Vision masters are unchanged either way.",on)}
+    ${togRow("sdr-master-codecs","Print CODECS on SDR variants","Fixed when a playback session is created: a running session keeps the master it started with, and only a session rebuilt after an owner takeover or VOD resurrection reads the current value. Only complete codec facts are printed, and HDR and Dolby Vision masters are unchanged either way.",on)}
     <details class="setdetails" open><summary>Readiness — advisory only</summary><div class="setdetails-body">
     ${devReq(readiness,"sdr_master_codecs","sdr_codecs_device_requalification","Apple TV and iPhone device check","With CODECS printed, every SDR variant must still be offered and play on tvOS and iOS. A player that rejects the string drops the variant before requesting it, so this server cannot observe the failure.")}
     <p class="devcheck-note">Advisory only. The switch remains available and its save is never refused.</p>

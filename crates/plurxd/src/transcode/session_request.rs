@@ -619,6 +619,14 @@ pub struct SessionRequest {
     pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
     pub candidate_context: Option<Box<CandidateExecutionContext>>,
+    /// Settings → Developer `playback.sdr_master_codecs`, read by the HTTP
+    /// create from the planning snapshot it already holds, so a rolling start
+    /// does not pay a second serial Store read for it. Never on the wire:
+    /// a request rebuilt from a durable recipe (owner takeover, a remote
+    /// worker, VOD resurrection) carries `None`, and its start reads the
+    /// switch's current value instead.
+    #[serde(skip)]
+    pub(crate) sdr_master_codecs: Option<bool>,
     /// Trusted service policy, retained by durable and worker envelopes. Native
     /// HTTP create never takes this from the client. A VOD-only request may
     /// not allocate the rolling recovery engine, even when globally enabled.

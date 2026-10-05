@@ -3238,11 +3238,13 @@ are identical either way.
 It is a switch rather than a default because AVPlayer filters variants on
 `CODECS` before it fetches a byte: a string tvOS or iOS dislikes removes the
 rung silently, and no server counter can see a request that was never made.
-The value is read once when a session is created (in the same settings batch
-as the VOD admission policy; one read per rolling start), so a running
-session's master never changes shape. Flip it, then start a **new** playback
-to observe the effect. The Developer row "Apple TV and iPhone keep every SDR
-variant with CODECS printed" is advisory and reads `not observable` until the
+The value is fixed when a session is created (taken from the create's own
+planning-snapshot read, so it costs no extra Store read), so a running
+session's master never changes shape; a session rebuilt after an owner
+takeover or VOD resurrection reads the current value. Flip it, then start a
+**new** playback to observe the effect. The Developer row "Apple TV and iPhone
+keep every SDR variant with CODECS printed" is advisory and reads `unknown`
+until the
 device check in
 [HONEST-MASTER-PLAYLIST §5.4](streaming/HONEST-MASTER-PLAYLIST.md#54-m4--re-qualify-the-sdr-ruling-on-the-named-devices-then-print-codecs)
 is recorded; it never refuses the save. If an SDR title stops offering a

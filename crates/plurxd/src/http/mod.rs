@@ -10486,7 +10486,7 @@ mod tests {
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
                 // S-10's SDR master CODECS switch, off by default. Its one
-                // row is `unobservable`: the device re-qualification is a
+                // row is `unknown`: the device re-qualification is a
                 // physical result this daemon cannot read.
                 "sdr_master_codecs",
                 "content_analysis_repair",

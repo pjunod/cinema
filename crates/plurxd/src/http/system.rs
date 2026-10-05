@@ -872,6 +872,41 @@ pub(super) fn pause_next_client_log_after_capture(
     (captured_rx, release_tx)
 }
 
+#[cfg(test)]
+static CLIENT_LOG_DETACHED_HOOK: std::sync::Mutex<
+    Option<(&'static str, tokio::sync::oneshot::Sender<()>)>,
+> = std::sync::Mutex::new(None);
+
+/// Fires its sender when the last holder drops it: the handler and every
+/// detached task it spawned for one client-log request.
+#[cfg(test)]
+struct ClientLogDetachedDone(Option<tokio::sync::oneshot::Sender<()>>);
+
+#[cfg(test)]
+impl Drop for ClientLogDetachedDone {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            let _ = done.send(());
+        }
+    }
+}
+
+/// Resolves once the next client-log request whose message is `message` has
+/// returned AND every detached task it spawned (the link-sample claim, the
+/// measured-Link fold, the playback-event emit) has finished. A test that
+/// asserts something durable was *not* written awaits this instead of
+/// yielding and hoping, so a late write is caught rather than raced.
+#[cfg(test)]
+pub(super) fn notify_when_client_log_detached_work_finishes(
+    message: &'static str,
+) -> tokio::sync::oneshot::Receiver<()> {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    *CLIENT_LOG_DETACHED_HOOK
+        .lock()
+        .expect("client-log detached hook lock") = Some((message, done_tx));
+    done_rx
+}
+
 /// POST /api/v1/client-log — any signed-in user. Records one browser playback
 /// error into the server log ring so it surfaces in `Settings → Logs`. Bounded
 /// by per-field clipping and by a global rate limit (this is diagnostics, not an
@@ -895,6 +930,21 @@ pub async fn client_log(
         return StatusCode::NO_CONTENT.into_response();
     };
     let line = client_log_line(&ev, suppressed);
+    #[cfg(test)]
+    let detached_done = {
+        let mut hook = CLIENT_LOG_DETACHED_HOOK
+            .lock()
+            .expect("client-log detached hook lock");
+        if hook
+            .as_ref()
+            .is_some_and(|(message, _)| *message == ev.message)
+        {
+            hook.take()
+                .map(|(_, done)| Arc::new(ClientLogDetachedDone(Some(done))))
+        } else {
+            None
+        }
+    };
 
     // Both WARN and ERROR clear the default `info` filter, so either shows in
     // the admin log without the operator touching PLURX_LOG.
@@ -964,7 +1014,11 @@ pub async fn client_log(
     if let Some(identity) = network.clone().filter(|_| link_sample.is_some()) {
         let proof_state = state.clone();
         let proof_session = ev.session_id.clone();
+        #[cfg(test)]
+        let detached_done = detached_done.clone();
         tokio::spawn(async move {
+            #[cfg(test)]
+            let _detached_done = detached_done;
             // The claim itself is the owner's in-memory receipt and needs no
             // opt-in: it is what later proves a fresh transfer (an upgrade)
             // or backs a Link negative's acknowledgement (D6). Only keeping
@@ -1027,7 +1081,11 @@ pub async fn client_log(
     let transcode = Arc::clone(&state.transcode);
     let store = Arc::clone(&state.store);
     let user_id = user.id;
+    #[cfg(test)]
+    let emit_done = detached_done.clone();
     tokio::spawn(async move {
+        #[cfg(test)]
+        let _detached_done = emit_done;
         if let Some(observation) = measured_link_prior {
             crate::store_result::observe(
                 crate::store_result::Operation::ObserveMeasuredLinkPrior,
@@ -1924,8 +1982,9 @@ pub struct SettingsDto {
     /// Explicit operator override, applied to new copy starts.
     pub hevc_unverified_copy: bool,
     /// Print `CODECS` on SDR HLS master variants (S-10). Off by default, which
-    /// is the pre-S-10 master; applied to sessions created after the save and
-    /// frozen per session. Developer readiness is advisory only.
+    /// is the pre-S-10 master. Fixed when a session is created; a session
+    /// rebuilt after an owner takeover or VOD resurrection reads the current
+    /// value. Developer readiness is advisory only.
     pub playback_sdr_master_codecs: bool,
     /// Advisory engine observation, never used to authorize a settings save.
     pub hevc_header_trace_available: Option<bool>,

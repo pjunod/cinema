@@ -355,6 +355,7 @@ impl TranscodeManager {
         };
         let file = &resolved_file;
         let mut request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,
@@ -805,6 +806,7 @@ impl TranscodeManager {
             (intent.width, intent.height),
         );
         let mut request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,

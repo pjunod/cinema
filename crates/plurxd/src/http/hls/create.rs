@@ -27,6 +27,48 @@ fn candidate_refusal_reason(
     "encode_route_unavailable"
 }
 
+/// Auto's choice when the displayed aspect is unknown, so
+/// `select_quality_candidate` cannot run: the Encode candidate at the resolved
+/// `height`.
+///
+/// `unnarrowed` is the catalog before the measured-Link verdict removed its
+/// starved rungs, and is `Some` only when the verdict removed something.
+/// `height` is resolved without that verdict, so it can name a rung the
+/// narrowed `catalog` no longer holds; the fallback then takes the highest
+/// Encode candidate at or below `height` that the narrowed catalog does hold,
+/// and only when it holds none, the same choice from `unnarrowed`. The verdict
+/// narrows Auto; it never turns into a `candidate_encode_route_unavailable`
+/// refusal. Among candidates of one height the catalog's own order decides,
+/// as before.
+pub(super) fn auto_encode_fallback<'a>(
+    catalog: &'a [plurx_core::playback::candidate::QualityCandidate],
+    unnarrowed: Option<&'a [plurx_core::playback::candidate::QualityCandidate]>,
+    height: i64,
+) -> Option<&'a plurx_core::playback::candidate::QualityCandidate> {
+    fn encode(candidate: &plurx_core::playback::candidate::QualityCandidate) -> bool {
+        candidate.decoder_compatible
+            && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
+    }
+    fn at_height(
+        list: &[plurx_core::playback::candidate::QualityCandidate],
+        height: i64,
+    ) -> Option<&plurx_core::playback::candidate::QualityCandidate> {
+        list.iter()
+            .find(|candidate| encode(candidate) && i64::from(candidate.target_height) == height)
+    }
+    let Some(unnarrowed) = unnarrowed else {
+        return at_height(catalog, height);
+    };
+    let at_or_below = |list: &'a [plurx_core::playback::candidate::QualityCandidate]| {
+        list.iter()
+            .filter(|candidate| encode(candidate) && i64::from(candidate.target_height) <= height)
+            .map(|candidate| i64::from(candidate.target_height))
+            .max()
+            .and_then(|best| at_height(list, best))
+    };
+    at_or_below(catalog).or_else(|| at_or_below(unnarrowed))
+}
+
 /// Everything a client must say to open a stream.
 ///
 /// A body rather than a query string, and a POST rather than a GET, because
@@ -441,6 +483,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -1555,6 +1598,9 @@ async fn resolve_plan_with_continuous(
                 )
                 .await;
             }
+            // The catalog before the measured-Link verdict narrowed it, kept
+            // only when it did: the unknown-aspect fallback below needs it.
+            let mut before_link_verdict = None;
             if requested.is_none() && body.candidate_auto_policy() {
                 // This create's one advisory deadline (minted on its first
                 // advisory read), shared by every link-evidence read of it.
@@ -1571,11 +1617,16 @@ async fn resolve_plan_with_continuous(
                     // Cold start: a network whose prior holds a measured
                     // Link starvation at rung H starts below H. No prior
                     // (priors off, IPv6, cold) leaves the catalog as is.
+                    let offered = catalog.len();
+                    let unnarrowed = catalog.clone();
                     catalog = link_receipts::link_starved_catalog(
                         network_prior,
                         catalog,
                         crate::media_sessions::unix_ms(),
                     );
+                    if catalog.len() != offered {
+                        before_link_verdict = Some(unnarrowed);
+                    }
                 }
                 if incumbent_receipt.is_some() && body.height != Some(1440) {
                     let measured = link_receipts::measured_outputs(
@@ -1618,14 +1669,7 @@ async fn resolve_plan_with_continuous(
                         None,
                     )
                 })
-                .or_else(|| {
-                    catalog.iter().find(|candidate| {
-                        candidate.target_height == height as u32
-                            && candidate.decoder_compatible
-                            && candidate.route
-                                == plurx_core::playback::candidate::CandidateRoute::Encode
-                    })
-                })
+                .or_else(|| auto_encode_fallback(&catalog, before_link_verdict.as_deref(), height))
             } else {
                 catalog.iter().find(|candidate| {
                     requested.map_or(candidate.target_height == 1440, |id| candidate.id == id)
@@ -1804,6 +1848,18 @@ async fn resolve_plan_with_continuous(
     request.quality_catalog = retained_catalog
         .as_ref()
         .map(|catalog| Arc::new(catalog.clone()));
+    // Frozen here, from the planning snapshot this create already holds, so
+    // the rolling start pays no extra Store read for it. Without a snapshot
+    // the start reads the switch itself.
+    request.sdr_master_codecs = snapshot.map(|snapshot| {
+        plurx_core::store::stored_switch(
+            snapshot
+                .settings
+                .get(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
+                .map(String::as_str),
+            false,
+        )
+    });
     if request
         .request_id
         .as_ref()

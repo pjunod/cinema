@@ -2584,47 +2584,45 @@ pub async fn decision(
     let selection_candidates = if q.force.as_deref().unwrap_or("auto") == "auto" {
         if let Some(catalog) = quality_candidates.as_ref() {
             let advisory = advisory.unwrap_or_else(super::hls::link_receipts::advisory_deadline);
-            let catalog = super::hls::candidate_recovery::decision_catalog(
-                &state,
-                identity.as_ref(),
-                &file,
-                super::hls::link_receipts::requested_receipt(&headers),
-                catalog.clone(),
-                advisory,
-            )
-            .await;
-            let catalog = super::hls::link_receipts::filter_catalog(
-                &state,
-                identity.as_ref(),
-                &file,
-                catalog,
-                advisory,
-            )
-            .await;
-            // Cold start only: with an incumbent receipt the live transfer
-            // below is fresher evidence than a stored verdict.
-            let catalog = if super::hls::link_receipts::requested_receipt(&headers).is_none() {
-                super::hls::link_receipts::link_starved_catalog(
-                    network_prior.as_ref(),
-                    catalog,
-                    crate::media_sessions::unix_ms(),
-                )
-            } else {
-                catalog
-            };
-            Some(
-                super::hls::link_receipts::positive_catalog(
+            // One source fence for every advisory read of this Decision, as
+            // a create gets; and one live positive proof, taken in
+            // `decision_catalog` and reused by the warm-Auto narrowing below.
+            super::hls::link_receipts::with_decision_source_link(async {
+                let (catalog, positive) = super::hls::candidate_recovery::decision_catalog(
                     &state,
                     identity.as_ref(),
                     &file,
                     super::hls::link_receipts::requested_receipt(&headers),
-                    None,
-                    catalog,
-                    measured_candidate_outputs.as_deref(),
+                    catalog.clone(),
                     advisory,
                 )
-                .await,
-            )
+                .await;
+                let catalog = super::hls::link_receipts::filter_catalog(
+                    &state,
+                    identity.as_ref(),
+                    &file,
+                    catalog,
+                    advisory,
+                )
+                .await;
+                // Cold start only: with an incumbent receipt the live transfer
+                // below is fresher evidence than a stored verdict.
+                let catalog = if super::hls::link_receipts::requested_receipt(&headers).is_none() {
+                    super::hls::link_receipts::link_starved_catalog(
+                        network_prior.as_ref(),
+                        catalog,
+                        crate::media_sessions::unix_ms(),
+                    )
+                } else {
+                    catalog
+                };
+                Some(super::hls::link_receipts::positive_catalog_with_proof(
+                    positive.as_ref(),
+                    catalog,
+                    measured_candidate_outputs.as_deref(),
+                ))
+            })
+            .await
         } else {
             None
         }

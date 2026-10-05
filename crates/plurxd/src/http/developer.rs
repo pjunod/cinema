@@ -1641,10 +1641,10 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
 
 /// S-10's SDR master `CODECS`. The switch is the whole decision; its one row
 /// says what nobody has measured yet and never refuses the save. It is
-/// `unobservable` by construction: whether AVPlayer still offers every SDR
-/// variant once the master names its codecs is a physical-device result, and
-/// a daemon that served such a master has no way to see a rung the player
-/// silently dropped before fetching it.
+/// `unknown` by construction — no observation this daemon can make proves it:
+/// whether AVPlayer still offers every SDR variant once the master names its
+/// codecs is a physical-device result, and a daemon that served such a master
+/// has no way to see a rung the player silently dropped before fetching it.
 fn sdr_master_codecs(enabled: bool) -> DeveloperEnableItem {
     DeveloperEnableItem {
         id: "sdr_master_codecs",
@@ -1654,13 +1654,13 @@ fn sdr_master_codecs(enabled: bool) -> DeveloperEnableItem {
         requirements: vec![DeveloperRequirement {
             id: "sdr_codecs_device_requalification",
             title: "Apple TV and iPhone keep every SDR variant with CODECS printed",
-            status: RequirementStatus::Unobservable,
+            status: RequirementStatus::Unknown,
             evidence: "Not recorded: the S-10 device re-qualification \
                        (HONEST-MASTER-PLAYLIST \u{a7}5.4) is a physical-device result this \
                        daemon cannot read, and a variant AVPlayer drops on CODECS is never \
-                       fetched, so no server counter can see it. Advisory only; the saved \
-                       choice applies to sessions created after it, and each session keeps \
-                       the master shape it started with."
+                       fetched, so no server counter can see it. Advisory only. The value is \
+                       fixed when a session is created; a session rebuilt after an owner \
+                       takeover or VOD resurrection reads the current value."
                 .to_owned(),
         }],
     }

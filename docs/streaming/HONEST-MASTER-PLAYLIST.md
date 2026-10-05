@@ -1039,25 +1039,30 @@ complete facts are still frozen (and still drive bandwidth and identity).
 The HDR/Dolby Vision branch never reads the switch; its `VIDEO-RANGE`,
 `CODECS` and `SUPPLEMENTAL-CODECS` are what they were before S-10.
 
-**Frozen per session.** The value is read once at session create and stored
-in the session's codec facts, never per playlist request:
+**Fixed when the session is created.** The HTTP create reads the switch in
+the planning snapshot it already takes (`QUALITY_PLANNING_KEYS`) and carries
+it on the request (`SessionRequest::sdr_master_codecs`, never serialized);
+the session stores it in its codec facts, never read per playlist request. A
+session rebuilt after an owner takeover or VOD resurrection has no create
+behind it and reads the current value:
 
 | Path | Where it is read | Where it is kept |
 |---|---|---|
-| VOD (encoded and copy) | `TranscodeManager::vod_settings`, in the existing settings batch — no extra Store read | `vod::Session::sdr_master_codecs`, beside `block_budget`; returned by `VodServe::hls_facts` |
-| Rolling transcode, cached, retained | `sdr_master_codecs_switch` once per `start_with_audio_offset` (this path had no settings batch) | `FrozenHlsPresentation.context.codec_facts` |
-| Rolling copy | `sdr_master_codecs_switch` once per `start_copy_with_audio_offset` | same |
+| VOD (encoded and copy) | the create's snapshot value; without one, `TranscodeManager::vod_settings`' existing settings batch — no extra Store read either way | `vod::Session::sdr_master_codecs`, beside `block_budget`; returned by `VodServe::hls_facts` |
+| Rolling transcode, cached, retained | the create's snapshot value; `sdr_master_codecs_switch` reads the Store only when the request carries none (takeover, a request rebuilt from its recipe) | `FrozenHlsPresentation.context.codec_facts` |
+| Rolling copy | same, in `start_copy_with_audio_offset` | same |
 
-`QUALITY_PLANNING_KEYS` was deliberately not widened: it is planning input
-that a parallel effort is changing, its snapshot binds candidate catalogs,
-and adding a presentation-only key to it would invalidate planning bindings
-for no planning reason. The switch is serialized into the facts only when on,
-so every off session's presentation fingerprint is byte-for-byte unchanged
-and an on session seals a different master contract.
+Carrying the key in `QUALITY_PLANNING_KEYS` does not move planning bindings:
+`PlanningBinding` digests the file, probe and reorder policy, not settings,
+and every `playback.*` write already advances the playback-input generation
+whether or not a snapshot reads the key. The switch is serialized into the
+facts only when on, so every off session's presentation fingerprint is
+byte-for-byte unchanged and an on session seals a different master contract.
 
 One limit: a VOD session **resurrected** from its durable recipe (idle reap
-or owner takeover) is a new incarnation and re-reads the switch, exactly as
-it re-reads its block budget. Carrying the value in `RemoteStartRequest`
+or owner takeover), and a rolling session taken over by a new owner, is a new
+incarnation and reads the switch's current value, exactly as it re-reads its
+block budget. Carrying the value in `RemoteStartRequest`
 would be a durable-format change on a `deny_unknown_fields` struct that an
 older node in a mixed-version cluster would refuse to parse. AVPlayer reads
 the master once per item, so this only matters if a client re-fetches the
@@ -1065,7 +1070,7 @@ master of a resurrected handle after the switch was flipped.
 
 Readiness (`GET /api/v1/developer/readiness`, item `sdr_master_codecs`) has
 one advisory row, `sdr_codecs_device_requalification`, which is
-`unobservable` by construction. The card's graduation line: it leaves
+`unknown` by construction: no observation this daemon can make proves it. The card's graduation line: it leaves
 Developer when the Apple TV and iPhone device check confirms every SDR
 variant is still offered; then the default becomes on and the switch is
 removed (with `FrozenHlsCodecFacts::sdr_master_codecs` collapsing back into

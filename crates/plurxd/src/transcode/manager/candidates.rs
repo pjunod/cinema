@@ -638,6 +638,7 @@ impl TranscodeManager {
                 CandidateRoute::Original => continue,
             };
             let request = SessionRequest {
+                sdr_master_codecs: None,
                 continuous_media: None,
                 vod_only: false,
                 passive_vod: false,
@@ -1171,7 +1172,7 @@ fn candidate_heights(source_height: Option<i64>) -> Vec<i64> {
     heights
 }
 
-pub(crate) const QUALITY_PLANNING_KEYS: [&str; 10] = [
+pub(crate) const QUALITY_PLANNING_KEYS: [&str; 11] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
     keys::AUDIO_LANG,
@@ -1182,6 +1183,10 @@ pub(crate) const QUALITY_PLANNING_KEYS: [&str; 10] = [
     keys::TRANSCODE_RATE_MODE,
     keys::TRANSCODE_QUALITY,
     "playback.vod_reorder_frames",
+    // Not a planning input: carried in the same committed read so the create
+    // freezes the session's SDR master shape without a second Store read
+    // (`SessionRequest::sdr_master_codecs`).
+    keys::PLAYBACK_SDR_MASTER_CODECS,
 ];
 
 #[cfg(test)]
@@ -1262,7 +1267,8 @@ mod snapshot_catalog_regression {
             .await
             .expect("snapshot")
             .expect("source");
-        assert_eq!(QUALITY_PLANNING_KEYS.len(), 10);
+        assert_eq!(QUALITY_PLANNING_KEYS.len(), 11);
+        assert!(QUALITY_PLANNING_KEYS.contains(&keys::PLAYBACK_SDR_MASTER_CODECS));
         assert!(QUALITY_PLANNING_KEYS.contains(&"playback.vod_reorder_frames"));
         assert!(!TranscodeManager::vod_reorder_from_snapshot(&off_snapshot));
         let base = crate::test_tempdir().expect("work");
@@ -1453,6 +1459,7 @@ mod snapshot_catalog_regression {
             assert!(!TranscodeManager::vod_reorder_from_snapshot(&snapshot));
         }
         let request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,
@@ -2305,6 +2312,7 @@ mod snapshot_catalog_regression {
         context.planning_binding =
             Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
         let mut request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: Some(Box::new(context)),

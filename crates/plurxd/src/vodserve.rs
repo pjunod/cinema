@@ -200,9 +200,11 @@ pub struct VodSettings {
     /// Node-wide ceiling on blocked segment GETs, from
     /// `playback.vod_blocked_get_cap`.
     pub blocked_get_cap: usize,
-    /// `playback.sdr_master_codecs`, read in the same batch as the rest of
-    /// this policy. Each session records it at create (beside its block
-    /// budget) so its master keeps one shape for that incarnation.
+    /// `playback.sdr_master_codecs`: the value the HTTP create froze from its
+    /// planning snapshot when the request carries one, else read in the same
+    /// batch as the rest of this policy. Each session records it at create
+    /// (beside its block budget) so its master keeps one shape for that
+    /// incarnation.
     pub sdr_master_codecs: bool,
 }
 

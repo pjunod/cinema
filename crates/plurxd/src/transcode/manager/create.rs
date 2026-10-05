@@ -785,6 +785,7 @@ impl TranscodeManager {
                     priority,
                     req.audio_claim.as_ref(),
                     req.audio_delivery.as_ref(),
+                    req.sdr_master_codecs,
                 )
                 .await
             }
@@ -811,6 +812,7 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.audio_delivery.as_ref(),
+                    req.sdr_master_codecs,
                 )
                 .await
             }
@@ -2032,11 +2034,15 @@ impl TranscodeManager {
             block_budget: Duration::from_secs_f64(block_secs),
             materialize_budget: Duration::from_secs_f64(materialize_secs),
             blocked_get_cap,
-            // Missing is off: the pre-S-10 master with no SDR CODECS.
-            sdr_master_codecs: plurx_core::store::stored_switch(
-                read(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS).map(String::as_str),
-                false,
-            ),
+            // The create's own snapshot read when it carried one, so VOD and
+            // rolling freeze the same value; else this batch's. Missing is
+            // off: the pre-S-10 master with no SDR CODECS.
+            sdr_master_codecs: req.sdr_master_codecs.unwrap_or_else(|| {
+                plurx_core::store::stored_switch(
+                    read(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS).map(String::as_str),
+                    false,
+                )
+            }),
         }))
     }
 

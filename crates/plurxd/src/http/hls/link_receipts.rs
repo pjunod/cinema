@@ -35,12 +35,19 @@ pub(crate) struct SessionBinding {
 /// Nonserializable live provenance; work after capture cannot renew its EOF.
 pub(crate) struct LiveLinkProof {
     binding: SessionBinding,
+    /// The playback the incumbent's route named when this proof was taken.
+    playback_id: String,
     completed: Instant,
     transfer: plurx_core::playback::candidate::NetworkTransferEvidence,
 }
 impl LiveLinkProof {
     pub(crate) fn incumbent_session(&self) -> &str {
         &self.binding.session
+    }
+    /// The incumbent route's playback, as validated by the read that minted
+    /// this proof — a caller that needs it does not read the route again.
+    pub(crate) fn playback_id(&self) -> &str {
+        &self.playback_id
     }
     pub(crate) fn transfer(
         &self,
@@ -254,9 +261,10 @@ impl SourceLinkIdentity {
         })
     }
 
-    /// The request's identity: inside a create the source is fenced once and
-    /// every later pre-start read of the same create reuses that fence;
-    /// outside one (or for another requester or file) this is [`Self::capture`].
+    /// The request's identity: inside a create — or a Decision run under
+    /// [`with_decision_source_link`] — the source is fenced once and every
+    /// later read of the same request reuses that fence; outside both (or for
+    /// another requester or file) this is [`Self::capture`].
     ///
     /// A check that must observe a source replaced DURING the create — the
     /// post-acceptance comparison, the staged registration — uses
@@ -267,8 +275,26 @@ impl SourceLinkIdentity {
         {
             return Some(identity);
         }
+        if let Some(identity) = DECISION_SOURCE_LINK
+            .try_with(|cell| {
+                cell.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .filter(|identity| identity.describes(network, file))
+                    .cloned()
+            })
+            .ok()
+            .flatten()
+        {
+            return Some(identity);
+        }
         let identity = Self::capture(network, file).await?;
         crate::media_pool::remember_create_source_link(&identity);
+        let _ = DECISION_SOURCE_LINK.try_with(|cell| {
+            *cell
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity.clone());
+        });
         Some(identity)
     }
 
@@ -303,6 +329,22 @@ impl SourceLinkIdentity {
             route,
         }
     }
+}
+
+tokio::task_local! {
+    /// A Decision's [`SourceLinkIdentity`], fenced once — the same reuse a
+    /// create gets from its startup budget (`media_pool::create_source_link`).
+    static DECISION_SOURCE_LINK: Mutex<Option<SourceLinkIdentity>>;
+}
+
+/// Run one Decision's advisory reads with ONE source fence between them:
+/// inside `work`, [`SourceLinkIdentity::for_request`] fences the source on its
+/// first call and every later call for the same requester and file reuses
+/// that identity, exactly as inside a create. Without it each live-proof,
+/// recovery-memory and negative-filter read of one Decision opened and
+/// `fstat`ed the source again.
+pub(crate) async fn with_decision_source_link<T>(work: impl std::future::Future<Output = T>) -> T {
+    DECISION_SOURCE_LINK.scope(Mutex::new(None), work).await
 }
 
 /// One candidate's binding. Fences the source each call, so a caller that
@@ -592,14 +634,19 @@ impl LinkReceipts {
             }
             // Async authority/source queries cannot refresh the original EOF.
             // Re-read this exact sample, never another receipt sharing a tuple.
-            self.exact_nonce_proof(nonce, &captured)
+            self.exact_nonce_proof(nonce, &captured, &current_route.playback_id)
         })
         .await
         .ok()
         .flatten()
     }
 
-    fn exact_nonce_proof(&self, nonce: &str, binding: &SessionBinding) -> Option<LiveLinkProof> {
+    fn exact_nonce_proof(
+        &self,
+        nonce: &str,
+        binding: &SessionBinding,
+        playback_id: &str,
+    ) -> Option<LiveLinkProof> {
         let rows = self.0.lock().ok()?;
         let row = rows.receipts.get(nonce)?;
         if &row.binding != binding {
@@ -609,6 +656,7 @@ impl LinkReceipts {
         let raw = row.raw.as_ref()?;
         let proof = LiveLinkProof {
             binding: binding.clone(),
+            playback_id: playback_id.to_owned(),
             completed,
             transfer: plurx_core::playback::candidate::NetworkTransferEvidence {
                 bytes: raw.bytes,
@@ -1042,7 +1090,9 @@ pub(crate) struct AcceptedLinkNegative {
 /// incumbent candidate's rung starved on this completed, unpaced, uncached
 /// body. The rung is read from the incumbent's own published response and
 /// must be the exact recipe the receipt was bound to; anything else is
-/// Unknown and records nothing.
+/// Unknown and records nothing. Because it carries a measured-Link proof, the
+/// store folds it into the attributed `link_*` pair only and never into the
+/// legacy starvation pair legacy Auto reads (`fold_prior`).
 fn measured_link_prior(
     network: &NetworkIdentity,
     value: &CandidateLinkObservation,
@@ -1271,7 +1321,7 @@ pub(crate) async fn positive_catalog(
     let Some(network) = network else {
         return catalog;
     };
-    let Some(proof) = state
+    let proof = state
         .link_receipts
         .current_positive_until(
             state,
@@ -1282,8 +1332,22 @@ pub(crate) async fn positive_catalog(
             Some(&state.node_id),
             deadline,
         )
-        .await
-    else {
+        .await;
+    positive_catalog_with_proof(proof.as_ref(), catalog, measured)
+}
+
+/// [`positive_catalog`] for a caller that already holds this request's live
+/// positive proof — a Decision takes it once in
+/// [`super::candidate_recovery::decision_catalog`] and passes it here rather
+/// than proving the same receipt again. `None` keeps the catalog. The proof's
+/// freshness is still checked here, at the point of use
+/// ([`LiveLinkProof::transfer`]): holding it longer cannot renew its EOF.
+pub(crate) fn positive_catalog_with_proof(
+    proof: Option<&LiveLinkProof>,
+    catalog: Vec<plurx_core::playback::candidate::QualityCandidate>,
+    measured: Option<&[crate::vodserve::retained::MeasuredCandidateOutput]>,
+) -> Vec<plurx_core::playback::candidate::QualityCandidate> {
+    let Some(proof) = proof else {
         return catalog;
     };
     let (digest, route) = proof.incumbent_recipe();
@@ -1497,31 +1561,15 @@ mod tests {
             "session_id":session.session,"link_sample":{"receipt":nonce,"object_name":"seg00001.m4s","etag":"etag",
             "body_bytes":4096,"body_duration_ms":5000,"age_ms":0,"network_load":true,"from_cache":false,"producer_paced":false,
             "cause":"link","negative":false,"media_duration_ms":4000,"presenting":true,"stalled":true,"runway_ms":1000}});
-        let raw: ClientLinkSample =
-            serde_json::from_value(body["link_sample"].clone()).expect("sample");
-        assert!(state
-            .link_receipts
-            .accept(&state, &network, Some(&session.session), &raw)
-            .await
-            .is_some());
-        // The fresh-transfer (upgrade) proof reads only the live receipt, so
-        // it holds whether or not network priors are kept (D6).
-        assert!(
-            state
+        if priors_on {
+            let raw: ClientLinkSample =
+                serde_json::from_value(body["link_sample"].clone()).expect("sample");
+            assert!(state
                 .link_receipts
-                .current_positive_until(
-                    &state,
-                    &network,
-                    &file,
-                    Some(&nonce),
-                    Some("http-ack-player"),
-                    Some(&state.node_id),
-                    advisory_deadline(),
-                )
+                .accept(&state, &network, Some(&session.session), &raw)
                 .await
-                .is_some(),
-            "live positive proof regardless of playback.network_priors"
-        );
+                .is_some());
+        }
         async fn send(
             state: &AppState,
             user: &plurx_core::domain::User,
@@ -1541,6 +1589,42 @@ mod tests {
         let positive = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(positive.status(), 204);
         assert!(!positive.headers().contains_key("x-plurx-link-accepted"));
+        if !priors_on {
+            // D6's own claim: with priors off the ClientLog positive ALONE
+            // claims the owner's receipt — nothing above called `accept`.
+            // The claim runs detached, so wait for it (bounded) before the
+            // negative, which `Receipt::claim` refuses without a claimed
+            // positive. Re-adding the priors gate to that detached claim
+            // leaves `raw` empty and fails here.
+            let claimed = tokio::time::timeout(Duration::from_secs(10), async {
+                while !state.link_receipts.raw_claimed_for_test(&nonce) {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await;
+            assert!(
+                claimed.is_ok(),
+                "the ClientLog positive must claim the live receipt with priors off"
+            );
+        }
+        // The fresh-transfer (upgrade) proof reads only the live receipt, so
+        // it holds whether or not network priors are kept (D6).
+        assert!(
+            state
+                .link_receipts
+                .current_positive_until(
+                    &state,
+                    &network,
+                    &file,
+                    Some(&nonce),
+                    Some("http-ack-player"),
+                    Some(&state.node_id),
+                    advisory_deadline(),
+                )
+                .await
+                .is_some(),
+            "live positive proof regardless of playback.network_priors"
+        );
         body["link_sample"]["negative"] = true.into();
         if conflicting_fold {
             // The durable namespace key deliberately conflicts with this exact
@@ -1587,6 +1671,12 @@ mod tests {
             ]))
             .is_err()
         );
+        // Priors off: a barrier on every detached task this acknowledged
+        // request spawns, so "nothing durable" below is checked after any
+        // late write could have landed, not after a guessed number of yields.
+        let accepted_detached = (!priors_on).then(|| {
+            crate::http::system::notify_when_client_log_detached_work_finishes("actual ack")
+        });
         let accepted = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(accepted.status(), 204);
         assert_eq!(
@@ -1603,6 +1693,9 @@ mod tests {
                 .expect("nonce"),
             nonce
         );
+        let duplicate_detached = (!priors_on).then(|| {
+            crate::http::system::notify_when_client_log_detached_work_finishes("actual ack")
+        });
         let duplicate = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(duplicate.status(), 204);
         assert!(!duplicate.headers().contains_key("x-plurx-link-accepted"));
@@ -1612,29 +1705,39 @@ mod tests {
             .expect("generation")
             .as_str()
             .to_owned();
-        if !priors_on {
+        if let Some(detached) = accepted_detached {
             // Priors off: the acknowledgement above came from memory. Nothing
             // per-network may exist — not the exact candidate row, not the
-            // coarse prior row — however long the detached work is given.
-            for _ in 0..32 {
-                tokio::task::yield_now().await;
-                assert!(state
-                    .store
-                    .candidate_link_prior(&session.source)
-                    .await
-                    .expect("candidate read")
-                    .is_none());
-                assert!(state
-                    .store
-                    .network_prior(
-                        &generation,
-                        &network.client_class,
-                        &network.network_fingerprint
-                    )
-                    .await
-                    .expect("prior read")
-                    .is_none());
+            // coarse prior row — once every detached task of the acknowledged
+            // request and of the duplicate after it has run to completion.
+            for (what, barrier) in [
+                ("acknowledged", Some(detached)),
+                ("duplicate", duplicate_detached),
+            ] {
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    barrier.expect("barrier registered with priors off"),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("the {what} request's detached work finishes"))
+                .expect("the barrier fires when its last holder drops");
             }
+            assert!(state
+                .store
+                .candidate_link_prior(&session.source)
+                .await
+                .expect("candidate read")
+                .is_none());
+            assert!(state
+                .store
+                .network_prior(
+                    &generation,
+                    &network.client_class,
+                    &network.network_fingerprint
+                )
+                .await
+                .expect("prior read")
+                .is_none());
             return;
         }
         // Priors on: the acknowledged negative also feeds the network's
@@ -1765,6 +1868,7 @@ mod tests {
             &user.password_hash,
         ));
         let mut request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,
@@ -2930,7 +3034,7 @@ mod tests {
             });
         }
         let mut proof = registry
-            .exact_nonce_proof(&first, &binding)
+            .exact_nonce_proof(&first, &binding, "player")
             .expect("exact proof");
         assert_eq!(proof.transfer().expect("fresh").elapsed_ms, 5000);
         assert_eq!(
@@ -2940,14 +3044,16 @@ mod tests {
         let mut other_attachment = binding.clone();
         other_attachment.incarnation = "another-installed-item".to_owned();
         assert!(registry
-            .exact_nonce_proof(&first, &other_attachment)
+            .exact_nonce_proof(&first, &other_attachment, "player")
             .is_none());
         proof.completed = Instant::now() - Duration::from_secs(16);
         assert!(
             proof.transfer().is_none(),
             "work after capture cannot renew EOF"
         );
-        assert!(registry.exact_nonce_proof(&second, &binding).is_some());
+        assert!(registry
+            .exact_nonce_proof(&second, &binding, "player")
+            .is_some());
         registry
             .0
             .lock()
@@ -2957,7 +3063,9 @@ mod tests {
             .expect("first")
             .completion = Some((Instant::now() - Duration::from_secs(16), 100_000));
         assert!(
-            registry.exact_nonce_proof(&first, &binding).is_none(),
+            registry
+                .exact_nonce_proof(&first, &binding, "player")
+                .is_none(),
             "fresh other body cannot replace requested nonce"
         );
     }

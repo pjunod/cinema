@@ -415,6 +415,91 @@
         assert_eq!(resolve_height(&state, Some(&source), Some(&prior), false, Some(2160)).await, 2160);
     }
 
+    /// D6 at create: with the displayed aspect unknown, `resolve_plan` skips
+    /// `select_quality_candidate` and falls back to "the Encode candidate at
+    /// `height`". That height is resolved without the measured-Link verdict,
+    /// so it can be the very rung the verdict removed — and an exact lookup
+    /// in the narrowed catalog then answered
+    /// `candidate_encode_route_unavailable`. The verdict narrows Auto; it
+    /// never refuses playback. This drives the fallback exactly as create
+    /// wires it: the catalog `link_starved_catalog` narrowed, and the one it
+    /// narrowed from.
+    #[test]
+    fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing() {
+        use plurx_core::domain::{NetworkPrior, NETWORK_PRIOR_STARVED_TTL_MS};
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let row = |height: u32, route: CandidateRoute| {
+            let digest = [(height / 8) as u8 ^ route as u8; 32];
+            QualityCandidate {
+                id: CandidateId::for_recipe_digest(digest),
+                recipe_digest: digest,
+                route,
+                normalized_geometry: true,
+                width: height * 16 / 9,
+                height,
+                target_height: height,
+                average_bps: None,
+                peak_bps: None,
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                decoder_compatible: true,
+                complete_cache: false,
+                sustainable: true,
+            }
+        };
+        let offered = vec![
+            row(2160, CandidateRoute::Remux),
+            row(1080, CandidateRoute::Encode),
+            row(720, CandidateRoute::Encode),
+            row(480, CandidateRoute::Encode),
+        ];
+        let now = 10 * NETWORK_PRIOR_STARVED_TTL_MS;
+        let prior = NetworkPrior {
+            link_worst_rung_height: Some(1080),
+            link_starved_at_ms: Some(now - 1_000),
+            ..Default::default()
+        };
+        let narrowed = crate::http::hls::link_receipts::link_starved_catalog(Some(&prior), offered.clone(), now);
+        assert!(
+            narrowed.len() < offered.len(),
+            "fixture: the verdict must narrow the catalog"
+        );
+        // The pre-fix lookup: exact `height` in the narrowed catalog.
+        assert!(
+            auto_encode_fallback(&narrowed, None, 1080).is_none(),
+            "fixture: the starved rung is exactly what the exact lookup misses"
+        );
+        for height in [1080, 2160] {
+            let picked = auto_encode_fallback(&narrowed, Some(offered.as_slice()), height)
+                .expect("a narrowed Auto still plays");
+            assert_eq!(
+                (picked.target_height, picked.route),
+                (720, CandidateRoute::Encode),
+                "height {height} at or above the starved rung lands on the highest Encode rung below it"
+            );
+        }
+        assert_eq!(
+            auto_encode_fallback(&narrowed, Some(offered.as_slice()), 480)
+                .map(|picked| picked.target_height),
+            Some(480),
+            "a height the verdict left in place is taken as is"
+        );
+        // A catalog the verdict did not narrow keeps the exact lookup: no new
+        // rung is invented for a height the catalog never offered.
+        assert_eq!(
+            auto_encode_fallback(&offered, None, 1080).map(|picked| picked.target_height),
+            Some(1080)
+        );
+        assert!(auto_encode_fallback(&offered, None, 900).is_none());
+        // Nothing at or below `height` in the narrowed catalog: the
+        // un-narrowed one answers rather than a refusal.
+        let only_high = vec![row(720, CandidateRoute::Encode)];
+        let before = vec![row(1080, CandidateRoute::Encode), row(360, CandidateRoute::Encode)];
+        assert_eq!(
+            auto_encode_fallback(&only_high, Some(before.as_slice()), 480).map(|picked| picked.target_height),
+            Some(360)
+        );
+    }
+
     #[tokio::test]
     async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
@@ -3120,6 +3205,7 @@
         // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
         let source = staging_source(&fixture).await;
         let mut recipe = crate::transcode::SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
             candidate_context: None,
