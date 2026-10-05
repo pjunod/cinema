@@ -773,6 +773,9 @@ pub struct VodSharedAudioRecipe {
     audio_offset_ms: i64,
     audio_channels: u32,
     audio_bitrate_kbps: u32,
+    /// The resolved delivery's measured fold (matrix and limiter), exactly
+    /// as every other route spells it; `None` when `-ac` alone is correct.
+    downmix: Option<String>,
     digest: String,
 }
 
@@ -790,15 +793,25 @@ impl VodSharedAudioRecipe {
             return None;
         }
         let audio_index = media.audio_index.unwrap_or(0);
+        // The fold is the resolved delivery's, from the one source of truth
+        // every other route uses: a stereo family gets the same Lo/Ro matrix
+        // and limiter as muxed VOD, never ffmpeg's plain `-ac` fold.
+        let downmix = media
+            .audio
+            .as_ref()
+            .and_then(crate::playback::audio::AudioDelivery::downmix_filter);
         let mut hash = Sha256::new();
         for value in [
-            "continuous-shared-aac-lc-48k-v1".to_owned(),
+            // v2: the fold entered the recipe. v1 objects were folded by a
+            // bare `-ac` and must never alias a limited fold's bytes.
+            "continuous-shared-aac-lc-48k-v2".to_owned(),
             plan.cache_identity().as_str().to_owned(),
             plan.source_facts_digest().to_owned(),
             audio_index.to_string(),
             media.audio_offset_ms.to_string(),
             media.audio_channels.to_string(),
             media.audio_bitrate_kbps.to_string(),
+            downmix.clone().unwrap_or_else(|| "default".to_owned()),
         ] {
             hash.update((value.len() as u64).to_le_bytes());
             hash.update(value.as_bytes());
@@ -808,6 +821,7 @@ impl VodSharedAudioRecipe {
             audio_offset_ms: media.audio_offset_ms,
             audio_channels: media.audio_channels,
             audio_bitrate_kbps: media.audio_bitrate_kbps,
+            downmix,
             digest: hex::encode(hash.finalize()),
         })
     }
@@ -858,6 +872,13 @@ impl VodSharedAudioRecipe {
         }
         let clock = AudioClock::new(execution.start_seconds, self.audio_offset_ms);
         let anchor = vod_audio_anchor(execution.start_seconds) as f64 / f64::from(VOD_AUDIO_RATE);
+        // As in muxed VOD, the fold runs first, on the decoded preroll, so
+        // the limiter has settled before the sample trim reaches the first
+        // kept sample and adjacent generations join on identical gain.
+        let filter = match &self.downmix {
+            Some(downmix) => format!("{downmix},{}", clock.filter()),
+            None => clock.filter(),
+        };
         Some(vec![
             "-copyts".into(),
             "-filter_threads".into(),
@@ -877,7 +898,7 @@ impl VodSharedAudioRecipe {
             "-map_chapters".into(),
             "-1".into(),
             "-af".into(),
-            clock.filter(),
+            filter,
             "-c:a".into(),
             "aac".into(),
             "-threads:a".into(),
@@ -1536,6 +1557,189 @@ mod tests {
             args.iter().position(|arg| arg == "-map_chapters")
                 < args.iter().position(|arg| arg == "pipe:1")
         );
+    }
+
+    /// A client whose current output route claims exactly one AAC sink.
+    fn aac_sink_profile(max_channels: u8) -> crate::playback::DeviceProfile {
+        let mut profile = crate::playback::default_profile().clone();
+        profile.audio_codecs = vec!["aac".to_owned()];
+        profile.max_audio_channels = [("aac".to_owned(), max_channels)].into_iter().collect();
+        profile.claimed_audio_decoders = ["aac".to_owned()].into_iter().collect();
+        profile.audio_sink_claims = [(
+            "aac".to_owned(),
+            crate::playback::audio::AudioSink {
+                codec: "aac".to_owned(),
+                max_channels,
+                passthrough: false,
+                sample_rates_hz: vec![48_000],
+            },
+        )]
+        .into_iter()
+        .collect();
+        profile
+    }
+
+    /// The source, plan and execution of one continuous family's soundtrack:
+    /// a surround source resolved for a client with an AAC sink of
+    /// `sink_channels`, exactly as the family's shared-audio role resolves it.
+    fn shared_audio_fixture(
+        source_channels: i64,
+        layout: &str,
+        sink_channels: u8,
+    ) -> (ResolvedTranscode, TranscodeExecution) {
+        use crate::playback::audio::{resolve_audio, AudioRoute};
+        let mut source = chaptered_source();
+        source.audio_streams = vec![crate::domain::AudioStream {
+            index: 1,
+            codec: "truehd".into(),
+            channels: Some(source_channels),
+            channel_layout: Some(layout.into()),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        }];
+        let mut options = crate::transcode::TranscodeOptions::default();
+        options.set_audio_delivery(resolve_audio(
+            source.audio_streams.first(),
+            &aac_sink_profile(sink_channels),
+            AudioRoute::EncodedVod,
+            0,
+        ));
+        recipe_plan_and_execution(&source, &options)
+    }
+
+    fn shared_audio_filter(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> String {
+        let args = vod_shared_audio_args(plan, execution, 12.0).expect("shared soundtrack argv");
+        let filters: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-af")
+            .map(|pair| pair[1].clone())
+            .collect();
+        assert_eq!(filters.len(), 1, "one audio chain: {filters:?}");
+        filters[0].clone()
+    }
+
+    /// The v1 soundtrack digest, frozen as it was before the fold entered
+    /// the recipe. Kept only to prove no v2 object can alias a v1 object.
+    fn shared_audio_v1_digest(plan: &ResolvedTranscode) -> String {
+        use sha2::{Digest, Sha256};
+        let media = plan.options();
+        let mut hash = Sha256::new();
+        for value in [
+            "continuous-shared-aac-lc-48k-v1".to_owned(),
+            plan.cache_identity().as_str().to_owned(),
+            plan.source_facts_digest().to_owned(),
+            media.audio_index.unwrap_or(0).to_string(),
+            media.audio_offset_ms.to_string(),
+            media.audio_channels.to_string(),
+            media.audio_bitrate_kbps.to_string(),
+        ] {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+        hex::encode(hash.finalize())
+    }
+
+    /// A stereo continuous family folds its shared soundtrack through the
+    /// same measured Lo/Ro matrix and -4 dBFS limiter as every other route,
+    /// ahead of the sample-lattice clock, instead of ffmpeg's bare `-ac 2`.
+    #[test]
+    fn stereo_shared_audio_folds_through_the_measured_matrix_and_limiter() {
+        use crate::playback::audio::DownmixMatrix;
+        let limiter = "alimiter=limit=0.6309573444801932:level=0:latency=1";
+        for (channels, layout, matrix) in [
+            (6, "5.1", DownmixMatrix::LoRo51),
+            (8, "7.1", DownmixMatrix::LoRo71),
+        ] {
+            let (plan, execution) = shared_audio_fixture(channels, layout, 2);
+            let audio = plan.options().audio.as_ref().expect("resolved delivery");
+            assert_eq!(audio.downmix, Some(matrix), "{layout}");
+            let fold = matrix.filter().expect("measured fold");
+            let filter = shared_audio_filter(&plan, &execution);
+            let clock = AudioClock::new(execution.start_seconds, 0).filter();
+            assert_eq!(filter, format!("{fold},{clock}"), "{layout}");
+            assert!(filter.contains(limiter), "{layout}: {filter}");
+            assert!(filter.contains("pan=stereo|"), "{layout}: {filter}");
+            let args = vod_shared_audio_args(&plan, &execution, 12.0).expect("argv");
+            assert!(args.windows(2).any(|pair| pair == ["-ac", "2"]));
+        }
+    }
+
+    /// A six-channel family keeps a 5.1 source untouched: no fold and no
+    /// limiter enter its chain.
+    #[test]
+    fn six_channel_shared_audio_carries_neither_matrix_nor_limiter() {
+        let (plan, execution) = shared_audio_fixture(6, "5.1", 6);
+        let filter = shared_audio_filter(&plan, &execution);
+        assert_eq!(filter, AudioClock::new(execution.start_seconds, 0).filter());
+        assert!(!filter.contains("alimiter"), "{filter}");
+        assert!(!filter.contains("pan="), "{filter}");
+        let args = vod_shared_audio_args(&plan, &execution, 12.0).expect("argv");
+        assert!(args.windows(2).any(|pair| pair == ["-ac", "6"]));
+    }
+
+    /// A 7.1 source in a six-channel family takes the measured limited
+    /// 7.1 -> 5.1 fold ahead of the clock, exactly as the other routes do.
+    #[test]
+    fn seven_one_into_a_six_channel_family_carries_the_limited_fold() {
+        use crate::playback::audio::DownmixMatrix;
+        let (plan, execution) = shared_audio_fixture(8, "7.1", 6);
+        let filter = shared_audio_filter(&plan, &execution);
+        let fold = DownmixMatrix::LimitedDefaultTo {
+            source_channels: 8,
+            target_channels: 6,
+        }
+        .filter()
+        .expect("limited fold");
+        assert_eq!(
+            filter,
+            format!(
+                "{fold},{}",
+                AudioClock::new(execution.start_seconds, 0).filter()
+            )
+        );
+        assert!(!filter.contains("pan="), "{filter}");
+        let args = vod_shared_audio_args(&plan, &execution, 12.0).expect("argv");
+        assert!(args.windows(2).any(|pair| pair == ["-ac", "6"]));
+    }
+
+    /// The fold's exact filter text is soundtrack identity, and the v2
+    /// domain separates every new object from every v1 object, folded or not.
+    #[test]
+    fn shared_audio_digest_carries_the_fold_and_never_aliases_v1() {
+        use crate::playback::audio::DownmixMatrix;
+        for (channels, layout, sink) in [(6, "5.1", 2), (8, "7.1", 2), (6, "5.1", 6)] {
+            let (plan, _) = shared_audio_fixture(channels, layout, sink);
+            let recipe = VodSharedAudioRecipe::from_plan(&plan).expect("soundtrack");
+            assert_ne!(
+                recipe.digest(),
+                shared_audio_v1_digest(&plan),
+                "{layout} into {sink} channels"
+            );
+        }
+        // Same source, channels and bitrate; only the fold's text differs.
+        let (plan, _) = shared_audio_fixture(6, "5.1", 2);
+        let folded = VodSharedAudioRecipe::from_plan(&plan).expect("Lo/Ro soundtrack");
+        let mut options = plan.options().clone();
+        let mut audio = options.audio.clone().expect("resolved delivery");
+        audio.downmix = Some(DownmixMatrix::LimitedDefault { source_channels: 6 });
+        assert!(audio.valid_snapshot());
+        options.audio = Some(audio);
+        let (_, _, facts, capabilities) =
+            recipe_fixture_parts(&chaptered_source(), &Default::default());
+        let refolded = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(crate::transcode::Encoder::Software, options),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("same soundtrack with another fold");
+        let refolded = VodSharedAudioRecipe::from_plan(&refolded).expect("default-fold soundtrack");
+        assert_ne!(folded.digest(), refolded.digest());
+        assert_eq!(VodSharedAudioRecipe::from_plan(&plan), Some(folded));
     }
 
     /// The fold runs on the decoded preroll, ahead of the lattice trim, so

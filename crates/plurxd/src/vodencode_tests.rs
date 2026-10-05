@@ -702,6 +702,126 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     }
 }
 
+/// A stereo continuous family's soundtrack from a hot 5.1 source: the real
+/// producer argv folds through the measured Lo/Ro matrix and the −4 dBFS
+/// limiter, so the published AAC stays under −2 dBFS. The same argv with the
+/// fold removed (the v1 recipe's bare `-ac 2`) overshoots full scale.
+#[tokio::test]
+async fn stereo_shared_audio_folds_hot_surround_under_the_limiter() {
+    use plurx_core::playback::audio::{resolve_audio, AudioRoute, AudioSink, DownmixMatrix};
+    use plurx_core::transcode::{
+        Encoder, Pacing, TranscodeExecution, TranscodeOptions, VodSharedAudioRecipe,
+    };
+    testfixtures::require_ffmpeg();
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("surround soundtrack");
+    let path = base.path().join("hot-surround.mkv");
+    let tone = "0.9*sin(2*PI*440*t)";
+    let output = tokio::process::Command::new(ffmpeg_bin())
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+        .arg(format!("aevalsrc={}:s=48000:c=5.1", [tone; 6].join("|")))
+        .args(["-t", "4", "-c:a", "flac"])
+        .arg(&path)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("generate surround source");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let mut file = media_file_at(path, 4_000);
+    file.video_codec = Some("h264".into());
+    file.width = Some(320);
+    file.height = Some(180);
+    file.audio_streams = vec![plurx_core::domain::AudioStream {
+        index: 0,
+        codec: "flac".into(),
+        channels: Some(6),
+        sample_rate: Some(48_000),
+        channel_layout: Some("5.1".into()),
+        language: None,
+        title: None,
+        default: true,
+    }];
+    let mut profile = plurx_core::playback::default_profile().clone();
+    profile.audio_codecs = vec!["aac".into()];
+    profile.max_audio_channels = [("aac".to_owned(), 2)].into_iter().collect();
+    profile.claimed_audio_decoders = ["aac".to_owned()].into_iter().collect();
+    profile.audio_sink_claims = [(
+        "aac".to_owned(),
+        AudioSink {
+            codec: "aac".into(),
+            max_channels: 2,
+            passthrough: false,
+            sample_rates_hz: vec![48_000],
+        },
+    )]
+    .into_iter()
+    .collect();
+    let audio = resolve_audio(file.audio_streams.first(), &profile, AudioRoute::EncodedVod, 0);
+    assert_eq!(audio.downmix, Some(DownmixMatrix::LoRo51));
+    let mut options = TranscodeOptions {
+        target_height: 144,
+        video_bitrate_kbps: 300,
+        software_threads: Some(2),
+        ..Default::default()
+    };
+    options.set_audio_delivery(audio);
+    let plan = encoded_plan(&file, &options, Encoder::Software);
+    let recipe = VodSharedAudioRecipe::from_plan(&plan).expect("stereo soundtrack recipe");
+    let execution = TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), ".")
+        .expect("soundtrack execution");
+    let folded = recipe.args(&execution, 4.0).expect("soundtrack argv");
+    let fold = DownmixMatrix::LoRo51.filter().expect("measured fold");
+    let chain = folded.windows(2).find(|pair| pair[0] == "-af").expect("audio chain");
+    assert!(chain[1].starts_with(&format!("{fold},asetpts=")), "{}", chain[1]);
+    assert!(folded.windows(2).any(|pair| pair == ["-ac", "2"]));
+    let mut bare = folded.clone();
+    let index = bare.iter().position(|arg| arg == "-af").expect("audio chain") + 1;
+    bare[index] = bare[index].replacen(&format!("{fold},"), "", 1);
+
+    let peak = |args: Vec<String>, name: &'static str| {
+        let out = base.path().join(name);
+        async move {
+            let encoded = tokio::process::Command::new(ffmpeg_bin())
+                .args(["-hide_banner", "-loglevel", "error"])
+                .args(&args)
+                .kill_on_drop(true)
+                .output()
+                .await
+                .expect("encode soundtrack");
+            assert!(encoded.status.success(), "{}", String::from_utf8_lossy(&encoded.stderr));
+            let mut reader = FragmentReader::new();
+            reader.push(&encoded.stdout);
+            let Some(Unit::Init(init)) = reader.next_unit().expect("soundtrack init") else {
+                panic!("soundtrack must start with an init");
+            };
+            assert_eq!(init.tracks.len(), 1);
+            tokio::fs::write(&out, &encoded.stdout).await.expect("soundtrack file");
+            let decoded = tokio::process::Command::new(ffmpeg_bin())
+                .args(["-hide_banner", "-loglevel", "error", "-i"])
+                .arg(&out)
+                .args(["-map", "0:a:0", "-f", "f32le", "-"])
+                .kill_on_drop(true)
+                .output()
+                .await
+                .expect("decode soundtrack");
+            assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
+            let peak = decoded
+                .stdout
+                .chunks_exact(4)
+                .map(|sample| f32::from_le_bytes(sample.try_into().expect("float")).abs())
+                .fold(0.0_f32, f32::max);
+            (init, peak)
+        }
+    };
+    let (init, limited) = peak(folded, "folded.mp4").await;
+    let facts = recipe.verify_init(&init).expect("actual soundtrack matches frozen recipe");
+    assert_eq!(facts.channels, 2);
+    // −2 dBFS: the ceiling the limiter's receipt kept after AAC overshoot.
+    assert!(limited > 0.3 && limited < 0.794, "limited peak {limited}");
+    let (_, unlimited) = peak(bare, "bare.mp4").await;
+    assert!(unlimited > 1.0, "the bare -ac 2 fold must be the defect: {unlimited}");
+}
+
 #[tokio::test]
 async fn continuous_reservation_verifies_actual_init_and_sample_bounds() {
     use plurx_core::transcode::*;
