@@ -383,6 +383,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [GROUPED-LIBRARY-ROWS-STATUS.md](clients/GROUPED-LIBRARY-ROWS-STATUS.md) | Approved grouped library browsing contract, progress, review, and merge evidence. | open |
 | [Live TV cluster resource](apple-builds/537-live-tv-cluster-resource.md) | Apple build 193 durable cluster start intents and protocol negotiation; validation limits. | built |
 | [Native policy runners](apple-builds/634-native-policy-runners.md) | Apple 202 / Android 140 pure Auto-quality ports and shared JSON test runners; no native controller enablement or device acceptance. | open |
 | [Native seek completion deadline](apple-builds/473-native-seek-deadline.md) | Apple recovery for seeks that never complete, cancellation and late-callback ownership. | built |
