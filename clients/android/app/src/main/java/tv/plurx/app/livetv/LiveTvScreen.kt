@@ -38,7 +38,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Row
@@ -107,6 +106,7 @@ import tv.plurx.app.ui.components.safeDisplayInsets
 import tv.plurx.app.ui.FormFactor
 import tv.plurx.app.ui.currentFormFactor
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import kotlinx.coroutines.delay
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -636,12 +636,30 @@ fun LiveTvScreen(
                             .background(Color(0x99000000), MaterialTheme.shapes.small)
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                     ) {
-                        Text(
-                            "● LIVE · ${state.watching?.guide_number.orEmpty()} " +
-                                state.watching?.guide_name.orEmpty(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            state.watching?.let { watching ->
+                                LiveTvStationChip(
+                                    name = watching.guide_name,
+                                    logo = controller.stationLogo(watching),
+                                    width = 36.dp,
+                                    height = 20.dp,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    shape = MaterialTheme.shapes.small,
+                                    background = Color(0x33FFFFFF),
+                                    textColor = Color.White,
+                                    padding = 2.dp,
+                                )
+                            }
+                            Text(
+                                "● LIVE · ${state.watching?.guide_number.orEmpty()} " +
+                                    state.watching?.guide_name.orEmpty(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                            )
+                        }
                         state.watching?.let { watching ->
                             dvrRecordingContext(dvrState, watching, controller.airing(watching, now).now, now)
                                 ?.let { Text("● $it", style = MaterialTheme.typography.labelSmall, color = Color.White) }
@@ -846,6 +864,7 @@ fun LiveTvScreen(
                     items(visible, key = { it.id }) { channel ->
                         LiveTvChannelRow(
                             channel = channel,
+                            logo = controller.stationLogo(channel),
                             airing = controller.airing(channel, now),
                             selected = state.watching?.id == channel.id,
                             onWatch = { controller.watch(channel) },
@@ -1607,7 +1626,8 @@ private fun WideLiveTvBrowser(
                     )
                     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                         LiveTvFocusedProgramme(
-                            focused, focusedAiring, state.status, focusedProgramme,
+                            focused, focused?.let(controller::stationLogo), focusedAiring, state.status,
+                            focusedProgramme,
                             eyebrow = true, technical = false,
                             actions = {
                                 LiveTvFocusedActions(
@@ -1656,7 +1676,8 @@ private fun WideLiveTvBrowser(
                     }
                 }
                 LiveTvFocusedProgramme(
-                    watching, watchingAiring, state.status, watchingAiring.now,
+                    watching, watching?.let(controller::stationLogo), watchingAiring, state.status,
+                    watchingAiring.now,
                     actions = {
                         LiveTvFocusedActions(
                             watching, watchingAiring.now, dvr, now,
@@ -1738,13 +1759,16 @@ private fun LiveTvPicture(
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        watching.guide_name,
+                    LiveTvStationChip(
+                        name = watching.guide_name,
+                        logo = LiveTvGuideReducer.stationLogoUrl(state.guide, watching.id),
+                        width = 44.dp,
+                        height = 22.dp,
                         style = type.badge,
-                        color = Color.White,
-                        modifier = Modifier
-                            .background(Color(0x99000000), MaterialTheme.shapes.small)
-                            .padding(horizontal = 5.dp, vertical = 2.dp),
+                        shape = MaterialTheme.shapes.small,
+                        background = Color(0x99000000),
+                        textColor = Color.White,
+                        padding = 2.dp,
                     )
                     Text(watching.title, style = type.secondary, color = Color.White)
                     Text(
@@ -1892,6 +1916,7 @@ private fun LiveTvOnNowList(
             }
             LiveTvBrowserRow(
                 channel = channel,
+                logo = controller.stationLogo(channel),
                 airing = controller.airing(channel, now),
                 watching = watchingChannelId == channel.id,
                 onFocused = { onFocused(channel) },
@@ -1905,6 +1930,7 @@ private fun LiveTvOnNowList(
 @Composable
 private fun LiveTvBrowserRow(
     channel: LiveTvChannel,
+    logo: String?,
     airing: LiveTvAiring,
     watching: Boolean,
     onFocused: () -> Unit,
@@ -1924,17 +1950,14 @@ private fun LiveTvBrowserRow(
             horizontalArrangement = Arrangement.spacedBy(7.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                channel.guide_name.take(5),
+            LiveTvStationChip(
+                name = channel.guide_name.take(5),
+                logo = logo,
+                width = 48.dp,
+                height = 28.dp,
                 style = type.eyebrow,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                modifier = Modifier
-                    .size(width = 42.dp, height = 20.dp)
-                    .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.small)
-                    .wrapContentHeight(),
+                shape = MaterialTheme.shapes.small,
+                padding = 3.dp,
             )
             Column(Modifier.weight(1f)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -1977,6 +2000,8 @@ private fun LiveTvBrowserRow(
 @Composable
 private fun LiveTvFocusedProgramme(
     channel: LiveTvChannel?,
+    /** The station's logo ([LiveTvPlayer.stationLogo]); null draws the callsign. */
+    logo: String?,
     airing: LiveTvAiring,
     status: LiveTvStatus?,
     selectedProgramme: LiveTvProgramme? = airing.now,
@@ -2001,12 +2026,27 @@ private fun LiveTvFocusedProgramme(
             overflow = TextOverflow.Ellipsis,
         )
     }
-    Text(
-        selectedProgramme?.title ?: channel?.guide_name ?: "Select a channel",
-        style = type.title,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-    )
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        channel?.let {
+            LiveTvStationChip(
+                name = it.guide_name,
+                logo = logo,
+                width = 56.dp,
+                height = 34.dp,
+                style = type.badge,
+                shape = RoundedCornerShape(6.dp),
+            )
+        }
+        Text(
+            selectedProgramme?.title ?: channel?.guide_name ?: "Select a channel",
+            style = type.title,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
     channel?.let {
         if (!eyebrow) {
             Text(
@@ -2134,11 +2174,30 @@ private fun LiveTvOverlay(
         verticalArrangement = Arrangement.SpaceBetween,
     ) {
         Column {
-            Text(
-                airing.now?.title ?: channel?.guide_name ?: "Live television",
-                style = MaterialTheme.typography.titleLarge,
-                color = Color.White,
-            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // The station's logo once it decodes; the channel number until
+                // then, and for a station the guide has no artwork for.
+                channel?.let {
+                    LiveTvStationChip(
+                        name = it.guide_number,
+                        logo = LiveTvGuideReducer.stationLogoUrl(guide, it.id),
+                        width = 64.dp,
+                        height = 40.dp,
+                        style = MaterialTheme.typography.titleMedium,
+                        shape = RoundedCornerShape(8.dp),
+                        background = Color(0x99000000),
+                        textColor = Color.White,
+                    )
+                }
+                Text(
+                    airing.now?.title ?: channel?.guide_name ?: "Live television",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = Color.White,
+                )
+            }
             Text(channel?.title.orEmpty(), style = MaterialTheme.typography.labelMedium, color = Color.White)
             channel?.let {
                 val summary = liveTvTechnicalSummary(it, status)

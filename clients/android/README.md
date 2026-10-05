@@ -20,7 +20,11 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `148` — a display-mode wait that times out
+> Status: **v0.3.0**, build `149` — Live TV station logos: the list rows,
+> grid headers, programme details, picture badge and fullscreen overlay draw
+> the guide's station artwork from the shared `station_logo` rule, fetched
+> without the account token. Not yet installed on hardware.
+> Build `148` — a display-mode wait that times out
 > withdraws its `preferredDisplayModeId` request while it still owns the
 > window, so a late HDMI switch cannot land mid-playback (needs
 > `display_mode_match` on; not yet observed on a television), and the

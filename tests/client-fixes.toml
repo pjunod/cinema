@@ -4142,6 +4142,56 @@ source_anchor = "if systemPaused, viewerOrigin { endSystemHoldForViewer(play: re
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testViewerPlayEndsASystemHoldThatIOSNeverEnded()"
 
+[[fixes]]
+# The web drew guide station logos from #755 while Apple and Android drew
+# callsigns only: the rule lived in the web page, outside the shared guide
+# contract the three clients replay (issue #815). Each native reducer now
+# answers the fixture's `station_logo` cases, and every surface that names a
+# station draws the tile.
+id = "apple.live-tv-guide-station-logos"
+commits = ["f2c36d0bc605d3aa6380a9c20cd8e06a638f1a6b"]
+source = "clients/apple/Sources/LiveTvGuide.swift"
+source_anchor = "static func stationLogoURL(_ guide: LiveTvGuide?, channelId: String) -> String?"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testStationLogoAnswersEverySharedCase() throws"
+
+[[fixes]]
+id = "android.live-tv-guide-station-logos"
+commits = ["11532e7c1d3d32cad90c46e06c5a1642cc474b4d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuide.kt"
+source_anchor = "fun stationLogoUrl(guide: LiveTvGuide?, channelId: String): String?"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvGuideTest.kt"
+test_anchor = "fun stationLogoAnswersEverySharedCase()"
+
+[[fixes]]
+# Coil's HTTP fetcher matches the scheme case-sensitively, so an accepted
+# `HTTPS://` logo drew on the web and Apple and not on Android. The shared rule
+# now respells the accepted scheme `https://` on every client.
+id = "live-tv.station-logo-scheme-respelled"
+commits = ["9c248d7cd5f28c28f7a53a6d72954eb9219d1cd9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuide.kt"
+source_anchor = "return \"https://$rest\""
+test = "tests/web/live-tv.test.js"
+test_anchor = "stationLogoUrl answers every shared station_logo case"
+
+[[fixes]]
+id = "apple.live-tv-station-tile-wiring"
+commits = ["92e1317756623a6c363d25223bf4b8c5b9583a29"]
+source = "clients/apple/Sources/LiveTvStationLogo.swift"
+source_anchor = "guard flights[address] == flight else { return }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testEveryStationSurfaceDrawsTheGuideLogo() throws"
+
+[[fixes]]
+# Coil keeps no record of failures, so a blocked logo host was asked again on
+# every recomposition of the guide. A failed address now backs off.
+id = "android.live-tv-station-logo-backoff"
+commits = ["184b1e7f87c890064d0f06994bd18a25808a0ffc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvStationLogo.kt"
+source_anchor = "fun shouldLoad(address: String, nowMs: Long = System.currentTimeMillis()): Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvGuideTest.kt"
+test_anchor = "fun aFailedStationLogoBacksOffAndASuccessClearsIt()"
+
 
 [[fixes]]
 id = "apple.native-library-group-membership"

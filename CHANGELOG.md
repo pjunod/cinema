@@ -50,6 +50,19 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **Station logos on the Apple and Android Live TV guides.** The web guide
+  has drawn HDHomeRun's station artwork since 2026-10-03; the Apple TV, iOS
+  and Android guides still showed only callsigns, because the rule that picks
+  a channel's logo lived in the web page instead of the shared guide contract
+  the three clients reproduce, so nothing asked the native clients for it.
+  The rule is now `station_logo` in `tests/playback/live-tv-guide-cases.json`,
+  answered identically by the web, Apple and Android reducers, and the native
+  list rows, grid headers, programme details, picture badge and fullscreen
+  identity draw the logo with the callsign as fallback. Native clients fetch
+  the third-party artwork without the account token. The web applies the same
+  textual rule, which is stricter than the browser's URL parser it replaced:
+  an address with an underscore or non-ASCII host, or a space, now shows the
+  callsign.
 - **Web: Play after a long pause no longer pulls the picture back about a
   second.** A pause of 60 seconds or more is an Auto quality boundary; the
   web player resumed through a seek to the position Play was pressed at,
