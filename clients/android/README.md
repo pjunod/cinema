@@ -20,11 +20,14 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `146` — a seek pressed while a prepared quality
+> Status: **v0.3.0**, build `147` — a seek pressed while a prepared quality
 > handoff has switched but not yet rendered is held and runs once on its first
 > frame (or on the picture an Auto rollback restores) instead of being dropped
 > until the 8-second target deadline reopens; a rollback reopen lands at the
 > seek's destination, not the playhead. Not yet on a device.
+> Build `146` — grouped library rows, a visible letter/year
+> index, expanded groups with Retry, and landscape home-media cards. Focused
+> phone and TV emulator checks passed; physical-device acceptance is unmeasured.
 > Build `145` — continuous quality: manual and Auto
 > quality changes adapt inside the one player, with owned outputs and release
 > fences around a prepared replacement, on top of current main's recovery

@@ -89,7 +89,7 @@ function libraryHarness(pages, state) {
   const parse = (html) => [...html.matchAll(/<i:([^>]+)>/g)].map((m) => ({ id: m[1] }));
   const makeNode = (id) => {
     const node = {
-      id, children: [], grid: null,
+      id, children: [], grid: null, classList:{remove(){}},
       set innerHTML(html) {
         this.children = [];
         this.grid = html.includes('<div class="grid">')
@@ -117,7 +117,9 @@ function libraryHarness(pages, state) {
   const api = new Function(
     "assert", "document", "state", "pages", "nodes",
     [
-      "let LIB_LOAD=0,LIB_PAGE_AT=0,LIB_VIEW=null,PHOTO_SET=null;",
+      "let LIB_LOAD=0,LIB_PAGE_AT=0,LIB_VIEW=null,PHOTO_SET=null,LIB_GROUP='',LIB_PRESENTATION='grid';",
+      "const location={hash:'#/library/1'};",
+      "function libraryGroups(){return [];} function libraryPaintControls(){}",
       "const LIB_PER_PAGE=200;",
       // The three filter globals and the page size are the state a case sets.
       "let LIB_SCOPE=state.scope||'',LIB_FIND=state.find||'',LIB_FILTER=state.filter||'all',LIB_PER=state.per||'all';",

@@ -1495,6 +1495,9 @@
             store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         }
         store.put_setting(keys::HLS_READRATE, readrate).await.expect("pacing");
+        // The default 90 s burst consumes this entire 12 s fixture before
+        // retention can be abandoned; pacing needs a zero burst as well.
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
             EncoderCaps::default(), Pipeline::Cpu));
@@ -1532,7 +1535,14 @@
         let directory = collection.directory_for_test();
         d3_wait_for_links(&directory).await;
         collection.abandon();
-        manager.vod.maintain().await;
+        // A published link can still hold the capture gate. Collection is
+        // deferred until that owned capture settles, even with a live session.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while directory.exists() {
+                manager.vod.maintain().await;
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("abandoned links collected after capture settles");
         assert!(manager.sessions.lock().await.contains_key(&info.session_id),
             "the session is still playing");
         assert!(!directory.exists(),

@@ -432,6 +432,23 @@ use crate::queue_fixture::QueueFixture;
         mgr.effective_recipe(&digest, &plan, false).hash()
     }
 
+    // A speculative producer now includes the canonical stereo sink claim.
+    // Keep claimless live keys separate: those deliberately cannot reuse it.
+    async fn producer_recipe_hash_for(
+        mgr: &TranscodeManager,
+        file: &plurx_core::domain::MediaFile,
+        height: i64,
+    ) -> String {
+        let encoder = mgr.encoder().await;
+        let Tracks { audio_index, subtitle_burn } = TranscodeManager::select_tracks_with_prefs(
+            file, None, None, &plurx_core::tracks::LangPrefs::default(), false,
+        );
+        let opts = mgr.speculative_producer_options(
+            mgr.rate_control_snapshot(), encoder, file, height, audio_index, subtitle_burn,
+        );
+        recipe_hash_for_options(mgr, file, &opts, encoder).await
+    }
+
     /// A retry that changes the decode route is a different production, and
     /// the two ways it could pretend otherwise are publishing under the failed
     /// plan's name and resuming the failed producer's prefix. Both are closed
@@ -1827,7 +1844,7 @@ use crate::queue_fixture::QueueFixture;
             ..ProducerTuning::default()
         });
         let file = store.get_file(file_id).await.expect("get").expect("file");
-        let hash = recipe_hash_for(&mgr, &file, 240).await;
+        let hash = producer_recipe_hash_for(&mgr, &file, 240).await;
 
         // A short budget: it encodes some of the film and runs out of time.
         let staging = crate::cachekeep::staging_dir(cache.path(), &hash);
@@ -1928,7 +1945,7 @@ use crate::queue_fixture::QueueFixture;
         let file_id = seed_file(&store).await;
         let (mgr, _work, _cache) = cached_manager(&store);
         let file = store.get_file(file_id).await.expect("get").expect("file");
-        let hash = recipe_hash_for(&mgr, &file, 1080).await;
+        let hash = producer_recipe_hash_for(&mgr, &file, 1080).await;
 
         // Somebody else is mid-encode.
         store
@@ -2011,9 +2028,13 @@ use crate::queue_fixture::QueueFixture;
         write_real_video(&source, SECONDS);
         let file_id = seed_real_file(&store, &source).await;
         let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, cache) = cached_manager(&store);
+        let audio_delivery = mgr.speculative_producer_options(
+            mgr.rate_control_snapshot(), Encoder::Software, &file, 240, None, None,
+        ).audio.expect("canonical producer audio");
         let package_id = "offline-preemption";
         let requested = NewOfflinePackage {
-            audio_recipe: None,
+            audio_recipe: Some(serde_json::to_string(&audio_delivery).expect("audio recipe")),
             id: package_id.to_owned(),
             request_id: "offline-preemption-request".to_owned(),
             user_id: user.id,
@@ -2049,7 +2070,6 @@ use crate::queue_fixture::QueueFixture;
             .expect("queued package");
         assert_eq!(claimed.id, package_id);
 
-        let (mgr, _work, cache) = cached_manager(&store);
         let mgr = Arc::new(mgr.with_producer_tuning(ProducerTuning {
             pacing: Pacing {
                 readrate: Some(READRATE),
@@ -2073,7 +2093,7 @@ use crate::queue_fixture::QueueFixture;
                 &claimed,
                 &file,
                 &OfflineSpec {
-                    audio_delivery: None,
+                    audio_delivery: Some(audio_delivery),
                     target_height: 240,
                     audio_index: None,
                     subtitle: OfflineSubtitle::None,
@@ -2367,7 +2387,7 @@ use crate::queue_fixture::QueueFixture;
 
         // It serves, which is the only thing any of this was for.
         let info = mgr
-            .start(file_id, 240, 0.0, None, None, "paul", "pb-resumed")
+            .start_claiming(file_id, 240, "pb-resumed", &plurx_core::playback::audio::canonical_producer_claim())
             .await
             .expect("start");
         assert!(info.vod, "a resumed asset is not findable");

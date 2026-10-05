@@ -2535,12 +2535,15 @@
             .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "1")
             .await
             .expect("enable shared preparation");
+        let mut enabled = settings();
+        enabled.index_cluster_cache = true;
+        enabled.output_preparation = crate::vodserve::OutputPreparation::Copy;
         for session in ["first", "retry"] {
             let refused = serve
                 .try_create(
                     &req,
                     &file,
-                    &settings(),
+                    &enabled,
                     VodAttribution {
                         user_name: "viewer",
                         item_title: "Cold source",

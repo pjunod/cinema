@@ -11622,6 +11622,8 @@ mod tests {
                 // P-02 §3.2); node-local, so not a clustered-only field.
                 "processes",
                 "producing",
+                "retained_output",
+                "retained_output_node",
                 "scans",
                 "sessions",
                 "trakt",

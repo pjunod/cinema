@@ -13684,9 +13684,11 @@ mod tests {
         );
         // Both branches publish, so the banner and its Stop cover them.
         let source = include_str!("state.rs");
+        // Formatting may split the call from its await; both production paths
+        // must still publish through this owner.
         let call = concat!(
-            "self.publish_preparation(&file, item.as_ref(), ",
-            "&reason, index).await;"
+            "self.publish_preparation(",
+            "&file, item.as_ref(), &reason, index)"
         );
         assert_eq!(source.matches(call).count(), 2);
     }

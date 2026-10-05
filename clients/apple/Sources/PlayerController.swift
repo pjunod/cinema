@@ -3089,6 +3089,9 @@ final class PlayerController: ObservableObject {
     /// which is exactly what the pinned published-field inventory in
     /// `tests/operations/test_playback_surface_fence.py` exists to refuse.
     private(set) var systemPaused = false
+    /// When the current system hold began, so a Play that ends it is a resume
+    /// after a pause of the hold's real length.
+    private var systemPauseBeganAt: TimeInterval?
     /// Feeds the SURFACE section of the Playback debug ledger and the
     /// `surface_*` client-log events. Fed from the presenter's log entries,
     /// which is the only half of a fault's life the presenter can know.
@@ -3907,7 +3910,9 @@ final class PlayerController: ObservableObject {
     }
 
     func togglePlayPause() {
-        setPlaybackRequested(!wantsPlayback)
+        // Under a system hold the transport is paused whatever the retained
+        // intent says, and the control reads Play: the press is a resume.
+        setPlaybackRequested(systemPaused || !wantsPlayback)
     }
 
     /// The one owner for explicit Play and Pause, including lock-screen input.
@@ -3918,6 +3923,7 @@ final class PlayerController: ObservableObject {
     }
 
     private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {
+        if systemPaused, viewerOrigin { endSystemHoldForViewer(play: requested) }
         guard requested != wantsPlayback else { return }
         let requestedAt = resumeNow()
         manualQualityRetention.transportChanged(from: viewerActionEpoch, to: viewerActionEpoch &+ 1)
@@ -5237,15 +5243,20 @@ final class PlayerController: ObservableObject {
     func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
         switch event {
         case .interruption(.suspend):
+            if !systemPaused { systemPauseBeganAt = resumeNow() }
             systemPaused = true
             player.pause()
             isPlaying = false
             invalidateResumeAttempt(outcome: "interrupted")
             present(.systemPaused(true))
         case .interruption(.resume):
+            let wasSystemPaused = systemPaused
             systemPaused = false
             present(.systemPaused(false))
-            guard wantsPlayback, started, player.currentItem != nil else { return }
+            // A late `.ended` after the viewer's own press already ended the
+            // hold must not start a rate ahead of that resume's owner.
+            guard wasSystemPaused, wantsPlayback, started, player.currentItem != nil,
+                  !isChangingStream, resumeAttempt == nil else { return }
             Self.applyPlaybackCommand(to: player, preferredRate: preferredRate, immediately: false)
             isPlaying = true
         case .interruption(.stay):
@@ -5256,17 +5267,52 @@ final class PlayerController: ObservableObject {
             // iOS declined automatic resume. The system suspension is over,
             // but the transport is still paused, so make the visible intent
             // agree: the next on-screen or remote Play is one real resume.
-            wantsPlayback = false
-            isPlaying = false
-            pauseBeganAt = resumeNow()
-            explicitViewerPause = nil
-            player.pause()
+            settleSystemHoldAsPause()
+        case .interruption(.ignore):
+            break
         case .routeChange(let revokesIntent):
             guard revokesIntent else { return }
             systemPaused = false
             present(.systemPaused(false))
             setPlaybackRequested(false, viewerOrigin: false)
         }
+    }
+
+    /// A system hold is over and the transport is still paused: make the
+    /// visible intent agree, so the next Play is one ordinary resume — through
+    /// the paused-retirement latch and the bounded resume like any other.
+    private func settleSystemHoldAsPause() {
+        wantsPlayback = false
+        isPlaying = false
+        pauseBeganAt = systemPauseBeganAt ?? resumeNow()
+        systemPauseBeganAt = nil
+        explicitViewerPause = nil
+        player.pause()
+    }
+
+    /// iOS does not promise an `.ended` for every `.began`, so a hold that only
+    /// `.ended` could clear can outlive the interruption indefinitely — and
+    /// with it the stall monitor, which `systemPaused` switches off. A viewer's
+    /// transport press is the end of it: retire the hold, take the audio
+    /// session back for a Play, and leave the press to the ordinary setter.
+    private func endSystemHoldForViewer(play: Bool) {
+        #if os(iOS)
+        if play {
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch {
+                // The interruption is still live (a call iOS will not yield
+                // to): the hold is true, so it stays, and so does its banner.
+                noteSurfaceLogOnly("system_hold_kept:activation_refused")
+                return
+            }
+        }
+        #endif
+        systemPaused = false
+        present(.systemPaused(false))
+        noteSurfaceLogOnly("system_hold_ended:viewer")
+        if play, wantsPlayback { settleSystemHoldAsPause() }
+        systemPauseBeganAt = nil
     }
 
     private func applyDisplayCriteria(for item: AVPlayerItem, generation: Int) {
@@ -5338,6 +5384,7 @@ final class PlayerController: ObservableObject {
         recoveryTask = nil
         audioSessionObserver.stop()
         systemPaused = false
+        systemPauseBeganAt = nil
         surfaceClockTask?.cancel()
         surfaceClockTask = nil
         clearPGSOverlaySelection()
@@ -8073,6 +8120,22 @@ final class PlayerController: ObservableObject {
         lastSurfaceSampleMs = observedPosition
         if presenting { surfaceHasPresented = true }
         present(.presenting(presenting, attached: attached))
+        endSystemHoldIfPlaying()
+    }
+
+    /// Film actually playing is the system's hold over, whether or not iOS
+    /// ever says so: retire the banner and give the stall monitor back. Kept
+    /// out of the sampler, whose evidence must never name a transport status;
+    /// this weighs the presenter's verdict AND the transport, because `rate`
+    /// alone is only the requested rate and a seek moves the position with
+    /// nothing playing.
+    private func endSystemHoldIfPlaying() {
+        guard systemPaused, surface.presenting, player.timeControlStatus == .playing,
+              seekState.pendingMs == nil else { return }
+        systemPaused = false
+        systemPauseBeganAt = nil
+        present(.systemPaused(false))
+        noteSurfaceLogOnly("system_hold_ended:presentation")
     }
 
     /// §4.3's disagreement detector, as a pure function of the evidence the
