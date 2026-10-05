@@ -1775,6 +1775,31 @@ final class LiveTvTests: XCTestCase {
         await controller.stop()
     }
 
+    func testLiveTvViewerPlayEndsASystemHoldThatIOSNeverEnded() async {
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started())
+        )
+        await controller.watch(channel)
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        XCTAssertEqual(controller.surfaceMessage, "Paused — audio interrupted")
+        controller.togglePause()
+        XCTAssertFalse(controller.systemPaused, "the viewer's press ends a hold iOS never ended")
+        XCTAssertFalse(controller.paused, "the control read Play, so the press resumes")
+        XCTAssertNil(controller.surfaceMessage)
+        controller.handleAudioSessionEvent(.interruption(.ignore))
+        XCTAssertFalse(controller.systemPaused)
+        await controller.stop()
+    }
+
+    func testLibraryChannelViewerPlayEndsASystemHoldThatIOSNeverEnded() async {
+        let controller = LibraryChannelPlayerController.testingAttached(to: libraryChannel)
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        await controller.togglePause()
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertFalse(controller.paused)
+        await controller.stop()
+    }
+
     func testLiveTvOldRouteLossKeepsVisiblePlayFunctional() async {
         let controller = LiveTvPlayerController.testing(
             requests: LiveTvMockRequests(result: started())

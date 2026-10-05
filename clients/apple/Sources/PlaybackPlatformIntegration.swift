@@ -55,6 +55,9 @@ enum AudioInterruptionResponse: Equatable, Sendable {
     case suspend
     case resume
     case stay
+    /// A `.began` that holds nothing: the viewer had already paused, so no
+    /// system took the transport away from them.
+    case ignore
 }
 
 @MainActor
@@ -71,7 +74,12 @@ final class PlaybackAudioSessionObserver {
     ) -> AudioInterruptionResponse {
         switch type {
         case .began:
-            return .suspend
+            // A viewer who already paused was not paused by the system. A hold
+            // raised here could only be cleared by an `.ended`, and iOS does not
+            // promise one for every `.began` — on 2026-10-04 an iPad paused for
+            // ten minutes received a `.began`, never an `.ended`, and kept
+            // "Paused — audio interrupted" over the picture for an hour.
+            return wantsPlayback ? .suspend : .ignore
         case .ended:
             return options.contains(.shouldResume) && wantsPlayback ? .resume : .stay
         @unknown default:
