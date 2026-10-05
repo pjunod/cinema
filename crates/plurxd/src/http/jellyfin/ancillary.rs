@@ -129,19 +129,101 @@ pub(super) async fn segments(
         json!({"TotalRecordCount":output.len(), "Items":output, "StartIndex":0}),
     ))
 }
+/// Jellyfin's subtitle window query: `StartPositionTicks` (a query value only
+/// on the four-segment route), `EndPositionTicks`, `CopyTimestamps` and
+/// `AddVttTimeMap`. Credential carriers are read by the extractor; any other
+/// key is ignored, as the upstream controller ignores it.
+#[derive(Default)]
+struct SubtitleWindow {
+    start: Option<Ticks>,
+    end: Option<Ticks>,
+    copy_timestamps: bool,
+    time_map: bool,
+}
+fn subtitle_window(raw: Option<&str>) -> Result<SubtitleWindow, ApiError> {
+    fn assign<T: PartialEq>(slot: &mut Option<T>, value: T) -> Result<(), ApiError> {
+        if slot.as_ref().is_some_and(|old| *old != value) {
+            return Err(ApiError::BadRequest("conflicting subtitle query".into()));
+        }
+        *slot = Some(value);
+        Ok(())
+    }
+    let ticks = |value: &str| {
+        value
+            .parse::<i64>()
+            .ok()
+            .and_then(|v| Ticks::try_from(v).ok())
+            .ok_or_else(|| ApiError::BadRequest("invalid subtitle position".into()))
+    };
+    let flag = |value: &str| match value.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(ApiError::BadRequest("invalid subtitle flag".into())),
+    };
+    let (mut start, mut end, mut copy, mut map) = (None, None, None, None);
+    for (name, value) in query_pairs(raw)? {
+        match name.to_ascii_lowercase().as_str() {
+            "startpositionticks" => assign(&mut start, ticks(&value)?)?,
+            "endpositionticks" => assign(&mut end, ticks(&value)?)?,
+            "copytimestamps" => assign(&mut copy, flag(&value)?)?,
+            "addvtttimemap" => assign(&mut map, flag(&value)?)?,
+            _ => {}
+        }
+    }
+    Ok(SubtitleWindow {
+        start,
+        end,
+        copy_timestamps: copy.unwrap_or(false),
+        time_map: map.unwrap_or(false),
+    })
+}
+/// `…/Subtitles/{index}/Stream.{format}`: the start position, if any, is a
+/// query value.
 pub(super) async fn subtitles(
     client: ClientUser,
-    State(state): State<AppState>,
+    state: State<AppState>,
     Path((item_id, source_id, index, filename)): Path<(String, String, i64, String)>,
+    RawQuery(raw): RawQuery,
 ) -> Result<Response, ApiError> {
+    let window = subtitle_window(raw.as_deref())?;
+    serve_subtitle(client, state, item_id, source_id, index, filename, window).await
+}
+/// `…/Subtitles/{index}/{startPositionTicks}/Stream.{format}`: the form both
+/// pinned clients request and the form `DeliveryUrl` names. A query start,
+/// when present, overrides the path value, as upstream.
+pub(super) async fn subtitles_from(
+    client: ClientUser,
+    state: State<AppState>,
+    Path((item_id, source_id, index, start, filename)): Path<(String, String, i64, i64, String)>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, ApiError> {
+    let mut window = subtitle_window(raw.as_deref())?;
+    if window.start.is_none() {
+        window.start = Some(
+            Ticks::try_from(start)
+                .map_err(|_| ApiError::BadRequest("invalid subtitle position".into()))?,
+        );
+    }
+    serve_subtitle(client, state, item_id, source_id, index, filename, window).await
+}
+async fn serve_subtitle(
+    client: ClientUser,
+    State(state): State<AppState>,
+    item_id: String,
+    source_id: String,
+    index: i64,
+    filename: String,
+    window: SubtitleWindow,
+) -> Result<Response, ApiError> {
+    use plurx_compat_jellyfin::subtitle::SubtitleFormat;
     if index < 0 {
         return Err(ApiError::NotFound("subtitle track"));
     }
-    let srt = match filename.as_str() {
-        "Stream.vtt" | "stream.vtt" => false,
-        "Stream.srt" | "stream.srt" => true,
-        _ => return Err(ApiError::NotFound("subtitle format")),
-    };
+    let format = filename
+        .split_once('.')
+        .filter(|(stem, _)| stem.eq_ignore_ascii_case("stream"))
+        .and_then(|(_, extension)| SubtitleFormat::parse(extension))
+        .ok_or(ApiError::NotFound("subtitle format"))?;
     let item = media_item(&client, &state, &item_id).await?;
     let source_wire = wire_id(&source_id)?;
     let source = item
@@ -167,21 +249,42 @@ pub(super) async fn subtitles(
         Path((file_id, format!("{ordinal}.vtt"))),
     )
     .await?;
-    if !srt {
+    let start_ms = window.start.map_or(0, Ticks::milliseconds);
+    let end_ms = window.end.map(Ticks::milliseconds).filter(|end| *end > 0);
+    if format == SubtitleFormat::Vtt && start_ms == 0 && end_ms.is_none() && !window.time_map {
+        // The native extraction itself, source times unchanged.
         return Ok(response);
     }
     let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
         .await
         .map_err(|_| ApiError::Internal("subtitle representation exceeds its bound".into()))?;
-    let bytes = plurx_compat_jellyfin::subtitle::vtt_to_srt(&bytes)
-        .map_err(|_| ApiError::BadRequest("subtitle cannot be represented as SRT".into()))?;
+    let bytes = plurx_compat_jellyfin::subtitle::window_vtt(
+        &bytes,
+        u64::try_from(start_ms).unwrap_or(0),
+        end_ms.and_then(|end| u64::try_from(end).ok()),
+        window.copy_timestamps,
+    )
+    .map_err(|_| ApiError::BadRequest("subtitle window cannot be represented".into()))?;
+    let bytes = match format {
+        SubtitleFormat::Srt => plurx_compat_jellyfin::subtitle::vtt_to_srt(&bytes)
+            .map_err(|_| ApiError::BadRequest("subtitle cannot be represented as SRT".into()))?,
+        // Upstream's HLS segment marker; only meaningful to a VTT consumer.
+        SubtitleFormat::Vtt if window.time_map => {
+            let text = String::from_utf8(bytes)
+                .map_err(|_| ApiError::BadRequest("subtitle is not UTF-8".into()))?;
+            text.replacen(
+                "WEBVTT",
+                "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000",
+                1,
+            )
+            .into_bytes()
+        }
+        SubtitleFormat::Vtt => bytes,
+    };
     Ok((
         StatusCode::OK,
         [
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/x-subrip; charset=utf-8",
-            ),
+            (axum::http::header::CONTENT_TYPE, format.content_type()),
             (axum::http::header::CACHE_CONTROL, "no-store"),
         ],
         bytes,

@@ -1,6 +1,8 @@
 //! Jellyfin connection and catalog facade over native authentication and Store.
 mod ancillary;
+mod metrics;
 mod playback;
+mod protocol;
 mod representation;
 mod startup;
 mod transport;
@@ -31,6 +33,24 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(not_found))
         .route("/System/Info/Public", get(system_info))
+        .route("/System/Info", get(protocol::system_info_authenticated))
+        .route("/Users/Public", get(protocol::public_users))
+        .route("/Sessions/Capabilities", post(protocol::capabilities))
+        .route(
+            "/Sessions/Capabilities/Full",
+            post(protocol::capabilities_full).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/Search/Hints", get(protocol::search_hints))
+        .route("/Items/{item_id}/Download", get(protocol::download))
+        .route(
+            "/UserPlayedItems/{item_id}",
+            post(playback::played_item).delete(playback::played_item),
+        )
+        .route("/Sessions/Playing/Ping", post(playback::ping))
+        .route(
+            "/Videos/ActiveEncodings",
+            axum::routing::delete(playback::active_encodings),
+        )
         .route(
             "/Users/AuthenticateByName",
             post(login).layer(DefaultBodyLimit::max(16 * 1024)),
@@ -79,6 +99,10 @@ pub(super) fn router() -> Router<AppState> {
             "/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}",
             get(ancillary::subtitles),
         )
+        .route(
+            "/Videos/{item_id}/{source_id}/Subtitles/{index}/{start_ticks}/{filename}",
+            get(ancillary::subtitles_from),
+        )
         .route("/Items/{item_id}/LocalTrailers", get(local_extras))
         .route("/Items/{item_id}/SpecialFeatures", get(local_extras))
         .route("/UserViews", get(current_views))
@@ -98,9 +122,12 @@ pub(super) fn router() -> Router<AppState> {
         .route("/Users/{user_id}/Items/{item_id}", get(user_item))
         .route("/Shows/{item_id}/Seasons", get(seasons))
         .route("/Shows/{item_id}/Episodes", get(episodes))
-        .fallback(not_found)
+        .route_layer(axum::middleware::from_fn(metrics::count_matched))
+        .fallback(unmatched)
         .method_not_allowed_fallback(method_not_allowed)
 }
+pub(crate) use metrics::prometheus;
+
 /// The facade's path on Plurx's own port, beside the web app and Plex.
 pub(crate) const MOUNT: &str = "/jellyfin";
 
@@ -203,7 +230,14 @@ impl StandardPortStatus {
 pub(super) async fn not_found() -> ApiError {
     ApiError::NotFound("Jellyfin endpoint")
 }
+/// A path no facade route matches: counted, so an unsupported request a
+/// client makes shows up in the metrics rather than only in a client log.
+async fn unmatched() -> ApiError {
+    metrics::record(metrics::UNMATCHED, "not_found");
+    not_found().await
+}
 async fn method_not_allowed() -> Response {
+    metrics::record(metrics::UNMATCHED, "not_found");
     (
         StatusCode::METHOD_NOT_ALLOWED,
         Json(json!({"error":"method not allowed"})),
@@ -212,10 +246,17 @@ async fn method_not_allowed() -> Response {
 }
 
 struct Enabled(String);
+/// The switch snapshot `enabled_gate` admitted this request under, so the
+/// handler reads the same one rather than making a second linearizable read.
+#[derive(Clone)]
+struct AdmittedSwitch(plurx_core::store::JellyfinCompatibilityState);
 impl FromRequestParts<AppState> for Enabled {
     type Rejection = ApiError;
-    async fn from_request_parts(_parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let setting = state.store.jellyfin_compatibility_state().await?;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        let setting = match parts.extensions.get::<AdmittedSwitch>() {
+            Some(AdmittedSwitch(setting)) => setting.clone(),
+            None => state.store.jellyfin_compatibility_state().await?,
+        };
         if !setting.enabled {
             return Err(ApiError::NotFound("Jellyfin endpoint"));
         }
@@ -271,6 +312,11 @@ struct ClientUser {
     token_hash: String,
     /// The enabled switch generation this request was admitted under.
     generation: String,
+    /// The login token this request itself presented, when it is one Plurx
+    /// minted (hex). Media URLs the facade returns carry it as `ApiKey`, as
+    /// Jellyfin's do: Android TV sends no header on media, subtitle or HLS
+    /// requests (J0 trace). `None` for a caller that presented only a link.
+    url_credential: Option<String>,
 }
 impl FromRequestParts<AppState> for ClientUser {
     type Rejection = ApiError;
@@ -300,12 +346,14 @@ async fn presented_client(
         return Ok((generation, None));
     };
     super::extract::authenticate_compatibility_token(state, token.expose()).await?;
-    let client = ClientUser::for_login(
+    let mut client = ClientUser::for_login(
         state,
         plurx_core::auth::hash_token(token.expose()),
         generation.clone(),
     )
     .await?;
+    client.url_credential = Some(token.expose().to_owned())
+        .filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()));
     Ok((generation, Some(client)))
 }
 impl ClientUser {
@@ -320,6 +368,7 @@ impl ClientUser {
             identity,
             token_hash,
             generation,
+            url_credential: None,
         })
     }
 }
@@ -1105,11 +1154,14 @@ fn source_dto(row: &Value) -> Result<wire::MediaSource, ApiError> {
 
 pub(super) async fn enabled_gate(
     State(state): State<AppState>,
-    request: axum::http::Request<axum::body::Body>,
+    mut request: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
     match state.store.jellyfin_compatibility_state().await {
-        Ok(setting) if setting.enabled => next.run(request).await,
+        Ok(setting) if setting.enabled => {
+            request.extensions_mut().insert(AdmittedSwitch(setting));
+            next.run(request).await
+        }
         Ok(_) => not_found().await.into_response(),
         Err(error) => ApiError::from(error).into_response(),
     }
@@ -1119,9 +1171,10 @@ fn image_tag(wire: &str, name: &str) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(format!("{wire}:{name}")))
 }
-// Safe interim access policy: the shared ClientUser extractor verifies native
-// token expiry/revocation and facade membership before any mapped artwork read.
-// Anonymous access remains pending the user's explicit approval decision.
+// Mapped Primary/Backdrop artwork answers without a login while the switch is
+// on (approved 2026-10-03, contract §5.1): the store read checks mapping,
+// incarnation and switch generation, and `serve_jellyfin_artwork` spends the
+// per-address miss budget. A presented login is not required or consulted.
 async fn image(
     _enabled: Enabled,
     auth::ClientPeer(peer): auth::ClientPeer,
@@ -1258,6 +1311,17 @@ mod tests {
             .expect("body")
             .to_bytes();
         (status, serde_json::from_slice(&bytes).expect("JSON body"))
+    }
+    /// A returned media URL as the client requests it: clients prefix the
+    /// configured server address, which already ends in `/jellyfin`.
+    fn without_key(url: &str, token: &str) -> String {
+        let key = format!("ApiKey={token}");
+        assert!(
+            url.contains(&key),
+            "a returned URL carries the login: {url}"
+        );
+        url.replace(&format!("&{key}"), "")
+            .replace(&format!("?{key}"), "")
     }
     async fn setup(app: &Router) -> String {
         let (status, body) = json_call(
@@ -1475,19 +1539,27 @@ mod tests {
             "native prerequisites refused: {info}"
         );
         let play_id = info["PlaySessionId"].as_str().expect("play");
-        let url = info["MediaSources"][0]["TranscodingUrl"]
+        let root_url = info["MediaSources"][0]["TranscodingUrl"]
             .as_str()
             .expect("native HLS URL");
-        let root_url = url;
-        let url = &mounted(url);
-        assert!(!url.contains(&f.token));
+        let url = &mounted(root_url);
         let response = f
             .app
             .clone()
-            .oneshot(request("GET", url, None, Value::Null))
+            .oneshot(request(
+                "GET",
+                &without_key(url, &f.token),
+                None,
+                Value::Null,
+            ))
             .await
             .expect("unauthenticated root");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        // Infuse lower-cases the first letter of every query key it was given.
+        let lowered = url
+            .replace("MediaSourceId=", "mediaSourceId=")
+            .replace("PlaySessionId=", "playSessionId=")
+            .replace("ApiKey=", "apiKey=");
         let response = if duplicate {
             let (first, second) = tokio::join!(
                 f.app
@@ -1523,9 +1595,10 @@ mod tests {
             );
             first
         } else {
+            // Android TV sends no header on media: the URL's ApiKey is all.
             f.app
                 .clone()
-                .oneshot(request("GET", url, Some(&f.token), Value::Null))
+                .oneshot(request("GET", &lowered, None, Value::Null))
                 .await
                 .expect("native root")
         };
@@ -1641,12 +1714,16 @@ mod tests {
         }
         let media_url = master
             .lines()
-            .find(|line| line.ends_with("index.m3u8") && !line.starts_with('#'))
+            .find(|line| line.contains("index.m3u8") && !line.starts_with('#'))
             .expect("media child");
+        assert!(
+            media_url.ends_with(&format!("index.m3u8?ApiKey={}", f.token)),
+            "every child carries the URL credential: {media_url}"
+        );
         if encoded {
             let subtitles = format!(
                 "{}subs/2/index.m3u8",
-                media_url.strip_suffix("index.m3u8").expect("HLS mount")
+                media_url.split_once("index.m3u8").expect("HLS mount").0
             );
             let refused = f
                 .app
@@ -1674,7 +1751,7 @@ mod tests {
         assert!(media.contains("#EXT-X-ENDLIST"));
         let segment_url = media
             .lines()
-            .find(|line| line.ends_with(".ts"))
+            .find(|line| line.contains(".ts?ApiKey="))
             .expect("inline child");
         let init = Box::pin(super::super::hls::segment(
             State(f.state.clone()),
@@ -1723,6 +1800,33 @@ mod tests {
             fresh.fetched_through_ms, 0,
             "a partial composite read cannot mark a full native fragment fetched"
         );
+        // While a node has lost serving authority (a quorum leader restart),
+        // the gate answers the facade as it answers native media: 503 with
+        // Retry-After, before any store read. The binding and route are
+        // untouched, so the same play answers once authority is back. That
+        // the native session itself outlives a short loss is the serving
+        // fence's own property (`serving_fence_flapping_losses_share_one_grace`).
+        f.state.serving.validation_set_ready(false).await;
+        let fenced = f
+            .app
+            .clone()
+            .oneshot(request("GET", segment_url, None, Value::Null))
+            .await
+            .expect("fenced child");
+        assert_eq!(fenced.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(fenced.headers().contains_key("retry-after"));
+        f.state.serving.validation_set_ready(true).await;
+        let recovered = f
+            .app
+            .clone()
+            .oneshot(request("GET", segment_url, None, Value::Null))
+            .await
+            .expect("recovered child");
+        assert_eq!(
+            recovered.status(),
+            StatusCode::OK,
+            "the play survives a recovered authority loss"
+        );
         if encoded {
             let response = f
                 .app
@@ -1768,7 +1872,12 @@ mod tests {
         let response = f
             .app
             .clone()
-            .oneshot(request("GET", segment_url, None, Value::Null))
+            .oneshot(request(
+                "GET",
+                &without_key(segment_url, &f.token),
+                None,
+                Value::Null,
+            ))
             .await
             .expect("anonymous child");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1827,12 +1936,52 @@ mod tests {
             1,
             "the resume resurrected the reader"
         );
-        for (endpoint, position) in [
-            ("/jellyfin/Sessions/Playing/Progress", 5000),
-            ("/jellyfin/Sessions/Playing/Stopped", 7000),
+        // Progress and Ping keep the play alive; ActiveEncodings releases its
+        // encoding but keeps the binding, so the final Stopped still commits.
+        for (method, endpoint, position) in [
+            (
+                "POST",
+                "/jellyfin/Sessions/Playing/Progress".to_owned(),
+                Some(5000),
+            ),
+            (
+                "POST",
+                format!("/jellyfin/Sessions/Playing/Ping?PlaySessionId={play_id}"),
+                None,
+            ),
+            (
+                "DELETE",
+                format!("/jellyfin/Videos/ActiveEncodings?PlaySessionId={play_id}"),
+                None,
+            ),
+            (
+                "POST",
+                "/jellyfin/Sessions/Playing/Stopped".to_owned(),
+                Some(7000),
+            ),
         ] {
-            let response = f.app.clone().oneshot(request("POST", endpoint, Some(&f.token), json!({"UserId":f.user,"ItemId":f.item,"MediaSourceId":f.source,"PlaySessionId":play_id,"PlayMethod":"Transcode","PositionTicks":position*10_000}))).await.expect("native watch event");
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let body = position.map_or(Value::Null, |position: i64| json!({"UserId":f.user,"ItemId":f.item,"MediaSourceId":f.source,"PlaySessionId":play_id,"PlayMethod":"Transcode","PositionTicks":position*10_000}));
+            let response = f
+                .app
+                .clone()
+                .oneshot(request(method, &endpoint, Some(&f.token), body))
+                .await
+                .expect("native watch event");
+            assert_eq!(
+                response.status(),
+                StatusCode::NO_CONTENT,
+                "{method} {endpoint}"
+            );
+            if method == "DELETE" {
+                let released = f
+                    .state
+                    .store
+                    .media_session_route_by_incarnation(&route.incarnation_id)
+                    .await
+                    .expect("released")
+                    .expect("native row");
+                assert_eq!(released.state, "ended", "the encoding is released");
+            }
         }
         let watch = f
             .state
@@ -2065,10 +2214,11 @@ mod tests {
             old_grant.revoked_at.is_some(),
             "a replacement without Stopped releases its predecessor's grant"
         );
-        let url = next["MediaSources"][0]["DirectStreamUrl"]
-            .as_str()
-            .expect("URL");
-        let url = &mounted(url);
+        let url = &mounted(
+            next["MediaSources"][0]["DirectStreamUrl"]
+                .as_str()
+                .expect("URL"),
+        );
         let response = f
             .app
             .clone()
@@ -2155,10 +2305,15 @@ mod tests {
         let f = playback_fixture().await;
         let negotiation = negotiate(&f).await;
         let play = negotiation["PlaySessionId"].as_str().expect("play");
-        let url = negotiation["MediaSources"][0]["DirectStreamUrl"]
-            .as_str()
-            .expect("direct URL");
-        let url = &mounted(url);
+        // Without the ApiKey it carries, the authenticated URL is just a path.
+        let url = &without_key(
+            &mounted(
+                negotiation["MediaSources"][0]["DirectStreamUrl"]
+                    .as_str()
+                    .expect("direct URL"),
+            ),
+            &f.token,
+        );
         let unauthorized = f
             .app
             .clone()
@@ -2300,10 +2455,11 @@ mod tests {
             .expect("scoped link")
             .to_owned();
         assert_eq!(tag.len(), 64);
-        let direct_url = negotiation["MediaSources"][0]["DirectStreamUrl"]
-            .as_str()
-            .expect("direct URL");
-        let direct_url = &mounted(direct_url);
+        let direct_url = &mounted(
+            negotiation["MediaSources"][0]["DirectStreamUrl"]
+                .as_str()
+                .expect("direct URL"),
+        );
         assert!(
             !direct_url.contains(&tag),
             "the authenticated URL must not carry the link"
@@ -2473,11 +2629,11 @@ mod tests {
     async fn jellyfin_direct_representation_matrix_keeps_native_range_and_validator_truth() {
         let f = playback_fixture().await;
         let negotiation = negotiate(&f).await;
-        let url = negotiation["MediaSources"][0]["DirectStreamUrl"]
-            .as_str()
-            .expect("URL")
-            .to_owned();
-        let url = mounted(&url);
+        let url = mounted(
+            negotiation["MediaSources"][0]["DirectStreamUrl"]
+                .as_str()
+                .expect("URL"),
+        );
         let call = |range: Option<&str>, if_range: Option<&str>, method: &str| {
             let mut r = request(method, &url, Some(&f.token), Value::Null);
             if let Some(range) = range {
@@ -2530,11 +2686,11 @@ mod tests {
             .as_str()
             .expect("link")
             .to_owned();
-        let url = negotiation["MediaSources"][0]["DirectStreamUrl"]
-            .as_str()
-            .expect("URL")
-            .to_owned();
-        let url = mounted(&url);
+        let url = mounted(
+            negotiation["MediaSources"][0]["DirectStreamUrl"]
+                .as_str()
+                .expect("URL"),
+        );
         for enabled in [false, true] {
             f.state
                 .store
@@ -2612,10 +2768,11 @@ mod tests {
         assert_eq!(native.status(), StatusCode::UNAUTHORIZED);
         // A fresh negotiation under the current generation plays normally.
         let fresh = negotiate(&f).await;
-        let fresh_url = fresh["MediaSources"][0]["DirectStreamUrl"]
-            .as_str()
-            .expect("fresh URL");
-        let fresh_url = &mounted(fresh_url);
+        let fresh_url = &mounted(
+            fresh["MediaSources"][0]["DirectStreamUrl"]
+                .as_str()
+                .expect("fresh URL"),
+        );
         assert_eq!(
             status_of(&f, request("GET", fresh_url, Some(&f.token), Value::Null))
                 .await
@@ -3056,6 +3213,80 @@ mod tests {
                 .expect("auth refusal");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
+        // The five-segment form both pinned clients request (J0 traces):
+        // Infuse with its login header and `Range: bytes=0-`, Android TV with
+        // only the `ApiKey` from `DeliveryUrl`, in `subrip` or `vtt`.
+        let subtitle = |path: String, token: Option<&str>| {
+            let mut r = request("GET", &path, token, json!({}));
+            r.headers_mut()
+                .insert("range", "bytes=0-".parse().expect("range"));
+            let app = f.app.clone();
+            async move {
+                let response = app.oneshot(r).await.expect("subtitle");
+                let status = response.status();
+                let kind = response
+                    .headers()
+                    .get("content-type")
+                    .map(|v| v.to_str().expect("type").to_owned())
+                    .unwrap_or_default();
+                let bytes = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("body")
+                    .to_bytes();
+                (
+                    status,
+                    kind,
+                    String::from_utf8(bytes.to_vec()).expect("UTF8"),
+                )
+            }
+        };
+        let base = format!(
+            "/jellyfin/Videos/{}/{}/Subtitles/{global_index}",
+            f.item, f.source
+        );
+        let (status, kind, text) = subtitle(format!("{base}/0/Stream.srt"), Some(&f.token)).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(kind.starts_with("application/x-subrip"));
+        assert!(text.contains("00:00:00,000 --> 00:00:02,125"), "{text}");
+        for (format, timing) in [
+            ("subrip", "00:00:03,456 --> 00:00:05,789"),
+            ("vtt", "00:03.456 --> 00:05.789"),
+        ] {
+            let (status, _, text) =
+                subtitle(format!("{base}/0/Stream.{format}?ApiKey={}", f.token), None).await;
+            assert_eq!(status, StatusCode::OK, "{format}: {text}");
+            assert!(text.contains(timing), "{format}: {text}");
+        }
+        // A start position is Jellyfin's window: earlier cues dropped, the
+        // rest moved by the start unless CopyTimestamps keeps source times.
+        let (status, _, text) =
+            subtitle(format!("{base}/30000000/Stream.vtt"), Some(&f.token)).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(!text.contains("First"), "{text}");
+        assert!(
+            text.contains("00:00:00.456 --> 00:00:02.789\nSecond"),
+            "{text}"
+        );
+        let (status, _, text) = subtitle(
+            format!("{base}/Stream.srt?StartPositionTicks=30000000&CopyTimestamps=true"),
+            Some(&f.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(text, "1\n00:00:03,456 --> 00:00:05,789\nSecond\n\n");
+        assert_eq!(
+            subtitle(format!("{base}/0/Stream.ass"), Some(&f.token))
+                .await
+                .0,
+            StatusCode::NOT_FOUND,
+            "only implemented formats are served"
+        );
+        assert_eq!(
+            subtitle(format!("{base}/0/Stream.vtt"), None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
         let invalid = format!(
             "/jellyfin/Videos/{}/{}/Subtitles/0/Stream.vtt",
             f.item, f.source
@@ -3633,5 +3864,535 @@ mod tests {
         assert!(!encoded.to_string().contains("secret"));
         assert!(encoded.get("RunTimeTicks").is_none());
         assert_eq!(encoded["SupportsDirectPlay"], false);
+    }
+
+    fn subtitle_probe(container: &str) -> plurx_core::domain::ProbeResult {
+        use plurx_core::domain::{AudioStream, ProbeResult, SubtitleStream};
+        let track = |index: i64, codec: &str| SubtitleStream {
+            index,
+            codec: codec.into(),
+            language: Some("eng".into()),
+            title: None,
+            default: false,
+            forced: false,
+            hearing_impaired: false,
+        };
+        ProbeResult {
+            duration_ms: Some(100_000),
+            container: Some(container.into()),
+            video_codec: Some("h264".into()),
+            video_codec_tag: Some("avc1".into()),
+            video_profile: Some("Main".into()),
+            width: Some(1920),
+            height: Some(1080),
+            bit_depth: Some(8),
+            bitrate: Some(100_000),
+            audio_streams: vec![AudioStream {
+                index: 0,
+                codec: "aac".into(),
+                channel_layout: None,
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                language: None,
+                title: None,
+                default: true,
+            }],
+            subtitle_streams: vec![
+                track(2, "subrip"),
+                track(3, "hdmv_pgs_subtitle"),
+                track(4, "ass"),
+            ],
+            raw_json: Some(
+                json!({"streams":[
+                    {"index":0,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"},
+                    {"index":1,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+                    {"index":2,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng"}},
+                    {"index":3,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng"}},
+                    {"index":4,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}]})
+                .to_string(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn jellyfin_subtitle_delivery_follows_each_client_profile_with_a_requestable_url() {
+        let f = playback_fixture().await;
+        let path = f
+            .root
+            .path()
+            .canonicalize()
+            .expect("root")
+            .join("movie.mp4");
+        f.state
+            .store
+            .upsert_file(
+                f.native_item,
+                path.to_str().expect("path"),
+                16,
+                1,
+                &subtitle_probe("mkv"),
+            )
+            .await
+            .expect("probe");
+        let ask = |subtitles: Value, selected: i64| {
+            json!({"UserId":f.user,"MediaSourceId":f.source,"AudioStreamIndex":0,"SubtitleStreamIndex":selected,
+                "DeviceProfile":{"DirectPlayProfiles":[{"Type":"Video","Container":"mkv","VideoCodec":"h264","AudioCodec":"aac"}],
+                "SubtitleProfiles":subtitles}})
+        };
+        let negotiate_with = |body: Value| {
+            let request = request(
+                "POST",
+                &format!("/jellyfin/Items/{}/PlaybackInfo", f.item),
+                Some(&f.token),
+                body,
+            );
+            let app = f.app.clone();
+            async move { json_call(&app, request).await }
+        };
+        let streams = |body: &Value| {
+            body["MediaSources"][0]["MediaStreams"]
+                .as_array()
+                .expect("streams")
+                .iter()
+                .filter(|s| s["Type"] == "Subtitle")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // Jellyfin Android TV 0.19.10: the direct file's own tracks are
+        // embedded, the bitmap one under Jellyfin's codec name.
+        let android = json!([
+            {"Format":"vtt","Method":"Embed"},{"Format":"vtt","Method":"External"},{"Format":"vtt","Method":"Hls"},
+            {"Format":"subrip","Method":"Embed"},{"Format":"subrip","Method":"External"},
+            {"Format":"pgssub","Method":"Embed"},{"Format":"pgssub","Method":"Encode"}]);
+        let (status, body) = negotiate_with(ask(android, -1)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["MediaSources"][0]["SupportsDirectPlay"], true);
+        let tracks = streams(&body);
+        assert_eq!(tracks.len(), 3);
+        assert!(
+            tracks[..2].iter().all(|s| s["DeliveryMethod"] == "Embed"),
+            "{tracks:?}"
+        );
+        assert!(tracks[..2].iter().all(|s| s.get("DeliveryUrl").is_none()));
+        // Android TV cannot render ASS itself: a converted VTT sidecar.
+        assert_eq!(tracks[2]["DeliveryMethod"], "External", "{tracks:?}");
+        assert_eq!(tracks[2]["IsTextSubtitleStream"], true);
+        assert!(tracks[2]["DeliveryUrl"]
+            .as_str()
+            .is_some_and(|url| url.contains("/Subtitles/4/0/Stream.vtt?ApiKey=")));
+        // Infuse 8.5.6: External VTT only. The text track becomes a sidecar at
+        // the five-segment route both clients request; the bitmap one cannot.
+        let infuse = json!([{"Format":"vtt","Method":"External","AllowChunkedResponse":true},
+            {"Format":"ass","Method":"External"},{"Format":"ssa","Method":"External"}]);
+        let (status, body) = negotiate_with(ask(infuse.clone(), -1)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let tracks = streams(&body);
+        assert_eq!(tracks[0]["Index"], 2);
+        assert_eq!(tracks[0]["DeliveryMethod"], "External");
+        assert_eq!(tracks[0]["IsExternalUrl"], false);
+        assert_eq!(
+            tracks[0]["DeliveryUrl"],
+            format!(
+                "/Videos/{}/{}/Subtitles/2/0/Stream.vtt?ApiKey={}",
+                f.item, f.source, f.token
+            )
+        );
+        assert_eq!(tracks[1]["DeliveryMethod"], "Encode");
+        assert!(tracks[1].get("DeliveryUrl").is_none());
+        // ASS is text the native extractor converts: a sidecar, not a burn.
+        assert_eq!(tracks[2]["DeliveryMethod"], "External");
+        let (status, body) = negotiate_with(ask(infuse.clone(), 4)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["MediaSources"][0]["SupportsDirectPlay"], true,
+            "a sidecar-capable selection keeps direct play: {body}"
+        );
+        // Selecting a track the direct file cannot deliver makes the play a
+        // transcode; this profile offers none, so negotiation refuses.
+        let (status, body) = negotiate_with(ask(infuse.clone(), 3)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ErrorCode"], "NotSupported", "{body}");
+        // Infuse's own request (J0) declares no DirectPlayProfiles and asks
+        // for HTTP direct play: it streams the file itself, tracks and all,
+        // so even a bitmap selection stays a direct play.
+        let mut own = infuse_request(&f);
+        own["SubtitleStreamIndex"] = json!(3);
+        own["DeviceProfile"]["SubtitleProfiles"] = infuse;
+        let (status, body) = negotiate_with(own).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["MediaSources"][0]["SupportsDirectPlay"], true,
+            "{body}"
+        );
+        // No profile list grants nothing.
+        let (_, body) = negotiate_with(ask(Value::Null, -1)).await;
+        assert!(streams(&body)
+            .iter()
+            .all(|s| s["DeliveryMethod"] == "Encode"));
+    }
+
+    /// Infuse 8.5.6's normal-play PlaybackInfo body (J0 `profiles[0]`).
+    fn infuse_request(f: &PlaybackFixture) -> Value {
+        json!({"AutoOpenLiveStream":true,"IsPlayback":true,"UserId":f.user,"EnableDirectPlay":true,
+            "MediaSourceId":f.source,"MaxStreamingBitrate":200_000_000,"DirectPlayProtocols":["Http"],
+            "DeviceProfile":{"MaxStreamingBitrate":200_000_000,"MaxStaticBitrate":200_000_000,
+                "MusicStreamingTranscodingBitrate":192_000,
+                "TranscodingProfiles":[
+                    {"MinSegments":1,"AudioCodec":"aac","Container":"aac","BreakOnNonKeyFrames":true,"MaxAudioChannels":"2","Type":"Audio","Context":"Streaming","Protocol":"hls"},
+                    {"AudioCodec":"aac","MinSegments":1,"Container":"ts","ManifestSubtitles":"vtt","MaxAudioChannels":"2","BreakOnNonKeyFrames":true,"Type":"Video","Context":"Streaming","VideoCodec":"hevc,h264,av1","Protocol":"hls"}],
+                "SubtitleProfiles":[{"AllowChunkedResponse":true,"Format":"vtt","Method":"External"},
+                    {"Format":"ass","Method":"External"},{"Format":"ssa","Method":"External"}]}})
+    }
+    #[tokio::test]
+    async fn jellyfin_infuse_direct_request_without_a_play_id_uses_its_own_newest_direct_play() {
+        let f = playback_fixture().await;
+        // Infuse's PlaybackInfo, as J0 captured it: no DirectPlayProfiles,
+        // `EnableDirectPlay` with `DirectPlayProtocols: ["Http"]`.
+        let infuse_info = |body: Value| {
+            let request = request(
+                "POST",
+                &format!("/jellyfin/Items/{}/PlaybackInfo", f.item),
+                Some(&f.token),
+                body,
+            );
+            let app = f.app.clone();
+            async move { json_call(&app, request).await }
+        };
+        let (status, older) = infuse_info(infuse_request(&f)).await;
+        assert_eq!(status, StatusCode::OK, "{older}");
+        assert_eq!(
+            older["MediaSources"][0]["SupportsDirectPlay"], true,
+            "{older}"
+        );
+        assert!(older["MediaSources"][0].get("TranscodingUrl").is_none());
+        let (_, newer) = infuse_info(infuse_request(&f)).await;
+        let newest = newer["PlaySessionId"].as_str().expect("play");
+        let mut odd = infuse_request(&f);
+        odd["DirectPlayProtocols"] = json!(["Carrier-Pigeon"]);
+        assert_eq!(infuse_info(odd).await.0, StatusCode::BAD_REQUEST);
+        // The direct URL Infuse builds: login header, `MediaSourceId`, `Static`.
+        let infuse = format!(
+            "/jellyfin/Videos/{}/stream?MediaSourceId={}&Static=true",
+            f.item, f.source
+        );
+        let mut ranged = request("GET", &infuse, Some(&f.token), Value::Null);
+        ranged
+            .headers_mut()
+            .insert("range", "bytes=0-".parse().expect("range"));
+        let (status, bytes) = status_of(&f, ranged).await;
+        assert_eq!(
+            status,
+            StatusCode::PARTIAL_CONTENT,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(bytes, b"0123456789abcdef");
+        let scope = f
+            .state
+            .store
+            .jellyfin_login_scope(plurx_core::auth::hash_token(&f.token))
+            .await
+            .expect("scope")
+            .expect("login");
+        let state_of = |play: String| {
+            let store = std::sync::Arc::clone(&f.state.store);
+            let scope = scope.clone();
+            async move {
+                store
+                    .jellyfin_play(&play, &scope)
+                    .await
+                    .expect("read")
+                    .expect("play")
+                    .state
+            }
+        };
+        assert_eq!(state_of(newest.to_owned()).await, "active");
+        assert_ne!(
+            state_of(older["PlaySessionId"].as_str().expect("play").to_owned()).await,
+            "active",
+            "the request resolved the newest negotiation only"
+        );
+        // Without a login the same URL is not a capability.
+        assert_eq!(
+            status_of(&f, request("GET", &infuse, None, Value::Null))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        // Another source of the item resolves nothing.
+        let other = format!(
+            "/jellyfin/Videos/{}/stream?MediaSourceId={}&Static=true",
+            f.item, f.item
+        );
+        assert_eq!(
+            status_of(&f, request("GET", &other, Some(&f.token), Value::Null))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn jellyfin_contract_routes_answer_their_minimum_semantics_and_are_counted() {
+        let f = playback_fixture().await;
+        let call = |method: &str, path: &str, token: Option<&str>, body: Value| {
+            let request = request(method, path, token, body);
+            let app = f.app.clone();
+            async move {
+                let response = app.oneshot(request).await.expect("response");
+                let status = response.status();
+                let bytes = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("body")
+                    .to_bytes();
+                (
+                    status,
+                    serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+                )
+            }
+        };
+        let token = Some(f.token.as_str());
+        // Public users: always empty, no login needed.
+        assert_eq!(
+            call("GET", "/jellyfin/Users/Public", None, Value::Null).await,
+            (StatusCode::OK, json!([]))
+        );
+        // Authenticated system information: the baseline plus Plurx's build.
+        assert_eq!(
+            call("GET", "/jellyfin/System/Info", None, Value::Null)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, info) = call("GET", "/jellyfin/System/Info", token, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(info["Version"], "10.11.11");
+        assert!(info["PackageName"]
+            .as_str()
+            .is_some_and(|p| p.starts_with("plurx ")));
+        assert!(info.get("ProgramDataPath").is_none() && info.get("LogPath").is_none());
+        // Capabilities: validated and accepted, not stored.
+        assert_eq!(
+            call("POST", "/jellyfin/Sessions/Capabilities?PlayableMediaTypes=Video&SupportsMediaControl=false", token, Value::Null).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/jellyfin/Sessions/Capabilities?SupportsMediaControl=maybe",
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/jellyfin/Sessions/Capabilities/Full",
+                token,
+                json!({"PlayableMediaTypes":["Video"]})
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/jellyfin/Sessions/Capabilities/Full",
+                token,
+                json!([])
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Search hints over the catalog search.
+        let (status, hints) = call(
+            "GET",
+            "/jellyfin/Search/Hints?searchTerm=direct&Limit=10",
+            token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{hints}");
+        assert_eq!(hints["TotalRecordCount"], 1);
+        assert_eq!(hints["SearchHints"][0]["Id"], f.item);
+        assert_eq!(hints["SearchHints"][0]["Type"], "Movie");
+        let (_, people) = call(
+            "GET",
+            "/jellyfin/Search/Hints?searchTerm=direct&IncludeItemTypes=Person",
+            token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(people["TotalRecordCount"], 0);
+        assert_eq!(
+            call("GET", "/jellyfin/Search/Hints", token, Value::Null)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Downloads: an honest refusal for a mapped item.
+        let (status, refused) = call(
+            "GET",
+            &format!("/jellyfin/Items/{}/Download", f.item),
+            token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(refused["code"], "download_not_offered");
+        // Watched state through the 10.9+ route, user optional.
+        let played = format!("/jellyfin/UserPlayedItems/{}", f.item);
+        let (status, data) = call("POST", &played, token, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["Played"], true);
+        let (status, data) = call(
+            "DELETE",
+            &format!("{played}?userId={}", f.user),
+            token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["Played"], false);
+        assert_eq!(
+            call(
+                "POST",
+                &format!("{played}?userId={}", f.item),
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        // Ping and ActiveEncodings act only on a named play of this login.
+        let mut second = request(
+            "POST",
+            "/jellyfin/Users/AuthenticateByName",
+            None,
+            json!({"Username":"catalog-admin","Pw":"supersecret"}),
+        );
+        second.headers_mut().insert("x-emby-authorization", "MediaBrowser Client=\"Jellyfin+Android+TV\", Device=\"other TV\", DeviceId=\"second-device\", Version=\"0.19.10\"".parse().expect("metadata"));
+        let (status, second) = json_call(&f.app, second).await;
+        assert_eq!(status, StatusCode::OK);
+        let other = second["AccessToken"]
+            .as_str()
+            .expect("second login")
+            .to_owned();
+        let play = negotiate(&f).await["PlaySessionId"]
+            .as_str()
+            .expect("play")
+            .to_owned();
+        let direct = format!(
+            "/jellyfin/Videos/{}/stream?MediaSourceId={}&PlaySessionId={play}",
+            f.item, f.source
+        );
+        assert_eq!(
+            status_of(&f, request("GET", &direct, token, Value::Null))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                "POST",
+                &format!("/jellyfin/Sessions/Playing/Ping?playSessionId={play}"),
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/jellyfin/Sessions/Playing/Ping",
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                "POST",
+                &format!(
+                    "/jellyfin/Sessions/Playing/Ping?playSessionId={play}&deviceId=someone-else"
+                ),
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                "DELETE",
+                "/jellyfin/Videos/ActiveEncodings?deviceId=catalog-contract",
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST,
+            "never a kill by device alone"
+        );
+        for (method, path) in [
+            (
+                "POST",
+                format!("/jellyfin/Sessions/Playing/Ping?playSessionId={play}"),
+            ),
+            (
+                "DELETE",
+                format!("/jellyfin/Videos/ActiveEncodings?playSessionId={play}"),
+            ),
+        ] {
+            assert_eq!(
+                call(method, &path, Some(&other), Value::Null).await.0,
+                StatusCode::NOT_FOUND,
+                "{method} {path}: another login's play is not this login's"
+            );
+        }
+        assert_eq!(
+            call("DELETE", &format!("/jellyfin/Videos/ActiveEncodings?deviceId=catalog-contract&playSessionId={play}"), token, Value::Null).await.0,
+            StatusCode::NO_CONTENT
+        );
+        // Every request above is counted under its template; an unknown path
+        // under `unmatched` (a delta: the counter is process-wide).
+        let unmatched = || {
+            super::metrics::prometheus()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix(
+                        "plurx_jellyfin_requests_total{route=\"unmatched\",outcome=\"not_found\"} ",
+                    )
+                    .map(|n| n.parse::<u64>().expect("count"))
+                })
+                .unwrap_or(0)
+        };
+        let before = unmatched();
+        call("GET", "/jellyfin/No/Such/Route", token, Value::Null).await;
+        assert!(unmatched() > before, "an unknown route is counted");
+        let text = super::metrics::prometheus();
+        for line in [
+            "route=\"/jellyfin/Search/Hints\",outcome=\"ok\"",
+            "route=\"/jellyfin/Items/{item_id}/Download\",outcome=\"forbidden\"",
+            "route=\"/jellyfin/Sessions/Playing/Ping\",outcome=\"refused\"",
+            "route=\"unmatched\",outcome=\"not_found\"",
+        ] {
+            assert!(text.contains(line), "{line} missing from:\n{text}");
+        }
+        assert!(!text.contains(&f.item) && !text.contains(&f.token) && !text.contains(&play));
     }
 }
