@@ -1,6 +1,6 @@
 # Grouped library rows — implementation and acceptance status
 
-**Status:** merged; post-merge checks in progress · **Updated:** 2026-10-05 · **Branch:**
+**Status:** native parity validated; merge tracked on PR #823 · **Updated:** 2026-10-05 · **Branch:**
 `codex/grouped-library-rows` · **Pull request:** [#821](http://192.168.4.7:3000/noirr/plurx/pulls/821)
 
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md), which maps the web
@@ -154,3 +154,86 @@ keyboard adapter; the row now calls an adapter-owned wiring function too.
 The merged-source keyboard navigation check and row-boundary browser case
 passed. The follow-up corrects only the adapter boundary, without relaxing
 its enforcement or changing keyboard behavior.
+
+
+## Native Android and Apple parity — 2026-10-05
+
+The approved mobile renders also cover native Android and iOS. The initial
+web-only interpretation was incorrect; this follow-up completes that scope
+in one native-client PR, including shared Android TV and tvOS screens.
+Work uses a fresh agent-owned clone, never the user's checkout.
+
+| Surface | State | Acceptance / evidence |
+|---|---|---|
+| Native grouping | implemented | Same five sort dimensions, unknown groups, stable row keys and full filtered membership. |
+| Android | validated | Existing LibraryPager and MediaRow; saved Rows/Grid, title search, visible group index, View all, partial error Retry. Twelve JVM and six phone/TV UI cases passed. |
+| Apple | validated | Existing LibraryGridCoordinator and cards; saved Rows/Grid, visible group index, View all destination, partial error Retry. Ten iPhone-simulator cases passed; iOS/tvOS builds passed. |
+| Paging ownership | implemented | Rows request all pages through the existing pager; Grid keeps viewport prefetch. No second loader. |
+| Review and tests | complete | One adversarial review, all five findings addressed, then focused tests; only failed cases rerun. |
+| Merge | pending | One batched native PR; retain regression trailers and monitor remaining tests under the user's merge-first direction. |
+
+Rows are the default on both native platforms. Native lazy row containers
+keep cards bounded to the viewport without limiting group membership.
+Grouping and filtering run off the UI thread. Release counters are Apple
+build 209 and Android versionCode 146; this work does not deploy a build or
+change playback.
+
+
+Native build evidence before review: Android debug APK, JVM test sources,
+and instrumentation APK compile; iOS and tvOS application builds pass;
+iOS XCTest sources compile with build-for-testing. No tests have been run
+for this native follow-up before its adversarial review.
+
+
+### Native adversarial review — 2026-10-05
+
+The one read-only review of `2b284bea9` requested five corrections, all
+implemented before executing tests:
+
+- Restore authoritative watch/rollup refresh after Apple detail navigation;
+  keep the prior complete row snapshot mounted while replacement pages load.
+- Show the shared incomplete-result message and Retry inside Android's
+  expanded group, not only underneath its full-screen sheet.
+- Match the approved visible horizontal letter/year index, with keyed buttons
+  and an accessible selected state.
+- Use landscape home-media artwork and recording metadata; Apple home
+  collections initially select recording-date groups.
+- Reuse month labels and one date formatter per grouping pass; skip Apple
+  grouping in Grid and cancel superseded grouping snapshots.
+
+Native PR: [#823](http://192.168.4.7:3000/noirr/plurx/pulls/823). Tests follow
+these corrections; their final commands and outcomes are recorded on the PR.
+
+
+### Native focused evidence after review
+
+Android: all 12 targeted JVM tests pass (`LibraryGroupsTest`,
+`LibraryPagerWatchFilterTest`, `LibrarySortTest`). Three Android TV UI tests
+pass: group jump/expansion/return, retry while expanded, and D-pad focus
+retention across a late page. All three phone acceptance cases also pass, including 16:9 home-video artwork and recording-year defaults.
+
+Apple: all nine grouping/coordinator cases have passed on an owned iPhone
+simulator. Only the failed partial-page retry case was rerun: the cause was
+the coordinator's reuse of Home's cached-content error suppression, which
+turned a partial-library failure into an immediate retry loop. The coordinator
+now retains the error for explicit Retry. The separate affected shelf-metadata
+regression also passes. iOS and tvOS compile after the corrections.
+
+The merge base remains `1dfcca2dd`; no user checkout or physical device was
+used. Apple build 209 and Android versionCode 146 remain the claimed counters.
+
+
+The phone navigation fixture initially selected both visible “View all”
+actions. Each action now has an accessible group-specific name; only that
+failed phone case was rerun. Final local evidence is 12 Android JVM cases,
+three Android TV UI/focus cases, three phone acceptance cases, and ten Apple
+cases (nine grouping/coordinator plus the existing card-metadata contract).
+The final PR body carries configured CI outcomes and the landing receipt.
+
+
+Native fast lane 4177 passed scope and mobile version validation, then stopped
+at history-check. This PR records its native regression anchors, updates the
+superseded watch-filter wiring anchor to the combined Rows/filter/search
+paging demand, and records the malformed immutable Python trailer in #822 as
+an erratum. The audit rules remain unchanged; the new PR trailers resolve
+against the current tree before landing.
