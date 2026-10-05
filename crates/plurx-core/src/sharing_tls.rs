@@ -486,6 +486,19 @@ impl SharingTlsListener {
 mod tests {
     use super::*;
     const NOW: i64 = 1_800_000_000;
+    /// `NodeTls` refuses a group- or world-writable key directory by design,
+    /// and a temporary directory inherits the runner umask (002 on some
+    /// hosts), so every fixture key directory is made private first.
+    fn private_tls_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("synthetic TLS directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("private synthetic TLS directory");
+        }
+        dir
+    }
     #[tokio::test]
     async fn sharing_tls_numeric_dial_rejects_non_tailnet_addresses_and_names() {
         let egress = PinnedEgress::LocalAddress("127.0.0.1".parse().expect("synthetic bind"));
@@ -526,7 +539,7 @@ mod tests {
     }
     #[test]
     fn sharing_tls_hot_reload_retains_configuration_on_failure() {
-        let dir = tempfile::tempdir().expect("synthetic TLS directory");
+        let dir = private_tls_dir();
         let node = LiveNodeTls::open(dir.path(), NOW).expect("live identity");
         let first = node.config().expect("verified configuration");
         node.renew(NOW + 1).expect("not yet due");
@@ -546,7 +559,7 @@ mod tests {
     }
     #[tokio::test]
     async fn sharing_tls_silent_handshake_does_not_block_another_peer() {
-        let dir = tempfile::tempdir().expect("synthetic TLS directory");
+        let dir = private_tls_dir();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let identity = Arc::new(LiveNodeTls::open(dir.path(), now).expect("live node"));
         let pin = identity.status().expect("node status").0;
@@ -577,7 +590,7 @@ mod tests {
     }
     #[test]
     fn sharing_tls_renewal_preserves_pin_and_refuses_lost_key() {
-        let dir = tempfile::tempdir().expect("synthetic node TLS directory");
+        let dir = private_tls_dir();
         let first = NodeTls::open(dir.path(), NOW).expect("provision node identity");
         let renewed =
             NodeTls::open(dir.path(), NOW + YEAR - RENEW_BEFORE + 1).expect("renew with same key");
@@ -590,7 +603,7 @@ mod tests {
     }
     #[test]
     fn sharing_tls_failed_renewal_preserves_identity_and_recovers() {
-        let dir = tempfile::tempdir().expect("synthetic node TLS directory");
+        let dir = private_tls_dir();
         let first = NodeTls::initialize(dir.path(), NOW).expect("provision identity");
         assert!(NodeTls::initialize(dir.path(), NOW).is_err());
         let key_path = dir.path().join(KEY_FILE);
@@ -630,7 +643,7 @@ mod tests {
     #[tokio::test]
     async fn sharing_tls_real_handshake_sends_no_application_bytes_for_wrong_pin() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let dir = tempfile::tempdir().expect("synthetic TLS directory");
+        let dir = private_tls_dir();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let node = NodeTls::open(dir.path(), now).expect("synthetic node");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
