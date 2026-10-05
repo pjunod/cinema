@@ -56,6 +56,60 @@ fn watch_map_on(
     Ok(rows)
 }
 
+/// The watch-rollup statements' plan is pinned so `sqlite_stat1` cannot
+/// change it (K-05). The plan without statistics drives from the requested
+/// trees: each root and its descendants by rowid and `idx_items_parent`, then
+/// each tree row's item by rowid. With statistics (the Hiqlite voters always
+/// have them: the vendored state machine runs `PRAGMA optimize`) the planner
+/// instead skip-scanned every item through `idx_items_library_kind` for the
+/// playable kinds and probed the tree through an automatic index, 2.6 → 7.9 ms
+/// on the K-05 fixture. So: `NOT INDEXED` on the seed and on the leaf join
+/// leaves them only the rowid, `INDEXED BY idx_items_parent` names the one
+/// index the recursion uses, and `CROSS JOIN` keeps the tree as the outer
+/// loop. `watch_rollup_plans_do_not_depend_on_statistics` pins the plan on
+/// both backends' statements. The Hiqlite statements in `hiqlite_media.rs`
+/// carry the same three pins.
+///
+/// One walk for the whole page: the recursion carries the root it started
+/// from alongside each descendant, so a single pass can group the leaf counts
+/// back onto the containers that asked. UNION (not UNION ALL) still dedupes,
+/// so a parent cycle terminates — and a (root, id) pair is unique per root, so
+/// two containers on the same page never contaminate each other's count.
+fn watch_rollups_sql(list: &str) -> String {
+    format!(
+        "WITH RECURSIVE tree(root, id) AS (
+                 SELECT id, id FROM items NOT INDEXED WHERE id IN ({list})
+                 UNION
+                 SELECT t.root, i.id FROM items i INDEXED BY idx_items_parent
+                 JOIN tree t ON i.parent_id = t.id
+             )
+             SELECT t.root, COUNT(*), COALESCE(SUM(w.watched), 0)
+             FROM tree t
+             CROSS JOIN items i NOT INDEXED ON i.id = t.id
+             LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
+             WHERE i.kind IN ({PLAYABLE_KINDS})
+             GROUP BY t.root"
+    )
+}
+
+/// [`watch_rollups_sql`] for one container, with the same pins.
+fn watch_rollup_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(id) AS (
+             SELECT id FROM items NOT INDEXED WHERE id = ?2
+             UNION
+             SELECT i.id FROM items i INDEXED BY idx_items_parent
+             JOIN tree t ON i.parent_id = t.id
+         )
+         SELECT COUNT(*),
+                COALESCE(SUM(w.watched), 0)
+         FROM tree t
+         CROSS JOIN items i NOT INDEXED ON i.id = t.id
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
+         WHERE i.kind IN ({PLAYABLE_KINDS})"
+    )
+}
+
 fn watch_rollups_on(
     conn: &rusqlite::Connection,
     user_id: i64,
@@ -67,26 +121,7 @@ fn watch_rollups_on(
     // ids are our own row ids (trusted i64s), so an inline IN-list is
     // safe — same reasoning `child_counts` runs on.
     let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-    // One walk for the whole page: the recursion carries the root it
-    // started from alongside each descendant, so a single pass can
-    // group the leaf counts back onto the containers that asked.
-    // UNION (not UNION ALL) still dedupes, so a parent cycle
-    // terminates — and a (root, id) pair is unique per root, so two
-    // containers on the same page never contaminate each other's
-    // count.
-    let sql = format!(
-        "WITH RECURSIVE tree(root, id) AS (
-                 SELECT id, id FROM items WHERE id IN ({list})
-                 UNION
-                 SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id
-             )
-             SELECT t.root, COUNT(*), COALESCE(SUM(w.watched), 0)
-             FROM tree t
-             JOIN items i ON i.id = t.id
-             LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
-             WHERE i.kind IN ({PLAYABLE_KINDS})
-             GROUP BY t.root"
-    );
+    let sql = watch_rollups_sql(&list);
     super::trace_statement("watch_rollups", &sql);
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
@@ -536,23 +571,10 @@ impl WatchStore for SqliteStore {
 
     async fn watch_rollup(&self, user_id: i64, item_id: i64) -> Result<WatchRollup, StoreError> {
         self.watch_read_pooled(move |conn| {
-            let (leaves, watched) = conn.query_row(
-                &format!(
-                    "WITH RECURSIVE tree(id) AS (
-                         SELECT id FROM items WHERE id = ?2
-                         UNION
-                         SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id
-                     )
-                     SELECT COUNT(*),
-                            COALESCE(SUM(w.watched), 0)
-                     FROM tree t
-                     JOIN items i ON i.id = t.id
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
-                     WHERE i.kind IN ({PLAYABLE_KINDS})"
-                ),
-                params![user_id, item_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )?;
+            let (leaves, watched) =
+                conn.query_row(&watch_rollup_sql(), params![user_id, item_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })?;
             Ok(WatchRollup { leaves, watched })
         })
         .await
@@ -662,6 +684,137 @@ mod tests {
             "SEARCH w USING INDEX sqlite_autoindex_watch_state_1 (user_id=? AND item_id=?)",
             "{plan:?}"
         );
+    }
+
+    /// `EXPLAIN QUERY PLAN` detail lines for every statement in `statements`
+    /// on `store`'s writer connection, user 1 and item 1 bound positionally.
+    async fn plans_of(
+        store: &SqliteStore,
+        statements: Vec<(&'static str, String)>,
+    ) -> Vec<(&'static str, Vec<String>)> {
+        store
+            .with_conn(move |conn| {
+                let mut plans = Vec::new();
+                for (name, sql) in statements {
+                    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let arity = stmt.parameter_count();
+                    let params = (0..arity).map(|_| 1_i64).collect::<Vec<_>>();
+                    let details = stmt
+                        .query_map(rusqlite::params_from_iter(params), |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    plans.push((name, details));
+                }
+                Ok(plans)
+            })
+            .await
+            .expect("plans")
+    }
+
+    /// K-05: the watch-rollup plan is the same with and without
+    /// `sqlite_stat1`, and it drives from the requested trees. The statistics
+    /// are the K-05 fixture's (`analysis_limit = 400; ANALYZE`, recorded in
+    /// `benchmarks/evidence/query-plans-012d8a3a.md`); the Hiqlite voters
+    /// carry the same shape because the vendored state machine runs
+    /// `PRAGMA optimize`. The statement as it was before the pins is the
+    /// control: with these statistics it skip-scans every item through
+    /// `idx_items_library_kind`, which is what made it 3x slower, so this test
+    /// fails if the statistics stop provoking the regression as well as if a
+    /// pin is removed. The replicated statements are planned on the standalone
+    /// schema, whose `items` and `watch_state` indexes are the same ones.
+    #[tokio::test]
+    async fn watch_rollup_plans_do_not_depend_on_statistics() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let unpinned = format!(
+            "WITH RECURSIVE tree(root, id) AS (
+                 SELECT id, id FROM items WHERE id IN (1,2,3)
+                 UNION
+                 SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id
+             )
+             SELECT t.root, COUNT(*), COALESCE(SUM(w.watched), 0)
+             FROM tree t
+             JOIN items i ON i.id = t.id
+             LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
+             WHERE i.kind IN ({})
+             GROUP BY t.root",
+            super::PLAYABLE_KINDS
+        );
+        #[cfg_attr(not(feature = "hiqlite-store"), allow(unused_mut))]
+        let mut statements = vec![
+            ("sqlite watch_rollups", super::watch_rollups_sql("1,2,3")),
+            ("sqlite watch_rollup", super::watch_rollup_sql()),
+        ];
+        #[cfg(feature = "hiqlite-store")]
+        statements.extend([
+            (
+                "hiqlite watch_rollups",
+                crate::store::hiqlite_media::watch_rollups_sql(),
+            ),
+            (
+                "hiqlite watch_rollup",
+                crate::store::hiqlite_media::watch_rollup_sql(),
+            ),
+            (
+                "hiqlite watch_summary",
+                crate::store::hiqlite_media::watch_summary_sql(),
+            ),
+        ]);
+        let without = plans_of(&store, statements.clone()).await;
+
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "ANALYZE;
+                     DELETE FROM sqlite_stat1;
+                     INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES
+                         ('items', 'idx_items_book_work', '0 0'),
+                         ('items', 'idx_items_missing_artwork', '75600 401'),
+                         ('items', 'idx_items_added', '75600 1'),
+                         ('items', 'idx_items_parent', '75600 23'),
+                         ('items', 'idx_items_library_kind', '75600 401 401'),
+                         ('files', 'idx_files_item', '100000 2'),
+                         ('files', 'sqlite_autoindex_files_1', '100000 1'),
+                         ('watch_state', 'idx_watch_updated', '35000 401 1'),
+                         ('watch_state', 'sqlite_autoindex_watch_state_1', '35000 401 1');
+                     ANALYZE sqlite_schema;",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("load the fixture's statistics");
+        let control = plans_of(&store, vec![("unpinned", unpinned)]).await;
+        assert!(
+            control[0]
+                .1
+                .iter()
+                .any(|line| line == "SCAN i USING COVERING INDEX idx_items_library_kind"),
+            "the statistics no longer provoke the K-05 regression, so this test proves \
+             nothing about the pins: {control:?}"
+        );
+        let with = plans_of(&store, statements).await;
+
+        assert_eq!(without, with, "a watch-rollup plan changed with statistics");
+        for (name, plan) in &with {
+            assert!(
+                plan.iter()
+                    .any(|line| line
+                        == "SEARCH i USING COVERING INDEX idx_items_parent (parent_id=?)"),
+                "{name}: {plan:?}"
+            );
+            assert!(
+                plan.iter()
+                    .any(|line| line == "SEARCH i USING INTEGER PRIMARY KEY (rowid=?)"),
+                "{name}: {plan:?}"
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|line| line.contains("idx_items_library_kind")
+                        || line.contains("AUTOMATIC")),
+                "{name}: {plan:?}"
+            );
+        }
     }
 
     #[tokio::test]

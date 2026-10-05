@@ -3935,6 +3935,73 @@ impl MediaStore for HiqliteAuthStore {
 
 const PLAYABLE_KINDS: &str = "'movie','episode','video','audiobook'";
 
+/// The replicated watch-rollup statements, with the plan pins (`NOT INDEXED`
+/// seed and leaf join, `INDEXED BY idx_items_parent` recursion, `CROSS JOIN`
+/// tree-first order) that `sqlite/watch.rs`'s `watch_rollups_sql` explains:
+/// the vendored state machine runs `PRAGMA optimize`, so every voter has
+/// `sqlite_stat1`, and with it the unpinned statement skip-scanned every item
+/// through `idx_items_library_kind` (K-05: 2.6 → 7.9 ms on the fixture).
+/// `watch_rollup_plans_do_not_depend_on_statistics` pins these too.
+pub(super) fn watch_rollups_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(root, id) AS ( \
+             SELECT id, id FROM items NOT INDEXED \
+             WHERE id IN (SELECT value FROM json_each($1)) \
+             UNION SELECT t.root, i.id FROM items i INDEXED BY idx_items_parent \
+             JOIN tree t ON i.parent_id = t.id \
+         ) \
+         SELECT t.root AS root, COUNT(*) AS leaves, \
+                COALESCE(SUM(w.watched), 0) AS watched \
+         FROM tree t CROSS JOIN items i NOT INDEXED ON i.id = t.id \
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
+         WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
+    )
+}
+
+/// [`watch_rollups_sql`] for one container.
+pub(super) fn watch_rollup_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(id) AS ( \
+             SELECT id FROM items NOT INDEXED WHERE id = $1 \
+             UNION SELECT i.id FROM items i INDEXED BY idx_items_parent \
+             JOIN tree t ON i.parent_id = t.id \
+         ) \
+         SELECT $1 AS root, COUNT(*) AS leaves, \
+                COALESCE(SUM(w.watched), 0) AS watched \
+         FROM tree t CROSS JOIN items i NOT INDEXED ON i.id = t.id \
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
+         WHERE i.kind IN ({PLAYABLE_KINDS})"
+    )
+}
+
+/// Both halves of `watch_summary` in one statement; its rollup half is
+/// [`watch_rollups_sql`]'s, pins included, and its watch-map half is
+/// `read_watch_map`'s id-driven `CROSS JOIN` (one `(user_id, item_id)` key
+/// lookup per requested id). Before K-05 pinned it, that half was still the
+/// `watch_state`-first join K-05 M4 replaced in `watch_map`: without
+/// statistics it walked every watch row the user has through
+/// `idx_watch_updated`, so it also changed plan with `sqlite_stat1`.
+pub(super) fn watch_summary_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(root, id) AS ( \
+             SELECT id, id FROM items NOT INDEXED \
+             WHERE id IN (SELECT value FROM json_each($1)) \
+             UNION SELECT t.root, i.id FROM items i INDEXED BY idx_items_parent \
+             JOIN tree t ON i.parent_id = t.id \
+         ) \
+         SELECT 0 AS part, w.item_id AS item_id, w.position_ms AS position_ms, \
+                w.duration_ms AS duration_ms, w.watched AS watched, \
+                w.updated_at AS updated_at, NULL AS leaves \
+         FROM json_each($2) j \
+         CROSS JOIN watch_state w ON w.user_id = $3 AND w.item_id = j.value \
+         UNION ALL \
+         SELECT 1, t.root, NULL, NULL, COALESCE(SUM(w.watched), 0), NULL, COUNT(*) \
+         FROM tree t CROSS JOIN items i NOT INDEXED ON i.id = t.id \
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $3 \
+         WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
+    )
+}
+
 #[async_trait]
 impl WatchStore for HiqliteAuthStore {
     async fn watch_state(
@@ -4417,23 +4484,7 @@ impl HiqliteAuthStore {
         let rows = self
             .watch_query::<WatchSummaryRow>(
                 read,
-                format!(
-                    "WITH RECURSIVE tree(root, id) AS ( \
-                         SELECT id, id FROM items \
-                         WHERE id IN (SELECT value FROM json_each($1)) \
-                         UNION SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                     ) \
-                     SELECT 0 AS part, w.item_id AS item_id, w.position_ms AS position_ms, \
-                            w.duration_ms AS duration_ms, w.watched AS watched, \
-                            w.updated_at AS updated_at, NULL AS leaves \
-                     FROM watch_state w JOIN json_each($2) j ON j.value = w.item_id \
-                     WHERE w.user_id = $3 \
-                     UNION ALL \
-                     SELECT 1, t.root, NULL, NULL, COALESCE(SUM(w.watched), 0), NULL, COUNT(*) \
-                     FROM tree t JOIN items i ON i.id = t.id \
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $3 \
-                     WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
-                ),
+                watch_summary_sql(),
                 params!(ids_json(container_ids)?, ids_json(item_ids)?, user_id),
             )
             .await?;
@@ -4483,21 +4534,7 @@ impl HiqliteAuthStore {
         item_id: i64,
     ) -> Result<WatchRollup, StoreError> {
         let rows = self
-            .watch_query::<RollupRow>(
-                read,
-                format!(
-                    "WITH RECURSIVE tree(id) AS ( \
-                         SELECT id FROM items WHERE id = $1 \
-                         UNION SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                     ) \
-                     SELECT $1 AS root, COUNT(*) AS leaves, \
-                            COALESCE(SUM(w.watched), 0) AS watched \
-                     FROM tree t JOIN items i ON i.id = t.id \
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
-                     WHERE i.kind IN ({PLAYABLE_KINDS})"
-                ),
-                params!(item_id, user_id),
-            )
+            .watch_query::<RollupRow>(read, watch_rollup_sql(), params!(item_id, user_id))
             .await?;
         let row = rows
             .into_iter()
@@ -4519,18 +4556,7 @@ impl HiqliteAuthStore {
             return Ok(HashMap::new());
         }
         let ids_json = ids_json(ids)?;
-        let sql = format!(
-            "WITH RECURSIVE tree(root, id) AS ( \
-                         SELECT id, id FROM items \
-                         WHERE id IN (SELECT value FROM json_each($1)) \
-                         UNION SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                     ) \
-                     SELECT t.root AS root, COUNT(*) AS leaves, \
-                            COALESCE(SUM(w.watched), 0) AS watched \
-                     FROM tree t JOIN items i ON i.id = t.id \
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
-                     WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
-        );
+        let sql = watch_rollups_sql();
         trace_statement("watch_rollups", &sql);
         let rows = self
             .watch_query::<RollupRow>(read, sql, params!(ids_json, user_id))

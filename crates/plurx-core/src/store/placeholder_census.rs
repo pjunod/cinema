@@ -951,7 +951,13 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // They are the continuous-quality ledger, reservation and cancellation-receipt
 // paths; the continuous_quality_ledger_* and quality_cancellation_* store
 // contracts execute every one of them on both backends.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
+// 92 -> 93: K-05's plan pin moves `watch_rollup`'s statement into
+// `watch_rollup_sql()` so `watch_rollup_plans_do_not_depend_on_statistics` can
+// plan the exact text; `query_row` binds `?1`/`?2` beside the call, out of
+// this scanner's reach. `marking_a_show_reaches_every_episode_under_it` and
+// `a_page_of_containers_rolls_up_in_one_pass_and_agrees_with_the_single_walk`
+// execute it.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
