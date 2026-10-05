@@ -112,6 +112,9 @@ struct LiveTvGridCell: Equatable, Sendable {
 struct LiveTvGridRow: Equatable, Sendable {
     let channel: LiveTvChannel
     let cells: [LiveTvGridCell]
+    /// The station's logo, from the same guide the cells came from
+    /// (`stationLogoURL`); nil draws the callsign.
+    var logo: String? = nil
 }
 
 struct LiveTvGridLayout: Equatable, Sendable {
@@ -445,6 +448,64 @@ enum LiveTvGuideReducer {
         guide?.channels.first { $0.id == channelId }
     }
 
+    /// The station's logo address, or nil for the callsign fallback.
+    ///
+    /// A transcription of the web's `stationLogoUrl`, checked against
+    /// `tests/playback/live-tv-guide-cases.json` `station_logo`; the fixture's
+    /// `rule` is the specification. The station is matched by lineup id, and
+    /// the guide's own HDHomeRun artwork is the only source. The rule is
+    /// textual on purpose — this is a third-party address inside a client that
+    /// holds a bearer token, and "whatever Foundation's parser tolerates" is
+    /// not the same set on two OS versions, let alone on three clients. The
+    /// accepted string is returned verbatim.
+    static let stationLogoMaxLength = 512
+
+    static func stationLogoURL(_ guide: LiveTvGuide?, channelId: String) -> String? {
+        guard let value = channel(guide, channelId)?.imageUrl, !value.isEmpty else { return nil }
+        let scalars = value.unicodeScalars
+        guard scalars.count <= stationLogoMaxLength,
+              scalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else { return nil }
+        // Printable ASCII from here on, so one byte is one character.
+        let bytes = Array(value.utf8)
+        guard bytes.count >= 8,
+              String(decoding: bytes[0..<8], as: UTF8.self).lowercased() == "https://" else { return nil }
+        let rest = bytes[8...]
+        let end = rest.firstIndex { $0 == UInt8(ascii: "/") || $0 == UInt8(ascii: "?") || $0 == UInt8(ascii: "#") }
+            ?? rest.endIndex
+        return stationLogoAuthorityIsValid(Array(rest[rest.startIndex..<end])) ? value : nil
+    }
+
+    /// `host[:port]`: letters, digits, `.` and `-`, or a bracketed IPv6
+    /// literal; the port one to five digits no greater than 65535.
+    private static func stationLogoAuthorityIsValid(_ authority: [UInt8]) -> Bool {
+        func isDigit(_ byte: UInt8) -> Bool { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) }
+        func isHex(_ byte: UInt8) -> Bool {
+            isDigit(byte) || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
+                || (UInt8(ascii: "A")...UInt8(ascii: "F")).contains(byte)
+        }
+        func isHostByte(_ byte: UInt8) -> Bool {
+            isDigit(byte) || (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte)
+                || (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+                || byte == UInt8(ascii: ".") || byte == UInt8(ascii: "-")
+        }
+        let hostEnd: Int
+        if authority.first == UInt8(ascii: "[") {
+            guard let close = authority.firstIndex(of: UInt8(ascii: "]")), close > 1,
+                  authority[1..<close].allSatisfy({ isHex($0) || $0 == UInt8(ascii: ":") || $0 == UInt8(ascii: ".") })
+            else { return false }
+            hostEnd = close + 1
+        } else {
+            hostEnd = authority.firstIndex(of: UInt8(ascii: ":")) ?? authority.count
+            guard hostEnd > 0, authority[0..<hostEnd].allSatisfy(isHostByte) else { return false }
+        }
+        if hostEnd == authority.count { return true }
+        guard authority[hostEnd] == UInt8(ascii: ":") else { return false }
+        let port = authority[(hostEnd + 1)...]
+        guard (1...5).contains(port.count), port.allSatisfy(isDigit),
+              let number = Int(String(decoding: port, as: UTF8.self)) else { return false }
+        return number <= 65535
+    }
+
     /// The start instant belongs to the programme that starts; the end instant
     /// does not. Without that rule a viewer at exactly 8:30 sees two programmes
     /// on air, and "what is on now" stops being a question with one answer.
@@ -499,7 +560,8 @@ enum LiveTvGuideReducer {
                     clipped: row.start < window.start || row.end > window.end
                 ))
             }
-            return LiveTvGridRow(channel: channel, cells: cells)
+            return LiveTvGridRow(channel: channel, cells: cells,
+                                 logo: stationLogoURL(guide, channelId: channel.id))
         }
         return LiveTvGridLayout(
             rows: rows,

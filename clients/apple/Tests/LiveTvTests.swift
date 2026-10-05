@@ -1977,12 +1977,28 @@ final class LiveTvTests: XCTestCase {
             let delta: Int
             let expect: String?
         }
+        struct StationLogoMatch: Decodable {
+            let name: String
+            let channel: String
+            let expect: String?
+        }
+        struct StationLogoValue: Decodable {
+            let name: String
+            let imageUrl: String?
+            let expect: String?
+        }
+        struct StationLogo: Decodable {
+            let match: [StationLogoMatch]
+            let noGuide: StationLogoMatch
+            let values: [StationLogoValue]
+        }
         let lineup: [LiveTvChannel]
         let guide: LiveTvGuide
         let programmeAt: [AiringCase]
         let grid: Grid
         let filters: [FilterCase]
         let adjacent: [AdjacentCase]
+        let stationLogo: StationLogo
     }
 
     /// `.convertFromSnakeCase` on the whole document, exactly as the client
@@ -2011,6 +2027,45 @@ final class LiveTvTests: XCTestCase {
                 XCTAssertNil(answer.progress, row.name)
             }
         }
+    }
+
+    /// The station-logo rule is the web's, transcribed. Until 2026-10-04 it
+    /// lived only in the web page, outside this fixture — which is how both
+    /// native guides shipped without logos and no suite noticed.
+    func testStationLogoAnswersEverySharedCase() throws {
+        let cases = try guideCases().stationLogo
+        XCTAssertFalse(cases.match.isEmpty, "the fixture lost its station-logo cases")
+        XCTAssertFalse(cases.values.isEmpty, "the fixture lost its station-logo values")
+        let base = try guideCases().guide
+        for row in cases.match {
+            XCTAssertEqual(LiveTvGuideReducer.stationLogoURL(base, channelId: row.channel), row.expect, row.name)
+        }
+        XCTAssertEqual(LiveTvGuideReducer.stationLogoURL(nil, channelId: cases.noGuide.channel),
+                       cases.noGuide.expect, cases.noGuide.name)
+        for row in cases.values {
+            let guide = LiveTvGuide(
+                source: "hdhomerun", freshness: "fresh", ageSeconds: 0, fetchedAt: nil,
+                window: LiveTvGuideWindow(start: 0, end: 0), refreshError: nil,
+                matchedChannels: 1, lineupChannels: 1,
+                channels: [LiveTvGuideChannel(id: "logo", guideNumber: "0.1", affiliate: nil,
+                                              imageUrl: row.imageUrl, programmes: [])])
+            XCTAssertEqual(LiveTvGuideReducer.stationLogoURL(guide, channelId: "logo"), row.expect, row.name)
+        }
+    }
+
+    /// The grid header draws the logo the layout carries, so the layout must
+    /// carry the same answer the rule gives, row by row.
+    func testGridRowsCarryTheirStationLogo() throws {
+        let cases = try guideCases()
+        let layout = LiveTvGuideReducer.gridLayout(
+            guide: cases.guide, channels: cases.lineup, window: cases.grid.window,
+            now: cases.grid.now, slotSeconds: cases.grid.slotSeconds, pxPerSlot: cases.grid.pxPerSlot)
+        for row in layout.rows {
+            XCTAssertEqual(row.logo, LiveTvGuideReducer.stationLogoURL(cases.guide, channelId: row.channel.id),
+                           row.channel.id)
+        }
+        XCTAssertEqual(layout.rows.first { $0.channel.id == "2.1" }?.logo, "https://example.invalid/cbs.png")
+        XCTAssertNil(layout.rows.first { $0.channel.id == "4.1" }?.logo)
     }
 
     func testGridLayoutPlacesEveryCellWhereTheSharedCasesSay() throws {
