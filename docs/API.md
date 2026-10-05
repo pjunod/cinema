@@ -3363,6 +3363,18 @@ client-base-relative (`/Videos/...`): clients join their server address,
 which already carries any mount. HLS manifest children are root-absolute
 under the mount the client used.
 
+Catalog queries follow Jellyfin's contract. A missing `Limit` returns every
+row and `Limit` has no ceiling: pages are assembled from store reads of 500
+rows, up to 10,000 rows per response, with the true `TotalRecordCount`. Every
+Jellyfin `IncludeItemTypes` and `SortBy` name is accepted. Kinds Plurx does not
+catalogue (BoxSet, Video, ...) select nothing, and orders it cannot compute
+(Random, CommunityRating, ...) are skipped, falling back to SortName.
+`SeriesId`/`SeasonId` scope a recursive read. `IncludeItemTypes=CollectionFolder`
+alone lists the user's libraries. A name Jellyfin does not define is still a
+400. A refused facade request (400, 403, 404 other than artwork, 405) is logged
+once a second as `Jellyfin client request refused`, with its path and query,
+and with credential values redacted.
+
 | Method | Path | Authority and response |
 |---|---|---|
 | GET | `/jellyfin/` | JSON 404 |

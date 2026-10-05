@@ -38,7 +38,7 @@ pub(super) async fn live_item(
     id: &str,
 ) -> Result<wire::Item, ApiError> {
     let mut query = browse(None)?;
-    query.limit = 1;
+    query.limit = Some(1);
     query.recursive = true;
     catalog(client, state, query, Some(wire_id(id)?))
         .await?
