@@ -5987,6 +5987,11 @@ pub struct HttpStoreOperationCounts {
     watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
     index_status_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
     cluster_index_availability_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Summed wall time of the counted operations, in nanoseconds. Operations
+    /// a request runs concurrently each add their own time, so this can
+    /// exceed the request's elapsed time; on the serial create path it is
+    /// the share of the handler spent waiting on the Store.
+    store_nanos: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HttpStoreOperationCounts {
@@ -6024,12 +6029,24 @@ impl HttpStoreOperationCounts {
         self.watch_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn record(&self, class_index: usize) {
+    /// Summed wall time of every operation counted in [`Self::snapshot`].
+    #[must_use]
+    pub fn store_time(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.store_nanos.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn record(&self, class_index: usize, elapsed: std::time::Duration) {
         use std::sync::atomic::Ordering;
 
         let _ =
             self.counts[class_index].try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 (current != u64::MAX).then(|| current.saturating_add(1))
+            });
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let _ = self
+            .store_nanos
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(nanos))
             });
     }
 }
@@ -6054,8 +6071,8 @@ pub fn scope_http_store_operations<T>(
     HTTP_STORE_OPERATION_COUNTS.scope(counts, Box::pin(future))
 }
 
-pub(super) fn record_http_store_operation(class_index: usize) {
-    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index));
+pub(super) fn record_http_store_operation(class_index: usize, elapsed: std::time::Duration) {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index, elapsed));
 }
 
 /// Count one watch-state read into the current request, if any. Called by

@@ -668,6 +668,7 @@ impl TranscodeManager {
 
         self.validate_candidate_planning_binding(req, replacement_deadline)
             .await?;
+        crate::media_pool::mark_create_phase("worker");
 
         if req.passive_vod
             && (!req.vod_only
@@ -748,6 +749,7 @@ impl TranscodeManager {
                 outcome = if vod.is_ok() { "ready" } else { "refused" },
                 "playback startup phase completed"
             );
+            crate::media_pool::mark_create_phase("vod");
             match vod {
                 Ok(info) => info,
                 Err(error) => {
@@ -782,6 +784,7 @@ impl TranscodeManager {
                             // metric whose HELP says "sessions served" must
                             // not include streams nobody ever received.
                             record_live_recovery(reason);
+                            crate::media_pool::mark_create_phase("rolling");
                             started
                         } else {
                             return Err(error);

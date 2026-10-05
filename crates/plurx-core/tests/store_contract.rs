@@ -35422,6 +35422,12 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
     check_summary(summary, "Authority");
     assert_watch_read_path(&store, false, "Authority summary is one consistent read");
     assert_eq!(request.watch_reads(), 1, "summary: one counted watch read");
+    // The same timer that counts the operation sums its wall time into the
+    // request, which the create path logs as `store_ms`.
+    assert!(
+        request.snapshot()[1] >= 1 && request.store_time() > std::time::Duration::ZERO,
+        "a counted Authority read adds its own time to the request"
+    );
 
     store.validation_reset_operation_counts();
     let request = plurx_core::store::HttpStoreOperationCounts::default();

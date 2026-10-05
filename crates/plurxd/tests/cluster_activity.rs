@@ -493,6 +493,16 @@ fn fragment_index_completion_match_ignores_forced_terminal_color() {
 }
 
 fn write_av_fixture(path: &Path) {
+    write_av_fixture_secs(path, 30);
+}
+
+fn write_av_fixture_secs(path: &Path, seconds: u32) {
+    write_av_fixture_sized(path, seconds, "96x64", &["libx264", "-preset", "ultrafast"]);
+}
+
+fn write_av_fixture_sized(path: &Path, seconds: u32, size: &str, video_codec: &[&str]) {
+    let video = format!("testsrc=size={size}:rate=2:duration={seconds}");
+    let audio = format!("sine=frequency=440:sample_rate=48000:duration={seconds}");
     let output = Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -501,15 +511,15 @@ fn write_av_fixture(path: &Path) {
             "-f",
             "lavfi",
             "-i",
-            "testsrc=size=96x64:rate=2:duration=30",
+            &video,
             "-f",
             "lavfi",
             "-i",
-            "sine=frequency=440:sample_rate=48000:duration=30",
+            &audio,
             "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
+        ])
+        .args(video_codec)
+        .args([
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -1229,6 +1239,520 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         .expect("activity nodes")
         .iter()
         .any(|node| node["node_id"] == remote_node && node["status"] == "unreachable"));
+
+    drop(node_b);
+    drop(node_a);
+}
+
+// ---------------------------------------------------------------------------
+// Create-path Store operation counts (startup and tone-map handoff §5.3).
+//
+// SQLite records no operation counts, and there is no in-process `AppState`
+// to wrap, so this is black-box: a real two-voter hiqlite cluster, a create
+// posted over HTTP, and the corrected `create startup read budget finished`
+// line parsed out of the ingress daemon's log. The media pool is left at its
+// default (off), so the ingress node is always the owner and the local
+// worker's Store operations land in the same request; every shape asserts
+// that its `worker` phase was recorded, which is only true of a local start.
+
+/// One parsed `create startup read budget finished` line.
+#[derive(Debug)]
+struct CreateBudgetLine {
+    authority_reads: u64,
+    local_reads: u64,
+    mutations: u64,
+    store_ms: u64,
+    elapsed_ms: u64,
+    phases: String,
+}
+
+fn log_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix(prefix.as_str()))
+}
+
+fn create_budget_lines(log: &str) -> Vec<CreateBudgetLine> {
+    log.lines()
+        .map(strip_ansi_csi)
+        .filter(|line| line.contains("create startup read budget finished"))
+        .map(|line| {
+            let number = |key: &str| {
+                log_field(&line, key)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or_else(|| panic!("`{key}` missing from create budget line: {line}"))
+            };
+            CreateBudgetLine {
+                authority_reads: number("authority_reads"),
+                local_reads: number("local_reads"),
+                mutations: number("mutations"),
+                store_ms: number("store_ms"),
+                elapsed_ms: number("elapsed_ms"),
+                phases: log_field(&line, "phases").unwrap_or_default().to_owned(),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn create_budget_line_parser_reads_the_corrected_fields() {
+    let log = "2026-10-04T00:00:00Z  INFO plurxd::http::hls: create startup read budget \
+               finished \x1b[3mfile_id\x1b[0m=7 catalog_calls=0 authority_reads=21 \
+               local_reads=2 mutations=6 store_ms=48 elapsed_ms=90 \
+               phases=lookup:3ms/1a/0l/0w,tail:0ms/0a/0l/0w\nunrelated line\n";
+    let lines = create_budget_lines(log);
+    assert_eq!(lines.len(), 1);
+    let line = &lines[0];
+    assert_eq!(
+        (line.authority_reads, line.local_reads, line.mutations),
+        (21, 2, 6)
+    );
+    assert_eq!((line.store_ms, line.elapsed_ms), (48, 90));
+    assert_eq!(line.phases, "lookup:3ms/1a/0l/0w,tail:0ms/0a/0l/0w");
+}
+
+/// Post one create to `base` and return the budget line of the create that
+/// succeeded. The fixture can see the joined voter's serving fence still
+/// refreshing, which answers 503 and is retried; every attempt logs its own
+/// line, so the successful create's line is the last new one.
+async fn create_and_measure(
+    client: &reqwest::Client,
+    daemon: &mut Daemon,
+    base: &str,
+    token: &str,
+    file_id: i64,
+    body: Value,
+) -> (Value, CreateBudgetLine) {
+    let before = create_budget_lines(&daemon.diagnostics()).len();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let response = loop {
+        daemon.assert_running("creating a measured session");
+        let response = client
+            .post(format!("{base}/api/v1/files/{file_id}/hls/sessions"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .expect("measured create request");
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if status.is_success() {
+            break serde_json::from_str::<Value>(&text).expect("create response JSON");
+        }
+        let retryable = status == StatusCode::SERVICE_UNAVAILABLE
+            && text.contains("local media worker has no serving authority");
+        assert!(
+            retryable && Instant::now() < deadline,
+            "measured create {body} failed: {status}: {text}\nlog:\n{}",
+            daemon.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut lines = create_budget_lines(&daemon.diagnostics());
+        if lines.len() > before {
+            let line = lines.pop().expect("a new budget line");
+            assert!(
+                line.phases.contains("worker:"),
+                "create {body} did not run on the ingress node's local worker: {line:?}"
+            );
+            return (response, line);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "create {body} logged no budget line:\n{}",
+            daemon.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_library_file(
+    client: &reqwest::Client,
+    daemon: &mut Daemon,
+    base: &str,
+    token: &str,
+    library_id: i64,
+    title: &str,
+    rescan: bool,
+) -> (i64, i64) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut next_scan = Instant::now();
+    loop {
+        daemon.assert_running("waiting for a scanned fixture");
+        // A scan request while one is still running is not queued
+        // (`started: false`), so a fixture added late asks again until a scan
+        // that began after it publishes it.
+        if rescan && Instant::now() >= next_scan {
+            let triggered = client
+                .post(format!("{base}/api/v1/libraries/{library_id}/scan"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .expect("rescan library");
+            assert!(triggered.status().is_success(), "rescan was refused");
+            next_scan = Instant::now() + Duration::from_secs(2);
+        }
+        let page = client
+            .get(format!("{base}/api/v1/libraries/{library_id}/items"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("library items")
+            .json::<Value>()
+            .await
+            .expect("library items JSON");
+        let item = page["items"].as_array().and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["title"].as_str().is_some_and(|t| t.contains(title)))
+                .and_then(|item| item["id"].as_i64())
+        });
+        if let Some(item_id) = item {
+            let file_id = wait_for_file_id(client, daemon, base, token, item_id).await;
+            return (item_id, file_id);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "library scan did not publish {title}: {page}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_path_store_operations_are_pinned_per_shape() {
+    let root = canonical_tempdir();
+    let media = root.path().join("media");
+    std::fs::create_dir_all(&media).expect("media directory");
+    write_av_fixture(&media.join("Create Path Indexed.mp4"));
+
+    let mut ports = reserved_ports(6).into_iter();
+    let mut a_http = ports.next().expect("node A HTTP reservation");
+    let mut a_raft = ports.next().expect("node A Raft reservation");
+    let mut a_api = ports.next().expect("node A API reservation");
+    let mut b_http = ports.next().expect("node B HTTP reservation");
+    let mut b_raft = ports.next().expect("node B Raft reservation");
+    let mut b_api = ports.next().expect("node B API reservation");
+
+    let a_data = root.path().join("node-a");
+    std::fs::create_dir_all(&a_data).expect("node A data");
+    drop(SqliteStore::open(&a_data.join("plurx.db")).expect("legacy SQLite source"));
+    let a_config = root.path().join("node-a.toml");
+    std::fs::write(
+        &a_config,
+        format!(
+            "[server]\nbind = \"127.0.0.1:{}\"\n\
+             [storage]\ndata_dir = \"{}\"\n\
+             [cluster]\nraft_bind = \"127.0.0.1:{}\"\n\
+             api_bind = \"127.0.0.1:{}\"\n\
+             advertise_host = \"127.0.0.1\"\n\
+             join_url = \"http://127.0.0.1:{}\"\n\
+             artwork_url = \"http://127.0.0.1:{}\"\n",
+            a_http.port,
+            toml_path(&a_data),
+            a_raft.port,
+            a_api.port,
+            a_http.port,
+            a_http.port,
+        ),
+    )
+    .expect("node A config");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("test client");
+    let a_http_port = a_http.port;
+    a_http.release();
+    a_raft.release();
+    a_api.release();
+    let mut node_a = Daemon::spawn(&a_config, root.path().join("node-a.log"), "plurx-node-a");
+    wait_ready(&client, &mut node_a, a_http_port).await;
+    let a_base = format!("http://127.0.0.1:{a_http_port}");
+    let setup = client
+        .post(format!("{a_base}/api/v1/setup"))
+        .json(&json!({"username":"owner","password":"cluster-proof-password"}))
+        .send()
+        .await
+        .expect("setup request");
+    assert_eq!(setup.status(), StatusCode::OK);
+    let token = setup.json::<Value>().await.expect("setup JSON")["token"]
+        .as_str()
+        .expect("setup token")
+        .to_owned();
+    let issued = client
+        .post(format!("{a_base}/api/v1/cluster/join-tokens"))
+        .bearer_auth(&token)
+        .json(&json!({"expires_in_seconds":600}))
+        .send()
+        .await
+        .expect("issue join token");
+    assert_eq!(issued.status(), StatusCode::OK);
+    let join_token = issued.json::<Value>().await.expect("join-token JSON")["token"]
+        .as_str()
+        .expect("join token")
+        .to_owned();
+
+    let b_data = root.path().join("node-b");
+    std::fs::create_dir_all(&b_data).expect("node B data");
+    let join_file = root.path().join("node-b.join");
+    std::fs::write(&join_file, format!("{join_token}\n")).expect("write join token");
+    std::fs::set_permissions(&join_file, Permissions::from_mode(0o600))
+        .expect("protect join token");
+    let b_config = root.path().join("node-b.toml");
+    std::fs::write(
+        &b_config,
+        format!(
+            "[server]\nbind = \"127.0.0.1:{}\"\n\
+             [storage]\ndata_dir = \"{}\"\n\
+             [cluster]\nraft_bind = \"127.0.0.1:{}\"\n\
+             api_bind = \"127.0.0.1:{}\"\n\
+             advertise_host = \"127.0.0.1\"\n\
+             artwork_url = \"http://127.0.0.1:{}\"\n\
+             join_token_file = \"{}\"\n",
+            b_http.port,
+            toml_path(&b_data),
+            b_raft.port,
+            b_api.port,
+            b_http.port,
+            toml_path(&join_file),
+        ),
+    )
+    .expect("node B config");
+    let b_http_port = b_http.port;
+    b_http.release();
+    b_raft.release();
+    b_api.release();
+    let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"), "plurx-node-b");
+    wait_ready(&client, &mut node_b, b_http_port).await;
+    wait_for_two_voters(&client, &mut node_a, &a_base, &token).await;
+    let b_base = format!("http://127.0.0.1:{b_http_port}");
+
+    let library = client
+        .post(format!("{a_base}/api/v1/libraries"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name":"Create path",
+            "kind":"movies",
+            "paths":[media.to_string_lossy()]
+        }))
+        .send()
+        .await
+        .expect("create library");
+    assert_eq!(library.status(), StatusCode::OK);
+    let library_id = library.json::<Value>().await.expect("library JSON")["id"]
+        .as_i64()
+        .expect("library id");
+    let (indexed_item, indexed_file) = wait_for_library_file(
+        &client,
+        &mut node_a,
+        &a_base,
+        &token,
+        library_id,
+        "Create Path Indexed",
+        false,
+    )
+    .await;
+    wait_for_remote_file(
+        &client,
+        &mut node_b,
+        &b_base,
+        &token,
+        indexed_item,
+        indexed_file,
+    )
+    .await;
+    wait_for_fragment_index(&mut node_a, &mut node_b).await;
+
+    // The index-miss shape needs a title with no index that stays that way.
+    // `vod_index_mins = 0` is the operator's "Paused": with it stored, no
+    // node starts another background indexing pass, and with the cluster
+    // index cache at its default (off) an index miss enqueues nothing either.
+    let paused = client
+        .put(format!("{a_base}/api/v1/settings"))
+        .bearer_auth(&token)
+        .json(&json!({"vod_index_mins": 0}))
+        .send()
+        .await
+        .expect("pause background indexing");
+    assert!(
+        paused.status().is_success(),
+        "pausing indexing failed: {}",
+        paused.text().await.unwrap_or_default()
+    );
+    // A different length, so the two fixtures are different content. The
+    // encode fixture is tall enough for the transcode ladder's lowest rung
+    // (a 64-line source cannot be an encoded session); encoded VOD needs no
+    // fragment index, so it is added with the paused pass too.
+    write_av_fixture_secs(&media.join("Create Path Unindexed.mp4"), 24);
+    write_av_fixture_sized(
+        &media.join("Create Path Encode.mp4"),
+        20,
+        "426x240",
+        &["libx264", "-preset", "ultrafast"],
+    );
+    let (unindexed_item, unindexed_file) = wait_for_library_file(
+        &client,
+        &mut node_a,
+        &a_base,
+        &token,
+        library_id,
+        "Create Path Unindexed",
+        true,
+    )
+    .await;
+    let (encode_item, encode_file) = wait_for_library_file(
+        &client,
+        &mut node_a,
+        &a_base,
+        &token,
+        library_id,
+        "Create Path Encode",
+        true,
+    )
+    .await;
+    wait_for_remote_file(
+        &client,
+        &mut node_b,
+        &b_base,
+        &token,
+        encode_item,
+        encode_file,
+    )
+    .await;
+    wait_for_remote_file(
+        &client,
+        &mut node_b,
+        &b_base,
+        &token,
+        unindexed_item,
+        unindexed_file,
+    )
+    .await;
+
+    // Each create goes to node B, a follower: its Authority reads travel to
+    // the leader, as on every non-leader fleet node.
+    let mut measured = Vec::new();
+    let (first, line) = create_and_measure(
+        &client,
+        &mut node_b,
+        &b_base,
+        &token,
+        indexed_file,
+        json!({"playback_id":"create-path-first","copy":true}),
+    )
+    .await;
+    assert_eq!(first["vod"], true, "first play is a VOD session: {first}");
+    measured.push(("first play, VOD index", line));
+    let (reopen, line) = create_and_measure(
+        &client,
+        &mut node_b,
+        &b_base,
+        &token,
+        indexed_file,
+        json!({"playback_id":"create-path-first","copy":true,"start":10.0}),
+    )
+    .await;
+    assert_ne!(
+        reopen["session_id"], first["session_id"],
+        "a reopen at a new position is a new session"
+    );
+    measured.push(("reopen, new position", line));
+    let (encode, line) = create_and_measure(
+        &client,
+        &mut node_b,
+        &b_base,
+        &token,
+        encode_file,
+        json!({"playback_id":"create-path-encode"}),
+    )
+    .await;
+    assert_eq!(
+        encode["vod"], true,
+        "an Auto encode is a VOD session: {encode}"
+    );
+    assert_ne!(
+        encode["encoder"], "vod",
+        "an Auto encode runs an encoder: {encode}"
+    );
+    measured.push(("Auto encode, VOD", line));
+    let (rolling, line) = create_and_measure(
+        &client,
+        &mut node_b,
+        &b_base,
+        &token,
+        unindexed_file,
+        json!({"playback_id":"create-path-rolling","copy":true}),
+    )
+    .await;
+    assert_ne!(
+        rolling["vod"], true,
+        "an index miss falls back to rolling: {rolling}"
+    );
+    assert!(
+        line.phases.contains("rolling:"),
+        "the index-miss create did not take the rolling fallback: {line:?}"
+    );
+    measured.push(("index miss, rolling copy", line));
+
+    let table = measured
+        .iter()
+        .map(|(shape, line)| {
+            format!(
+                "{shape}: authority={} local={} writes={} handler_ms={} store_ms={} phases={}",
+                line.authority_reads,
+                line.local_reads,
+                line.mutations,
+                line.elapsed_ms,
+                line.store_ms,
+                line.phases
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!("create-path store operations:\n{table}");
+    // (authority reads, local reads, writes) per shape, as measured at B-M1
+    // on main fb4397c44. The window is the create handler's own, plus the
+    // activation task it awaits; the bearer-token read happens before it.
+    // Every shape takes six writes on that main (the reopen two more, to
+    // project and hand off its predecessor).
+    let expected: [(&str, (u64, u64, u64)); 4] = [
+        ("first play, VOD index", (36, 0, 6)),
+        ("reopen, new position", (46, 0, 8)),
+        ("Auto encode, VOD", (41, 0, 6)),
+        ("index miss, rolling copy", (33, 0, 6)),
+    ];
+    let observed = measured
+        .iter()
+        .map(|(shape, line)| {
+            (
+                *shape,
+                (line.authority_reads, line.local_reads, line.mutations),
+            )
+        })
+        .collect::<Vec<_>>();
+    // The rolling start reads its three scratch bounds through `ahead_limits`,
+    // a process-wide two-second snapshot that the maintenance loop also
+    // refreshes. Whether this create finds it fresh is timing, so the rolling
+    // shape may carry exactly those three reads on top of its pinned count
+    // (measured: 33 or 36 at B-M1, on otherwise identical runs). Any other
+    // difference fails.
+    const AHEAD_LIMITS_REFRESH_READS: u64 = 3;
+    let observed = observed
+        .into_iter()
+        .zip(&expected)
+        .map(|((shape, (reads, local, writes)), (_, (pinned, _, _)))| {
+            let refreshed =
+                shape.contains("rolling") && reads == pinned + AHEAD_LIMITS_REFRESH_READS;
+            (
+                shape,
+                (if refreshed { *pinned } else { reads }, local, writes),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(observed, expected, "create-path counts changed:\n{table}");
 
     drop(node_b);
     drop(node_a);

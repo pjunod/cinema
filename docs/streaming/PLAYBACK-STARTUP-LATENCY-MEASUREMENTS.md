@@ -385,8 +385,11 @@ was changed.
 The unchanged conservative policy reported **3,580 ms to first frame**,
 306 ms to the first completed segment, 843 ms to the writer gate and 1,260 ms
 from gated inventory to the first served snapshot. The create handler took
-59 ms with 29 local reads and three mutations, versus 2,520 ms with 33 local
-reads and six mutations on media1. Safari reached 3:00 of 3:00; no post-start
+59 ms with 29 Authority (quorum) reads and three mutations, versus 2,520 ms
+with 33 Authority reads and six mutations on media1. (The log line printed
+these under `local_reads`: its two read labels were swapped until the
+startup and tone-map build corrected them, so both figures are quorum reads
+through the leader, not node-local ones.) Safari reached 3:00 of 3:00; no post-start
 stall/error was reported in that capture. These are real daemon/client
 measurements, not the earlier generated-media fixture.
 
