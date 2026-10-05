@@ -677,7 +677,12 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(playback, /reopen loop/);
   assert.match(playback, /One recovery per playback, and it is never given back/);
   assert.match(playback, /best-effort selected-stream diagnostics/);
-  assert.match(html, /Native controllers[\s\S]*?not met in this build/);
+  // Both native clients already run an inline Auto controller; what they
+  // lack is device qualification, not code (handoff §8.1).
+  assert.match(html, /Native controllers[\s\S]*?built · not device-qualified/);
+  assert.match(html, /Native controllers[\s\S]*?tickDisplayAwareAuto[\s\S]*?route-v1[\s\S]*?both switches default off/);
+  assert.match(html, /Native controllers[\s\S]*?shaped-link Apple TV, iPhone and Android TV runs[\s\S]*?switches-off control/);
+  assert.doesNotMatch(html, /not met in this build|have not shipped|is unclaimed/);
   assert.match(html, /HDR playback[\s\S]*?not measured/);
   assert.match(html, /These observations never gate this checkbox/);
   // Paul's Developer lifecycle (2026-09-28): a card lives on this page only
@@ -701,6 +706,11 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   };
   assert.doesNotMatch(waitsOf("Local catalogue reads"), /echo with its normal default lands/);
   assert.match(waitsOf("Local catalogue reads"), /already shipped \(5ba02212f\)/);
+  // The native echo is source on main; what the card still waits on is the
+  // fleet readout from those clients, not the clients.
+  assert.match(waitsOf("Local catalogue reads"), /fleet readout from the Apple and Android clients on a non-leader node/);
+  assert.match(waitsOf("Local catalogue reads"), /native echo ships in Apple build 209 and Android versionCode 146/);
+  assert.doesNotMatch(html, /Other clients retain authority reads until they implement the same echo/);
   assert.match(waitsOf("Portable cluster backup"), /arm64 container-smoke leg \(amd64 passed in run 3205\)/);
   assert.doesNotMatch(waitsOf("Unverified HEVC copy"), /containment is deployed and/);
   assert.match(waitsOf("Unverified HEVC copy"), /containment itself is deployed \(87ca67c0e\)/);
@@ -708,7 +718,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // Adaptive Auto's graduation is Paul's choice between two destinations.
   const autoCard = developerCards.find((card) => card.startsWith("CARDHEAD:Adaptive Auto quality|"));
   assert.ok(autoCard, "Developer renders the adaptive Auto card");
-  assert.match(autoCard, /Leaves Developer when:<\/b> A-04's D3 matrix[^<]*A-05's native controllers[^<]*<b>Then:<\/b> Paul chooses: the switch returns to Playback as a permanent toggle, or it is removed/);
+  assert.match(autoCard, /Leaves Developer when:<\/b> A-04's D3 matrix[^<]*shipped native controllers pass their shaped-link device runs[^<]*<b>Then:<\/b> Paul chooses: the switch returns to Playback as a permanent toggle, or it is removed/);
   const quality = panels.preparedQualityCard(settings, readiness);
   assert.match(quality, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/);
   assert.match(quality, /FOOT:savePreparedQuality/);

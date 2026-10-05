@@ -1,6 +1,6 @@
 # Bounded replica reads rollout — a consistency-policy change, one route at a time
 
-**Status:** M0–M3, the web echo, and the normal default merged; M4 watch failure coverage and named lab/rolling-upgrade acceptance remain open · **Executes:** S1, F-sc-1, F-core-4 from
+**Status:** M0–M3, the web echo, the native echo (Apple build 209, Android versionCode 146), and the normal default merged; M4 watch failure coverage, named lab/rolling-upgrade acceptance and the native fleet readout remain open · **Executes:** S1, F-sc-1, F-core-4 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -27,7 +27,17 @@ change or an unknown write. Its focused contracts are
 item page's three playback-language setting reads into one `get_settings`
 call. These are merged source facts, not the §5.1 lab readout, watch-method
 paused/partitioned-follower proof, rolling-upgrade observation, or fleet
-acceptance. Earlier “not built” and default-false entries below record the
+acceptance.
+
+**2026-10-04 source correction:** the Apple and Android clients now echo too
+(Apple build 209, Android versionCode 146), each following the web contract
+in `crates/plurxd/src/web/core/api.js`: capture from every API response,
+forward-only with equal values refreshing the 60 s monotonic window, an epoch
+bumped by every forget, replies discarded across an auth change, and the
+header sent on API requests only — never on image, media, segment, download
+or log requests. That settles §7 question 1. It is source, not a readout:
+no device has yet shown its watch reads served locally on a non-leader node
+(the fleet readout in §6). Earlier “not built” and default-false entries below record the
 M2–M3 state at their dated snapshots. The E1 build record is
 [DURABLE-WORK-QUEUE-STATUS.md](DURABLE-WORK-QUEUE-STATUS.md).
 
@@ -247,8 +257,9 @@ behind would show an episode as unwatched a second after the tick. The fence:
   carries `X-Plurx-Commit-Index`, the web client echoes the last value it saw
   as `X-Plurx-Read-After` on the next requests for 60 s, and the reader
   honours the larger of the two. A client that does not send the header
-  (Apple, Android until updated) gets Authority for watch reads on
-  non-writing nodes — correct, merely slower. *(As built after the review of
+  (Apple before build 209, Android before versionCode 146, any other
+  client) gets Authority for watch reads on non-writing nodes — correct,
+  merely slower. *(As built after the review of
   #504: on every node, the writing one included — see below.)*
 
 Only after M2 do `watch_map`, `watch_rollups`, `continue_watching`, `next_up`
@@ -322,8 +333,8 @@ Authority: it precedes a mutation.
   in §5.3). It was client code left to the web owner; until #572 landed,
   no client sent the header, so **no node served watch state locally**, even
   with `bounded_replica_reads=true`. The local path was exercised by the
-  contracts but dormant without a client echo. Apple and Android are §7
-  question 1.
+  contracts but dormant without a client echo. Apple (build 209) and
+  Android (versionCode 146) echo it as well; §7 question 1 is settled.
 - *Not fenced*: `publish_identity_repair`'s watch-row copies
   (`hiqlite_publication.rs`) are a catalogue repair under a job lease, not
   a user's write; the rows move with the items they describe and are
@@ -524,11 +535,21 @@ its own consistency proof and falls back per request. Record the §5.1 lab
 readout and rolling-upgrade observation separately before claiming rollout
 acceptance.
 
+The native echo has its own readout, not yet run: from the Apple and the
+Android client in turn, alone on a non-leader node, ten cycles of one watch
+write followed within 60 s by one Home, one library and one item read must
+show authority reads per request ≤ 2 for `home` and ≤ 1 for `library` and
+`item` — the §5.5 bar — with the watched state current every time. Both
+clients call `hubs`, `libraries/{id}/items`, `/items/{id}` and `search`;
+neither calls `/home/previews`.
+
 ## 7. Open questions
 
-1. Whether Apple and Android should adopt the `X-Plurx-Read-After` echo in
-   the same quarter; until then their Home rails are Authority on
-   non-writing nodes, which is today's behaviour.
+1. *(Settled 2026-10-04.)* Apple and Android adopt the `X-Plurx-Read-After`
+   echo: Apple from build 209, Android from versionCode 146, on the web
+   client's rules. Older builds keep Authority watch reads on non-writing
+   nodes. What remains is evidence, not a decision: the native fleet
+   readout in §6.
 2. Whether to lengthen the implemented 60 s per-user write index and header
    window; a longer window only costs Authority reads.
 3. Should `route_group` include `reader` (ebooks) as its own value? Nine
@@ -536,9 +557,10 @@ acceptance.
 4. *(Raised by the M2 build, for Paul; narrowed by the review of #504.)* A
    watch read is local only for a client that echoes an
    `X-Plurx-Read-After` from the last 60 s. A node's own write record no
-   longer counts on its own (§3.3 *As built*). The web echo landed in #572;
-   Apple and Android (question 1) and an idle web session stay on Authority
-   for watch state.
+   longer counts on its own (§3.3 *As built*). The web echo landed in #572
+   and the native echo in Apple build 209 and Android versionCode 146
+   (question 1); a client session with no write in the last 60 s stays on
+   Authority for watch state.
    That is what makes the fence sound without a replicated per-user
    revision, and M3 already takes that Authority cost from two reads to one.
    The header also gives per-client, not per-user, consistency: a second
