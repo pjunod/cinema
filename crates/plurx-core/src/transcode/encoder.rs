@@ -56,35 +56,22 @@ pub struct OutputCodecContract {
     pub codec: VideoCodec,
     pub bit_depth: u8,
     pub grade: OutputGrade,
-    pub rate_control: EffectiveRateControl,
     pub encoder: Encoder,
     pub pipeline: super::Pipeline,
 }
 
 impl OutputCodecContract {
     /// Preserve today's selection while making every dimension explicit.
-    pub fn resolve(
-        encoder: Encoder,
-        pipeline: super::Pipeline,
-        rate_control: EffectiveRateControl,
-    ) -> Option<Self> {
+    pub fn resolve(encoder: Encoder, pipeline: super::Pipeline) -> Option<Self> {
         let grade = pipeline.output_grade();
         let (codec, bit_depth) = match grade {
             OutputGrade::Sdr => (VideoCodec::H264, 8),
             OutputGrade::Hdr10 => (VideoCodec::Hevc, 10),
         };
-        // The incumbent HDR10 argument builder is bitrate-bounded regardless
-        // of the supplied quality preference. Publish what it actually emits,
-        // without changing the legacy options or their recipe identity.
-        let rate_control = match grade {
-            OutputGrade::Hdr10 => EffectiveRateControl::Vbr,
-            OutputGrade::Sdr => rate_control,
-        };
         let contract = Self {
             codec,
             bit_depth,
             grade,
-            rate_control,
             encoder,
             pipeline,
         };
@@ -94,7 +81,6 @@ impl OutputCodecContract {
     pub fn qualified(self) -> bool {
         self.pipeline.output_grade() == self.grade
             && self.pipeline.pairs_with(self.encoder)
-            && (self.grade != OutputGrade::Hdr10 || self.rate_control == EffectiveRateControl::Vbr)
             && self.encoder_name().is_some()
     }
 
@@ -144,8 +130,7 @@ mod output_codec_contract_tests {
                 let old = pipeline.pairs_with(family)
                     && family.video_codec_for(pipeline.output_grade()).is_some();
                 assert_eq!(
-                    OutputCodecContract::resolve(family, pipeline, EffectiveRateControl::Vbr)
-                        .is_some(),
+                    OutputCodecContract::resolve(family, pipeline).is_some(),
                     old
                 );
             }
@@ -160,19 +145,15 @@ mod output_codec_contract_tests {
                     codec: VideoCodec::Hevc,
                     bit_depth: depth,
                     grade: OutputGrade::Sdr,
-                    rate_control: EffectiveRateControl::Vbr,
                     encoder: family,
                     pipeline: Pipeline::Cpu,
                 };
                 assert!(!contract.qualified());
             }
         }
-        let mut contract = OutputCodecContract::resolve(
-            Encoder::Software,
-            Pipeline::DoviPassthrough,
-            EffectiveRateControl::Vbr,
-        )
-        .expect("the incumbent software Main10 graph remains qualified");
+        let mut contract =
+            OutputCodecContract::resolve(Encoder::Software, Pipeline::DoviPassthrough)
+                .expect("the incumbent software Main10 graph remains qualified");
         contract.bit_depth = 8;
         assert!(!contract.qualified());
         contract.bit_depth = 10;
@@ -198,8 +179,7 @@ mod output_codec_contract_tests {
                         quality: family.default_quality(),
                     },
                 ] {
-                    let Some(contract) = OutputCodecContract::resolve(family, pipeline, rate)
-                    else {
+                    let Some(contract) = OutputCodecContract::resolve(family, pipeline) else {
                         continue;
                     };
                     for forced_idr in [false, true] {
@@ -213,7 +193,7 @@ mod output_codec_contract_tests {
                         let explicit = contract.encoder.encode_args_for(
                             contract.grade,
                             6000,
-                            contract.rate_control,
+                            rate,
                             forced_idr,
                             Some(2),
                         );
@@ -232,40 +212,6 @@ mod output_codec_contract_tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn output_codec_contract_hdr10_reports_vbr_and_refuses_malformed_qvbr() {
-        for encoder in [Encoder::Software, Encoder::Qsv] {
-            let supplied = EffectiveRateControl::Qvbr { quality: 22 };
-            let contract =
-                OutputCodecContract::resolve(encoder, Pipeline::Hdr10Passthrough, supplied)
-                    .expect("incumbent Main10 graph resolves");
-            assert_eq!(contract.rate_control, EffectiveRateControl::Vbr);
-            assert!(contract.qualified());
-            assert_eq!(
-                encoder.encode_args_for(OutputGrade::Hdr10, 6000, supplied, false, Some(2)),
-                encoder.encode_args_for(
-                    contract.grade,
-                    6000,
-                    contract.rate_control,
-                    false,
-                    Some(2)
-                ),
-            );
-            assert!(!OutputCodecContract {
-                rate_control: supplied,
-                ..contract
-            }
-            .qualified());
-        }
-        let supplied = EffectiveRateControl::Qvbr { quality: 22 };
-        assert_eq!(
-            OutputCodecContract::resolve(Encoder::Software, Pipeline::Cpu, supplied)
-                .expect("incumbent SDR graph resolves")
-                .rate_control,
-            supplied
-        );
     }
 }
 

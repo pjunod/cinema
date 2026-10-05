@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn output_codec_contract_hdr10_normalization_preserves_legacy_options_and_identity() {
+    fn hdr10_quality_preference_keeps_legacy_options_and_identity() {
         let (d, f) = (digest(), media());
         let mut options = TranscodeOptions {
             pipeline: Pipeline::Hdr10Passthrough,
@@ -589,26 +589,18 @@ mod tests {
         };
         let first = plan(&f, &options, Encoder::Software);
         assert_eq!(
-            first.codec_contract().rate_control,
-            EffectiveRateControl::Vbr
-        );
-        assert_eq!(
             first.options().effective_rate_control,
             options.effective_rate_control
         );
         options.effective_rate_control = EffectiveRateControl::Qvbr { quality: 23 };
         let second = plan(&f, &options, Encoder::Software);
         assert_eq!(
-            second.codec_contract().rate_control,
-            EffectiveRateControl::Vbr
-        );
-        assert_eq!(
             second.options().effective_rate_control,
             options.effective_rate_control
         );
-        // Legacy identity fed the supplied option even for the VBR-only HDR
-        // builder. Retain that key space; correcting delivered facts does not
-        // silently invalidate entries or rewrite the incumbent options.
+        // Legacy identity feeds the supplied option even for the VBR-only HDR
+        // builder. Retain that key space: entries are not silently invalidated
+        // and the incumbent options are not rewritten.
         assert_ne!(
             Recipe::new(&d, &first, false).hash(),
             Recipe::new(&d, &second, false).hash()

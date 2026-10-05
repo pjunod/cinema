@@ -3152,12 +3152,8 @@ pub fn resolve_transcode(
     } else {
         None
     };
-    let codec_contract = super::OutputCodecContract::resolve(
-        request.encoder,
-        options.pipeline,
-        options.effective_rate_control,
-    )
-    .ok_or(PlanError::IncompatibleRenderer)?;
+    let codec_contract = super::OutputCodecContract::resolve(request.encoder, options.pipeline)
+        .ok_or(PlanError::IncompatibleRenderer)?;
     let output_grade = codec_contract.grade;
     let output_encoder = codec_contract
         .encoder_name()
