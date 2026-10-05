@@ -494,7 +494,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # simulated loss for a third of the grace. Test-only, bounded, and it decides
 # nothing about producers.
 # Effort and main union: 56 (effort) + 1 (main fence-grace test) = 57, measured on the merged source.
-expected_occurrences = 57
+# +4 for the D3 retention tests in transcode/tests/chunk_05.rs: each polls
+# every 25 ms, inside a 30 s `tokio::time::timeout`, for a link or a
+# publication the session under test is already producing. Test-only; they own
+# no producer and decide nothing.
+expected_occurrences = 61
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2596,7 +2600,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # shutdown cancels its token at the same moment as the main listener's, and
 # `drain()` awaits the handle before progress is flushed; Drop cancels on the
 # error paths. It owns no producer, process or timer.
-expected_occurrences = 741
+# +1 for `capture_racing_abandon_leaves_no_link` (chunk_05.rs): a
+# `spawn_blocking` that waits for the paused capture to reach its link, joined
+# by the test. The cache-produce tick's existing `tokio::spawn` is unchanged in
+# count (its argument now names the preparation lanes).
+expected_occurrences = 742
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3893,7 +3901,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Effort and main union: 1225 (effort) + 4 (main serving-fence loop and tests) = 1229, measured on the merged source.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 1268
+# +9 with the main-merge defects build: the eight test-only waits counted
+# under `all-async-sleeps` (four 30 s timeouts, four 25 ms sleeps), and one
+# 3 s `tokio::time::timeout` bounding the Developer readiness read of cluster
+# membership (http/developer.rs), like the other bounded readiness reads. No
+# production loop, schedule or watchdog: output-preparation draining and the
+# retained-headroom sample run on ticks that already existed.
+# 1277 -> 1278: one test-only deadline waits for abandoned links to be
+# collected after their in-flight capture settles; no production owner added.
+expected_occurrences = 1278
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4786,10 +4802,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 515 -> 517 (#806): two Axum `Response::status()` reads in the Jellyfin HLS
 # test, for the master and a child fetched through the standard-port app.
 # HTTP status codes on in-process oneshot responses; nothing is launched.
-# 517 -> 523 (#808 + #813): the facade gaps add five net status reads;
-# refusal logging adds one more. All inspect in-process HTTP responses,
-# and none launches a process or owns a producer.
-expected_occurrences = 523
+# +1: `state.membership.status()` in the Developer readiness read is a
+# membership observation the `.status(` shape matches, not a process launch.
+# +6: integrated Jellyfin admission, catalog and refusal response reads.
+expected_occurrences = 524
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

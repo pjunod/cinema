@@ -490,20 +490,42 @@ quality_catalog: None,
             live.effective_rate_control,
             EffectiveRateControl::Qvbr { quality: 21 }
         );
-        assert_eq!(
-            live, speculative,
-            "producer normalization drifted from live"
+        // Two identities, compared where each is complete. A producer plans
+        // typed audio under the canonical producer claim, so it equals a live
+        // start only AFTER the live start's own audio step under that claim.
+        // A legacy offline package stays untyped, so it equals the untyped
+        // live options. The three-way equality this test used to assert
+        // compared options before the audio step, which is how producer keys
+        // drifted away from every sink-claiming client unnoticed.
+        let live_typed = mgr.rolling_start_audio_options(
+            &file,
+            live.clone(),
+            Some(&plurx_core::playback::audio::canonical_producer_claim()),
+            None,
         );
-        assert_eq!(live, offline, "offline normalization drifted from live");
+        assert!(speculative.audio.is_some(), "the producer plans typed audio");
+        assert_eq!(
+            live_typed, speculative,
+            "producer normalization drifted from live after the audio step"
+        );
+        assert_eq!(
+            live, offline,
+            "legacy offline normalization drifted from untyped live"
+        );
 
         let expected = recipe_hash_for_options(&mgr, &file, &live, encoder).await;
         assert_eq!(
-            recipe_hash_for_options(&mgr, &file, &speculative, encoder).await,
-            expected
-        );
-        assert_eq!(
             recipe_hash_for_options(&mgr, &file, &offline, encoder).await,
             expected
+        );
+        let expected_typed = recipe_hash_for_options(&mgr, &file, &live_typed, encoder).await;
+        assert_eq!(
+            recipe_hash_for_options(&mgr, &file, &speculative, encoder).await,
+            expected_typed
+        );
+        assert_ne!(
+            expected_typed, expected,
+            "typed and untyped audio are different artifacts"
         );
 
         // Mutation sentinels: each path's rate-control input independently
@@ -541,7 +563,7 @@ quality_catalog: None,
         assert_ne!(speculative_q22, speculative);
         assert_ne!(
             recipe_hash_for_options(&mgr, &file, &speculative_q22, encoder).await,
-            expected
+            expected_typed
         );
 
         let offline_q23 = OfflineSpec {
@@ -554,6 +576,188 @@ quality_catalog: None,
             recipe_hash_for_options(&mgr, &file, &offline_q23, encoder).await,
             expected
         );
+    }
+
+    // ---- D1 (main-merge defects 2026-10-04): producer keys are typed ------
+    //
+    // Every current client sends audio sinks, so its rolling lookup key
+    // carries the resolved audio delivery. These pin which clients the one
+    // canonical producer artifact reaches, and which it deliberately cannot.
+
+    fn d1_sink(codec: &str, channels: u8) -> plurx_core::playback::audio::AudioSink {
+        plurx_core::playback::audio::AudioSink {
+            codec: codec.to_owned(),
+            max_channels: channels,
+            passthrough: false,
+            sample_rates_hz: vec![44_100, 48_000],
+        }
+    }
+
+    /// What Chrome on a stereo route sends (`browserAudioSinks` in
+    /// `web/player/decode-tiers.js`).
+    fn d1_web_stereo_claim() -> plurx_core::playback::audio::AudioClaim {
+        plurx_core::playback::audio::AudioClaim {
+            decoders: vec!["aac".into(), "flac".into(), "mp3".into()],
+            sinks: vec![d1_sink("aac", 2), d1_sink("flac", 2), d1_sink("mp3", 2)],
+        }
+    }
+
+    fn d1_with_audio(
+        file: &plurx_core::domain::MediaFile,
+        codec: &str,
+        channels: i64,
+        layout: Option<&str>,
+    ) -> plurx_core::domain::MediaFile {
+        let mut file = file.clone();
+        file.audio_streams = vec![plurx_core::domain::AudioStream {
+            index: 0,
+            codec: codec.to_owned(),
+            channels: Some(channels),
+            sample_rate: Some(48_000),
+            channel_layout: layout.map(str::to_owned),
+            default: true,
+            ..Default::default()
+        }];
+        file
+    }
+
+    /// (producer key, live key for `claim`) on the same file and rung.
+    async fn d1_keys(
+        mgr: &TranscodeManager,
+        file: &plurx_core::domain::MediaFile,
+        claim: Option<&plurx_core::playback::audio::AudioClaim>,
+    ) -> (String, String) {
+        let encoder = Encoder::Software;
+        let rate_control = mgr.rate_control_snapshot();
+        let Tracks {
+            audio_index,
+            subtitle_burn,
+        } = TranscodeManager::select_tracks_with_prefs(
+            file,
+            None,
+            None,
+            &plurx_core::tracks::LangPrefs::default(),
+            false,
+        );
+        let producer = mgr.speculative_producer_options(
+            rate_control,
+            encoder,
+            file,
+            720,
+            audio_index,
+            subtitle_burn.clone(),
+        );
+        let live = mgr.live_lookup_options(
+            rate_control,
+            encoder,
+            file,
+            720,
+            0.0,
+            audio_index,
+            subtitle_burn,
+            None,
+            OutputGrade::Sdr,
+        );
+        let live = mgr.rolling_start_audio_options(file, live, claim, None);
+        (
+            recipe_hash_for_options(mgr, file, &producer, encoder).await,
+            recipe_hash_for_options(mgr, file, &live, encoder).await,
+        )
+    }
+
+    async fn d1_fixture() -> (
+        TranscodeManager,
+        plurx_core::domain::MediaFile,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, work, cache) = cached_manager(&store);
+        (mgr, file, work, cache)
+    }
+
+    #[tokio::test]
+    async fn speculative_producer_key_equals_live_canonical_stereo_client_key() {
+        let (mgr, file, _work, _cache) = d1_fixture().await;
+        let web = d1_web_stereo_claim();
+        for (codec, channels, layout) in [("dts", 6, Some("5.1(side)")), ("aac", 2, Some("stereo"))] {
+            let source = d1_with_audio(&file, codec, channels, layout);
+            let (producer, live) = d1_keys(&mgr, &source, Some(&web)).await;
+            assert_eq!(
+                producer, live,
+                "a stereo web client must find the pre-transcoded {codec} {channels}ch rung"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dolby_copying_client_never_equals_the_speculative_key() {
+        let (mgr, file, _work, _cache) = d1_fixture().await;
+        let dolby = plurx_core::playback::audio::AudioClaim {
+            decoders: vec!["aac".into(), "ac3".into(), "eac3".into()],
+            sinks: vec![d1_sink("aac", 2), d1_sink("ac3", 2), d1_sink("eac3", 2)],
+        };
+        let source = d1_with_audio(&file, "ac3", 6, Some("5.1(side)"));
+        let (producer, live) = d1_keys(&mgr, &source, Some(&dolby)).await;
+        assert_ne!(
+            producer, live,
+            "a client that decodes Dolby copies AC-3; the stereo AAC artifact is not its stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn six_channel_route_never_equals_the_speculative_key() {
+        let (mgr, file, _work, _cache) = d1_fixture().await;
+        let surround = plurx_core::playback::audio::AudioClaim {
+            decoders: vec!["aac".into(), "eac3".into()],
+            sinks: vec![d1_sink("aac", 2), d1_sink("eac3", 6)],
+        };
+        let source = d1_with_audio(&file, "dts", 6, Some("5.1(side)"));
+        let (producer, live) = d1_keys(&mgr, &source, Some(&surround)).await;
+        assert_ne!(
+            producer, live,
+            "a 6-channel E-AC-3 route gets 5.1, never the stereo fold"
+        );
+    }
+
+    #[tokio::test]
+    async fn mp3_source_is_not_served_from_the_speculative_key() {
+        let (mgr, file, _work, _cache) = d1_fixture().await;
+        let source = d1_with_audio(&file, "mp3", 2, Some("stereo"));
+        let (producer, live) = d1_keys(&mgr, &source, Some(&d1_web_stereo_claim())).await;
+        assert_ne!(
+            producer, live,
+            "every client copies MP3, so the producer's AAC re-encode is a known miss"
+        );
+    }
+
+    #[tokio::test]
+    async fn claimless_lookup_keeps_the_v4_untyped_key() {
+        let (mgr, file, _work, _cache) = d1_fixture().await;
+        let source = d1_with_audio(&file, "aac", 2, Some("stereo"));
+        let (producer, claimless) = d1_keys(&mgr, &source, None).await;
+        let rate_control = mgr.rate_control_snapshot();
+        let untyped = mgr.live_lookup_options(
+            rate_control,
+            Encoder::Software,
+            &source,
+            720,
+            0.0,
+            Some(0),
+            None,
+            None,
+            OutputGrade::Sdr,
+        );
+        assert!(untyped.audio.is_none());
+        assert_eq!(
+            claimless,
+            recipe_hash_for_options(&mgr, &source, &untyped, Encoder::Software).await,
+            "a client that sends no sinks keeps the untyped key it always computed"
+        );
+        assert_ne!(producer, claimless);
     }
 
     #[tokio::test]

@@ -541,7 +541,6 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       // viewer's information. A client that only waited would leave a viewer
       // eight seconds into a frozen picture with no UI and no bound, forever.
       // The reopen is what a hold suppresses; the explanation is what it earns.
-      if(p.abr) p.abr.stallVerdictUntilMs=began+CONTROL_STALL_DEFER_DEADLINE_MS;
       p.stallDeferrals=(p.stallDeferrals||0)+1;
       if(p.abr) p.abr.controlStallVerdict={waitAt:began,
         atMs:performance.now(),untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
@@ -564,7 +563,6 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   }
   if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT
      &&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
-    if(p.abr) p.abr.stallVerdictUntilMs=began+CONTROL_STALL_DEFER_DEADLINE_MS;
     // Production stopped for something that may not recur, and named when to
     // look again. Pace to it rather than reopening — but bounded, because a
     // server that keeps saying "soon" is not distinguishable, from here, from

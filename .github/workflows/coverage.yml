@@ -23,7 +23,11 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     container: ubuntu:24.04
     # Instrumented cold builds need headroom beyond the ordinary unit lane.
-    timeout-minutes: 45
+    # The uninstrumented suite alone grew to ~55 minutes in the week of
+    # 2026-09-27 (the fast lane went 35 -> 60 -> 90). Runs 4087, 4103, 4106 and
+    # 4115 were all cut off at exactly 45:00 inside the llvm-cov step,
+    # still passing tests, so a 45-minute bound could no longer finish.
+    timeout-minutes: 120
     # Manual runs on other refs must never overwrite the main badge.
     if: github.ref == 'refs/heads/main'
     # Private-repository coverage badge — no codecov.io account or token.
@@ -63,7 +67,7 @@ jobs:
         # completed; merge the valid profiles, but still fail if none are valid.
         run: >-
           cargo llvm-cov --workspace --locked --exclude plurx-cluster-check
-          --summary-only --json --output-path cov.json --failure-mode all
+          --no-fail-fast --summary-only --json --output-path cov.json --failure-mode all
       - name: Publish the unit coverage badge
         env:
           GITHUB_TOKEN: ${{ github.token }}

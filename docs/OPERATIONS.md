@@ -3715,8 +3715,8 @@ they live in that voter's own SQLite sidecar and never pass through Raft.
 | `telemetry.retain_days` | 30 | Days to keep raw playback rows. `0` disables raw row writes and their pruning while preserving the existing client log lines. It does **not** disable network priors — see the note below |
 | `playback.network_priors` | off | Whether to accumulate per-network playback history and let it choose Auto's starting rung |
 
-`playback.network_priors` has no Settings control yet. The only way to change
-it is the API:
+Settings → Developer → **Network priors** turns it on and off (2026-10-04;
+before that it had no control). The API does the same:
 
 ```
 curl -X PUT http://<server>:32400/api/v1/settings \
@@ -3745,6 +3745,18 @@ evening does not cap a link permanently.
 Priors are node-local. In a Hiqlite cluster they live in the voter's own
 sidecar and are not replicated, so a client that reaches a different node
 starts cold there. That is accepted, not a defect.
+
+**Priors are also a prerequisite for Fit Auto to display.** Link receipts —
+the server's acknowledgement that a stall was the network's fault, and the
+proof a voluntary upgrade needs — are accepted only while priors are on. With
+the Developer switch for Fit Auto on and priors off, a native client's Auto
+can still step down for producer pressure, decoder failure and link pressure
+it sees before a stall, but it never upgrades, and a link-caused stall
+reopens the same quality until the stall budget runs out. Two cases never get
+link evidence even with priors on: a session whose create was handled by a
+peer node (receipts are registered only where the handling node owns the
+session) and an IPv6 client (no network identity). The Developer card lists
+all three as advisory rows. This is documented, not changed, in this build.
 
 The `/24` is taken from `Forwarded`, `X-Forwarded-For`, or `X-Real-IP` when
 present, and otherwise from the socket peer. plurx does not maintain a
@@ -4609,6 +4621,73 @@ newer replacement may fail itself, but its stale identity cannot retire the
 new package generation. Legacy and non-queue cache entries have neither an
 authoritative digest nor a scrub cursor and remain serveable as the explicit
 legacy path.
+
+### Complete-output preparation and rolling retention
+
+Two kinds of work a VOD start can leave behind are Developer switches, both
+off by default (2026-10-04). Before then both ran on any node whose
+`cache.max_gb` row existed, and saving the Pre-transcoding card writes that
+row, so saving the card for any reason turned them on.
+
+| Setting | Values | What it does |
+|---|---|---|
+| `vod.output_preparation` | `off` · `copy` · `copy_and_encoded` | Which complete-output preparation a VOD start may queue (`copy_output_prepare`, `encoded_output_prepare`). It runs on the pre-transcode worker whether or not `cache_produce_mins` is on; the speculative rows and the cachekeep sweep still need that schedule. Rows carry a seven-day deadline |
+| `vod.rolling_retention` | off · on | Hard-link a rolling session's segments into `<cache>/renditions/.retained/<nonce>/` so a verified complete output outlives the session |
+
+Both are bounded by `cache.max_gb`, where no stored row means the 50 GB the
+settings page shows and `0` means off. VOD rendition admission is different:
+no stored row keeps it closed, as it always has.
+
+**Turning a kind off.** Every node, on every pre-transcode loop tick, cancels
+up to 32 queued rows of each disabled kind without claiming them. Each one is
+counted in `plurx_output_preparation_drained_total{kind}` and logged
+(`output preparation disabled; cancelled queued row`) with its job id. A row a
+node claimed in the same moment goes to `cancelling` and is settled by its
+executor's heartbeat, or by store upkeep at lease expiry if that executor is
+gone. Activity shows the rows as cancelled.
+
+**Stop.** A running preparation publishes itself as the producer in Activity.
+Stop there cancels the job on the node that answers the request. It does not
+reach a preparation running on a peer, and the next play of the title may
+queue it again.
+
+**Retention's free-space guard.** Retained links keep segment bytes on disk
+after rolling eviction has returned their scratch credit, so retention checks
+the disk itself. The scratch free-space sampler (every 30 s) computes
+
+    slack = free bytes − (scratch cap − (ledger total − unused grants))
+
+for the filesystem that holds the retained namespace. A capture links only
+while `slack` is at least 1 GiB and the sample is under 60 s old. Evicting a
+segment that still has a retained link subtracts its size from `slack`
+immediately. When the check fails, or a scratch write hits ENOSPC, every
+unpublished collection is abandoned and its links released. A collection is
+refused before it reserves anything when session scratch and the namespace
+are on different filesystems; on Windows retention stays off. The Developer
+card shows the live slack, so the 1 GiB reserve can be judged against a real
+node.
+
+Settings → Activity lists each retained output on this node with its bytes and
+state, and Stop releases it (refused while a session is reading it). The
+collector deletes released and orphaned directories in 250 ms slices each
+tick, across the whole queue.
+
+**Rolling start reads.** A rolling start now reads its settings in one
+snapshot. When the optional retained-output lookup cannot plan, the start goes
+ahead without it and counts
+`plurx_rolling_retained_lookup_skipped_total{reason}`.
+
+**Pre-transcode audio and the rollout rule.** Speculative pre-transcodes are
+now produced with the canonical stereo AAC audio claim, so a current client
+on a stereo route computes the same cache key (see
+[ENCODER-RATE-CONTROL-DEFAULTS.md §7.2](streaming/ENCODER-RATE-CONTROL-DEFAULTS.md)).
+The policy generation moved with it, and a generation mismatch cancels the
+job (`policy_changed`). With nodes on two versions each would cancel the
+other's rows and discovery would re-enqueue them. **Set
+`jobs.cache_produce_mins = 0` before deploying this build and restore it after
+every node runs it.** The existing pre-transcode library is not reachable by
+current clients; it is produced again once, and the budget evicts the old
+generation.
 
 ### Offline package storage and quotas
 

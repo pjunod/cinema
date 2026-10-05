@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 303
+One binary serves everything on one port (`:32400` by default). plurx has 304
 routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -434,6 +434,7 @@ of never storing it.
 | DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one transcode or VOD session |
 | DELETE | `/api/v1/activity/offline/{id}` | admin | Cancels and deletes one visible offline package |
 | DELETE | `/api/v1/activity/producer` | admin | Stops the pre-transcode producer after the current title |
+| DELETE | `/api/v1/activity/retained/{nonce}` | admin | Releases one retained rolling output this node holds |
 | DELETE | `/api/v1/activity/processes/{pid}` | admin | Kills one child process the Activity page lists |
 
 ### 5.1 Settings
@@ -490,6 +491,20 @@ Refusals worth knowing, each a 400 unless noted:
 - `sign-in expiry must be between 1 and 3650 days` for `auth_token_idle_days`
   out of range. Switching `auth_token_expiry` from off to on also writes
   `auth_token_expiry_since` = now in the same commit (§2.5).
+
+Two Developer switches govern work a VOD start can leave behind (added
+2026-10-04, both off by default):
+
+- `vod_output_preparation` — `"off"`, `"copy"` or `"copy_and_encoded"`. What
+  complete-output preparation a VOD start may queue. Anything else is a 400.
+  It runs whether or not `cache_produce_mins` is on. Turning a kind off
+  cancels that kind's queued rows within a minute, on every node.
+- `vod_rolling_retention` — boolean. Whether a rolling session's segments are
+  hard-linked into a retained artifact as they are written.
+
+`cache_max_gb` is reported as 50 when no row is stored, and that is the budget
+both features use. VOD rendition admission keeps its own rule: no stored row
+means admission is closed. Storing `0` turns all three off.
 
 Job intervals (`probe_retry_mins`, `artwork_retry_mins`,
 `transcode_cleanup_mins`, `cache_produce_mins`) take 0 to mean off and
@@ -625,6 +640,19 @@ handles a crashed encoder or a failed probe.
 title**, not mid-encode, because the producer resumes from published segment
 boundaries: a clean stop keeps the part already made and a kill throws it
 away.
+A copy or encoded output preparation is different: Stop **cancels** the job
+running on the node that answers the request. It does not reach a preparation
+running on a peer, and the next play of that title may queue it again.
+
+The admin view of `/api/v1/activity/detail` carries `retained_output`: one row
+per rolling output this node is collecting, holding or releasing (`nonce`,
+`file_id`, `title`, `bytes`, `state` — `collecting`, `retained`,
+`releasing` — and `attached`), plus `retained_output_node`. The list
+is this node's only; it is not part of the peer Activity snapshot.
+`DELETE /api/v1/activity/retained/{nonce}` abandons a collecting artifact or
+releases a retained one: `200 {"ok": true}` on success (the collector deletes
+it on its next tick), `400` for a nonce that is not a UUID, `404` for one this
+node does not hold, `409` while a session is reading the published artifact.
 
 ---
 

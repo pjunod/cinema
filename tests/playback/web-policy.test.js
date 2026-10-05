@@ -6458,7 +6458,7 @@ test("hls.js media recovery is fenced by the shared attach and item budgets", ()
   assert.ok(terminal > recovery,
     "decoder rescue must run before the attempt is reported terminal");
   assert.match(handler, /sourceBufferName:d\.sourceBufferName\|\|null/,
-    "the vendored hls.js 1.6.16 payload names its SourceBuffer explicitly");
+    "the vendored hls.js payload names its SourceBuffer explicitly");
 });
 
 test("web HLS startup has one bounded manifest policy and terminal precedence", () => {
@@ -6772,6 +6772,31 @@ test("ending a wait retires its stall-scoped verdict", () => {
     () => 0, () => ({kind: "supply"}));
   end(false);
   assert.equal(p.abr.controlStallVerdict, null);
+});
+
+test("Auto reads one stall verdict, and it is the one a wait retires", () => {
+  // `stallVerdictUntilMs` was a second owner of the same fact: written beside
+  // `controlStallVerdict`, read first, scoped to no wait and cleared by nothing.
+  assert.doesNotMatch(SHIPPED_UI, /stallVerdictUntilMs/,
+    "the uncleared stall deadline must not come back beside controlStallVerdict");
+  const classify = new Function(
+    "PlaybackPolicy", "STREAM_FAILURE", "Date",
+    `${shippedSource("autoCauseEvidence")}\nreturn autoCauseEvidence;`,
+  )(policy, null, Date);
+  const p = {mediaAttachment: "a1", waitAt: null,
+    health: {producer_state: "active", recent_speed: 3}, healthObservedAt: 10_000,
+    abr: {stallEvents: {decode: []}, recentEstimateAtMs: null,
+      controlStallVerdict: null, stallVerdictUntilMs: 21_000}};
+  assert.notEqual(classify(p, 10_000).kind, "control-stall-verdict",
+    "a resumed stall leaves nothing behind that suppresses Auto");
+  // Both at once: a stale verdict from the previous wait and a deadline that
+  // has not passed yet must not combine into a verdict for this wait.
+  p.waitAt = 12_000;
+  p.abr.controlStallVerdict = {waitAt: 1_000, atMs: 9_000, untilMs: 21_000};
+  assert.notEqual(classify(p, 12_500).kind, "control-stall-verdict");
+  assert.equal(shippedSource("persistentWait").match(/controlStallVerdict=null/g).length, 1,
+    "every pass of a wait re-derives its verdict");
+  assert.match(shippedSource("endWait"), /controlStallVerdict=null/);
 });
 
 test("every controller gate the fixture names is still in the shipped tick", () => {

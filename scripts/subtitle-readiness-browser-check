@@ -11,7 +11,7 @@ hls.js rendition does not make it fetch the segment again.
 That is measured here rather than asserted in prose. The fixture serves the
 subtitle segment EMPTY on its first request and with cues on every request
 after it, so a mechanism that does not refetch cannot pass by accident. For
-the record, against the bundled hls.js 1.6.16 none of these produced a single
+the record, against hls.js 1.6.16 (bundled when measured) none of these produced a single
 cue, and each produced exactly ONE request for the segment:
 
   * `subtitleTrack = -1` then back to the same ordinal

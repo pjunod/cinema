@@ -77,7 +77,7 @@ and every container image.
 
 | Component | Version | License | Copyright |
 |---|---|---|---|
-| [hls.js](https://github.com/video-dev/hls.js) | 1.6.16 | Apache-2.0 | Dailymotion and the hls.js contributors |
+| [hls.js](https://github.com/video-dev/hls.js) | 1.6.19 | Apache-2.0 | Dailymotion and the hls.js contributors |
 | [eventemitter3](https://github.com/primus/eventemitter3) | bundled in `hls.min.js` | MIT — [full text](licenses/eventemitter3-MIT.txt) | Copyright (c) 2014 Arnout Kazemier |
 | [url-toolkit](https://github.com/tjenkinson/url-toolkit) | bundled in `hls.min.js` | Apache-2.0 | Tom Jenkinson |
 | [Material Design icons](https://github.com/google/material-design-icons) | inline SVG paths | Apache-2.0 | Google LLC |
@@ -85,7 +85,7 @@ and every container image.
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | subset `woff2` | SIL OFL 1.1 — [full text](licenses/JetBrainsMono-OFL.txt) | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) |
 
 **hls.js and what it carries.** `hls.min.js` is the upstream minified `dist`
-build with its license header stripped by the minifier. hls.js 1.6.16
+build with its license header stripped by the minifier. hls.js 1.6.19
 declares no runtime `dependencies`; it bundles its build-time dependencies
 directly into `dist`, so eventemitter3 and url-toolkit ship inside that one
 file. They are separate copyright holders with their own terms — MIT

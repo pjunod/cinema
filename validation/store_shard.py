@@ -22,6 +22,25 @@ TEST_RESULT = re.compile(r"^test (.+) \.\.\. (ok|FAILED|ignored(?:,.*)?)$")
 ELF64 = 2
 ELF_LITTLE_ENDIAN = 1
 X86_64_MACHINE = 62
+# The exported binary is a debug build, and in a debug build one poll of the
+# hundred-step replicated migration loop needs more than libtest's default
+# 2 MiB thread stack: every test that opens a store from an old marker (v47,
+# v65) aborts the whole binary with a stack overflow, taking the rest of the
+# shard with it. `make cluster-store-check` runs the same tests at this bound.
+TEST_THREAD_STACK_BYTES = 8 * 1024 * 1024
+
+
+def test_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment the Store binary runs under: the caller's, plus a stack
+    floor. An explicitly larger `RUST_MIN_STACK` is kept; a smaller one is not."""
+
+    env = dict(os.environ if base is None else base)
+    try:
+        configured = int(env.get("RUST_MIN_STACK", "0"))
+    except ValueError:
+        configured = 0
+    env["RUST_MIN_STACK"] = str(max(configured, TEST_THREAD_STACK_BYTES))
+    return env
 
 
 class StoreShardError(ValueError):
@@ -301,6 +320,7 @@ def run_shard(
             log.write("command: " + json.dumps(command) + "\n")
             process = subprocess.Popen(
                 command,
+                env=test_environment(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

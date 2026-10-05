@@ -242,7 +242,9 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.web_layout == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 5
+    # web-unit-check measured 103 s serial on two cores; the rest is checkout,
+    # node and the pinned tsc.
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -256,8 +258,6 @@ jobs:
         run: |
           scripts/js-check
           git ls-files -z 'crates/plurxd/src/web/*.js' | xargs -0 -n1 node --check
-      - name: Check media preparation and track containment
-        run: node --test tests/web/media-preparation.test.js tests/web/layout-containment.test.js
       # TypeScript's checker over the same rows, against tests/web/
       # tsc-baseline.tsv: the counts must match exactly, so a new or raised
       # diagnostic fails and so does one that fell without the baseline being
@@ -272,6 +272,14 @@ jobs:
           node tests/web/jsconfig-generated.test.js
           scripts/web-types --base "$PR_BASE_SHA"
           node tests/web/player-typedef.test.js
+      # Every Node web and playback test, the same list `make web-check` runs
+      # minus its two real-browser scripts. Until 2026-10-04 a pull request ran
+      # two of them here and the rest ran only when someone typed make; a stale
+      # assertion sat red on main for two days that way.
+      - name: Run every Node web and playback test
+        env:
+          TMPDIR: /tmp
+        run: make web-unit-check
 
   apple_compile:
     name: fast Apple compile

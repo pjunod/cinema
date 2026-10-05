@@ -200,6 +200,80 @@ pub struct VodSettings {
     /// Node-wide ceiling on blocked segment GETs, from
     /// `playback.vod_blocked_get_cap`.
     pub blocked_get_cap: usize,
+    /// `playback.vod_index_cluster_cache`: whether a copy rendition may use a
+    /// peer's fragment index. Absent means off.
+    pub index_cluster_cache: bool,
+    /// `playback.hevc_unverified_copy`: whether an HEVC copy that drops its
+    /// in-band parameter sets may skip the per-node configuration proof.
+    /// Absent means off; a failed read fails the whole snapshot, so this
+    /// stays fail-closed.
+    pub hevc_unverified_copy: bool,
+    /// `playback.vod_live_recovery`: whether a typed VOD prerequisite refusal
+    /// may fall back to the live engine. Absent means on.
+    pub live_recovery: bool,
+    /// `vod.output_preparation`: which complete-output preparation a VOD
+    /// start may queue. Absent means off.
+    pub output_preparation: OutputPreparation,
+    /// What complete-output preparation may hold in the retained registry:
+    /// `cache.max_gb` through [`crate::cachekeep::cache_budget`], so unset is
+    /// the 50 GB the settings page shows. Distinct from
+    /// `completed_cache_bytes`, whose unset value keeps admission closed.
+    pub output_budget_bytes: u64,
+}
+
+/// The Developer switch for complete-output preparation queued by a VOD
+/// start (`vod.output_preparation`). Off by default: one play must not start
+/// a whole-title background encode nobody asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputPreparation {
+    #[default]
+    Off,
+    /// Copy (remux) preparation only.
+    Copy,
+    /// Copy and encoded preparation.
+    CopyAndEncoded,
+}
+
+impl OutputPreparation {
+    pub const OFF: &'static str = "off";
+    pub const COPY: &'static str = "copy";
+    pub const COPY_AND_ENCODED: &'static str = "copy_and_encoded";
+
+    /// Anything but the two enabling spellings is off.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some(Self::COPY) => Self::Copy,
+            Some(Self::COPY_AND_ENCODED) => Self::CopyAndEncoded,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => Self::OFF,
+            Self::Copy => Self::COPY,
+            Self::CopyAndEncoded => Self::COPY_AND_ENCODED,
+        }
+    }
+
+    /// Whether a start may queue preparation of this kind.
+    pub fn admits(self, encoded: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Copy => !encoded,
+            Self::CopyAndEncoded => true,
+        }
+    }
+
+    /// The durable job kinds this mode lets a node claim.
+    pub fn job_kinds(self) -> &'static [plurx_core::store::background_jobs::JobKind] {
+        use plurx_core::store::background_jobs::JobKind;
+        match self {
+            Self::Off => &[],
+            Self::Copy => &[JobKind::CopyOutputPrepare],
+            Self::CopyAndEncoded => &[JobKind::CopyOutputPrepare, JobKind::EncodedOutputPrepare],
+        }
+    }
 }
 
 /// Why a session ended for good. Every cause answers 410 and never resurrects.
