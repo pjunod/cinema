@@ -4117,3 +4117,27 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "if systemPaused, viewerOrigin { endSystemHoldForViewer(play: requested) }"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testViewerPlayEndsASystemHoldThatIOSNeverEnded()"
+
+[[fixes]]
+id = "apple.read-after-echo-on-api-verbs-only"
+commits = ["4a52c13edfa1a45daa59e0dc68a5ee0e8c105a6f"]
+source = "clients/apple/Sources/PlurxAPI.swift"
+source_anchor = "private func exchange("
+test = "clients/apple/Tests/ReadAfterFloorTests.swift"
+test_anchor = "func testALateLogoutReplyDoesNotChangeTheStoredValue()"
+
+[[fixes]]
+id = "android.read-after-echo-on-tagged-api-calls-only"
+commits = ["71e1b2ffdee7bc6099ed1dc911b1837200747eb5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/ReadAfter.kt"
+source_anchor = "class ReadAfterInterceptor(private val floor: ReadAfterFloor) : Interceptor {"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/ReadAfterCallSitesTest.kt"
+test_anchor = "fun theLanProbeCarriesNothingAndCapturesNothing()"
+
+[[fixes]]
+id = "android.continuous-enrollment-without-display-aware"
+commits = ["2739c84aba978d9c4744fe1894856854fb97cc6d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousEnrollment.kt"
+source_anchor = "): MediaIntentEnvelope = body.intent ?: playbackIntent.mediaIntent(selection)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousEnrollmentTest.kt"
+test_anchor = "fun displayAwareOffEnrollmentReachesTheContinuousStartWithItsOwnIntent()"
