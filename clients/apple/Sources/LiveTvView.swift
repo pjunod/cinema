@@ -1463,13 +1463,18 @@ struct LiveTvGuideGrid: View {
                     HStack(spacing: 0) {
                         Button { onAiring(row.channel) } label: {
                             HStack(spacing: LiveTvGridMetrics.stationChipGap) {
-                                LiveTvStationChip(
-                                    name: row.channel.guideName,
-                                    logo: row.logo,
-                                    width: LiveTvGridMetrics.stationChipWidth,
-                                    height: LiveTvGridMetrics.stationChipHeight,
-                                    font: LiveTvType.badge
-                                )
+                                // Only a station with artwork gives up header width
+                                // to a tile — the name column already says the
+                                // callsign, and the layout knows before any load.
+                                if let logo = row.logo {
+                                    LiveTvStationChip(
+                                        name: row.channel.guideName,
+                                        logo: logo,
+                                        width: LiveTvGridMetrics.stationChipWidth,
+                                        height: LiveTvGridMetrics.stationChipHeight,
+                                        font: LiveTvType.badge
+                                    )
+                                }
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(row.channel.guideNumber).font(LiveTvType.secondary.weight(.semibold))
                                     Text(row.channel.guideName).font(LiveTvType.badge)

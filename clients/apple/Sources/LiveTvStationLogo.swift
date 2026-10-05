@@ -47,26 +47,38 @@ final class LiveTvStationLogoLoader: @unchecked Sendable {
         images.object(forKey: address as NSString)
     }
 
-    func image(for address: String, now: Date = Date()) async -> UIImage? {
+    func image(for address: String) async -> UIImage? {
         if let hit = cached(address) { return hit }
-        let flight: Task<UIImage?, Never>
+        guard let flight = joinOrStart(address, now: Date()) else { return nil }
+        let image = await flight.value
+        finish(address, flight: flight, image: image, now: Date())
+        return image
+    }
+
+    /// The fetch in flight for `address`, a new one, or nil while a recent
+    /// failure is still backing off. Synchronous: the lock is never held
+    /// across a suspension point.
+    private func joinOrStart(_ address: String, now: Date) -> Task<UIImage?, Never>? {
         lock.lock()
+        defer { lock.unlock() }
         if let failedAt = failures[address], now.timeIntervalSince(failedAt) < Self.failureRetrySeconds {
-            lock.unlock()
             return nil
         }
-        if let existing = flights[address] {
-            flight = existing
-        } else {
-            flight = Task.detached(priority: .utility) { [session] in
-                await Self.fetch(address, session: session)
-            }
-            flights[address] = flight
+        if let existing = flights[address] { return existing }
+        let flight = Task.detached(priority: .utility) { [session] in
+            await Self.fetch(address, session: session)
         }
-        lock.unlock()
+        flights[address] = flight
+        return flight
+    }
 
-        let image = await flight.value
+    /// Every waiter reports; only the first to arrive for this flight records
+    /// it, and a newer flight for the same address is never cleared by a
+    /// waiter of an older one.
+    private func finish(_ address: String, flight: Task<UIImage?, Never>, image: UIImage?, now: Date) {
         lock.lock()
+        defer { lock.unlock() }
+        guard flights[address] == flight else { return }
         flights[address] = nil
         if let image {
             images.setObject(image, forKey: address as NSString)
@@ -74,8 +86,6 @@ final class LiveTvStationLogoLoader: @unchecked Sendable {
         } else {
             failures[address] = now
         }
-        lock.unlock()
-        return image
     }
 
     private static func fetch(_ address: String, session: URLSession) async -> UIImage? {
@@ -115,10 +125,21 @@ struct LiveTvStationChip: View {
     var foreground: Color = Palette.muted
     var padding: CGFloat = 5
 
-    @State private var image: UIImage?
+    /// The decoded logo and the address it is for: a row reused for another
+    /// channel must not show the previous station for a frame.
+    @State private var loaded: (address: String, image: UIImage)?
+
+    private var shown: UIImage? {
+        guard let logo else { return nil }
+        if let loaded, loaded.address == logo { return loaded.image }
+        // Already decoded elsewhere: draw it on the first frame, so a lazy
+        // list that recreates the row does not flash the callsign.
+        return LiveTvStationLogoLoader.shared.cached(logo)
+    }
 
     var body: some View {
-        ZStack {
+        let image = shown
+        return ZStack {
             Text(name)
                 .font(font)
                 .foregroundStyle(foreground)
@@ -139,17 +160,9 @@ struct LiveTvStationChip: View {
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         .accessibilityHidden(true)
         .task(id: logo) {
-            guard let logo else {
-                image = nil
-                return
-            }
-            if let hit = LiveTvStationLogoLoader.shared.cached(logo) {
-                image = hit
-                return
-            }
-            image = nil
-            let loaded = await LiveTvStationLogoLoader.shared.image(for: logo)
-            if !Task.isCancelled { image = loaded }
+            guard let logo, LiveTvStationLogoLoader.shared.cached(logo) == nil else { return }
+            let image = await LiveTvStationLogoLoader.shared.image(for: logo)
+            if !Task.isCancelled, let image { loaded = (logo, image) }
         }
     }
 }
@@ -157,11 +170,14 @@ struct LiveTvStationChip: View {
 /// Tile sizes for the surfaces that are not a list row or a grid header
 /// (those keep their sizes beside the geometry they belong to).
 enum LiveTvStationChipMetrics {
+    // `detail` is no taller than the title line it sits beside: the tvOS
+    // guide stage is a fixed 302 pt, and a taller row would cost the
+    // synopsis a line.
     #if os(tvOS)
-    static let detail = CGSize(width: 84, height: 48)
+    static let detail = CGSize(width: 64, height: 36)
     static let pictureBadge = CGSize(width: 72, height: 34)
     #else
-    static let detail = CGSize(width: 52, height: 32)
+    static let detail = CGSize(width: 40, height: 22)
     static let pictureBadge = CGSize(width: 44, height: 22)
     #endif
     /// The fullscreen identity tile, the largest any chip draws.

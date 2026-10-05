@@ -2885,6 +2885,27 @@ final class LiveTvTests: XCTestCase {
     /// The arrangement itself, not just the constants behind it: each of these
     /// would still be true if the numbers changed, and each is false if the
     /// rewrite is reverted.
+    /// Reducer cases cannot see whether a screen draws what the reducer says.
+    /// The logo rule once existed on the web alone and both native guides
+    /// shipped without it, so the wiring is pinned too: every surface that
+    /// names a station draws `LiveTvStationChip` with the guide's logo.
+    func testEveryStationSurfaceDrawsTheGuideLogo() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        let chips = source.components(separatedBy: "LiveTvStationChip(").count - 1
+        XCTAssertGreaterThanOrEqual(chips, 6,
+            "list row, grid header, focused details, phone details, picture badge, fullscreen identity")
+        XCTAssertTrue(source.contains("LiveTvStationChip(name: stationName, logo: logo"), "the list row draws its logo")
+        XCTAssertFalse(source.contains("Text(stationName)"), "the list row's callsign-only chip is gone")
+        XCTAssertTrue(source.contains("if let logo = row.logo {"), "the grid header draws the row's logo")
+        XCTAssertTrue(source.contains("logo: live.stationLogo(watching)"), "the picture badge draws its logo")
+        XCTAssertGreaterThanOrEqual(
+            source.components(separatedBy: "live.stationLogo(channel)").count - 1, 5,
+            "both channel lists, both detail surfaces and the fullscreen identity pass the logo")
+    }
+
     func testTheLiveTvArrangementIsWiredToTheDerivedGeometry() throws {
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let source = try String(
