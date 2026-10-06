@@ -1982,6 +1982,7 @@ pub fn router(state: AppState) -> Router {
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
         )
+        .merge(shared_receiver_playback::internal_forwarding_router())
         .route(
             crate::media_sessions::ACTIVATE_PATH,
             post(internal_media_sessions::activate).layer(DefaultBodyLimit::max(

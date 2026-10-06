@@ -605,7 +605,7 @@ pub(super) async fn receiver_status(
         _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
     let body = shared_status_body(&actor.0.intent.recipe, &tuple, &status);
-    let guard = match actor.retain_accepted_connection(state, connection) {
+    let guard = match actor.retain_delivery_connection(state, connection).await {
         Ok(guard) => guard,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
@@ -626,6 +626,7 @@ pub(super) async fn receiver_control(
     state: Arc<AppState>,
     connection: &crate::SharingConnectionCancellation,
     bytes: axum::body::Bytes,
+    forwarded: bool,
 ) -> Response {
     let Ok(request) = serde_json::from_slice::<ControlRequestV1>(&bytes) else {
         return invalid_control_body();
@@ -646,10 +647,27 @@ pub(super) async fn receiver_control(
     if request.demand == crate::playback_control::PlaybackDemand::End {
         // A terminal exchange ends B's own session through the one retirement
         // owner: it answers only after the actual confirmed Source End.
+        let self_wait = forwarded
+            || state.sharing.accepted_drivers.connection_owes_principal(
+                connection,
+                "receiver",
+                tuple.incarnation,
+            );
         actor.begin_retirement(
             state,
             plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Deleted,
         );
+        if self_wait {
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the shared media session end is not yet confirmed",
+                generation,
+                epoch,
+                Some(500),
+                None,
+            );
+        }
         return match actor.wait_confirmed_end(tuple.session).await {
             Ok(()) => control_error(
                 StatusCode::GONE,
@@ -671,7 +689,10 @@ pub(super) async fn receiver_control(
             ),
         };
     }
-    let guard = match actor.retain_accepted_connection(state.clone(), connection) {
+    let guard = match actor
+        .retain_delivery_connection(state.clone(), connection)
+        .await
+    {
         Ok(guard) => guard,
         Err(_) => {
             return refusal_response(

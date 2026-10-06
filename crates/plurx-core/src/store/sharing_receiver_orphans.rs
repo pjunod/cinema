@@ -642,7 +642,16 @@ mod tests {
             .await
             .expect("claim")
         {
-            ReceiverOrphanClaimOutcome::Claimed(claimed) => claimed.orphan().clone(),
+            ReceiverOrphanClaimOutcome::Claimed(claimed) => {
+                // SQL-only model fixture: empty metadata fence is NOT a
+                // daemon driver receipt or evidence of a physical producer.
+                super::super::sharing_receiver_retirement::install_model_ingress_fence(
+                    store,
+                    &claimed.orphan().owner().incarnation_id.to_string(),
+                )
+                .await;
+                claimed.orphan().clone()
+            }
             _ => panic!("exact orphan claim must win"),
         }
     }

@@ -35,6 +35,7 @@ impl CleanupPeerConnection {
     /// Own one immutable End across approved endpoints under one total budget.
     /// A retained node can keep TLS alive while refusing/losing its End route;
     /// only a successful authenticated exact echo settles the obligation.
+    #[allow(clippy::too_many_arguments)] // Exact immutable End authority plus its owner's absolute budget.
     pub(crate) async fn end_for_session(
         state: &crate::state::AppState,
         intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
@@ -43,8 +44,9 @@ impl CleanupPeerConnection {
         viewer_hash: &str,
         session: &SourcePeerSession,
         known: Option<&SourcePeerLineage>,
+        deadline: tokio::time::Instant,
     ) -> Result<SourceEndReceipt, PeerError> {
-        let deadline = tokio::time::Instant::now() + SOURCE_END_DEADLINE;
+        let deadline = deadline.min(tokio::time::Instant::now() + SOURCE_END_DEADLINE);
         let mut endpoints = vec![retained.clone()];
         if let Ok(Ok(Some(import))) = tokio::time::timeout_at(
             (tokio::time::Instant::now() + CLEANUP_IMPORT_LOOKUP_DEADLINE).min(deadline),

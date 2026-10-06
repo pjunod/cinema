@@ -78,22 +78,25 @@ enum RetirementStall {
 /// observed only before the next one.
 struct RetirementBudget {
     failures: u32,
+    deadline: Instant,
     shutdown: tokio_util::sync::CancellationToken,
 }
 impl RetirementBudget {
     fn new(shutdown: tokio_util::sync::CancellationToken) -> Self {
         Self {
             failures: 0,
+            deadline: Instant::now() + RECEIVER_WRITER_JOIN_DEADLINE,
             shutdown,
         }
     }
     async fn retry(&mut self) -> Result<(), RetirementStall> {
         self.failures = self.failures.saturating_add(1);
-        if self.failures >= RETIREMENT_ATTEMPTS {
+        if self.failures >= RETIREMENT_ATTEMPTS || Instant::now() >= self.deadline {
             return Err(RetirementStall::Exhausted);
         }
         tokio::select! {
             () = self.shutdown.cancelled() => Err(RetirementStall::Shutdown),
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline)) => Err(RetirementStall::Exhausted),
             () = tokio::time::sleep(retirement_retry_delay(self.failures)) => Ok(()),
         }
     }
@@ -384,9 +387,73 @@ impl ReceiverStartActor {
             .join_start_for_cleanup()
             .await
             .map_err(|_| RetirementStall::Unjoined)?;
-        let bodies = tokio::time::timeout(RECEIVER_WRITER_JOIN_DEADLINE, self.0.bodies.join())
+        let writer_deadline = budget.deadline;
+        let route = state
+            .store
+            .media_session_route_by_incarnation(&self.0.intent.recipe.source_request_id.to_string())
             .await
-            .map_err(|_| RetirementStall::Unjoined)?;
+            .map_err(|_| RetirementStall::Refused)?;
+        if let Some(route) = route {
+            self.refresh_cleanup_capsules(state, &joined, &route)
+                .await
+                .map_err(|_| RetirementStall::Refused)?;
+            let existing = state
+                .store
+                .receiver_ingress_snapshot(&route)
+                .await
+                .map_err(|_| RetirementStall::Refused)?;
+            let retained = {
+                let owned = self.0.state.lock().expect("receiver owner");
+                (owned.ingress_owner_identity.clone(), owned.source.clone())
+            };
+            let original = if let Some(snapshot) = existing {
+                Some(snapshot.owner_identity)
+            } else if let Some(identity) = retained.0 {
+                Some(identity)
+            } else if let Some(attachment) = retained.1 {
+                Some(
+                    plurx_core::sharing_receiver_delivery::receiver_retained_owner_identity(
+                        &route.recipe_json,
+                        &attachment,
+                    )
+                    .map_err(|_| RetirementStall::Refused)?,
+                )
+            } else {
+                // No attached binding has ever existed in this retained
+                // joined attempt, so no protected ingress was admissible.
+                // Still install a distinct sealed fence before any Source End.
+                Some(plurx_core::auth::hash_token(&format!(
+                    "plurx.receiver.unpublished.ingress.v1\0{}\0{}\0{}\0{}\0{}",
+                    route.incarnation_id,
+                    route.session_id,
+                    route.owner_node_id,
+                    route.owner_epoch,
+                    route.recipe_json
+                )))
+            };
+            if let Some(original) = original {
+                let mode = if self.0.retirement_cuts_transports() {
+                    crate::sharing_connection_custody::DriverCloseMode::Revoke
+                } else {
+                    crate::sharing_connection_custody::DriverCloseMode::Drain
+                };
+                ingress_custody::close_receiver_ingress(
+                    Arc::new(state.clone()),
+                    &route,
+                    &original,
+                    mode,
+                    writer_deadline,
+                )
+                .await
+                .map_err(|_| RetirementStall::Unjoined)?;
+            }
+        }
+        let bodies = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(writer_deadline),
+            self.0.bodies.join(),
+        )
+        .await
+        .map_err(|_| RetirementStall::Unjoined)?;
         // Sealed resource admissions plus actual last guard release are needed
         // even for a no-send outcome. No elapsed timeout can construct this.
         if !Arc::ptr_eq(&bodies.0, &self.0.bodies) {
@@ -464,7 +531,7 @@ impl ReceiverStartActor {
         }
         let mut witness = loop {
             match self
-                .confirm_retirement(state, &joined, &bodies, reason)
+                .confirm_retirement(state, &joined, &bodies, reason, budget.deadline)
                 .await
             {
                 Ok(witness) => break witness,
@@ -477,6 +544,8 @@ impl ReceiverStartActor {
             let refused = matches!(&outcome, Ok(ReceiverRetirementOutcome::Refused));
             match outcome {
                 Ok(ReceiverRetirementOutcome::Applied | ReceiverRetirementOutcome::Replay) => {
+                    self.compact_confirmed_ingress(state, &witness, budget.deadline)
+                        .await;
                     return self.mark_confirmed_retired(&witness);
                 }
                 Ok(ReceiverRetirementOutcome::Refused) if witness.binding.is_some() => {
@@ -488,6 +557,8 @@ impl ReceiverStartActor {
                         Ok(
                             ReceiverRetirementOutcome::Applied | ReceiverRetirementOutcome::Replay,
                         ) => {
+                            self.compact_confirmed_ingress(state, &witness, budget.deadline)
+                                .await;
                             return self.mark_confirmed_retired(&witness);
                         }
                         _ => witness.binding = binding,
@@ -501,7 +572,7 @@ impl ReceiverStartActor {
                 // definitive refusal of the route itself ends the owner, and
                 // commit-unknown never enters this metadata refresh path.
                 match self
-                    .confirm_retirement(state, &joined, &bodies, reason)
+                    .confirm_retirement(state, &joined, &bodies, reason, budget.deadline)
                     .await
                 {
                     Ok(refreshed) if refreshed.confirmation == witness.confirmation => {
@@ -518,12 +589,39 @@ impl ReceiverStartActor {
             budget.retry().await?;
         }
     }
+    // Only exact terminal SQL plus already joined custody permits compacting
+    // replay history. Failure retains debt; it never erases the replay fence.
+    async fn compact_confirmed_ingress(
+        &self,
+        state: &AppState,
+        witness: &ConfirmedRetirement,
+        deadline: Instant,
+    ) {
+        let work = async {
+            let Ok(Some(route)) = state
+                .store
+                .media_session_route_by_incarnation(&witness.owner.incarnation_id.to_string())
+                .await
+            else {
+                return;
+            };
+            let Ok(Some(snapshot)) = state.store.receiver_ingress_snapshot(&route).await else {
+                return;
+            };
+            let _ = state
+                .store
+                .reclaim_receiver_ingress(&route, &snapshot)
+                .await;
+        };
+        let _ = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work).await;
+    }
     async fn confirm_retirement(
         &self,
         state: &AppState,
         joined: &JoinedReceiverStart,
         bodies: &JoinedReceiverBodies,
         reason: ReceiverRetirementReason,
+        deadline: Instant,
     ) -> Result<ConfirmedRetirement, RetirementStep> {
         // Only a Store read or the Source dial may be repeated; every other
         // failure is a refusal of the exact immutable route and receipt.
@@ -538,11 +636,11 @@ impl ReceiverStartActor {
             .dispatched
             .is_some();
         let source = if dispatched {
-            Some(self.request_source_end(state, joined).await?)
+            Some(self.request_source_end(state, joined, deadline).await?)
         } else {
             None
         };
-        let (planned, owner, binding) = {
+        let (planned, owner, _binding) = {
             let owned = self.0.state.lock().expect("receiver owner");
             if !owned.dispatch_closed {
                 return Err(RetirementStep::Refused);
@@ -584,6 +682,10 @@ impl ReceiverStartActor {
         }) {
             return Err(RetirementStep::Refused);
         }
+        let binding = self
+            .refresh_cleanup_capsules(state, joined, &route)
+            .await
+            .map_err(|_| RetirementStep::Retry)?;
         let owner = ReceiverSourceOwner {
             incarnation_id: Uuid::parse_str(&route.incarnation_id)
                 .map_err(|_| RetirementStep::Refused)?,

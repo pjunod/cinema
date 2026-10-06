@@ -1879,6 +1879,14 @@ async fn boot(
     );
     state
         .membership
+        .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
+    state
+        .membership
+        .publish_ingress_custody_boot()
+        .await
+        .context("publishing actual accepted-driver custody boot")?;
+    state
+        .membership
         .prepare_purpose_master(purpose_master)
         .await
         .context("qualifying coordinated sharing purpose master")?;

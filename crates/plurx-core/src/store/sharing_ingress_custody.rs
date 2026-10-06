@@ -51,21 +51,23 @@ pub(crate) async fn read<T: Backend>(
     if row.revision <= 0 {
         return Err(invalid());
     }
+    let state = IngressCustodyState::decode(&row.custody)?;
+    if kind == "receiver" && state.source_routing().is_some() {
+        return Err(invalid());
+    }
     Ok(Some(IngressCustodySnapshot {
         principal_kind: kind.into(),
         incarnation_id: incarnation,
         owner_identity: owner.into(),
         revision: row.revision,
-        state: IngressCustodyState::decode(&row.custody)?,
+        state,
     }))
 }
-#[allow(dead_code)] // Complete CAS helper; Source/B same-write principal adapters integrate next.
 pub(crate) fn create(kind: &str, incarnation: Uuid, owner: &str) -> Result<Statement, StoreError> {
     identity(kind, incarnation, owner)?;
     Ok(("INSERT INTO sharing_ingress_custody(principal_kind,incarnation_id,owner_identity,custody_json,revision) VALUES($1,$2,$3,$4,1) ON CONFLICT(principal_kind,incarnation_id) DO NOTHING".into(),
         vec![kind.to_owned().into(), incarnation.into(), owner.to_owned().into(), IngressCustodyState::default().encode()?.into()]))
 }
-#[allow(dead_code)] // Complete CAS helper; Source/B same-write principal adapters integrate next.
 pub(crate) fn compare_and_swap(
     snapshot: &IngressCustodySnapshot,
     next: &IngressCustodyState,

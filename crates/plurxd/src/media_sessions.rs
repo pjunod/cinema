@@ -2788,6 +2788,63 @@ impl MediaSessionCoordinator {
             .ok_or(PeerTransportError::Unreachable)
     }
 
+    /// Shared receiver bytes retain the existing authenticated streaming driver.
+    pub(crate) async fn receiver_forward_stream(
+        &self,
+        owner_node_id: &str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<reqwest::Response, PeerTransportError> {
+        if body.len() > 128 * 1024 || tokio::time::Instant::now() >= deadline {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request_stream(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                "/internal/cluster/sharing/receiver/forward",
+                body,
+                deadline,
+                PeerAuthMode::ExactRequest,
+            )
+            .await
+    }
+
+    /// Only the named receiver control/custody operations use signed replies.
+    pub(crate) async fn receiver_forward_bounded(
+        &self,
+        owner_node_id: &str,
+        path: &'static str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<crate::http::peer_transport::PeerResponse, PeerTransportError> {
+        if !matches!(
+            path,
+            "/internal/cluster/sharing/receiver/control"
+                | "/internal/cluster/sharing/receiver/register"
+                | "/internal/cluster/sharing/receiver/ack"
+        ) || body.len() > 128 * 1024
+            || tokio::time::Instant::now() >= deadline
+        {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                path,
+                body,
+                deadline,
+                64 * 1024,
+                PeerAuthMode::ExactRequestAndMemberResponse,
+            )
+            .await
+    }
+
     pub(crate) async fn start_remote(
         &self,
         owner_node_id: &str,
@@ -2968,7 +3025,6 @@ impl MediaSessionCoordinator {
 
     /// Exact authenticated closure of an outer accepted driver. No request
     /// timeout or missing registry entry is interpreted as physical closure.
-    #[allow(dead_code)] // Complete authenticated close RPC; Source/B principal retirement adapters integrate next.
     pub(crate) async fn close_sharing_ingress(
         &self,
         ingress_node: &str,
@@ -3001,7 +3057,7 @@ impl MediaSessionCoordinator {
                 body,
                 deadline,
                 2048,
-                PeerAuthMode::ExactRequest,
+                PeerAuthMode::ExactRequestAndMemberResponse,
             )
             .await?;
         if !response.status.is_success() {

@@ -23,8 +23,20 @@ mod retirement;
 pub(crate) use retirement::receiver_recovery_loop;
 #[path = "shared_receiver_direct.rs"]
 mod direct;
+#[path = "shared_receiver_forwarding.rs"]
+pub(crate) mod forwarding;
+#[path = "shared_receiver_ingress_custody.rs"]
+mod ingress_custody;
 #[path = "shared_receiver_successor.rs"]
 mod successor;
+use direct::receiver_direct_actor;
+use ingress_custody::{
+    ack_owner, receiver_forward_admit, receiver_forward_cleanup_tuple,
+    receiver_forward_reconcile_cleanup, register_owner, validate_forward_ingress, validate_owner,
+};
+pub(crate) fn internal_forwarding_router() -> axum::Router<AppState> {
+    forwarding::internal_router()
+}
 
 /// Shared direct play on the public media group, beside the Shared start:
 /// GET/HEAD bytes for the exact B session bound to this file alias.
@@ -47,6 +59,7 @@ pub(crate) enum ReceiverStartError {
 }
 #[derive(Default)]
 pub(crate) struct ReceiverStartRegistry {
+    ingress: ingress_custody::ReceiverIngressCache,
     entries: Mutex<Vec<Arc<ReceiverStartInner>>>,
     settled: Mutex<Vec<SettledReceiverAttempt>>,
     /// Registration order. A published Start supersedes only attempts that
@@ -110,6 +123,7 @@ struct ReceiverStartState {
     owner: Option<ReceiverSourceOwner>,
     planned_activation: Option<MediaSessionActivation>,
     retirement_started: bool,
+    ingress_owner_identity: Option<String>,
     /// Why retirement began; read by the connection monitors when it stops.
     retirement_reason: Option<plurx_core::sharing_receiver_retirement::ReceiverRetirementReason>,
     retired: bool,
@@ -132,7 +146,7 @@ impl ReceiverStartInner {
         use plurx_core::sharing_receiver_retirement::ReceiverRetirementReason as Reason;
         !matches!(
             self.state.lock().expect("receiver owner").retirement_reason,
-            Some(Reason::Superseded | Reason::Replaced)
+            Some(Reason::Deleted | Reason::Superseded | Reason::Replaced)
         )
     }
     fn retain_dispatch(
@@ -255,6 +269,33 @@ struct ReceivedSource {
     endpoint: plurx_core::sharing::Endpoint,
     incarnation: Uuid,
     start: ReceivedStart,
+}
+/// Compare authenticated current plaintext with an actual retained invocation.
+/// Ciphertext equality is intentionally not part of the immutable Source tuple.
+fn current_capsule_matches_received(
+    intent: &ReceiverSessionIntent,
+    binding: &ReceiverSourceBinding,
+    capsule: &UpstreamCapsule,
+    received: &ReceivedSource,
+) -> Result<bool, ReceiverStartError> {
+    let (session, epoch) = received.source_tuple()?;
+    Ok(capsule.version == 1
+        && capsule.reference == intent.recipe.reference
+        && capsule.reference == binding.reference
+        && capsule.file_id == intent.recipe.file_id
+        && capsule.file_id == binding.file_id
+        && capsule.file_revision == intent.recipe.file_revision
+        && capsule.file_revision == binding.file_revision
+        && capsule.source_request_id == intent.recipe.source_request_id
+        && capsule.source_request_id == binding.source_request_id
+        && capsule.source_session_id == binding.source_session_id
+        && capsule.source_session_id == session
+        && capsule.source_incarnation_id == binding.source_incarnation_id
+        && capsule.source_incarnation_id == received.incarnation
+        && capsule.source_owner_epoch == epoch
+        && capsule.viewer_hash == received.viewer_hash
+        && capsule.endpoint == received.endpoint
+        && capsule.credential.expose() == received.credential.expose())
 }
 /// The Source Start B received, of the presentation its recipe names.
 enum ReceivedStart {
@@ -664,14 +705,6 @@ impl ReceiverStartActor {
             .ok_or(ReceiverStartError::Unresolved)?;
         let a = &attachment.binding;
         let b = &snapshot.binding;
-        let original = a
-            .capability_envelope
-            .to_persist()
-            .map_err(|_| ReceiverStartError::Unresolved)?;
-        let current = b
-            .capability_envelope
-            .to_persist()
-            .map_err(|_| ReceiverStartError::Unresolved)?;
         if snapshot.response_json.is_none()
             || a.reference != b.reference
             || a.file_id != b.file_id
@@ -679,10 +712,32 @@ impl ReceiverStartActor {
             || a.source_request_id != b.source_request_id
             || a.source_session_id != b.source_session_id
             || a.source_incarnation_id != b.source_incarnation_id
-            || original != current
         {
             return Err(ReceiverStartError::Unresolved);
         }
+        let local = state
+            .store
+            .sharing_identity(clock_ms())
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?;
+        // Rewrap changes ciphertext, never the retained actual Source. Open only
+        // the current envelope, then pin that exact ciphertext in subsequent CAS.
+        let opened = state
+            .sharing
+            .key
+            .open_sharing(
+                SharingSecretPurpose::Upstream,
+                local.server_id,
+                self.0.intent.scope.import_id,
+                &b.capability_envelope,
+            )
+            .map_err(|_| ReceiverStartError::Unresolved)?;
+        let capsule: UpstreamCapsule =
+            serde_json::from_str(opened.expose()).map_err(|_| ReceiverStartError::Unresolved)?;
+        if !current_capsule_matches_received(&self.0.intent, b, &capsule, &received)? {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        attachment.binding = b.clone();
         let hash = plurx_core::auth::hash_token(&attachment.owner.session_id.to_string());
         state
             .store
@@ -693,7 +748,157 @@ impl ReceiverStartActor {
         if self.0.stop.is_cancelled() {
             return Err(ReceiverStartError::Unresolved);
         }
+        {
+            let mut owned = self.0.state.lock().expect("receiver owner");
+            if owned.retirement_started
+                || !owned
+                    .received
+                    .as_ref()
+                    .is_some_and(|actual| Arc::ptr_eq(actual, &received))
+            {
+                return Err(ReceiverStartError::Unresolved);
+            }
+            let retained = owned
+                .source
+                .as_mut()
+                .ok_or(ReceiverStartError::Unresolved)?;
+            if retained.owner.incarnation_id != attachment.owner.incarnation_id
+                || retained.owner.session_id != attachment.owner.session_id
+                || retained.owner.owner_node_id != attachment.owner.owner_node_id
+                || retained.owner.owner_epoch != attachment.owner.owner_epoch
+            {
+                return Err(ReceiverStartError::Unresolved);
+            }
+            retained.binding = attachment.binding.clone();
+        }
         Ok((authority, attachment, received))
+    }
+    // Cleanup-only refresh after actual start ownership joins. Metadata cannot
+    // manufacture a received Source or dispatch; current plaintext must equal
+    // this exact retained owner, including when the original grant is revoked.
+    async fn refresh_cleanup_capsules(
+        &self,
+        state: &AppState,
+        joined: &JoinedReceiverStart,
+        route: &plurx_core::domain::MediaSessionRoute,
+    ) -> Result<Option<ReceiverSourceBinding>, ReceiverStartError> {
+        if !Arc::ptr_eq(&self.0, &joined.0) {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        let (owner, attachment, received, dispatched) = {
+            let held = self.0.state.lock().expect("receiver owner");
+            if !held.dispatch_closed {
+                return Err(ReceiverStartError::Unresolved);
+            }
+            (
+                held.owner.clone().ok_or(ReceiverStartError::Unresolved)?,
+                held.source.clone(),
+                held.received.clone(),
+                held.dispatched.clone(),
+            )
+        };
+        let current = state
+            .store
+            .receiver_cleanup_capsules(
+                route,
+                &owner,
+                attachment.as_ref().map(|a| &a.binding),
+                &self.0.intent,
+            )
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?
+            .ok_or(ReceiverStartError::Unresolved)?;
+        let local = state
+            .store
+            .sharing_identity(clock_ms())
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?;
+        match (&current.binding, &received) {
+            (Some(binding), Some(received)) => {
+                let opened = state
+                    .sharing
+                    .key
+                    .open_sharing(
+                        SharingSecretPurpose::Upstream,
+                        local.server_id,
+                        self.0.intent.scope.import_id,
+                        &binding.capability_envelope,
+                    )
+                    .map_err(|_| ReceiverStartError::Unresolved)?;
+                let capsule: UpstreamCapsule = serde_json::from_str(opened.expose())
+                    .map_err(|_| ReceiverStartError::Unresolved)?;
+                if !current_capsule_matches_received(&self.0.intent, binding, &capsule, received)? {
+                    return Err(ReceiverStartError::Unresolved);
+                }
+            }
+            (None, None) => {}
+            _ => return Err(ReceiverStartError::Unresolved),
+        }
+        match (&current.dispatch, &dispatched) {
+            (Some(envelope), Some(dispatched)) => {
+                let opened = state
+                    .sharing
+                    .key
+                    .open_sharing(
+                        SharingSecretPurpose::Upstream,
+                        local.server_id,
+                        self.0.intent.scope.import_id,
+                        envelope,
+                    )
+                    .map_err(|_| ReceiverStartError::Unresolved)?;
+                let capsule: DispatchCapsule = serde_json::from_str(opened.expose())
+                    .map_err(|_| ReceiverStartError::Unresolved)?;
+                let recipe = &self.0.intent.recipe;
+                if capsule.version != 1
+                    || capsule.kind != DISPATCH_CAPSULE_KIND
+                    || capsule.reference != recipe.reference
+                    || capsule.file_id != recipe.file_id
+                    || capsule.file_revision != recipe.file_revision
+                    || capsule.source_request_id != recipe.source_request_id
+                    || capsule.viewer_hash != dispatched.viewer_hash
+                    || capsule.endpoint != dispatched.endpoint
+                    || capsule.credential.expose() != dispatched.credential.expose()
+                    || received.as_ref().is_some_and(|source| {
+                        capsule.viewer_hash != source.viewer_hash
+                            || capsule.endpoint != source.endpoint
+                            || capsule.credential.expose() != source.credential.expose()
+                    })
+                {
+                    return Err(ReceiverStartError::Unresolved);
+                }
+            }
+            (None, None) => {}
+            _ => return Err(ReceiverStartError::Unresolved),
+        }
+        let mut held = self.0.state.lock().expect("receiver owner");
+        let same_received = match (&held.received, &received) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        let same_dispatched = match (&held.dispatched, &dispatched) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !held.dispatch_closed
+            || !same_received
+            || !same_dispatched
+            || !held.owner.as_ref().is_some_and(|actual| {
+                actual.incarnation_id == owner.incarnation_id
+                    && actual.session_id == owner.session_id
+                    && actual.owner_node_id == owner.owner_node_id
+                    && actual.owner_epoch == owner.owner_epoch
+            })
+        {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        match (&mut held.source, &current.binding) {
+            (Some(attachment), Some(binding)) => attachment.binding = binding.clone(),
+            (None, None) => {}
+            _ => return Err(ReceiverStartError::Unresolved),
+        }
+        Ok(current.binding)
     }
     pub(crate) async fn record_progress(
         &self,
@@ -792,7 +997,7 @@ impl ReceiverStartActor {
         self.current_delivery_attachment(&state).await?;
         self.current_source_status(&state).await?;
         self.current_delivery_attachment(&state).await?;
-        let guard = self.retain_accepted_connection(state, connection)?;
+        let guard = self.retain_delivery_connection(state, connection).await?;
         let (parts, body) = response.into_parts();
         let stream = body.into_data_stream().map(move |frame| {
             let _accepted_writer = &guard;
@@ -802,6 +1007,35 @@ impl ReceiverStartActor {
             parts,
             axum::body::Body::from_stream(stream),
         ))
+    }
+    pub(crate) async fn retain_delivery_connection(
+        &self,
+        state: Arc<AppState>,
+        connection: &crate::SharingConnectionCancellation,
+    ) -> Result<Arc<dyn Send + Sync>, ReceiverStartError> {
+        let incarnation = self.0.intent.recipe.source_request_id;
+        let route = state
+            .store
+            .media_session_route_by_incarnation(&incarnation.to_string())
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?
+            .ok_or(ReceiverStartError::Unavailable)?;
+        let proof = state
+            .store
+            .receiver_relay_read_authority(&route)
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?
+            .ok_or(ReceiverStartError::Unavailable)?;
+        let ingress = receiver_forward_admit(
+            state.clone(),
+            &route,
+            &proof,
+            connection,
+            Instant::now() + Duration::from_secs(9),
+        )
+        .await?;
+        let local = self.retain_accepted_connection(state, connection)?;
+        Ok(Arc::new((local, ingress)))
     }
     pub(crate) fn retain_accepted_connection(
         &self,
@@ -1006,6 +1240,7 @@ impl ReceiverStartActor {
         &self,
         state: &AppState,
         joined: &JoinedReceiverStart,
+        deadline: Instant,
     ) -> Result<Arc<crate::sharing_client::SourceEndReceipt>, retirement::RetirementStep> {
         use retirement::RetirementStep;
         if !Arc::ptr_eq(&self.0, &joined.0) {
@@ -1035,6 +1270,7 @@ impl ReceiverStartActor {
                 &dispatched.viewer_hash,
                 &self.0.peer_session,
                 known.as_ref(),
+                tokio::time::Instant::from_std(deadline),
             )
             .await
             .map_err(RetirementStep::from_source_end)?,
@@ -1469,7 +1705,8 @@ async fn run_owner(
         actor
             .current_source_status_owned(&state, connection_lifetime.clone())
             .await?;
-        actor.current_delivery_attachment(&state).await?;
+        let (_, current_attachment, _) = actor.current_delivery_attachment(&state).await?;
+        attachment = current_attachment;
         let authority = state
             .store
             .prepare_receiver_session_authority(intent.clone())
@@ -1541,7 +1778,6 @@ pub(crate) async fn receiver_media(
         http::{Method, StatusCode},
         response::IntoResponse,
     };
-    use futures_util::StreamExt;
     // This layer sits on the router nested at /api/v1, which strips the
     // prefix from the request URI; the public path is the original one.
     let original = request
@@ -1603,11 +1839,7 @@ pub(crate) async fn receiver_media(
                         value.get("kind").and_then(|kind| kind.as_str()) == Some("remote_source")
                     });
                 if remote {
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "shared playback owner unavailable",
-                    )
-                        .into_response();
+                    return forwarding::relay_public(state, route, request).await;
                 }
             }
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -1615,7 +1847,36 @@ pub(crate) async fn receiver_media(
         }
         return next.run(request).await;
     }
-    let actor = actor.expect("actual receiver actor");
+    receiver_media_actor(
+        state,
+        actor.expect("actual receiver actor"),
+        suffix,
+        request,
+    )
+    .await
+}
+pub(super) async fn receiver_media_actor(
+    state: AppState,
+    actor: ReceiverStartActor,
+    suffix: &str,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::{
+        http::{Method, StatusCode},
+        response::IntoResponse,
+    };
+    use futures_util::StreamExt;
+    let session_id = actor
+        .0
+        .state
+        .lock()
+        .expect("receiver owner")
+        .owner
+        .as_ref()
+        .map(|owner| owner.session_id);
+    let Some(session_id) = session_id else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     // A direct session is retired here like any session, but it has no HLS
     // playlist, segment, status or control to relay.
     if actor.0.direct
@@ -1631,10 +1892,30 @@ pub(crate) async fn receiver_media(
         .into_response();
     }
     if suffix.is_empty() && request.method() == Method::DELETE && request.uri().query().is_none() {
+        let forwarded = request
+            .extensions()
+            .get::<forwarding::ReceiverForwardContext>()
+            .is_some()
+            || request
+                .extensions()
+                .get::<crate::SharingConnectionCancellation>()
+                .is_some_and(|connection| {
+                    state.sharing.accepted_drivers.connection_owes_principal(
+                        connection,
+                        "receiver",
+                        actor.0.intent.recipe.source_request_id,
+                    )
+                });
         actor.begin_retirement(
             Arc::new(state),
             plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Deleted,
         );
+        // This response may itself keep an already registered outer H2 driver
+        // alive. Finish the stream now; the retained retirement owner closes
+        // real custody and an exact retry can return confirmation afterward.
+        if forwarded {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
         return match actor.wait_confirmed_end(session_id).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -1648,6 +1929,10 @@ pub(crate) async fn receiver_media(
         else {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
+        let forwarded = request
+            .extensions()
+            .get::<forwarding::ReceiverForwardContext>()
+            .is_some();
         let method = request.method().clone();
         let control_body = if suffix == "control" && method == Method::POST {
             let Ok(bytes) = axum::body::to_bytes(request.into_body(), 64 * 1024).await else {
@@ -1671,7 +1956,7 @@ pub(crate) async fn receiver_media(
                 control::receiver_status(actor, state, &connection).await
             }
             ("control", &Method::POST, Some(bytes)) => {
-                control::receiver_control(actor, state, &connection, bytes).await
+                control::receiver_control(actor, state, &connection, bytes, forwarded).await
             }
             _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
         };
@@ -1702,7 +1987,10 @@ pub(crate) async fn receiver_media(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     let state = Arc::new(state);
-    let guard = match actor.retain_accepted_connection(state.clone(), &connection) {
+    let guard = match actor
+        .retain_delivery_connection(state.clone(), &connection)
+        .await
+    {
         Ok(guard) => guard,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
@@ -2352,5 +2640,124 @@ mod tests {
         assert_eq!(registry.supersede_predecessors(&state, &successor), 1);
         assert!(superseding(&older));
         assert!(retired_within(&ReceiverStartActor(older), Duration::from_secs(5)).await);
+    }
+}
+
+#[cfg(test)]
+mod rewrap_tests {
+    use super::*;
+    #[test]
+    fn sharing_receiver_current_rewrapped_capsule_preserves_actual_source_and_refuses_plaintext_changes(
+    ) {
+        let intent = super::tests::intent("rewrap");
+        let key = plurx_core::secrets::CredentialKey::from_bytes([7; 32]);
+        let server = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let incarnation = Uuid::new_v4();
+        let received = ReceivedSource {
+            credential: plurx_core::secrets::Secret::from_cleartext(
+                "retained actual Source credential",
+            ),
+            viewer_hash: "a".repeat(64),
+            endpoint: plurx_core::sharing::Endpoint {
+                ipv4: std::net::Ipv4Addr::new(100, 64, 0, 2),
+                ipv6: None,
+                ts_fqdn: "source.example.ts.net".into(),
+                port: 9443,
+                spki_sha256: "b".repeat(64),
+            },
+            incarnation,
+            start: ReceivedStart::Direct(crate::http::sharing_direct_wire::SourceDirectStart {
+                session_id: session.to_string(),
+                control_epoch: 1,
+                length: 10,
+                mime: "video/mp4".into(),
+            }),
+        };
+        let plaintext = serde_json::to_string(&UpstreamCapsuleOut {
+            version: 1,
+            reference: &intent.recipe.reference,
+            file_id: &intent.recipe.file_id,
+            file_revision: &intent.recipe.file_revision,
+            source_request_id: intent.recipe.source_request_id,
+            source_session_id: session,
+            source_incarnation_id: incarnation,
+            source_owner_epoch: 1,
+            viewer_hash: &received.viewer_hash,
+            endpoint: &received.endpoint,
+            credential: received.credential.expose(),
+        })
+        .expect("canonical current capsule");
+        let old = key
+            .seal_sharing(
+                SharingSecretPurpose::Upstream,
+                server,
+                intent.scope.import_id,
+                &plaintext,
+            )
+            .expect("old ciphertext");
+        let current = key
+            .seal_sharing(
+                SharingSecretPurpose::Upstream,
+                server,
+                intent.scope.import_id,
+                &plaintext,
+            )
+            .expect("rewrapped ciphertext");
+        assert_ne!(
+            old.to_persist().expect("old persist"),
+            current.to_persist().expect("current persist")
+        );
+        let binding = ReceiverSourceBinding {
+            reference: intent.recipe.reference.clone(),
+            file_id: intent.recipe.file_id.clone(),
+            file_revision: intent.recipe.file_revision.clone(),
+            source_request_id: intent.recipe.source_request_id,
+            source_session_id: session,
+            source_incarnation_id: incarnation,
+            capability_envelope: current,
+        };
+        // The old envelope is never opened. Only authenticated current plaintext
+        // can be compared with retained physical invocation metadata.
+        let opened = key
+            .open_sharing(
+                SharingSecretPurpose::Upstream,
+                server,
+                intent.scope.import_id,
+                &binding.capability_envelope,
+            )
+            .expect("authenticate current");
+        let mut capsule: UpstreamCapsule =
+            serde_json::from_str(opened.expose()).expect("strict current capsule");
+        assert!(
+            current_capsule_matches_received(&intent, &binding, &capsule, &received)
+                .expect("lineage")
+        );
+        capsule.credential = plurx_core::secrets::Secret::from_cleartext("different credential");
+        assert!(
+            !current_capsule_matches_received(&intent, &binding, &capsule, &received)
+                .expect("lineage")
+        );
+        capsule.credential =
+            plurx_core::secrets::Secret::from_cleartext(received.credential.expose());
+        capsule.source_owner_epoch = 2;
+        assert!(
+            !current_capsule_matches_received(&intent, &binding, &capsule, &received)
+                .expect("lineage")
+        );
+        capsule.source_owner_epoch = 1;
+        capsule.source_request_id = Uuid::new_v4();
+        assert!(
+            !current_capsule_matches_received(&intent, &binding, &capsule, &received)
+                .expect("lineage")
+        );
+        assert!(key
+            .open_sharing(
+                SharingSecretPurpose::Upstream,
+                Uuid::new_v4(),
+                intent.scope.import_id,
+                &binding.capability_envelope
+            )
+            .is_err());
     }
 }
