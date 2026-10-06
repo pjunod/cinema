@@ -720,11 +720,18 @@ impl TranscodeManager {
         evidence: &crate::transcode::source_preparation::SourceHeldProbeEvidence,
         proof: &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
     ) -> Result<Arc<crate::vodencode::Encoding>, String> {
+        // A burn's sidecar must be the one this Source operation extracted for
+        // this exact track; nothing here reaches Local's shared burn cache.
+        let burn_matches = match (prepared.request().subtitle_burn, evidence.burn()) {
+            (None, None) => true,
+            (Some(index), Some(burn)) => burn.subtitle_index() == index,
+            _ => false,
+        };
         if !prepared.matches_assignment(proof.assignment())
-            || prepared.request().subtitle_burn.is_some()
-            || !matches!(prepared.request().kind, SessionKind::Transcode { .. })
+            || !burn_matches
+            || !crate::transcode::source_actor::source_recipe_is_encoded(prepared.request())
         {
-            return Err("Source encoding requires exact unburned prepared assignment".into());
+            return Err("Source encoding requires its exact prepared assignment and burn".into());
         }
         Box::pin(self.prepare_vod_encoding_with_source(
             prepared.request(),
@@ -750,7 +757,12 @@ impl TranscodeManager {
                 // A copy whose burn track the store holds as having no cues
                 // has nothing to burn: it stays the copy it would have been,
                 // rather than a full re-encode to overlay nothing.
-                Some(index) if self.burn_track_is_stored_empty(file, index).await => {
+                // Local only: the Source burns what its own sidecar holds and
+                // never reads Local's subtitle store to skip it.
+                Some(index)
+                    if source_evidence.is_none()
+                        && self.burn_track_is_stored_empty(file, index).await =>
+                {
                     tracing::info!(
                         target: "plurxd::transcode",
                         file_id = file.id,
@@ -841,7 +853,27 @@ impl TranscodeManager {
             })
             .transpose()?;
         if let Some(burn) = &subtitle_burn {
-            if let Some(reason) = crate::pipeprobe::burn_filters().await.refusal(burn.bitmap) {
+            // A Source recipe reads the filter listing its own operation
+            // proved; Local keeps the process-wide preflight.
+            let filters = match source_evidence.and_then(|(evidence, _)| evidence.burn()) {
+                Some(artifacts) => {
+                    if artifacts.bitmap() != burn.bitmap {
+                        return Err(vod_refusal_error(
+                            "vod_subtitle_track_missing",
+                            "the Source burn sidecar differs from the selected track",
+                        ));
+                    }
+                    artifacts.filters()
+                }
+                None if source_evidence.is_some() => {
+                    return Err(vod_refusal_error(
+                        "vod_subtitle_burn_unavailable",
+                        "the Source preparation made no burn sidecar",
+                    ));
+                }
+                None => crate::pipeprobe::burn_filters().await,
+            };
+            if let Some(reason) = filters.refusal(burn.bitmap) {
                 return Err(unsupported_build_error(reason));
             }
         }
@@ -938,7 +970,25 @@ impl TranscodeManager {
         // A `Nothing` answer chooses the encoder and grade again without the
         // burn: the HTTP layer admits an HDR delivery whose burn track the
         // store holds as `empty`, and that session must keep its range.
+        let source_sidecar = source_evidence.and_then(|(evidence, _)| evidence.burn());
         let (subtitle_burn, burn_file) = match subtitle_burn {
+            // The Source's own sidecar, extracted by its owned preparation
+            // from this same held object. Local's cache, its detached flight
+            // and its stored-track shortcuts are never consulted for it.
+            Some(burn) if source_evidence.is_some() => {
+                let artifacts = source_sidecar.ok_or_else(|| {
+                    vod_refusal_error(
+                        "vod_subtitle_burn_unavailable",
+                        "the Source preparation made no burn sidecar",
+                    )
+                })?;
+                let handle = artifacts.sidecar().map_err(|error| {
+                    start_infrastructure_error(format!(
+                        "retaining the Source burn sidecar: {error}"
+                    ))
+                })?;
+                (Some(burn), Some(handle))
+            }
             Some(burn) => {
                 // The only caller that passes the short budget. A start has 50 s
                 // for everything; a cold burn sidecar on a remux of this size needs

@@ -77,6 +77,8 @@ pub(crate) enum PeerError {
     Authentication,
     InvalidResponse,
     Rejected(StatusCode),
+    /// An authenticated Start refusal, never a physical cleanup receipt.
+    DolbyVisionUnsupported,
 }
 #[derive(Deserialize)]
 pub(crate) struct Identity {
@@ -623,7 +625,7 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if !status.is_success() {
-                return Err(PeerError::Rejected(status));
+                return Err(source_start_refusal(status, &bytes));
             }
             crate::http::sharing_direct_wire::decode_source_start(&bytes, expected, direct)
                 .map_err(|_| PeerError::InvalidResponse)
@@ -1372,5 +1374,56 @@ mod driver_lifetime_tests {
             .expect("server closure")
             .expect("server task")
             .is_ok());
+    }
+}
+
+/// Preserve only the closed typed Start code; peer prose never reaches B's UI.
+/// This answer says nothing about whether an older invocation owns resources.
+fn source_start_refusal(status: StatusCode, bytes: &[u8]) -> PeerError {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Refusal {
+        code: String,
+        message: String,
+    }
+    if status == StatusCode::UNPROCESSABLE_ENTITY {
+        if let Ok(refusal) = serde_json::from_slice::<Refusal>(bytes) {
+            if refusal.code
+                == crate::http::shared_source_playback::SHARING_START_DOLBY_VISION_UNSUPPORTED
+                && refusal.message.len() <= 4096
+            {
+                return PeerError::DolbyVisionUnsupported;
+            }
+        }
+    }
+    PeerError::Rejected(status)
+}
+
+#[cfg(test)]
+mod source_start_refusal_tests {
+    use super::*;
+    #[test]
+    fn sharing_source_start_preserves_only_the_authenticated_dv_refusal_code() {
+        let body =
+            br#"{"code":"sharing_start_dolby_vision_unsupported","message":"source detail"}"#;
+        assert!(matches!(
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, body),
+            PeerError::DolbyVisionUnsupported
+        ));
+        assert!(matches!(
+            source_start_refusal(StatusCode::SERVICE_UNAVAILABLE, body),
+            PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+        assert!(matches!(
+            source_start_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                br#"{"code":"something_else","message":"detail"}"#
+            ),
+            PeerError::Rejected(StatusCode::UNPROCESSABLE_ENTITY)
+        ));
+        assert!(matches!(
+            source_start_refusal(StatusCode::UNPROCESSABLE_ENTITY, b"not json"),
+            PeerError::Rejected(StatusCode::UNPROCESSABLE_ENTITY)
+        ));
     }
 }

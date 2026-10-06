@@ -2500,7 +2500,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # withdrawn or superseded through the existing retirement owner. The prepared
 # handoff CGNAT fixture shares the reopen fixture's two servers (`PinnedPair`),
 # each stopped and joined in `finish`.
-expected_occurrences = 807
+# +1 Shared burn sidecar creation: the Source probe owns and awaits the
+# blocking tempfile job; its anonymous file closes on failure or rendition
+# settlement. No timer or detached recovery owner is added.
+expected_occurrences = 808
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -4047,7 +4050,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Source permit, `spawn_job_owned` and kill_on_drop. Test-only: ffmpeg and
 # ffprobe fixture generators awaited through `.output()`, and finite
 # `sleep 60` children in vod/tests/source_lifetime.rs the producer slot reaps.
-expected_occurrences = 212
+# +3 Shared burns: held-source subtitle extraction and the filter listing
+# both run through the admitted Source executor and are reaped before its
+# result. The third is a test-only subtitle fixture mux, awaited by its fixture.
+expected_occurrences = 215
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4537,7 +4543,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in the typed page-failure mapping test. No process.
 # +1 for Shared manual watched state: a test-only HTTP `Response::status()`
 # read in the viewer-route test's watched-route loop. No process.
-expected_occurrences = 571
+# +4 Shared burns/HDR: filter-listing output uses Source-owned run_child;
+# fixture subtitle mux output is awaited; two HTTP status assertions inspect
+# responses only. None creates an additional detached owner.
+expected_occurrences = 575
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 

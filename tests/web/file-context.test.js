@@ -232,14 +232,14 @@ test("shipped remux and session-start callers preserve legitimate full engine ca
   assert.throws(()=>h.url(shared,"stream.mp4",{vmaxheight:"hevc:999999"}));
 });
 
-test("Shared initial route is direct only for an actual direct decision, else session-first HLS refusing burn HDR or absent capability",()=>{
- const ctx=vm.createContext({AUTH_GENERATION:0,window:{Hls:{isSupported:()=>true}},PLAYER:{},failed:[],ROUTE:"direct"});
+test("Shared initial route is direct only for an actual direct decision, else session-first HLS with burn and HDR10, refusing Dolby Vision or absent capability",()=>{
+ const ctx=vm.createContext({AUTH_GENERATION:0,window:{Hls:{isSupported:()=>true}},PLAYER:{subs:[]},failed:[],ROUTE:"direct",subLabelFor:(_,i)=>"track "+i});
  vm.runInContext(source+`
  const Hls=window.Hls;
  const useNativeHls=()=>false,segmentedRemuxOk=()=>true,copyHlsMseOk=()=>true,noSegments=()=>false;
  const playbackInitialRoute=()=>ROUTE;
  `+shippedFunction("player/decode-tiers.js","choosePlayRoute")+`
- this.run=(c,method,grade,burn)=>choosePlayRoute({fileContext:c,video:{},sessionAudioOffset:0,libraryChannel:false,failPreparation:e=>failed.push(e.code)},{decision:{method,delivered_dynamic_range:grade}},{preBurn:burn},null);
+ this.run=(c,method,grade,burn,extra={})=>choosePlayRoute({fileContext:c,video:{},sessionAudioOffset:0,libraryChannel:false,failPreparation:e=>failed.push(e.code)},{decision:{method,delivered_dynamic_range:grade,...extra}},{preBurn:burn},null);
  this.shared=sharedPlaybackFileContextFromDetail;this.local=localPlaybackFileContext;`,ctx);
  const c=ctx.shared(reference,detail());
  // The browser plays the original container: the Shared route is direct,
@@ -249,11 +249,29 @@ test("Shared initial route is direct only for an actual direct decision, else se
  // A direct decision the browser cannot take as a raw file (a non-default
  // audio track) is Copy HLS, never a progressive remux, for a Shared file.
  ctx.ROUTE="progressive_remux";assert.equal(ctx.run(c,"direct_play","sdr",null),"copy_hls");ctx.ROUTE="direct";
- assert.equal(ctx.run(c,"direct_play","sdr",2),null);
+ // A burn always encodes: the Source owns its sidecar and fonts. A direct or
+ // copy decision with a burn is a transcode, never raw bytes or Copy HLS.
+ assert.equal(ctx.run(c,"direct_play","sdr",2),"transcode_hls");
+ assert.equal(ctx.run(c,"remux","sdr",0),"transcode_hls");
  assert.equal(ctx.run(c,"transcode","sdr",null),"transcode_hls");
- assert.equal(ctx.run(c,"transcode","hdr10",null),null);assert.equal(ctx.run(c,"remux","sdr",0),null);
+ // HDR10/HLG grades are the Source's own answer to these caps.
+ assert.equal(ctx.run(c,"transcode","hdr10",null),"transcode_hls");
+ assert.equal(ctx.run(c,"remux","hdr10",null),"copy_hls");
+ assert.equal(ctx.run(c,"remux","hlg",null),"copy_hls");
+ assert.equal(ctx.failed.length,0);
+ // Dolby Vision is refused with its own typed reason before any Start:
+ // preserved, converted, or a Dolby Vision source re-encoded or burned.
+ assert.equal(ctx.run(c,"remux","dolby_vision",null,{preserve_dolby_vision:true}),null);
+ assert.equal(ctx.run(c,"remux","dolby_vision",null,{convert_dolby_vision:true}),null);
+ assert.equal(ctx.run(c,"transcode","sdr",null,{source:{hdr:"dolby_vision"}}),null);
+ assert.equal(ctx.run(c,"remux","hdr10",1,{source:{hdr:"dolby_vision"}}),null);
+ assert.deepEqual(Array.from(ctx.failed),Array(4).fill("sharing_start_dolby_vision_unsupported"));
+ // A Dolby Vision source copied as its HDR10 base needs nothing the Source lacks.
+ assert.equal(ctx.run(c,"remux","hdr10",null,{source:{hdr:"dolby_vision"}}),"copy_hls");
+ ctx.failed.length=0;
+ assert.equal(ctx.run(c,"transcode","future",null),null);
  ctx.window.Hls.isSupported=()=>false;assert.equal(ctx.run(c,"transcode","sdr",null),null);
- assert.deepEqual(Array.from(ctx.failed),Array(4).fill("sharing_start_unsupported"));
+ assert.deepEqual(Array.from(ctx.failed),Array(2).fill("sharing_start_unsupported"));
 });
 test("shared status metrics are read only from the bound Shared grammar",()=>{
   const h=harness(),id="55555555-5555-4555-8555-555555555555";

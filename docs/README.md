@@ -521,6 +521,7 @@ Two rounds of performance work, each with its plan, review, and response.
 |---|---|---|
 | [SHARED-LIBRARIES-DESIGN.md](features/SHARED-LIBRARIES-DESIGN.md) | Why Cinema shares selected libraries over private Tailscale; scope and deferred Plex/Watch Together work. | open |
 | [SHARED-LIBRARIES-IMPLEMENTATION.md](features/SHARED-LIBRARIES-IMPLEMENTATION.md) | Revised S0–S8 build contract, authority, deployment, playback integration and acceptance evidence. | open |
+| [SHARED-LIBRARIES-STATUS.md](features/SHARED-LIBRARIES-STATUS.md) | Current shared-libraries batch, compiler evidence, remaining acceptance and promotion hold. | open |
 | [SHARED-LIBRARIES-HANDOFF.md](features/SHARED-LIBRARIES-HANDOFF.md) | Dated integration and agent snapshot, all remaining S2–S8 implementation/qualification work, compiler commands and promotion requirements. | open |
 | [SHARED-LIBRARIES-RE-REVIEW.md](features/SHARED-LIBRARIES-RE-REVIEW.md) | Opus re-review of the revised contract; SL-18–24 and links to their corrections. | open |
 | [SHARED-LIBRARIES-REVIEW.md](features/SHARED-LIBRARIES-REVIEW.md) | Opus's original S0 findings; links to the current dispositions and remaining qualification. | open |

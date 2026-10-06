@@ -305,7 +305,7 @@ pub fn declares_filters(listing: &str, names: &[&str]) -> bool {
 /// A listing that names none of the three is treated as unread rather than as
 /// a build without them: every ffmpeg has `scale`, so an answer that lacks it
 /// is a parse or a spawn that went wrong, not a capability report.
-fn burn_filters_from_listing(listing: &str) -> BurnFilters {
+pub(crate) fn burn_filters_from_listing(listing: &str) -> BurnFilters {
     let caps = BurnFilters {
         overlay: declares_filters(listing, &["overlay"]),
         scale: declares_filters(listing, &["scale"]),

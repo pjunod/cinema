@@ -1066,6 +1066,22 @@ impl TranscodeManager {
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
         let proof = owner.gate.current_preparation(&owner.assignment).await?;
+        // A burn's artifacts are made inside this same owned operation, from
+        // the Source's own prepared request and scanned track facts.
+        let burn = match prepared.request().subtitle_burn {
+            Some(index) => {
+                let stream = usize::try_from(index)
+                    .ok()
+                    .and_then(|ordinal| prepared.file().subtitle_streams.get(ordinal))
+                    .ok_or(SourceWorkerError::Unsupported)?;
+                Some(super::source_preparation::SourceBurnAsk {
+                    subtitle_index: index,
+                    bitmap: plurx_core::tracks::is_bitmap_subtitle(&stream.codec),
+                    runtime_dir: self.runtime_cache.clone(),
+                })
+            }
+            None => None,
+        };
         *work = Some(super::source_preparation::start_source_probe(
             prepared.file().clone(),
             source,
@@ -1074,6 +1090,7 @@ impl TranscodeManager {
             Arc::clone(&self.store),
             deadline,
             Arc::clone(&self.source_workers.probe_hooks),
+            burn,
         ));
         let evidence = work
             .as_ref()
@@ -1122,17 +1139,18 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unresolved);
                 }
                 unowned_existing = false;
+                // The HTTP preparation refused these with their typed reasons
+                // before any claim; this owner re-derives the same policy from
+                // the same prepared facts and never builds past it.
                 if (!prepared.native_subtitles().0 && prepared.native_subtitles().1.is_some())
-                    || prepared.request().subtitle_burn.is_some()
                     || prepared.request().previous_session_id.is_some()
                     || prepared.request().reopen_reason.is_some()
-                    || (matches!(prepared.request().kind, SessionKind::Transcode { .. })
-                        && (plurx_core::playback::hdr_route(prepared.file()).is_some()
-                            || plurx_core::playback::is_dolby_vision(prepared.file())))
-                    || !matches!(
-                        prepared.request().kind,
-                        SessionKind::Copy { .. } | SessionKind::Transcode { .. }
+                    || source_delivery_refusal(
+                        prepared.request(),
+                        prepared.file(),
+                        prepared.native_subtitles(),
                     )
+                    .is_some()
                 {
                     return Err(SourceWorkerError::Unsupported);
                 }
@@ -1142,11 +1160,6 @@ impl TranscodeManager {
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
                 if prepared.native_subtitles().0 {
-                    if plurx_core::playback::hdr_route(prepared.file()).is_some()
-                        || plurx_core::playback::is_dolby_vision(prepared.file())
-                    {
-                        return Err(SourceWorkerError::Unsupported);
-                    }
                     let tracks = Box::pin(self.prepare_source_native_tracks(
                         &owner,
                         &prepared,
@@ -1156,7 +1169,7 @@ impl TranscodeManager {
                     .await?;
                     owner.state.lock().expect("Source native actor").native = Some(tracks);
                 }
-                let encoding = if matches!(prepared.request().kind, SessionKind::Transcode { .. }) {
+                let encoding = if source_recipe_is_encoded(prepared.request()) {
                     Some(
                         Box::pin(self.prepare_source_encoded_recipe(
                             &owner,
@@ -1564,6 +1577,61 @@ impl TranscodeManager {
 
 /// Actual frozen VOD recipe facts plus SQL-bounded captured Source probe. This
 /// avoids the generic Copy metadata path's mutable unbounded probe read.
+/// Why a Source refuses a prepared HLS recipe, decided only from the
+/// Source's own prepared request — the player's real caps through the shared
+/// planner, never a B claim — and its own scanned file facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceDeliveryRefusal {
+    /// Any Dolby Vision delivery: preservation, the Profile 7 conversion, a
+    /// re-encode of a Dolby Vision source (the RPU renderer's per-source
+    /// proof is not Source-owned work yet) or native subtitles beside one.
+    DolbyVision,
+    /// A shape this Source does not build: native subtitles over an HDR
+    /// source, a burn beside native subtitles, a burn of a downloaded sidecar
+    /// or of a track the scan does not hold.
+    Unsupported,
+}
+
+/// A burn always encodes, whatever the copy ask said: burn pixels need an
+/// encoder, exactly as Local's VOD recipe treats a copy that burns.
+pub(crate) fn source_recipe_is_encoded(request: &crate::transcode::SessionRequest) -> bool {
+    matches!(request.kind, SessionKind::Transcode { .. }) || request.subtitle_burn.is_some()
+}
+
+pub(crate) fn source_delivery_refusal(
+    request: &crate::transcode::SessionRequest,
+    file: &plurx_core::domain::MediaFile,
+    (native, _): (bool, Option<i64>),
+) -> Option<SourceDeliveryRefusal> {
+    if let SessionKind::Copy {
+        preserve_dolby_vision,
+        convert_dolby_vision,
+        ..
+    } = request.kind
+    {
+        if preserve_dolby_vision || convert_dolby_vision {
+            return Some(SourceDeliveryRefusal::DolbyVision);
+        }
+    }
+    if plurx_core::playback::is_dolby_vision(file) && (source_recipe_is_encoded(request) || native)
+    {
+        return Some(SourceDeliveryRefusal::DolbyVision);
+    }
+    if native && plurx_core::playback::hdr_route(file).is_some() {
+        return Some(SourceDeliveryRefusal::Unsupported);
+    }
+    if let Some(index) = request.subtitle_burn {
+        let embedded = usize::try_from(index)
+            .ok()
+            .and_then(|ordinal| file.subtitle_streams.get(ordinal))
+            .is_some();
+        if native || !embedded || file.downloaded_subtitle(index).is_some() {
+            return Some(SourceDeliveryRefusal::Unsupported);
+        }
+    }
+    None
+}
+
 fn source_native_presentation(
     facts: crate::vodserve::VodHlsFacts,
     probe: &str,

@@ -49,6 +49,8 @@ impl RetirementStep {
             PeerError::Unavailable
             | PeerError::IdentityMismatch
             | PeerError::InvalidResponse
+            // A Start refusal is never evidence about this End operation.
+            | PeerError::DolbyVisionUnsupported
             | PeerError::Rejected(_) => Self::Retry,
         }
     }

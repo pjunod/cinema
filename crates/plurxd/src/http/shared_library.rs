@@ -2643,6 +2643,14 @@ mod tests {
                 "current source scope"
             );
             if !h2 {
+                // The handler bounds the whole request at 5 s and its pre-demand
+                // authority re-read at 1 s. Both are real request deadlines, but
+                // this block proves the variant answer and demand dedup, so the
+                // engine attestation the daemon establishes once per process is
+                // warmed first and Tokio time is held: blocking store work then
+                // cannot advance those deadlines, however loaded the runner is.
+                crate::ffmpeg::fragment_index_engine_digest().await;
+                tokio::time::pause();
                 let variant = plurx_core::sharing_artwork::SourceArtReference {
                     variant: ArtVariant::W300,
                     ..reference.clone()
@@ -2710,6 +2718,7 @@ mod tests {
                     jobs,
                     "refused authority cannot add render work"
                 );
+                tokio::time::resume();
             }
             let dropped = Arc::new(AtomicBool::new(false));
             let data = Arc::new(AtomicBool::new(false));

@@ -6241,3 +6241,47 @@ Evidence on nuc4 (rustc 1.97.1, node 22.22.1):
 Not qualified here: a real browser handoff against a pinned Source/B pair
 (two pipelines, frame proof, commit, status and progress moving to the
 successor), and the Apple and Android fixture suites with the four new rows.
+
+### Source-owned burns and HDR — completion design (2026-10-06)
+
+**Status:** implementation in progress; compiler evidence pending; runtime
+qualification deferred under Paul's 2026-10-06 test policy. Track the batch
+and unproved boundaries in [the status page](SHARED-LIBRARIES-STATUS.md).
+
+The existing Source actor refuses burns and HDR encodes because the Local
+preparation path can start shared-cache work whose lifetime is not owned by
+the Source session. Removing those refusals alone would let Source retirement
+release its admission while extraction or font work was still running.
+
+1. **The admitted Source probe owns burn preparation.** Resolve the embedded
+   subtitle from the Source's own scanned file and prepared request. Extract
+   one subtitle-only Matroska stream, including attachments, from the already
+   held source descriptor. Bound it to 64 MiB and the existing Start deadline.
+   Every FFmpeg and Fontconfig child uses the Source command executor, which
+   retains admission, cancellation, reap and pipe joins.
+2. **The rendition owns its artifacts.** Keep the extracted sidecar in an
+   anonymous file and the text renderer's frozen Fontconfig directory in the
+   existing reference-counted engine. Hand the encoding its own descriptor.
+   Last-reference release removes the artifacts; no sweep or watchdog is
+   introduced. Local playback keeps its existing cache behavior.
+3. **The Source decides the grade.** Reuse the existing planner with the
+   player's actual capability document and Source file facts. Burns always
+   encode. SDR-only players get the supported tone-map route; preserving HDR
+   requires the existing encoder and display capability proofs. B validates
+   the delivered range against its retained request, including the precise
+   PQ/HLG presentation range, before publishing the session.
+4. **Dolby Vision conversion stays a typed limitation.** Its per-source RPU
+   proof is not yet owned by Source preparation. Refuse DV preservation,
+   conversion and re-encoding before dispatch with
+   `sharing_start_dolby_vision_unsupported`. Direct play retains untouched
+   bytes and its normal capability decision. Do not silently claim an HDR10
+   or SDR conversion of a DV source.
+5. **Retain regression definitions, defer execution.** Cover text and bitmap
+   burn selection, bounded extraction/settlement, HDR grade binding, and DV
+   refusal. Compile test targets now; execute required regressions only after
+   the main-promotion adversarial review. A generated fixture without rendered
+   output inspection is not evidence of subtitle or HDR fidelity.
+
+Native subtitles beside HDR and downloaded subtitle burns remain typed
+unsupported shapes until their Source-owned preparation is implemented.
+They do not justify a hidden feature gate or a disabled Developer switch.

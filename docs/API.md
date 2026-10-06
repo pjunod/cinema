@@ -3266,8 +3266,24 @@ decision bodies; content fetched from a Source also retains its Source-scope
 checks. A file alias is not login or
 session authority: the decision route verifies its current import lifecycle
 and exact file/revision binding before contacting the pinned Source. Missing
-keys, revoked scope and unavailable Sources refuse delivery. No live Shared
-Start route is registered on this listener.
+keys, revoked scope and unavailable Sources refuse delivery. Shared Start is
+registered on the authenticated media router and dispatches through B's
+receiver owner.
+
+Shared HLS accepts embedded subtitle burns and HDR10 requests. The Source
+recomputes the plan from the original capabilities and its own file facts;
+burn extraction and font preparation belong to its admitted operation. A
+burn sidecar is bounded to 64 MiB, and a burn always encodes. B verifies the
+returned HDR grade against the viewer's exact PQ or HLG presentation claim.
+An SDR display declaration overrides a decoder's HDR claim.
+
+Dolby Vision preservation, conversion and re-encoding return `422
+sharing_start_dolby_vision_unsupported`. Direct play keeps the original bytes
+when the Source's direct-play decision permits them. Downloaded subtitle
+burns and native subtitle renditions beside HDR remain unsupported. A typed
+Start refusal is not an End receipt or proof that an earlier invocation owns
+no resources. Runtime qualification of these additions remains recorded
+separately in [the sharing status](features/SHARED-LIBRARIES-STATUS.md).
 
 The four pre-session asset routes answer `Cache-Control: no-store` and hold
 no B cache; each body is file-scoped and the current login, import,

@@ -43,6 +43,7 @@ pub(crate) enum ReceiverStartError {
     Unresolved,
     Deadline,
     Unsupported,
+    DolbyVisionUnsupported,
 }
 #[derive(Default)]
 pub(crate) struct ReceiverStartRegistry {
@@ -1211,7 +1212,10 @@ async fn run_owner(
     let mut pending_authorized = true;
     let result = loop {
         tokio::select! {
-            result = &mut start => break result.map_err(|_| ReceiverStartError::Unresolved)?,
+            result = &mut start => break result.map_err(|error| match error {
+                crate::sharing_client::PeerError::DolbyVisionUnsupported => ReceiverStartError::DolbyVisionUnsupported,
+                _ => ReceiverStartError::Unresolved,
+            })?,
             _ = entry.stop.cancelled(), if pending_authorized => pending_authorized = false,
             _ = timer.tick(), if pending_authorized => {
                 let renewed = async {
@@ -1254,11 +1258,17 @@ async fn run_owner(
     if entry.stop.is_cancelled() {
         return Err(ReceiverStartError::Unresolved);
     }
-    // The presentation received must be the one this recipe asked for.
+    // The presentation received must be the one this recipe asked for, and
+    // an HDR grade must be one the viewer's own retained caps present.
     if entry.direct != received.direct().is_some()
-        || received
-            .hls()
-            .is_some_and(|response| response.media_origin_ms != Some(0) || !response.vod)
+        || received.hls().is_some_and(|response| {
+            response.media_origin_ms != Some(0)
+                || !response.vod
+                || !crate::http::sharing_start_decode::delivered_range_presentable(
+                    &intent.recipe.request_json,
+                    response,
+                )
+        })
     {
         return Err(ReceiverStartError::Unresolved);
     }
