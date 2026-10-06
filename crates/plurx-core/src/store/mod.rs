@@ -29,8 +29,14 @@ pub mod sharing_file_locators;
 pub mod sharing_purpose_keys;
 pub use sharing_file_locators::SharingFileLocatorStore;
 pub use sharing_purpose_keys::SharingPurposeKeyStore;
-pub mod sharing_receiver_delivery;
+pub mod sharing_ingress_custody;
+mod sharing_receiver_delivery;
+pub use sharing_ingress_custody::SharingIngressCustodyStore;
 pub use sharing_receiver_delivery::SharingReceiverDeliveryStore;
+mod sharing_receiver_capsule_refresh;
+pub use sharing_receiver_capsule_refresh::ReceiverCleanupCapsules;
+mod sharing_receiver_ingress;
+pub use sharing_receiver_ingress::SharingReceiverIngressStore;
 pub mod sharing_receiver_orphans;
 pub mod sharing_receiver_progress;
 pub mod sharing_receiver_retirement;
@@ -40,7 +46,9 @@ pub use sharing_receiver_progress::SharingReceiverProgressStore;
 #[cfg(feature = "hiqlite-store")]
 pub(crate) mod sharing_source_schema;
 pub use sharing_receiver_sessions::SharingReceiverSessionStore;
+pub mod sharing_source_ingress_custody;
 pub mod sharing_source_sessions;
+pub use sharing_source_ingress_custody::SharingSourceIngressCustodyStore;
 pub use sharing_source_sessions::SharingSourceSessionStore;
 pub mod classification;
 #[cfg(feature = "hiqlite-store")]
@@ -5382,10 +5390,13 @@ pub trait Store:
     + SharingSourceCatalogueStore
     + SharingSourceDetailsStore
     + SharingReceiverSessionStore
+    + SharingIngressCustodyStore
     + SharingReceiverDeliveryStore
+    + SharingReceiverIngressStore
     + SharingReceiverProgressStore
     + SharingReceiverRetirementStore
     + SharingSourceSessionStore
+    + SharingSourceIngressCustodyStore
     + SettingsStore
     + BackgroundJobStore
     + DvConversionStore
@@ -5431,10 +5442,13 @@ impl<T> Store for T where
         + SharingSourceCatalogueStore
         + SharingSourceDetailsStore
         + SharingReceiverSessionStore
+        + SharingIngressCustodyStore
         + SharingReceiverDeliveryStore
+        + SharingReceiverIngressStore
         + SharingReceiverProgressStore
         + SharingReceiverRetirementStore
         + SharingSourceSessionStore
+        + SharingSourceIngressCustodyStore
         + SettingsStore
         + BackgroundJobStore
         + DvConversionStore

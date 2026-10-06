@@ -145,7 +145,6 @@ pub(super) async fn receiver_direct(
     method: Method,
     request: axum::extract::Request,
 ) -> Response {
-    use futures_util::StreamExt;
     let (mut parts, _) = request.into_parts();
     let Some(session) = session_query(parts.uri.query()) else {
         return refusal(StatusCode::BAD_REQUEST, "sharing_delivery_session_required");
@@ -170,9 +169,7 @@ pub(super) async fn receiver_direct(
     }
     // Only an existing actor's exact session can authorize bytes. No lookup
     // creates or resumes a Source session.
-    let Some(actor) = state.sharing.receiver_starts.by_session(session) else {
-        return refusal(StatusCode::NOT_FOUND, "sharing_delivery_unavailable");
-    };
+    let actor = state.sharing.receiver_starts.by_session(session);
     let import = match state.store.sharing_import(import_id).await {
         Ok(Some(import)) if import.summary.state == "active" => import,
         Ok(_) => return refusal(StatusCode::NOT_FOUND, "sharing_delivery_unavailable"),
@@ -195,14 +192,6 @@ pub(super) async fn receiver_direct(
     let Ok(reference) = key.verify(&locator, import_id, import.summary.lifecycle_generation) else {
         return refusal(StatusCode::BAD_REQUEST, "sharing_invalid_request");
     };
-    if !actor.direct_binds(&reference) {
-        return refusal(StatusCode::FORBIDDEN, "sharing_delivery_forbidden");
-    }
-    // Account headers are optional for native players; when present they must
-    // name this session's own viewer.
-    if !authenticated_viewer_matches(&state, &mut parts, actor.0.intent.user_id).await {
-        return refusal(StatusCode::FORBIDDEN, "sharing_delivery_forbidden");
-    }
     let Some(connection) = parts
         .extensions
         .get::<crate::SharingConnectionCancellation>()
@@ -213,6 +202,80 @@ pub(super) async fn receiver_direct(
             "sharing_delivery_unavailable",
         );
     };
+    let Some(actor) = actor else {
+        let route = match state.store.media_session_route(&session.to_string()).await {
+            Ok(Some(route)) => route,
+            _ => {
+                return refusal(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "sharing_delivery_unavailable",
+                )
+            }
+        };
+        let proof = match state.store.receiver_relay_read_authority(&route).await {
+            Ok(Some(proof)) if proof.binds_file(&reference) => proof,
+            _ => return refusal(StatusCode::FORBIDDEN, "sharing_delivery_forbidden"),
+        };
+        if !authenticated_viewer_matches(&state, &mut parts, proof.viewer_id()).await {
+            return refusal(StatusCode::FORBIDDEN, "sharing_delivery_forbidden");
+        }
+        return match forwarding::relay_operation(
+            state,
+            route,
+            forwarding::ReceiverForwardOperation::Direct {
+                demand,
+                reference: forwarding::ReceiverDirectReference::from_reference(&reference),
+                viewer_id: proof.viewer_id(),
+            },
+            Some(connection),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        };
+    };
+    if !authenticated_viewer_matches(&state, &mut parts, actor.0.intent.user_id).await {
+        return refusal(StatusCode::FORBIDDEN, "sharing_delivery_forbidden");
+    }
+    let viewer_id = actor.0.intent.user_id;
+    receiver_direct_actor(
+        state,
+        actor,
+        &reference,
+        demand,
+        viewer_id,
+        &connection,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn receiver_direct_actor(
+    state: AppState,
+    actor: ReceiverStartActor,
+    reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+    demand: DirectByteRequest,
+    viewer_id: i64,
+    connection: &crate::SharingConnectionCancellation,
+    context: Option<&forwarding::ReceiverForwardContext>,
+) -> Response {
+    use futures_util::StreamExt;
+    if viewer_id != actor.0.intent.user_id || !actor.direct_binds(reference) {
+        return refusal(StatusCode::FORBIDDEN, "sharing_delivery_forbidden");
+    }
+    if let Some(context) = context {
+        if Instant::now() >= context.deadline
+            || validate_forward_ingress(&state, &context.tuple, &context.ingress)
+                .await
+                .is_err()
+        {
+            return refusal(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_delivery_unavailable",
+            );
+        }
+    }
     // Authorize before registering a writer, then again after Source IO.
     if actor.current_delivery_attachment(&state).await.is_err() {
         return refusal(
@@ -221,7 +284,10 @@ pub(super) async fn receiver_direct(
         );
     }
     let state = Arc::new(state);
-    let guard = match actor.retain_accepted_connection(state.clone(), &connection) {
+    let guard = match actor
+        .retain_delivery_connection(state.clone(), connection)
+        .await
+    {
         Ok(guard) => guard,
         Err(_) => {
             return refusal(
@@ -439,6 +505,22 @@ mod tests {
             assert_eq!(response.status(), expected, "{method} {query} {range:?}");
             assert!(!response.headers().contains_key("content-range"));
             assert!(!response.headers().contains_key("accept-ranges"));
+        }
+    }
+
+    #[test]
+    fn sharing_protocol_fixture_direct_session_query() {
+        use crate::sharing_protocol_fixture::{accepted, fixture, rows};
+        let fixture = fixture();
+        let b = Uuid::parse_str(fixture["direct"]["b_session"].as_str().expect("B"))
+            .expect("B session");
+        for row in rows(&fixture["direct_session_query"], "direct session query") {
+            let query = row["query"].as_str().expect("query");
+            assert_eq!(
+                session_query(Some(query)),
+                accepted(row).then_some(b),
+                "{query}"
+            );
         }
     }
 }

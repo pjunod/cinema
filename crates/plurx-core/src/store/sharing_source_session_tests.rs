@@ -94,6 +94,23 @@ async fn setup_with_media_id(store: &SqliteStore, media_id: i64) -> (Uuid, Crede
         .expect("all candidate objects");
     let now = now_ms().expect("clock");
     store.sharing_txn(vec![("INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3)".into(),vec![identity.server_id.into(),identity.catalogue_epoch.into(),envelope.as_stored().to_owned().into()]),("INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,$1,'movie','Movie','movie')".into(),vec![library.into()]),("INSERT INTO files(id,item_id,path,size,mtime) VALUES(1,1,'/private/synthetic.mkv',20,1000)".into(),vec![]),("INSERT INTO cluster_nodes VALUES('voter',1,$1,NULL,NULL,'api','raft')".into(),vec![now.into()]),("INSERT INTO cluster_node_capabilities VALUES('voter',$1,$3),('voter',$2,$3),('voter',$4,$3),('voter',$5,$3)".into(),vec![SHARING_SESSION_PRINCIPAL_CAPABILITY.to_owned().into(),SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY.to_owned().into(),now.into(),SHARING_PURPOSE_KEYS_CAPABILITY.to_owned().into(),format!("sharing_purpose_master_v1:{}",credential.sharing_purpose_master_fingerprint()).into()]),("INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1) ON CONFLICT(key) DO UPDATE SET value='true'".into(),vec![])]).await.expect("current Source fixture");
+    // These unit rows exercise routing/admission SQL only, never physical
+    // driver closure or a production registry owner.
+    store
+        .sharing_txn(vec![(
+            "INSERT INTO cluster_node_capabilities VALUES('voter',$1,$3),('voter',$2,$3)".into(),
+            vec![
+                crate::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY
+                    .to_owned()
+                    .into(),
+                "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213"
+                    .to_owned()
+                    .into(),
+                now.into(),
+            ],
+        )])
+        .await
+        .expect("metadata-only current boot fixture");
     store
         .sharing_txn(
             crate::cluster::membership::sharing_member_admission_guard_schema()
@@ -154,6 +171,8 @@ async fn intent_for_media(
                 request_fingerprint: "d".repeat(64),
                 playback_id: format!("p-{name}"),
                 incarnation_id: Uuid::new_v4(),
+                ingress_registry_boot_id: Uuid::parse_str("01a1128a-944d-4f11-9bf2-c7599d355213")
+                    .expect("routing metadata boot, not physical proof"),
                 now_ms: now,
                 claim_expires_at_ms: now + 60000,
                 credential_hash: "b".repeat(64),
@@ -788,6 +807,8 @@ async fn intent_hash(
                 request_fingerprint: "d".repeat(64),
                 playback_id: format!("p-{name}"),
                 incarnation_id: Uuid::new_v4(),
+                ingress_registry_boot_id: Uuid::parse_str("01a1128a-944d-4f11-9bf2-c7599d355213")
+                    .expect("routing metadata boot, not physical proof"),
                 now_ms: now,
                 claim_expires_at_ms: now + 60000,
                 credential_hash: hash,
@@ -1874,6 +1895,91 @@ async fn sharing_source_index_permission_and_bounded_evidence_preserve_lineage()
                 .await
                 .is_err(),
             "genuine database failure must not become an authority refusal"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_retained_planned_intent_fences_only_exact_boot_bound_uninvoked_g0() {
+    let dir = tempfile::tempdir().expect("Source g0 fixture");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory Source"),
+        SqliteStore::open(&dir.path().join("uncertain-g0.db")).expect("file Source"),
+    ] {
+        let (grant, credential) = setup(&store).await;
+        let planned = intent(&store, grant, &credential, "uncertain-g0").await;
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&planned)
+                .await
+                .expect("missing exact claim"),
+            SourceReleaseOutcome::Refused,
+            "absence cannot discharge an uncertain invocation"
+        );
+        let acquired = match store
+            .claim_source_media_session(&planned, &proof())
+            .await
+            .expect("actual claim mutation")
+        {
+            SourceClaimOutcome::Acquired(value) => value,
+            _ => panic!("fresh fixture claim"),
+        };
+        // These definitions exercise the exact SQL fence. Only the daemon's
+        // joined actual pre-factory invocation can retain its cleanup receipt.
+        let adopted = intent(&store, grant, &credential, "uncertain-g0").await;
+        assert_ne!(adopted.request.incarnation_id, acquired.incarnation_id());
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&adopted)
+                .await
+                .expect("historical nonce refusal"),
+            SourceReleaseOutcome::Refused
+        );
+        let mut wrong_boot = planned.clone();
+        wrong_boot.request.ingress_registry_boot_id = Uuid::new_v4();
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&wrong_boot)
+                .await
+                .expect("foreign boot refusal"),
+            SourceReleaseOutcome::Refused
+        );
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&planned)
+                .await
+                .expect("exact retained planned fence"),
+            SourceReleaseOutcome::Released
+        );
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&planned)
+                .await
+                .expect("exact retry"),
+            SourceReleaseOutcome::ExactReplay
+        );
+
+        let assigned_intent = intent(&store, grant, &credential, "historical-g1").await;
+        let binding = match store
+            .claim_source_media_session(&assigned_intent, &proof())
+            .await
+            .expect("second claim")
+        {
+            SourceClaimOutcome::Acquired(value) => value,
+            _ => panic!("fresh assigned fixture"),
+        };
+        store
+            .assign_source_dispatch(&binding, &credential, &proof())
+            .await
+            .expect("actual dispatch assignment")
+            .expect("assigned");
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&assigned_intent)
+                .await
+                .expect("g1 remains owned"),
+            SourceReleaseOutcome::Refused,
+            "a joined pre-factory intent cannot settle an already assigned incarnation"
         );
     }
 }

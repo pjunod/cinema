@@ -53,10 +53,17 @@ function playbackFileContext(value){
   }
   return localPlaybackFileContext(value);
 }
-function withPlaybackFileSession(value,id){
+// A started session. An HLS session also carries the control tuple its Start
+// bound (B's incarnation and owner epoch), which its status replies must name;
+// a direct session has no control route and carries none.
+function withPlaybackFileSession(value,id,control=null){
   const context=playbackFileContext(value);
   if(typeof id!=="string"||id.length!==36||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) playbackFileReject();
-  return registerPlaybackFileContext({...context,session_id:id});
+  if(control!==null&&(!control||typeof control.generation!=="string"
+    ||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(control.generation)
+    ||!Number.isSafeInteger(control.control_epoch)||control.control_epoch<=0)) playbackFileReject();
+  return registerPlaybackFileContext({...context,session_id:id,
+    control_generation:control?control.generation:null,control_epoch:control?control.control_epoch:null});
 }
 function playbackFileKey(value){
   const c=playbackFileContext(value), r=c.source_ref;
@@ -72,6 +79,14 @@ function playbackFileSuffix(suffix){
     ||new RegExp(`^subs/${index}/overlay/[a-f0-9]{64}/objects/[a-f0-9]{64}\\.png$`).test(suffix)
     ||new RegExp(`^chapters/${index}/thumb$`).test(suffix)) return suffix;
   playbackFileReject();
+}
+// The Shared file grammar (plurx_core::sharing_resources::SharingFileResource)
+// bounds track and chapter indexes at 4095; Local keeps its own wider bound.
+function sharedPlaybackFileSuffix(suffix){
+  playbackFileSuffix(suffix);
+  const index=/^(?:subs|chapters)\/([0-9]+)/.exec(suffix);
+  if(index&&Number(index[1])>4095) playbackFileReject();
+  return suffix;
 }
 function playbackFileQuery(suffix,query){
   if(!query||typeof query!=="object"||Array.isArray(query)) playbackFileReject();
@@ -123,7 +138,8 @@ function playbackFileQuery(suffix,query){
   }).join("&");
 }
 function playbackFileUrl(value,suffix,query={}){
-  const context=playbackFileContext(value); playbackFileSuffix(suffix);
+  const context=playbackFileContext(value);
+  if(context.source_ref.kind==="local") playbackFileSuffix(suffix); else sharedPlaybackFileSuffix(suffix);
   let q=playbackFileQuery(suffix,query);
   if(context.session_id&&!["decision","hls/sessions"].includes(suffix))
     q+=(q?"&":"")+`session=${context.session_id}`;
@@ -217,18 +233,32 @@ function sharedPlaybackSessionPlaylist(url,id){
   return true;
 }
 
+// B's status word rule (sharing_playback_client::status_token): short machine
+// vocabulary, never prose, a path or markup.
+const SHARED_STATUS_WORDS=Object.freeze(["encoder","playlist_shape","producer_state","producer_hold",
+  "producer_decision","control_demand","render_state","server_ready_state","tone_map_peak_source"]);
+function sharedPlaybackStatusToken(value){
+  return typeof value==="string"&&/^[A-Za-z0-9_.-]{1,32}$/.test(value);
+}
+// The envelope's exact top-level keys (shared_receiver_control::shared_status_body).
+const SHARED_STATUS_KEYS=Object.freeze(["subject","reference","session_id","incarnation_id","control_epoch","status"]);
 // B's Shared status grammar for this context's started session. Only the
-// nested Source metrics come back, and only when the outer subject, session,
-// item and file revision are this context's; anything else is no sample at
-// all, never something to read as Local status.
+// nested Source metrics come back, and only when the envelope has exactly its
+// six keys, the outer subject, session, incarnation, control epoch, item and
+// file revision are this context's, and every word field is a status token;
+// anything else is no sample at all, never something to read as Local status.
 function sharedPlaybackStatusMetrics(value,reply){
   const c=playbackFileContext(value);
-  if(c.source_ref.kind==="local"||!c.session_id||!reply||typeof reply!=="object"||Array.isArray(reply)) return null;
+  if(c.source_ref.kind==="local"||!c.session_id||!c.control_generation||!reply||typeof reply!=="object"||Array.isArray(reply)) return null;
+  const keys=Object.keys(reply);
+  if(keys.length!==SHARED_STATUS_KEYS.length||SHARED_STATUS_KEYS.some(k=>!keys.includes(k))) return null;
   const r=reply.reference,status=reply.status;
-  if(reply.subject!=="shared"||reply.session_id!==c.session_id||!r||typeof r!=="object"
+  if(reply.subject!=="shared"||reply.session_id!==c.session_id
+    ||reply.incarnation_id!==c.control_generation||reply.control_epoch!==c.control_epoch||!r||typeof r!=="object"
     ||r.item?.import_id!==c.source_ref.import_id||r.item?.item_id!==c.source_ref.item_id
     ||r.file_id!==c.source_file_id||r.revision!==c.file_revision
-    ||!status||typeof status!=="object"||Array.isArray(status)) return null;
+    ||!status||typeof status!=="object"||Array.isArray(status)
+    ||SHARED_STATUS_WORDS.some(k=>status[k]!=null&&!sharedPlaybackStatusToken(status[k]))) return null;
   return status;
 }
 // Ordinary complete B Start reply, bound to the authenticated signed-file
@@ -248,7 +278,26 @@ function sharedPlaybackStartContext(value,response){
     ||typeof control.generation!=="string"||control.generation.length!==36||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(control.generation)
     ||!Number.isSafeInteger(control.control_epoch)||control.control_epoch<=0
     ||control.next_exchange_ms!==5000||control.lease_timeout_ms!==300000) playbackFileReject();
-  return withPlaybackFileSession(c,id);
+  return withPlaybackFileSession(c,id,control);
+}
+// B's prepared successor for a started Shared HLS session, offered in a
+// `prepare` on the predecessor's control channel. It binds only whole, through
+// the same Shared Start grammar as any B session: another B session than the
+// predecessor's, its own index or master playlist, and its own control
+// bootstrap (`/api/v1/hls/{successor}/control`, a new incarnation, B's VOD
+// cadence and lease) on the same file. Anything else is refused before a
+// second pipeline is primed.
+function sharedPlaybackSuccessorContext(base,predecessor,action){
+  const c=playbackFileContext(base),before=playbackFileContext(predecessor);
+  if(c.source_ref.kind==="local"||c.session_id||!before.session_id||!before.control_generation
+    ||playbackFileKey(before)!==playbackFileKey(c)||!action||typeof action!=="object") playbackFileReject();
+  const id=action.session_id,control=action.control,playlist=action.playlist_url;
+  if(typeof id!=="string"||id===before.session_id||!control||typeof control!=="object"
+    ||control.generation===before.control_generation||typeof playlist!=="string"
+    ||!["index.m3u8","master.m3u8"].includes(playlist.split("?")[0].slice(`/api/v1/hls/${id}/`.length))
+    ||!playlist.startsWith(`/api/v1/hls/${id}/`)) playbackFileReject();
+  return sharedPlaybackStartContext(c,{session_id:id,playlist_url:playlist,vod:true,start_seconds:0,
+    media_origin_ms:action.media_origin_ms,control});
 }
 // The media types Local direct play can name, which is all B relays for a
 // Shared direct session (sharing_direct_wire::DIRECT_MIMES).

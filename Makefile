@@ -1515,6 +1515,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node --test tests/web/file-context.test.js
 	@node --test tests/web/shared-decision.test.js
 	@node --test tests/web/shared-libraries.test.js
+	@node --test tests/web/sharing-protocol-cases.test.js
 	@node --test tests/web/shared-artwork.test.js
 	@node --test tests/web/sharing-management.test.js
 	@node tests/web/asset-order.test.js

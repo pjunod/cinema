@@ -139,4 +139,30 @@ final class SharedLibraryTests: XCTestCase {
         draft.choose(true); draft.received(false, requestedAt: requestRevision)
         XCTAssertTrue(draft.enabled, "in-flight acknowledgement overwrote user's newer choice")
     }
+    func testSharedContinueWatchingKeepsFullSourceIdentityOrderAndRefusesOfflineMetadata() async throws {
+        func group(_ source: SharedLibraryIdentity) -> [String: Any] {
+            ["import_id": source.importId, "server_id": source.serverId, "catalogue_epoch": source.catalogueEpoch, "source_name": "Configured Source", "count": 2]
+        }
+        var offline = false
+        SharedBrowseHTTP.respond = { request in
+            if request.url!.path == "/api/v1/shared/libraries" { return (200, ["libraries": [try self.assignment(self.first), try self.assignment(self.other)]]) }
+            if request.url!.path == "/api/v1/shared/continue-watching" { return (200, ["groups": [group(self.first), group(self.other)]]) }
+            let source = request.url!.path.contains(self.first.importId) ? self.first : self.other
+            var reply = group(source)
+            reply["availability"] = offline ? "unavailable" : "online"
+            reply["items"] = try [self.item, "9007199254740993"].map { id in
+                ["item": try self.wireItem(source, id: id), "watch": ["position_ms": 12000, "duration_ms": 90000, "watched": false, "sequence": 7, "updated_at_ms": 8]] as [String: Any]
+            }
+            return (200, reply)
+        }
+        let api = try client(), assigned = try await api.assignments(), groups = try await api.continueGroups()
+        let a = try await api.continueItems(groups[0], assigned: assigned)
+        let c = try await api.continueItems(groups[1], assigned: assigned)
+        XCTAssertEqual(a.items.map { $0.item.reference.itemId }, [item, "9007199254740993"])
+        XCTAssertNotEqual(a.items[0].id, c.items[0].id)
+        do { _ = try await api.continueItems(groups[0], assigned: [assigned[1]]); XCTFail("foreign assignment accepted") } catch {}
+        offline = true
+        do { _ = try await api.continueItems(groups[0], assigned: assigned); XCTFail("offline stale metadata accepted") } catch {}
+    }
+
 }

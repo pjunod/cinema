@@ -10,7 +10,7 @@ use std::{
 };
 
 use super::super::{
-    real_source_start_fixture_with, start, tests::actual_resource_request, RealSourceStartFixture,
+    real_source_start_fixture_with, tests::actual_resource_request, RealSourceStartFixture,
     SourceFixtureMode,
 };
 
@@ -18,7 +18,7 @@ async fn direct_start(
     fixture: &RealSourceStartFixture,
     request: &Value,
 ) -> Result<axum::response::Response, ApiError> {
-    start(
+    fixture_start(
         axum::extract::State((*fixture.state).clone()),
         fixture.headers.clone(),
         axum::extract::Path((

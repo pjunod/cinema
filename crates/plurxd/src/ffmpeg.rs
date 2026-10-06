@@ -681,6 +681,57 @@ pub(crate) fn source_held_probe_command(
     Ok(command)
 }
 
+/// Build a burn's subtitle-only Matroska sidecar from the held source,
+/// without starting unowned subtitle work: the selected track with its ASS
+/// styling or bitmap display state intact, and the source's attachments, so
+/// a text burn's embedded fonts travel with the track to libass. The same
+/// extraction Local's burn cache runs; the Source runs it as its own child.
+pub(crate) fn source_burn_sidecar_command(
+    source: &std::fs::File,
+    index: i64,
+    max_bytes: u64,
+) -> Result<tokio::process::Command, String> {
+    if !(0..=4095).contains(&index) {
+        return Err("Source burn track is out of bounds".into());
+    }
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    #[cfg(unix)]
+    inherit_file_descriptors(&mut command, &[(source, 3)]);
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-copyts",
+        "-start_at_zero",
+        "-i",
+    ]);
+    #[cfg(unix)]
+    command.arg("/dev/fd/3");
+    #[cfg(windows)]
+    {
+        let path = windows_source_path(source)?;
+        verify_windows_source_path(source, &path)?;
+        command.arg(path);
+    }
+    command
+        .args([
+            "-map",
+            &format!("0:s:{index}"),
+            "-map",
+            "0:t?",
+            "-c",
+            "copy",
+            "-avoid_negative_ts",
+            "disabled",
+            "-f",
+            "matroska",
+            "-fs",
+        ])
+        .arg((max_bytes + 1).to_string())
+        .arg("pipe:1");
+    Ok(command)
+}
+
 /// Build native text extraction without starting unowned subtitle work.
 pub(crate) fn source_native_text_command(
     source: &std::fs::File,
@@ -1930,21 +1981,33 @@ impl EncodedEngine {
         let media = FRAGMENT_INDEX_ENGINE
             .get_or_init(fragment_index_engine_inner)
             .await;
-        Self::capture_with_media(text_burn, source_config, media).await
+        Self::capture_with_media(text_burn, source_config, media, None).await
     }
 
+    /// The Source's capture: every child — the encoder's own version and
+    /// dependency queries and, for a text burn, the Fontconfig enumeration
+    /// and the frozen environment's proofs — runs as this Source operation's
+    /// owned work, under its permit, deadline and cancellation. The frozen
+    /// environment itself is the reference-counted directory the engine
+    /// holds, so the last recipe holding it (the Source rendition, released
+    /// at settlement) removes it.
     pub(crate) async fn capture_source(
         execution: &crate::transcode::source_preparation::SourceCommandExecutor<'_>,
+        text_burn: Option<&std::path::Path>,
     ) -> Result<(Self, String), String> {
         // A Source cancellation/refusal cannot poison Local's cached snapshot.
         let (media, build) = fragment_index_engine_with_source(Some(execution)).await;
-        Ok((Self::capture_with_media(None, None, &media).await?, build))
+        Ok((
+            Self::capture_with_media(text_burn, None, &media, Some(execution)).await?,
+            build,
+        ))
     }
 
     async fn capture_with_media(
         text_burn: Option<&std::path::Path>,
         source_config: Option<&std::path::Path>,
         media: &FragmentIndexEngine,
+        execution: Option<&crate::transcode::source_preparation::SourceCommandExecutor<'_>>,
     ) -> Result<Self, String> {
         let mut charges = EngineAttestationCharges::default();
         if !media.usable {
@@ -1974,7 +2037,7 @@ impl EncodedEngine {
             // loaded media libraries. Probe it for every recipe capture so a
             // newly installed font or rule cannot reuse the old URI identity,
             // then freeze what it found so the producer can see nothing else.
-            let enumeration = font_render_engine_inner(source_config).await;
+            let enumeration = font_render_engine_inner(source_config, execution).await;
             charges.add(
                 EngineAttestationKind::Font,
                 EngineAttestationPhase::Spawn,
@@ -2014,6 +2077,7 @@ impl EncodedEngine {
                     versions: &versions,
                     listing: &enumeration.listing,
                 },
+                execution,
             )
             .await;
             charges.add(
@@ -2408,13 +2472,27 @@ struct FontEnumeration {
 }
 
 /// A Fontconfig tool run under the font probe budget, answering its stdout.
-pub(crate) async fn font_probe_output(command: tokio::process::Command) -> Result<Vec<u8>, String> {
-    bounded_command_output_with_timeout(command, FONT_ENGINE_PROBE_TIMEOUT)
-        .await
-        .map(|output| output.stdout)
+pub(crate) async fn font_probe_output(
+    command: tokio::process::Command,
+    execution: Option<&crate::transcode::source_preparation::SourceCommandExecutor<'_>>,
+) -> Result<Vec<u8>, String> {
+    match execution {
+        // A Source capture's Fontconfig child is that Source operation's own
+        // owned work, never an unowned capability probe.
+        Some(execution) => execution
+            .output(command, ENGINE_PROBE_MAX_BYTES as usize)
+            .await
+            .map(|output| output.stdout),
+        None => bounded_command_output_with_timeout(command, FONT_ENGINE_PROBE_TIMEOUT)
+            .await
+            .map(|output| output.stdout),
+    }
 }
 
-async fn font_render_engine_inner(source_config: Option<&std::path::Path>) -> FontEnumeration {
+async fn font_render_engine_inner(
+    source_config: Option<&std::path::Path>,
+    execution: Option<&crate::transcode::source_preparation::SourceCommandExecutor<'_>>,
+) -> FontEnumeration {
     let probe_started = Instant::now();
     let mut digest = Sha256::new();
     digest.update(b"plurx/font-render/engine-v1\0");
@@ -2431,11 +2509,11 @@ async fn font_render_engine_inner(source_config: Option<&std::path::Path>) -> Fo
         font_list.env("FONTCONFIG_FILE", config);
         configuration.env("FONTCONFIG_FILE", config);
     }
-    match bounded_command_output_with_timeout(font_list, FONT_ENGINE_PROBE_TIMEOUT).await {
-        Ok(output) => {
-            digest.update((output.stdout.len() as u64).to_be_bytes());
-            digest.update(&output.stdout);
-            listing = String::from_utf8_lossy(&output.stdout).into_owned();
+    match font_probe_output(font_list, execution).await {
+        Ok(stdout) => {
+            digest.update((stdout.len() as u64).to_be_bytes());
+            digest.update(&stdout);
+            listing = String::from_utf8_lossy(&stdout).into_owned();
             fonts.extend(
                 listing
                     .lines()
@@ -2453,11 +2531,11 @@ async fn font_render_engine_inner(source_config: Option<&std::path::Path>) -> Fo
         }
     }
 
-    match bounded_command_output_with_timeout(configuration, FONT_ENGINE_PROBE_TIMEOUT).await {
-        Ok(output) => {
-            digest.update((output.stdout.len() as u64).to_be_bytes());
-            digest.update(&output.stdout);
-            for rule in String::from_utf8_lossy(&output.stdout)
+    match font_probe_output(configuration, execution).await {
+        Ok(stdout) => {
+            digest.update((stdout.len() as u64).to_be_bytes());
+            digest.update(&stdout);
+            for rule in String::from_utf8_lossy(&stdout)
                 .lines()
                 .filter_map(|line| line.strip_prefix("+ "))
                 .filter_map(|line| line.split_once(": ").map(|(path, _)| path))

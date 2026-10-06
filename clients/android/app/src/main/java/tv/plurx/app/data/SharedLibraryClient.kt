@@ -14,13 +14,14 @@ import tv.plurx.app.BuildConfig
 /** Captures B authorization; no caller or response can choose a foreign origin. */
 internal class SharedLibraryClient private constructor(private val auth: Session.PlaybackAuthorization, private val transport: OkHttpClient) {
     fun requireCurrent() { require(Session.playbackAuthorization() == auth && !auth.token.isNullOrEmpty()) }
-    private suspend fun request(path: String, query: Map<String, String> = emptyMap(), enabled: Boolean? = null): JsonObject = withContext(Dispatchers.IO) {
+    private suspend fun request(path: String, query: Map<String, String> = emptyMap(), enabled: Boolean? = null, post: JsonObject? = null): JsonObject = withContext(Dispatchers.IO) {
         requireCurrent()
         val builder = auth.origin.toHttpUrl().newBuilder().encodedPath("/api/v1/$path")
         query.forEach { (key, value) -> builder.addQueryParameter(key, value) }
         val url = builder.build()
         val request = Request.Builder().url(url).header("Authorization", "Bearer ${auth.token}")
         if (enabled != null) request.put(buildJsonObject { put("enabled", enabled) }.toString().toRequestBody("application/json".toMediaType()))
+        if (post != null) { require(enabled == null); request.post(post.toString().toRequestBody("application/json".toMediaType())) }
         transport.newCall(request.build()).execute().use { response ->
             requireCurrent(); require(response.request.url == url)
             val source = requireNotNull(response.body).source()
@@ -84,8 +85,78 @@ internal class SharedLibraryClient private constructor(private val auth: Session
         val detail = json.decodeFromJsonElement<SharedLibraryDetail>(wire).also { it.validate(reference) }
         requireCurrent(); return detail.copy(item = detail.item.copy(artworkSubject = artworkSubject(detail.item)))
     }
+    /**
+     * B-private explicit watched state (contract §5.3). B reads current Source
+     * membership under current assignment and takes the next history sequence
+     * inside the write, so a progress beat sent before this cannot restore the
+     * old position. Source history and Local watch state are untouched.
+     */
+    suspend fun setWatched(reference: SharedPlaybackReference, watched: Boolean): SharedLibraryWatch {
+        reference.validate()
+        val wire = request("shared/imports/${reference.import_id}/items/${reference.item_id}/watched", post = buildJsonObject { put("watched", watched) })
+        require(wire.getValue("updated").jsonPrimitive.let { !it.isString && it.longOrNull == 1L })
+        val watch = json.decodeFromJsonElement<SharedLibraryWatch>(wire.getValue("watch"))
+        require(watch.watched == watched && watch.position_ms >= 0 && watch.sequence >= 0 && watch.updated_at_ms >= 0)
+        requireCurrent(); return watch
+    }
+
+    /**
+     * The next episode in Source order, read only through B's viewer routes:
+     * the next episode of this season, else the first episode of the next
+     * season. Every page is checked against the current assignment by B and
+     * against this Source's library here. The answer is a full Shared
+     * reference for a fresh authorized Start, never a Local item and never an
+     * inherited playback context. Null when there is no next episode.
+     */
+    suspend fun nextEpisode(reference: SharedPlaybackReference): SharedPlaybackReference? {
+        reference.validate()
+        val library = SharedLibraryIdentity(reference.import_id, reference.server_id, reference.catalogue_epoch, reference.library_id)
+        val current = detail(reference).item
+        if (current.kind != "episode") return null
+        val season = current.parent ?: return null
+        val episodes = children(library, season, "episode")
+        val at = episodes.indexOf(reference)
+        if (at < 0) return null
+        if (at + 1 < episodes.size) return episodes[at + 1]
+        val show = detail(season).item.parent ?: return null
+        val seasons = children(library, show, "season")
+        val next = seasons.indexOf(season).takeIf { it >= 0 }?.let { seasons.getOrNull(it + 1) } ?: return null
+        return children(library, next, "episode").firstOrNull()
+    }
+
+    /** One parent's children of [kind], in the order B pages them, bounded. */
+    private suspend fun children(library: SharedLibraryIdentity, parent: SharedPlaybackReference, kind: String): List<SharedPlaybackReference> {
+        val rows = mutableListOf<SharedPlaybackReference>()
+        var cursor: String? = null
+        val seen = mutableSetOf<String>()
+        repeat(MAX_CHILD_PAGES) {
+            val page = page(library, parent, cursor = cursor)
+            page.items.filter { it.kind == kind && it.reference !in rows }.forEach { rows += it.reference }
+            cursor = page.next_cursor ?: return rows
+            require(seen.add(cursor!!)) { "Shared children unavailable" }
+        }
+        error("Shared season unavailable")
+    }
     private fun artworkSubject(item: SharedLibraryItem): SharedArtworkSubject {
         requireCurrent(); return CapturedSharedArtwork(auth, transport, item)
+    }
+    suspend fun continueGroups(): List<SharedContinueGroup> {
+        val rows = request("shared/continue-watching", mapOf("limit" to "200")).getValue("groups").jsonArray
+        require(rows.size <= 32)
+        val groups = rows.map { value ->
+            val wire = value.jsonObject
+            listOf("import_id", "server_id", "catalogue_epoch").forEach { wire.string(it) }
+            json.decodeFromJsonElement<SharedContinueGroup>(wire).also { it.validate() }
+        }
+        require(groups.map { it.id }.toSet().size == groups.size); requireCurrent(); return groups
+    }
+    suspend fun continueItems(group: SharedContinueGroup, assigned: List<SharedLibraryAssignment>): SharedContinueItems {
+        group.validate()
+        val wire = request("shared/imports/${group.import_id}/continue-watching", mapOf("limit" to "200"))
+        listOf("import_id", "server_id", "catalogue_epoch").forEach { wire.string(it) }
+        wire.getValue("items").jsonArray.forEach { strictItem(it.jsonObject.getValue("item").jsonObject) }
+        val reply = json.decodeFromJsonElement<SharedContinueItems>(wire).also { it.validate(group, assigned) }
+        requireCurrent(); return reply.copy(items = reply.items.map { entry -> entry.copy(item = entry.item.copy(artworkSubject = artworkSubject(entry.item))) })
     }
     suspend fun settings(): Boolean = json.decodeFromJsonElement<SharingSetting>(request("sharing/settings")).enabled
     suspend fun save(enabled: Boolean): Boolean = json.decodeFromJsonElement<SharingSetting>(request("sharing/settings", enabled = enabled)).enabled.also { require(it == enabled) }
@@ -93,6 +164,8 @@ internal class SharedLibraryClient private constructor(private val auth: Session
     @Serializable private data class SharingSetting(val enabled: Boolean)
     companion object {
         private val json = Json { ignoreUnknownKeys = true }
+        /** Sixty a page: a season of up to 1 200 rows, then a typed refusal rather than a walk. */
+        private const val MAX_CHILD_PAGES = 20
         fun create(): SharedLibraryClient {
             val auth = Session.playbackAuthorization()
             require(Session.canonicalOrigin(auth.origin) != null && !auth.token.isNullOrEmpty())

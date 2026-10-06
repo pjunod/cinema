@@ -6,10 +6,10 @@ const ref={import_id:"11111111-1111-4111-8111-111111111111",server_id:"22222222-
 function harness(read){
  const elements=new Map(),requests=[];
  const context=vm.createContext({TextDecoder,Uint8Array,URLSearchParams,URL,AbortController,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/shared",href:"https://b.test/#/shared"},
-  PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+  PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,HTMLButtonElement:class{},
   esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),fmtDur:String,
   api:async(path)=>{requests.push(path);const response=await read(path);Object.defineProperty(response,"url",{value:new URL("/api/v1"+path,"https://b.test").href});return response;},layoutChrome(){},setPagePhase(){},
-  document:{getElementById(id){if(!elements.has(id))elements.set(id,{innerHTML:"",more:null,querySelector(){return this.more;},insertAdjacentHTML(where,html){this.innerHTML+=html;},appendChild(button){this.more=button;button.remove=()=>{this.more=null;};}});return elements.get(id);},createElement(){return {dataset:{}};}}
+  document:{getElementById(id){if(!elements.has(id))elements.set(id,{innerHTML:"",more:null,querySelector(){return this.more;},querySelectorAll(){return [];},insertAdjacentHTML(where,html){this.innerHTML+=html;},appendChild(button){this.more=button;button.remove=()=>{this.more=null;};}});return elements.get(id);},createElement(){return {dataset:{}};}}
  });
  vm.runInContext(artworkSource,context);
  vm.runInContext(source+"\nthis.shared={id:sharedCatalogueId,key:sharedCatalogueGroupKey,href:sharedCatalogueHref,route:sharedCatalogueRoute,item:sharedCatalogueItemHtml,read:sharedCatalogueRead,view:viewSharedCatalogue,page:sharedCatalogueLoadPage};",context);
@@ -112,4 +112,75 @@ test("Shared launch refetches current delivery and retains string file identity 
  fixture.context.SHARED_DECISION.details=async()=>({detail:{delivery_status:"unavailable"},files:[]});
  await assert.rejects(fixture.context.launch(ref,"9007199254740993",fixture.capture()));assert.equal(launches.length,1);
  fixture.context.AUTH_GENERATION++;await assert.rejects(fixture.context.launch(ref,"9007199254740993",fixture.capture()));assert.equal(launches.length,1);
+});
+
+test("an expired or substituted Source cursor reopens the list once instead of retrying a dead cursor",async()=>{
+ for(const code of ["sharing_cursor_expired","sharing_query_changed","sharing_cursor_invalid"]){
+  const item=n=>({source:"shared",reference:{...ref,item_id:String(n)},title:"Item "+n,kind:"movie"});
+  let calls=0;const fixture=harness(async path=>{calls++;
+   if(path.includes("cursor="))throw Object.assign(new Error("cursor refused"),{status:410,code});
+   return reply({items:[item(1),item(2)],next_cursor:calls===1?"opaque-1":null});});
+  const {item_id:_,...library}=ref;
+  await fixture.h.page("/shared/imports/"+ref.import_id+"/libraries/"+ref.library_id+"/items",library,fixture.capture(),"rows");
+  const rows=fixture.elements.get("rows");await rows.more.onclick();
+  assert.equal(calls,3,code);assert.ok(fixture.requests[1].includes("cursor=opaque-1"));assert.ok(!fixture.requests[2].includes("cursor="),"fresh open");
+  assert.match(rows.innerHTML,/reopened from the start/);assert.equal((rows.innerHTML.match(/<strong>Item 1/g)||[]).length,1);
+  assert.equal(rows.more,null,"the reopened list ended without another dead cursor");
+ }
+ // Other refusals keep the existing retry affordance and never reopen.
+ let calls=0;const fixture=harness(async path=>{calls++;if(path.includes("cursor="))throw Object.assign(new Error("offline"),{status:503,code:"sharing_source_unavailable"});
+  return reply({items:[{source:"shared",reference:ref,title:"Kept",kind:"movie"}],next_cursor:"opaque"});});
+ await fixture.h.page("/shared/imports/"+ref.import_id+"/libraries/"+ref.library_id+"/items",ref,fixture.capture(),"rows");
+ const rows=fixture.elements.get("rows"),button=rows.more;button.disabled=false;await button.onclick();
+ assert.equal(calls,2);assert.equal(button.disabled,false);assert.match(rows.innerHTML,/Kept/);
+});
+
+test("a show page renders its seasons instead of refusing children as a changed source",async()=>{
+ const show={...ref,item_id:"100"},season={...ref,item_id:"9007199254740995"};
+ const fixture=harness(async path=>{
+  if(path.endsWith("/items/100"))return reply({item:{source:"shared",reference:show,title:"Show",kind:"show"},files:[],delivery_status:"unavailable",watch:null});
+  if(path.includes("/items/100/children"))return reply({items:[{source:"shared",reference:season,title:"Season 1",kind:"season"}],next_cursor:null});
+  throw new Error("unexpected "+path);
+ });
+ const route=fixture.h.href(show);fixture.context.location.hash=route;
+ await fixture.h.view(1);
+ const children=fixture.elements.get("shared-children").innerHTML;
+ assert.match(children,/Season 1/);assert.ok(!children.includes("unavailable"),children);
+ assert.ok(!fixture.elements.get("shared-catalogue").innerHTML.includes("Mark watched"),"a show has no single watched state");
+});
+test("Shared next episode follows Source order through B and mints a fresh authorized start",async()=>{
+ const fixture=harness(),reads=[],launches=[];
+ const at=id=>({...ref,library_id:"12",item_id:id});
+ const tree={"100":{kind:"show"},"200":{kind:"season",parent:"100"},"201":{kind:"season",parent:"100"},"9007199254740993":{kind:"episode",parent:"200"},"9007199254740994":{kind:"episode",parent:"200"},"9007199254740995":{kind:"episode",parent:"201"}};
+ const children={"100":["200","201"],"200":["9007199254740993","9007199254740994"],"201":["9007199254740995"]};
+ const read=async path=>{reads.push(path);
+  const child=/\/items\/([0-9]+)\/children\?limit=200$/.exec(path);
+  if(child)return {items:children[child[1]].map(id=>({source:"shared",reference:at(id),kind:tree[id].kind,title:id})),next_cursor:null};
+  const id=/\/items\/([0-9]+)$/.exec(path)[1];
+  return {item:{source:"shared",reference:at(id),kind:tree[id].kind,parent:tree[id].parent?at(tree[id].parent):null}};};
+ vm.runInContext("this.next=sharedCatalogueNextEpisode;this.launch=sharedCatalogueLaunch",fixture.context);
+ assert.equal((await fixture.context.next(at("9007199254740993"),read)).item_id,"9007199254740994","exact huge-ID order");
+ assert.equal((await fixture.context.next(at("9007199254740994"),read)).item_id,"9007199254740995","rolls into the next season");
+ assert.equal(await fixture.context.next(at("9007199254740995"),read),null,"end of the series");
+ assert.ok(reads.every(path=>path.startsWith("/shared/imports/"+ref.import_id+"/items/")),"never a Local route");
+ await assert.rejects(fixture.context.next(at("9007199254740993"),async path=>{const value=await read(path);
+  if(value.items)value.items[0].reference={...value.items[0].reference,server_id:"44444444-4444-4444-8444-444444444444"};return value;}),/Shared source changed/);
+ const fresh={source_file_id:"77"};
+ fixture.context.SHARED_DECISION={details:async reference=>{launches.push(["details",reference.item_id]);return {detail:{delivery_status:"available",item:{title:"Next",reference},watch:{position_ms:5000,watched:true}},files:[{context:fresh,file:{duration_ms:1000}}]};}};
+ fixture.context.play=(...args)=>{launches.push(args);};
+ await fixture.context.launch(at("9007199254740994"),null,()=>true);
+ assert.deepEqual(launches[0],["details","9007199254740994"],"a new authorized start reads fresh details");
+ assert.equal(launches[1][0],"77");assert.equal(launches[1][2],0,"a watched next episode starts from the beginning");assert.equal(launches[1][4].fileContext,fresh);
+ fixture.context.SHARED_DECISION.details=async()=>({detail:{delivery_status:"unavailable"},files:[]});
+ await assert.rejects(fixture.context.launch(at("9007199254740994"),null,()=>true));assert.equal(launches.length,2);
+});
+test("manual Shared watched state posts only to the B-private Shared route",async()=>{
+ const fixture=harness(async path=>reply({updated:1,watch:{sequence:3,position_ms:0,watched:false}})),bodies=[];
+ const api=fixture.context.api;fixture.context.api=async(path,options)=>{bodies.push(options);return api(path,options);};
+ vm.runInContext("this.watched=sharedCatalogueSetWatched",fixture.context);
+ await fixture.context.watched(ref,false);await fixture.context.watched(ref,true);
+ const route=`/shared/imports/${ref.import_id}/items/${ref.item_id}/watched`;
+ assert.deepEqual(fixture.requests,[route,route]);
+ assert.deepEqual(bodies.map(o=>[o.method,o.body.watched]),[["POST",false],["POST",true]]);
+ await assert.rejects(fixture.context.watched(ref,"false"));assert.equal(fixture.requests.length,2);
 });

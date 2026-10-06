@@ -2788,6 +2788,122 @@ impl MediaSessionCoordinator {
             .ok_or(PeerTransportError::Unreachable)
     }
 
+    /// Shared receiver bytes retain the existing authenticated streaming driver.
+    pub(crate) async fn receiver_forward_stream(
+        &self,
+        owner_node_id: &str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<reqwest::Response, PeerTransportError> {
+        if body.len() > 128 * 1024 || tokio::time::Instant::now() >= deadline {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request_stream(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                "/internal/cluster/sharing/receiver/forward",
+                body,
+                deadline,
+                PeerAuthMode::ExactRequest,
+            )
+            .await
+    }
+
+    /// Only the named receiver control/custody operations use signed replies.
+    pub(crate) async fn receiver_forward_bounded(
+        &self,
+        owner_node_id: &str,
+        path: &'static str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<crate::http::peer_transport::PeerResponse, PeerTransportError> {
+        if !matches!(
+            path,
+            "/internal/cluster/sharing/receiver/control"
+                | "/internal/cluster/sharing/receiver/register"
+                | "/internal/cluster/sharing/receiver/ack"
+        ) || body.len() > 128 * 1024
+            || tokio::time::Instant::now() >= deadline
+        {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                path,
+                body,
+                deadline,
+                64 * 1024,
+                PeerAuthMode::ExactRequestAndMemberResponse,
+            )
+            .await
+    }
+
+    /// Source body relay: keep byte backpressure and accepted-writer custody.
+    pub(crate) async fn source_forward_stream(
+        &self,
+        owner_node_id: &str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<reqwest::Response, PeerTransportError> {
+        if body.len() > 1024 * 1024 {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request_stream(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                "/internal/cluster/sharing/source/forward",
+                body,
+                deadline,
+                crate::http::peer_transport::PeerAuthMode::ExactRequest,
+            )
+            .await
+    }
+
+    /// Bounded Source control and custody answers authenticate status/body too.
+    pub(crate) async fn source_forward_bounded(
+        &self,
+        owner_node_id: &str,
+        path: &'static str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<crate::http::peer_transport::PeerResponse, PeerTransportError> {
+        if body.len() > 1024 * 1024
+            || !matches!(
+                path,
+                "/internal/cluster/sharing/source/locate"
+                    | "/internal/cluster/sharing/source/prepare"
+                    | "/internal/cluster/sharing/source/control"
+                    | "/internal/cluster/sharing/source/register"
+                    | "/internal/cluster/sharing/source/ack"
+            )
+        {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                path,
+                body,
+                deadline,
+                64 * 1024,
+                crate::http::peer_transport::PeerAuthMode::ExactRequestAndMemberResponse,
+            )
+            .await
+    }
+
     pub(crate) async fn start_remote(
         &self,
         owner_node_id: &str,
@@ -2964,6 +3080,55 @@ impl MediaSessionCoordinator {
             )
             .await?;
         relay_response(response)
+    }
+
+    /// Exact authenticated closure of an outer accepted driver. No request
+    /// timeout or missing registry entry is interpreted as physical closure.
+    #[allow(dead_code)] // Complete authenticated close RPC; Source/B principal retirement adapters integrate next.
+    pub(crate) async fn close_sharing_ingress(
+        &self,
+        ingress_node: &str,
+        request: &crate::sharing_connection_custody::DriverCloseRequest,
+    ) -> Result<crate::sharing_connection_custody::DriverClosureReceipt, PeerTransportError> {
+        use crate::sharing_connection_custody::{DriverClosureReceipt, CLOSE_PATH};
+        let remaining = request.deadline_unix_ms.saturating_sub(unix_ms());
+        if !request.driver.valid()
+            || !(1..=9_007_199_254_740_991).contains(&request.registration_sequence)
+            || request.expected_owner_epoch <= 0
+            || !matches!(request.principal_kind.as_str(), "source" | "receiver")
+            || request.incarnation_id.is_nil()
+            || !crate::sharing_connection_custody::owner_identity_valid(&request.owner_identity)
+            || !(1..=315_000).contains(&remaining)
+        {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let deadline = deadline_after(Duration::from_millis(
+            u64::try_from(remaining).map_err(|_| PeerTransportError::InvalidResponse)?,
+        ));
+        let base = self.peer_base(ingress_node, deadline).await?;
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        let response = self
+            .transport
+            .request(
+                ingress_node,
+                &base,
+                reqwest::Method::POST,
+                CLOSE_PATH,
+                body,
+                deadline,
+                2048,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        if !response.status.is_success() {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let receipt: DriverClosureReceipt = serde_json::from_slice(&response.body)
+            .map_err(|_| PeerTransportError::InvalidResponse)?;
+        if !receipt.matches(&request.driver) {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        Ok(receipt)
     }
 
     /// Mutating playback control uses its own exact-auth endpoint. It must not

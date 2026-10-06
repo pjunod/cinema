@@ -15,8 +15,60 @@ internet, read [Non-goals](#non-goals--what-plurx-does-not-defend-against)
 first: several protections you'd expect at that boundary are the proxy's job,
 not plurx's, by design.
 
-Audited 2026-09-09. Where a claim below is exhaustive, the test that keeps it
-honest is named inline.
+Audited 2026-09-09; the shared-library boundary below was updated 2026-10-06
+for the effort implementation. Where a claim below is exhaustive, the test
+that keeps it honest is named inline.
+
+## Shared libraries — private peer authority and local viewer authority
+
+The [shared-library effort](features/SHARED-LIBRARIES-STATUS.md) adds a separate
+pinned-TLS peer listener. It does not expose the ordinary administration or
+viewer API through Tailscale Serve. The supported deployment contract is raw
+TCP Serve to the sharing-only loopback listener; real Tailscale, Docker egress
+and two-home qualification remain open. The ordinary LAN service described
+above keeps its existing boundary.
+
+An exporting Source grants selected libraries to a recipient server. The
+recipient separately assigns its own viewers. Matching account names do not
+link accounts, and the Source does not impersonate a local user to produce
+media. The Source trusts the authorized recipient administrator with the
+granted bytes; this is access control, not copy prevention.
+
+The recipient retains the peer credential and relays playback. Clients see
+recipient URLs and opaque compound references, not a Source bearer, Source
+filesystem path or numeric Local file identity. Outbound credentials and
+cleanup capsules are purpose-bound ciphertext in the Store. Dialing requires
+the approved endpoint's SPKI pin and certificate validity before sending a
+credential; redirects, proxy inheritance and public-DNS fallback are refused.
+Endpoint additions and pin changes require the authenticated manifest or an
+explicit administrator confirmation. An address hint is not new identity
+authority.
+
+Playback has both durable authorization and physical resource ownership.
+Source preparation retains its processes, descriptors and artifacts through
+actual join. Recipient retirement retains its Source obligation until confirmed
+End. A durable assignment, expired lease, missing local actor or failed HTTP
+request alone cannot prove that media production stopped. Restore and clone
+handling disable sharing and require re-pairing; replaying old database state
+must not silently restore a revoked relationship.
+
+Within each cluster, non-owner forwarding uses a current member's signed
+request bound to the target, method, path and body. It carries the exact
+sharing principal and invocation identity, never the raw peer bearer or a
+filesystem path. The owner independently checks current playback authority;
+cleanup uses the retained original obligation. File-location observations are
+bounded, signed metadata and cannot authorize producer creation. Actual ingress
+closure receipts are also signed for the requesting member and exact request.
+Neither a forwarded header nor a database-only owner change grants physical
+ownership. See the [ingress custody design](features/SHARED-LIBRARIES-INGRESS-CUSTODY.md)
+for registration, lost-reply and retirement boundaries.
+
+The contract requires new Source and recipient delivery to stop within 30
+seconds of revocation, excluding bytes already buffered by a player. That is
+an acceptance requirement, not a completed live-topology measurement. Consult
+the [current status](features/SHARED-LIBRARIES-STATUS.md) before interpreting
+component receipts as end-to-end qualification. The Developer switch remains
+an explicit saved choice with advisory readiness while that work is open.
 
 ## Authentication — one token bar, no anonymous back doors
 
@@ -233,8 +285,9 @@ rotations and upstream capabilities. Sharing AEAD binds secret purpose,
 local server UUID and import UUID; ciphertext substitution across any of
 those contexts fails. The startup census includes both Trakt and sharing,
 including disabled imports. Missing or mismatched keys preserve whole-server
-startup refusal. Sharing listeners and playback are still pending later
-milestones; these storage records do not expose a peer API.
+startup refusal. The effort now implements the isolated peer listener and
+shared playback described above; production promotion and topology/device
+qualification remain open.
 
 | Property | How |
 |---|---|

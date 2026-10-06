@@ -35,14 +35,13 @@ struct SourceOwnerGenerations {
     detached: bool,
     in_flight: usize,
     used: Vec<ProducerRegistration>,
+    ingress: Option<plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission>,
 }
 /// One viewer's producer associations are settled; its actor must separately
 /// settle demand, readers, response writers and its exact durable route.
-#[allow(dead_code)] // Private Source actor handoff is the next integration.
 pub(crate) struct SourceProducerAssociationsSettled {
     assignment: SourceDispatchAssignment,
 }
-#[allow(dead_code)]
 impl SourceProducerAssociationsSettled {
     pub(crate) fn matches(&self, assignment: &SourceDispatchAssignment) -> bool {
         self.assignment.same_identity(assignment)
@@ -65,7 +64,6 @@ impl SourceRenditionOwners {
                         .detached
             })
     }
-    #[allow(dead_code)] // Source attach remains closed until actor integration.
     pub(super) fn attach(
         &self,
         assignment: &SourceDispatchAssignment,
@@ -194,6 +192,17 @@ impl SourceRenditionOwners {
         {
             return Err(permit);
         }
+        let Some(ingress) = producer_gate.retained_ingress(&owner.assignment) else {
+            return Err(permit);
+        };
+        // Each actual owner's initially issued permission survives ordinary
+        // connection gaps independently. A retired predecessor cannot supply
+        // or invalidate a successor's producer authority.
+        owner
+            .generations
+            .lock()
+            .expect("Source producer associations")
+            .ingress = Some(ingress);
         state.initial_permit = Some((Arc::clone(owner), permit));
         state.admissions = Some(admissions.clone());
         state.producer_gate = Some(Arc::clone(producer_gate));
@@ -339,7 +348,6 @@ impl SourceRenditionOwner {
     /// Detach under the reader/lifecycle transition before this is called.
     /// Other viewers may keep the rendition's producer running; that keeps
     /// this viewer's exact physical obligation retained until actual reap.
-    #[allow(dead_code)] // Private owned actor invokes after demand detachment.
     pub(crate) async fn detach_and_wait(&self) -> SourceProducerAssociationsSettled {
         // Serialize detachment with capture before waiting on actual tokens.
         self.begin_detach();
@@ -387,12 +395,21 @@ impl SourceGenerationDispatch {
             .producer_gate
             .as_ref()
             .ok_or_else(|| "Source producer gate is unavailable".to_owned())?;
-        let assignments: Vec<_> = self
+        let permissions: Vec<_> = self
             .owners
             .iter()
-            .map(|owner| owner.assignment.clone())
+            .filter_map(|owner| {
+                owner
+                    .generations
+                    .lock()
+                    .expect("Source producer associations")
+                    .ingress
+                    .clone()
+            })
             .collect();
-        gate.authorize_generation(&assignments).await.map(Some)
+        // A newly attached owner has no authority until its actual actor arms
+        // admission. Existing admitted owners continue during that transition.
+        gate.authorize_generation(&permissions).await.map(Some)
     }
 }
 impl Drop for SourceGenerationDispatch {

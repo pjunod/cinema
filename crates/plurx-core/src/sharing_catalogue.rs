@@ -480,6 +480,20 @@ mod tests {
             CatalogueCursor::new(&key).resume(&token, &wrong, 2000),
             Err(CatalogueError::QueryChanged)
         );
+        // Substitution across Sources, catalogue epochs and libraries is a
+        // typed reopen, never a boundary applied to another list.
+        for field in 0..3 {
+            wrong = context();
+            match field {
+                0 => wrong.server_id = Uuid::from_u128(5),
+                1 => wrong.catalogue_epoch = Uuid::from_u128(6),
+                _ => wrong.library_id = SourceId::parse("9007199254740993").expect("library"),
+            }
+            assert_eq!(
+                CatalogueCursor::new(&key).resume(&token, &wrong, 2000),
+                Err(CatalogueError::QueryChanged)
+            );
+        }
         assert_eq!(
             CatalogueCursor::new(&CredentialKey::from_bytes([42; 32])).resume(
                 &token,

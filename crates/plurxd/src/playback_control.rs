@@ -61,6 +61,15 @@ const RETRY_RESOURCE_ACTION: &str = "retry_resource";
 /// declared it is never sent one, which is what makes shipping the server half
 /// ahead of the client half safe.
 pub(crate) const PREPARE_REPLACEMENT_ACTION: &str = "prepare_replacement";
+/// The name a client declares, beside [`PREPARE_REPLACEMENT_ACTION`], when it
+/// can consume a `prepare` on a Shared session: at commit it moves its Shared
+/// progress beats, status and bound playback context to the successor B
+/// session the action names. A Shared receiver offers its own prepared
+/// successor only to a client that declares both; every other client keeps
+/// the `preparation: "none"` reopen. Like `prepare_replacement`, it lets the
+/// server half ship ahead of the client halves, and a server that does not
+/// know the name ignores it.
+pub(crate) const SHARED_PREPARE_REPLACEMENT_ACTION: &str = "shared_prepare_replacement";
 /// The actions that report what production is doing and carry no
 /// transaction, session or URL: a relay may forward exactly these.
 pub(crate) fn is_advisory_action_name(name: &str) -> bool {

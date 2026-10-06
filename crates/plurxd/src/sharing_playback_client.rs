@@ -16,6 +16,8 @@ const MAX_EPOCH: i64 = 9_007_199_254_740_991;
 /// transit, so a slow Source settlement is answered once rather than timed
 /// out into another dial.
 const SOURCE_END_DEADLINE: Duration = Duration::from_secs(315);
+const CLEANUP_IMPORT_LOOKUP_DEADLINE: Duration = Duration::from_secs(3);
+const CLEANUP_ALTERNATIVE_ATTEMPT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// No Deref or access to catalogue, Start or resource methods. The retained
 /// approved SPKI authenticates TLS; the exact authenticated End echo binds
@@ -30,6 +32,70 @@ impl CleanupPeerConnection {
             .await
             .map(Self)
     }
+    /// Own one immutable End across approved endpoints under one total budget.
+    /// A retained node can keep TLS alive while refusing/losing its End route;
+    /// only a successful authenticated exact echo settles the obligation.
+    #[allow(clippy::too_many_arguments)] // Exact immutable End authority plus its owner's absolute budget.
+    pub(crate) async fn end_for_session(
+        state: &crate::state::AppState,
+        intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
+        retained: &Endpoint,
+        credential: &Secret,
+        viewer_hash: &str,
+        session: &SourcePeerSession,
+        known: Option<&SourcePeerLineage>,
+        deadline: tokio::time::Instant,
+    ) -> Result<SourceEndReceipt, PeerError> {
+        let deadline = deadline.min(tokio::time::Instant::now() + SOURCE_END_DEADLINE);
+        let mut endpoints = vec![retained.clone()];
+        if let Ok(Ok(Some(import))) = tokio::time::timeout_at(
+            (tokio::time::Instant::now() + CLEANUP_IMPORT_LOOKUP_DEADLINE).min(deadline),
+            state.store.sharing_import(intent.scope.import_id),
+        )
+        .await
+        {
+            if cleanup_import_matches(&import.summary, intent) {
+                for endpoint in import.summary.endpoints {
+                    if !endpoints.contains(&endpoint) {
+                        endpoints.push(endpoint);
+                    }
+                }
+            }
+        }
+        let mut last = PeerError::Unavailable;
+        let candidate_count = endpoints.len();
+        for (index, endpoint) in endpoints.into_iter().enumerate() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(PeerError::Unavailable);
+            }
+            // Preserve useful budget for approved alternatives even if a
+            // retained peer accepts TLS and then never answers End. The last
+            // candidate receives the remainder, allowing a real slow owner to
+            // finish the same immutable End; timeout never means settlement.
+            let remaining_candidates =
+                u32::try_from(candidate_count - index).map_err(|_| PeerError::Unavailable)?;
+            let remaining = deadline.saturating_duration_since(now);
+            let allowance = if remaining_candidates == 1 {
+                remaining
+            } else {
+                (remaining / remaining_candidates).min(CLEANUP_ALTERNATIVE_ATTEMPT_DEADLINE)
+            };
+            let attempt = tokio::time::timeout_at(now + allowance, async {
+                let mut connection = Self::connect(&state.sharing, &endpoint).await?;
+                connection
+                    .end(credential, viewer_hash, session, known)
+                    .await
+            })
+            .await;
+            match attempt {
+                Ok(Ok(receipt)) => return Ok(receipt),
+                Ok(Err(error)) => last = error,
+                Err(_) => last = PeerError::Unavailable,
+            }
+        }
+        Err(last)
+    }
     pub(crate) async fn end(
         &mut self,
         credential: &Secret,
@@ -41,6 +107,18 @@ impl CleanupPeerConnection {
             .file_end(credential, viewer_hash, session, known)
             .await
     }
+}
+
+fn cleanup_import_matches(
+    import: &plurx_core::sharing::ImportSummary,
+    intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
+) -> bool {
+    import.id == intent.scope.import_id
+        && import.source_server_id == intent.scope.source_server_id
+        && import.catalogue_epoch == intent.scope.catalogue_epoch
+        && import.lifecycle_generation >= intent.scope.lifecycle_generation
+        && import.remote_grant_id == Some(intent.scope.remote_grant_id)
+        && import.claim_id == intent.scope.claim_id
 }
 
 pub(crate) struct SourcePeerSession {
@@ -349,6 +427,91 @@ impl PeerConnection {
 mod tests {
     use super::*;
     use plurx_core::sharing_catalogue_details::FileRevision;
+
+    #[test]
+    fn sharing_cleanup_endpoint_refresh_binds_exact_import_lineage_even_after_disable() {
+        use plurx_core::{
+            sharing::ImportSummary,
+            sharing_catalogue::SharedReference,
+            sharing_receiver_sessions::{
+                ReceiverProducerKind, ReceiverSessionIntent, RemoteSourceRecipe,
+            },
+            store::sharing_catalogue::ReceiverCatalogueScope,
+        };
+        let mut import = ImportSummary {
+            id: Uuid::new_v4(),
+            source_server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            source_name: "Source".into(),
+            claim_id: Uuid::new_v4(),
+            remote_grant_id: Some(Uuid::new_v4()),
+            state: "disabled".into(),
+            assignment_generation: 3,
+            lifecycle_generation: 2,
+            endpoint_generation: 4,
+            observed_endpoint_revision: Some(7),
+            endpoints: Vec::new(),
+        };
+        let scope = ReceiverCatalogueScope {
+            import_id: import.id,
+            source_server_id: import.source_server_id,
+            catalogue_epoch: import.catalogue_epoch,
+            lifecycle_generation: import.lifecycle_generation,
+            assignment_generation: 1,
+            endpoint_generation: 1,
+            claim_id: import.claim_id,
+            remote_grant_id: import.remote_grant_id.expect("grant"),
+            libraries: vec![SourceId::parse("1").expect("library")],
+        };
+        let reference = SharedReference {
+            import_id: import.id,
+            server_id: import.source_server_id,
+            catalogue_epoch: import.catalogue_epoch,
+            library_id: scope.libraries[0].clone(),
+            item_id: SourceId::parse("2").expect("item"),
+        };
+        let intent = ReceiverSessionIntent {
+            scope,
+            user_id: 1,
+            login_hash: "a".repeat(64),
+            source_position_ms: 0,
+            recipe: RemoteSourceRecipe {
+                kind: ReceiverProducerKind::RemoteSource,
+                version: 1,
+                reference,
+                lifecycle_generation: import.lifecycle_generation,
+                file_id: SourceId::parse("3").expect("file"),
+                file_revision: FileRevision::parse(&"b".repeat(64)).expect("revision"),
+                source_request_id: Uuid::new_v4(),
+                parent_login_hash: "a".repeat(64),
+                request_json: "{}".into(),
+            },
+        };
+        assert!(
+            cleanup_import_matches(&import, &intent),
+            "disable and endpoint edits cannot strand owed End"
+        );
+        import.lifecycle_generation += 1;
+        assert!(
+            cleanup_import_matches(&import, &intent),
+            "disable advances lifecycle but retains the original claim and grant"
+        );
+        import.lifecycle_generation -= 1;
+        for changed in ["source", "epoch", "grant", "claim", "import"] {
+            let mut foreign = import.clone();
+            match changed {
+                "source" => foreign.source_server_id = Uuid::new_v4(),
+                "epoch" => foreign.catalogue_epoch = Uuid::new_v4(),
+                "grant" => foreign.remote_grant_id = Some(Uuid::new_v4()),
+                "claim" => foreign.claim_id = Uuid::new_v4(),
+                _ => foreign.id = Uuid::new_v4(),
+            }
+            assert!(
+                !cleanup_import_matches(&foreign, &intent),
+                "foreign {changed} refused"
+            );
+        }
+    }
 
     fn fixture() -> (SourcePeerSession, SourcePeerLineage, Value) {
         let reference = SourcePlaybackTarget {

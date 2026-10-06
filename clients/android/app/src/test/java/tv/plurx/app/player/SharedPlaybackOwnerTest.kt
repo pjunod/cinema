@@ -13,14 +13,65 @@ import tv.plurx.app.data.SharedStartedDirect
 // Synthetic B through the actual authenticated client and a recording renderer.
 // Protocol and ordering evidence only: no Source, relay or device playback.
 class SharedPlaybackOwnerTest {
-    private class Renderer(private val log: MutableList<String>) : SharedRenderer {
-        var position = 0L; var active = false
-        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) { log += "attach hls $url @$positionMs"; position = positionMs; active = playWhenReady }
-        override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) { log += "attach direct $url @$positionMs"; position = positionMs; active = playWhenReady }
+    private class Renderer(private val log: MutableList<String>, private val rejectAttach: Boolean = false) : SharedRenderer {
+        var position = 0L; var active = false; var presented = true
+        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) { if (rejectAttach) error("decoder allocation failed"); log += "attach hls $url @$positionMs"; position = positionMs; active = playWhenReady }
+        override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) { if (rejectAttach) error("decoder allocation failed"); log += "attach direct $url @$positionMs"; position = positionMs; active = playWhenReady }
         override fun seekTo(positionMs: Long) { log += "seek $positionMs"; position = positionMs }
         override fun setPlaying(playing: Boolean) { log += "playing $playing"; active = playing }
-        override fun snapshot() = SharedRendererSnapshot(position, position + 4_000, 90_000, active, RenderState.RENDERING)
+        override fun snapshot() = SharedRendererSnapshot(position, position + 4_000, 90_000, active, RenderState.RENDERING, framePresented = presented)
         override fun release() { log += "release" }
+        // These owners never declare a Shared successor, so nothing primes one.
+        override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean) = error("no successor without the declaration")
+        override fun successorSnapshot(): SharedSuccessorSnapshot? = null
+        override fun parkSuccessor(positionMs: Long) = error("no successor")
+        override fun switchToSuccessor() = error("no successor")
+        override fun restorePredecessor() = error("no successor")
+        override fun releasePredecessor() = error("no successor")
+        override fun releaseSuccessor() = error("no successor")
+    }
+
+    @Test fun rendererSetupFailureEndsTheStartedSessionForHlsAndDirect(): Unit = runBlocking {
+        for (direct in listOf(false, true)) {
+            val f = SharedFixture(if (direct) "206" else "205"); f.login()
+            val owner = SharedPlaybackOwner(this, { SharedDecisionClient.forTest(f.transport()) }, Renderer(f.log, rejectAttach = true))
+            val plan = f.plan(f.context(), if (direct) "direct_play" else "remux", allowDirect = direct)
+            assertTrue(runCatching { owner.start(plan) }.isFailure)
+            assertEquals(listOf("start", "delete ${f.session(1)}"), f.log)
+            assertNull(owner.currentSession)
+            owner.stop()
+        }
+    }
+
+    @Test fun noRenderedFrameNeverWritesZeroHistoryOnTickOrClose(): Unit = runBlocking {
+        val f = SharedFixture("207"); f.login()
+        val renderer = Renderer(f.log).also { it.presented = false }
+        val owner = SharedPlaybackOwner(this, { SharedDecisionClient.forTest(f.transport()) }, renderer)
+        owner.start(f.plan(f.context()))
+        renderer.position = 0
+        owner.tickNow(progress = true)
+        owner.stop()
+        assertFalse(f.log.any { it.startsWith("progress") })
+        assertEquals("delete ${f.session(1)}", f.log.last())
+    }
+
+    @Test fun frameEvidenceCarriesPreparedProofAndRejectsOldAttachmentCallbacks() {
+        val evidence = SharedFrameEvidence()
+        val predecessor = evidence.attach()
+        evidence.frameRendered(predecessor)
+        val retained = evidence.presented
+        val successor = evidence.attach(alreadyPresented = true)
+        assertTrue(evidence.presented) // No second callback is required after a proven switch.
+        val rollback = evidence.attach(alreadyPresented = retained)
+        assertTrue(evidence.presented)
+        assertFalse(evidence.accepts(successor))
+        val reopened = evidence.attach()
+        evidence.frameRendered(predecessor)
+        evidence.frameRendered(successor)
+        evidence.frameRendered(rollback)
+        assertFalse(evidence.presented) // Late old-item callbacks cannot save a new session's zero.
+        evidence.frameRendered(reopened)
+        assertTrue(evidence.presented)
     }
 
     @Test fun seekPauseAndPlayReachTheRendererOnlyAfterBAccepts(): Unit = runBlocking {

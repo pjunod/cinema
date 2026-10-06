@@ -1984,6 +1984,23 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
+    // Preserve unresolved physical debts as diagnostic custody. Imported rows
+    // never confer a driver handle or a closure receipt in this process boot.
+    TablePlan {
+        name: "sharing_ingress_custody",
+        columns: &[
+            "principal_kind",
+            "incarnation_id",
+            "owner_identity",
+            "custody_json",
+            "revision",
+        ],
+        order_by: "principal_kind, incarnation_id",
+        minimum_schema: 93,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
 ];
 
 /// Groups import rows into transactions bounded by serialized bytes.
@@ -3721,6 +3738,7 @@ mod tests {
             "sharing_endpoint_manifest",
             "sharing_relay_upstream",
             "sharing_delivery_grants",
+            "sharing_ingress_custody",
         ] {
             assert!(names.contains(&name), "durable sharing table: {name}");
         }

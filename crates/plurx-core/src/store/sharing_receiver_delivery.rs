@@ -15,6 +15,11 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait SharingReceiverDeliveryStore: Send + Sync {
+    /// Read-only ingress authority over the exact currently published route.
+    async fn receiver_relay_read_authority(
+        &self,
+        route: &crate::domain::MediaSessionRoute,
+    ) -> Result<Option<crate::sharing_receiver_delivery::ReceiverRelayReadAuthority>, StoreError>;
     async fn issue_receiver_delivery(
         &self,
         authority: &ReceiverSessionWriteAuthority,
@@ -42,6 +47,13 @@ fn valid_deadline() -> &'static str {
 }
 #[async_trait]
 impl<T: Backend> SharingReceiverDeliveryStore for T {
+    async fn receiver_relay_read_authority(
+        &self,
+        route: &crate::domain::MediaSessionRoute,
+    ) -> Result<Option<crate::sharing_receiver_delivery::ReceiverRelayReadAuthority>, StoreError>
+    {
+        relay_read(self, route).await
+    }
     async fn issue_receiver_delivery(
         &self,
         authority: &ReceiverSessionWriteAuthority,
@@ -156,4 +168,114 @@ async fn result<T: Backend>(
         Err(e) if source_write_refused(&e) => Ok(ReceiverDeliveryWrite::Refused),
         Err(e) => Err(e),
     }
+}
+
+/// Decode metadata only, then repeat the existing guarded login, binding and
+/// grant reads. A durable recipe is never turned into a process-local actor.
+async fn relay_read<T: Backend>(
+    store: &T,
+    route: &crate::domain::MediaSessionRoute,
+) -> Result<Option<crate::sharing_receiver_delivery::ReceiverRelayReadAuthority>, StoreError> {
+    use super::SharingReceiverSessionStore;
+    use crate::sharing_receiver_sessions::{
+        ReceiverSessionIntent, ReceiverSourceOwner, RemoteSourceRecipe,
+    };
+    use crate::store::sharing_catalogue::ReceiverCatalogueScope;
+    use serde::Deserialize;
+    use sha2::Digest;
+    use uuid::Uuid;
+    let Some(user_id) = route.principal.local_user_id() else {
+        return Ok(None);
+    };
+    let Ok(recipe) = serde_json::from_str::<RemoteSourceRecipe>(&route.recipe_json) else {
+        return Ok(None);
+    };
+    if route.state != "active" || route.publication_ready_at_ms != 0 {
+        return Ok(None);
+    }
+    let now = super::sharing::wall_clock_ms()?;
+    let rows = store.sharing_read(
+        "SELECT json_object('request',r.request_id,'claim',i.claim_id,'grant',i.remote_grant_id,'assignment',b.assignment_generation,'endpoint',b.endpoint_revision,'position',b.source_position_ms) AS payload FROM sharing_relay_upstream b JOIN media_sessions s ON s.incarnation_id=b.incarnation_id JOIN media_session_requests r ON r.incarnation_id=s.incarnation_id AND r.user_id=s.user_id JOIN sharing_imports i ON i.id=b.import_id WHERE s.session_id=$1 AND s.incarnation_id=$2 AND s.owner_node_id=$3 AND s.owner_epoch=$4 AND s.recipe_json=$5 AND s.lease_expires_at_ms=$6 AND s.state='active' AND s.publication_ready_at_ms=0 AND length(r.request_id)<=128 LIMIT 2",
+        vec![route.session_id.clone().into(), route.incarnation_id.clone().into(), route.owner_node_id.clone().into(), route.owner_epoch.into(), route.recipe_json.clone().into(), route.lease_expires_at_ms.into()],
+    ).await?;
+    let [row] = rows.as_slice() else {
+        return if rows.is_empty() {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    };
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        request: String,
+        claim: Uuid,
+        grant: Uuid,
+        assignment: i64,
+        endpoint: i64,
+        position: i64,
+    }
+    let row: Row = serde_json::from_str(row).map_err(|_| invalid())?;
+    let intent = ReceiverSessionIntent {
+        scope: ReceiverCatalogueScope {
+            import_id: recipe.reference.import_id,
+            source_server_id: recipe.reference.server_id,
+            catalogue_epoch: recipe.reference.catalogue_epoch,
+            lifecycle_generation: recipe.lifecycle_generation,
+            assignment_generation: row.assignment,
+            endpoint_generation: row.endpoint,
+            claim_id: row.claim,
+            remote_grant_id: row.grant,
+            libraries: vec![recipe.reference.library_id.clone()],
+        },
+        user_id,
+        login_hash: recipe.parent_login_hash.clone(),
+        recipe,
+        source_position_ms: row.position,
+    };
+    let Some(authority) = store.prepare_receiver_session_authority(intent).await? else {
+        return Ok(None);
+    };
+    let owner = ReceiverSourceOwner {
+        incarnation_id: Uuid::parse_str(&route.incarnation_id).map_err(|_| invalid())?,
+        session_id: Uuid::parse_str(&route.session_id).map_err(|_| invalid())?,
+        owner_node_id: route.owner_node_id.clone(),
+        owner_epoch: route.owner_epoch,
+        request_id: row.request,
+        lease_expires_at_ms: route.lease_expires_at_ms,
+        now_ms: now,
+    };
+    let Some(snapshot) = store.receiver_source_binding(&authority, &owner).await? else {
+        return Ok(None);
+    };
+    if snapshot.response_json.is_none() {
+        return Ok(None);
+    }
+    let attachment = ReceiverSourceAttachment {
+        owner: owner.clone(),
+        binding: snapshot.binding,
+    };
+    let hash = crate::auth::hash_token(&route.session_id);
+    let Some(grant) = store
+        .receiver_delivery(&authority, &attachment, &hash)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let b = &attachment.binding;
+    let fingerprint = serde_json::to_vec(&serde_json::json!({
+        "recipe": route.recipe_json, "reference":b.reference, "file":b.file_id,
+        "revision":b.file_revision, "request":b.source_request_id, "session":b.source_session_id,
+        "incarnation":b.source_incarnation_id,
+    }))
+    .map_err(|_| invalid())?;
+    Ok(Some(
+        crate::sharing_receiver_delivery::ReceiverRelayReadAuthority {
+            owner,
+            deadline_ms: grant.deadline_ms,
+            binding_fingerprint: sha2::Sha256::digest(fingerprint).into(),
+            authority,
+            attachment,
+        },
+    ))
 }

@@ -149,7 +149,7 @@ extension SharedStart {
         guard context.reference != nil, context.sessionId == nil,
               response.vod == true, let position = response.startSeconds,
               position.isFinite, position >= 0, position <= 9_007_199_254_740,
-              response.durationMs.map({ $0 >= 0 }) ?? true,
+              response.durationMs.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true,
               let control = response.control,
               PlaybackFileContext.matches(control.generation, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
               control.nextExchangeMs == 5_000, control.leaseTimeoutMs == 300_000
@@ -325,13 +325,13 @@ struct SharedPlaybackPlan {
         guard caps.v == 2, caps.transports.contains("hls"), request.caps == caps,
               request.presentation == "vod" || direct, request.intent == nil,
               request.previousSessionId == nil, request.controlSequence == nil, request.reopenReason == nil,
-              request.subtitleBurn == nil, request.preserveDolbyVision != true, request.hdr10 != true,
+              request.preserveDolbyVision != true,
               (request.start ?? 0) == Double(subject.resumeMs) / 1000,
               request.height.map({ $0 > 0 && $0 <= 8192 }) ?? true,
               direct ? Self.directEligible(decision) && request.copy == nil && request.height == nil && request.aac == nil
                     && request.audio == nil && request.nativeSubtitles == nil && request.subtitle == nil
-                : decision.presentation.deliveredDynamicRange.map({ $0 == "sdr" }) ?? true
-                    && (decision.method == "transcode" ? request.copy != true : request.copy == true)
+                    && request.subtitleBurn == nil && request.hdr10 != true && request.blockBudgetSecs == nil
+                : (decision.method == "transcode" || request.subtitleBurn != nil ? request.copy != true : request.copy == true)
         else { throw APIError.transport("This Shared HLS plan is not available yet.") }
         self.subject = subject; self.decision = decision; self.caps = caps; self.request = request
     }
@@ -363,18 +363,22 @@ struct SharedPlaybackPlan {
         let subtitle = subtitleIndex.flatMap { index in
             index >= 0 && decision.presentation.subtitles?.contains(where: { $0.index == index && $0.isNativeHLS }) == true ? index : nil
         }
-        if subtitleIndex.map({ $0 >= 0 }) == true && subtitle == nil {
-            throw APIError.transport("This Shared subtitle needs a burn-in, which is not available.")
+        let burn = subtitleIndex.flatMap { index in
+            index >= 0 && decision.presentation.subtitles?.contains(where: { $0.index == index && !$0.isNativeHLS }) == true ? index : nil
+        }
+        if let index = subtitleIndex, index >= 0, subtitle == nil, burn == nil {
+            throw APIError.transport("This Shared subtitle is unavailable.")
         }
         var request: CreateSessionRequest
-        if audioIndex == nil, subtitle == nil, quality == .auto || quality == .original, directEligible(decision) {
+        if audioIndex == nil, subtitle == nil, burn == nil, quality == .auto || quality == .original, directEligible(decision) {
             request = CreateSessionRequest(playbackId: playbackId, requestId: requestId, start: start, caps: caps)
             request.presentation = "direct"
         } else {
             request = CreateSessionRequest(playbackId: playbackId, requestId: requestId,
                 height: quality.rungHeight, qualityAuto: quality == .auto, start: start, audio: audioIndex,
-                nativeSubtitles: subtitle == nil ? nil : true, subtitle: subtitle,
-                copy: decision.method != "transcode", aac: decision.presentation.transcodeAudio, caps: caps)
+                subtitleBurn: burn, nativeSubtitles: subtitle == nil ? nil : true, subtitle: subtitle,
+                copy: burn == nil && decision.method != "transcode", aac: decision.presentation.transcodeAudio,
+                hdr10: decision.method == "transcode" && decision.presentation.deliveredDynamicRange == "hdr10" ? true : nil, caps: caps)
         }
         return try Self(subject: subject, decision: decision, caps: caps, request: request)
     }
@@ -391,11 +395,14 @@ extension SharedPlaybackPlan {
         if request.qualityAuto ?? (request.height == nil) {
             quality = ["mode": .string("auto")]
             if let height = request.height { quality["height"] = .integer(Int64(height)) }
-        } else if request.copy == true { quality = ["mode": .string("original")] }
+        } else if request.copy == true || request.height == nil { quality = ["mode": .string("original")] }
         else if let height = request.height, height > 0 { quality = ["mode": .string("manual"), "height": .integer(Int64(height))] }
         else { throw APIError.transport("The original Shared selection is unavailable.") }
         var subtitle: [String: SharedPlaybackJSON] = ["mode": .string("off")]
-        if request.nativeSubtitles == true, let track = request.subtitle {
+        if let track = request.subtitleBurn {
+            guard (0...1024).contains(track) else { throw APIError.badURL }
+            subtitle = ["mode": .string("burn"), "track": .integer(Int64(track))]
+        } else if request.nativeSubtitles == true, let track = request.subtitle {
             guard (0...1024).contains(track) else { throw APIError.transport("The original Shared subtitle selection is unavailable.") }
             subtitle = ["mode": .string("native"), "track": .integer(Int64(track))]
         }

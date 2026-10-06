@@ -44,13 +44,13 @@ struct SharedDecisionClient {
         else { throw APIError.badURL }
         try context.validateSharedReference(reference, file: context.sourceFileId, revision: revision)
         guard body.intent == nil, body.previousSessionId == nil, body.controlSequence == nil,
-              body.reopenReason == nil, body.subtitleBurn == nil, body.hdr10 != true,
+              body.reopenReason == nil,
               body.preserveDolbyVision != true
         else { throw APIError.transport("This Shared playback change is not available yet.") }
         let direct = body.presentation == "direct"
         if direct {
             guard body.copy == nil, body.height == nil, body.nativeSubtitles == nil, body.subtitle == nil,
-                  body.aac == nil, body.blockBudgetSecs == nil
+                  body.aac == nil, body.blockBudgetSecs == nil, body.subtitleBurn == nil, body.hdr10 != true
             else { throw APIError.transport("This Shared direct play is not available.") }
         }
         guard body.caps?.v == 2, body.presentation == "vod" || direct, !body.playbackId.isEmpty,
@@ -122,7 +122,11 @@ struct SharedDecisionClient {
         let answer: ControlResponse
         do { answer = try PlaybackControl.decoder.decode(ControlResponse.self, from: response.data) }
         catch { throw ControlProtocolError(reason: "body") }
-        return try channel.accept(answer, for: control)
+        // A `prepare` is the whole offer from this same answer, including the
+        // successor's control bootstrap the Local action type does not model.
+        let offer = answer.action.type == PlaybackControl.prepareActionType && channel.prepares
+            ? try SharedPreparedOffer.decode(answer.action, raw: response.data, predecessor: channel.sessionId) : nil
+        return try channel.accept(answer, offer: offer, for: control)
     }
     func playlistURL(playback: SharedStartedPlayback) throws -> URL {
         try requireCurrent(); _ = try playback.start.validated(playback.context)

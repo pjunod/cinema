@@ -15,7 +15,7 @@ and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
 The ordinary listener (`:32400` by default) serves the four surfaces below.
-plurx has 280 routes on that listener. Sharing uses a separate loopback TLS
+plurx has 281 routes on that listener. Sharing uses a separate loopback TLS
 listener with its own peer credentials (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -3063,8 +3063,17 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |
 | POST | `/internal/cluster/media/sessions/abort`, `/internal/cluster/media/sessions/relay` | 96 KiB | Settles an abort; relays one owned HLS resource |
 | POST | `/internal/cluster/media/sessions/control` | 20 KiB | Relays one playback-control exchange |
+| POST | `/internal/media-sessions/sharing-ingress-close` | 2 KiB | Exact-request member authentication and current durable ownership authorize closure of one registered Source/B ingress driver. Binds principal, incarnation, owner identity/epoch, ingress boot, physical driver and registration sequence. Returns an exact member-signed receipt bound to the request nonce and path only after actual accepted-driver closure; absence, restart and timeout remain unavailable. |
+| POST | `/internal/cluster/sharing/source/locate` | 16 KiB | Read-only, exact-request member-authenticated observation of an authorized file on this worker. Returns at most 8 KiB of signed file identity and actual registry boot under the inherited placement deadline (at most 9 s); creates no Source claim, factory or producer. Cold-file placement precedes g0 and cannot redirect an uncertain invocation. |
+| POST | `/internal/cluster/sharing/source/prepare` | 1 MiB | Exact-request member authentication binds a fresh Source invocation to its eligible worker, or resolves an already pinned pending invocation. Unknown replies never authorize alternate dispatch. |
+| POST | `/internal/cluster/sharing/source/control` | 1 MiB | Forwards bounded Start/status/control/End exchanges to the retained Source worker and registry boot. Cleanup-only status cannot expose a playable envelope; response bound 64 KiB. |
+| POST | `/internal/cluster/sharing/source/forward` | 1 MiB | Streams an authorized retained Source resource or direct response after registering the actual outer ingress driver. Preserves Range, HEAD and end-to-end response headers. |
+| POST | `/internal/cluster/sharing/source/register`, `/internal/cluster/sharing/source/ack` | 1 MiB | Registers an exact principal-bound ingress obligation or acknowledges actual driver closure through the Source owner's guarded custody write. Timeout and missing state do not supply closure proof. |
+| POST | `/internal/cluster/sharing/receiver/forward` | 128 KiB | Relays one authorized Shared receiver resource or direct response to its retained physical owner, with exact accepted-ingress custody and bounded streaming. SQL routing metadata cannot adopt an absent actor. |
+| POST | `/internal/cluster/sharing/receiver/control` | 128 KiB | Relays bounded Shared receiver status/control/End through the existing receiver dispatch. End uses retained cleanup authority without registering a new writer; response bound 64 KiB. |
+| POST | `/internal/cluster/sharing/receiver/register`, `/internal/cluster/sharing/receiver/ack` | 128 KiB | Authenticates one exact receiver ingress registration or actual-closure acknowledgement against the current owner fence and custody record. |
 
-The five path prefixes are historical, not a versioning scheme. In particular,
+These path prefixes are historical, not a versioning scheme. In particular,
 the `/api/v1/internal/…` ones are inside the API prefix **by spelling only** —
 they are registered on the root router, so no API extractor and no account
 auth ever runs on them. `/_internal/v1/live-tv/snapshot` is a POST despite the
@@ -3248,7 +3257,8 @@ item. File references add the Source file, revision and import lifecycle.
 | POST | `/api/v1/shared/imports/{import}/items:batch` | Read a validated metadata batch from a body of at most 16 KiB. Missing items retain their own result identities. |
 | GET | `/api/v1/shared/continue-watching` | List per-Source watch-group summaries for this viewer. |
 | GET | `/api/v1/shared/imports/{import}/continue-watching` | Hydrate this Source's current watch items; an unavailable Source is reported without stale title fallback. |
-| POST | `/api/v1/shared/imports/{import}/items/{item}/progress` | Refuse writes with `503 sharing_progress_session_binding_unavailable` until an actual active Shared session can authorize progress. |
+| POST | `/api/v1/shared/imports/{import}/items/{item}/progress` | Ordered Shared progress `{session_id, sequence, position_ms, duration_ms, watched}` for the viewer's exact published Shared session; `409 sharing_progress_conflict` carries `current_sequence`, and `503 sharing_progress_session_binding_unavailable` answers when no live session binds the beat. |
+| POST | `/api/v1/shared/imports/{import}/items/{item}/watched` | B-private manual watched state `{watched: bool}` for a Shared movie or episode, after one fresh pinned Source membership read under current assignment. The Store write takes the next history sequence, so an earlier beat cannot restore the old position; Source history and Local watch state are untouched. Other item kinds answer `409 sharing_watch_unsupported`. |
 | GET | `/api/v1/shared/imports/{import}/art/{resource}` | Fetch an advertised signed recipient art alias after current account, import and Source-scope checks; no arbitrary Source URL is accepted. |
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/decision` | Negotiate the complete existing decision DTO from runtime v2 capabilities, a signed file locator and current account/import/Source authority. The request body is bounded to 128 KiB. |
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Start Shared HLS playback through B's receiver actor from the ordinary `CreateSession` body (at most 128 KiB, initial play/resume only). The answer is the ordinary Start envelope with B's own session, playlist and control URLs; the session then serves `/api/v1/hls/{session}/…`, `status` (the Shared grammar) and `control` (current rendition only). |
@@ -3265,8 +3275,24 @@ decision bodies; content fetched from a Source also retains its Source-scope
 checks. A file alias is not login or
 session authority: the decision route verifies its current import lifecycle
 and exact file/revision binding before contacting the pinned Source. Missing
-keys, revoked scope and unavailable Sources refuse delivery. No live Shared
-Start route is registered on this listener.
+keys, revoked scope and unavailable Sources refuse delivery. Shared Start is
+registered on the authenticated media router and dispatches through B's
+receiver owner.
+
+Shared HLS accepts embedded subtitle burns and HDR10 requests. The Source
+recomputes the plan from the original capabilities and its own file facts;
+burn extraction and font preparation belong to its admitted operation. A
+burn sidecar is bounded to 64 MiB, and a burn always encodes. B verifies the
+returned HDR grade against the viewer's exact PQ or HLG presentation claim.
+An SDR display declaration overrides a decoder's HDR claim.
+
+Dolby Vision preservation, conversion and re-encoding return `422
+sharing_start_dolby_vision_unsupported`. Direct play keeps the original bytes
+when the Source's direct-play decision permits them. Downloaded subtitle
+burns and native subtitle renditions beside HDR remain unsupported. A typed
+Start refusal is not an End receipt or proof that an earlier invocation owns
+no resources. Runtime qualification of these additions remains recorded
+separately in [the sharing status](features/SHARED-LIBRARIES-STATUS.md).
 
 The four pre-session asset routes answer `Cache-Control: no-store` and hold
 no B cache; each body is file-scoped and the current login, import,

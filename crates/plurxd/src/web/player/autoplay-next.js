@@ -12,6 +12,9 @@ function togglePlayerAutonext(){ setAutoNext(!autoNextOn()); toast(autoNextOn()?
 // so the page behind the player follows along. Returns true if it started one.
 async function playNextEpisode(){
   const current=playbackContinuation(PLAYER);
+  // A Shared source_ref is the full Source reference and carries no `kind`
+  // tag; only Local contexts are tagged.
+  if(PLAYER&&playbackFileContextForPlayer(PLAYER).source_ref.kind!=="local")return playNextSharedEpisode(current);
   if(!PLAYER||playbackFileContextForPlayer(PLAYER).source_ref.kind!=="local")return false;
   const itemId=ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(PLAYER))]; if(!itemId) return false;
   const preparation=beginPlaybackPreparation(current);
@@ -53,6 +56,19 @@ async function playNextEpisode(){
     if(current())toast("Could not load the next episode. Choose it from the library to retry.");
     return false;
   }finally{preparation.finish();}
+}
+// Shared next episode: Source order read through B, then a new authorized
+// start from fresh details. A Source ID never reaches the Local router.
+async function playNextSharedEpisode(current){
+  const reference=PLAYER?.meta?.sharedReference;if(!reference)return false;
+  const preparation=beginPlaybackPreparation(current);
+  let next=null;
+  try{next=await sharedCatalogueNextEpisode(reference,path=>preparation.run(signal=>api(path,{signal})));}
+  catch(error){if(current())toast("Could not load the next shared episode. Choose it from the library to retry.");return false;}
+  finally{preparation.finish();}
+  if(!next||!current())return false;
+  try{toast("▶ Up next");await sharedCatalogueLaunch(next,null,current);return true;}
+  catch(error){if(current())toast(error.message||"The next shared episode is not available.");return false;}
 }
 function playbackContinuation(p){
   const action=p?.controlIntentGeneration||0, generation=p?._seekToken||0;

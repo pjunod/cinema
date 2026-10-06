@@ -213,12 +213,34 @@ final class SharedPlaybackControlTests: XCTestCase {
         XCTAssertThrowsError(try plan.directedSelection(SharedDirectedChange(audioIndex: .some(2_000))))
     }
 
+    func testSharedBurnAndHDRPlanUseSourceOwnedStartFields() async throws {
+        let context = try await context(), caps = Caps.snapshot().document
+        let subject = SharedPlaybackSubject(context: context, title: "Shared", resumeMs: 0, watchSequence: 1)
+        let burn = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "transcode"), caps: caps, quality: .auto, subtitleIndex: 4)
+        XCTAssertEqual(burn.request.subtitleBurn, 4)
+        XCTAssertEqual(burn.request.copy, false)
+        XCTAssertNil(burn.request.nativeSubtitles)
+        XCTAssertEqual(try burn.frozenControlSelection().object?["subtitle"], .object(["mode": .string("burn"), "track": .integer(4)]))
+        let hdr = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "transcode") { $0["delivered_dynamic_range"] = "hdr10" }, caps: caps, quality: .p720)
+        XCTAssertEqual(hdr.request.hdr10, true)
+        XCTAssertNil(hdr.request.preserveDolbyVision)
+        let projected = try SharedPreparedHandoff.successorRequest(hdr.request, selection: burn.frozenControlSelection(), positionMs: 5000)
+        XCTAssertEqual(projected.subtitleBurn, 4)
+        XCTAssertEqual(projected.hdr10, true)
+        XCTAssertNil(projected.nativeSubtitles)
+    }
+
     func testReopenPlanKeepsPlaybackIdHasNoLineageAndChoosesDirectOnlyWhenAVPlayerCanTakeTheBytes() async throws {
         let context = try await context(), caps = Caps.snapshot().document
         let subject = SharedPlaybackSubject(context: context, title: "Shared", resumeMs: 61_500, watchSequence: 7)
         let direct = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play"), caps: caps, quality: .auto, playbackId: "player-1")
         XCTAssertEqual(direct.request.presentation, "direct"); XCTAssertEqual(direct.request.playbackId, "player-1")
         XCTAssertEqual(direct.request.start, 61.5)
+        var injected = direct.request
+        injected.subtitleBurn = 4
+        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: direct.decision, caps: caps, request: injected))
+        injected = direct.request; injected.hdr10 = true
+        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: direct.decision, caps: caps, request: injected))
         XCTAssertNil(direct.request.copy); XCTAssertNil(direct.request.height); XCTAssertNil(direct.request.aac); XCTAssertNil(direct.request.audio)
         XCTAssertNil(direct.request.previousSessionId); XCTAssertNil(direct.request.reopenReason); XCTAssertNil(direct.request.controlSequence); XCTAssertNil(direct.request.intent)
         let again = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play"), caps: caps, quality: .auto, playbackId: "player-1")
@@ -231,7 +253,7 @@ final class SharedPlaybackControlTests: XCTestCase {
         XCTAssertEqual(chosenAudio.request.presentation, "vod"); XCTAssertEqual(chosenAudio.request.audio, 2)
         let native = try SharedPlaybackPlan.make(subject: subject, decision: try decision(), caps: caps, quality: .original, subtitleIndex: 3)
         XCTAssertEqual(native.request.nativeSubtitles, true); XCTAssertEqual(native.request.subtitle, 3); XCTAssertEqual(native.rawSubtitleIndex, 3)
-        XCTAssertThrowsError(try SharedPlaybackPlan.make(subject: subject, decision: try decision(), caps: caps, quality: .original, subtitleIndex: 4))
+        XCTAssertEqual(try SharedPlaybackPlan.make(subject: subject, decision: try decision(), caps: caps, quality: .original, subtitleIndex: 4).request.subtitleBurn, 4)
         let rung = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "transcode"), caps: caps, quality: .p480)
         XCTAssertEqual(rung.request.height, 480); XCTAssertNotEqual(rung.request.copy, true); XCTAssertEqual(rung.rawQuality, .p480)
         var smuggled = direct.request; smuggled.copy = true

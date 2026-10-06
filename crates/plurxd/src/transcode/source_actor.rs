@@ -7,15 +7,23 @@ pub(crate) struct SourceProducerAuthority {
     store: Arc<dyn Store>,
     membership: plurx_core::cluster::membership::MembershipManager,
     master: Arc<plurx_core::secrets::CredentialKey>,
+    registry_boot_id: uuid::Uuid,
+    ingress: plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission,
 }
 
 pub(crate) struct SourceGenerationAuthority {
     proofs: Vec<plurx_core::sharing_source_sessions::SourcePublicationAuthority>,
+    ingress: Vec<plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission>,
 }
 
 impl SourceGenerationAuthority {
     pub(crate) fn validate_before_spawn(&self) -> Result<(), String> {
         let now = crate::fragment_index_cluster::unix_ms();
+        for permission in &self.ingress {
+            permission
+                .validate_observation_freshness(now)
+                .map_err(|_| "Source ingress observation expired before spawn".to_owned())?;
+        }
         for proof in &self.proofs {
             proof
                 .validate_observation_freshness(now)
@@ -26,11 +34,19 @@ impl SourceGenerationAuthority {
 }
 
 impl SourceProducerAuthority {
+    pub(crate) fn retained_ingress(
+        &self,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    ) -> Option<plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission> {
+        (self.ingress.assignment().same_identity(assignment)
+            && self.ingress.registry_boot_id() == self.registry_boot_id)
+            .then(|| self.ingress.clone())
+    }
     pub(crate) async fn authorize_generation(
         &self,
-        assignments: &[plurx_core::sharing_source_sessions::SourceDispatchAssignment],
+        permissions: &[plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission],
     ) -> Result<SourceGenerationAuthority, String> {
-        if assignments.is_empty() || assignments.len() > 8 {
+        if permissions.is_empty() || permissions.len() > 8 {
             return Err("Source producer assignment bound exceeded".into());
         }
         use plurx_core::sharing_source_sessions::SourcePublicationAuthorityRead;
@@ -40,15 +56,34 @@ impl SourceProducerAuthority {
             .await
             .map_err(|_| "Source member observation failed".to_owned())?
             .ok_or_else(|| "Source member floor is unavailable".to_owned())?;
-        let mut proofs = Vec::with_capacity(assignments.len());
-        for assignment in assignments {
+        let mut proofs = Vec::with_capacity(permissions.len());
+        let mut ingress = Vec::with_capacity(permissions.len());
+        for retained in permissions {
+            if retained.registry_boot_id() != self.registry_boot_id {
+                continue;
+            }
+            let assignment = retained.assignment();
+            let Some(permission) = self
+                .store
+                .refresh_source_ingress_admission(retained, &members)
+                .await
+                .map_err(|_| "Source ingress authority read failed".to_owned())?
+            else {
+                continue;
+            };
+            permission
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .map_err(|_| "Source ingress authority expired".to_owned())?;
             match self
                 .store
                 .prepare_source_publication_authority(assignment, &self.master, &members)
                 .await
                 .map_err(|_| "Source producer authority read failed".to_owned())?
             {
-                SourcePublicationAuthorityRead::Ready(proof) => proofs.push(*proof),
+                SourcePublicationAuthorityRead::Ready(proof) => {
+                    proofs.push(*proof);
+                    ingress.push(*permission);
+                }
                 SourcePublicationAuthorityRead::Unavailable
                 | SourcePublicationAuthorityRead::Capacity => {}
             }
@@ -56,25 +91,13 @@ impl SourceProducerAuthority {
         if proofs.is_empty() {
             return Err("Source producer has no current authorized viewer".to_owned());
         }
-        let authority = SourceGenerationAuthority { proofs };
+        let authority = SourceGenerationAuthority { proofs, ingress };
         authority.validate_before_spawn()?;
         Ok(authority)
     }
 }
 
 impl TranscodeManager {
-    /// The same actual admission/materialization allowance used by the Source
-    /// actor and its peer start handler. Transport adds its separate margin.
-    /// A response deadline never certifies producer or writer settlement.
-    #[allow(dead_code)] // The qualified peer start consumer is being integrated.
-    pub(crate) async fn source_worker_start_budget(
-        &self,
-        prepared: &crate::http::hls::PreparedSourcePlayback,
-    ) -> Result<Duration, String> {
-        self.source_start_budget_for_request(prepared.request())
-            .await
-    }
-
     async fn source_start_budget_for_request(
         &self,
         request: &SessionRequest,
@@ -112,8 +135,9 @@ use plurx_core::{
     },
     sharing_resources::{SharingHlsResource, SharingHlsResourceKind},
     sharing_source_sessions::{
-        SourceDispatchAssignment, SourceOwnedRouteAuthorityRead, SourcePublicationAuthorityRead,
-        SourceReleaseOutcome, SourceSessionWriteAuthority, SourceWriteAuthorityRead,
+        SourceDispatchAssignment, SourceIngressAdmissionPermission, SourceOwnedRouteAuthorityRead,
+        SourcePublicationAuthorityRead, SourceReleaseOutcome, SourceSessionWriteAuthority,
+        SourceWriteAuthorityRead,
     },
 };
 
@@ -125,6 +149,37 @@ pub(crate) enum SourceWorkerError {
     Deadline,
     Unresolved,
     Unsupported,
+}
+
+/// One actual factory invocation returned before registry insertion or spawn.
+/// No wire decoder or HTTP task-stage observer can mint this receipt. The
+/// coordinator must separately retain its fresh acquired claim: this receipt
+/// describes this invocation, never another process's historical admission.
+#[derive(Clone)]
+pub(crate) struct SourceWorkerNoAdmission {
+    assignment: Box<SourceDispatchAssignment>,
+    reason: SourceWorkerError,
+}
+impl std::fmt::Debug for SourceWorkerNoAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceWorkerNoAdmission")
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+impl SourceWorkerNoAdmission {
+    fn refused(assignment: &SourceDispatchAssignment, reason: SourceWorkerError) -> Self {
+        Self {
+            assignment: Box::new(assignment.clone()),
+            reason,
+        }
+    }
+    pub(crate) fn assignment(&self) -> &SourceDispatchAssignment {
+        &self.assignment
+    }
+    pub(crate) fn reason(&self) -> SourceWorkerError {
+        self.reason
+    }
 }
 
 /// How long a Source owner waits before retrying a settlement that a Store or
@@ -168,6 +223,7 @@ struct SourceViewerInner {
     /// Present only for a direct-play owner: the fenced file it serves. Such
     /// an owner has no producer and never publishes an HLS Start.
     direct: Option<Arc<direct::SourceDirectFile>>,
+    retirement_deadline: std::sync::OnceLock<Instant>,
     state: std::sync::Mutex<SourceViewerState>,
     changed: tokio::sync::Notify,
 }
@@ -203,6 +259,7 @@ struct SourceViewerState {
     native: Option<Arc<super::source_subtitles::SourceNativeTracks>>,
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
     retirement_requested: bool,
+    retirement_mode: crate::sharing_connection_custody::DriverCloseMode,
     settled: Option<Result<(), SourceWorkerError>>,
     /// The owner has stopped for good and left the worker registry. Until
     /// then an unresolved `settled` may still be retried.
@@ -251,6 +308,37 @@ impl Drop for SourceResponseGuard {
     }
 }
 impl SourceResponseGuard {
+    pub(crate) fn assignment(&self) -> &SourceDispatchAssignment {
+        &self.owner.assignment
+    }
+    pub(crate) fn retirement_deadline(&self) -> Instant {
+        *self
+            .owner
+            .retirement_deadline
+            .get_or_init(|| Instant::now() + Duration::from_secs(305))
+    }
+    pub(crate) fn retirement_mode(&self) -> crate::sharing_connection_custody::DriverCloseMode {
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|source| !source.unchanged())
+        {
+            crate::sharing_connection_custody::DriverCloseMode::Revoke
+        } else {
+            self.owner
+                .state
+                .lock()
+                .expect("Source retirement cause")
+                .retirement_mode
+        }
+    }
+    pub(crate) fn request_revocation(&self) {
+        let mut state = self.owner.state.lock().expect("Source retirement cause");
+        state.retirement_mode = crate::sharing_connection_custody::DriverCloseMode::Revoke;
+        state.retirement_requested = true;
+        drop(state);
+        self.owner.changed.notify_waiters();
+    }
     pub(crate) async fn cancelled(&self) {
         loop {
             if self
@@ -282,12 +370,6 @@ impl SourceViewerActor {
     pub(crate) fn settlement_status(&self) -> Option<Result<(), SourceWorkerError>> {
         self.0.state.lock().expect("Source worker state").settled
     }
-    /// Whether the owner has stopped for good: settled, refused a witness that
-    /// can never settle, or exhausted its bounded retries. Nothing in this
-    /// process still works for it once this is true.
-    pub(crate) fn settlement_final(&self) -> bool {
-        self.0.state.lock().expect("Source worker state").finished
-    }
     pub(crate) async fn wait_ready(
         &self,
         deadline: Instant,
@@ -316,6 +398,13 @@ impl SourceViewerActor {
                 .await
                 .map_err(|_| SourceWorkerError::Deadline)?;
         }
+    }
+    pub(crate) async fn retire_with_deadline(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), SourceWorkerError> {
+        self.0.retirement_deadline.get_or_init(|| deadline);
+        self.retire().await
     }
     pub(crate) async fn retire(&self) -> Result<(), SourceWorkerError> {
         self.request_retirement();
@@ -715,6 +804,20 @@ impl SourceProducerAuthority {
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?
             .ok_or(SourceWorkerError::Unavailable)?;
+        if !self.ingress.assignment().same_identity(assignment) {
+            return Err(SourceWorkerError::Conflict);
+        }
+        let Some(permission) = self
+            .store
+            .refresh_source_ingress_admission(&self.ingress, &members)
+            .await
+            .map_err(|_| SourceWorkerError::Unresolved)?
+        else {
+            return Err(SourceWorkerError::Unavailable);
+        };
+        permission
+            .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+            .map_err(|_| SourceWorkerError::Unavailable)?;
         let SourceWriteAuthorityRead::Ready(proof) = self
             .store
             .prepare_source_activation_authority(assignment, &self.master, &members)
@@ -837,15 +940,31 @@ impl TranscodeManager {
         state: Arc<crate::state::AppState>,
         assignment: SourceDispatchAssignment,
         activation: SourceSessionWriteAuthority,
+        ingress: SourceIngressAdmissionPermission,
         prepared: crate::http::hls::PreparedSourcePlayback,
         deadline: Instant,
-    ) -> Result<SourceViewerActor, SourceWorkerError> {
+    ) -> Result<SourceViewerActor, SourceWorkerNoAdmission> {
         if !Arc::ptr_eq(&self.store, &state.store)
             || !prepared.matches_assignment(&assignment)
             || !activation.assignment().same_identity(&assignment)
+            || !ingress.assignment().same_identity(&assignment)
+            || ingress.registry_boot_id() != state.sharing.accepted_drivers.boot_id()
         {
-            return Err(SourceWorkerError::Conflict);
+            return Err(SourceWorkerNoAdmission::refused(
+                &assignment,
+                SourceWorkerError::Conflict,
+            ));
         }
+        if ingress
+            .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+            .is_err()
+        {
+            return Err(SourceWorkerNoAdmission::refused(
+                &assignment,
+                SourceWorkerError::Unavailable,
+            ));
+        }
+        let registry_boot_id = state.sharing.accepted_drivers.boot_id();
         let mut registry = self.source_workers.entries.lock().expect("Source workers");
         if let Some(owner) = registry
             .iter()
@@ -854,7 +973,10 @@ impl TranscodeManager {
             return Ok(SourceViewerActor(Arc::clone(owner)));
         }
         if registry.len() >= 8 {
-            return Err(SourceWorkerError::Capacity);
+            return Err(SourceWorkerNoAdmission::refused(
+                &assignment,
+                SourceWorkerError::Capacity,
+            ));
         }
         let owner = Arc::new(SourceViewerInner {
             control_target_duration_ms: i64::from(match prepared.request().kind {
@@ -870,11 +992,15 @@ impl TranscodeManager {
                 store: Arc::clone(&self.store),
                 membership: state.membership.clone(),
                 master: Arc::clone(&state.sharing.key),
+                registry_boot_id,
+                ingress,
             }),
+            retirement_deadline: Default::default(),
             direct: None,
             state: std::sync::Mutex::new(SourceViewerState {
                 start: None,
                 retirement_requested: false,
+                retirement_mode: crate::sharing_connection_custody::DriverCloseMode::Drain,
                 settled: None,
                 finished: false,
                 bodies: 0,
@@ -1066,6 +1192,22 @@ impl TranscodeManager {
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
         let proof = owner.gate.current_preparation(&owner.assignment).await?;
+        // A burn's artifacts are made inside this same owned operation, from
+        // the Source's own prepared request and scanned track facts.
+        let burn = match prepared.request().subtitle_burn {
+            Some(index) => {
+                let stream = usize::try_from(index)
+                    .ok()
+                    .and_then(|ordinal| prepared.file().subtitle_streams.get(ordinal))
+                    .ok_or(SourceWorkerError::Unsupported)?;
+                Some(super::source_preparation::SourceBurnAsk {
+                    subtitle_index: index,
+                    bitmap: plurx_core::tracks::is_bitmap_subtitle(&stream.codec),
+                    runtime_dir: self.runtime_cache.clone(),
+                })
+            }
+            None => None,
+        };
         *work = Some(super::source_preparation::start_source_probe(
             prepared.file().clone(),
             source,
@@ -1074,6 +1216,7 @@ impl TranscodeManager {
             Arc::clone(&self.store),
             deadline,
             Arc::clone(&self.source_workers.probe_hooks),
+            burn,
         ));
         let evidence = work
             .as_ref()
@@ -1122,17 +1265,25 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unresolved);
                 }
                 unowned_existing = false;
+                // This actual worker owns the configured queue/materialization
+                // allowance. Its inherited deadline can only become shorter.
+                let startup_budget = self
+                    .source_start_budget_for_request(prepared.request())
+                    .await
+                    .map_err(|_| SourceWorkerError::Unavailable)?;
+                let deadline = deadline.min(Instant::now() + startup_budget);
+                // The HTTP preparation refused these with typed reasons before
+                // factory admission; this owner rechecks the same prepared facts
+                // before admitting physical producer work.
                 if (!prepared.native_subtitles().0 && prepared.native_subtitles().1.is_some())
-                    || prepared.request().subtitle_burn.is_some()
                     || prepared.request().previous_session_id.is_some()
                     || prepared.request().reopen_reason.is_some()
-                    || (matches!(prepared.request().kind, SessionKind::Transcode { .. })
-                        && (plurx_core::playback::hdr_route(prepared.file()).is_some()
-                            || plurx_core::playback::is_dolby_vision(prepared.file())))
-                    || !matches!(
-                        prepared.request().kind,
-                        SessionKind::Copy { .. } | SessionKind::Transcode { .. }
+                    || source_delivery_refusal(
+                        prepared.request(),
+                        prepared.file(),
+                        prepared.native_subtitles(),
                     )
+                    .is_some()
                 {
                     return Err(SourceWorkerError::Unsupported);
                 }
@@ -1142,11 +1293,6 @@ impl TranscodeManager {
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
                 if prepared.native_subtitles().0 {
-                    if plurx_core::playback::hdr_route(prepared.file()).is_some()
-                        || plurx_core::playback::is_dolby_vision(prepared.file())
-                    {
-                        return Err(SourceWorkerError::Unsupported);
-                    }
                     let tracks = Box::pin(self.prepare_source_native_tracks(
                         &owner,
                         &prepared,
@@ -1156,7 +1302,7 @@ impl TranscodeManager {
                     .await?;
                     owner.state.lock().expect("Source native actor").native = Some(tracks);
                 }
-                let encoding = if matches!(prepared.request().kind, SessionKind::Transcode { .. }) {
+                let encoding = if source_recipe_is_encoded(prepared.request()) {
                     Some(
                         Box::pin(self.prepare_source_encoded_recipe(
                             &owner,
@@ -1366,7 +1512,7 @@ impl TranscodeManager {
                         }
                         match owner.gate.current_owned(&owner.assignment).await {
                             Ok(proof) if owner.gate.renew_with(&owner.assignment, &proof).await.is_ok() => {},
-                            _ => break,
+                            _ => {owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;break},
                         }
                     }
                 }
@@ -1388,8 +1534,15 @@ impl TranscodeManager {
             work.cancel();
             preparations.native = Some(work.settle().await);
         }
-        self.finish_source_owner(&owner, shutdown, unowned_existing, reserved, preparations)
-            .await;
+        self.finish_source_owner(
+            &owner,
+            &state,
+            shutdown,
+            unowned_existing,
+            reserved,
+            preparations,
+        )
+        .await;
     }
     /// Settle a stopped Source owner, VOD or direct: release its physical
     /// producer (if any) and its row through the bounded detached retry, then
@@ -1397,11 +1550,15 @@ impl TranscodeManager {
     async fn finish_source_owner(
         &self,
         owner: &Arc<SourceViewerInner>,
+        app_state: &crate::state::AppState,
         shutdown: tokio_util::sync::CancellationToken,
         unowned_existing: bool,
         mut reserved: Option<crate::vodserve::ReservedSourceVodRendition>,
         mut preparations: SourcePreparationSettlements,
     ) {
+        let deadline = *owner
+            .retirement_deadline
+            .get_or_init(|| Instant::now() + Duration::from_secs(305));
         let mut physical = None;
         let mut attempts = 0;
         let settlement = loop {
@@ -1410,15 +1567,33 @@ impl TranscodeManager {
             let result = if unowned_existing {
                 Err(SourceSettlementFault::Mismatch)
             } else {
-                Box::pin(self.settle_source_owner(
-                    owner,
-                    &mut reserved,
-                    &mut physical,
-                    &mut preparations,
-                ))
+                let mode = owner
+                    .state
+                    .lock()
+                    .expect("Source retirement cause")
+                    .retirement_mode;
+                if crate::http::shared_source_playback::settle_ingress_custody(
+                    app_state,
+                    &owner.assignment,
+                    deadline,
+                    mode,
+                )
                 .await
+                .is_err()
+                {
+                    Err(SourceSettlementFault::Transient)
+                } else {
+                    Box::pin(self.settle_source_owner(
+                        owner,
+                        &mut reserved,
+                        &mut physical,
+                        &mut preparations,
+                    ))
+                    .await
+                }
             };
-            if result != Err(SourceSettlementFault::Transient)
+            if Instant::now() >= deadline
+                || result != Err(SourceSettlementFault::Transient)
                 || attempts >= SOURCE_SETTLEMENT_ATTEMPTS
             {
                 break result;
@@ -1564,6 +1739,61 @@ impl TranscodeManager {
 
 /// Actual frozen VOD recipe facts plus SQL-bounded captured Source probe. This
 /// avoids the generic Copy metadata path's mutable unbounded probe read.
+/// Why a Source refuses a prepared HLS recipe, decided only from the
+/// Source's own prepared request — the player's real caps through the shared
+/// planner, never a B claim — and its own scanned file facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceDeliveryRefusal {
+    /// Any Dolby Vision delivery: preservation, the Profile 7 conversion, a
+    /// re-encode of a Dolby Vision source (the RPU renderer's per-source
+    /// proof is not Source-owned work yet) or native subtitles beside one.
+    DolbyVision,
+    /// A shape this Source does not build: native subtitles over an HDR
+    /// source, a burn beside native subtitles, a burn of a downloaded sidecar
+    /// or of a track the scan does not hold.
+    Unsupported,
+}
+
+/// A burn always encodes, whatever the copy ask said: burn pixels need an
+/// encoder, exactly as Local's VOD recipe treats a copy that burns.
+pub(crate) fn source_recipe_is_encoded(request: &crate::transcode::SessionRequest) -> bool {
+    matches!(request.kind, SessionKind::Transcode { .. }) || request.subtitle_burn.is_some()
+}
+
+pub(crate) fn source_delivery_refusal(
+    request: &crate::transcode::SessionRequest,
+    file: &plurx_core::domain::MediaFile,
+    (native, _): (bool, Option<i64>),
+) -> Option<SourceDeliveryRefusal> {
+    if let SessionKind::Copy {
+        preserve_dolby_vision,
+        convert_dolby_vision,
+        ..
+    } = request.kind
+    {
+        if preserve_dolby_vision || convert_dolby_vision {
+            return Some(SourceDeliveryRefusal::DolbyVision);
+        }
+    }
+    if plurx_core::playback::is_dolby_vision(file) && (source_recipe_is_encoded(request) || native)
+    {
+        return Some(SourceDeliveryRefusal::DolbyVision);
+    }
+    if native && plurx_core::playback::hdr_route(file).is_some() {
+        return Some(SourceDeliveryRefusal::Unsupported);
+    }
+    if let Some(index) = request.subtitle_burn {
+        let embedded = usize::try_from(index)
+            .ok()
+            .and_then(|ordinal| file.subtitle_streams.get(ordinal))
+            .is_some();
+        if native || !embedded || file.downloaded_subtitle(index).is_some() {
+            return Some(SourceDeliveryRefusal::Unsupported);
+        }
+    }
+    None
+}
+
 fn source_native_presentation(
     facts: crate::vodserve::VodHlsFacts,
     probe: &str,

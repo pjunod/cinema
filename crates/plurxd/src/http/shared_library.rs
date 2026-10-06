@@ -95,12 +95,18 @@ fn missing() -> ApiError {
 fn source_id(value: &str) -> Result<SourceId, ApiError> {
     SourceId::parse(value).map_err(|_| invalid())
 }
-pub(super) async fn authority(
+pub(super) async fn authority<
+    H: super::shared_source_playback::forwarding::AuthenticationHeaders + Send + Sync + ?Sized,
+>(
     state: &AppState,
-    headers: &HeaderMap,
+    headers: &H,
 ) -> Result<(String, uuid::Uuid), ApiError> {
-    let secret = sharing::credential(headers)?;
-    let hash = secret_hash(SecretDomain::Grant, &secret);
+    let hash = if let Some(hash) = headers.authenticated_hash() {
+        hash.to_owned()
+    } else {
+        let secret = sharing::credential(headers.raw_headers())?;
+        secret_hash(SecretDomain::Grant, &secret)
+    };
     let grant = state
         .store
         .sharing_grant_status(&hash)
@@ -137,6 +143,16 @@ pub(super) async fn authority(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "sharing_member_floor_unavailable",
             ));
+        }
+    }
+    if let Some(principal) = headers.authenticated_principal() {
+        let viewer = super::shared_source_playback::viewer_hash(headers)?;
+        if plurx_core::playback_principal::PlaybackPrincipal::sharing(grant.grant.id, &viewer)
+            .as_ref()
+            .ok()
+            != Some(principal)
+        {
+            return Err(missing());
         }
     }
     Ok((hash, grant.grant.id))
@@ -717,6 +733,7 @@ pub(super) async fn guard_source_response(
         .into_response();
     }
     let cancel = connection.0.clone();
+    let drain = connection.drain_token();
     let closed = connection.closed();
     // Cancelled by the body's drop, or with the connection as its parent.
     let live = connection.0.child_token();
@@ -730,13 +747,22 @@ pub(super) async fn guard_source_response(
         loop {
             tokio::select! {
                 () = body_live.cancelled() => break,
-                () = source_guard.cancelled() => { cancel.cancel(); break; },
+                () = source_guard.cancelled() => {
+                    let mode=source_guard.retirement_mode();
+                    match mode {crate::sharing_connection_custody::DriverCloseMode::Drain=>drain.cancel(),crate::sharing_connection_custody::DriverCloseMode::Revoke=>cancel.cancel()}
+                    let _=super::shared_source_playback::settle_ingress_custody(&state,source_guard.assignment(),source_guard.retirement_deadline(),mode).await;
+                    break;
+                },
                 _ = interval.tick() => {},
             }
             tokio::select! {
                 () = body_live.cancelled() => break,
                 current = source_content_current(&state, &authority) => {
-                    if !current { cancel.cancel(); break; }
+                    if !current {
+                        source_guard.request_revocation();cancel.cancel();
+                        let _=super::shared_source_playback::settle_ingress_custody(&state,source_guard.assignment(),source_guard.retirement_deadline(),crate::sharing_connection_custody::DriverCloseMode::Revoke).await;
+                        break;
+                    }
                 },
             }
         }
@@ -747,7 +773,9 @@ pub(super) async fn guard_source_response(
         tokio::select! {
             () = closed.wait() => {},
             () = source_guard.cancelled() => {
-                cancel.cancel();
+                let mode=source_guard.retirement_mode();
+                match mode {crate::sharing_connection_custody::DriverCloseMode::Drain=>drain.cancel(),crate::sharing_connection_custody::DriverCloseMode::Revoke=>cancel.cancel()}
+                let _=super::shared_source_playback::settle_ingress_custody(&state,source_guard.assignment(),source_guard.retirement_deadline(),mode).await;
                 // A cancellation request is not an accepted-writer join receipt.
                 closed.wait().await;
             },
@@ -1179,6 +1207,10 @@ pub(crate) fn viewer_router(state: AppState) -> Router<AppState> {
             "/shared/imports/{import}/items/{item}/progress",
             post(viewer_progress),
         )
+        .route(
+            "/shared/imports/{import}/items/{item}/watched",
+            post(viewer_watched),
+        )
         .route("/shared/imports/{import}/items:batch", post(viewer_batch))
         .route_layer(middleware::from_fn_with_state(
             state,
@@ -1193,7 +1225,13 @@ fn import_id(value: &str) -> Result<uuid::Uuid, ApiError> {
     Ok(id)
 }
 fn peer_failure(error: crate::sharing_client::PeerError) -> ApiError {
-    if matches!(error, crate::sharing_client::PeerError::Authentication) {
+    // The Source answered "not in your scope" (deleted, moved out or
+    // unexported). That is a typed absence, not an offline Source.
+    if matches!(
+        error,
+        crate::sharing_client::PeerError::Authentication
+            | crate::sharing_client::PeerError::Rejected(StatusCode::NOT_FOUND)
+    ) {
         missing()
     } else if matches!(
         error,
@@ -1205,6 +1243,22 @@ fn peer_failure(error: crate::sharing_client::PeerError) -> ApiError {
             StatusCode::SERVICE_UNAVAILABLE,
             "sharing_source_unavailable",
         )
+    }
+}
+/// A Source cursor refusal must stay a typed reopen result at B. Mapping it to
+/// "Source unavailable" left an expired or substituted cursor retried forever.
+fn page_failure(error: crate::sharing_client::PeerError, cursor: bool) -> ApiError {
+    use crate::sharing_client::PeerError::Rejected;
+    match error {
+        Rejected(StatusCode::GONE) if cursor => fail(StatusCode::GONE, "sharing_cursor_expired"),
+        Rejected(StatusCode::CONFLICT) if cursor => {
+            fail(StatusCode::CONFLICT, "sharing_query_changed")
+        }
+        // B already validated every other query field the Source checks.
+        Rejected(StatusCode::BAD_REQUEST) if cursor => {
+            fail(StatusCode::BAD_REQUEST, "sharing_cursor_invalid")
+        }
+        other => peer_failure(other),
     }
 }
 fn shared_item(
@@ -1475,6 +1529,7 @@ async fn viewer_page(
     let art_key = super::shared_artwork::receiver_key(state).await?;
     let scope_library = library.clone();
     let scope_parent = parent.clone();
+    let had_cursor = q.cursor.is_some();
     let (summary, reply) = state
         .sharing
         .read_catalogue(
@@ -1493,7 +1548,7 @@ async fn viewer_page(
             },
         )
         .await
-        .map_err(peer_failure)?;
+        .map_err(|error| page_failure(error, had_cursor))?;
     let crate::sharing::CatalogueReply::Page(page) = reply else {
         return Err(invalid());
     };
@@ -1768,6 +1823,65 @@ async fn viewer_progress(
         Json(value),
     )
         .into_response())
+}
+/// Explicit B-private watched state. Current Source membership comes from one
+/// fresh pinned read under current assignment; the Store write then takes the
+/// next global history sequence, so a beat issued before this override cannot
+/// restore the old position. Source history and Local watch state are untouched.
+async fn viewer_watched(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    Path((import, item)): Path<(String, String)>,
+    body: Body,
+) -> Result<Response, ApiError> {
+    use plurx_core::store::sharing_catalogue::{RemoteProgressOutcome, RemoteWatchedOverride};
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct WatchedBody {
+        watched: bool,
+    }
+    let import = import_id(&import)?;
+    let item = source_id(&item)?;
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(15), to_bytes(body, 64))
+        .await
+        .map_err(|_| invalid())?
+        .map_err(|_| invalid())?;
+    let WatchedBody { watched } = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let user = user.id;
+    let (summary, metadata) = current_viewer_item(&state, user, import, item.clone()).await?;
+    if !matches!(
+        metadata.kind,
+        SourceItemKind::Movie | SourceItemKind::Episode
+    ) {
+        return Err(fail(StatusCode::CONFLICT, "sharing_watch_unsupported"));
+    }
+    let (outcome, watch) = state
+        .store
+        .set_remote_watched(RemoteWatchedOverride {
+            import_id: import,
+            library_id: metadata.library_id,
+            item_id: item,
+            user_id: user,
+            lifecycle_generation: summary.lifecycle_generation,
+            assignment_generation: summary.assignment_generation,
+            watched,
+            updated_at_ms: clock_ms(),
+        })
+        .await
+        .map_err(unavailable)?;
+    match (outcome, watch) {
+        (RemoteProgressOutcome::Applied, Some(watch)) => Ok((
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(json!({"updated":1,"watch":watch})),
+        )
+            .into_response()),
+        (RemoteProgressOutcome::Conflict, _) => Err(fail(
+            StatusCode::CONFLICT,
+            "sharing_history_library_changed",
+        )),
+        _ => Err(missing()),
+    }
 }
 async fn viewer_assigned_libraries(
     State(state): State<AppState>,
@@ -2557,6 +2671,14 @@ mod tests {
                 "current source scope"
             );
             if !h2 {
+                // The handler bounds the whole request at 5 s and its pre-demand
+                // authority re-read at 1 s. Both are real request deadlines, but
+                // this block proves the variant answer and demand dedup, so the
+                // engine attestation the daemon establishes once per process is
+                // warmed first and Tokio time is held: blocking store work then
+                // cannot advance those deadlines, however loaded the runner is.
+                crate::ffmpeg::fragment_index_engine_digest().await;
+                tokio::time::pause();
                 let variant = plurx_core::sharing_artwork::SourceArtReference {
                     variant: ArtVariant::W300,
                     ..reference.clone()
@@ -2624,6 +2746,7 @@ mod tests {
                     jobs,
                     "refused authority cannot add render work"
                 );
+                tokio::time::resume();
             }
             let dropped = Arc::new(AtomicBool::new(false));
             let data = Arc::new(AtomicBool::new(false));
@@ -2860,6 +2983,69 @@ mod tests {
                 .to_bytes();
             let body = String::from_utf8(bytes.to_vec()).expect("synthetic catalogue fixture");
             assert!(!body.contains("synthetic-password"));
+        }
+        // Manual watched state needs a login, canonical identities and a fresh
+        // Source read under a current import; none of these fall back.
+        let watched = format!("/api/v1/shared/imports/{import}/items/9007199254740993/watched");
+        for (path, login, body, status) in [
+            (
+                watched.clone(),
+                false,
+                r#"{"watched":false}"#,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                watched.clone(),
+                true,
+                r#"{"watched":false}"#,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                watched.clone(),
+                true,
+                r#"{"watched":true}"#,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (watched.clone(), true, "", StatusCode::BAD_REQUEST),
+            (
+                watched.clone(),
+                true,
+                r#"{"watched":"no"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                watched.clone(),
+                true,
+                r#"{"watched":false,"position_ms":0}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                watched.replace("9007199254740993", "01"),
+                true,
+                r#"{"watched":false}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                watched.replace(&import.to_string(), &import.to_string().to_uppercase()),
+                true,
+                r#"{"watched":false}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mut request = axum::http::Request::builder().method("POST").uri(path);
+            if login {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(body))
+                        .expect("synthetic catalogue fixture"),
+                )
+                .await
+                .expect("synthetic catalogue fixture");
+            assert_eq!(response.status(), status, "{body}");
         }
         assert!(state
             .store
@@ -3170,8 +3356,10 @@ mod tests {
         for h2 in [false, true] {
             let source = body_fixture().await;
             let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
-            let tls =
-                Arc::new(LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"));
+            let tls = Arc::new(
+                LiveNodeTls::open(&tls_dir.path().join("tls"), clock_ms() / 1000)
+                    .expect("Source TLS"),
+            );
             let (pin, _) = tls.status().expect("Source SPKI");
             let listener = tokio::net::TcpListener::bind((address, 0))
                 .await
@@ -3211,6 +3399,7 @@ mod tests {
                 SharingNetworkConfig {
                     bind: "127.0.0.1:32444".parse().expect("unused bind"),
                     egress: SharingEgressConfig::LocalAddress { address },
+                    ..SharingNetworkConfig::default()
                 },
             ));
             receiver
@@ -3600,7 +3789,8 @@ mod tests {
                 }
                 let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
                 let tls = Arc::new(
-                    LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"),
+                    LiveNodeTls::open(&tls_dir.path().join("tls"), clock_ms() / 1000)
+                        .expect("Source TLS"),
                 );
                 let (pin, _) = tls.status().expect("Source SPKI");
                 let listener = tokio::net::TcpListener::bind((address, 0))
@@ -3641,6 +3831,7 @@ mod tests {
                     SharingNetworkConfig {
                         bind: "127.0.0.1:32444".parse().expect("unused bind"),
                         egress: SharingEgressConfig::LocalAddress { address },
+                        ..SharingNetworkConfig::default()
                     },
                 ));
                 receiver
@@ -4238,7 +4429,8 @@ mod tests {
                 let source = body_fixture().await;
                 let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
                 let tls = Arc::new(
-                    LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"),
+                    LiveNodeTls::open(&tls_dir.path().join("tls"), clock_ms() / 1000)
+                        .expect("Source TLS"),
                 );
                 let (pin, _) = tls.status().expect("Source SPKI");
                 let listener = tokio::net::TcpListener::bind((address, 0))
@@ -4273,6 +4465,7 @@ mod tests {
                     SharingNetworkConfig {
                         bind: "127.0.0.1:32444".parse().expect("unused bind"),
                         egress: SharingEgressConfig::LocalAddress { address },
+                        ..SharingNetworkConfig::default()
                     },
                 ));
                 receiver
@@ -4873,6 +5066,86 @@ mod tests {
             assert!(!text.contains("Exported movies"));
             assert!(!text.contains("/source/private/path"));
             assert!(text.contains("sharing_authority_unavailable"));
+        }
+    }
+    #[tokio::test]
+    async fn sharing_catalogue_page_failures_keep_typed_reopen_and_absence_results() {
+        use crate::sharing_client::PeerError;
+        async fn typed(error: ApiError) -> (StatusCode, String) {
+            let response = error.into_response();
+            let status = response.status();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("typed body")
+                .to_bytes();
+            let value: Value = serde_json::from_slice(&body).expect("typed JSON");
+            (
+                status,
+                value["code"].as_str().unwrap_or_default().to_owned(),
+            )
+        }
+        for (error, cursor, status, code) in [
+            (
+                PeerError::Rejected(StatusCode::GONE),
+                true,
+                StatusCode::GONE,
+                "sharing_cursor_expired",
+            ),
+            (
+                PeerError::Rejected(StatusCode::CONFLICT),
+                true,
+                StatusCode::CONFLICT,
+                "sharing_query_changed",
+            ),
+            (
+                PeerError::Rejected(StatusCode::BAD_REQUEST),
+                true,
+                StatusCode::BAD_REQUEST,
+                "sharing_cursor_invalid",
+            ),
+            (
+                PeerError::Rejected(StatusCode::BAD_REQUEST),
+                false,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_source_unavailable",
+            ),
+            (
+                PeerError::Rejected(StatusCode::NOT_FOUND),
+                true,
+                StatusCode::NOT_FOUND,
+                "sharing_not_found",
+            ),
+            (
+                PeerError::Authentication,
+                false,
+                StatusCode::NOT_FOUND,
+                "sharing_not_found",
+            ),
+            (
+                PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS),
+                true,
+                StatusCode::TOO_MANY_REQUESTS,
+                "sharing_metadata_capacity",
+            ),
+            (
+                PeerError::Unavailable,
+                true,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_source_unavailable",
+            ),
+            (
+                PeerError::IdentityMismatch,
+                true,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_source_unavailable",
+            ),
+        ] {
+            assert_eq!(
+                typed(page_failure(error, cursor)).await,
+                (status, code.to_owned())
+            );
         }
     }
     #[test]

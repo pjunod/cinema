@@ -10,9 +10,7 @@ use crate::http::{
     },
     stream::{file_range_head, plan_file_range, FileRangePlan},
 };
-use crate::transcode::source_actor::{
-    direct::SourceDirectFile, SourceViewerActor, SourceWorkerError,
-};
+use crate::transcode::source_actor::{direct::SourceDirectFile, SourceViewerActor};
 use plurx_core::playback_principal::PlaybackPrincipal;
 
 /// Prepared by current Source authority and the actual decision engine with
@@ -23,6 +21,7 @@ pub(crate) struct PreparedSourceDirect {
     playback_id: String,
     request_id: String,
     fingerprint: String,
+    invocation_fingerprint: Option<String>,
     file: plurx_core::domain::MediaFile,
     object_version: String,
     length: u64,
@@ -44,7 +43,7 @@ impl PreparedSourceDirect {
             && binding.file_revision() == &self.target.revision
             && binding.playback_id() == self.playback_id
             && binding.request_id() == self.request_id
-            && binding.request_fingerprint() == self.fingerprint
+            && self.invocation_fingerprint.as_deref() == Some(binding.request_fingerprint())
     }
     pub(crate) fn into_direct_file(self) -> SourceDirectFile {
         SourceDirectFile::new(
@@ -72,7 +71,7 @@ fn direct_fingerprint(session: &CreateSession) -> Result<String, SourceStartFail
 /// refuse unless it is direct play of this exact current file.
 pub(super) async fn prepare_source_direct(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
     target: SourcePlaybackTarget,
     session: CreateSession,
 ) -> Result<PreparedSourceDirect, SourceStartFailure> {
@@ -116,11 +115,8 @@ pub(super) async fn prepare_source_direct(
     let (hash, grant) = super::super::shared_library::authority(state, headers)
         .await
         .map_err(|_| refused)?;
-    let viewer = headers
-        .get("cinemashare-viewer")
-        .and_then(|value| value.to_str().ok())
-        .ok_or(refused)?;
-    let principal = PlaybackPrincipal::sharing(grant, viewer).map_err(|_| refused)?;
+    let viewer = super::viewer_hash(headers).map_err(|_| refused)?;
+    let principal = PlaybackPrincipal::sharing(grant, &viewer).map_err(|_| refused)?;
     let read_witness = || {
         state.store.source_item_file_witness(
             &hash,
@@ -231,6 +227,7 @@ pub(super) async fn prepare_source_direct(
         playback_id: session.playback_id.clone(),
         request_id: session.request_id.clone().ok_or(refused)?,
         fingerprint,
+        invocation_fingerprint: None,
         file,
         object_version,
         length,
@@ -246,6 +243,34 @@ pub(super) enum PreparedSourceStart {
     Direct(Box<PreparedSourceDirect>),
 }
 impl PreparedSourceStart {
+    pub(super) fn bind_invocation(
+        &mut self,
+        binding: &plurx_core::sharing_source_sessions::SourceBindingHandle,
+    ) -> Result<(), SourceStartFailure> {
+        if self.principal() != binding.principal() || self.playback_id() != binding.playback_id() {
+            return Err(SourceStartFailure::Unresolved);
+        }
+        match self {
+            Self::Hls(prepared) => prepared
+                .bind_source_invocation(binding)
+                .map_err(|_| SourceStartFailure::Unresolved),
+            Self::Direct(prepared) => {
+                let target = &prepared.target;
+                if binding.request_id() != prepared.request_id
+                    || binding.source_server_id() != target.server_id
+                    || binding.catalogue_epoch() != target.catalogue_epoch
+                    || binding.library_id() != &target.library_id
+                    || binding.item_id() != &target.item_id
+                    || binding.file_id() != &target.file_id
+                    || binding.file_revision() != &target.revision
+                {
+                    return Err(SourceStartFailure::Unresolved);
+                }
+                prepared.invocation_fingerprint = Some(binding.request_fingerprint().to_owned());
+                Ok(())
+            }
+        }
+    }
     pub(super) fn principal(&self) -> &PlaybackPrincipal {
         match self {
             Self::Hls(prepared) => prepared.principal(),
@@ -255,7 +280,10 @@ impl PreparedSourceStart {
     pub(super) fn fingerprint(&self) -> &str {
         match self {
             Self::Hls(prepared) => prepared.fingerprint(),
-            Self::Direct(prepared) => &prepared.fingerprint,
+            Self::Direct(prepared) => prepared
+                .invocation_fingerprint
+                .as_deref()
+                .unwrap_or(&prepared.fingerprint),
         }
     }
     pub(super) fn playback_id(&self) -> &str {
@@ -267,7 +295,7 @@ impl PreparedSourceStart {
 }
 pub(super) async fn prepare_source_start(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
     reference: SourcePlaybackTarget,
     session: CreateSession,
 ) -> Result<PreparedSourceStart, SourceStartFailure> {
@@ -276,30 +304,51 @@ pub(super) async fn prepare_source_start(
             .await
             .map(|prepared| PreparedSourceStart::Direct(Box::new(prepared)));
     }
-    Box::pin(super::super::hls::prepare_source_playback(
+    let prepared = Box::pin(super::super::hls::prepare_source_playback(
         state, headers, reference, session,
     ))
     .await
-    .map(|prepared| PreparedSourceStart::Hls(Box::new(prepared)))
-    .map_err(|_| SourceStartFailure::Unavailable)
+    .map_err(|error| match error {
+        // The shared planner's own refusal of a burn that would cost this
+        // session its HDR grade: a definite answer, not an outage.
+        ApiError::Unprocessable(_) => SourceStartFailure::Unsupported,
+        _ => SourceStartFailure::Unavailable,
+    })?;
+    // The delivery policy is decided here, after a fresh claim, from the
+    // Source's own prepared request (the player's real caps through the
+    // shared planner) and its own scanned file facts. B is never trusted.
+    match crate::transcode::source_actor::source_delivery_refusal(
+        prepared.request(),
+        prepared.file(),
+        prepared.native_subtitles(),
+    ) {
+        Some(crate::transcode::source_actor::SourceDeliveryRefusal::DolbyVision) => {
+            Err(SourceStartFailure::DolbyVisionUnsupported)
+        }
+        Some(crate::transcode::source_actor::SourceDeliveryRefusal::Unsupported) => {
+            Err(SourceStartFailure::Unsupported)
+        }
+        None => Ok(PreparedSourceStart::Hls(Box::new(prepared))),
+    }
 }
 pub(super) async fn start_prepared_worker(
     state: std::sync::Arc<crate::state::AppState>,
     assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
     activation: plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+    ingress: plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission,
     prepared: PreparedSourceStart,
     deadline: std::time::Instant,
-) -> Result<SourceViewerActor, SourceWorkerError> {
+) -> Result<SourceViewerActor, crate::transcode::source_actor::SourceWorkerNoAdmission> {
     let manager = std::sync::Arc::clone(&state.transcode);
     match prepared {
         PreparedSourceStart::Hls(prepared) => {
             manager
-                .start_source_worker(state, assignment, activation, *prepared, deadline)
+                .start_source_worker(state, assignment, activation, ingress, *prepared, deadline)
                 .await
         }
-        PreparedSourceStart::Direct(prepared) => {
-            manager.start_source_direct_worker(state, assignment, activation, *prepared, deadline)
-        }
+        PreparedSourceStart::Direct(prepared) => manager.start_source_direct_worker(
+            state, assignment, activation, ingress, *prepared, deadline,
+        ),
     }
 }
 
@@ -329,13 +378,14 @@ fn observe_direct_published(
 /// owner's response guard. Status renews the lease, never viewer activity.
 pub(super) async fn published_reply(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
     entry: &SourceStartEntry,
     owned: &SourceStartOwned,
     target: &SourcePlaybackTarget,
     grant: Uuid,
     deadline: std::time::Instant,
 ) -> Result<axum::response::Response, ApiError> {
+    super::ingress::publication_allowed(state, &owned.assignment).await?;
     let (start, guard) = owned
         .actor
         .open_direct_start(deadline)
@@ -354,7 +404,7 @@ pub(super) async fn published_reply(
     Ok(hold_start_body(response, guard))
 }
 
-fn parse_direct_request(
+pub(super) fn parse_direct_request(
     bytes: &[u8],
     item: &str,
     file: &str,
@@ -392,7 +442,7 @@ fn parse_direct_request(
 /// Source reader behind the owner's revocable response guard.
 pub(super) async fn direct_bytes(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: super::SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     #[cfg(test)] read_gate: Option<axum::Extension<std::sync::Arc<SourceReadJobGate>>>,
@@ -417,6 +467,13 @@ pub(super) async fn direct_bytes(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
+    super::ingress::register_local(
+        &state,
+        &connection.as_ref().ok_or_else(unavailable)?.0,
+        &entry,
+        &owned.assignment,
+    )
+    .await?;
     if !owned.actor.is_direct() {
         return Err(SourceStartFailure::Unsupported.response());
     }
@@ -432,6 +489,7 @@ pub(super) async fn direct_bytes(
     let (file, length, mime, guard) = opened.into_parts();
     let guard = std::sync::Arc::new(guard);
     let method = demand.method();
+    super::ingress::publication_allowed(&state, &owned.assignment).await?;
     let plan = plan_file_range(&demand.headers().map_err(|_| invalid())?, &method, length);
     let (status, planned) = file_range_head(plan, length, mime);
     let body_length = planned_body_length(plan, &method, length);

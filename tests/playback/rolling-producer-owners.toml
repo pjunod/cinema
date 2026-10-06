@@ -1764,6 +1764,8 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# Shared H2 drain: the accepted driver moves to JoinSet.spawn; two finite
+# regression drivers are explicitly stopped and joined (+1 net).
 # Durable queue: background_jobs.rs adds one ActiveJob-owned heartbeat (joined
 # before retirement), plus two joined race/process fixtures; ffmpeg.rs adds a
 # joined cancellation fixture. main.rs starts the daemon-owned consumer loop.
@@ -2493,7 +2495,24 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # stand-in Start task the B supersession tests join, and the reopen CGNAT
 # fixture's Source and B servers, each stopped and joined at its end. The
 # supersession itself reuses the existing single retirement owner.
-expected_occurrences = 806
+# +1 for the shared prepared successor (P1/P2), test-only: the completed
+# stand-in Start task of a registered successor, joined by its retirement owner
+# in the successor tests. A staged successor is started through the existing
+# registry owner (`spawn_owner`, the same spawn moved out of `begin`) and
+# withdrawn or superseded through the existing retirement owner. The prepared
+# handoff CGNAT fixture shares the reopen fixture's two servers (`PinnedPair`),
+# each stopped and joined in `finish`.
+# +1 Shared burn sidecar creation: the Source probe owns and awaits the
+# blocking tempfile job; its anonymous file closes on failure or rendition
+# settlement. No timer or detached recovery owner is added.
+# +1 approved-endpoint fixture: its replacement TLS server is stopped and
+# joined by the fixture after the real immutable End settles.
+# 810 -> 821, shared cluster forwarding completion (2026-10-06).
+# Source/receiver forwarding completion: actual Source HTTP and factory fixtures own
+# their finite servers, H2 drivers and closure monitors, cancelling and joining
+# them during teardown. Production Source Start/End keep their existing tasks
+# in retained entry/retirement owners; no periodic monitor was introduced.
+expected_occurrences = 821
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2530,6 +2549,8 @@ expected_occurrences = 806
 
 [[module_structures]]
 id = "method-spawn"
+# Shared H2 drain: the HTTP server JoinSet owns every accepted driver through
+# daemon drain; each driver drops its socket before publishing actual closure.
 # Durable queue removes the state.rs fragment JoinSet launcher. The common
 # consumer now awaits each admitted execution and owns its fence through reap.
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
@@ -2667,7 +2688,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # terminated and reaped it for foreground, download, ownership and deadline yields.
 # Shared libraries S2: the lost-response fixture JoinSet owns and aborts
 # accepted TLS connections; this is the same in-process task inventoried above.
-expected_occurrences = 53
+# 54 -> 55, shared cluster forwarding completion (2026-10-06).
+# Receiver retirement owns the bounded JoinSet of actual ingress close exchanges;
+# it joins every result, or shuts the set down at the original retirement deadline.
+# Source uses awaited FuturesUnordered, with no independently spawned close task.
+expected_occurrences = 55
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2680,10 +2705,18 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # the drop and slot-termination reap fixtures, and the fd-6 closure fixture).
 # None of them is a task call, and the five shipped callers reach the builder by
 # its `crate::producer_spawn::` path, which the namespaced sentinel counts.
-expected_occurrences = 10
+# 10 -> 11, shared cluster forwarding completion (2026-10-06).
+# The Source non-owner fixture adds its server constructor named spawn; the
+# fixture retains the server task and cancels/joins it on teardown.
+expected_occurrences = 11
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Shared ingress custody adds one bounded actual-driver closure wait and two
+# finite regression bounds (independent admission and real HTTP driver closure).
+# The accepted driver owns monitors through their join; no polling owner is added.
+# Shared H2 drain: retirement bounds its actual writer join without treating
+# timeout as closure; two finite regression waits bound frame and socket evidence.
 # Durable queue: background_jobs.rs adds four claim/heartbeat lease timers and
 # three bounded fixture waits (+7); ffmpeg replaces timeout with sleep and adds
 # three fixture waits (+3); fragindex removes two outer waits in favor of the
@@ -3685,7 +3718,26 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # control-interval wait and its bounded predecessor-retirement poll. The reopen
 # itself adds no timer: it is driven by the control answer and the existing
 # client fallback.
-expected_occurrences = 1314
+# +3 for the shared prepared successor (P1/P2), all test-only, in the prepared
+# handoff CGNAT fixture: its outer bound, its control-interval wait between
+# new sequences, and its bounded Source-session poll. The successor deadline
+# adds no timer: it is checked on the successor owner's existing renewal tick.
+# +1 for Shared manual watched state: `viewer_watched` bounds its 64-byte body
+# read with the same 15 s timeout as the progress route. The requesting handler
+# awaits it; it owns no task, producer or process.
+# +1 for the shared prepared successor hand-over fix, test-only: the bound on
+# the hand-over transport test's waits (busy and revoked transports cut, idle
+# custody released). The commit hand-off itself adds no task or timer: it runs
+# when the commit answer's writer is released.
+# +4 approved-endpoint cleanup: bounded import lookup and total-budget
+# endpoint attempt replace the old unbounded dial loop; two fixture bounds
+# cover an actual End refusal and an accepted request stalled until settlement.
+# 1329 -> 1380, shared cluster forwarding completion (2026-10-06).
+# Forwarded control, admission, close and ACK operations inherit bounded request
+# or retirement deadlines. Response owners retain delivery/no-progress budgets;
+# test fixtures own finite wait/teardown deadlines. No periodic SQL poller or
+# playback watchdog is added, and retries do not renew retirement deadlines.
+expected_occurrences = 1380
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -4029,10 +4081,15 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Source permit, `spawn_job_owned` and kill_on_drop. Test-only: ffmpeg and
 # ffprobe fixture generators awaited through `.output()`, and finite
 # `sleep 60` children in vod/tests/source_lifetime.rs the producer slot reaps.
-expected_occurrences = 212
+# +3 Shared burns: held-source subtitle extraction and the filter listing
+# both run through the admitted Source executor and are reaped before its
+# result. The third is a test-only subtitle fixture mux, awaited by its fixture.
+expected_occurrences = 215
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# Shared H2 drain: JoinSet.spawn starts the accepted HTTP task described above,
+# not an operating-system process.
 # Durable queue removes state.rs JoinSet.spawn for the fragment worker. This
 # is the same removed task counted by method-spawn, not an OS child.
 pattern = "\\.(?:spawn|output|status)\\s*\\("
@@ -4515,7 +4572,19 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 for the shared directed-change reopen (P0): one HTTP `.status()` read in
 # the Source adapter test's directed-change case and the reopen CGNAT
 # fixture's `LiveNodeTls::status()` SPKI read. No process.
-expected_occurrences = 569
+# +1 for the S4 catalogue audit: a test-only HTTP `Response::status()` read
+# in the typed page-failure mapping test. No process.
+# +1 for Shared manual watched state: a test-only HTTP `Response::status()`
+# read in the viewer-route test's watched-route loop. No process.
+# +4 Shared burns/HDR: filter-listing output uses Source-owned run_child;
+# fixture subtitle mux output is awaited; two HTTP status assertions inspect
+# responses only. None creates an additional detached owner.
+# +1 approved-endpoint fixture server launch, owned and joined by the fixture.
+# 577 -> 594, shared cluster forwarding completion (2026-10-06).
+# Forwarding adds response status builders/readers and finite fixture server
+# launches to this conservative method-shape census. B retirement owns and
+# joins its close-task fanout. No additional media child-process factory is added.
+expected_occurrences = 594
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
@@ -4531,6 +4600,13 @@ expected_occurrences = 0
 
 [[module_structures]]
 id = "process-lifecycle-method"
+# Common ingress adds three waits on the actual accepted-driver closure signal
+# and one real HTTP fixture closure wait. These are not process lifecycle calls;
+# the server JoinSet owns the driver and joins its finite closure monitors.
+# Source failed-Start receipt fixtures add four net waits on exact Start/End
+# owners. They join existing owners and create no process or background loop.
+# Shared H2 regression awaits the accepted connection closure observer; this
+# wait observes a driver already owned by the server JoinSet, not a child process.
 # Durable queue adds start_kill and an awaited wait to the ffmpeg collector.
 # Cancellation/expiry retains the child job and caller admission until reap;
 # the normal completion wait remains. There is no second process owner.
@@ -4754,7 +4830,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # the fixture sleeper.
 # +1: the Source direct byte route awaits its Start entry (`entry.wait`), the
 # same in-process outcome wait every Source operation uses. No child process.
-expected_occurrences = 284
+# 293 -> 297, shared cluster forwarding completion (2026-10-06).
+# Source non-owner and actual-driver fixture waits use retained Start/End or
+# closure owners. Fixture teardown cancels and joins its finite transport tasks;
+# these method shapes do not add an independent media-process lifecycle.
+expected_occurrences = 297
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

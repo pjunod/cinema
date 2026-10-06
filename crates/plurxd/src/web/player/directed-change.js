@@ -183,7 +183,10 @@ async function requestQualityChange(p,reason,fallback,autoMove){
   p.directedChange=change;
   let outcome="timed_out";
   try{ outcome=await awaitPreparedOffer(p,change.tappedAt); }catch(e){ outcome="timed_out"; }
-  if(p.directedChange===change){ change.outcome=outcome; change.outcomeAt=performance.now(); }
+  // A change already settled while the waiter confirmed -- a commit that beat
+  // the confirmation, or an offer that did not bind and took its reopen --
+  // keeps the outcome it settled with.
+  if(p.directedChange===change&&!change.settled){ change.outcome=outcome; change.outcomeAt=performance.now(); }
   // A prepared successor is now this change's business: its commit settles it,
   // and its failure reopens through the same owner.
   if(outcome==="prepared") return outcome;
@@ -455,8 +458,11 @@ function startPlaybackControl(v,p,bootstrap){
     const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
       ?PlurxPlaybackControl.capture(playbackControlSnapshot(document.getElementById("video"),p),
         p.controlIntentGeneration||0,owner):null;
+    // A Shared session also names B's successor transaction; dual-player
+    // preparation stays the Developer switch every session honours.
+    const shared=!!(p.fileContext&&p.fileContext.source_ref&&p.fileContext.source_ref.kind!=="local");
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
-      clientInstanceId:CONTROL_CLIENT_ID,
+      clientInstanceId:CONTROL_CLIENT_ID,sharedSuccessor:shared,
       capture,
       send:sendPlaybackControl,
       onExchange:({request,response,error,capture:captured})=>{
@@ -516,6 +522,12 @@ function startPlaybackControl(v,p,bootstrap){
             message:"playback-control exchange recovered; legacy recovery remained authoritative"});
         }
         if(error){
+          const pending=p.preparedControlPending;
+          if(shared&&pending?.sharedContext&&request.acknowledgement?.state==="committed"
+            &&request.acknowledgement.action_id===pending.actionId){
+            recoverSharedCommittedReplacement(p,pending);
+            return;
+          }
           const now=Date.now(), message=String(error.message||error);
           p.controlLastError={at:now,message};
           if(Number(error.status)===410){
@@ -896,11 +908,11 @@ function attachSession(v, t, info, wantSec){
 // hardware slot held for nobody — every time a player closes or replaces its
 // stream. `keepalive` is what makes it survive the page going away, and is
 // also why the route authenticates by session id rather than by header.
-function releaseSession(sessionId){
+function releaseSession(sessionId,token=TOKEN){
   if(!sessionId) return;
   try{
     fetch(API+`/hls/${sessionId}`,{method:"DELETE",keepalive:true,
-      headers:TOKEN?{"authorization":"Bearer "+TOKEN}:{}}).catch(()=>{});
+      headers:token?{"authorization":"Bearer "+token}:{}}).catch(()=>{});
   }catch(e){}
 }
 // A Shared direct session ends with the attachment that reads it: the same

@@ -11,6 +11,7 @@ struct SharedLibrariesEntry: View {
 
 struct SharedLibrariesView: View {
     @State private var assignments: [SharedLibraryAssignment] = []
+    @State private var history: [SharedContinueGroup] = []
     @State private var loading = false
     @State private var error: String?
     private var groups: [[SharedLibraryAssignment]] {
@@ -25,7 +26,7 @@ struct SharedLibrariesView: View {
                 if loading { ProgressView() }
                 if let error { Text(error).foregroundStyle(.secondary) }
                 if !loading && error == nil && assignments.isEmpty { Text("No Shared libraries are assigned to your account.") }
-                ForEach(groups, id: \.first!.identity.sourceId) { group in SharedSourceLibrariesView(assignments: group) }
+                ForEach(groups, id: \.first!.identity.sourceId) { group in SharedSourceLibrariesView(assignments: group, historyGroup: history.first { $0.id == group.first!.identity.sourceId }) }
                 Button("Refresh Shared libraries") { Task { await load() } }.disabled(loading)
             }.padding()
         }
@@ -38,12 +39,17 @@ struct SharedLibrariesView: View {
             let client = try SharedLibraryClient()
             let rows = try await client.assignments(); try client.requireCurrent()
             assignments = rows; error = nil
+            do { history = try await client.continueGroups(); try client.requireCurrent() }
+            catch { history = []; self.error = "Shared Continue Watching is unavailable." }
         } catch { self.error = error.localizedDescription }
     }
 }
 
 private struct SharedSourceLibrariesView: View {
     let assignments: [SharedLibraryAssignment]
+    let historyGroup: SharedContinueGroup?
+    @State private var recent: SharedContinueItems?
+    @State private var historyError: String?
     @State private var rows: [SharedLibraryRow] = []
     @State private var loading = false
     @State private var error: String?
@@ -52,6 +58,24 @@ private struct SharedSourceLibrariesView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(sourceName).font(.title3.bold())
             Text("Source · \(assignments.first!.serverId.prefix(8))").font(.caption).foregroundStyle(.secondary)
+            if let historyGroup {
+                Text("Continue Watching · \(historyGroup.sourceName)").font(.headline)
+                if let recent {
+                    if recent.availability != "online" { Text("Continue Watching unavailable for this Source.").foregroundStyle(.secondary) }
+                    ForEach(recent.items) { entry in
+                        let reference = entry.item.reference
+                        let identity = SharedLibraryIdentity(importId: reference.importId, serverId: reference.serverId, catalogueEpoch: reference.catalogueEpoch, libraryId: reference.libraryId)
+                        let row = rows.first { $0.identity == identity } ?? SharedLibraryRow(identity: identity, name: "Shared library", sourceName: sourceName, kind: entry.item.kind)
+                        NavigationLink { SharedLibraryDetailView(reference: reference, library: row) } label: {
+                            VStack(alignment: .leading) {
+                                Text(entry.item.title)
+                                Text("Resume at \(entry.watch.positionMs / 1000) s · \(sourceName)").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                if let historyError { Text(historyError).foregroundStyle(.secondary) }
+            }
             if loading { ProgressView() }
             if let error { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.secondary) }
             ForEach(rows) { row in
@@ -62,18 +86,20 @@ private struct SharedSourceLibrariesView: View {
             if !loading && rows.isEmpty && error == nil { Text("No libraries are currently available from this Source.") }
             Button("Refresh \(sourceName)") { Task { await load() } }.disabled(loading)
         }
-        .task(id: assignments.map(\.id).joined(separator: ",")) { await load() }
+        .task(id: assignments.map(\.id).joined(separator: ",") + "|" + (historyGroup?.id ?? "") + "|" + String(historyGroup?.count ?? 0)) { await load() }
     }
     private func load() async {
-        loading = true; defer { loading = false }
+        loading = true; recent = nil; defer { loading = false }
         do {
             let client = try SharedLibraryClient()
-            let result = try await client.libraries(assignments); try client.requireCurrent()
-            rows = result; error = nil
-        } catch {
-            self.error = (error as? APIError)?.refusalCode == "sharing_source_unavailable"
-                ? "Source unavailable. Your other libraries remain available." : error.localizedDescription
-        }
+            do {
+                rows = try await client.libraries(assignments); try client.requireCurrent(); error = nil
+            } catch { rows = []; self.error = "Source libraries unavailable." }
+            if let historyGroup {
+                do { recent = try await client.continueItems(historyGroup, assigned: assignments); try client.requireCurrent(); historyError = nil }
+                catch { recent = nil; historyError = "Continue Watching unavailable for this Source." }
+            }
+        } catch { rows = []; recent = nil; self.error = error.localizedDescription }
     }
 }
 
@@ -156,6 +182,12 @@ struct SharedLibraryDetailView: View {
                         Text(watch.watched ? "Watched on this server" : "Position on this server: \(watch.positionMs / 1000) seconds")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    if SharedWatchedAction.applies(to: detail.item) {
+                        let watched = detail.watch?.watched == true
+                        Button(SharedWatchedAction.title(watched: watched)) { Task { await setWatched(!watched) } }
+                            .disabled(loading)
+                            .accessibilityIdentifier("shared-watched-toggle")
+                    }
                     if detail.item.hasChildren {
                         NavigationLink("Browse children") {
                             SharedLibraryItemsView(library: library, parent: reference, title: detail.item.title)
@@ -177,7 +209,7 @@ struct SharedLibraryDetailView: View {
         }
         .navigationTitle(detail?.item.title ?? "Shared title")
         .sheet(isPresented: Binding(get: { playbackPlan != nil }, set: { if !$0 { playbackPlan = nil } })) {
-            if let playbackPlan { SharedPlayerView(plan: playbackPlan) }
+            if let playbackPlan { SharedPlayerView(plan: playbackPlan).environmentObject(model) }
         }
         .task(id: reference) { await load() }
     }
@@ -194,4 +226,22 @@ struct SharedLibraryDetailView: View {
             detail = result; error = nil
         } catch { self.error = error.localizedDescription }
     }
+    /// B's own watched override, then a fresh detail read so the page shows
+    /// what B now holds rather than what was asked.
+    private func setWatched(_ watched: Bool) async {
+        loading = true
+        do {
+            let client = try SharedLibraryClient()
+            _ = try await client.setWatched(reference, watched: watched); try client.requireCurrent()
+            loading = false
+            await load()
+        } catch { loading = false; self.error = error.localizedDescription }
+    }
+}
+
+/// Where the manual watched control appears: B accepts it for a movie or an
+/// episode only (`sharing_watch_unsupported` otherwise), as Local offers it.
+enum SharedWatchedAction {
+    static func applies(to item: SharedLibraryItem) -> Bool { item.kind == "movie" || item.kind == "episode" }
+    static func title(watched: Bool) -> String { watched ? "Mark unwatched" : "Mark watched" }
 }

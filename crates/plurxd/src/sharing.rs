@@ -57,6 +57,7 @@ pub(crate) struct StrandedReceiver {
     pub observed_at_ms: i64,
 }
 pub(crate) struct SharingManager {
+    pub(crate) accepted_drivers: crate::sharing_connection_custody::AcceptedDriverRegistry,
     #[allow(dead_code)] // Receiver HTTP registration follows relay qualification.
     pub(crate) receiver_starts: crate::http::shared_receiver_playback::ReceiverStartRegistry,
     pub key: Arc<CredentialKey>,
@@ -274,6 +275,7 @@ impl SharingManager {
     ) -> Self {
         Self {
             receiver_starts: Default::default(),
+            accepted_drivers: Default::default(),
             key,
             key_directory,
             status: RwLock::new(SharingStatus {
@@ -371,9 +373,10 @@ impl SharingManager {
                 }
                 Ok(true) => {
                     let lifetime = self.begin_lifetime();
-                    // The first host profile is raw TCP Serve to loopback TLS.
-                    // An unqualified wildcard must never become a LAN listener.
-                    if !self.network.bind.ip().is_loopback() || self.network.bind.port() == 0 {
+                    // The host profile stays loopback-only. The explicit Linux
+                    // bridge profile is checked with its pinned local egress;
+                    // host publication and forwarding remain deployment proofs.
+                    if !self.network.listener_bind_is_allowed() {
                         self.listener_status("unqualified_listener_profile");
                     } else {
                         let directory = self.key_directory.clone();
@@ -709,7 +712,7 @@ struct PeerEndpointManifest {
     endpoints: Vec<plurx_core::sharing::Endpoint>,
 }
 impl SharingManager {
-    async fn refresh_active_import(
+    pub(crate) async fn refresh_active_import(
         &self,
         state: &AppState,
         import: plurx_core::sharing::StoredImport,

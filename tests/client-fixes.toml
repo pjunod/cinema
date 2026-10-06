@@ -3515,3 +3515,129 @@ source = "clients/apple/Sources/SharedPlaybackControl.swift"
 source_anchor = "response.acceptedSequence == request.sequence"
 test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
 test_anchor = "testAnswersBindOnlyToTheSentSequenceOnBsTuple"
+
+[[fixes]]
+id = "sharing.native-shared-asset-index-grammar"
+commits = ["399a1a7cd"]
+source = "clients/apple/Sources/PlaybackFileContext.swift"
+source_anchor = "if reference != nil, !Self.sharedAssetIndexIsCanonical(resource) { throw APIError.badURL }"
+test = "clients/apple/Tests/SharedProtocolFixtureTests.swift"
+test_anchor = "testFileSuffixGrammarAndPresessionAssetPaths"
+
+[[fixes]]
+id = "sharing.native-shared-start-safe-duration"
+commits = []
+supplements = "sharing.native-shared-asset-index-grammar"
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "response.durationMs.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true,"
+test = "clients/apple/Tests/SharedProtocolFixtureTests.swift"
+test_anchor = "testHlsStartPublicProjectionAndClientMutations"
+
+[[fixes]]
+# One row per fix commit: the suffix bound and the 2^53 duration bound both land
+# in 20a1d58c0, and the same fixture suite reads both rows.
+id = "sharing.android-shared-file-suffix-index-bound"
+commits = ["20a1d58c0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = "if (reference != null) require(sharedFileSuffix(resource))"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedProtocolCasesTest.kt"
+test_anchor = "sharedFileSuffixesFollowTheClosedSharedGrammar"
+
+[[fixes]]
+id = "sharing.web-source-owned-burn-and-hdr-request"
+commits = ["d4d2ec8e4"]
+source = "crates/plurxd/src/web/core/shared-decision.js"
+source_anchor = "if(body.preserve_dolby_vision===true)dolbyVisionUnsupported();"
+test = "tests/web/shared-decision.test.js"
+test_anchor = "synthetic B Start carries a burn and an HDR10 ask unchanged and refuses Dolby Vision before sending"
+
+[[fixes]]
+id = "sharing.native-burn-hdr-and-closed-direct-request"
+commits = ["ec9b12a0f", "316f21c33"]
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "let burn = subtitleIndex.flatMap"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testSharedBurnAndHDRPlanUseSourceOwnedStartFields"
+
+[[fixes]]
+id = "sharing.android-source-owned-burn-and-hdr-request"
+commits = []
+supplements = "sharing.native-burn-hdr-and-closed-direct-request"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedPlaybackSession.kt"
+source_anchor = "val burn = selection.burn || track?.isNativeHls == false"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedPlaybackSessionTest.kt"
+test_anchor = "sharedBurnAndHdrPlanUseSourceOwnedStartFields"
+
+[[fixes]]
+id = "sharing.web-refused-handoff-original-account-cleanup"
+commits = ["da2e407a2"]
+source = "crates/plurxd/src/web/player/prepared-replacement.js"
+source_anchor = "releaseSession(predecessor,accountToken);"
+test = "tests/playback/web-control.test.js"
+test_anchor = "Shared visible commit refusal reopens once and ends both old sessions even when Start fails"
+
+[[fixes]]
+id = "sharing.android-failed-renderer-start-cleanup"
+commits = ["9dbd35ea3", "432a4e3bc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { runCatching { client.end(direct) } }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "rendererSetupFailureEndsTheStartedSessionForHlsAndDirect"
+
+[[fixes]]
+id = "sharing.native-history-requires-a-rendered-frame"
+commits = ["3490ed451"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "val framePresented: Boolean = false,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "noRenderedFrameNeverWritesZeroHistoryOnTickOrClose"
+
+[[fixes]]
+id = "sharing.native-continue-watching-source-groups"
+commits = ["3bfdbcf66"]
+source = "clients/apple/Sources/SharedLibraryClient.swift"
+source_anchor = "func continueGroups() async throws -> [SharedContinueGroup] {"
+test = "clients/apple/Tests/SharedLibraryTests.swift"
+test_anchor = "testSharedContinueWatchingKeepsFullSourceIdentityOrderAndRefusesOfflineMetadata"
+
+[[fixes]]
+id = "sharing.android-continue-watching-source-groups"
+commits = []
+supplements = "sharing.native-continue-watching-source-groups"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedLibraryClient.kt"
+source_anchor = "suspend fun continueGroups(): List<SharedContinueGroup> {"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "sharedContinueWatchingKeepsFullSourceIdentityOrderAndRefusesOfflineMetadata"
+
+[[fixes]]
+id = "sharing.android-advisory-qualification-status"
+commits = ["3dd492f8c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingSettingsScreen.kt"
+source_anchor = "Shared playback is implemented; private network, cluster recovery and physical-device qualification remain pending."
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "savedChoiceAndPendingEditSurviveUnknownReadiness"
+
+[[fixes]]
+id = "sharing.native-next-episode-current-membership"
+commits = ["32a556f7b"]
+source = "clients/apple/Sources/SharedLibraryClient.swift"
+source_anchor = "guard let at = episodes.firstIndex(of: reference) else { return nil }"
+test = "clients/apple/Tests/SharedCatalogueActionsTests.swift"
+test_anchor = "testMissingCurrentEpisodeNeverSkipsToTheNextSeason"
+
+[[fixes]]
+id = "sharing.android-next-episode-current-membership"
+commits = []
+supplements = "sharing.native-next-episode-current-membership"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedLibraryClient.kt"
+source_anchor = "if (at < 0) return null"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedCatalogueActionsTest.kt"
+test_anchor = "missingCurrentEpisodeNeverSkipsToTheNextSeason"
+
+[[fixes]]
+id = "sharing.android-frame-proof-belongs-to-attachment"
+commits = ["a062ce299"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "internal class SharedFrameEvidence {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "frameEvidenceCarriesPreparedProofAndRejectsOldAttachmentCallbacks"

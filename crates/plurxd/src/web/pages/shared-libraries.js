@@ -108,13 +108,20 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
         if(sharedCatalogueGroupKey(current)!==sharedCatalogueGroupKey(ref)||current.library_id!==ref.library_id||current.item_id!==ref.item_id) throw new Error("Shared source changed");
         if(!Array.isArray(detail.files)||detail.files.length>64) throw new Error("Shared details unavailable");
         const launch=detail.delivery_status==="available";
-        paint(`${SHARED_ARTWORK.markup(item,ref,capture,true)}<h2>${esc(item.title||"")}</h2><p>${esc(item.overview||"")}</p>${launch?"":'<p class="muted">Playback is not available for this shared item yet.</p>'}<div>${detail.files.map((file,index)=>{
+        const watchable=item.kind==="movie"||item.kind==="episode",watched=!!detail.watch?.watched;
+        paint(`${SHARED_ARTWORK.markup(item,ref,capture,true)}<h2>${esc(item.title||"")}</h2><p>${esc(item.overview||"")}</p>${launch?"":'<p class="muted">Playback is not available for this shared item yet.</p>'}${watchable?`<p><button class="ghost sm" data-shared-watched="${watched?0:1}">${watched?"Mark unwatched":"Mark watched"}</button></p>`:""}<div>${detail.files.map((file,index)=>{
           sharedCatalogueId(file.file_id);
           const fileRef=sharedCatalogueReference(file.reference?.item);
           if(JSON.stringify(fileRef)!==JSON.stringify(current)||file.reference.file_id!==file.file_id) throw new Error("Shared file changed");
           return `<p>${esc(file.video_codec||file.container||"Media file")}${file.duration_ms?` · ${esc(fmtDur(file.duration_ms/1000))}`:""} <button data-shared-play="${index}"${launch?"":" disabled"}>Play</button></p>`;
         }).join("")}</div><div id="shared-children"></div>`);
         const mount=document.getElementById("shared-catalogue");
+        const watchButton=mount?.querySelector("button[data-shared-watched]");
+        if(watchButton instanceof HTMLButtonElement)watchButton.onclick=async()=>{
+          if(!sharedCatalogueCurrent(capture))return;watchButton.disabled=true;
+          try{await sharedCatalogueSetWatched(ref,watchButton.dataset.sharedWatched==="1");if(sharedCatalogueCurrent(capture))void render();}
+          catch(error){if(sharedCatalogueCurrent(capture)){watchButton.disabled=false;watchButton.title=error.message||"Shared watch state unavailable";}}
+        };
         if(mount)for(const button of mount.querySelectorAll("button[data-shared-play]")){
           if(!(button instanceof HTMLButtonElement))continue;
           const index=Number(button.dataset.sharedPlay),file=detail.files[index];
@@ -124,7 +131,9 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
             finally{if(sharedCatalogueCurrent(capture))button.disabled=!launch;}
           };
         }
-        await sharedCatalogueLoadPage(`${base}/items/${ref.item_id}/children`,ref,capture,"shared-children");
+        // Children are other items of the same library: bind the page to the
+        // library reference, not to this parent's item identity.
+        await sharedCatalogueLoadPage(`${base}/items/${ref.item_id}/children`,sharedCatalogueLibraryReference(ref),capture,"shared-children");
       }else{
         const ref=parsed.reference;
         paint(`<form id="shared-search"><label>Search this library <input name="q" maxlength="512" value="${esc(parsed.q)}"></label><button class="ghost" type="submit">Search</button></form><div id="shared-items"></div>`);
@@ -145,6 +154,7 @@ async function sharedCatalogueLoadPage(path,ref,capture,mount,q=""){
   const load=async()=>{
     if(loading||!sharedCatalogueCurrent(capture)) return;loading=true;
     const el=document.getElementById(mount);if(!el){loading=false;return;}
+    let reopen=false;
     const prior=/** @type {HTMLButtonElement|null} */(el.querySelector("button[data-shared-more]"));if(prior) prior.disabled=true;
     try{
       const page=await sharedCatalogueRead(path+"?limit=100"+(q?`&q=${encodeURIComponent(q)}`:"")+(cursor?`&cursor=${encodeURIComponent(cursor)}`:""),capture);
@@ -162,24 +172,76 @@ async function sharedCatalogueLoadPage(path,ref,capture,mount,q=""){
       cursor=next||null;
       if(cursor&&seenItems.size>=5000){el.insertAdjacentHTML("beforeend",'<p class="muted">Search this library to narrow the results.</p>');}
       else if(cursor){seen.add(cursor);const button=document.createElement("button");button.className="ghost";button.dataset.sharedMore="true";button.textContent="Load more";button.onclick=load;el.appendChild(button);}
-    }catch(error){if(sharedCatalogueCurrent(capture)){if(prior) prior.disabled=false;else el.innerHTML=sharedCatalogueError(error);}}
+    }catch(error){if(sharedCatalogueCurrent(capture)){
+      if(cursor&&SHARED_CATALOGUE_REOPEN.includes(error?.code)) reopen=true;
+      else if(prior) prior.disabled=false;else el.innerHTML=sharedCatalogueError(error);}}
     finally{loading=false;}
+    // An expired, substituted or refused Source cursor is a typed fresh open:
+    // retrying the same cursor can never succeed. One open per request, from
+    // the first page, so this cannot become a restart loop.
+    if(reopen&&sharedCatalogueCurrent(capture)){
+      cursor=null;seen=new Set();seenItems=new Set();
+      el.innerHTML='<p class="muted" role="status">This list changed or its place expired, so it was reopened from the start.</p>';
+      await load();
+    }
   };
   await load();
 }
+const SHARED_CATALOGUE_REOPEN=Object.freeze(["sharing_cursor_expired","sharing_query_changed","sharing_cursor_invalid"]);
 
 // Fresh B details mint the opaque context. Displayed cached file facts never
 // become a Play authority, and Source numbers never enter the Local router.
 async function sharedCataloguePlay(reference,fileId,capture){
-  const ref=sharedCatalogueReference(reference),id=sharedCatalogueId(fileId);
-  if(!sharedCatalogueCurrent(capture))throw new Error("Shared page changed.");
+  return sharedCatalogueLaunch(reference,sharedCatalogueId(fileId),()=>sharedCatalogueCurrent(capture));
+}
+// A null file selects the first file of the fresh details (next episode).
+async function sharedCatalogueLaunch(reference,fileId,stillCurrent){
+  const ref=sharedCatalogueReference(reference),id=fileId===null?null:sharedCatalogueId(fileId);
+  if(!stillCurrent())throw new Error("Shared page changed.");
   const fresh=await SHARED_DECISION.details(ref);
-  if(!sharedCatalogueCurrent(capture)||fresh.detail.delivery_status!=="available")throw new Error("Shared playback is not available yet.");
-  const selected=fresh.files.find(entry=>entry.context.source_file_id===id);
+  if(!stillCurrent()||fresh.detail.delivery_status!=="available")throw new Error("Shared playback is not available yet.");
+  const selected=id===null?fresh.files[0]:fresh.files.find(entry=>entry.context.source_file_id===id);
   if(!selected)throw new Error("Shared file changed.");
   const watch=fresh.detail.watch;
   const resume=watch&&!watch.watched?watch.position_ms:0,duration=selected.file.duration_ms??0;
   if(!Number.isSafeInteger(resume)||resume<0||!Number.isSafeInteger(duration)||duration<0)throw new Error("Shared timeline unavailable.");
-  return play(id,fresh.detail.item.title||"Shared item",resume,duration,
+  return play(selected.context.source_file_id,fresh.detail.item.title||"Shared item",resume,duration,
     {...fresh.detail.item,fileContext:selected.context,sharedReference:ref});
+}
+// B-private explicit watched state; the server takes the next history
+// sequence, so a beat sent before this click cannot restore the old position.
+async function sharedCatalogueSetWatched(reference,watched){
+  const ref=sharedCatalogueReference(reference);
+  if(typeof watched!=="boolean")throw new TypeError("Invalid shared watched state");
+  return api(`/shared/imports/${ref.import_id}/items/${ref.item_id}/watched`,{method:"POST",body:{watched}});
+}
+// Next episode follows Source hierarchy and order through B: next in the
+// season, else the first episode of the next season. It returns a full Shared
+// reference for a new authorized start and never derives a Local item ID.
+async function sharedCatalogueNextEpisode(reference,read){
+  const ref=sharedCatalogueReference(reference),base=`/shared/imports/${ref.import_id}`,group=sharedCatalogueGroupKey(ref);
+  const owned=value=>{const r=sharedCatalogueReference(value);if(sharedCatalogueGroupKey(r)!==group)throw new Error("Shared source changed");return r;};
+  const detail=async id=>{const item=(await read(`${base}/items/${sharedCatalogueId(id)}`))?.item;
+    if(!item||owned(item.reference).item_id!==id)throw new Error("Shared source changed");return item;};
+  const children=async(id,kind)=>{
+    const rows=[],ids=new Set();let cursor=null;
+    for(let page=0;page<10;page++){
+      const reply=await read(`${base}/items/${sharedCatalogueId(id)}/children?limit=200`+(cursor?`&cursor=${encodeURIComponent(cursor)}`:""));
+      if(!Array.isArray(reply?.items)||reply.items.length>200)throw new Error("Shared children unavailable");
+      for(const row of reply.items){const r=owned(row.reference);if(row.kind===kind&&!ids.has(r.item_id)){ids.add(r.item_id);rows.push(r);}}
+      cursor=reply.next_cursor||null;if(!cursor)return rows;
+    }
+    throw new Error("Shared season unavailable");
+  };
+  const current=await detail(ref.item_id);
+  if(current.kind!=="episode"||!current.parent)return null;
+  const season=owned(current.parent),episodes=await children(season.item_id,"episode");
+  const at=episodes.findIndex(row=>row.item_id===ref.item_id);
+  if(at>=0&&episodes[at+1])return episodes[at+1];
+  const seasonItem=await detail(season.item_id);
+  if(!seasonItem.parent)return null;
+  const seasons=await children(owned(seasonItem.parent).item_id,"season");
+  const index=seasons.findIndex(row=>row.item_id===season.item_id),next=index<0?null:seasons[index+1];
+  if(!next)return null;
+  return (await children(next.item_id,"episode"))[0]||null;
 }

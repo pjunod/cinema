@@ -14,7 +14,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 #[async_trait]
 pub trait SharingReceiverRetirementStore: Send + Sync {
     /// Cleanup-only exact claim with no created route/resources. Caller retains
@@ -119,12 +118,7 @@ impl<T: Backend> SharingReceiverRetirementStore for T {
                 Err(e) => Err(e),
             };
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|d| i64::try_from(d.as_millis()).ok())
-            .filter(|n| *n > 0)
-            .ok_or_else(invalid)?;
+        let now = super::sharing::wall_clock_ms()?;
         let update = "UPDATE media_session_requests SET state='failed',claim_expires_at_ms=$2,updated_at_ms=$2 WHERE incarnation_id=json_extract($1,'$.incarnation') AND user_id=json_extract($1,'$.user') AND request_id=json_extract($1,'$.request') AND state='starting'";
         let written = format!("{after} AND EXISTS(SELECT 1 FROM media_session_requests r WHERE {identity} AND r.updated_at_ms=$2 AND r.claim_expires_at_ms=$2)");
         let statements = vec![
@@ -238,11 +232,7 @@ impl<T: Backend> SharingReceiverRetirementStore for T {
         digest.update(b"plurx.receiver.retirement-context.v1\0");
         digest.update(context_identity.as_bytes());
         let receipt=serde_json::json!({"kind":"receiver_retirement_v1","context":format!("{:x}",digest.finalize()),"confirmation":w.confirmation_id(),"disposition":disposition,"reason":reason}).to_string();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|d| i64::try_from(d.as_millis()).ok())
-            .ok_or_else(invalid)?;
+        let now = super::sharing::wall_clock_ms()?;
         let vals = vec![
             Value::Text(context),
             Value::Text(receipt),
@@ -253,10 +243,14 @@ impl<T: Backend> SharingReceiverRetirementStore for T {
         let request="r.incarnation_id=s.incarnation_id AND r.user_id=s.user_id AND r.request_id=json_extract($1,'$.request') AND r.owner_node_id=s.owner_node_id AND r.playback_id=s.playback_id AND r.request_fingerprint=s.request_fingerprint AND r.response_json IS json_extract($1,'$.request_response')";
         let upstream="b.incarnation_id=s.incarnation_id AND b.import_id=json_extract($1,'$.import') AND b.lifecycle_generation=json_extract($1,'$.lifecycle') AND b.assignment_generation=json_extract($1,'$.assignment') AND b.endpoint_revision=json_extract($1,'$.endpoint') AND b.remote_library_id=json_extract(s.recipe_json,'$.reference.library_id') AND b.remote_item_id=json_extract(s.recipe_json,'$.reference.item_id') AND b.remote_file_id=json_extract(s.recipe_json,'$.file_id') AND b.remote_revision=json_extract(s.recipe_json,'$.file_revision') AND b.source_request_id=json_extract(s.recipe_json,'$.source_request_id') AND b.source_position_ms=s.media_origin_ms AND ((json_extract($1,'$.binding') IS NULL AND b.source_session_id IS NULL AND b.source_incarnation_id IS NULL AND b.capability_envelope IS NULL AND r.state IN('starting','failed') AND r.response_json IS NULL) OR (json_extract($1,'$.binding') IS NOT NULL AND b.source_session_id=json_extract($1,'$.binding.session') AND b.source_incarnation_id=json_extract($1,'$.binding.incarnation') AND b.capability_envelope=json_extract($1,'$.binding.envelope') AND ((r.state='resolved' AND r.response_json=s.response_json AND (s.publication_ready_at_ms=0 OR s.state='ended')) OR (r.state IN('starting','failed') AND r.response_json IS NULL))))";
         let resources="NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id AND (j.owner_node_id<>s.owner_node_id OR j.fence<>s.owner_epoch OR (j.expires_at_ms<>s.lease_expires_at_ms AND (s.state<>'ended' OR j.expires_at_ms>s.lease_expires_at_ms)))) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=s.incarnation_id AND p.consumer_epoch<>s.owner_epoch) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.current_incarnation_id=s.incarnation_id AND (p.user_id<>s.user_id OR p.playback_id<>s.playback_id))";
+        // Closure remains the private daemon factory's responsibility. This
+        // same-write predicate refuses durable release with any open ingress
+        // obligation, including an already-authorized late Register.
+        let custody = "EXISTS(SELECT 1 FROM sharing_ingress_custody c WHERE c.principal_kind='receiver' AND c.incarnation_id=s.incarnation_id AND json_extract(c.custody_json,'$.version')=1 AND json_extract(c.custody_json,'$.sealed')=1 AND NOT EXISTS(SELECT 1 FROM json_each(c.custody_json,'$.slots') slot WHERE json_extract(slot.value,'$.closed_confirmation') IS NULL))";
         // A never-dispatched disposition additionally requires the durable
         // `none` dispatch marker: a recorded (or unknown) dispatch owes End.
-        let before=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} JOIN sharing_relay_upstream b ON {upstream} WHERE {identity} AND s.state IN('active','ended') AND (json_extract($2,'$.disposition')<>'never_dispatched' OR b.dispatch_envelope='none') AND ({resources}))");
-        let after=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} WHERE {identity} AND s.state='ended' AND s.response_json=$2 AND s.terminal_reason IS NOT NULL AND s.publication_ready_at_ms=0 AND r.state IN('resolved','failed') AND NOT EXISTS(SELECT 1 FROM sharing_delivery_grants g WHERE g.incarnation_id=s.incarnation_id AND g.state<>'revoked') AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.current_incarnation_id=s.incarnation_id))");
+        let before=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} JOIN sharing_relay_upstream b ON {upstream} WHERE {identity} AND s.state IN('active','ended') AND (json_extract($2,'$.disposition')<>'never_dispatched' OR b.dispatch_envelope='none') AND ({resources}) AND ({custody}))");
+        let after=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} WHERE {identity} AND s.state='ended' AND s.response_json=$2 AND s.terminal_reason IS NOT NULL AND s.publication_ready_at_ms=0 AND r.state IN('resolved','failed') AND NOT EXISTS(SELECT 1 FROM sharing_delivery_grants g WHERE g.incarnation_id=s.incarnation_id AND g.state<>'revoked') AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.current_incarnation_id=s.incarnation_id) AND ({custody}))");
         let read = retirement_ordered(
             &format!("SELECT 'replay' AS payload WHERE ({after})"),
             vals.clone(),
@@ -319,6 +313,37 @@ impl ReceiverRetirementWitness for MetadataRetirementFixture {
         &self.confirmation
     }
 }
+/// Metadata-only fixture setup. It creates no producer/driver or closure
+/// receipt; raw model witnesses exercise SQL fencing, not daemon ownership.
+#[cfg(test)]
+pub(crate) async fn install_model_ingress_fence<T: Backend + super::MediaSessionStore>(
+    store: &T,
+    incarnation: &str,
+) {
+    use super::SharingReceiverIngressStore;
+    let Some(route) = store
+        .media_session_route_by_incarnation(incarnation)
+        .await
+        .expect("model route")
+    else {
+        return;
+    };
+    if store
+        .receiver_ingress_snapshot(&route)
+        .await
+        .expect("model custody")
+        .is_none()
+    {
+        let identity = crate::auth::hash_token(&format!(
+            "plurx.metadata-only.receiver.fence\0{incarnation}"
+        ));
+        store
+            .seal_receiver_ingress_route(&route, &identity)
+            .await
+            .expect("empty model seal");
+    }
+}
+
 #[cfg(test)]
 pub(crate) async fn metadata_retirement_matrix<T: Backend + super::MediaSessionStore>(
     store: &T,
@@ -326,6 +351,7 @@ pub(crate) async fn metadata_retirement_matrix<T: Backend + super::MediaSessionS
     deleted: bool,
 ) {
     let inc = witness.attachment.owner.incarnation_id;
+    install_model_ingress_fence(store, &inc.to_string()).await;
     // Metadata corruption fixture: even an expired retained grant must revoke
     // atomically; expiry by itself is never Source settlement evidence.
     store.sharing_txn(vec![("INSERT INTO sharing_delivery_grants(token_hash,incarnation_id,source_token_hash,state,deadline_ms) VALUES($1,$2,$3,'active',1)".into(),vec![inc.simple().to_string().repeat(2).into(),inc.into(),witness.intent.login_hash.clone().into()])]).await.expect("retained grant fixture");
@@ -439,10 +465,7 @@ pub(crate) async fn metadata_retirement_matrix<T: Backend + super::MediaSessionS
         .await
         .expect("successor authority")
         .expect("current original login");
-    let actual = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_millis() as i64;
+    let actual = crate::store::sharing::wall_clock_ms().expect("clock");
     let next = crate::domain::MediaSessionActivation {
         incarnation_id: next_intent.recipe.source_request_id.to_string(),
         session_id: uuid::Uuid::new_v4().to_string(),
@@ -537,10 +560,7 @@ pub(crate) async fn metadata_retirement_matrix<T: Backend + super::MediaSessionS
             ])
             .await
             .expect("logout/import revocation and displaced old pointer");
-        let actual = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_millis() as i64;
+        let actual = crate::store::sharing::wall_clock_ms().expect("clock");
         let ack = crate::domain::MediaSessionTerminalAck {
             incarnation_id: inc.to_string(),
             session_id: witness.attachment.owner.session_id.to_string(),
@@ -677,6 +697,7 @@ pub(crate) async fn pending_metadata_retirement_matrix<T: Backend + super::Media
     w: PendingMetadataFixture,
 ) {
     let inc = w.owner.incarnation_id;
+    install_model_ingress_fence(store, &inc.to_string()).await;
     store.sharing_txn(vec![("UPDATE sharing_relay_upstream SET source_session_id='partial' WHERE incarnation_id=$1".into(),vec![inc.into()]),("CREATE TRIGGER retirement_ignore_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("partial binding plus ignored assertion");
     assert_eq!(
         store
@@ -754,6 +775,7 @@ mod pending_request_tests {
     }
     #[tokio::test]
     async fn sharing_receiver_pending_retirement_requires_exact_claim_and_absent_resources() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let dir = tempfile::tempdir().expect("pool");
         for rebuilt in [false, true] {
             for pooled in [false, true] {
@@ -828,10 +850,7 @@ mod pending_request_tests {
                     store.sharing_txn(vec![("INSERT INTO sharing_viewers VALUES($1,$2)".into(),vec![user.id.into(),Uuid::new_v4().into()]),("INSERT INTO sharing_imports(id,source_server_id,catalogue_epoch,source_name,claim_id,remote_grant_id,credential_envelope,endpoints_json,assignment_generation,lifecycle_generation,endpoint_generation,state,created_at_ms,updated_at_ms) VALUES($1,$2,$3,'Source',$4,$5,'unopened metadata fixture','[]',1,1,1,'active',1,1)".into(),vec![w.intent.scope.import_id.into(),w.intent.scope.source_server_id.into(),w.intent.scope.catalogue_epoch.into(),w.intent.scope.claim_id.into(),w.intent.scope.remote_grant_id.into()]),("INSERT INTO sharing_assignments VALUES($1,'0',$2,1)".into(),vec![w.intent.scope.import_id.into(),user.id.into()])]).await.expect("actual B import/assignment metadata before revocation");
                     let principal = PlaybackPrincipal::LocalUser { user_id: user.id };
                     let inc = w.intent.recipe.source_request_id.to_string();
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("clock")
-                        .as_millis() as i64;
+                    let now = crate::store::sharing::wall_clock_ms().expect("clock");
                     assert!(matches!(
                         store
                             .claim_media_session_request(

@@ -271,6 +271,48 @@ async fn retire_claimed(
     let orphan = claimed.orphan();
     let owner = orphan.owner().clone();
     let mut budget = RetirementBudget::new(shutdown.clone());
+    let route = match state
+        .store
+        .media_session_route_by_incarnation(&owner.incarnation_id.to_string())
+        .await
+    {
+        Ok(Some(route))
+            if route.owner_node_id == state.node_id && route.owner_epoch == owner.owner_epoch =>
+        {
+            route
+        }
+        _ => return OrphanOutcome::Deferred("cleanup_owner_changed"),
+    };
+    let snapshot = match state.store.receiver_ingress_snapshot(&route).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => return OrphanOutcome::Deferred("ingress_custody_unavailable"),
+    };
+    let original = match snapshot {
+        Some(snapshot) => snapshot.owner_identity,
+        None if orphan.binding().is_some() => {
+            return OrphanOutcome::Stranded("ingress_custody_missing")
+        }
+        None => plurx_core::auth::hash_token(&format!(
+            "plurx.receiver.unpublished.ingress.v1\0{}\0{}\0{}\0{}\0{}",
+            route.incarnation_id,
+            route.session_id,
+            route.owner_node_id,
+            route.owner_epoch,
+            route.recipe_json
+        )),
+    };
+    if ingress_custody::close_receiver_ingress(
+        Arc::new(state.clone()),
+        &route,
+        &original,
+        crate::sharing_connection_custody::DriverCloseMode::Revoke,
+        budget.deadline,
+    )
+    .await
+    .is_err()
+    {
+        return OrphanOutcome::Stranded("ingress_custody_unresolved");
+    }
     let (disposition, confirmation, source) = match plan {
         EndPlan::NeverDispatched => {
             // The claim advanced the epoch, so the dead owner's dispatch
@@ -301,14 +343,16 @@ async fn retire_claimed(
                 lineage,
                 session,
             } = end.as_ref();
-            let attempt = async {
-                let mut connection =
-                    crate::sharing_client::CleanupPeerConnection::connect(&state.sharing, endpoint)
-                        .await?;
-                connection
-                    .end(credential, viewer_hash, session, lineage.as_ref())
-                    .await
-            }
+            let attempt = crate::sharing_client::CleanupPeerConnection::end_for_session(
+                state,
+                orphan.intent(),
+                endpoint,
+                credential,
+                viewer_hash,
+                session,
+                lineage.as_ref(),
+                tokio::time::Instant::from_std(budget.deadline),
+            )
             .await;
             match attempt {
                 Ok(receipt) => match receipt.retirement_confirmation(session) {
@@ -1107,6 +1151,38 @@ mod tests {
             f.state.sharing.status().receiver_recovery.retired_total,
             1,
             "the first look retired the never-dispatched route"
+        );
+    }
+
+    #[test]
+    fn sharing_protocol_fixture_receiver_recovery_status() {
+        let fixture = crate::sharing_protocol_fixture::fixture();
+        let recovery = &fixture["receiver_recovery"];
+        assert_eq!(recovery["stranded_max"], STRANDED_MAX);
+        let wire = &recovery["status"];
+        let status = crate::sharing::ReceiverRecoveryStatus {
+            last_scan_at_ms: wire["last_scan_at_ms"].as_i64(),
+            in_flight: crate::sharing_protocol_fixture::rows(&wire["in_flight"], "in flight")
+                .iter()
+                .map(|id| Uuid::parse_str(id.as_str().expect("id")).expect("id"))
+                .collect(),
+            retired_total: wire["retired_total"].as_u64().expect("retired"),
+            stranded: crate::sharing_protocol_fixture::rows(&wire["stranded"], "stranded")
+                .iter()
+                .map(|row| crate::sharing::StrandedReceiver {
+                    incarnation_id: row["incarnation_id"].as_str().expect("id").to_owned(),
+                    reason: match row["reason"].as_str().expect("reason") {
+                        "dispatch_unknown" => "dispatch_unknown",
+                        other => panic!("unlisted fixture reason {other}"),
+                    },
+                    observed_at_ms: row["observed_at_ms"].as_i64().expect("observed"),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            serde_json::to_value(&status).expect("recovery wire"),
+            *wire,
+            "/sharing/status receiver_recovery is exactly the fixture shape"
         );
     }
 }

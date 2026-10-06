@@ -7,6 +7,16 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
 
+#[path = "shared_source_forwarding.rs"]
+pub(crate) mod forwarding;
+use forwarding::{AuthenticationHeaders, SourceHeaders};
+#[path = "shared_source_ingress.rs"]
+mod ingress;
+use ingress::{
+    apply_forward_custody, execute_forward_unassigned_cleanup, prepare_forward_start,
+    resolve_forward_route, source_forward_locality, validate_retained_forward,
+};
+
 #[path = "shared_source_direct.rs"]
 pub(crate) mod direct;
 
@@ -20,6 +30,7 @@ struct SourceStartInput {
 }
 #[derive(Default)]
 pub(crate) struct SourceStartRegistry {
+    forwarding: forwarding::ForwardingRegistry,
     entries: std::sync::Mutex<Vec<std::sync::Arc<SourceStartEntry>>>,
     settled: std::sync::Mutex<std::collections::VecDeque<std::sync::Arc<SourceStartEntry>>>,
 }
@@ -30,6 +41,8 @@ struct SourceStartEntry {
     authenticated_hashes: std::sync::Mutex<Vec<String>>,
     published: std::sync::Mutex<Option<SourcePublishedLineage>>,
     ending: std::sync::Mutex<Option<std::sync::Arc<SourceEndOwner>>>,
+    end_deadline: std::sync::OnceLock<std::time::Instant>,
+    local_custody: std::sync::Mutex<Vec<ingress::LocalCustody>>,
     changed: tokio::sync::Notify,
     result: std::sync::Mutex<Option<Result<SourceStartOwned, SourceStartFailure>>>,
     task: SourceStartTask,
@@ -41,13 +54,14 @@ struct SourceStartEntry {
 struct SourceStartTask {
     stage: std::sync::Mutex<SourceStartTaskStage>,
     joined: std::sync::Mutex<Option<SourceStartTaskJoined>>,
+    cleanup: std::sync::Mutex<Option<SourceUninvokedCleanup>>,
+    cleanup_confirmation: std::sync::Mutex<Option<Uuid>>,
+    supervisor: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 #[derive(Default)]
 enum SourceStartTaskStage {
     #[default]
     Registered,
-    Preparing,
-    Prepared,
     ReadingIntent {
         planned_incarnation: Uuid,
     },
@@ -58,23 +72,71 @@ enum SourceStartTaskStage {
     Claiming {
         planned_incarnation: Uuid,
         // Preserve the actual opaque prepared intent across an unknown claim
-        // outcome, even though the HTTP layer cannot turn it into authority.
-        _intent: plurx_core::sharing_source_sessions::SourceSessionIntent,
+        // outcome, never as an adopted factory or physical-admission authority.
+        intent: plurx_core::sharing_source_sessions::SourceSessionIntent,
     },
     Acquired(plurx_core::sharing_source_sessions::SourceBindingHandle),
     Assigning(plurx_core::sharing_source_sessions::SourceBindingHandle),
     Assigned(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
     Activating(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
     InvokingFactory(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
+    FactoryRefused(crate::transcode::source_actor::SourceWorkerNoAdmission),
 }
 enum SourceStartTaskJoined {
     Returned,
     PanickedOrCancelled,
 }
+// Private invocation custody: only the supervisor that joined the actual Start
+// task can retain this receipt. It covers this acquired incarnation, never a
+// historical request or an assignment reconstructed from durable rows.
+#[derive(Clone)]
+enum SourceUninvokedCleanup {
+    UncertainG0 {
+        planned_incarnation: Uuid,
+        intent: Box<plurx_core::sharing_source_sessions::SourceSessionIntent>,
+    },
+    G0(plurx_core::sharing_source_sessions::SourceBindingHandle),
+    G1(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
+}
+impl SourceUninvokedCleanup {
+    fn incarnation(&self) -> Uuid {
+        match self {
+            Self::UncertainG0 {
+                planned_incarnation,
+                ..
+            } => *planned_incarnation,
+            Self::G0(binding) => binding.incarnation_id(),
+            Self::G1(assignment) => assignment.binding().incarnation_id(),
+        }
+    }
+    async fn release(&self, state: &crate::state::AppState) -> Result<(), SourceStartFailure> {
+        use plurx_core::sharing_source_sessions::SourceReleaseOutcome;
+        let result = match self {
+            Self::UncertainG0 { intent, .. } => {
+                state
+                    .store
+                    .release_source_uncertain_uninvoked_claim(intent)
+                    .await
+            }
+            Self::G0(binding) => state.store.release_source_never_dispatched(binding).await,
+            Self::G1(assignment) => {
+                state
+                    .store
+                    .settle_source_assigned_without_activation(assignment)
+                    .await
+            }
+        }
+        .map_err(|_| SourceStartFailure::Unresolved)?;
+        match result {
+            SourceReleaseOutcome::Released | SourceReleaseOutcome::ExactReplay => Ok(()),
+            SourceReleaseOutcome::Refused => Err(SourceStartFailure::Unresolved),
+        }
+    }
+}
 impl SourceStartTaskStage {
     fn incarnation(&self) -> Option<Uuid> {
         match self {
-            Self::Registered | Self::Preparing | Self::Prepared => None,
+            Self::Registered => None,
             Self::ReadingIntent {
                 planned_incarnation,
             }
@@ -90,26 +152,29 @@ impl SourceStartTaskStage {
             Self::Assigned(assignment)
             | Self::Activating(assignment)
             | Self::InvokingFactory(assignment) => Some(assignment.binding().incarnation_id()),
+            Self::FactoryRefused(receipt) => Some(receipt.assignment().binding().incarnation_id()),
         }
     }
 }
 impl SourceStartEntry {
     fn retain_stage(&self, stage: SourceStartTaskStage) {
         *self.task.stage.lock().expect("Source owned start stage") = stage;
+        self.changed.notify_waiters();
     }
     fn start_owned_task(
         self: &std::sync::Arc<Self>,
         state: std::sync::Arc<crate::state::AppState>,
-        headers: HeaderMap,
+        headers: SourceHeaders,
         input: SourceStartInput,
         deadline: std::time::Instant,
     ) {
-        // The detached supervisor owns the actual JoinHandle. Waiter loss
+        // The entry retains its supervisor, which owns the actual JoinHandle. Waiter loss
         // cannot drop this task or replace its retained claim/assignment stage.
         // Publish an outcome only after this exact worker future has joined.
         let entry = std::sync::Arc::clone(self);
         let worker_entry = std::sync::Arc::clone(self);
         let grant = self.grant;
+        let cleanup_state = std::sync::Arc::clone(&state);
         let worker = tokio::spawn(async move {
             Box::pin(own_start(
                 state,
@@ -121,7 +186,7 @@ impl SourceStartEntry {
             ))
             .await
         });
-        tokio::spawn(async move {
+        let supervisor = tokio::spawn(async move {
             let (result, joined) = match worker.await {
                 Ok(result) => (result, SourceStartTaskJoined::Returned),
                 Err(_) => (
@@ -140,10 +205,49 @@ impl SourceStartEntry {
                     Some(owned.assignment.binding().incarnation_id())
                 );
             }
+            if result.is_err() && matches!(joined, SourceStartTaskJoined::Returned) {
+                // The exact future returned before dispatch; its prepared inputs
+                // have dropped. A fresh acquired handle or this invocation's
+                // retained planned nonce can fence only its exact g0 attempt;
+                // refusal retains custody instead of fabricating g1 proof.
+                let cleanup = match &*entry.task.stage.lock().expect("Source start stage") {
+                    SourceStartTaskStage::Claiming {
+                        planned_incarnation,
+                        intent,
+                    } => {
+                        // Only this joined invocation's fresh planned nonce and
+                        // opaque intent survive an unknown claim; an exact g0
+                        // CAS may fence it, never release an adopted g1 owner.
+                        Some(SourceUninvokedCleanup::UncertainG0 {
+                            planned_incarnation: *planned_incarnation,
+                            intent: Box::new(intent.clone()),
+                        })
+                    }
+                    SourceStartTaskStage::Acquired(binding)
+                    | SourceStartTaskStage::Assigning(binding) => {
+                        Some(SourceUninvokedCleanup::G0(binding.clone()))
+                    }
+                    SourceStartTaskStage::Assigned(assignment)
+                    | SourceStartTaskStage::Activating(assignment) => {
+                        Some(SourceUninvokedCleanup::G1(assignment.clone()))
+                    }
+                    SourceStartTaskStage::FactoryRefused(receipt) => {
+                        Some(SourceUninvokedCleanup::G1(receipt.assignment().clone()))
+                    }
+                    _ => None,
+                };
+                *entry.task.cleanup.lock().expect("uninvoked Source custody") = cleanup;
+                let _ = entry.release_uninvoked(&cleanup_state).await;
+            }
             *entry.task.joined.lock().expect("actual Source task join") = Some(joined);
             *entry.result.lock().expect("Source HTTP outcome") = Some(result);
             entry.changed.notify_waiters();
         });
+        *self
+            .task
+            .supervisor
+            .lock()
+            .expect("Source start supervisor owner") = Some(supervisor);
     }
 }
 struct SourceStartIdentity {
@@ -152,6 +256,10 @@ struct SourceStartIdentity {
     reference: SourcePlaybackTarget,
     recipe_hash: [u8; 32],
 }
+/// The typed refusal of a shared Dolby Vision delivery, on the Source and on
+/// B's own Start validation alike.
+pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
+    "sharing_start_dolby_vision_unsupported";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceStartFailure {
     Unavailable,
@@ -159,6 +267,9 @@ enum SourceStartFailure {
     Conflict,
     Unresolved,
     Unsupported,
+    /// A Dolby Vision delivery this Source does not build yet: refused with
+    /// its own typed code after a fresh invocation claim, before admission.
+    DolbyVisionUnsupported,
     Deadline,
 }
 impl SourceStartRegistry {
@@ -219,6 +330,8 @@ impl SourceStartRegistry {
             authenticated_hashes: std::sync::Mutex::new(Vec::new()),
             published: std::sync::Mutex::new(None),
             ending: std::sync::Mutex::new(None),
+            end_deadline: std::sync::OnceLock::new(),
+            local_custody: Default::default(),
             changed: tokio::sync::Notify::new(),
             result: std::sync::Mutex::new(None),
             task: SourceStartTask::default(),
@@ -249,6 +362,7 @@ struct SourceEndReceipt {
     settled: bool,
 }
 struct SourceEndOwner {
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     changed: tokio::sync::Notify,
     result: std::sync::Mutex<Option<Result<SourceEndReceipt, SourceStartFailure>>>,
 }
@@ -282,20 +396,68 @@ impl SourceStartEntry {
                     .is_ok_and(|owned| owned.actor.settlement_status() == Some(Ok(())))
             })
     }
-    /// Nothing in this process still owns work for this start. The outcome
-    /// is published only after the worker joined, so a failure handed no
-    /// actor to this entry; durable claim and assignment rows it may have
-    /// left are reclaimed by their own lease expiry. A started actor counts
-    /// once it has finished settlement, successfully or not.
+    /// A joined error may still own an ambiguous durable/physical obligation.
+    /// Only an exact cleanup receipt allows that acquired obligation to leave
+    /// admission capacity. Failure before any claim owns no durable work here.
     fn actual_finished(&self) -> bool {
         self.result
             .lock()
             .expect("Source HTTP outcome")
             .as_ref()
             .is_some_and(|result| match result {
-                Ok(owned) => owned.actor.settlement_final(),
-                Err(_) => true,
+                Ok(owned) => owned.actor.settlement_status() == Some(Ok(())),
+                Err(_) => {
+                    self.task
+                        .cleanup_confirmation
+                        .lock()
+                        .expect("Source cleanup confirmation")
+                        .is_some()
+                        || (matches!(
+                            *self.task.joined.lock().expect("Source joined task"),
+                            Some(SourceStartTaskJoined::Returned)
+                        ) && matches!(
+                            *self.task.stage.lock().expect("Source start stage"),
+                            SourceStartTaskStage::Registered
+                                | SourceStartTaskStage::ReadingIntent { .. }
+                                | SourceStartTaskStage::IntentReady { .. }
+                        ))
+                }
             })
+    }
+    async fn release_uninvoked(
+        &self,
+        state: &crate::state::AppState,
+    ) -> Result<(Uuid, Uuid), SourceStartFailure> {
+        let cleanup = self
+            .task
+            .cleanup
+            .lock()
+            .expect("uninvoked Source custody")
+            .clone()
+            .ok_or(SourceStartFailure::Unresolved)?;
+        if self
+            .task
+            .cleanup_confirmation
+            .lock()
+            .expect("Source cleanup confirmation")
+            .is_none()
+        {
+            cleanup.release(state).await?;
+            let mut confirmation = self
+                .task
+                .cleanup_confirmation
+                .lock()
+                .expect("Source cleanup confirmation");
+            confirmation.get_or_insert_with(Uuid::new_v4);
+        }
+        Ok((
+            cleanup.incarnation(),
+            self.task
+                .cleanup_confirmation
+                .lock()
+                .expect("Source cleanup confirmation")
+                .expect("actual cleanup receipt"),
+        ))
     }
     fn remember_authenticated_hash(&self, hash: &str) -> Result<(), SourceStartFailure> {
         if hash.len() != 64
@@ -360,7 +522,10 @@ impl SourceStartEntry {
         }
         Ok(())
     }
-    fn end(self: &std::sync::Arc<Self>) -> std::sync::Arc<SourceEndOwner> {
+    fn end(
+        self: &std::sync::Arc<Self>,
+        state: std::sync::Arc<crate::state::AppState>,
+    ) -> std::sync::Arc<SourceEndOwner> {
         let mut ending = self.ending.lock().expect("Source End owner");
         if let Some(owner) = ending.as_ref() {
             // The actor retains its actual physical proof and retries failed
@@ -371,11 +536,23 @@ impl SourceStartEntry {
                 *owner.result.lock().expect("Source End outcome"),
                 Some(Err(_))
             );
-            if !failed || !self.actual_settled() {
+            if !failed
+                || (!self.actual_settled()
+                    && self
+                        .task
+                        .cleanup
+                        .lock()
+                        .expect("uninvoked Source custody")
+                        .is_none())
+            {
                 return std::sync::Arc::clone(owner);
             }
         }
+        let deadline = *self
+            .end_deadline
+            .get_or_init(|| std::time::Instant::now() + std::time::Duration::from_secs(305));
         let owner = std::sync::Arc::new(SourceEndOwner {
+            task: std::sync::Mutex::new(None),
             changed: tokio::sync::Notify::new(),
             result: std::sync::Mutex::new(None),
         });
@@ -384,14 +561,34 @@ impl SourceStartEntry {
         let task = std::sync::Arc::clone(&owner);
         // Insertion and detached spawn precede every wait/retirement await.
         // Disconnect loses only the HTTP waiter, never this actual obligation.
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let result = async {
-                let owned = entry
-                    .wait(std::time::Instant::now() + std::time::Duration::from_secs(305))
-                    .await?;
+                if let Some(assignment) = ingress::actual_assignment(&entry) {
+                    ingress::retire_custody(&state, &assignment, deadline)
+                        .await
+                        .map_err(|_| SourceStartFailure::Unresolved)?;
+                    entry.changed.notify_waiters();
+                }
+                let owned = match entry.wait(deadline).await {
+                    Ok(owned) => owned,
+                    Err(_) => {
+                        let (incarnation_id, confirmation_id) =
+                            entry.release_uninvoked(&state).await?;
+                        return Ok(SourceEndReceipt {
+                            reference: entry.identity.reference.clone(),
+                            request_id: entry.identity.request_id,
+                            incarnation_id,
+                            session_id: None,
+                            control_epoch: None,
+                            state: "settled",
+                            confirmation_id,
+                            settled: true,
+                        });
+                    }
+                };
                 owned
                     .actor
-                    .retire()
+                    .retire_with_deadline(deadline)
                     .await
                     .map_err(SourceStartFailure::from)?;
                 if owned.actor.settlement_status() != Some(Ok(())) {
@@ -420,6 +617,7 @@ impl SourceStartEntry {
             *task.result.lock().expect("Source End outcome") = Some(result);
             task.changed.notify_waiters();
         });
+        *owner.task.lock().expect("Source End task owner") = Some(handle);
         owner
     }
 }
@@ -586,8 +784,9 @@ fn parse_live_operation(
 }
 async fn live_operation_owner(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &SourceHeaders,
     input: &SourceOperationInput,
+    connection: Option<&crate::SharingConnectionCancellation>,
     deadline: std::time::Instant,
 ) -> Result<(std::sync::Arc<SourceStartEntry>, SourceStartOwned), ApiError> {
     let viewer = viewer_hash(headers)?;
@@ -604,11 +803,18 @@ async fn live_operation_owner(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
+    ingress::register_local(
+        state,
+        connection.ok_or_else(unavailable)?,
+        &entry,
+        &owned.assignment,
+    )
+    .await?;
     Ok((entry, owned))
 }
 async fn live_operation_response(
     state: crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &SourceHeaders,
     input: SourceOperationInput,
     entry: &SourceStartEntry,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
@@ -619,6 +825,8 @@ async fn live_operation_response(
     ),
 ) -> Result<axum::response::Response, ApiError> {
     let (field, value, guard) = content;
+    let assignment = ingress::actual_assignment(entry).ok_or_else(unavailable)?;
+    ingress::publication_allowed(&state, &assignment).await?;
     let (_, grant) = current_reference(&state, headers, &input.start.reference).await?;
     if grant != entry.grant {
         return Err(unavailable());
@@ -644,7 +852,7 @@ async fn live_operation_response(
 }
 async fn vod_status(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
@@ -654,7 +862,14 @@ async fn vod_status(
         .await
         .map_err(|_| invalid())?;
     let (input, _) = parse_live_operation(&bytes, &item, &file, &request, false)?;
-    let (entry, owned) = live_operation_owner(&state, &headers, &input, deadline).await?;
+    let (entry, owned) = live_operation_owner(
+        &state,
+        &headers,
+        &input,
+        connection.as_ref().map(|value| &value.0),
+        deadline,
+    )
+    .await?;
     let (status, guard) = owned
         .actor
         .open_status(deadline)
@@ -678,7 +893,7 @@ async fn vod_status(
 }
 async fn control(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
@@ -689,7 +904,14 @@ async fn control(
         .map_err(|_| invalid())?;
     let (input, control) = parse_live_operation(&bytes, &item, &file, &request, true)?;
     let request = control.ok_or_else(invalid)?;
-    let (entry, owned) = live_operation_owner(&state, &headers, &input, deadline).await?;
+    let (entry, owned) = live_operation_owner(
+        &state,
+        &headers,
+        &input,
+        connection.as_ref().map(|value| &value.0),
+        deadline,
+    )
+    .await?;
     // A dropped HTTP waiter cannot discard an accepted actor exchange or its
     // nested observations. The exact owned task retains the physical guard.
     let command = request.clone();
@@ -731,7 +953,7 @@ async fn control(
 }
 async fn status(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
@@ -743,9 +965,7 @@ async fn status(
         .map_err(|_| invalid())?;
     let input = parse_operation_request(&bytes, &item, &file, &request)?;
     let viewer = viewer_hash(&headers)?;
-    let credential = super::sharing::credential(&headers)?;
-    let hash =
-        plurx_core::sharing::secret_hash(plurx_core::sharing::SecretDomain::Grant, &credential);
+    let hash = source_credential_hash(&headers)?;
     let current = current_reference(&state, &headers, &input.start.reference).await;
     let entry = match current.as_ref() {
         Ok((current_hash, current_grant)) => state.transcode.source_http_starts.current_entry(
@@ -767,7 +987,28 @@ async fn status(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
-    if let (Ok((_, current_grant)), true) = (current.as_ref(), owned.actor.is_direct()) {
+    let ledger = state
+        .store
+        .source_ingress_custody(&owned.assignment)
+        .await
+        .map_err(|_| unavailable())?
+        .ok_or_else(unavailable)?;
+    let cleanup_only = headers.cleanup_only()
+        || current.is_err()
+        || ledger.state.is_sealed()
+        || entry.ending.lock().expect("Source ending owner").is_some();
+    if !cleanup_only {
+        ingress::register_local(
+            &state,
+            &connection.as_ref().ok_or_else(unavailable)?.0,
+            &entry,
+            &owned.assignment,
+        )
+        .await?;
+    }
+    if let (Ok((_, current_grant)), true) =
+        (current.as_ref(), owned.actor.is_direct() && !cleanup_only)
+    {
         if let Ok(response) = direct::published_reply(
             &state,
             &headers,
@@ -787,8 +1028,9 @@ async fn status(
             .await);
         }
     }
-    if current.is_ok() {
+    if current.is_ok() && !cleanup_only {
         if let Ok((response, guard)) = owned.actor.open_start_response(deadline).await {
+            ingress::publication_allowed(&state, &owned.assignment).await?;
             entry
                 .observe_published(&owned, &response)
                 .map_err(SourceStartFailure::response)?;
@@ -828,8 +1070,9 @@ async fn status(
 }
 async fn end(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
+    connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
 ) -> Result<axum::Json<SourceEndReceipt>, ApiError> {
     let bytes = axum::body::to_bytes(body, 128 * 1024)
@@ -837,9 +1080,7 @@ async fn end(
         .map_err(|_| invalid())?;
     let input = parse_operation_request(&bytes, &item, &file, &request)?;
     let viewer = viewer_hash(&headers)?;
-    let credential = super::sharing::credential(&headers)?;
-    let hash =
-        plurx_core::sharing::secret_hash(plurx_core::sharing::SecretDomain::Grant, &credential);
+    let hash = source_credential_hash(&headers)?;
     // Cleanup authenticates only the exact previously owned obligation. It
     // grants no resource/status content permission and reads no expired grant.
     let entry = state
@@ -850,9 +1091,31 @@ async fn end(
     entry
         .validate_known(input.known.as_ref())
         .map_err(SourceStartFailure::response)?;
-    let owner = entry.end();
+    let owner = entry.end(std::sync::Arc::new(state.clone()));
+    let mut drivers = Vec::with_capacity(2);
+    if let Some(ingress) = headers.forwarded_ingress() {
+        drivers.push(ingress.driver.clone());
+    }
+    if let Some(connection) = connection.as_ref() {
+        if let Ok(captured) = state
+            .sharing
+            .accepted_drivers
+            .capture(&connection.0, &state.node_id)
+        {
+            drivers.push(captured.id().clone());
+        }
+    }
+    for driver in drivers {
+        if ingress::end_uses_registered_driver(&state, &entry, &driver).await? {
+            // Either the ingress writer or a pooled internal writer may carry
+            // existing media debt. Return before waiting for that same writer.
+            return Err(SourceStartFailure::Unresolved.response());
+        }
+    }
     let receipt = owner
-        .wait(std::time::Instant::now() + std::time::Duration::from_secs(305))
+        // A different driver may await the retained owner for a bounded reply;
+        // retries preserve the same task and original retirement budget.
+        .wait(headers.deadline(std::time::Duration::from_secs(9)))
         .await
         .map_err(SourceStartFailure::response)?;
     Ok(axum::Json(receipt))
@@ -885,6 +1148,10 @@ impl SourceStartFailure {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "sharing_start_unsupported",
             ),
+            Self::DolbyVisionUnsupported => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                SHARING_START_DOLBY_VISION_UNSUPPORTED,
+            ),
             Self::Unresolved => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unresolved"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable"),
             Self::Deadline => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_deadline"),
@@ -910,6 +1177,45 @@ impl SourceStartEntry {
         }
     }
 }
+pub(crate) async fn settle_ingress_custody(
+    state: &crate::state::AppState,
+    assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    deadline: std::time::Instant,
+    mode: crate::sharing_connection_custody::DriverCloseMode,
+) -> Result<(), ApiError> {
+    ingress::retire_custody_with_mode(state, assignment, deadline, mode).await
+}
+pub(crate) fn internal_forwarding_router() -> axum::Router<crate::state::AppState> {
+    axum::Router::new()
+        .route(
+            forwarding::LOCATE_PATH,
+            axum::routing::post(forwarding::locate)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            forwarding::PREPARE_PATH,
+            axum::routing::post(forwarding::prepare),
+        )
+        .route(
+            forwarding::CONTROL_PATH,
+            axum::routing::post(forwarding::receive_control),
+        )
+        .route(
+            forwarding::FORWARD_PATH,
+            axum::routing::post(forwarding::receive),
+        )
+        .route(
+            forwarding::REGISTER_PATH,
+            axum::routing::post(forwarding::register_http),
+        )
+        .route(
+            forwarding::ACK_PATH,
+            axum::routing::post(forwarding::ack_http),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            forwarding::MAX_WIRE_BYTES,
+        ))
+}
 pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::state::AppState> {
     axum::Router::new()
         .route(
@@ -917,7 +1223,7 @@ pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::
             axum::routing::post(start),
         )
         .route_layer(axum::middleware::from_fn_with_state(
-            state,
+            state.clone(),
             super::shared_library::source_content_guard,
         ))
         .merge(
@@ -947,6 +1253,10 @@ pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::
                     axum::routing::post(direct::direct_bytes),
                 ),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            forwarding::route_to_owner,
+        ))
 }
 #[cfg(test)]
 #[derive(Default)]
@@ -1135,7 +1445,7 @@ fn parse_resource_request(
 }
 async fn resources(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     #[cfg(test)] read_gate: Option<axum::Extension<std::sync::Arc<SourceReadJobGate>>>,
@@ -1162,6 +1472,13 @@ async fn resources(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
+    ingress::register_local(
+        &state,
+        &connection.as_ref().ok_or_else(unavailable)?.0,
+        &entry,
+        &owned.assignment,
+    )
+    .await?;
     let opened = owned
         .actor
         .open_resource(&input.resource, deadline)
@@ -1169,6 +1486,7 @@ async fn resources(
         .map_err(|e| SourceStartFailure::from(e).response())?;
     let (_, current_grant) =
         current_reference(&state, &headers, &input.operation.start.reference).await?;
+    ingress::publication_allowed(&state, &owned.assignment).await?;
     if current_grant != grant {
         return Err(unavailable());
     }
@@ -1267,8 +1585,9 @@ async fn resources(
 
 async fn start(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file)): axum::extract::Path<(String, String)>,
+    connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
 ) -> Result<axum::response::Response, ApiError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(305);
@@ -1276,7 +1595,6 @@ async fn start(
         .await
         .map_err(|_| invalid())?;
     let input = parse_start_request(&bytes, &item, &file)?;
-    validate_initial_source_start(&input.session).map_err(SourceStartFailure::response)?;
     let viewer = viewer_hash(&headers)?;
     let (authenticated_hash, grant) = current_reference(&state, &headers, &input.reference).await?;
     let target = input.reference.clone();
@@ -1291,6 +1609,9 @@ async fn start(
         let state = std::sync::Arc::new(state.clone());
         entry.start_owned_task(state, headers.clone(), input, deadline);
     }
+    let assignment = ingress::assigned(&state, &entry, deadline).await?;
+    let connection = connection.ok_or_else(unavailable)?;
+    ingress::register_local(&state, &connection.0, &entry, &assignment).await?;
     let owned = entry
         .wait(deadline)
         .await
@@ -1308,6 +1629,7 @@ async fn start(
     if current_grant != grant {
         return Err(unavailable());
     }
+    ingress::publication_allowed(&state, &owned.assignment).await?;
     entry
         .observe_published(&owned, &response)
         .map_err(SourceStartFailure::response)?;
@@ -1374,7 +1696,7 @@ fn validate_initial_source_start(session: &CreateSession) -> Result<(), SourceSt
 }
 async fn own_start(
     state: std::sync::Arc<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     input: SourceStartInput,
     grant: Uuid,
     deadline: std::time::Instant,
@@ -1383,19 +1705,14 @@ async fn own_start(
     use plurx_core::sharing_source_sessions::{
         SourceClaimOutcome, SourceIntentRead, SourceSessionRequest, SourceWriteAuthorityRead,
     };
-    validate_initial_source_start(&input.session)?;
     let reference = input.reference.clone();
-    entry.retain_stage(SourceStartTaskStage::Preparing);
-    // The presentation branches only here: direct play recomputes the actual
-    // decision and refuses anything but direct play of this exact file.
-    let prepared = Box::pin(direct::prepare_source_start(
-        &state,
-        &headers,
-        reference.clone(),
-        input.session,
-    ))
-    .await?;
-    entry.retain_stage(SourceStartTaskStage::Prepared);
+    // v2 identifies this complete canonical wire invocation, before fallible
+    // physical preparation. Engine normalization remains in prepared inputs.
+    use sha2::Digest;
+    let mut invocation = sha2::Sha256::new();
+    invocation.update(b"plurx.sharing-source-invocation.v2\0");
+    invocation.update(&input.canonical_recipe);
+    let invocation_fingerprint = format!("{:x}", invocation.finalize());
     let (hash, current_grant) = current_reference(&state, &headers, &reference)
         .await
         .map_err(|_| SourceStartFailure::Unavailable)?;
@@ -1415,11 +1732,16 @@ async fn own_start(
         .store
         .prepare_source_session_intent(
             SourceSessionRequest {
-                principal: prepared.principal().clone(),
+                principal: plurx_core::playback_principal::PlaybackPrincipal::sharing(
+                    grant,
+                    &entry.viewer,
+                )
+                .map_err(|_| SourceStartFailure::Unavailable)?,
                 request_id: input.request_id.to_string(),
-                request_fingerprint: prepared.fingerprint().into(),
-                playback_id: prepared.playback_id().to_owned(),
+                request_fingerprint: invocation_fingerprint.clone(),
+                playback_id: input.session.playback_id.clone(),
                 incarnation_id: planned_incarnation,
+                ingress_registry_boot_id: state.sharing.accepted_drivers.boot_id(),
                 now_ms: now,
                 claim_expires_at_ms: now + remaining,
                 credential_hash: hash,
@@ -1448,7 +1770,7 @@ async fn own_start(
         .ok_or(SourceStartFailure::Unavailable)?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
         planned_incarnation,
-        _intent: (*intent).clone(),
+        intent: (*intent).clone(),
     });
     let binding = match state
         .store
@@ -1467,6 +1789,20 @@ async fn own_start(
         SourceClaimOutcome::Capacity(_) => return Err(SourceStartFailure::Capacity),
     };
     entry.retain_stage(SourceStartTaskStage::Acquired(binding.clone()));
+    // Only this fresh Acquired factory may cover preparation refusal. A
+    // historical or commit-unknown claim never reaches this stage.
+    validate_initial_source_start(&input.session)?;
+    let mut prepared = Box::pin(direct::prepare_source_start(
+        &state,
+        &headers,
+        reference.clone(),
+        input.session,
+    ))
+    .await?;
+    prepared.bind_invocation(&binding)?;
+    if prepared.fingerprint() != invocation_fingerprint {
+        return Err(SourceStartFailure::Unresolved);
+    }
     let members = state
         .membership
         .observe_source_admission_members()
@@ -1481,9 +1817,43 @@ async fn own_start(
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
     entry.retain_stage(SourceStartTaskStage::Assigned(assignment.clone()));
+    state
+        .store
+        .initialize_source_ingress_custody(&assignment)
+        .await
+        .map_err(|_| SourceStartFailure::Unresolved)?;
+    loop {
+        let changed = entry.changed.notified();
+        let ledger = state
+            .store
+            .source_ingress_custody(&assignment)
+            .await
+            .map_err(|_| SourceStartFailure::Unresolved)?
+            .ok_or(SourceStartFailure::Unresolved)?;
+        if ledger.state.is_sealed() {
+            return Err(SourceStartFailure::Unresolved);
+        }
+        if ledger.state.open().next().is_some() {
+            break;
+        }
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), changed)
+            .await
+            .map_err(|_| SourceStartFailure::Unresolved)?;
+    }
+
     let members = state
         .membership
         .observe_source_admission_members()
+        .await
+        .map_err(|_| SourceStartFailure::Unresolved)?
+        .ok_or(SourceStartFailure::Unresolved)?;
+    let ingress_permission = state
+        .store
+        .prepare_source_ingress_admission(
+            &assignment,
+            state.sharing.accepted_drivers.boot_id(),
+            &members,
+        )
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
@@ -1499,23 +1869,31 @@ async fn own_start(
         SourceWriteAuthorityRead::Capacity => return Err(SourceStartFailure::Capacity),
     };
     entry.retain_stage(SourceStartTaskStage::InvokingFactory(assignment.clone()));
-    let actor = direct::start_prepared_worker(
+    let actor = match direct::start_prepared_worker(
         std::sync::Arc::clone(&state),
         assignment.clone(),
         activation,
+        *ingress_permission,
         prepared,
         deadline,
     )
     .await
-    .map_err(SourceStartFailure::from)?;
+    {
+        Ok(actor) => actor,
+        Err(receipt) => {
+            let reason = receipt.reason();
+            entry.retain_stage(SourceStartTaskStage::FactoryRefused(receipt));
+            return Err(SourceStartFailure::from(reason));
+        }
+    };
     Ok(SourceStartOwned { actor, assignment })
 }
 
 // Read-only current authentication can precede owner insertion. It owns no
 // durable or physical obligation and binds a stable grant across rotation.
-async fn current_reference(
+async fn current_reference<H: AuthenticationHeaders + Send + Sync + ?Sized>(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &H,
     target: &SourcePlaybackTarget,
 ) -> Result<(String, Uuid), ApiError> {
     use plurx_core::{
@@ -1632,7 +2010,27 @@ fn closed_provided_fields(input: &Value, typed: &Value) -> bool {
         _ => input == typed,
     }
 }
-fn viewer_hash(headers: &HeaderMap) -> Result<String, ApiError> {
+fn source_credential_hash<H: AuthenticationHeaders + ?Sized>(
+    headers: &H,
+) -> Result<String, ApiError> {
+    if let Some(hash) = headers.authenticated_hash() {
+        return Ok(hash.to_owned());
+    }
+    let credential = super::sharing::credential(headers.raw_headers())?;
+    Ok(plurx_core::sharing::secret_hash(
+        plurx_core::sharing::SecretDomain::Grant,
+        &credential,
+    ))
+}
+pub(in crate::http) fn viewer_hash<H: AuthenticationHeaders + ?Sized>(
+    headers: &H,
+) -> Result<String, ApiError> {
+    if let Some(plurx_core::playback_principal::PlaybackPrincipal::Sharing { viewer_key, .. }) =
+        headers.authenticated_principal()
+    {
+        return Ok(viewer_key.as_str().to_owned());
+    }
+    let headers = headers.raw_headers();
     let mut values = headers.get_all("cinemashare-viewer").iter();
     let value = values
         .next()
@@ -1649,6 +2047,71 @@ fn viewer_hash(headers: &HeaderMap) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
+#[cfg(test)]
+async fn fixture_start(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    headers: HeaderMap,
+    axum::extract::Path((item, file)): axum::extract::Path<(String, String)>,
+    body: axum::body::Body,
+) -> Result<axum::response::Response, ApiError> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("actual Source fixture listener");
+    let address = listener
+        .local_addr()
+        .expect("actual Source fixture address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::sharing::peer_router(state),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let bytes = axum::body::to_bytes(body, 128 * 1024)
+        .await
+        .map_err(|_| invalid())?;
+    let url = format!("http://{address}/sharing/v1/items/{item}/files/{file}/sessions");
+    let response =
+        tests::actual_resource_request(address, false, &url, headers, bytes.to_vec()).await;
+    let _ = stop.send(());
+    server
+        .await
+        .expect("actual fixture accept owner joined")
+        .expect("actual fixture server drain");
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .map_err(|_| invalid())?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let code = [
+        "sharing_start_conflict",
+        "sharing_start_capacity",
+        "sharing_start_unsupported",
+        SHARING_START_DOLBY_VISION_UNSUPPORTED,
+        "sharing_start_unresolved",
+        "sharing_start_unavailable",
+        "sharing_start_deadline",
+        "sharing_invalid_request",
+        "sharing_playback_authority_unavailable",
+        "sharing_body_authority_unavailable",
+    ]
+    .into_iter()
+    .find(|code| Some(*code) == value.get("code").and_then(Value::as_str))
+    .unwrap_or("sharing_source_fixture_refusal");
+    Err(ApiError::typed(
+        status,
+        code,
+        value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Source refused actual fixture HTTP request"),
+    ))
+}
 #[cfg(test)]
 pub(crate) struct RealSourceStartFixture {
     pub state: std::sync::Arc<crate::state::AppState>,
@@ -1714,6 +2177,31 @@ impl RealSourceStartFixture {
             .expect("actual voter shutdown");
     }
 }
+/// PGS display sets from the fuzz corpus's real `mkpgs` capture, retimed to
+/// show one bitmap from `start_ms` to `end_ms`.
+#[cfg(test)]
+fn source_fixture_pgs(start_ms: u32, end_ms: u32) -> Vec<u8> {
+    let fixture = include_bytes!("../../../../fuzz/corpus/inspect_sup/mkpgs-1920x1080.sup");
+    let mut sup = Vec::new();
+    let mut cursor = 0;
+    while cursor + 13 <= fixture.len() {
+        assert_eq!(&fixture[cursor..cursor + 2], b"PG");
+        let pts = u32::from_be_bytes(fixture[cursor + 2..cursor + 6].try_into().expect("PTS"));
+        let len = usize::from(u16::from_be_bytes(
+            fixture[cursor + 11..cursor + 13]
+                .try_into()
+                .expect("PGS length"),
+        )) + 13;
+        if pts == 90_000 || pts == 630_000 {
+            let mut segment = fixture[cursor..cursor + len].to_vec();
+            let at = if pts == 90_000 { start_ms } else { end_ms };
+            segment[2..6].copy_from_slice(&(at * 90).to_be_bytes());
+            sup.extend(segment);
+        }
+        cursor += len;
+    }
+    sup
+}
 #[cfg(test)]
 pub(crate) fn real_source_start_fixture(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
@@ -1728,18 +2216,48 @@ pub(crate) enum SourceFixtureMode {
     NativeEncoded,
     /// The Copy fixture's MP4 started as direct play.
     Direct,
+    /// A Matroska with one embedded SubRip track, started as a copy that
+    /// burns it (a burn always encodes).
+    BurnText,
+    /// A Matroska with one embedded PGS track, started as a 144-row encode
+    /// that burns it.
+    BurnBitmap,
+    /// A PQ-tagged HEVC Main10 source started by an SDR-only player: the
+    /// Source tone-maps.
+    Hdr10Sdr,
+    /// A 1080p PQ-tagged HEVC Main10 source started by a player that presents
+    /// PQ on HEVC Main10 and asks HDR10, on a node with the HDR10 passthrough
+    /// proof: the Source encodes Main10 PQ.
+    Hdr10,
+    /// The Encoded fixture scanned as Dolby Vision: refused before a claim.
+    DolbyVisionEncoded,
 }
 #[cfg(test)]
 pub(crate) fn real_source_start_fixture_with(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
-    Box::pin(build_real_source_start_fixture(mode, recipient_server_id))
+    Box::pin(build_real_source_start_fixture(
+        mode,
+        recipient_server_id,
+        None,
+    ))
+}
+#[cfg(test)]
+fn real_source_start_fixture_at(
+    address: std::net::SocketAddr,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
+    Box::pin(build_real_source_start_fixture(
+        SourceFixtureMode::Copy,
+        None,
+        Some(address),
+    ))
 }
 #[cfg(test)]
 async fn build_real_source_start_fixture(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
+    advertised_http: Option<std::net::SocketAddr>,
 ) -> RealSourceStartFixture {
     use plurx_core::{
         cluster::migration::select_daemon_store,
@@ -1753,6 +2271,10 @@ async fn build_real_source_start_fixture(
     let directory = crate::test_tempdir().expect("real Source fixture");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
+    if let Some(address) = advertised_http {
+        config.server.bind = address;
+        config.cluster.artwork_url = format!("http://{address}");
+    }
     let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("Raft port");
     let api = std::net::TcpListener::bind("127.0.0.1:0").expect("API port");
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
@@ -1785,6 +2307,16 @@ async fn build_real_source_start_fixture(
         config.storage.data_dir.clone(),
         config.sharing.clone(),
     ));
+    state_mut.node_id = selected.identity.node_id.clone();
+    state_mut
+        .membership
+        .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
+    state_mut
+        .membership
+        .publish_ingress_custody_boot()
+        .await
+        .expect("actual registry boot publication before admission");
+
     let store = Arc::clone(&state.store);
     store
         .put_setting(keys::SW_POOL_THREADS, "4")
@@ -1820,37 +2352,69 @@ async fn build_real_source_start_fixture(
         mode,
         SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
     );
+    let burn = matches!(
+        mode,
+        SourceFixtureMode::BurnText | SourceFixtureMode::BurnBitmap
+    );
+    let hdr = matches!(mode, SourceFixtureMode::Hdr10Sdr | SourceFixtureMode::Hdr10);
     let encoded = matches!(
         mode,
-        SourceFixtureMode::Encoded | SourceFixtureMode::NativeEncoded
+        SourceFixtureMode::Encoded
+            | SourceFixtureMode::NativeEncoded
+            | SourceFixtureMode::BurnText
+            | SourceFixtureMode::BurnBitmap
+            | SourceFixtureMode::Hdr10Sdr
+            | SourceFixtureMode::Hdr10
+            | SourceFixtureMode::DolbyVisionEncoded
     );
-    let file = directory
-        .path()
-        .join(if native { "source.mkv" } else { "source.mp4" });
+    let (width, height) = if matches!(mode, SourceFixtureMode::Hdr10) {
+        (1920, 1080)
+    } else {
+        (320, 180)
+    };
+    let file = directory.path().join(if native || burn {
+        "source.mkv"
+    } else {
+        "source.mp4"
+    });
     // 180 rows so both recipes stay inside the v1 control contract
     // (heights 144..=2160): Copy names 180 and Encoded a real 144 encode.
     // A client controls with the rung it started, so a sub-144 fixture
     // could start but never be controlled.
-    let generated = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
-        .args([
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=s=320x180:r=24",
-            "-t",
-            "2",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-y",
-        ])
-        .arg(&file)
-        .output()
-        .await
-        .expect("actual FFmpeg");
+    let mut generate = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    generate.args(["-v", "error", "-f", "lavfi", "-i"]);
+    if hdr {
+        // Real HEVC Main10 with PQ/BT.2020 signalled in the bitstream, so the
+        // scan, the held probe and the Source's grade all read actual facts.
+        generate
+            .arg(format!("testsrc2=s={width}x{height}:r=24"))
+            .args([
+                "-t",
+                "2",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p10le",
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "smpte2084",
+                "-colorspace",
+                "bt2020nc",
+                "-x265-params",
+                "log-level=error:hdr10=1:repeat-headers=1",
+                "-tag:v",
+                "hvc1",
+                "-y",
+            ]);
+    } else {
+        generate
+            .arg("color=s=320x180:r=24")
+            .args(["-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y"]);
+    }
+    let generated = generate.arg(&file).output().await.expect("actual FFmpeg");
     assert!(
         generated.status.success(),
         "{}",
@@ -1892,6 +2456,38 @@ async fn build_real_source_start_fixture(
         );
         std::fs::rename(muxed, &file).expect("actual captioned Source");
     }
+    if burn {
+        let muxed = directory.path().join("burnable.mkv");
+        let mut mux = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+        mux.args(["-v", "error", "-i"]).arg(&file);
+        if matches!(mode, SourceFixtureMode::BurnText) {
+            let caption = directory.path().join("burn.srt");
+            std::fs::write(
+                &caption,
+                "1\n00:00:00,000 --> 00:00:02,000\nBURNED SHARED CAPTION\n\n",
+            )
+            .expect("actual burn subtitle");
+            mux.arg("-i").arg(&caption).args(["-c:s", "subrip"]);
+        } else {
+            let sup = directory.path().join("burn.sup");
+            std::fs::write(&sup, source_fixture_pgs(100, 1900)).expect("actual PGS display sets");
+            mux.args(["-f", "sup", "-i"])
+                .arg(&sup)
+                .args(["-c:s", "copy"]);
+        }
+        let result = mux
+            .args(["-map", "0:v:0", "-map", "1:s:0", "-c:v", "copy", "-y"])
+            .arg(&muxed)
+            .output()
+            .await
+            .expect("actual burn mux");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::rename(muxed, &file).expect("actual burnable Source");
+    }
     let metadata = std::fs::metadata(&file).expect("actual file");
     let mtime = metadata
         .modified()
@@ -1914,7 +2510,7 @@ async fn build_real_source_start_fixture(
         .await
         .expect("actual probe");
     assert!(probe.status.success());
-    let native_tracks = if native {
+    let native_tracks = if native || burn {
         let observed: serde_json::Value =
             serde_json::from_slice(&probe.stdout).expect("actual native scan JSON");
         let tracks: Vec<_> = observed["streams"]
@@ -1923,9 +2519,14 @@ async fn build_real_source_start_fixture(
             .iter()
             .filter(|stream| stream["codec_type"] == "subtitle")
             .collect();
-        assert_eq!(tracks.len(), 2, "actual generated embedded track count");
+        let (count, codec) = match mode {
+            SourceFixtureMode::BurnText => (1, "subrip"),
+            SourceFixtureMode::BurnBitmap => (1, "hdmv_pgs_subtitle"),
+            _ => (2, "subrip"),
+        };
+        assert_eq!(tracks.len(), count, "actual generated embedded track count");
         assert!(
-            tracks.iter().all(|track| track["codec_name"] == "subrip"),
+            tracks.iter().all(|track| track["codec_name"] == codec),
             "facts must match actual ffprobe"
         );
         Some(
@@ -1959,6 +2560,25 @@ async fn build_real_source_start_fixture(
             )
             .await
             .expect("actual scanned Source subtitle");
+    }
+    if hdr {
+        // The scan's facts for the generated HEVC Main10 PQ source.
+        client
+            .execute(
+                "UPDATE files SET video_codec='hevc',width=$1,height=$2,bit_depth=10,hdr='hdr10' WHERE id=1",
+                hiqlite::params!(width, height),
+            )
+            .await
+            .expect("actual scanned HDR10 facts");
+    }
+    if matches!(mode, SourceFixtureMode::DolbyVisionEncoded) {
+        client
+            .execute(
+                "UPDATE files SET hdr='dolby_vision' WHERE id=1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("Dolby Vision scan facts");
     }
     let now = crate::state::clock_ms();
     let grant = Uuid::new_v4();
@@ -2040,12 +2660,17 @@ async fn build_real_source_start_fixture(
     }
     Arc::get_mut(&mut state)
         .expect("sole State before listeners")
-        .transcode = Arc::new(crate::transcode::TranscodeManager::new(
-        Arc::clone(&store),
-        directory.path().join("workers"),
-        plurx_core::transcode::EncoderCaps::default(),
-        plurx_core::transcode::Pipeline::Cpu,
-    ));
+        .transcode = Arc::new(
+        crate::transcode::TranscodeManager::new(
+            Arc::clone(&store),
+            directory.path().join("workers"),
+            plurx_core::transcode::EncoderCaps::default(),
+            plurx_core::transcode::Pipeline::Cpu,
+        )
+        // The boot proof the HDR10 rung needs; the planner still decides the
+        // grade from the player's caps.
+        .with_hdr10_passthrough(matches!(mode, SourceFixtureMode::Hdr10)),
+    );
     let mut headers = HeaderMap::new();
     headers.insert(
         "authorization",
@@ -2067,6 +2692,23 @@ async fn build_real_source_start_fixture(
     if native {
         recipe["session"]["native_subtitles"] = serde_json::json!(true);
         recipe["session"]["subtitle"] = serde_json::json!(0);
+    }
+    match mode {
+        SourceFixtureMode::BurnText => {
+            // A copy ask that burns: the Source encodes at source height.
+            recipe["session"]["copy"] = serde_json::json!(true);
+            recipe["session"]["height"] = serde_json::json!(180);
+            recipe["session"]["subtitle_burn"] = serde_json::json!(0);
+        }
+        SourceFixtureMode::BurnBitmap => {
+            recipe["session"]["subtitle_burn"] = serde_json::json!(0);
+        }
+        SourceFixtureMode::Hdr10 => {
+            recipe["session"]["height"] = serde_json::json!(1080);
+            recipe["session"]["hdr10"] = serde_json::json!(true);
+            recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"display":{"hdr":true}});
+        }
+        _ => {}
     }
     if matches!(mode, SourceFixtureMode::Direct) {
         let session = recipe["session"].as_object_mut().expect("session");
@@ -2158,7 +2800,7 @@ mod tests {
     async fn actual_source_end_sql_recovery() {
         use std::time::{Duration, Instant};
         let fixture = real_source_start_fixture().await;
-        let response = start(
+        let response = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -2193,7 +2835,7 @@ mod tests {
         // Inject a real transactional failure at the actual release write. No
         // Source actor flags/proofs or physical settlement results are forged.
         client.execute("CREATE TRIGGER fixture_source_release_failure BEFORE UPDATE OF reservation_state ON sharing_source_session_bindings WHEN NEW.reservation_state='released' BEGIN SELECT RAISE(ABORT,'fixture release temporarily unavailable'); END",hiqlite::params![]).await.expect("actual transient SQL failure fixture");
-        let first = entry.end();
+        let first = entry.end(std::sync::Arc::clone(&fixture.state));
         assert_eq!(
             first
                 .wait(Instant::now() + Duration::from_secs(10))
@@ -2208,7 +2850,7 @@ mod tests {
             ))
         );
         assert!(
-            std::sync::Arc::ptr_eq(&first, &entry.end()),
+            std::sync::Arc::ptr_eq(&first, &entry.end(std::sync::Arc::clone(&fixture.state))),
             "failed proof remains retained before actual successful retry"
         );
         client
@@ -2225,7 +2867,7 @@ mod tests {
         })
         .await
         .expect("same actor physically/SQL settles through owned retry");
-        let recovered = entry.end();
+        let recovered = entry.end(std::sync::Arc::clone(&fixture.state));
         assert!(!std::sync::Arc::ptr_eq(&first, &recovered));
         let receipt = recovered
             .wait(Instant::now() + Duration::from_secs(5))
@@ -2237,7 +2879,7 @@ mod tests {
             owned.assignment.binding().incarnation_id()
         );
         assert_eq!(receipt.confirmation_id.get_version_num(), 4);
-        let replay = entry.end();
+        let replay = entry.end(std::sync::Arc::clone(&fixture.state));
         assert!(std::sync::Arc::ptr_eq(&recovered, &replay));
         assert_eq!(
             replay
@@ -2268,7 +2910,7 @@ mod tests {
                 .await
                 .expect("actual transactional failure");
             let invoke = || {
-                start(
+                fixture_start(
                     axum::extract::State((*fixture.state).clone()),
                     fixture.headers.clone(),
                     axum::extract::Path((
@@ -2323,14 +2965,25 @@ mod tests {
                     .err(),
                 Some(SourceStartFailure::Unresolved)
             );
-            let end = entry.end();
-            assert_eq!(
-                end.wait(Instant::now() + Duration::from_secs(1))
+            let end = entry.end(std::sync::Arc::clone(&fixture.state));
+            if assignment_failure {
+                let receipt = end
+                    .wait(Instant::now() + Duration::from_secs(1))
                     .await
-                    .err(),
-                Some(SourceStartFailure::Unresolved),
-                "joined failure is not a no-admission/settlement proof"
-            );
+                    .expect("exact acquired g0 cleanup");
+                assert_eq!(receipt.incarnation_id, incarnation);
+                assert!(receipt.session_id.is_none());
+                assert!(entry.actual_finished());
+            } else {
+                assert_eq!(
+                    end.wait(Instant::now() + Duration::from_secs(1))
+                        .await
+                        .err(),
+                    Some(SourceStartFailure::Unresolved),
+                    "unknown claim is never no-admission"
+                );
+                assert!(!entry.actual_finished());
+            }
             client
                 .execute(
                     "DROP TRIGGER fixture_source_task_failure",
@@ -2355,26 +3008,119 @@ mod tests {
                     .incarnation(),
                 Some(incarnation)
             );
-            // The joined failure owns no in-process work, so it leaves start
-            // capacity; its receipt stays in the settled cache, where the exact
-            // retry above found it instead of dispatching again.
             let registry = &fixture.state.transcode.source_http_starts;
-            assert!(registry.entries.lock().expect("start capacity").is_empty());
-            let after = registry
-                .settled
-                .lock()
-                .expect("settled receipts")
-                .iter()
-                .find(|settled| std::sync::Arc::ptr_eq(settled, &entry))
-                .cloned()
-                .expect("same entry");
-            assert!(std::sync::Arc::ptr_eq(&entry, &after));
+            if assignment_failure {
+                assert!(registry.entries.lock().expect("start capacity").is_empty());
+                assert!(registry
+                    .settled
+                    .lock()
+                    .expect("settled receipts")
+                    .iter()
+                    .any(|settled| std::sync::Arc::ptr_eq(settled, &entry)));
+            } else {
+                assert!(registry
+                    .entries
+                    .lock()
+                    .expect("unresolved custody")
+                    .iter()
+                    .any(|retained| std::sync::Arc::ptr_eq(retained, &entry)));
+                assert!(registry
+                    .settled
+                    .lock()
+                    .expect("settled receipts")
+                    .is_empty());
+            }
             assert!(
-                std::sync::Arc::ptr_eq(&end, &entry.end()),
-                "no failed task receipt can overwrite End ownership"
+                std::sync::Arc::ptr_eq(&end, &entry.end(std::sync::Arc::clone(&fixture.state))),
+                "exact retry preserves unresolved or settled End ownership"
             );
             fixture.shutdown().await;
         }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_uninvoked_g0_cleanup_retains_failed_release_and_retries_exact_end()
+    {
+        use std::time::{Duration, Instant};
+        let fixture = real_source_start_fixture().await;
+        let client = fixture.selected.local_client().expect("actual voter");
+        client.execute("CREATE TRIGGER fixture_source_assignment_failure BEFORE UPDATE OF dispatch_generation ON sharing_source_session_bindings WHEN NEW.dispatch_generation=1 BEGIN SELECT RAISE(ABORT,'fixture assignment unavailable'); END", hiqlite::params![]).await.expect("actual failed assignment");
+        client.execute("CREATE TRIGGER fixture_source_g0_release_failure BEFORE UPDATE OF reservation_state ON sharing_source_session_bindings WHEN NEW.reservation_state='released' BEGIN SELECT RAISE(ABORT,'fixture release unavailable'); END", hiqlite::params![]).await.expect("actual failed cleanup");
+        fixture_start(
+            axum::extract::State((*fixture.state).clone()),
+            fixture.headers.clone(),
+            axum::extract::Path((
+                fixture.reference.item_id.as_str().to_owned(),
+                fixture.reference.file_id.as_str().to_owned(),
+            )),
+            axum::body::Body::from(fixture.request.clone()),
+        )
+        .await
+        .expect_err("failed assignment");
+        let entry = fixture
+            .state
+            .transcode
+            .source_http_starts
+            .entries
+            .lock()
+            .expect("retained owner")
+            .first()
+            .cloned()
+            .expect("actual fresh acquired owner");
+        let incarnation = entry
+            .task
+            .stage
+            .lock()
+            .expect("retained stage")
+            .incarnation()
+            .expect("acquired lineage");
+        assert!(!entry.actual_finished());
+        let first = entry.end(std::sync::Arc::clone(&fixture.state));
+        assert_eq!(
+            first
+                .wait(Instant::now() + Duration::from_secs(1))
+                .await
+                .err(),
+            Some(SourceStartFailure::Unresolved)
+        );
+        assert!(entry
+            .task
+            .cleanup_confirmation
+            .lock()
+            .expect("cleanup receipt")
+            .is_none());
+        client
+            .execute(
+                "DROP TRIGGER fixture_source_g0_release_failure",
+                hiqlite::params![],
+            )
+            .await
+            .expect("restore cleanup");
+        let recovered = entry.end(std::sync::Arc::clone(&fixture.state));
+        let receipt = recovered
+            .wait(Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("actual g0 cleanup");
+        assert_eq!(receipt.incarnation_id, incarnation);
+        assert!(receipt.session_id.is_none());
+        assert!(entry.actual_finished());
+        let replay = entry.end(std::sync::Arc::clone(&fixture.state));
+        assert!(std::sync::Arc::ptr_eq(&recovered, &replay));
+        assert_eq!(
+            replay
+                .wait(Instant::now() + Duration::from_secs(1))
+                .await
+                .expect("same receipt")
+                .confirmation_id,
+            receipt.confirmation_id
+        );
+        client
+            .execute(
+                "DROP TRIGGER fixture_source_assignment_failure",
+                hiqlite::params![],
+            )
+            .await
+            .expect("restore assignment");
+        fixture.shutdown().await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sharing_source_http_lost_start_end_uses_actual_assignment_without_inventing_session() {
@@ -2555,6 +3301,119 @@ mod tests {
         ))
         .await;
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_burned_text_h1_h2_and_confirmed_end() {
+        Box::pin(actual_source_resource_delivery(SourceFixtureMode::BurnText)).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_burned_bitmap_h1_h2_and_confirmed_end() {
+        Box::pin(actual_source_resource_delivery(
+            SourceFixtureMode::BurnBitmap,
+        ))
+        .await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_hdr10_to_sdr_h1_h2_and_confirmed_end() {
+        Box::pin(actual_source_resource_delivery(SourceFixtureMode::Hdr10Sdr)).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_hdr10_preserved_h1_h2_and_confirmed_end() {
+        Box::pin(actual_source_resource_delivery(SourceFixtureMode::Hdr10)).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_dolby_vision_refusal_fresh_claim_confirms_exact_end() {
+        use axum::response::IntoResponse;
+        let fixture =
+            real_source_start_fixture_with(SourceFixtureMode::DolbyVisionEncoded, None).await;
+        let denied = fixture_start(
+            axum::extract::State((*fixture.state).clone()),
+            fixture.headers.clone(),
+            axum::extract::Path((
+                fixture.reference.item_id.as_str().to_owned(),
+                fixture.reference.file_id.as_str().to_owned(),
+            )),
+            axum::body::Body::from(fixture.request.clone()),
+        )
+        .await
+        .expect_err("DV encode has no Source-owned RPU preparation")
+        .into_response();
+        assert_eq!(denied.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(denied.into_body(), 4096)
+            .await
+            .expect("typed refusal");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON refusal");
+        assert_eq!(body["code"], SHARING_START_DOLBY_VISION_UNSUPPORTED);
+        let entries = fixture
+            .state
+            .transcode
+            .source_http_starts
+            .entries
+            .lock()
+            .expect("registry")
+            .clone();
+        assert_eq!(
+            entries.len(),
+            1,
+            "retain the exact failed invocation for cleanup"
+        );
+        assert!(
+            matches!(
+                *entries[0].task.stage.lock().expect("stage"),
+                SourceStartTaskStage::Acquired(_)
+            ),
+            "fresh invocation is claimed before preparation but never dispatched"
+        );
+        let request = entries[0].identity.request_id.to_string();
+        let first = end(
+            axum::extract::State((*fixture.state).clone()),
+            fixture.headers.clone().into(),
+            axum::extract::Path((
+                fixture.reference.item_id.as_str().to_owned(),
+                fixture.reference.file_id.as_str().to_owned(),
+                request.clone(),
+            )),
+            None,
+            axum::body::Body::from(fixture.request.clone()),
+        )
+        .await
+        .expect("authenticated exact g0 cleanup")
+        .0;
+        assert!(first.session_id.is_none());
+        assert!(
+            entries[0].actual_finished(),
+            "accounting released only after exact cleanup"
+        );
+        for _ in 0..3 {
+            fixture_start(
+                axum::extract::State((*fixture.state).clone()),
+                fixture.headers.clone(),
+                axum::extract::Path((
+                    fixture.reference.item_id.as_str().to_owned(),
+                    fixture.reference.file_id.as_str().to_owned(),
+                )),
+                axum::body::Body::from(fixture.request.clone()),
+            )
+            .await
+            .expect_err("exact refusal retry");
+            let replay = end(
+                axum::extract::State((*fixture.state).clone()),
+                fixture.headers.clone().into(),
+                axum::extract::Path((
+                    fixture.reference.item_id.as_str().to_owned(),
+                    fixture.reference.file_id.as_str().to_owned(),
+                    request.clone(),
+                )),
+                None,
+                axum::body::Body::from(fixture.request.clone()),
+            )
+            .await
+            .expect("same cleanup receipt")
+            .0;
+            assert_eq!(replay.confirmation_id, first.confirmation_id);
+            assert_eq!(replay.incarnation_id, first.incarnation_id);
+        }
+        fixture.shutdown().await;
+    }
     async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         use std::time::{Duration, Instant};
         let fixture = real_source_start_fixture_with(mode, None).await;
@@ -2564,7 +3423,8 @@ mod tests {
         );
         let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");
         unsupported["session"]["previous_session_id"] = json!(Uuid::new_v4());
-        let denied = start(
+        unsupported["session"]["request_id"] = json!(Uuid::new_v4());
+        let denied = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -2589,8 +3449,9 @@ mod tests {
             .entries
             .lock()
             .expect("registry")
-            .is_empty());
-        let response = start(
+            .iter()
+            .all(|entry| entry.actual_finished()));
+        let response = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -2606,6 +3467,16 @@ mod tests {
             .expect("full DTO");
         let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
             .expect("strict actual Start");
+        if matches!(mode, SourceFixtureMode::Hdr10 | SourceFixtureMode::Hdr10Sdr) {
+            assert_eq!(
+                decoded.response().delivered_dynamic_range.as_deref(),
+                Some(if matches!(mode, SourceFixtureMode::Hdr10) {
+                    "hdr10"
+                } else {
+                    "sdr"
+                })
+            );
+        }
         let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
         let request = recipe["session"]["request_id"]
             .as_str()
@@ -3127,7 +3998,7 @@ mod tests {
             time::{Duration, Instant},
         };
         let fixture = real_source_start_fixture().await;
-        let response = start(
+        let response = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -3337,7 +4208,7 @@ mod tests {
             time::{Duration, Instant},
         };
         let fixture = real_source_start_fixture().await;
-        let response = start(
+        let response = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -3706,7 +4577,7 @@ mod tests {
         assert!(entry.ending.lock().expect("End owner").is_none());
         // This is an actual actor-created metadata Body guard, not a projected
         // readiness flag. End cannot certify terminal settlement while held.
-        let held = start(
+        let held = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -4434,7 +5305,7 @@ mod tests {
             plurx_core::transcode::EncoderCaps::default(),
             plurx_core::transcode::Pipeline::Cpu,
         ));
-        let unknown = Box::pin(start(
+        let unknown = Box::pin(fixture_start(
             axum::extract::State(untracked.clone()),
             rotated.clone(),
             axum::extract::Path((
@@ -4465,7 +5336,7 @@ mod tests {
         // Hold the actual returned HTTP Body, not an invented publication
         // flag. The actor cannot settle physical/body/SQL obligations while
         // the complete Start transport still owns this response guard.
-        let held = Box::pin(start(
+        let held = Box::pin(fixture_start(
             axum::extract::State((*fixture.state).clone()),
             rotated.clone(),
             axum::extract::Path((
@@ -4725,3 +5596,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sharing_source_adapter_tests.rs"]
 mod actor_adapter_tests;
+
+#[cfg(test)]
+#[path = "shared_source_forwarding_tests.rs"]
+mod actual_forwarding_tests;

@@ -26,7 +26,7 @@ async fn actual_actor_adapters(encoded: bool) {
         recipe["session"]["height"] = json!(144);
         fixture.request = serde_json::to_vec(&recipe).expect("admitted raw manual selection");
     }
-    let started = start(
+    let started = fixture_start(
         axum::extract::State((*fixture.state).clone()),
         fixture.headers.clone(),
         axum::extract::Path((
@@ -63,14 +63,27 @@ async fn actual_actor_adapters(encoded: bool) {
         &request,
     )
     .expect("known full tuple");
-    let (entry, owned) = live_operation_owner(
-        &fixture.state,
-        &fixture.headers,
-        &input,
-        std::time::Instant::now() + std::time::Duration::from_secs(5),
-    )
-    .await
-    .expect("actual owner");
+    // Observe the actual retained owner established by the real HTTP Start.
+    // This private fixture lookup opens no media response and creates no new
+    // transport obligation; all public operations below use accepted Hyper.
+    let source_headers: SourceHeaders = fixture.headers.clone().into();
+    let viewer = viewer_hash(&source_headers).expect("actual original viewer");
+    let (hash, grant) = current_reference(&fixture.state, &source_headers, &input.start.reference)
+        .await
+        .expect("fresh actual Source reference");
+    let entry = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .current_entry(grant, &hash, &viewer, &input.start)
+        .expect("actual retained invocation");
+    entry
+        .validate_known(input.known.as_ref())
+        .expect("complete actual tuple");
+    let owned = entry
+        .wait(std::time::Instant::now() + std::time::Duration::from_secs(5))
+        .await
+        .expect("actual retained owner");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener");

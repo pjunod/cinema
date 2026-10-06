@@ -295,6 +295,9 @@ pub(crate) fn project_shared_start(
         || !v4(receiver_incarnation)
         || !(1..=9_007_199_254_740_991).contains(&receiver_owner_epoch)
         || response.control.is_none()
+        // A shared Start is always a VOD presentation (B accepts only `vod`
+        // or `direct`, and direct play has its own reply).
+        || !response.vod
         || source_session == receiver_session
         || response.session_id != source_session.to_string()
     {
@@ -320,11 +323,7 @@ pub(crate) fn project_shared_start(
             || control.control_epoch == 0
             || control.control_epoch > 9_007_199_254_740_991
             || control.next_exchange_ms != crate::playback_control::NEXT_EXCHANGE_MS
-            || !matches!(
-                control.lease_timeout_ms,
-                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
-                    | crate::playback_control::VOD_LEASE_TIMEOUT_MS
-            )
+            || control.lease_timeout_ms != crate::playback_control::VOD_LEASE_TIMEOUT_MS
             || Uuid::parse_str(&control.generation)
                 .ok()
                 .is_none_or(|id| !v4(id) || id.to_string() != control.generation)
@@ -957,5 +956,49 @@ mod tests {
             serde_json::json!({"code":"rate_limited","retry_after_ms":250,"message":"raw"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn sharing_protocol_fixture_hls_start_projection() {
+        use crate::sharing_protocol_fixture::{accepted, b_layer, fixture, mutated, rows};
+        let fixture = fixture();
+        let start = &fixture["hls_start"];
+        let uuid = |value: &serde_json::Value| {
+            Uuid::parse_str(value.as_str().expect("fixture uuid")).expect("fixture uuid")
+        };
+        let source_session = uuid(&start["source"]["session_id"]);
+        let receiver = uuid(&start["receiver"]["session_id"]);
+        let incarnation = uuid(&start["receiver"]["incarnation_id"]);
+        let epoch = start["receiver"]["control_epoch"]
+            .as_i64()
+            .expect("fixture epoch");
+        let project = |source: &serde_json::Value| {
+            serde_json::from_value::<StartResponse>(source.clone())
+                .ok()
+                .and_then(|response| {
+                    project_shared_start(response, source_session, receiver, incarnation, epoch)
+                        .ok()
+                })
+                .map(|public| serde_json::to_value(public).expect("public wire"))
+        };
+        assert_eq!(project(&start["source"]), Some(start["public"].clone()));
+        let mut checked = 0;
+        for row in rows(&start["mutations"], "Start mutation") {
+            if !b_layer(row) {
+                continue;
+            }
+            let projected = project(&mutated(&start["source"], row, &source_session.to_string()));
+            assert_eq!(projected.is_some(), accepted(row), "{}", row["id"]);
+            if row["layer"] == "both" && accepted(row) {
+                assert_eq!(
+                    projected,
+                    Some(mutated(&start["public"], row, &receiver.to_string())),
+                    "{}",
+                    row["id"]
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 14, "Start rows the receiver validates");
     }
 }

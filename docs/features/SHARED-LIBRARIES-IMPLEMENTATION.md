@@ -1,9 +1,10 @@
 # Shared libraries — the Tailscale build contract for Opus and Sol
 
-**Status:** implementation in progress; S1 implemented; S2 topology
-qualification pending; S3–S7 partially implemented; S8 live validation open;
-task gates pending · **Revised:** 2026-10-03 ·
-**Source rechecked:** `15e36f7f4` ·
+**Status:** implementation in progress; S1 integrated; S2 topology
+qualification pending; S3–S7 implemented in part with completion work active;
+S8 live validation open · **Revised:** 2026-10-06 ·
+**Current status:** [build and acceptance ledger](SHARED-LIBRARIES-STATUS.md) ·
+**Source rechecked:** `d4d2ec8e4` ·
 **Executes:** the Cinema-to-Cinema and private-Tailscale decisions in
 [SHARED-LIBRARIES-DESIGN.md](SHARED-LIBRARIES-DESIGN.md) ·
 **Implementation lane:** `effort/shared-libraries`, created from current main
@@ -98,21 +99,29 @@ container does not own the host's Tailscale interface. Follow the shipped
 [Compose deployment](../../deploy/docker-compose.yml), with an opt-in sharing
 override; do not change the ordinary app's network mode.
 
-Proposed node-local configuration:
+Implemented node-local bare-host configuration:
 
 ```toml
 [sharing]
-transport = "tailscale-serve"
-bind = "127.0.0.1:32444" # bare host; container override is 0.0.0.0:32444
-peer_port = 32443
-key_directory = "/var/lib/plurx/sharing-tls"
+listener_profile = "host_loopback"
+bind = "127.0.0.1:32444"
+
+[sharing.egress]
+mode = "interface"
+name = "tailscale0"
 ```
 
-For containers publish only `127.0.0.1:32444:32444`; the process binds the
-container interface so Docker can reach it. The container interface is not
-a public-host wildcard. Treat other containers on that bridge as network
-peers with no application authority. Do not use host `100.x` publication:
-Docker must start successfully before Tailscale obtains an address.
+For Linux Docker bridge hosting, select `listener_profile = "docker_bridge"`,
+bind the process to `0.0.0.0:32444` or its static container IPv4 address, and
+set `sharing.egress.mode = "local_address"` with that concrete RFC1918 address.
+Publish only host `127.0.0.1:32444:32444`. The
+[opt-in deployment recipe](../../deploy/README.md#sharing-uses-an-explicit-linux-bridge-profile)
+and normal startup preflight check the rendered configuration; running-host
+isolation and private egress remain qualification requirements. Treat other
+containers as network peers without application authority. Do not use host
+`100.x` publication: Docker must start before Tailscale obtains an address.
+TLS files remain under the daemon's data directory at `sharing-tls`; `transport`,
+`peer_port` and `key_directory` are not configuration fields.
 
 Proposed initialization command and existing Tailscale commands:
 
@@ -122,7 +131,7 @@ tailscale serve --bg --tcp=32443 tcp://127.0.0.1:32444
 tailscale serve status --json
 ```
 
-`init-tls` is to be implemented; it creates a node key and self-signed
+`init-tls` is implemented; it creates a node key and self-signed
 certificate with owner-only access and refuses to overwrite an existing key.
 Initial issuance and renewal set `notBefore = now - 1 hour`, allowing bounded
 receiver clock skew without disabling validity checks.
@@ -1333,6 +1342,72 @@ Proposed focused suite anchors: Rust test modules `sharing` and
 `SharedLibrariesTests`, Kotlin `SharedLibrariesTest`. These do not exist yet.
 Sol must record exact executed paths/names and nonzero test counts; a filter
 matching zero tests is not evidence.
+
+#### Shared protocol fixture parity matrix (2026-10-04)
+
+Audit of `tests/sharing/protocol-cases.json` (version 2) against the table
+above and the wires added since. The §13.1 groups are behaviour, not wire
+shapes: Pairing, Authorization, Secrets, Progress and most of Catalogue,
+Recovery and Resources are proved by the Store contract and daemon suites
+(`store_contract sharing_*`, plurxd `sharing_*`) and have no fixture row. What
+a row can carry is the wire every implementation must agree on: IDs above
+2^53 (Catalogue), malformed or foreign playlist URIs and the seek origin
+(Playback), old prepared answers and Source loss (Recovery, as preparation and
+refusal rows), and same-viewer concurrent sessions (per-session playback ids).
+
+A row's `layer` names who validates it: `b` the receiver, `client` a player,
+`both` both. "yes" means the named test reads every row of the group for that
+layer; "B-only" means no client parses that wire.
+
+| Fixture group | Rows | Rust | Web | Swift | Kotlin |
+|---|---|---|---|---|---|
+| `cases` Source IDs | 12 | yes, core `sharing_shared_protocol_fixture_validates_exact_wire_ids` | yes, `playbackFileDecimal` | yes, `SharedProtocolFixtureTests` | yes, `SharedProtocolCasesTest` (`canonicalId`) |
+| `status_tokens` × `shared_status.word_fields` | 12 × 9 | yes, `sharing_protocol_fixture_status_grammar` | yes, `sharedPlaybackStatusMetrics` | yes | yes, `SharedPlaybackStatus.isToken` and `decode` |
+| `shared_status` accepted + mutations | 1 + 21 (b 10, client 17) | decode and b rows: yes. B's emitted envelope: yes, `sharing_protocol_fixture_receiver_status_envelope` (`shared_status_body`) | yes, including the exact key set, `incarnation_id` and `control_epoch` | yes (client 17) | yes, `SharedPlaybackStatus.decode` |
+| `control_refusals.source` | 14 (7 valid) | validity and Source minting: yes, `sharing_protocol_fixture_source_control_refusals`. B's mapped answer (`b`): yes, `sharing_protocol_fixture_receiver_refusals` (`refusal_response`) | client outcome (`client`): yes | client outcome: yes | client outcome: yes, `SharedControlChannel` |
+| `control_refusals.b_precheck` | 4 | yes, `sharing_protocol_fixture_receiver_control_precheck` (`receiver_control_precheck`) | client outcome: yes | client outcome: yes | client outcome: yes, `SharedControlChannel` |
+| `control_preparation` (`none`) | 3 | yes, `sharing_protocol_fixture_receiver_preparation_rebind` (`rebind_to_receiver`) | yes, `settlePreparedOfferWaiter` | yes (`SharedControlStep`, `PreparedOfferWait`) | yes, `PreparedOfferWait` with the Shared rule |
+| `hls_start` public + mutations | 1 + 17 (b 15, client 16) | yes, `sharing_protocol_fixture_hls_start_projection` | yes, `sharedPlaybackStartContext` | yes (client 16; fixed `unsafe-duration`) | yes, `SharedStart.bindInitial` |
+| `direct` MIME set, public + mutations | 13; 1 + 16 (b 9, client 13) | yes, `sharing_protocol_fixture_direct_start` | yes, `sharedPlaybackDirectStartContext` | yes (client 13) | yes, `SharedStartedDirect.decode` |
+| `direct_session_query` | 11 | yes, `sharing_protocol_fixture_direct_session_query` | yes | yes | yes |
+| `file_suffixes` (route class `b`) | 25 | yes, core `sharing_protocol_fixture_file_suffixes` | yes, `playbackFileUrl` | yes (5 rows fixed) | yes, `PlaybackFileContext.path` (fixed 2026-10-04) |
+| `asset_session_query` | 14 | yes, `sharing_protocol_fixture_asset_session_query` | B-only parser; web composes the bound query (next row) | B-only | B-only |
+| `presession_assets` | 4 | yes, same test | yes, `playbackFileUrl` bound and unbound | yes, bound and unbound | yes, `PlaybackFileContext.path` |
+| `resource_unsupported` (typed 422) | 1 | yes, `sharing_protocol_fixture_resource_unsupported` | B-only | B-only | B-only |
+| `playback_ids` (per-session) | 1 | yes, `sharing_protocol_fixture_per_session_playback_ids` | B-only (B to Source) | B-only | B-only |
+| `receiver_recovery` | 1 + 4 rendered | yes, `sharing_protocol_fixture_receiver_recovery_status` | yes, `sharingRecoveryHTML` | B-only (web node card) | B-only |
+
+Executed 2026-10-04 on the pinned toolchain: plurx-core `--lib` filters
+`sharing_protocol sharing_shared_protocol sharing_file_resources
+sharing_wire_ids` 4 passed; plurxd `--bin plurxd -- sharing_protocol_fixture`
+9 passed (27 with the touched modules' existing tests); `node --test
+tests/web/sharing-protocol-cases.test.js` 9 passed; clippy `-D warnings`
+clean.
+
+The three Rust cells this audit left **open** are closed (2026-10-04, see
+"Web Shared prepared successor and fixture-driven B wire" below):
+`shared_status_body` and `receiver_control_precheck` are pure functions in
+`http/shared_receiver_control.rs`, and the fixture drives them,
+`refusal_response` and `rebind_to_receiver`.
+
+No Swift test reads the fixture yet. `subs/[0-9]{1,6}` and
+`chapters/[0-9]{1,6}/thumb` in `PlaybackFileContext.swift` accept
+`subs/4096`, `subs/4096.vtt`, `subs/4096/overlay.json`,
+`chapters/4096/thumb` and `subs/01`, which the Shared grammar refuses, so
+those five `file_suffixes` rows fail there until the Shared context bounds
+canonical indexes at 0..4095. Kotlin had the same hole; it was fixed and the
+Kotlin column filled on 2026-10-04 (see "Android Shared prepared successor,
+catalogue actions and fixture parity"). The web status binding
+was looser than Swift's (no exact outer key set, `incarnation_id` or
+`control_epoch`); it now matches, with four client rows for it.
+
+Fixes this audit made: `project_shared_start` accepted a rolling-lease Start
+that every client refuses, so a Source answering `vod: true` with a 60 s lease
+reached the player as a Start it then rejected; it now requires the VOD lease
+and `vod: true` itself (rows `rolling-lease`, `vod-false`; its callers already
+refused `vod: false`). Web `playbackFileUrl` built Shared track and
+chapter indexes above 4095, and web Shared status accepted prose, paths and
+markup in word fields.
 
 ### 13.2 Commands and compiler discipline
 
@@ -5648,3 +5723,644 @@ Evidence on nuc3 (pinned `plurx-android-build` image, JDK 25):
 Not qualified here: a physical Android device against a real pinned
 Source/B pair, the native subtitle rendition on reopen, rate limiting under a
 real seek storm, and the Apple half of these slices.
+
+### Shared prepared successor — P1/P2 (2026-10-04)
+
+A directed change on a shared HLS session can now be a prepared handoff: B
+builds the successor beside the session the viewer is watching, offers a
+`prepare` naming only its own URLs once that successor is published, and
+settles the client's commit or abort exactly. A client that does not ask for
+it keeps the P0 reopen.
+
+**Deviation: B owns the successor; the Source is unchanged.** The design
+staged the successor on the Source (a `media_session_preparations` row for the
+Source session, a new `…/sessions/{pred}/successor` route, a B↔Source mapping
+row). The code says otherwise. Since P0 every B session is its own Store and
+Source playback (`shared-<source_request_id>`), and every Source guard (claim,
+worker authorization, owned routes, settlement and retirement in
+`store/sharing_source_sessions.rs`) refuses any preparation row naming the
+incarnation and requires the session's own playback pointer. A Source-staged
+successor would have meant reopening every one of those guards on both Store
+backends. Instead the successor is what the P0 reopen already is, an ordinary
+second B session of the same viewer, file and player playback id, started by
+B through the same owner, claim, Source Start, attachment, publication and
+delivery grant as any shared Start. That one path already counts the Source
+slot, the grant slot and the B slot, replays a lost Start by request id,
+renews the Source lease every period, and retires through the single
+retirement owner with a confirmed Source End. No Store schema, Source route or
+Source code changed. "P1" (Source staging) therefore has no code of its own;
+both halves land as one B change.
+
+**Negotiation.** A client asks for a Shared successor by declaring
+`shared_prepare_replacement` beside `prepare_replacement`, plus
+`dual_player_preparation`. The Local promise alone is not enough. Today's web
+client declares `prepare_replacement` everywhere, but it would keep beating
+Shared progress on the bound context of the session it left (and Apple and
+Android Shared channels declare no actions). Without the new name those
+clients get `preparation: "none"` and reopen exactly as in P0. The name
+follows the precedent of `prepare_replacement`: the server half ships first,
+and an older server ignores an unknown action name. B never forwards either
+name, or any acknowledgement, to the Source. The `PREPARED_QUALITY_HANDOFF`
+switch is read exactly as Local reads it (default on); off means `none`. There
+is no new gate.
+
+**Staging (`shared_receiver_successor.rs`).** For each Source-accepted
+exchange B applies Local's dispatch rule (`take_preparation_dispatch`). The
+first exchange records the ask the session was created for. A different ask
+dispatches once. An ask that arrives while the slot is busy waits for the
+first exchange after the slot frees. A staged successor for an ask the client
+has since left is withdrawn (reason `Replaced`), and the new ask is dispatched
+only once that successor has fully retired and freed its slots, so one player
+never holds three Source sessions. The successor request is the predecessor's
+retained request with the new selection, a fresh request id, the sampled
+film position (clamped to the film) and no lineage fields. A selection a
+shared Start cannot carry (a burn, an explicit codec or grade, a negotiated
+candidate, direct play) is a typed decline. So is a full B registry, or a
+Source that refuses the Start (cap full): no slot, `none`, and the client
+reopens. Nothing answers 5xx for it. An uncommitted successor stages nothing
+of its own.
+
+**Offer.** While the successor is unpublished the answer is `staging`. Once it
+is published, and no outranking action is on the exchange, it is `offered`
+with `Prepare { action_id, session_id, playlist_url, control, media_origin_ms,
+effective_selection }`, taken only from the successor's own projected B Start.
+The B session, `/api/v1/hls/{B}/index.m3u8` and B's control bootstrap
+(generation = the successor's B incarnation) are the only identities named.
+One action id is minted per staging and reused by every later offer. The
+response is re-validated against the relay contract before it leaves. The
+successor's playlist, segments, status and control dispatch through
+`by_session` like any published B session, so its media is served before
+commit.
+
+**Settlement.** An acknowledgement is decided against the slot before
+anything is sent to the Source. These are refused `409 stale_control`, with
+no Source exchange:
+
+- an action id the slot never offered;
+- an acknowledgement past the deadline (VOD lease + 30 s; this also withdraws
+  the successor);
+- a commit whose `committed_media_origin_ms` or current ask no longer matches
+  the offer;
+- a second commit.
+
+The exchange then goes to the Source as an ordinary one: same sequence, no
+acknowledgement. Only after the Source accepts it does B settle. A commit
+marks the successor committed and supersedes the predecessor, plus any older
+attempt of the same player, through the make-before-break path. The
+predecessor's retirement owner sends the Source its End. An abort or failure
+withdraws the successor, and its owner frees both slots. A deadline is
+enforced on the successor owner's existing renewal tick (no new timer).
+Retiring the predecessor for any reason withdraws an uncommitted successor.
+Progress beats on an uncommitted successor are refused; after commit the
+predecessor is retiring and refuses them.
+
+**Exact replay.** The exact answer bytes of each acknowledgement exchange are
+kept per session (bounded to eight). They are served before any authority
+read, because a commit retires the session it was sent to. The same request
+replays byte-identical; a changed body under an answered sequence is
+`stale_control`; neither writes or sends anything. When the retired
+predecessor is pruned from the registry, its answers move to its bounded
+tombstone, so a lost commit answer still replays. A waiter cancelled between
+the Source's acceptance and B's settlement leaves nothing half done. The
+client's retry is a same-sequence Source replay, and B settles then.
+
+**Proof boundaries.** The successor relation is process-local, like every
+other piece of B playback state. B playback does not survive a B restart:
+orphan recovery retires both routes with their owed Source Ends and never
+adopts. That is why no durable mapping row is written, and why "restart
+between commits recovers the same incarnation" does not apply. Supersession
+and withdrawal are decided from B's registry, never from row absence or lease
+expiry. Retirement still needs the confirmed Source End.
+
+Evidence on nuc4 (rustc 1.97.1):
+
+- New B tests, all passing: fourteen in `shared_receiver_successor_tests.rs`
+  and `sharing_receiver_control_never_forwards_an_acknowledgement`.
+  - Request building:
+    `sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position`.
+  - Publication and commit: `…_prepared_publication_never_supersedes_its_predecessor`,
+    `…_commit_supersedes_exact_predecessor_and_settles_the_slot`.
+  - Withdrawal: `…_abort_withdraws_successor_and_keeps_predecessor`,
+    `…_predecessor_retirement_withdraws_uncommitted_successor`.
+  - Offer: `sharing_receiver_prepare_names_only_b_urls_and_bootstrap`, including
+    the Local-only client that keeps `none`;
+    `…_prepare_offered_only_after_successor_publication`.
+  - Replay: `…_ack_replays_exactly_and_refuses_a_changed_replay`,
+    `…_lost_commit_reconciles_after_predecessor_retired`.
+  - Stale and dispatch: `…_stale_acknowledgements_are_refused_before_the_source`,
+    `…_observe_ask_dispatches_once_and_withdraws_a_left_ask`.
+  - Deadline and media: `…_successor_deadline_and_progress_follow_the_commit`,
+    `…_successor_media_relays_before_commit`.
+  - Capacity: `sharing_receiver_viewer_cap_declines_typed`.
+- Affected daemon filters (`sharing`, `source_`, `direct_range`, `receiver_`):
+  333 passed, 10 ignored (the opt-in CGNAT fixtures), 4 failed. None of the
+  four is in code this change touches. Three were load or host-port flakes
+  that passed on an exact rerun: a Source voter's API port in use, a Source
+  actor Deadline, and an fd-close race. The fourth,
+  `sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor`,
+  answered 503 for 429 under load, as in P0, and passed alone.
+- Clippy with denied warnings on plurxd and plurx-core, all targets.
+- `tests/validation` (253, including the ownership inventory: +1 test-only
+  spawn, +3 test-only fixture waits), `make validation-lint`,
+  `tests.operations.test_docs_index` and `tests.operations.test_known_red`
+  pass. `make history-check` cannot read history in this partial clone (a
+  promisor blob of an earlier commit); these commits are not corrective.
+
+Not qualified here:
+`sharing_receiver_real_pinned_prepared_handoff_commit_and_abort` is
+registered as an opt-in fixture and has not run, because it needs the
+disposable CGNAT namespace. Over H1 and H2 it covers:
+
+- staging, then an offer naming only B URLs;
+- two Source sessions;
+- the successor playlist served before commit;
+- a byte-identical commit replay, before and after the predecessor retired;
+- the predecessor's confirmed End;
+- an abort freeing the successor's Source slot;
+- a late commit refused.
+
+It shares its pair setup with the P0 reopen fixture, which now declares only
+`prepare_replacement` and so still exercises the reopen.
+
+Client work still owed before a client may declare
+`shared_prepare_replacement`:
+
+- **Web.** Done; see "Web Shared prepared successor and fixture-driven B
+  wire" below. The owed work was: on commit, rebind `t.fileContext` to a
+  bound context for the successor B session (`SHARED_DECISION` `bases`/`accepted` keyed by it), so
+  progress beats and any later reopen name the successor. Then send the next
+  beat with the next sequence, and drop the P0 predecessor DELETE for a
+  committed handoff, since B supersedes it. Then add
+  `shared_prepare_replacement` to `SUPPORTED_ACTIONS` for Shared sessions
+  only.
+- **Apple.** Done; see "Apple Shared prepared successor, watched state, next
+  episode and fixture" below.
+- **Android.** Shared channels declare no actions and no dual-player
+  preparation today. They need a second player on the offered B playlist, the
+  acknowledgement sequence on the predecessor channel, a switch of the Shared
+  control channel and progress pool to the successor's tuple after commit,
+  and then the two action names.
+
+### S4 catalogue, history and artwork audit (2026-10-04)
+
+This audit compares the S4 catalogue, Continue Watching, history and artwork
+paths with §6, §7.4 and the Catalogue/Progress rows of §13.1. Each row names
+the code that enforces the rule and the tests that prove it. Rows marked
+**fixed** were wrong or missing. Each has a regression test that fails on the
+old code.
+
+| Row | Code anchor | Tests | Status |
+|---|---|---|---|
+| IDs above 2^53, up to `i64::MAX`, end to end | `SourceId::parse` (`plurx-core/src/sharing.rs`). The keyset seek in `source_catalogue_page` casts the boundary ID with `cast(... AS INTEGER)`, and `RECORD` emits `cast(i.id AS TEXT)`. Web: `sharedCatalogueId` | `sharing_wire_ids_preserve_huge_values_and_reject_aliases`, `sharing_catalogue_source_keyset_survives_boundary_deletion_and_moves_with_exact_huge_ties` (now pages ties at `i64::MAX-1`/`i64::MAX` with no wrap or repeat), `sharing_catalogue_source_pages_complete_during_continuous_metadata_writes`, `sharing_current_scope_rejects_oversized_and_malformed_inputs`, `sharing_art_resources_bind_full_identity_user_lifecycle_and_expiry_through_rewrap`. Web: "contexts copy source authority and retain exact unsafe-for-Number source IDs" | proven. Coverage added for the top of the range |
+| Same numeric ID on two Sources and on Local | `SharedReference` and `BrowseSeen` key on the full reference. History is keyed `(source_server_id, catalogue_epoch, remote_item_id, user_id)` and is separate from Local `watch_state` | `sharing_catalogue_live_cursor_resumes_across_revisions_and_deduplicates_sources`, `sharing_private_watch_orders_updates_and_isolates_sources_and_assignments`, `sharing_continue_groups_isolate_sources_filter_assignments_and_refuse_hidden_overflow`, `sharing_file_locator_binds_full_source_and_import_lifecycle_without_numeric_collision`, `sharing_manual_watch_override_takes_next_global_sequence_and_refuses_late_beats` (Local `watch_state` untouched). Web: "same numeric source file cannot collide with local playback resources or source keys" | proven |
+| Live keyset paging while sort keys move | `(sort_key COLLATE BINARY, i.id) > boundary` in `source_catalogue_page`. B deduplicates by full reference (`BrowseSeen`, web `seenItems`) | `sharing_catalogue_source_keyset_survives_boundary_deletion_and_moves_with_exact_huge_ties` (new): an item moved ahead is resent and displayed once, an item moved behind waits for the next open, and nothing unchanged is skipped. Also `sharing_catalogue_source_pages_complete_during_continuous_metadata_writes`. Web: "shared pagination encodes opaque cursors, keeps full-reference deduplication and refuses repeated cursors" | proven. Test added: no test combined moves with a boundary deletion |
+| Item/file deletion and catalogue epoch change mid-paging | A deleted boundary is a value boundary, not a row lookup. The cursor context binds `server_id`, `catalogue_epoch`, `grant_id`, `library_id` and the filter digest. B `peer_failure` | Keyset test above (the boundary item itself is deleted). `sharing_catalogue_item_identity_does_not_recycle_after_deletion`. `sharing_catalogue_cursor_authenticates_boundary_and_refuses_replay_context` (now covers server, epoch and library substitution). `sharing_catalogue_page_failures_keep_typed_reopen_and_absence_results` | **fixed**: B turned the Source's 404 for a deleted or unexported item into 503 `sharing_source_unavailable`. It is now 404 `sharing_not_found` |
+| Cursor substitution across imports, Sources, sorts and accounts | `CatalogueCursor::resume` gives `QueryChanged`, `Expired` or `Invalid`, and the Source answers 409, 410 or 400. B's new `page_failure` keeps those typed. Web: `sharedCatalogueLoadPage` reopens once. Accounts: B checks that the account is assigned the cursor's library (`read_catalogue_inner`) before forwarding. The library is part of the signed context. A cursor is a position, never authority | Cursor test above, plus `sharing_catalogue_page_failures_keep_typed_reopen_and_absence_results`, `sharing_private_watch_orders_updates_and_isolates_sources_and_assignments` (an outsider gets no assigned libraries) and `sharing_catalogue_cache_key_separates_full_authority_and_request`. Web: "an expired or substituted Source cursor reopens the list once instead of retrying a dead cursor" | **fixed**: B mapped every cursor refusal to 503, so the page kept a Load-more button on a dead cursor. B now returns 410 `sharing_cursor_expired`, 409 `sharing_query_changed` or 400 `sharing_cursor_invalid`. The web page reopens from the start exactly once and does not loop |
+| Artwork cache denial and bounds | `shared_artwork::receiver` verifies the resource token before and after a fresh pinned `read_artwork`, which checks lifecycle, grant and current assignment. The disk cache is write-only, keyed by user, lifecycle, grant and digest, and never serves bytes | `sharing_art_resources_bind_full_identity_user_lifecycle_and_expiry_through_rewrap`, `sharing_art_snapshot_refuses_wrong_scope_moves_and_private_names`, `sharing_art_disk_serializes_lru_rehashes_and_isolates_full_references`, `sharing_art_nonqueued_byte_capacity_survives_held_owners`, `sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor`. Web: "unconfirmed bitmap retirement remains charged and current403 retires only its Source" | proven by existing tests |
+| Global progress order across sessions and devices | One `sharing_watch.sequence` per Source/epoch/item/user. The guard `sequence < excluded.sequence` is in both `save_remote_watch` and receiver progress. Web `SHARED_DECISION.progress` drops a 409'd beat and resyncs | `sharing_private_watch_orders_updates_and_isolates_sources_and_assignments`. Web: "ordered Shared beats retry identical payload then resync409 without replaying old position", "two imports of the same Source item share ordered beats across B sessions", "a declined shared HLS change reopens as a fresh Start of its base file and carries the progress sequence" | proven by existing tests |
+| Manual mark unwatched (and watched) | New `SharingCatalogueStore::set_remote_watched`: a single guarded upsert takes `sequence+1` inside the write, under import, assignment and captured generations. New `POST /api/v1/shared/imports/{i}/items/{item}/watched` `{watched}` (§5.3) after a fresh Source membership read. New web Mark watched/unwatched control on movie and episode details | `sharing_manual_watch_override_takes_next_global_sequence_and_refuses_late_beats` (both backends: a late beat conflicts, an older one is stale, the position clears, the item leaves Continue Watching, watched keeps the position, and refusals write nothing). `sharing_catalogue_viewer_routes_require_login_and_fail_closed_without_import` (login, body grammar, canonical IDs). Web: "manual Shared watched state posts only to the B-private Shared route" | **fixed**: there was no route, Store operation or control |
+| Next episode reauthorizes against current scope | Web `sharedCatalogueNextEpisode` follows Source hierarchy and order only through B viewer routes, which check current assignment and Source scope. `sharedCatalogueLaunch` reads fresh details and makes a new Start. `playNextEpisode` dispatches non-Local contexts to `playNextSharedEpisode` | Web: "Shared next episode follows Source order through B and mints a fresh authorized start" and "Shared next episode dispatches to the Source-order resolver and a fresh authorized start, never a Local route" | **fixed**: Shared playback had no next episode |
+| Show and season pages (found during the audit) | `viewSharedCatalogue` binds the children page to the library reference | Web: "a show page renders its seasons instead of refusing children as a changed source" | **fixed**: children were checked against the parent's item reference, so every child was refused as "Shared source changed" |
+
+Still open:
+
+- Android has neither the manual watched control nor Shared next episode. The
+  web client is the reference implementation; Apple has both (see "Apple Shared
+  prepared successor, watched state, next episode and fixture", below).
+- B answers a refused artwork read (assignment removed, import inactive) with
+  503 rather than a typed 404. No bytes are served either way.
+- None of this is physically qualified against a real pinned Source/B pair.
+
+### Shared prepared successor — commit transport and cancelled change (2026-10-04)
+
+Two defects in the P1/P2 handoff above, found on the integrated
+`claude/sharing-batch4` tree.
+
+**Commit answer cut by its own predecessor.** The real pinned fixture failed
+over B H2: the commit exchange got `BrokenPipe`. The commit settled at B and
+called `supersede_predecessors` inside the control handler, before the answer
+was returned. That started the predecessor's retirement, which cancels `stop`.
+The predecessor's connection monitor (`retain_accepted_connection`) then cut
+every transport it was retained on, including the one still carrying the
+commit answer. Over H1 the body is written inside the connection's own poll,
+so the race was usually won; over H2 the stream task hands the frame to the
+connection driver, and the cut won.
+
+The fix is ordering and ownership, with no delay or retry:
+
+- `commit_successor` still marks the successor committed at once. The
+  predecessors it replaces now travel in a `CommittedHandoff` owned by the
+  commit answer's writer (`CommitAnswerWriter`).
+- The writer drops its connection guard first, then the handoff. Only then is
+  each predecessor handed to its retirement owner with reason `Superseded`.
+  The handoff runs on every path, including a client that left before reading
+  the answer, so a settled commit always supersedes.
+- A connection monitor whose session retires as a hand-over to the same
+  viewer's successor (`Superseded`, or a withdrawn successor's `Replaced`)
+  releases its custody without cutting when none of that session's writers is
+  still on the transport. Admission is already closed, so no writer can join
+  after the count.
+- A transport with a writer still in flight, and every revocation, deletion
+  or administrative stop, is cut exactly as before.
+
+Without that last distinction the commit answer, or the successor's own media
+on a shared H2 connection, could still be cut after its body ended.
+
+**A cancelled change restaged the original rendition.** The dispatch rule
+compared each ask with the last *dispatched* ask. After a change to X was
+withdrawn (the client returned to its original ask A) or aborted, A differed
+from X, so B staged a successor for the rendition it was already delivering.
+An idle player then held a second Source and B slot until the deadline. Now
+each session records its own ask (`own_digest`): the first accepted exchange,
+or the ask a successor was staged for. An ask equal to it never stages.
+`dispatched_digest` now only keeps a refused or failed ask from being
+redispatched. It is cleared when the successor is withdrawn for a left ask or
+aborted, so a renewed change stages again.
+
+Evidence on nuc4 (rustc 1.97.1), integrated tree:
+
+- New regressions, each failing on the old code and passing now:
+  - `sharing_receiver_commit_answer_writer_is_released_before_the_predecessor_retires`;
+  - `receiver_handover_releases_idle_transports_and_cuts_busy_or_revoked_ones`;
+  - `sharing_receiver_cancelled_change_never_restages_the_sessions_own_ask`.
+
+  The commit tests now assert the predecessor keeps serving until the
+  handoff runs.
+- Real pinned CGNAT fixtures in the disposable namespace:
+  - `sharing_receiver_real_pinned_prepared_handoff_commit_and_abort` passed
+    over H1 and H2, twice (85.5 s and 96.3 s);
+  - `sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot`,
+    whose superseded predecessor now takes the release-or-cut path, passed
+    (34.3 s).
+- Affected daemon filters (`sharing`, `source_`, `direct_range`, `receiver_`):
+  348 passed, 10 ignored, 2 failed. The failures were
+  `sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor`
+  (503 for 429 under load) and
+  `source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation`
+  (an fd-close race). Neither is in changed code, and both passed on an exact
+  rerun.
+- Clippy with denied warnings on plurxd and plurx-core, all targets.
+  `tests/validation` (253) passes, with the ownership inventory at +1
+  test-only wait.
+
+### Apple Shared prepared successor, watched state, next episode and fixture (2026-10-04)
+
+The Apple client now covers the four client items the B prepared successor,
+the S4 audit and the fixture parity matrix left open. Android remains open
+for all four.
+
+**Prepared successor.** The Shared channel declares `dual_player_preparation`
+at sequence 1 and both `prepare_replacement` and `shared_prepare_replacement`
+when the existing Developer switch enables two-player preparation (the switch
+Local reads; a source with no video codec keeps the P0 reopen, since there is
+no frame to prove a switch with). B records a session's first exchange as the
+ask it was started for, so a session that has not spoken states its own ask
+before the change. A `prepare` binds only whole: another canonical B session,
+its own `/api/v1/hls/{B}/index.m3u8` or master playlist and its own control
+bootstrap (`/api/v1/hls/{B}/control`, 5 s cadence, 300 s lease)
+(`SharedPreparedOffer`). It is bound to the player's context through the
+ordinary Shared Start grammar before anything is primed; one that does not
+bind is settled `failed` and reopens.
+
+The machinery is Local M6's, reused rather than copied: `PreparedOfferWait`
+reads `staging`, the offer, a later `none` and its 12 s bound;
+`PreparedReplacementCoordinator` owns the ledger; the commit uses Local's
+rendezvous, 4 s alignment bound, 6 s first-frame bound and 250 ms tolerance.
+The second AVPlayer is muted, layer-less and never played, primed at the film
+position (a shared session is VOD, so its zero is the film's, per Local's
+`sessionMediaOriginMs`). Every acknowledgement rides the predecessor's B
+channel on its own ordered sequence: progress at most once a second and not
+resent, and the terminal one always; a lost answer resends the identical bytes
+(at most three sends), which B replays byte-identically. Only an accepted
+committed exchange makes the successor the player's session: a fresh ordered
+channel on its B tuple, its status, and the shared progress beat, which names
+it from the next beat on with the item's next sequence. The predecessor is not
+DELETEd; B retires it. A paused viewer, a failed or late successor and a
+switch without a frame take the P0 reopen. A commit B did not accept after
+the item already moved reopens fresh and ends both sessions. A viewer action
+while the change is still waiting or priming takes the player back (`aborted`);
+the switch and its settlement do not yield. `stop()` also ends a staged
+successor it never adopted.
+
+**Manual watched.** Movie and episode details offer Mark watched/unwatched,
+posting `{watched}` to `POST /api/v1/shared/imports/{i}/items/{item}/watched`
+and adopting only an answer for the state asked; the page then re-reads its
+details. The next progress beat resyncs on its typed conflict.
+
+**Next episode.** At a natural end with autoplay on, the player resolves the
+next episode in Source order through B's viewer routes only (next in the
+season, else the first episode of the next season; bounded cursors, a repeated
+cursor refuses, never another library) and starts it from fresh B details: a
+new authenticated context, decision, plan and playback id in a new player
+session. The lookup is owned by the player view.
+
+**Fixture.** `SharedProtocolFixtureTests` reads every client-parsed group of
+`tests/sharing/protocol-cases.json` (matrix above). It exposed the five
+`file_suffixes` rows and `hls_start` `unsafe-duration`; the Shared context now
+refuses a non-canonical or out-of-range (above 4095) subtitle or chapter index
+(the Local route keeps its pattern), and the Start binder refuses a
+`duration_ms` past 2^53 - 1.
+
+Evidence on the lab Mac (Xcode simulators, owned DerivedData): `make
+apple-test` passed 796 iOS and 780 tvOS tests, zero failures (sixteen new:
+`SharedProtocolFixtureTests` 8, `SharedPreparedHandoffTests` 5,
+`SharedCatalogueActionsTests` 3). Reverting the two fixes failed exactly the
+six fixture rows; dropping the successor control-URL check failed its test.
+`tests/validation` (253) and `tests.operations.test_playback_surface_fence`
+(the Shared player's published inventory gains `preparing`) pass. These are
+synthetic authenticated protocol tests: the two-player switch, its first-frame
+proof and the B commit/abort against a real pinned Source/B pair are not
+qualified here, and B's `observe_ask` stages a successor for a session's own
+original ask after a withdrawn change (the client aborts such an unrequested
+offer the next time it exchanges, but nothing exchanges while the viewer is
+idle).
+
+Regression-Test: clients/apple/Tests/SharedPreparedHandoffTests.swift::testCommittedSuccessorBecomesThePlayersSessionAskAndProgress
+
+### Android Shared prepared successor, catalogue actions and fixture parity (2026-10-04)
+
+The Android client now covers the client work the P1/P2 and S4 audit sections
+above leave owed, and reads the protocol fixture. Local paths, the numeric
+Local guards and the original-account checks are unchanged; `versionCode` is
+not bumped.
+
+**Prepared successor (A).** When Settings → Developer leaves prepared
+replacement on (the same switch Local uses, default on), the Shared channel
+declares `prepare_replacement` and `shared_prepare_replacement`, plus
+`dual_player_preparation` in its sequence-1 capabilities. Off, it declares no
+actions and keeps the P0 reopen. `SharedPlaybackOwner` drives the handoff
+with the Local M6 pieces rather than new ones: `PreparedOfferWait` (with
+`noneOnTheAskDeclines`, because B decides on the exchange that carries the
+ask), `PreparedReplacementLedger` for the acknowledgement grammar, and
+`RendezvousHold` for the meeting point. Every exchange on the predecessor
+while the handoff lives carries the new ask, since an exchange carrying the
+old one tells B the viewer left it. `staging` and absence keep waiting (12 s
+bound); `none` reopens at once. On `offered`, `SharedStart.successor` binds
+the `prepare` like a Start: only B's successor session, its
+`/api/v1/hls/{successor}/…` playlist and its control bootstrap (v4
+generation, 5 s cadence, VOD lease) are accepted. The renderer primes a
+second ExoPlayer (`buildSuccessorPlayer`, muted, no surface, parked). Then:
+
+- `metadata_ready` once it is playable, then a park at the rendezvous;
+- `buffer_ready` once the park has landed with runway through it;
+- the switch at the rendezvous: the successor takes the surface, volume and
+  transport intent, and the predecessor is retained;
+- `committed`, echoing the offer's `media_origin_ms`, once the successor
+  renders a real frame (5 s bound).
+
+Every acknowledgement rides the predecessor's channel. A commit with no
+answer is asked again byte for byte under its own sequence
+(`SharedControlChannel.replayLast`), so B replays its answer or settles once.
+After an accepted commit, control (a new channel from sequence 1, same
+`client_instance_id`), status and Shared progress move to the successor's B
+session. The predecessor is not DELETEd, because B retires it. A withdrawn
+successor (`none` after the offer), a readiness or rendezvous failure, or an
+offer the client cannot bind is acknowledged `failed`. A frameless switch is
+`failed` after the predecessor is put back. A refused commit puts the
+predecessor back. Each of these takes the P0 reopen exactly once, with the
+decision already asked for the successor. A seek while unswitched
+acknowledges `aborted` and reopens at the target with the new selection. A
+commit whose outcome stays unknown reopens and ends the successor too. The
+view releases a pipeline it has moved off from its own update, and `stop`
+releases whatever is left. There is no timer for either.
+
+**Manual watched (B).** Shared movie and episode details show Mark watched /
+Mark unwatched, which posts `{watched}` to
+`POST /api/v1/shared/imports/{import}/items/{item}/watched` (§5.3). The answer
+must be `updated: 1` with the asked state.
+
+**Next episode (C).** `SharedLibraryClient.nextEpisode` follows Source order
+through B's viewer routes only: the next episode of the season, else the
+first episode of the next season. Every child page is validated against the
+import's library, and the cursor walk is bounded and refuses a repeated
+cursor. When a Shared episode ends and autoplay next is on, the details screen
+starts the next one with `prepareNextSharedEpisode`. That is a fresh detail
+read, context, decision and playback id under the current login, never an
+inherited context.
+
+**Fixture (D).** `tests/sharing` is a JVM test resource directory, and
+`SharedProtocolCasesTest` reads every Kotlin column group of the parity
+matrix above through the shipped decoders. It exposed two real bugs, now
+fixed: the Shared file-suffix grammar accepted indexes above 4095 and leading
+zeros (`PlaybackFileContext.sharedFileSuffix`), and a Shared Start accepted a
+duration above 2^53-1 ms.
+
+Evidence on nuc3 (pinned `plurx-android-build` image):
+
+- New suites: `SharedProtocolCasesTest` (8), `SharedCatalogueActionsTest` (3)
+  and `SharedPreparedHandoffTest` (5). The handoff suite covers a commit
+  whose answer is lost and replayed with identical bytes, the move of control
+  and progress, `none` on the ask, a withdrawn successor, a refused commit,
+  and a seek while staging. Each mutation of the two grammar fixes fails its
+  fixture row.
+- Full `testDebugUnitTest`: 885 tests, 0 failures, 0 skipped. `lintDebug`: no
+  errors.
+- Python fences pass: player builder, credential exposure, playback surface,
+  player input, control wire, caps wire, test markers, contracts. So do
+  `scripts/playback-surface-fence`, `scripts/player-input-fence` and
+  `make validation-lint`.
+
+Not qualified here: any physical device against a real pinned Source/B pair.
+That includes a real two-pipeline prime and switch on a phone and on a
+television (where Local M5.5 measured dual prime failing), first-frame proof
+on the surface, the next episode on a real series, and the watched control
+against a real B.
+
+### Web Shared prepared successor and fixture-driven B wire (2026-10-04)
+
+The web client now consumes the B prepared successor, and the B wire the
+parity matrix listed as open is driven from the fixture in Rust.
+
+**Negotiation.** A Shared reporter (`startPlaybackControl` on a Shared file
+context) declares `shared_prepare_replacement` beside `prepare_replacement`
+(`PlurxPlaybackControl.Reporter` option `sharedSuccessor`; Local reporters are
+unchanged). `dual_player_preparation` stays the Settings → Developer "Allow a
+second player" switch every session honours, so B stages nothing with it off
+and the change keeps the P0 reopen. There is no new gate.
+
+**Offer.** A `prepare` on a Shared session binds whole before a second
+pipeline is primed: `SHARED_DECISION.successor` binds it under the accepted
+login through `sharedPlaybackSuccessorContext`, which requires another B
+session than the predecessor's, its own `/api/v1/hls/{successor}/index.m3u8`
+or `master.m3u8` (the Shared playlist query grammar), and its own control
+bootstrap through the ordinary Shared Start grammar
+(`/api/v1/hls/{successor}/control`, a new v4 incarnation, 5 s cadence, 300 s
+lease) on the same file. An offer that does not bind is acknowledged `failed`
+on the predecessor's channel (B withdraws it), nothing is primed, and the
+change takes its one P0 reopen. `none` still reopens at once, as in P0.
+
+**Switch and commit.** The existing web prepared-replacement player
+(`player/prepared-replacement.js`, `player/directed-change.js`) primes,
+aligns, proves the frame and switches, exactly as for Local. Every
+acknowledgement rides the predecessor's reporter. Only B's acceptance of the
+`committed` exchange moves the player's Shared context: `p.fileContext` and
+`p.meta.fileContext` become the successor's bound context (same accepted
+record, so the ordered watch sequence carries on and a later reopen starts
+from it), and the successor's reporter starts on its own bootstrap. Status
+then reads the successor's session and incarnation. The predecessor is never
+DELETEd after a committed handoff; B supersedes it. A Shared beat retained for
+one session is never resent under another
+(`SHARED_DECISION.progress`), so a lost predecessor beat cannot wedge the
+successor's progress. A change that settled before its offer waiter confirmed
+keeps its settled outcome (`requestQualityChange`).
+
+**Status reader.** `sharedPlaybackStatusMetrics` refuses an envelope whose
+top-level keys are not exactly B's six, or whose `incarnation_id` and
+`control_epoch` are not the started session's control tuple
+(`withPlaybackFileSession` now carries it for HLS sessions; a direct session
+has none and gets no sample). Fixture rows `envelope-foreign-incarnation`,
+`envelope-foreign-control-epoch`, `envelope-missing-incarnation` and
+`envelope-unknown-key` (client layer) cover it; Swift and Kotlin already
+refuse all four, and the Swift exact row count moved from 13 to 17.
+
+**B wire extraction (no behaviour change).** `shared_status_body` (the
+envelope `receiver_status` emits) and `receiver_control_precheck` (the bounded
+v1 check, generation, owner epoch and acknowledgement plan, returning a typed
+`PrecheckRefusal`) are pure functions; `receiver_control` calls them. The
+fixture now drives the envelope, `refusal_response`, the precheck (against a
+real registered actor with no staged successor) and `rebind_to_receiver`.
+That exposed one stale fixture row: since P1/P2 an acknowledgement with no
+staged successor is `409 stale_control`, not `422 shared_control_unsupported`
+(P0's answer). The row now says so; every client's outcome for it is still
+`stop`.
+
+Evidence on nuc4 (rustc 1.97.1, node 22.22.1):
+
+- New Rust tests, all passing: `sharing_protocol_fixture_receiver_status_envelope`,
+  `sharing_protocol_fixture_receiver_refusals`,
+  `sharing_protocol_fixture_receiver_control_precheck`,
+  `sharing_protocol_fixture_receiver_preparation_rebind`.
+- Affected daemon filters (`sharing`, `source_`, `direct_range`, `receiver_`):
+  353 passed, 10 ignored (the opt-in CGNAT fixtures), 1 failed:
+  `sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor`
+  (503 for 429 under load, as before), which passed on an exact rerun.
+- Clippy with denied warnings on plurxd and plurx-core, all targets.
+- Web: `tests/web/shared-decision.test.js` 18/18 (new: the successor binds
+  whole, the next beat names it), `tests/web/file-context.test.js` 18/18,
+  `tests/web/sharing-protocol-cases.test.js` 9/9,
+  `tests/playback/web-control.test.js` 23/23 (new: a bound Shared offer
+  commits and moves the context only on B's acceptance; an unbindable offer
+  is acknowledged `failed` and reopens once; a Shared reporter declares
+  `shared_prepare_replacement`), `tests/playback/seek-control.test.js` 24/24.
+  `scripts/web-types` unchanged at 518.
+- `tests/validation` (253), `make validation-lint` and
+  `tests.operations.test_docs_index` pass. `make history-check` cannot read
+  history in this partial clone (a promisor blob of an earlier commit).
+
+Not qualified here: a real browser handoff against a pinned Source/B pair
+(two pipelines, frame proof, commit, status and progress moving to the
+successor), and the Apple and Android fixture suites with the four new rows.
+
+### Source-owned burns and HDR — completion design (2026-10-06)
+
+**Status:** implemented in `d4d2ec8e4`, with Rust check and denied Clippy passed; runtime
+qualification deferred under Paul's 2026-10-06 test policy. Track the batch
+and unproved boundaries in [the status page](SHARED-LIBRARIES-STATUS.md).
+
+The existing Source actor refuses burns and HDR encodes because the Local
+preparation path can start shared-cache work whose lifetime is not owned by
+the Source session. Removing those refusals alone would let Source retirement
+release its admission while extraction or font work was still running.
+
+1. **The admitted Source probe owns burn preparation.** Resolve the embedded
+   subtitle from the Source's own scanned file and prepared request. Extract
+   one subtitle-only Matroska stream, including attachments, from the already
+   held source descriptor. Bound it to 64 MiB and the existing Start deadline.
+   Every FFmpeg and Fontconfig child uses the Source command executor, which
+   retains admission, cancellation, reap and pipe joins.
+2. **The rendition owns its artifacts.** Keep the extracted sidecar in an
+   anonymous file and the text renderer's frozen Fontconfig directory in the
+   existing reference-counted engine. Hand the encoding its own descriptor.
+   Last-reference release removes the artifacts; no sweep or watchdog is
+   introduced. Local playback keeps its existing cache behavior.
+3. **The Source decides the grade.** Reuse the existing planner with the
+   player's actual capability document and Source file facts. Burns always
+   encode. SDR-only players get the supported tone-map route; preserving HDR
+   requires the existing encoder and display capability proofs. B validates
+   the delivered range against its retained request, including the precise
+   PQ/HLG presentation range, before publishing the session.
+4. **Dolby Vision conversion stays a typed limitation.** Its per-source RPU
+   proof is not yet owned by Source preparation. Refuse DV preservation,
+   conversion and re-encoding before dispatch with
+   `sharing_start_dolby_vision_unsupported`. Direct play retains untouched
+   bytes and its normal capability decision. Do not silently claim an HDR10
+   or SDR conversion of a DV source.
+5. **Retain regression definitions, defer execution.** Cover text and bitmap
+   burn selection, bounded extraction/settlement, HDR grade binding, and DV
+   refusal. Compile test targets now; execute required regressions only after
+   the main-promotion adversarial review. A generated fixture without rendered
+   output inspection is not evidence of subtitle or HDR fidelity.
+
+Native subtitles beside HDR and downloaded subtitle burns remain typed
+unsupported shapes until their Source-owned preparation is implemented.
+They do not justify a hidden feature gate or a disabled Developer switch.
+
+### Fresh Source invocation custody before preparation (2026-10-06)
+
+**Status:** implemented in `e0fd7b898`; pinned compile and Clippy passed on
+the builder checkpoint. Runtime regression execution remains deferred.
+
+Preparation could reject a valid, authenticated Start before the Source had
+claimed the invocation. B had already dispatched the request, so the Source
+could neither prove a fresh refusal nor confirm End. The Source now claims
+the complete canonical reference and request under the domain
+`plurx.sharing-source-invocation.v2` before fallible preparation. Only a fresh
+`Acquired` result owns the undispatched g0 cleanup receipt. An old claim,
+commit-unknown result or missing actor remains unresolved.
+
+The durable invocation fingerprint is separate from the planner's normalized
+recipe and engine/cache identity. A private binder checks the complete
+principal, request, playback and Source file tuple before factory admission.
+Both HLS and direct factories require that explicit binding; a historical
+normalized fingerprint cannot admit an unbound prepared request.
+
+Typed preparation failures, including unsupported Dolby Vision encoding, can
+therefore confirm exact End after releasing the fresh claim. Regression
+definitions cover stable refusal/End retries and rejection of an unbound
+normalized preparation. This closes the preparation-refusal gap; cluster
+forwarding and distributed ingress cleanup remain separate work recorded on
+the status page.
+
+### Cluster forwarding and physical ingress custody (2026-10-06)
+
+**Status:** Source runtime checkpoint `d32be9ca8` and receiver runtime checkpoint
+`2e4fd9e21` compiled and linted. Combined integration `0ba500735`, including the final
+lost-reply follow-ups and bounded closure fanout, passed its pinned normal hook
+and Core contract-feature compilation. Platform receipts are recorded on the
+[status page](SHARED-LIBRARIES-STATUS.md). No new runtime or
+topology acceptance receipt is claimed. Paul deferred test execution until main
+promotion after its adversarial review.
+
+The concrete missing proof was the outer accepted connection: forwarding an
+HTTP response through the playback owner did not make that owner's internal
+writer own the ingress node's queued bytes. Source and receiver now use the
+same private accepted-driver registry, bounded per-principal durable ledger,
+sealed registration and authenticated actual-closure acknowledgments. End
+retains its original deadline and cannot confirm from SQL ownership, stream
+EOF, missing actors or elapsed time. A same-driver End first returns closing
+so it does not wait for the connection carrying its own response.
+
+Source placement uses signed read-only observations of the exact authorized
+file, without requiring a warm fragment index or a legacy MPEG-TS offer.
+The g0 claim records the chosen process and original credential hash before
+fallible preparation. Fresh producer admission requires an opaque permission
+backed by a registered ingress; subsequent renewal revalidates each retained
+session owner's permission without requiring a continuously open HTTP
+connection between requests. Receiver forwarding uses fresh read authority
+and the actual retained owner. Its orphan cleanup closes original ingress
+obligations before Source End; no database-only actor adoption is introduced.
+
+The [custody decision](SHARED-LIBRARIES-INGRESS-CUSTODY.md) describes the schema,
+retry and compatibility boundaries. Real non-owner HTTP regression definitions
+cover signed placement/forwarding and same-driver End, with test-owned finite
+servers and transport tasks. Their execution is deferred. Same-host fixtures
+cannot establish remote-only mounts, Tailscale, independent NATs, physical
+players, revocation bounds or active Shared restore qualification.
+
+The final Source follow-up `8b885f707` narrows the earlier commit-unknown
+limitation: only the actual joined invocation retains its private fresh intent
+and planned incarnation. A same-write guard may clear that exact undispatched
+g0, bound to the original worker boot and initial credential hash. Absence, a
+foreign intent, g1 dispatch or historical metadata still cannot supply cleanup
+proof. Pending forwarding retains the original process identity and releases
+its bounded routing pin only after an authenticated exact settled End.

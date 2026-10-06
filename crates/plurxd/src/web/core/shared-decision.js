@@ -47,6 +47,9 @@ const SHARED_DECISION=(()=>{
     if(watch!=null)state.sequence=Math.max(state.sequence,integer(watch.sequence));return state;
   }
   function unsupported(){throw Object.assign(new Error("This shared playback change is not available yet."),{code:"sharing_start_unsupported"});}
+  // Shared Dolby Vision delivery is not built yet; the Source and B refuse it
+  // with this same typed reason, so the viewer is told why before any Start.
+  function dolbyVisionUnsupported(){throw Object.assign(new Error("Dolby Vision is not available for shared playback yet."),{code:"sharing_start_dolby_vision_unsupported"});}
   // A started session is never replaced in place: the Source stages no
   // successor. A fresh Start from a bound context -- a directed quality, audio
   // or subtitle change B declined with `preparation: none`, an expired direct
@@ -61,9 +64,13 @@ const SHARED_DECISION=(()=>{
     if(!c||!base||base.session_id||(restart?!authorized(c):!current(c)))fail();playbackFileContext(base);
     if(!body||typeof body!=="object"||Array.isArray(body))fail();
     for(const field of ["previous_session_id","control_sequence","reopen_reason","intent","candidate_id"])if(body[field]!=null)unsupported();
-    if(body.subtitle_burn!=null||body.hdr10===true||body.preserve_dolby_vision===true)unsupported();
+    // A burn and an HDR10 ask ride the ordinary Start: the Source owns the
+    // burn's sidecar and fonts and decides the grade from these caps itself.
+    if(body.preserve_dolby_vision===true)dolbyVisionUnsupported();
+    if(body.subtitle_burn!=null&&(!Number.isSafeInteger(body.subtitle_burn)||body.subtitle_burn<0||body.subtitle_burn>4095||body.native_subtitles===true))unsupported();
+    if(body.hdr10!=null&&typeof body.hdr10!=="boolean")unsupported();
     const direct=body.presentation==="direct";
-    if(body.presentation!=null&&body.presentation!=="vod"&&!direct||direct&&body.native_subtitles===true)unsupported();
+    if(body.presentation!=null&&body.presentation!=="vod"&&!direct||direct&&(body.native_subtitles===true||body.subtitle_burn!=null))unsupported();
     if(body.caps?.v!==2||typeof body.playback_id!=="string"||!body.playback_id||body.playback_id.length>128||/[\u0000-\u001f\u007f]/.test(body.playback_id)
       ||typeof body.request_id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.request_id))fail();
     const text=JSON.stringify(body);if(new TextEncoder().encode(text).length>24*1024)fail();
@@ -72,6 +79,16 @@ const SHARED_DECISION=(()=>{
     const bound=direct?sharedPlaybackDirectStartContext(base,response):sharedPlaybackStartContext(base,response);accepted.set(bound,c);bases.set(bound,base);
     if(c.watch.pending&&c.watch.pending.session_id!==bound.session_id)c.watch.pending=null;
     Object.defineProperty(response,"_sharedContext",{value:bound,enumerable:false});return response;
+  }
+  // B's prepared successor of a started HLS session, offered on the
+  // predecessor's control channel, binds under the accepted login before
+  // anything is primed. It keeps the same accepted record, so once the client
+  // commits to it the ordered watch state carries on and a later reopen starts
+  // from it like any bound context. Nothing is sent: B started it.
+  function successor(context,action){
+    const c=accepted.get(context),base=bases.get(context);
+    if(!c||!base||!authorized(c))fail();
+    const bound=sharedPlaybackSuccessorContext(base,context,action);accepted.set(bound,c);bases.set(bound,base);return bound;
   }
   async function resync(context,c,state){
     const fresh=await read(`/api/v1/shared/imports/${context.source_ref.import_id}/items/${context.source_ref.item_id}`,c,null,null,"session");
@@ -86,6 +103,10 @@ const SHARED_DECISION=(()=>{
     state.busy=true;
     try{
       if(state.resync){await resync(context,c,state);return false;}
+      // A retained beat belongs to the session it named. One for a session
+      // the player has left (a committed handoff, a reopen) is never resent
+      // under another; the next beat names the current session.
+      if(state.pending&&state.pending.session_id!==context.session_id)state.pending=null;
       if(!state.pending){if(state.sequence>=Number.MAX_SAFE_INTEGER)fail();state.pending=Object.freeze({session_id:context.session_id,sequence:++state.sequence,position_ms,duration_ms,watched});}
       // An uncertain send retries exactly; a later beat never renumbers the
       // retained payload or overwrites newer Source/item history after409.
@@ -128,6 +149,6 @@ const SHARED_DECISION=(()=>{
     if((bound?accepted.get(context):contexts.get(context))!==c||!valid())fail();const result=validate(raw,base);
     Object.defineProperty(result,"_capsSnapshot",{value:snapshot,enumerable:false});return result;
   }
-  return Object.freeze({details,decision,start,progress,retire});
+  return Object.freeze({details,decision,start,successor,progress,retire});
 })();
 function sharedDecisionRetire(){SHARED_DECISION.retire();}

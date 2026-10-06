@@ -144,7 +144,8 @@ async fn install(inner: &ReplicatedMembership) -> Result<bool, MembershipError> 
     let (floor, roster, cutoff, now) = members.write_guard(unix_ms()?, 1, 2, 3)?;
     let boot = layout::boot_authority_guard(4);
     let closed_admission = sharing_admission_schema_shape_predicate();
-    let authority=format!("({closed_admission}) AND ({floor}) AND ({boot}) AND EXISTS(SELECT 1 FROM settings WHERE key='sharing_enabled' AND value='true') AND NOT EXISTS(SELECT 1 FROM sharing_source_boot_intents intent JOIN cluster_nodes node ON node.node_id=intent.node_id AND node.raft_id=intent.raft_id WHERE node.removed_at IS NULL AND intent.master_fingerprint!=\'{}\') AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) AND EXISTS(SELECT 1 FROM sharing_purpose_key_installation ready JOIN sharing_identity identity ON identity.singleton=ready.singleton AND identity.server_id=ready.server_id AND identity.catalogue_epoch=ready.catalogue_epoch WHERE ready.singleton=1 AND ready.state='ready') AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={} AND role IS NOT 'learner' AND removed_at IS NULL)",master.sharing_purpose_master_fingerprint(),inner.identity.raft_id);
+    let ingress_floor = sharing_member_guard_predicate(SharingMemberFloor::IngressCustody, 1, 2, 3);
+    let authority=format!("({closed_admission}) AND ({floor}) AND ({ingress_floor}) AND ({boot}) AND EXISTS(SELECT 1 FROM settings WHERE key='sharing_enabled' AND value='true') AND NOT EXISTS(SELECT 1 FROM sharing_source_boot_intents intent JOIN cluster_nodes node ON node.node_id=intent.node_id AND node.raft_id=intent.raft_id WHERE node.removed_at IS NULL AND intent.master_fingerprint!=\'{}\') AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) AND EXISTS(SELECT 1 FROM sharing_purpose_key_installation ready JOIN sharing_identity identity ON identity.singleton=ready.singleton AND identity.server_id=ready.server_id AND identity.catalogue_epoch=ready.catalogue_epoch WHERE ready.singleton=1 AND ready.state='ready') AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={} AND role IS NOT 'learner' AND removed_at IS NULL)",master.sharing_purpose_master_fingerprint(),inner.identity.raft_id);
     if !predicate(
         &inner.client,
         format!("({authority}) AND ({})", layout::predecessor_guard(3)),
@@ -164,7 +165,7 @@ async fn install(inner: &ReplicatedMembership) -> Result<bool, MembershipError> 
         (layout::INSTALLATION_SCHEMA.to_owned(),params!()),
         ("INSERT INTO sharing_source_schema_installation VALUES(1,71,$1,$2)".to_owned(),params!(master.sharing_purpose_master_fingerprint(),now)),
         (layout::TRANSACTION_SCHEMA.to_owned(),params!()),
-        ("UPDATE cluster_meta SET schema_version=71,migrated_at=$1 WHERE singleton=1 AND schema_version=70".to_owned(),params!(now / 1000)),
+        ("UPDATE cluster_meta SET schema_version=73,migrated_at=$1 WHERE singleton=1 AND schema_version=72".to_owned(),params!(now / 1000)),
         (format!("INSERT INTO sharing_source_schema_transaction_guard VALUES(1,CASE WHEN ({authority}) AND ({}) THEN 1 ELSE 0 END)",layout::installed_shape_guard()),params!(roster,cutoff,now,captured)),
 
     ]);

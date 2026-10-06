@@ -152,6 +152,8 @@ pub const SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY: &str = "sharing_catalogue_
 /// Census, factory, restore archive and rewrap support must all be qualified
 /// before a heartbeat may advertise this separate purpose-material capability.
 pub const SHARING_PURPOSE_KEYS_CAPABILITY: &str = "sharing_purpose_keys_v1";
+/// Binary support plus a separately checked exact installed custody adjunct.
+pub const SHARING_INGRESS_CUSTODY_CAPABILITY: &str = "sharing_ingress_custody_v1";
 
 /// Closed, bounded capability requirements. No caller-supplied identifier can
 /// become SQL, and an empty capability set cannot authorize a new writer.
@@ -161,6 +163,7 @@ pub enum SharingMemberFloor {
     CatalogueItemIdentity,
     PrincipalAndCatalogue,
     PurposeKeys,
+    IngressCustody,
     AllSharing,
 }
 
@@ -168,6 +171,7 @@ impl SharingMemberFloor {
     fn capabilities(self) -> &'static [&'static str] {
         match self {
             Self::PurposeKeys => &[SHARING_PURPOSE_KEYS_CAPABILITY],
+            Self::IngressCustody => &[SHARING_INGRESS_CUSTODY_CAPABILITY],
             Self::AllSharing => &[
                 SHARING_SESSION_PRINCIPAL_CAPABILITY,
                 SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
@@ -1476,8 +1480,13 @@ impl SharingJoinCapabilities {
 
 fn sharing_installed_marker_predicate(capability: &str) -> String {
     match capability {
+        SHARING_INGRESS_CUSTODY_CAPABILITY => crate::store::sharing_ingress_custody::schema_guard(),
+        // The census table is boot ownership that every startup creates
+        // (`begin_*_census`), never installed purpose material: a census-only
+        // shape is `InstallationState::Fresh`. Counting it here would demand
+        // purpose-key support from every joiner of any cluster that has booted.
         SHARING_PURPOSE_KEYS_CAPABILITY =>
-            "EXISTS (SELECT 1 FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_archive','sharing_purpose_key_installation','sharing_purpose_census_intents'))".to_owned(),
+            "EXISTS (SELECT 1 FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_archive','sharing_purpose_key_installation'))".to_owned(),
         SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY =>
             "EXISTS (SELECT 1 FROM sqlite_master WHERE name='item_identity_watermark')".to_owned(),
         SHARING_SESSION_PRINCIPAL_CAPABILITY =>
@@ -2860,6 +2869,30 @@ impl SourceAdmissionMembers {
     }
 }
 
+/// Opaque current roster for outer-ingress custody, independent of Source
+/// principal installation and Source purpose-key factory readiness.
+#[derive(Clone)]
+pub struct IngressCustodyMembers {
+    members: SourceAdmissionMembers,
+}
+impl IngressCustodyMembers {
+    pub fn write_guard(
+        &self,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
+        self.members.write_guard_for(
+            SharingMemberFloor::IngressCustody,
+            now_ms,
+            members_parameter,
+            cutoff_parameter,
+            observed_at_parameter,
+        )
+    }
+}
+
 /// Actual current-roster witness exclusively for purpose-key factory writes.
 /// It cannot be substituted for the Source session observation.
 #[derive(Clone)]
@@ -3925,6 +3958,7 @@ struct ReplicatedMembership {
     secrets: JoinSecrets,
     purpose_master: Mutex<Option<Arc<crate::secrets::CredentialKey>>>,
     source_boot_attempt: Mutex<Option<String>>,
+    ingress_custody_boot: Mutex<Option<String>>,
     activity_signing_key: ActivitySigningKey,
     activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
@@ -4330,6 +4364,7 @@ impl MembershipManager {
                 secrets,
                 purpose_master: Mutex::new(None),
                 source_boot_attempt: Mutex::new(None),
+                ingress_custody_boot: Mutex::new(None),
                 activity_signing_key,
                 activity_public_keys: Mutex::new(BTreeMap::new()),
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
@@ -5623,6 +5658,22 @@ impl MembershipManager {
             ] {
                 statements.push(("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents WHERE node_id=$1) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(inner.identity.node_id.as_str(),proof,now)));
             }
+        }
+        // The physical accepted-driver registry supplies this boot identity.
+        // Replace prior-boot evidence in the same heartbeat; stale rows cannot
+        // register new obligations for a restarted or different driver registry.
+        statements.push(("DELETE FROM cluster_node_capabilities WHERE node_id=$1 AND capability GLOB 'sharing_ingress_boot_v1:*'".into(), params!(inner.identity.node_id.as_str())));
+        let ingress_shape = crate::store::sharing_ingress_custody::schema_guard();
+        statements.push((format!("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE ({ingress_shape}) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at"),params!(inner.identity.node_id.as_str(),SHARING_INGRESS_CUSTODY_CAPABILITY,now)));
+        let ingress_boot = inner
+            .ingress_custody_boot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(boot) = ingress_boot {
+            let shape = crate::store::sharing_ingress_custody::schema_guard();
+            let capability = format!("sharing_ingress_boot_v1:{boot}");
+            statements.push((format!("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE ({shape}) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at"),params!(inner.identity.node_id.as_str(),capability,now)));
         }
         // One bounded current attempt per node; previous boot capability rows
         // cannot accumulate across restarts or survive a serving heartbeat.
@@ -9557,6 +9608,39 @@ impl MembershipManager {
     }
 
     /// Quorum-confirm a closed set of requirements for a shared admission.
+    /// Publish only the boot of this process's real accepted-driver registry.
+    /// The heartbeat binds it to the exact installed adjunct and its timestamp.
+    pub fn set_ingress_custody_boot(&self, boot: Option<uuid::Uuid>) {
+        if let Some(inner) = &self.inner {
+            *inner
+                .ingress_custody_boot
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = boot
+                .filter(|boot| !boot.is_nil() && boot.get_version_num() == 4)
+                .map(|boot| boot.to_string());
+        }
+    }
+
+    /// Publish the actual registry boot before accepting protected requests.
+    /// Startup may publish the binary capability earlier, without a registry.
+    pub async fn publish_ingress_custody_boot(&self) -> Result<(), MembershipError> {
+        let Some(inner) = self.inner.as_ref() else {
+            return Ok(());
+        };
+        if inner
+            .ingress_custody_boot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_none()
+        {
+            return Err(MembershipError::Incompatible);
+        }
+        let mut committed = inner.heartbeat_writes.last_committed.lock().await;
+        self.commit_heartbeat(inner).await?;
+        *committed = Some(tokio::time::Instant::now());
+        Ok(())
+    }
+
     pub async fn sharing_member_floor_ready(
         &self,
         required: SharingMemberFloor,
@@ -9568,6 +9652,20 @@ impl MembershipManager {
     /// Observe the actual serving member and both Source writer capabilities.
     /// The opaque result can supply guarded write inputs, never a cached
     /// readiness permission. Missing factories and unresolved intents refuse.
+    pub async fn observe_ingress_custody_members(
+        &self,
+    ) -> Result<Option<IngressCustodyMembers>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        Ok(sharing_member_floor_observation(
+            &inner.client,
+            inner.identity.raft_id,
+            SharingMemberFloor::IngressCustody,
+            true,
+        )
+        .await?
+        .map(|members| IngressCustodyMembers { members }))
+    }
+
     pub async fn observe_source_admission_members(
         &self,
     ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {

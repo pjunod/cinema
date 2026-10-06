@@ -115,4 +115,34 @@ class SharedLibraryTest {
         assertFalse(api.save(draft.enabled)); draft = draft.choose(true).received(false, revision)
         assertTrue(draft.enabled)
     }
+    @Test fun sharedContinueWatchingKeepsFullSourceIdentityOrderAndRefusesOfflineMetadata(): Unit = runBlocking {
+        fun group(source: SharedLibraryIdentity) = buildJsonObject {
+            put("import_id", source.import_id); put("server_id", source.server_id); put("catalogue_epoch", source.catalogue_epoch)
+            put("source_name", "Configured Source"); put("count", 2)
+        }
+        var offline = false
+        handler = { request -> when (request.url.encodedPath) {
+            "/api/v1/shared/libraries" -> 200 to buildJsonObject { put("libraries", buildJsonArray { add(assignment(first)); add(assignment(other)) }) }
+            "/api/v1/shared/continue-watching" -> 200 to buildJsonObject { put("groups", buildJsonArray { add(group(first)); add(group(other)) }) }
+            else -> {
+                val source = if (first.import_id in request.url.encodedPath) first else other
+                200 to JsonObject(group(source) + mapOf(
+                    "availability" to JsonPrimitive(if (offline) "unavailable" else "online"),
+                    "items" to buildJsonArray { listOf(item, "9007199254740993").forEach { id -> add(buildJsonObject {
+                        put("item", wireItem(source, id)); put("watch", buildJsonObject {
+                            put("position_ms", 12000); put("duration_ms", 90000); put("watched", false); put("sequence", 7); put("updated_at_ms", 8)
+                        })
+                    }) } },
+                ))
+            }
+        } }
+        val api = client(); val assigned = api.assignments(); val groups = api.continueGroups()
+        val a = api.continueItems(groups[0], assigned); val c = api.continueItems(groups[1], assigned)
+        assertEquals(listOf(item, "9007199254740993"), a.items.map { it.item.reference.item_id })
+        assertNotEquals(a.items[0].item.reference, c.items[0].item.reference)
+        assertTrue(runCatching { api.continueItems(groups[0], listOf(assigned[1])) }.isFailure)
+        offline = true
+        assertTrue(runCatching { api.continueItems(groups[0], assigned) }.isFailure)
+    }
+
 }

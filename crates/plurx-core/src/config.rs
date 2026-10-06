@@ -52,16 +52,51 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SharingNetworkConfig {
+    pub listener_profile: SharingListenerProfile,
     pub bind: SocketAddr,
     pub egress: SharingEgressConfig,
 }
 impl Default for SharingNetworkConfig {
     fn default() -> Self {
         Self {
+            listener_profile: SharingListenerProfile::HostLoopback,
             bind: SocketAddr::from(([127, 0, 0, 1], 32444)),
             egress: SharingEgressConfig::Interface {
                 name: "tailscale0".into(),
             },
+        }
+    }
+}
+/// Operator-selected namespace profile, independent of saved Sharing enablement.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SharingListenerProfile {
+    #[default]
+    HostLoopback,
+    DockerBridge,
+}
+impl SharingNetworkConfig {
+    /// A bridge declaration requires a concrete RFC1918 source address. The
+    /// daemon cannot inspect the host's published ports or forwarding policy;
+    /// deployment preflight and runtime qualification own those proofs.
+    pub fn listener_bind_is_allowed(&self) -> bool {
+        if self.bind.port() == 0 {
+            return false;
+        }
+        match self.listener_profile {
+            SharingListenerProfile::HostLoopback => self.bind.ip().is_loopback(),
+            SharingListenerProfile::DockerBridge => {
+                let SharingEgressConfig::LocalAddress {
+                    address: std::net::IpAddr::V4(address),
+                } = self.egress
+                else {
+                    return false;
+                };
+                cfg!(target_os = "linux")
+                    && address.is_private()
+                    && (self.bind.ip() == std::net::IpAddr::V4(address)
+                        || self.bind.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            }
         }
     }
 }
@@ -808,5 +843,43 @@ mod tests {
             Err(ConfigError::Env { var, .. })
                 if var == "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS"
         ));
+    }
+    #[test]
+    fn sharing_listener_profile_keeps_host_loopback_and_explicit_bridge_separate() {
+        let mut network = SharingNetworkConfig::default();
+        assert!(network.listener_bind_is_allowed());
+        network.bind = "0.0.0.0:32444".parse().expect("wildcard");
+        assert!(!network.listener_bind_is_allowed());
+        network.listener_profile = SharingListenerProfile::DockerBridge;
+        assert!(
+            !network.listener_bind_is_allowed(),
+            "host-interface egress is not bridge config"
+        );
+        network.egress = SharingEgressConfig::LocalAddress {
+            address: "172.30.44.2".parse().expect("container address"),
+        };
+        assert_eq!(
+            network.listener_bind_is_allowed(),
+            cfg!(target_os = "linux")
+        );
+        network.bind = "192.168.1.2:32444".parse().expect("foreign address");
+        assert!(!network.listener_bind_is_allowed());
+        network.bind = "0.0.0.0:0".parse().expect("ephemeral bind");
+        assert!(!network.listener_bind_is_allowed());
+        network.bind = "0.0.0.0:32444".parse().expect("wildcard");
+        for address in ["0.0.0.0", "127.0.0.1", "100.127.90.2", "8.8.8.8", "::1"] {
+            network.egress = SharingEgressConfig::LocalAddress {
+                address: address.parse().expect("address"),
+            };
+            assert!(!network.listener_bind_is_allowed());
+        }
+        let parsed: SharingNetworkConfig = toml::from_str(
+            "listener_profile = \"docker_bridge\"\nbind = \"0.0.0.0:32444\"\n[egress]\nmode = \"local_address\"\naddress = \"172.30.44.2\"\n"
+        ).expect("explicit node-local bridge config");
+        assert_eq!(
+            parsed.listener_profile,
+            SharingListenerProfile::DockerBridge
+        );
+        assert_eq!(parsed.listener_bind_is_allowed(), cfg!(target_os = "linux"));
     }
 }

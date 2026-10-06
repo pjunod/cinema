@@ -1982,6 +1982,7 @@ pub fn router(state: AppState) -> Router {
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
         )
+        .merge(shared_receiver_playback::internal_forwarding_router())
         .route(
             crate::media_sessions::ACTIVATE_PATH,
             post(internal_media_sessions::activate).layer(DefaultBodyLimit::max(
@@ -2001,6 +2002,10 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::sharing_connection_custody::CLOSE_PATH,
+            post(crate::sharing_connection_custody::close_http).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
             crate::media_sessions::RELAY_PATH,
             post(internal_media_sessions::relay).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
@@ -2011,7 +2016,8 @@ pub fn router(state: AppState) -> Router {
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
             )),
-        );
+        )
+        .merge(shared_source_playback::internal_forwarding_router());
 
     Router::new()
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
@@ -12051,8 +12057,11 @@ mod tests {
         assert!(plurx_core::sharing::is_tailnet_address(address));
         let temporary = tempfile::tempdir().expect("fixture TLS directory");
         let tls = Arc::new(
-            LiveNodeTls::open(temporary.path(), crate::state::clock_ms() / 1000)
-                .expect("generated source TLS"),
+            LiveNodeTls::open(
+                &temporary.path().join("tls"),
+                crate::state::clock_ms() / 1000,
+            )
+            .expect("generated source TLS"),
         );
         let (pin, _) = tls.status().expect("public source pin");
         let socket = tokio::net::TcpListener::bind((address, 0))
@@ -12146,6 +12155,7 @@ mod tests {
         let network = SharingNetworkConfig {
             bind: "127.0.0.1:32444".parse().expect("unused listener config"),
             egress: SharingEgressConfig::LocalAddress { address },
+            ..SharingNetworkConfig::default()
         };
         let restart = |state: &AppState| {
             Arc::new(crate::sharing::SharingManager::new(

@@ -3094,7 +3094,7 @@ private fun BackChip(onExit: () -> Unit) {
 /** Explicit Shared dispatch, without a numeric Local PlanLike sentinel. Every
  * control here asks the server first; the picture moves only after B accepts. */
 @Composable
-internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, onExit: () -> Unit) {
+internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, onEnded: () -> Unit = {}, onExit: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val controller = remember(vm, plan) { SharedPlayerController(context, vm) }
     val starting by controller.owner.starting.collectAsStateWithLifecycle()
@@ -3105,10 +3105,20 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
     val scope = rememberCoroutineScope()
     BackHandler { scope.launch { controller.stop(); onExit() } }
     LaunchedEffect(plan) { controller.start(plan) }
+    val ended by controller.ended.collectAsStateWithLifecycle()
+    val finished by rememberUpdatedState(onEnded)
+    LaunchedEffect(ended) { if (ended) finished() }
     DisposableEffect(controller) { onDispose { controller.close() } }
     Column(Modifier.fillMaxSize()) {
         Text(plan.subject.title, style = MaterialTheme.typography.headlineSmall)
-        AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = controller.player } }, modifier = Modifier.weight(1f).fillMaxWidth())
+        // A prepared handoff moves the surface to the successor (and a rollback
+        // back); the view releases the pipeline it left once it no longer
+        // points at it.
+        val surface by controller.surfacePlayer.collectAsStateWithLifecycle()
+        val retired by controller.retired.collectAsStateWithLifecycle()
+        AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = surface } },
+            update = { view -> if (view.player !== surface) view.player = surface; if (retired != null) controller.collectRetired(view.player) },
+            modifier = Modifier.weight(1f).fillMaxWidth())
         if (starting) Text("Starting Shared playback")
         statusSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         failure?.let { Text(it) }

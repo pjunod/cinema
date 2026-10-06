@@ -16,15 +16,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_ms() -> Result<i64, StoreError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .filter(|n| *n > 0)
-        .ok_or_else(invalid)
+    super::sharing::wall_clock_ms()
 }
 fn policy_json_sql() -> String {
     let read = |key: &str| format!("(SELECT value FROM settings WHERE key='{key}')");
@@ -673,11 +667,14 @@ fn authority_predicate() -> String {
     format!("EXISTS(SELECT 1 FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=$1 AND u.id=$2 AND t.last_seen_at>=$5 AND {SCOPE} AND {SWITCH} AND NOT EXISTS(SELECT key,value FROM json_each({}) EXCEPT SELECT key,value FROM json_each($4)) AND NOT EXISTS(SELECT key,value FROM json_each($4) EXCEPT SELECT key,value FROM json_each({})))", policy_json_sql(), policy_json_sql())
 }
 
+/// `now` is the caller's single clock read for this write (see
+/// [`super::sharing::wall_clock_ms`]). SQLite evaluates the guard inside its
+/// blocking connection closure, so the read happens before that closure.
 pub(crate) fn receiver_activation_guard(
     authority: &ReceiverSessionWriteAuthority,
     activation: &MediaSessionActivation,
+    now: i64,
 ) -> Result<Option<Statement>, StoreError> {
-    let now = now_ms()?;
     if activation.principal
         != (PlaybackPrincipal::LocalUser {
             user_id: authority.intent.user_id,
@@ -770,6 +767,7 @@ mod tests {
     #[tokio::test]
     async fn sharing_receiver_activation_atomically_binds_full_remote_recipe_and_current_login_scope(
     ) {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let directory = tempfile::tempdir().expect("pooled receiver");
         for rebuilt in [false, true] {
             for pooled in [false, true] {
@@ -1136,6 +1134,7 @@ mod tests {
     }
     #[tokio::test]
     async fn sharing_receiver_source_binding_publication_and_renewal_are_guarded_and_exact() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         use crate::secrets::{CredentialKey, SharingSecretPurpose};
         use crate::sharing_receiver_sessions::{ReceiverSourceBinding, ReceiverSourceOwner};
         let directory = tempfile::tempdir().expect("receiver Source binding fixture");
@@ -1813,6 +1812,95 @@ mod tests {
                     .await;
                 use crate::sharing_receiver_delivery::ReceiverDeliveryWrite;
                 use crate::store::SharingReceiverDeliveryStore;
+                // A relay proof is read authority over the actual published
+                // owner, never a route-only recipe or stale owner epoch.
+                let route = store
+                    .media_session_route_by_incarnation(
+                        &attachment.owner.incarnation_id.to_string(),
+                    )
+                    .await
+                    .expect("published route")
+                    .expect("retained route");
+                let relay_grant = crate::sharing_receiver_delivery::ReceiverDeliveryGrant {
+                    token_hash: crate::auth::hash_token(&route.session_id),
+                    deadline_ms: attachment.owner.lease_expires_at_ms,
+                };
+                assert_eq!(
+                    store
+                        .issue_receiver_delivery(&current, &attachment, &relay_grant)
+                        .await
+                        .expect("relay grant"),
+                    ReceiverDeliveryWrite::Applied
+                );
+                let proof = store
+                    .receiver_relay_read_authority(&route)
+                    .await
+                    .expect("fresh relay read")
+                    .expect("actual published binding");
+                assert_eq!(proof.viewer_id(), intent.user_id);
+                use crate::store::SharingReceiverIngressStore;
+                assert!(store
+                    .receiver_ingress_snapshot(&route)
+                    .await
+                    .expect("no fabricated custody")
+                    .is_none());
+                let sealed = store
+                    .seal_receiver_ingress_route(&route, &proof.owner_identity())
+                    .await
+                    .expect("install absent retirement fence")
+                    .expect("sealed fence");
+                assert!(sealed.state.is_sealed());
+                let boot = Uuid::new_v4();
+                let late = crate::sharing_ingress_custody::IngressRegistration {
+                    node_id: route.owner_node_id.clone(),
+                    boot_id: boot,
+                    connection_id: Uuid::new_v4(),
+                    driver_sequence: 1,
+                    registration_sequence: 1,
+                    closed_confirmation: None,
+                };
+                // This proof was authorized before absent-ledger sealing. The
+                // late same-write Register must never create a new obligation.
+                assert_eq!(
+                    store
+                        .register_receiver_ingress(&proof, None, boot, &late)
+                        .await
+                        .expect("late authorized write refused"),
+                    crate::sharing_ingress_custody::CustodyMutation::Refused
+                );
+                let after = store
+                    .receiver_ingress_snapshot(&route)
+                    .await
+                    .expect("retained sealed fence")
+                    .expect("never missing-row proof");
+                assert!(after.state.is_sealed());
+                assert!(!after.state.contains_driver(&late));
+                let mut stale = route.clone();
+                stale.owner_epoch += 1;
+                assert!(store
+                    .receiver_relay_read_authority(&stale)
+                    .await
+                    .expect("stale owner refuses")
+                    .is_none());
+                let mut changed = route.clone();
+                changed.recipe_json.push(' ');
+                assert!(store
+                    .receiver_relay_read_authority(&changed)
+                    .await
+                    .expect("changed retained recipe refuses")
+                    .is_none());
+                assert_eq!(
+                    store
+                        .revoke_receiver_delivery(&current, &attachment, &relay_grant.token_hash)
+                        .await
+                        .expect("relay grant revoke"),
+                    ReceiverDeliveryWrite::Applied
+                );
+                assert!(store
+                    .receiver_relay_read_authority(&route)
+                    .await
+                    .expect("revoked relay read refuses")
+                    .is_none());
                 store.sharing_txn(vec![("CREATE TRIGGER delivery_ignore_update BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("delivery trigger fixture");
                 assert_eq!(
                     store
@@ -1850,11 +1938,7 @@ mod tests {
                     .expect("delivery trigger fixture");
                 let delivery_renewal = crate::sharing_receiver_sessions::ReceiverSourceRenewal {
                     attachment: attachment.clone(),
-                    lease_expires_at_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .expect("clock")
-                        .as_millis() as i64
-                        + 30000,
+                    lease_expires_at_ms: now_ms().expect("clock") + 30000,
                 };
                 store.sharing_txn(vec![("CREATE TRIGGER delivery_ignore_deadline BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("renewal trigger fixture");
                 assert_eq!(
@@ -1886,10 +1970,7 @@ mod tests {
                     ReceiverSourceWrite::Applied
                 );
                 attachment.owner.lease_expires_at_ms = delivery_renewal.lease_expires_at_ms;
-                attachment.owner.now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("clock")
-                    .as_millis() as i64;
+                attachment.owner.now_ms = now_ms().expect("clock");
                 delivery.deadline_ms = delivery_renewal.lease_expires_at_ms;
                 assert_eq!(
                     store

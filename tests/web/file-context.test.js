@@ -76,7 +76,7 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     ["player/audio-sync.js",["subUrl"]],
     ["detail/watch-browser.js",["watchChapterThumbUrl"]],
     ["player/stats.js",["reportProgress"]],
-    ["player/autoplay-next.js",["playNextEpisode","playNextAudiobookPart","playbackContinuation"]],
+    ["player/autoplay-next.js",["playNextEpisode","playNextSharedEpisode","playNextAudiobookPart","playbackContinuation"]],
   ].flatMap(([file,names])=>names.map(name=>shippedFunction(file,name))).join("\n");
   vm.runInContext(source+`\nlet PREPLAY={},PLAYER=null,STREAM_SEQ=0;
     const PLAYBACK_ID="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",SERVER=null;
@@ -103,6 +103,8 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     subtitle:subUrl,thumb:watchChapterThumbUrl,remux:remuxUrl,
     progress(){return reportProgress("7");},next:playNextEpisode,bookNext:playNextAudiobookPart,
     contract(session){vodClientContract=()=>({session});},
+    stub(name,fn){globalThis[name]=fn;},
+    attachShared(c,sharedReference){PLAYER={fileId:"7",fileContext:c,meta:{fileContext:c,kind:"episode",sharedReference},aoffset:0};},
     requests};`,ctx);
   return ctx.calls;
 }
@@ -230,14 +232,14 @@ test("shipped remux and session-start callers preserve legitimate full engine ca
   assert.throws(()=>h.url(shared,"stream.mp4",{vmaxheight:"hevc:999999"}));
 });
 
-test("Shared initial route is direct only for an actual direct decision, else session-first HLS refusing burn HDR or absent capability",()=>{
- const ctx=vm.createContext({AUTH_GENERATION:0,window:{Hls:{isSupported:()=>true}},PLAYER:{},failed:[],ROUTE:"direct"});
+test("Shared initial route is direct only for an actual direct decision, else session-first HLS with burn and HDR10, refusing Dolby Vision or absent capability",()=>{
+ const ctx=vm.createContext({AUTH_GENERATION:0,window:{Hls:{isSupported:()=>true}},PLAYER:{subs:[]},failed:[],ROUTE:"direct",subLabelFor:(_,i)=>"track "+i});
  vm.runInContext(source+`
  const Hls=window.Hls;
  const useNativeHls=()=>false,segmentedRemuxOk=()=>true,copyHlsMseOk=()=>true,noSegments=()=>false;
  const playbackInitialRoute=()=>ROUTE;
  `+shippedFunction("player/decode-tiers.js","choosePlayRoute")+`
- this.run=(c,method,grade,burn)=>choosePlayRoute({fileContext:c,video:{},sessionAudioOffset:0,libraryChannel:false,failPreparation:e=>failed.push(e.code)},{decision:{method,delivered_dynamic_range:grade}},{preBurn:burn},null);
+ this.run=(c,method,grade,burn,extra={})=>choosePlayRoute({fileContext:c,video:{},sessionAudioOffset:0,libraryChannel:false,failPreparation:e=>failed.push(e.code)},{decision:{method,delivered_dynamic_range:grade,...extra}},{preBurn:burn},null);
  this.shared=sharedPlaybackFileContextFromDetail;this.local=localPlaybackFileContext;`,ctx);
  const c=ctx.shared(reference,detail());
  // The browser plays the original container: the Shared route is direct,
@@ -247,15 +249,34 @@ test("Shared initial route is direct only for an actual direct decision, else se
  // A direct decision the browser cannot take as a raw file (a non-default
  // audio track) is Copy HLS, never a progressive remux, for a Shared file.
  ctx.ROUTE="progressive_remux";assert.equal(ctx.run(c,"direct_play","sdr",null),"copy_hls");ctx.ROUTE="direct";
- assert.equal(ctx.run(c,"direct_play","sdr",2),null);
+ // A burn always encodes: the Source owns its sidecar and fonts. A direct or
+ // copy decision with a burn is a transcode, never raw bytes or Copy HLS.
+ assert.equal(ctx.run(c,"direct_play","sdr",2),"transcode_hls");
+ assert.equal(ctx.run(c,"remux","sdr",0),"transcode_hls");
  assert.equal(ctx.run(c,"transcode","sdr",null),"transcode_hls");
- assert.equal(ctx.run(c,"transcode","hdr10",null),null);assert.equal(ctx.run(c,"remux","sdr",0),null);
+ // HDR10/HLG grades are the Source's own answer to these caps.
+ assert.equal(ctx.run(c,"transcode","hdr10",null),"transcode_hls");
+ assert.equal(ctx.run(c,"remux","hdr10",null),"copy_hls");
+ assert.equal(ctx.run(c,"remux","hlg",null),"copy_hls");
+ assert.equal(ctx.failed.length,0);
+ // Dolby Vision is refused with its own typed reason before any Start:
+ // preserved, converted, or a Dolby Vision source re-encoded or burned.
+ assert.equal(ctx.run(c,"remux","dolby_vision",null,{preserve_dolby_vision:true}),null);
+ assert.equal(ctx.run(c,"remux","dolby_vision",null,{convert_dolby_vision:true}),null);
+ assert.equal(ctx.run(c,"transcode","sdr",null,{source:{hdr:"dolby_vision"}}),null);
+ assert.equal(ctx.run(c,"remux","hdr10",1,{source:{hdr:"dolby_vision"}}),null);
+ assert.deepEqual(Array.from(ctx.failed),Array(4).fill("sharing_start_dolby_vision_unsupported"));
+ // A Dolby Vision source copied as its HDR10 base needs nothing the Source lacks.
+ assert.equal(ctx.run(c,"remux","hdr10",null,{source:{hdr:"dolby_vision"}}),"copy_hls");
+ ctx.failed.length=0;
+ assert.equal(ctx.run(c,"transcode","future",null),null);
  ctx.window.Hls.isSupported=()=>false;assert.equal(ctx.run(c,"transcode","sdr",null),null);
- assert.deepEqual(Array.from(ctx.failed),Array(4).fill("sharing_start_unsupported"));
+ assert.deepEqual(Array.from(ctx.failed),Array(2).fill("sharing_start_unsupported"));
 });
 test("shared status metrics are read only from the bound Shared grammar",()=>{
   const h=harness(),id="55555555-5555-4555-8555-555555555555";
-  const started=h.withPlaybackFileSession(h.sharedPlaybackFileContextFromDetail(reference,detail()),id);
+  const started=h.withPlaybackFileSession(h.sharedPlaybackFileContextFromDetail(reference,detail()),id,
+    {generation:"66666666-6666-4666-8666-666666666666",control_epoch:1});
   const status={target_height:720,http_wait_count:2,active_encode_milli_realtime:1500};
   const reply={subject:"shared",reference:{item:{...reference},file_id:"7",revision:"a".repeat(64),lifecycle_generation:1},
     session_id:id,incarnation_id:"66666666-6666-4666-8666-666666666666",control_epoch:1,status};
@@ -267,8 +288,14 @@ test("shared status metrics are read only from the bound Shared grammar",()=>{
     {...reply,reference:{...reply.reference,revision:"b".repeat(64)}},
     {...reply,reference:{...reply.reference,item:{...reference,item_id:"10"}}},
     {...reply,status:null},
+    {...reply,incarnation_id:"88888888-8888-4888-8888-888888888888"},
+    {...reply,control_epoch:2},
+    {...reply,local_session_id:"1"},
+    (({incarnation_id,...rest})=>rest)(reply),
     status,
   ]) assert.equal(h.sharedPlaybackStatusMetrics(started,wrong),null);
+  // A started session with no control tuple (direct play) has no status sample.
+  assert.equal(h.sharedPlaybackStatusMetrics(h.withPlaybackFileSession(h.sharedPlaybackFileContextFromDetail(reference,detail()),id),reply),null);
   assert.equal(h.sharedPlaybackStatusMetrics(h.sharedPlaybackFileContextFromDetail(reference,detail()),reply),null);
   assert.equal(h.sharedPlaybackStatusMetrics(h.localPlaybackFileContext(7),reply),null);
 });
@@ -355,4 +382,21 @@ test("Shared direct attachment polls no status, starts no control, DELETEs its B
   assert.match(shippedFunction("player/stats.js","closePlayer"),/releaseSharedDirect\(PLAYER\)/);
   assert.match(shippedFunction("player/decode-margin.js","retirePlaybackPredecessor"),/releaseSharedDirect\(predecessor\)/);
   assert.match(shippedFunction("player/decode-tiers.js","preparePlayOutgoing"),/releaseSharedDirect\(outgoing\)/);
+});
+test("Shared next episode dispatches to the Source-order resolver and a fresh authorized start, never a Local route",async()=>{
+  const h=callerHarness(),shared=h.shared(reference,detail()),calls=[];
+  const next={...reference,item_id:"9007199254740994"};
+  h.stub("toast",()=>{});
+  h.stub("beginPlaybackPreparation",()=>({run:fn=>fn(null),finish(){calls.push("finish");}}));
+  h.stub("sharedCatalogueNextEpisode",async(ref,read)=>{calls.push(["resolve",ref.item_id]);await read("/shared/imports/"+ref.import_id+"/items/"+ref.item_id);return next;});
+  h.stub("sharedCatalogueLaunch",async(ref,file,current)=>{calls.push(["launch",ref.item_id,file,current()]);});
+  h.attachShared(shared,reference);
+  assert.equal(await h.next(),true);
+  assert.deepEqual(calls,[["resolve","9"],"finish",["launch","9007199254740994",null,true]]);
+  assert.deepEqual(h.requests.map(r=>r.url),["/shared/imports/"+reference.import_id+"/items/9"]);
+  // The end of the series, or a resolver refusal, ends without any start.
+  calls.length=0;h.stub("sharedCatalogueNextEpisode",async()=>null);
+  assert.equal(await h.next(),false);assert.deepEqual(calls,["finish"]);
+  calls.length=0;h.stub("sharedCatalogueNextEpisode",async()=>{throw new Error("Shared source changed");});
+  assert.equal(await h.next(),false);assert.deepEqual(calls,["finish"]);
 });

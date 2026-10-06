@@ -843,7 +843,7 @@ fn peer_error(error: crate::sharing_client::PeerError) -> ApiError {
         PeerError::InvalidResponse => {
             failure(StatusCode::BAD_GATEWAY, "sharing_invalid_peer_response")
         }
-        PeerError::Unavailable | PeerError::Rejected(_) => {
+        PeerError::Unavailable | PeerError::Rejected(_) | PeerError::DolbyVisionUnsupported => {
             failure(StatusCode::BAD_GATEWAY, "sharing_peer_unavailable")
         }
     }

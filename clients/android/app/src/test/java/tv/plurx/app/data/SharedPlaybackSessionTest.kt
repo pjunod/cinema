@@ -45,7 +45,7 @@ class SharedPlaybackSessionTest {
         val playback = client.start(plan.subject.context, plan.request)
         val channel = SharedControlChannel(client, playback, instance, sharedControlCapabilities(plan.caps))
         val state = SharedControlState(PlaybackDemand.ACTIVE, 40_000, 45_000, RenderState.RENDERING)
-        assertEquals(SharedControlOutcome.Accepted("none"), channel.exchange(state, plan.frozenControlSelection()))
+        assertEquals(SharedControlOutcome.Accepted("none", 1), channel.exchange(state, plan.frozenControlSelection()))
         val first = f.body("control ${f.session(1)}")
         assertEquals(f.generation(1), first.getValue("generation").jsonPrimitive.content)
         assertEquals(1L, first.getValue("control_epoch").jsonPrimitive.long)
@@ -126,6 +126,24 @@ class SharedPlaybackSessionTest {
         assertTrue(runCatching { client.startDirect(context, plan.request.copy(presentation = "vod")) }.isFailure)
         assertTrue(runCatching { client.start(context, plan.request) }.isFailure)
         assertEquals(starts, f.starts)
+    }
+
+    @Test fun sharedBurnAndHdrPlanUseSourceOwnedStartFields(): Unit = runBlocking {
+        val f = SharedFixture("105"); f.login(); val context = f.context()
+        val original = Json.parseToJsonElement(f.decision("transcode")).jsonObject
+        val wire = JsonObject(original + mapOf(
+            "delivered_dynamic_range" to JsonPrimitive("hdr10"),
+            "subtitles" to buildJsonArray { add(buildJsonObject { put("index", 4); put("codec", "hdmv_pgs_subtitle"); put("native", false); put("text", false) }) },
+        )).toString()
+        val plan = f.plan(context, "transcode", SharedSelection(PlaybackQuality.Q720, subtitle = 4), wire = wire)
+        assertEquals(4, plan.request.subtitle_burn)
+        assertEquals(true, plan.request.hdr10)
+        assertEquals(false, plan.request.copy)
+        assertEquals(null, plan.request.native_subtitles)
+        assertEquals("burn", plan.frozenControlSelection().getValue("subtitle").jsonObject.getValue("mode").jsonPrimitive.content)
+        assertEquals(plan.selection.controlSelection(), plan.frozenControlSelection())
+        val directWire = JsonObject(Json.parseToJsonElement(f.decision("direct_play")).jsonObject + ("delivered_dynamic_range" to JsonPrimitive("hdr10"))).toString()
+        assertTrue(f.plan(context, "direct_play", allowDirect = true, wire = directWire).direct)
     }
 
     @Test fun directIsChosenOnlyForTheUntouchedFileAndSelectionsRoundTrip(): Unit = runBlocking {

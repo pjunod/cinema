@@ -150,7 +150,7 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         require(context.sessionId == null && requireNotNull(context.lifecycleGeneration) > 0)
         context.validateSharedReference(reference, context.sourceFileId, requireNotNull(context.revision))
         require(body.intent == null && body.previous_session_id == null && body.control_sequence == null && body.reopen_reason == null
-            && body.subtitle_burn == null && body.hdr10 != true && body.preserve_dolby_vision != true) { "This Shared playback change is not available yet." }
+            && body.preserve_dolby_vision != true) { "This Shared playback change is not available yet." }
         require(body.caps?.v == 2 && body.playback_id.isNotEmpty()
             && body.playback_id.toByteArray().size <= 128 && body.playback_id.none { it.code < 32 || it.code == 127 })
         require(body.request_id?.let { Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(it) } == true)

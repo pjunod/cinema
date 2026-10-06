@@ -104,6 +104,14 @@ internal class PreparedOfferWait(
     private val floorSequence: Long,
     private val boundMs: Long = BOUND_MS,
     private val stagingCadenceMs: Long = STAGING_CADENCE_MS,
+    /**
+     * Whether `none` on the exchange that carried the ask is already the
+     * decision. A Local server answers that exchange before it has looked, so
+     * Local keeps the default. A Shared B decides on the same exchange (it
+     * stages, or declines typed, before it answers), so its `none` there is a
+     * decline and waiting the bound out would only delay the reopen.
+     */
+    private val noneOnTheAskDeclines: Boolean = false,
 ) {
     sealed interface Step {
         /** Nothing decided yet. [nextExchangeMs] is how long to wait before looking again. */
@@ -154,7 +162,7 @@ internal class PreparedOfferWait(
         // A decline, but never on the exchange that carried the ask: that one
         // is answered before the server has looked, and on an old server it is
         // answered with nothing at all.
-        if (answer.preparation == PREPARATION_NONE && !first) return Step.Reopen("declined")
+        if (answer.preparation == PREPARATION_NONE && (!first || noneOnTheAskDeclines)) return Step.Reopen("declined")
         // `staging`, `offered` without the action yet, an unknown word from a
         // newer server, or the silence of an older one. All of them mean the
         // same thing here: keep waiting, and let the bound decide.
