@@ -283,7 +283,7 @@ class SharedDecisionClientTest {
         login(); val context = context(); var calls = 0
         val client = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { calls++; response(it.request(), "{}") }.build())
         val base = CreateSessionReq(playback_id = "shared", request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps = caps())
-        for (request in listOf(base.copy(previous_session_id = ""), base.copy(control_sequence = 0), base.copy(reopen_reason = ReopenReason.Stall), base.copy(subtitle_burn = 0), base.copy(preserve_dolby_vision = true), base.copy(request_id = base.request_id!!.uppercase()))) {
+        for (request in listOf(base.copy(previous_session_id = ""), base.copy(control_sequence = 0), base.copy(reopen_reason = ReopenReason.Stall), base.copy(preserve_dolby_vision = true), base.copy(request_id = base.request_id!!.uppercase()))) {
             assertTrue(runCatching { client.start(context, request) }.isFailure)
         }
         assertEquals(0, calls)

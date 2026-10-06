@@ -242,8 +242,9 @@ internal class SharedPlaybackOwner(
     }
 
     /** A directed quality, audio or subtitle change. */
-    suspend fun change(next: SharedSelection) = commands.withLock {
+    suspend fun change(requested: SharedSelection) = commands.withLock {
         val current = requireNotNull(plan)
+        val next = requested.copy(burn = requested.subtitle?.let { index -> current.decision.presentation.subtitles.firstOrNull { it.index == index.toLong() }?.isNativeHls == false } ?: false)
         // A newer ask supersedes an unfinished one, which owes B its abort.
         handoff?.let { abandon(it, failed = false) }
         if (next == current.selection) return@withLock
@@ -335,8 +336,11 @@ internal class SharedPlaybackOwner(
         handoff = null
         renderer.releasePredecessor()
         val view = renderer.snapshot()
-        reopen(h.next, view.positionMs, view.playing, allowDirect = false, decided = h.result)
-        runCatching { client.end(successor) }
+        try {
+            reopen(h.next, view.positionMs, view.playing, allowDirect = false, decided = h.result)
+        } finally {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { runCatching { client.end(successor) } }
+        }
     }
 
     /** The offer arrived: bind B's successor and prime a second pipeline on it. */
@@ -350,7 +354,7 @@ internal class SharedPlaybackOwner(
             val plan = successorPlan(h, view.positionMs)
             val successor = SharedStart.successor(requireNotNull(h.offer), current, plan.request)
             h.successorPlan = plan; h.successor = successor; h.preparedAtMs = clock()
-            renderer.prepareSuccessor(client.playlistUrl(successor), view.positionMs, h.next.subtitle != null)
+            renderer.prepareSuccessor(client.playlistUrl(successor), view.positionMs, h.next.subtitle != null && !h.next.burn)
         } catch (error: Exception) {
             if (error is kotlinx.coroutines.CancellationException) throw error
             // An offer this client cannot bind, or a device that cannot stand
@@ -466,7 +470,17 @@ internal class SharedPlaybackOwner(
         val current = requireNotNull(plan)
         val result = h.result ?: client.redecide(current.subject.context, current.caps, h.next.decisionQuery()).also { h.result = it }
         val subject = SharedPlaybackSubject(current.subject.context, current.subject.title, positionMs.coerceAtLeast(0), current.subject.watchSequence)
-        return sharedPlaybackPlan(subject, result, h.next, current.request.playback_id, UUID.randomUUID().toString(), allowDirect = false)
+        // B projects the frozen original request, not this fresh decision's
+        // plan flags. Retain its caps/HDR request and replace exactly the ask.
+        val request = current.request.copy(
+            request_id = UUID.randomUUID().toString(), start = subject.resumeMs.toDouble() / 1000,
+            quality_auto = h.next.quality == PlaybackQuality.Auto, height = h.next.quality.rungHeight,
+            copy = when { h.next.burn -> false; h.next.quality == PlaybackQuality.Auto -> null; else -> h.next.quality == PlaybackQuality.Original },
+            audio = h.next.audio, native_subtitles = h.next.subtitle?.takeUnless { h.next.burn }?.let { true },
+            subtitle = h.next.subtitle?.takeUnless { h.next.burn }, subtitle_burn = h.next.subtitle?.takeIf { h.next.burn },
+            intent = null, previous_session_id = null, control_sequence = null, reopen_reason = null,
+        )
+        return SharedPlaybackPlan(subject, result.decision, current.caps, request, adopted = true)
     }
 
     /** Send an acknowledgement now, on the predecessor's channel. */
@@ -577,10 +591,15 @@ internal class SharedPlaybackOwner(
 
     private suspend fun attachHls(next: SharedPlaybackPlan, positionMs: Long, playWhenReady: Boolean): SharedStartedPlayback {
         val started = client.start(next.subject.context, next.request)
+        try {
         renderer.attachHls(client.playlistUrl(started), positionMs, playWhenReady)
         commit(next, started, SharedControlChannel(client, started, clientInstanceId,
             sharedControlCapabilities(next.caps, preparedHandoff), prepared = preparedHandoff))
         return started
+        } catch (error: Throwable) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { runCatching { client.end(started) } }
+            throw error
+        }
     }
 
     private fun commit(next: SharedPlaybackPlan, started: SharedBoundSession, control: SharedControlChannel?) {

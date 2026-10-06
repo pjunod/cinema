@@ -522,6 +522,12 @@ function startPlaybackControl(v,p,bootstrap){
             message:"playback-control exchange recovered; legacy recovery remained authoritative"});
         }
         if(error){
+          const pending=p.preparedControlPending;
+          if(shared&&pending?.sharedContext&&request.acknowledgement?.state==="committed"
+            &&request.acknowledgement.action_id===pending.actionId){
+            recoverSharedCommittedReplacement(p,pending);
+            return;
+          }
           const now=Date.now(), message=String(error.message||error);
           p.controlLastError={at:now,message};
           if(Number(error.status)===410){

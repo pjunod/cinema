@@ -5172,6 +5172,9 @@ internal class SharedPlayerController(private val context: android.content.Conte
         override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean) {
             dropSuccessor()
             val built = buildSuccessorPlayer(context, vm).player
+            // Register ownership before any setup that can throw on a TV.
+            successor = built
+            try {
             successorSeekLanded = false; successorFailed = false; successorFirstFrameUnixMs = null
             built.addListener(successorListener)
             built.trackSelectionParameters = built.trackSelectionParameters.buildUpon()
@@ -5181,7 +5184,10 @@ internal class SharedPlayerController(private val context: android.content.Conte
             built.playWhenReady = false
             built.setMediaItem(MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build(), positionMs)
             built.prepare()
-            successor = built
+            } catch (error: Throwable) {
+                dropSuccessor()
+                throw error
+            }
         }
         override fun successorSnapshot(): SharedSuccessorSnapshot? = successor?.let {
             SharedSuccessorSnapshot(

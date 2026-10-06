@@ -44,7 +44,7 @@ struct SharedDecisionClient {
         else { throw APIError.badURL }
         try context.validateSharedReference(reference, file: context.sourceFileId, revision: revision)
         guard body.intent == nil, body.previousSessionId == nil, body.controlSequence == nil,
-              body.reopenReason == nil, body.subtitleBurn == nil, body.hdr10 != true,
+              body.reopenReason == nil,
               body.preserveDolbyVision != true
         else { throw APIError.transport("This Shared playback change is not available yet.") }
         let direct = body.presentation == "direct"

@@ -200,6 +200,24 @@ function settlePlaybackControlAcknowledgement(p,request){
   }
 }
 
+// A visible Shared switch whose commit is refused or lost has two possible
+// server owners. Reopen under the accepted predecessor context and then end
+// both old sessions; the fresh Start owns the viewer's current selection.
+function recoverSharedCommittedReplacement(p,pending){
+  if(PLAYER!==p||p.preparedControlPending!==pending) return false;
+  p.preparedControlPending=null;
+  stopPlaybackControl(p);
+  const predecessor=p.fileContext?.session_id;
+  const successor=pending.sessionId;
+  const position=positionForPlaybackIntent(document.getElementById("video"),p);
+  const reopening=play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
+  Promise.resolve(reopening).finally(()=>{
+    releaseSession(predecessor);
+    if(successor!==predecessor) releaseSession(successor);
+  }).catch(()=>{});
+  return true;
+}
+
 /** @returns {HTMLVideoElement|null} */
 function preparedVideoElement(){
   return /** @type {HTMLVideoElement|null} */ (document.getElementById("video-prepared"));
