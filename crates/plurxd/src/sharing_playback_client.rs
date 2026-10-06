@@ -16,6 +16,8 @@ const MAX_EPOCH: i64 = 9_007_199_254_740_991;
 /// transit, so a slow Source settlement is answered once rather than timed
 /// out into another dial.
 const SOURCE_END_DEADLINE: Duration = Duration::from_secs(315);
+const CLEANUP_IMPORT_LOOKUP_DEADLINE: Duration = Duration::from_secs(3);
+const CLEANUP_ALTERNATIVE_ATTEMPT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// No Deref or access to catalogue, Start or resource methods. The retained
 /// approved SPKI authenticates TLS; the exact authenticated End echo binds
@@ -30,41 +32,67 @@ impl CleanupPeerConnection {
             .await
             .map(Self)
     }
-    /// Retained cleanup remains reachable after an authenticated manifest edit.
-    /// A re-paired import is a new lineage and cannot supply replacement pins.
-    /// This opens only End; it never admits work under the old viewer authority.
-    pub(crate) async fn connect_for_session(
+    /// Own one immutable End across approved endpoints under one total budget.
+    /// A retained node can keep TLS alive while refusing/losing its End route;
+    /// only a successful authenticated exact echo settles the obligation.
+    pub(crate) async fn end_for_session(
         state: &crate::state::AppState,
         intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
         retained: &Endpoint,
-    ) -> Result<Self, PeerError> {
-        match Self::connect(&state.sharing, retained).await {
-            Ok(connection) => return Ok(connection),
-            Err(PeerError::Unavailable) => {}
-            Err(error) => return Err(error),
-        }
-        let import = state
-            .store
-            .sharing_import(intent.scope.import_id)
-            .await
-            .map_err(|_| PeerError::Unavailable)?
-            .ok_or(PeerError::Unavailable)?;
-        if !cleanup_import_matches(&import.summary, intent) {
-            return Err(PeerError::Unavailable);
-        }
-        for endpoint in import
-            .summary
-            .endpoints
-            .iter()
-            .filter(|endpoint| *endpoint != retained)
+        credential: &Secret,
+        viewer_hash: &str,
+        session: &SourcePeerSession,
+        known: Option<&SourcePeerLineage>,
+    ) -> Result<SourceEndReceipt, PeerError> {
+        let deadline = tokio::time::Instant::now() + SOURCE_END_DEADLINE;
+        let mut endpoints = vec![retained.clone()];
+        if let Ok(Ok(Some(import))) = tokio::time::timeout_at(
+            (tokio::time::Instant::now() + CLEANUP_IMPORT_LOOKUP_DEADLINE).min(deadline),
+            state.store.sharing_import(intent.scope.import_id),
+        )
+        .await
         {
-            match Self::connect(&state.sharing, endpoint).await {
-                Ok(connection) => return Ok(connection),
-                Err(PeerError::Unavailable) => {}
-                Err(error) => return Err(error),
+            if cleanup_import_matches(&import.summary, intent) {
+                for endpoint in import.summary.endpoints {
+                    if !endpoints.contains(&endpoint) {
+                        endpoints.push(endpoint);
+                    }
+                }
             }
         }
-        Err(PeerError::Unavailable)
+        let mut last = PeerError::Unavailable;
+        let candidate_count = endpoints.len();
+        for (index, endpoint) in endpoints.into_iter().enumerate() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(PeerError::Unavailable);
+            }
+            // Preserve useful budget for approved alternatives even if a
+            // retained peer accepts TLS and then never answers End. The last
+            // candidate receives the remainder, allowing a real slow owner to
+            // finish the same immutable End; timeout never means settlement.
+            let remaining_candidates =
+                u32::try_from(candidate_count - index).map_err(|_| PeerError::Unavailable)?;
+            let remaining = deadline.saturating_duration_since(now);
+            let allowance = if remaining_candidates == 1 {
+                remaining
+            } else {
+                (remaining / remaining_candidates).min(CLEANUP_ALTERNATIVE_ATTEMPT_DEADLINE)
+            };
+            let attempt = tokio::time::timeout_at(now + allowance, async {
+                let mut connection = Self::connect(&state.sharing, &endpoint).await?;
+                connection
+                    .end(credential, viewer_hash, session, known)
+                    .await
+            })
+            .await;
+            match attempt {
+                Ok(Ok(receipt)) => return Ok(receipt),
+                Ok(Err(error)) => last = error,
+                Err(_) => last = PeerError::Unavailable,
+            }
+        }
+        Err(last)
     }
     pub(crate) async fn end(
         &mut self,

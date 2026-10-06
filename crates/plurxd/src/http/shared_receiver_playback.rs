@@ -1026,23 +1026,18 @@ impl ReceiverStartActor {
             .map(|source| source.lineage())
             .transpose()
             .map_err(|_| RetirementStep::Refused)?;
-        let mut connection = crate::sharing_client::CleanupPeerConnection::connect_for_session(
-            state,
-            &self.0.intent,
-            &dispatched.endpoint,
-        )
-        .await
-        .map_err(RetirementStep::from_source_end)?;
         let receipt = Arc::new(
-            connection
-                .end(
-                    &dispatched.credential,
-                    &dispatched.viewer_hash,
-                    &self.0.peer_session,
-                    known.as_ref(),
-                )
-                .await
-                .map_err(RetirementStep::from_source_end)?,
+            crate::sharing_client::CleanupPeerConnection::end_for_session(
+                state,
+                &self.0.intent,
+                &dispatched.endpoint,
+                &dispatched.credential,
+                &dispatched.viewer_hash,
+                &self.0.peer_session,
+                known.as_ref(),
+            )
+            .await
+            .map_err(RetirementStep::from_source_end)?,
         );
         // Preserve the authenticated result before a subsequent Store await.
         let mut owner = self.0.state.lock().expect("receiver owner");

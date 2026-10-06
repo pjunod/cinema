@@ -2505,7 +2505,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # +1 Shared burn sidecar creation: the Source probe owns and awaits the
 # blocking tempfile job; its anonymous file closes on failure or rendition
 # settlement. No timer or detached recovery owner is added.
-expected_occurrences = 809
+# +1 approved-endpoint fixture: its replacement TLS server is stopped and
+# joined by the fixture after the real immutable End settles.
+expected_occurrences = 810
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3715,7 +3717,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the hand-over transport test's waits (busy and revoked transports cut, idle
 # custody released). The commit hand-off itself adds no task or timer: it runs
 # when the commit answer's writer is released.
-expected_occurrences = 1325
+# +4 approved-endpoint cleanup: bounded import lookup and total-budget
+# endpoint attempt replace the old unbounded dial loop; two fixture bounds
+# cover an actual End refusal and an accepted request stalled until settlement.
+expected_occurrences = 1329
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -4557,7 +4562,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +4 Shared burns/HDR: filter-listing output uses Source-owned run_child;
 # fixture subtitle mux output is awaited; two HTTP status assertions inspect
 # responses only. None creates an additional detached owner.
-expected_occurrences = 576
+# +1 approved-endpoint fixture server launch, owned and joined by the fixture.
+expected_occurrences = 577
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 

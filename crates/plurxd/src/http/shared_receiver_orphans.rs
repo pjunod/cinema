@@ -301,18 +301,15 @@ async fn retire_claimed(
                 lineage,
                 session,
             } = end.as_ref();
-            let attempt = async {
-                let mut connection =
-                    crate::sharing_client::CleanupPeerConnection::connect_for_session(
-                        state,
-                        orphan.intent(),
-                        endpoint,
-                    )
-                    .await?;
-                connection
-                    .end(credential, viewer_hash, session, lineage.as_ref())
-                    .await
-            }
+            let attempt = crate::sharing_client::CleanupPeerConnection::end_for_session(
+                state,
+                orphan.intent(),
+                endpoint,
+                credential,
+                viewer_hash,
+                session,
+                lineage.as_ref(),
+            )
             .await;
             match attempt {
                 Ok(receipt) => match receipt.retirement_confirmation(session) {
