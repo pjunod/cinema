@@ -44,6 +44,8 @@ pub struct SourceSessionRequest {
     pub request_fingerprint: String,
     pub playback_id: String,
     pub incarnation_id: Uuid,
+    /// The actual worker registry boot supplied by the daemon boundary.
+    pub ingress_registry_boot_id: Uuid,
     pub now_ms: i64,
     pub claim_expires_at_ms: i64,
     pub credential_hash: String,
@@ -87,6 +89,8 @@ impl SourceSessionIntent {
     ) -> Result<Self, StoreError> {
         if !matches!(request.principal, PlaybackPrincipal::Sharing { .. })
             || !request.principal.valid_admission_shape()
+            || request.ingress_registry_boot_id.is_nil()
+            || request.ingress_registry_boot_id.get_version_num() != 4
             || !is_hash(&request.credential_hash)
             || !is_hash(&request.request_fingerprint)
             || !(1..=128).contains(&request.request_id.len())
@@ -239,6 +243,12 @@ impl SourceDispatchAssignment {
         self.dispatch_generation
     }
 
+    /// Canonical accounting identity for this exact dispatch. This hash carries
+    /// no admission or physical closure authority, and survives grant rotation.
+    pub fn custody_identity(&self) -> String {
+        binding_custody_identity(&self.binding, &self.owner_node_id, self.dispatch_generation)
+    }
+
     /// Membership observations may refresh without changing dispatch lineage.
     pub fn same_identity(&self, other: &Self) -> bool {
         self.binding.same_identity(&other.binding)
@@ -247,6 +257,69 @@ impl SourceDispatchAssignment {
     }
     /// Check the original observation's clock before actual queue admission.
     /// Success is not a current grant/floor proof or a physical worker permit.
+    pub fn validate_observation_freshness(&self, now_ms: i64) -> Result<(), SourceAdmissionError> {
+        self.members.write_guard(now_ms, 1, 2, 3).map(|_| ())
+    }
+}
+
+pub(crate) fn binding_custody_identity(
+    binding: &SourceBindingHandle,
+    owner: &str,
+    generation: i64,
+) -> String {
+    let PlaybackPrincipal::Sharing {
+        grant_id,
+        viewer_key,
+    } = &binding.principal
+    else {
+        unreachable!("Source binding factory accepts only sharing principals")
+    };
+    let values = [
+        binding.principal.owner_key(),
+        grant_id.to_string(),
+        viewer_key.as_str().to_owned(),
+        binding.request_id.clone(),
+        binding.request_fingerprint.clone(),
+        binding.playback_id.clone(),
+        binding.incarnation_id.to_string(),
+        owner.to_owned(),
+        generation.to_string(),
+        binding.source_server_id.to_string(),
+        binding.catalogue_epoch.to_string(),
+        binding.library_id.as_str().to_owned(),
+        binding.item_id.as_str().to_owned(),
+        binding.file_id.as_str().to_owned(),
+        binding.file_revision.as_str().to_owned(),
+    ];
+    custody_identity_fields(values)
+}
+/// Fixed ordered metadata fields, not an opaque binding/assignment factory.
+pub(crate) fn custody_identity_fields(values: [String; 15]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"plurx.sharing-source-ingress-owner.v1\0");
+    for value in values {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// Additive ingress activation authority. It is neither driver closure nor
+/// a negative-admission receipt; only a guarded Store factory constructs it.
+#[derive(Clone)]
+pub struct SourceIngressAdmissionPermission {
+    pub(crate) assignment: SourceDispatchAssignment,
+    pub(crate) registry_boot_id: Uuid,
+    pub(crate) members: SourceAdmissionMembers,
+}
+impl SourceIngressAdmissionPermission {
+    pub fn assignment(&self) -> &SourceDispatchAssignment {
+        &self.assignment
+    }
+    pub fn registry_boot_id(&self) -> Uuid {
+        self.registry_boot_id
+    }
     pub fn validate_observation_freshness(&self, now_ms: i64) -> Result<(), SourceAdmissionError> {
         self.members.write_guard(now_ms, 1, 2, 3).map(|_| ())
     }

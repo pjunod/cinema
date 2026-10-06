@@ -60,6 +60,28 @@ async fn source_factory_refuses_unbound_normalized_preparation_before_admission(
     Box::pin(source_copy_preadmission_fixture(49)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_factory_refuses_permission_from_another_actual_registry_boot() {
+    Box::pin(source_copy_preadmission_fixture(50)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_ingress_permission_refuses_empty_ledger_before_factory() {
+    Box::pin(source_copy_preadmission_fixture(51)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_producer_preparation_requires_fresh_unsealed_ingress_permission() {
+    Box::pin(source_copy_preadmission_fixture(52)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_retained_permission_survives_zero_open_connections_and_reconnect() {
+    Box::pin(source_copy_preadmission_fixture(54)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_retired_predecessor_cannot_invalidate_surviving_owner_generation_permission() {
+    Box::pin(source_copy_preadmission_fixture(53)).await;
+}
+
 fn source_fixture_state() -> Arc<crate::state::AppState> {
     Arc::new(crate::http::source_actor_test_state())
 }
@@ -122,6 +144,16 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         config.storage.data_dir.clone(),
         config.sharing.clone(),
     ));
+    state_mut.node_id = selected.identity.node_id.clone();
+    state_mut
+        .membership
+        .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
+    state_mut
+        .membership
+        .publish_ingress_custody_boot()
+        .await
+        .expect("actual registry boot publication before admission");
+
     let store = &state.store;
     store
         .put_setting(keys::SHARING_ENABLED, "true")
@@ -426,6 +458,25 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         "cinemashare-viewer",
         "c".repeat(64).parse().expect("viewer"),
     );
+    let second_prepared = if mode == 53 {
+        let mut second: CreateSession =
+            serde_json::from_value(serde_json::to_value(&body).expect("second actual ask"))
+                .expect("second complete ask");
+        second.playback_id = "copy-source-survivor".into();
+        second.request_id = Some("copy-source-survivor-request".into());
+        Some(
+            Box::pin(prepare_source_playback(
+                &state,
+                &headers,
+                target.clone(),
+                second,
+            ))
+            .await
+            .expect("actual second prepared Source invocation"),
+        )
+    } else {
+        None
+    };
     let preparation = Box::pin(prepare_source_playback(&state, &headers, target, body));
     eprintln!(
         "Source preparation future: {} bytes",
@@ -446,9 +497,10 @@ async fn source_copy_preadmission_fixture(mode: u8) {
                 request_fingerprint: prepared.fingerprint().into(),
                 playback_id: prepared.request().playback_id.clone(),
                 incarnation_id: uuid::Uuid::new_v4(),
+                ingress_registry_boot_id: state.sharing.accepted_drivers.boot_id(),
                 now_ms: now,
                 claim_expires_at_ms: now + 60000,
-                credential_hash: hash,
+                credential_hash: hash.clone(),
                 item_id: SourceId::parse(&item.to_string()).expect("item ID"),
                 file_id: SourceId::parse("1").expect("file ID"),
                 file_revision: revision,
@@ -517,6 +569,63 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         EncoderCaps::default(),
         Pipeline::Cpu,
     ));
+    if let Some(mut second_prepared) = second_prepared {
+        let now = crate::fragment_index_cluster::unix_ms();
+        let SourceIntentRead::Ready(second_intent) = store
+            .prepare_source_session_intent(
+                SourceSessionRequest {
+                    principal: second_prepared.principal().clone(),
+                    request_id: "copy-source-survivor-request".into(),
+                    request_fingerprint: second_prepared.fingerprint().into(),
+                    playback_id: second_prepared.request().playback_id.clone(),
+                    incarnation_id: uuid::Uuid::new_v4(),
+                    ingress_registry_boot_id: state.sharing.accepted_drivers.boot_id(),
+                    now_ms: now,
+                    claim_expires_at_ms: now + 60000,
+                    credential_hash: hash,
+                    item_id: assignment.binding().item_id().clone(),
+                    file_id: assignment.binding().file_id().clone(),
+                    file_revision: assignment.binding().file_revision().clone(),
+                },
+                &master,
+            )
+            .await
+            .expect("actual second Source intent")
+        else {
+            panic!("second intent");
+        };
+        let fresh_members = membership
+            .observe_source_admission_members()
+            .await
+            .expect("actual second members")
+            .expect("actual second floor");
+        let SourceClaimOutcome::Acquired(second_binding) = store
+            .claim_source_media_session(&second_intent, &fresh_members)
+            .await
+            .expect("actual second claim")
+        else {
+            panic!("second claim");
+        };
+        second_prepared
+            .bind_source_invocation(&second_binding)
+            .expect("bind actual second invocation");
+        let second_assignment = store
+            .assign_source_dispatch(&second_binding, &master, &fresh_members)
+            .await
+            .expect("actual second assignment")
+            .expect("second assigned owner");
+        Box::pin(source_two_owner_generation_fixture(
+            state,
+            manager,
+            prepared,
+            assignment,
+            second_prepared,
+            second_assignment,
+        ))
+        .await;
+        selected.shutdown().await.expect("actual voter shutdown");
+        return;
+    }
     if mode >= 5 {
         source_actual_actor_boxed(state, manager, prepared, assignment, mode, client.clone()).await;
         selected.shutdown().await.expect("actual voter shutdown");
@@ -563,6 +672,15 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         selected.shutdown().await.expect("actual voter shutdown");
         return;
     }
+    let seal = store
+        .seal_source_ingress_custody(&assignment)
+        .await
+        .expect("exact empty fixture custody seal");
+    assert!(matches!(
+        seal,
+        plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::Applied
+            | plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::ExactReplay
+    ));
     assert_eq!(
         store
             .settle_source_assigned_without_activation(&assignment)
@@ -663,10 +781,17 @@ async fn source_actual_copy_attachment(
         MEDIA_SESSION_PUBLICATION_BLOCKED
     );
     assert!(manager.vod.session_ids().await.is_empty());
+    let ingress_fixture = Box::pin(SourceFactoryIngressFixture::new(
+        Arc::new(state.clone()),
+        assignment,
+    ))
+    .await;
     let gate = Arc::new(SourceProducerAuthority {
         store: Arc::clone(store),
         membership: membership.clone(),
         master: Arc::clone(master),
+        registry_boot_id: state.sharing.accepted_drivers.boot_id(),
+        ingress: ingress_fixture.permission().await,
     });
     authority
         .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
@@ -716,6 +841,7 @@ async fn source_actual_copy_attachment(
         .await
         .expect("exact terminal Store")
         .expect("ended Source route");
+    ingress_fixture.close().await;
     let settled = Box::pin(reserved.retire(&manager.vod))
         .await
         .expect("actual producer and writers barrier");
@@ -841,12 +967,81 @@ async fn source_actual_actor(
     else {
         panic!("activation hint")
     };
-    if mode == 48 || mode == 49 {
+    if mode == 51 {
+        assert!(state
+            .store
+            .prepare_source_ingress_admission(
+                &assignment,
+                state.sharing.accepted_drivers.boot_id(),
+                &members
+            )
+            .await
+            .expect("guarded empty ledger read")
+            .is_none());
+        state
+            .store
+            .seal_source_ingress_custody(&assignment)
+            .await
+            .expect("empty exact custody seal");
+        assert_eq!(
+            state
+                .store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("sealed empty assignment cleanup"),
+            SourceReleaseOutcome::Released
+        );
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        return;
+    }
+    let ingress_fixture = Box::pin(SourceFactoryIngressFixture::new(
+        Arc::clone(&state),
+        &assignment,
+    ))
+    .await;
+    let ingress_permission = ingress_fixture.permission().await;
+    if mode == 52 {
+        let gate = SourceProducerAuthority {
+            store: Arc::clone(&state.store),
+            membership: state.membership.clone(),
+            master: Arc::clone(&state.sharing.key),
+            registry_boot_id: state.sharing.accepted_drivers.boot_id(),
+            ingress: ingress_permission.clone(),
+        };
+        assert!(gate.current_preparation(&assignment).await.is_ok());
+        ingress_fixture.close().await;
+        assert!(gate.current_preparation(&assignment).await.is_err());
+        assert_eq!(
+            state
+                .store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("actual closure and sealed assignment cleanup"),
+            SourceReleaseOutcome::Released
+        );
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        return;
+    }
+    if matches!(mode, 48..=50) {
         // A real factory validation refusal, with a genuine acquired/assigned
         // Source claim and activation authority. No registry flag or SQL
         // absence is used to manufacture its no-admission receipt.
         let other = if mode == 49 {
             Arc::clone(&state)
+        } else if mode == 50 {
+            let mut other = source_fixture_state();
+            let owned = Arc::get_mut(&mut other).expect("sole replacement registry fixture");
+            owned.store = Arc::clone(&state.store);
+            owned.membership = state.membership.clone();
+            owned.node_id = state.node_id.clone();
+            assert_ne!(
+                owned.sharing.accepted_drivers.boot_id(),
+                ingress_permission.registry_boot_id()
+            );
+            assert!(prepared.matches_assignment(&assignment));
+            other
         } else {
             source_fixture_state()
         };
@@ -858,6 +1053,7 @@ async fn source_actual_actor(
                 other,
                 assignment.clone(),
                 *activation,
+                ingress_permission,
                 prepared,
                 Instant::now() + Duration::from_secs(15),
             )
@@ -869,6 +1065,7 @@ async fn source_actual_actor(
             crate::transcode::source_actor::SourceWorkerError::Conflict
         );
         assert!(refusal.assignment().same_identity(&assignment));
+        ingress_fixture.close().await;
         assert_eq!(
             state
                 .store
@@ -913,11 +1110,68 @@ async fn source_actual_actor(
         Arc::clone(&state),
         assignment.clone(),
         *activation,
+        ingress_permission,
         prepared,
         Instant::now() + Duration::from_secs(15),
     ))
     .await
     .expect("owned Source task");
+    if mode == 54 {
+        actor
+            .wait_ready(Instant::now() + Duration::from_secs(15))
+            .await
+            .expect("actual admitted owner");
+        ingress_fixture.close_transport(false).await;
+        let fresh = state
+            .membership
+            .observe_source_admission_members()
+            .await
+            .expect("gap members")
+            .expect("gap floor");
+        assert!(state
+            .store
+            .prepare_source_ingress_admission(
+                &assignment,
+                state.sharing.accepted_drivers.boot_id(),
+                &fresh
+            )
+            .await
+            .expect("initial admission requires a current driver")
+            .is_none());
+        let retained = actor
+            .0
+            .gate
+            .retained_ingress(&assignment)
+            .expect("actual owner's initial permission");
+        assert!(
+            actor.0.gate.authorize_generation(&[retained]).await.is_ok(),
+            "ordinary closed connection cannot end a still-admitted producer"
+        );
+        let reconnected = Box::pin(SourceFactoryIngressFixture::new(
+            Arc::clone(&state),
+            &assignment,
+        ))
+        .await;
+        let _monitor = reconnected.monitor_actor(actor.clone());
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse("index.m3u8").expect("typed reconnect resource"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("reconnected owner still serves media");
+        let (payload, guard) = opened.into_parts();
+        assert!(
+            matches!(payload, SourceResourcePayload::Playlist(bytes) if bytes.starts_with(b"#EXTM3U"))
+        );
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(10), actor.retire())
+            .await
+            .expect("actual reconnect retirement budget")
+            .expect("actual reconnect retirement");
+        return;
+    }
+    let _ingress_monitor = ingress_fixture.monitor_actor(actor.clone());
     let joined = manager
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
@@ -2038,3 +2292,345 @@ fn assert_descriptor(pause: &resource::SourceResourceJobPause, open: bool, why: 
 }
 #[cfg(not(unix))]
 fn assert_descriptor(_pause: &resource::SourceResourceJobPause, _open: bool, _why: &str) {}
+
+/// Real accepted Hyper custody for factory fixtures. This transport setup is
+/// not distributed playback qualification; it prevents a fabricated permission
+/// or closure token from standing in for an accepted writer.
+struct SourceFactoryIngressFixture {
+    state: Arc<crate::state::AppState>,
+    assignment: SourceDispatchAssignment,
+    obligation: crate::sharing_connection_custody::CapturedIngressObligation,
+    registration: plurx_core::sharing_ingress_custody::IngressRegistration,
+    client: Option<hyper::client::conn::http2::SendRequest<axum::body::Body>>,
+    response: Option<hyper::body::Incoming>,
+    driver: Option<tokio::task::JoinHandle<Result<(), hyper::Error>>>,
+    server: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+}
+impl Drop for SourceFactoryIngressFixture {
+    fn drop(&mut self) {
+        // Panic/cancellation owns both real drivers through abort; it does not
+        // write an ACK or claim settlement from an aborted observer.
+        if let Some(driver) = &self.driver {
+            driver.abort();
+        }
+        if let Some(server) = &self.server {
+            server.abort();
+        }
+    }
+}
+struct SourceFactoryIngressMonitor(tokio::task::JoinHandle<()>);
+impl Drop for SourceFactoryIngressMonitor {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+impl SourceFactoryIngressFixture {
+    async fn new(
+        state: Arc<crate::state::AppState>,
+        assignment: &SourceDispatchAssignment,
+    ) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("factory ingress bind");
+        let address = listener.local_addr().expect("factory ingress address");
+        let (accepted, mut observed) = tokio::sync::mpsc::channel(1);
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(
+                move |axum::Extension(connection): axum::Extension<
+                    crate::SharingConnectionCancellation,
+                >| {
+                    let accepted = accepted.clone();
+                    async move {
+                        accepted
+                            .send(connection)
+                            .await
+                            .expect("actual accepted connection observer");
+                        axum::body::Body::empty()
+                    }
+                },
+            ),
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(crate::serve_http(
+            listener,
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            crate::HTTP_TIMEOUTS,
+        ));
+        let socket = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("factory ingress connect");
+        let (mut client, driver) = hyper::client::conn::http2::handshake::<_, _, axum::body::Body>(
+            hyper_util::rt::TokioExecutor::new(),
+            hyper_util::rt::TokioIo::new(socket),
+        )
+        .await
+        .expect("factory ingress handshake");
+        let driver = tokio::spawn(driver);
+        let response = client
+            .send_request(
+                axum::http::Request::builder()
+                    .uri(format!("http://{address}/"))
+                    .body(axum::body::Body::empty())
+                    .expect("factory ingress request"),
+            )
+            .await
+            .expect("factory ingress response")
+            .into_body();
+        let connection = observed.recv().await.expect("actual Hyper connection");
+        let captured = state
+            .sharing
+            .accepted_drivers
+            .capture(&connection, assignment.owner_node_id())
+            .expect("actual registry capture");
+        let mut permit = state
+            .sharing
+            .accepted_drivers
+            .registration_guard()
+            .await
+            .expect("actual registration permit");
+        let obligation = captured
+            .prepare_obligation(
+                &mut permit,
+                "source",
+                assignment.binding().incarnation_id(),
+                &assignment.custody_identity(),
+            )
+            .expect("actual Source obligation");
+        let registration = plurx_core::sharing_ingress_custody::IngressRegistration {
+            node_id: state.node_id.clone(),
+            boot_id: captured.id().boot_id,
+            connection_id: captured.id().connection_id,
+            driver_sequence: captured.id().driver_sequence,
+            registration_sequence: obligation.registration_sequence(),
+            closed_confirmation: None,
+        };
+        let members = state
+            .membership
+            .observe_source_admission_members()
+            .await
+            .expect("fresh registration members")
+            .expect("fresh registration floor");
+        let registered = state
+            .store
+            .register_source_ingress_custody(assignment, &registration, &members)
+            .await
+            .expect("guarded actual driver registration");
+        assert!(matches!(registered, plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::Applied | plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::ExactReplay));
+        permit.complete();
+        Self {
+            state,
+            assignment: assignment.clone(),
+            obligation,
+            registration,
+            client: Some(client),
+            response: Some(response),
+            driver: Some(driver),
+            server: Some(server),
+            stop: Some(stop),
+        }
+    }
+    async fn permission(&self) -> SourceIngressAdmissionPermission {
+        let members = self
+            .state
+            .membership
+            .observe_source_admission_members()
+            .await
+            .expect("actual ingress members")
+            .expect("actual ingress floor");
+        *self
+            .state
+            .store
+            .prepare_source_ingress_admission(
+                &self.assignment,
+                self.state.sharing.accepted_drivers.boot_id(),
+                &members,
+            )
+            .await
+            .expect("guarded permission issuer")
+            .expect("registered actual ingress permission")
+    }
+    async fn close(self) {
+        self.close_transport(true).await;
+    }
+    async fn close_transport(mut self, seal: bool) {
+        if seal {
+            let sealed = self
+                .state
+                .store
+                .seal_source_ingress_custody(&self.assignment)
+                .await
+                .expect("exact Source custody seal");
+            assert!(matches!(sealed, plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::Applied | plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::ExactReplay));
+        }
+        drop(self.response.take());
+        drop(self.client.take());
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(server) = self.server.take() {
+            tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .expect("actual server driver deadline")
+                .expect("actual server driver join")
+                .expect("actual server stopped");
+        }
+        if let Some(driver) = self.driver.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(10), driver)
+                .await
+                .expect("actual client driver deadline")
+                .expect("actual client driver join");
+        }
+        let receipt = tokio::time::timeout(Duration::from_secs(10), self.obligation.joined())
+            .await
+            .expect("actual accepted Hyper driver closure");
+        let ack = self
+            .state
+            .store
+            .acknowledge_source_ingress_custody(
+                &self.assignment,
+                &self.registration,
+                receipt.confirmation(),
+            )
+            .await
+            .expect("exact actual receipt ACK");
+        assert!(matches!(ack, plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::Applied | plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::ExactReplay));
+        self.obligation
+            .release_after_ack(&receipt)
+            .expect("actual closure after durable ACK");
+    }
+    fn monitor_actor(self, actor: SourceViewerActor) -> SourceFactoryIngressMonitor {
+        SourceFactoryIngressMonitor(tokio::spawn(async move {
+            loop {
+                let changed = actor.0.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if actor
+                    .0
+                    .state
+                    .lock()
+                    .expect("actual Source state")
+                    .retirement_requested
+                {
+                    break;
+                }
+                changed.await;
+            }
+            self.close().await;
+        }))
+    }
+}
+
+async fn source_two_owner_generation_fixture(
+    state: Arc<crate::state::AppState>,
+    manager: Arc<TranscodeManager>,
+    prepared_a: crate::http::hls::PreparedSourcePlayback,
+    assignment_a: SourceDispatchAssignment,
+    prepared_b: crate::http::hls::PreparedSourcePlayback,
+    assignment_b: SourceDispatchAssignment,
+) {
+    let ingress_a = Box::pin(SourceFactoryIngressFixture::new(
+        Arc::clone(&state),
+        &assignment_a,
+    ))
+    .await;
+    let initial_a = ingress_a.permission().await;
+    let members = state
+        .membership
+        .observe_source_admission_members()
+        .await
+        .expect("first members")
+        .expect("first floor");
+    let SourceWriteAuthorityRead::Ready(activation_a) = state
+        .store
+        .prepare_source_activation_authority(&assignment_a, &state.sharing.key, &members)
+        .await
+        .expect("first activation")
+    else {
+        panic!("first activation");
+    };
+    let actor_a = Box::pin(manager.start_source_worker(
+        Arc::clone(&state),
+        assignment_a.clone(),
+        *activation_a,
+        initial_a.clone(),
+        prepared_a,
+        Instant::now() + Duration::from_secs(15),
+    ))
+    .await
+    .expect("first actual owner");
+    let _monitor_a = ingress_a.monitor_actor(actor_a.clone());
+    actor_a
+        .wait_ready(Instant::now() + Duration::from_secs(15))
+        .await
+        .expect("first owner ready");
+    let ingress_b = Box::pin(SourceFactoryIngressFixture::new(
+        Arc::clone(&state),
+        &assignment_b,
+    ))
+    .await;
+    let initial_b = ingress_b.permission().await;
+    let members = state
+        .membership
+        .observe_source_admission_members()
+        .await
+        .expect("second members")
+        .expect("second floor");
+    let SourceWriteAuthorityRead::Ready(activation_b) = state
+        .store
+        .prepare_source_activation_authority(&assignment_b, &state.sharing.key, &members)
+        .await
+        .expect("second activation")
+    else {
+        panic!("second activation");
+    };
+    let actor_b = Box::pin(manager.start_source_worker(
+        Arc::clone(&state),
+        assignment_b.clone(),
+        *activation_b,
+        initial_b.clone(),
+        prepared_b,
+        Instant::now() + Duration::from_secs(15),
+    ))
+    .await
+    .expect("second actual owner");
+    let _monitor_b = ingress_b.monitor_actor(actor_b.clone());
+    actor_b
+        .wait_ready(Instant::now() + Duration::from_secs(15))
+        .await
+        .expect("second owner ready");
+    tokio::time::timeout(Duration::from_secs(10), actor_a.retire())
+        .await
+        .expect("first retirement deadline")
+        .expect("first actual retirement");
+    assert!(manager.lookup_source_worker(&assignment_a).is_none());
+    assert!(manager.lookup_source_worker(&assignment_b).is_some());
+    // Exercise the same private per-owner collection used by rendition dispatch;
+    // one released permission cannot replace its surviving owner's authority.
+    assert!(actor_b
+        .0
+        .gate
+        .authorize_generation(&[initial_a, initial_b])
+        .await
+        .is_ok());
+    let opened = actor_b
+        .open_resource(
+            &SharingHlsResource::parse("index.m3u8").expect("typed survivor resource"),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("surviving owner still serves media");
+    let (payload, guard) = opened.into_parts();
+    assert!(
+        matches!(payload, SourceResourcePayload::Playlist(bytes) if bytes.starts_with(b"#EXTM3U"))
+    );
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(10), actor_b.retire())
+        .await
+        .expect("second retirement deadline")
+        .expect("second actual retirement");
+}

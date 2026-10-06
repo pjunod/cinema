@@ -2788,6 +2788,67 @@ impl MediaSessionCoordinator {
             .ok_or(PeerTransportError::Unreachable)
     }
 
+    #[allow(dead_code)] // Wired by the coordinated Source forwarding module checkpoint.
+    /// Source body relay: keep byte backpressure and accepted-writer custody.
+    pub(crate) async fn source_forward_stream(
+        &self,
+        owner_node_id: &str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<reqwest::Response, PeerTransportError> {
+        if body.len() > 1024 * 1024 {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request_stream(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                "/internal/cluster/sharing/source/forward",
+                body,
+                deadline,
+                crate::http::peer_transport::PeerAuthMode::ExactRequest,
+            )
+            .await
+    }
+
+    #[allow(dead_code)] // Wired by the coordinated Source forwarding module checkpoint.
+    /// Bounded Source control and custody answers authenticate status/body too.
+    pub(crate) async fn source_forward_bounded(
+        &self,
+        owner_node_id: &str,
+        path: &'static str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<crate::http::peer_transport::PeerResponse, PeerTransportError> {
+        if body.len() > 1024 * 1024
+            || !matches!(
+                path,
+                "/internal/cluster/sharing/source/locate"
+                    | "/internal/cluster/sharing/source/prepare"
+                    | "/internal/cluster/sharing/source/control"
+                    | "/internal/cluster/sharing/source/register"
+                    | "/internal/cluster/sharing/source/ack"
+            )
+        {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                path,
+                body,
+                deadline,
+                64 * 1024,
+                crate::http::peer_transport::PeerAuthMode::ExactRequestAndMemberResponse,
+            )
+            .await
+    }
+
     pub(crate) async fn start_remote(
         &self,
         owner_node_id: &str,

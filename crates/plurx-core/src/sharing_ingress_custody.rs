@@ -49,6 +49,28 @@ struct Highwater {
     boot_id: Uuid,
     sequence: u64,
 }
+/// Routing-only identity of the original Source invocation worker. Neither
+/// these fields nor their presence prove physical admission or non-admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceIngressRouting {
+    pub owner_node_id: String,
+    /// Initial authenticated credential hash permits exact cleanup routing after rotation.
+    /// It is routing evidence only; the actual worker must authenticate retained custody.
+    pub initial_credential_hash: String,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
+    pub registry_boot_id: Uuid,
+}
+impl SourceIngressRouting {
+    fn valid(&self) -> bool {
+        crate::sharing::is_hash(&self.initial_credential_hash)
+            && !self.owner_node_id.is_empty()
+            && self.owner_node_id.len() <= 256
+            && !self.owner_node_id.chars().any(char::is_control)
+            && !self.registry_boot_id.is_nil()
+            && self.registry_boot_id.get_version_num() == 4
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngressCustodyState {
@@ -56,6 +78,8 @@ pub struct IngressCustodyState {
     pub sealed: bool,
     slots: Vec<IngressRegistration>,
     highwater: Vec<Highwater>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_routing: Option<SourceIngressRouting>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CustodyMutation {
@@ -70,16 +94,70 @@ impl Default for IngressCustodyState {
             sealed: false,
             slots: Vec::new(),
             highwater: Vec::new(),
+            source_routing: None,
         }
     }
 }
 impl IngressCustodyState {
+    pub fn is_sealed(&self) -> bool {
+        self.sealed
+    }
+    /// Accounting compaction only; caller must retain independent actual closure proofs.
+    pub fn compact_settled(&mut self) -> CustodyMutation {
+        if !self.sealed || self.open().next().is_some() {
+            return CustodyMutation::Refused;
+        }
+        if self.slots.is_empty() && self.highwater.is_empty() {
+            return CustodyMutation::Replay;
+        }
+        self.slots.clear();
+        self.highwater.clear();
+        CustodyMutation::Applied
+    }
+    /// Metadata fence only. A caller MUST already own an exact actual driver
+    /// closure receipt; neither this predicate nor a missing slot proves EOF.
+    pub fn registration_fenced_after_closure(&self, registration: &IngressRegistration) -> bool {
+        registration.valid()
+            && !self
+                .slots
+                .iter()
+                .any(|slot| slot.same_driver(registration) && slot.closed_confirmation.is_none())
+            && self.highwater.iter().any(|mark| {
+                mark.node_id == registration.node_id
+                    && mark.boot_id == registration.boot_id
+                    && mark.sequence >= registration.registration_sequence
+            })
+    }
+    pub fn source_routing(&self) -> Option<&SourceIngressRouting> {
+        self.source_routing.as_ref()
+    }
+    pub fn bind_source_routing(&mut self, routing: SourceIngressRouting) -> CustodyMutation {
+        if !routing.valid() {
+            return CustodyMutation::Refused;
+        }
+        if let Some(old) = &self.source_routing {
+            return if old == &routing {
+                CustodyMutation::Replay
+            } else {
+                CustodyMutation::Refused
+            };
+        }
+        if self.sealed || !self.slots.is_empty() || !self.highwater.is_empty() {
+            return CustodyMutation::Refused;
+        }
+        self.source_routing = Some(routing);
+        CustodyMutation::Applied
+    }
     pub fn decode(json: &str) -> Result<Self, crate::error::StoreError> {
         if json.len() > 65536 {
             return Err(crate::sharing::invalid());
         }
         let state: Self = serde_json::from_str(json).map_err(|_| crate::sharing::invalid())?;
         if state.version != 1
+            || state
+                .source_routing
+                .as_ref()
+                .is_some_and(|routing| !routing.valid())
             || state.slots.len() > INGRESS_CONNECTIONS_PER_SESSION
             || state.highwater.len() > INGRESS_NODES_MAX
             || state.slots.iter().any(|slot| !slot.valid())
@@ -129,6 +207,32 @@ impl IngressCustodyState {
             return Err(crate::sharing::invalid());
         }
         Ok(json)
+    }
+    /// Install a replay fence for an independently verified exact closed driver.
+    /// The caller must supply actual closure proof and full Source/B owner CAS.
+    /// Metadata alone never permits invoking this mutation as EOF evidence.
+    pub fn fence_closed_registration(
+        &mut self,
+        registration: &IngressRegistration,
+        confirmation: &str,
+    ) -> CustodyMutation {
+        if !registration.valid() || !crate::sharing::is_hash(confirmation) {
+            return CustodyMutation::Refused;
+        }
+        if self.registration_fenced_after_closure(registration) || self.sealed {
+            return CustodyMutation::Replay;
+        }
+        if self.highwater.iter().any(|mark| {
+            mark.node_id == registration.node_id && mark.boot_id != registration.boot_id
+        }) {
+            return CustodyMutation::Refused;
+        }
+        match self.register(registration.clone()) {
+            CustodyMutation::Applied | CustodyMutation::Replay => {
+                self.acknowledge(registration, confirmation)
+            }
+            CustodyMutation::Refused => CustodyMutation::Refused,
+        }
     }
     /// The caller verifies current member/boot proof in the same transaction.
     /// Exact active replay precedes the highwater check: a lost register answer
@@ -242,6 +346,47 @@ impl IngressCustodyState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_routing_is_immutable_and_absent_receiver_field_preserves_canonical_bytes() {
+        let old = r#"{"version":1,"sealed":false,"slots":[],"highwater":[]}"#;
+        let mut state =
+            super::IngressCustodyState::decode(old).expect("previous receiver encoding");
+        assert_eq!(
+            state
+                .encode()
+                .expect("unchanged canonical receiver encoding"),
+            old
+        );
+        let route = super::SourceIngressRouting {
+            owner_node_id: "actual-selected-source".into(),
+            initial_credential_hash: "a".repeat(64),
+            registry_boot_id: uuid::Uuid::new_v4(),
+        };
+        assert_eq!(
+            state.bind_source_routing(route.clone()),
+            super::CustodyMutation::Applied
+        );
+        assert_eq!(
+            state.bind_source_routing(route.clone()),
+            super::CustodyMutation::Replay
+        );
+        let mut changed = route.clone();
+        changed.registry_boot_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            state.bind_source_routing(changed),
+            super::CustodyMutation::Refused
+        );
+        state.seal();
+        let decoded =
+            super::IngressCustodyState::decode(&state.encode().expect("source routing bytes"))
+                .expect("source codec");
+        assert_eq!(decoded.source_routing(), Some(&route));
+        assert!(
+            decoded.settled(),
+            "routing metadata alone carries no writer obligation"
+        );
+    }
+
     use super::*;
     fn registration(sequence: u64) -> IngressRegistration {
         IngressRegistration {

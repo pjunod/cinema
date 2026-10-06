@@ -550,19 +550,24 @@ pub(crate) async fn close_http(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let route = match state
-        .store
-        .media_session_route_by_incarnation(&request.incarnation_id.to_string())
-        .await
-    {
-        Ok(Some(route))
-            if route.owner_node_id == auth.node_id
-                && route.owner_epoch == request.expected_owner_epoch =>
-        {
-            route
-        }
-        _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    let authorized_owner = if request.principal_kind == "source" {
+        state
+            .store
+            .current_source_ingress_owner(
+                request.incarnation_id,
+                &request.owner_identity,
+                &auth.node_id,
+                request.expected_owner_epoch,
+            )
+            .await
+            .unwrap_or(false)
+    } else {
+        matches!(state.store.media_session_route_by_incarnation(&request.incarnation_id.to_string()).await,
+            Ok(Some(route)) if route.owner_node_id==auth.node_id && route.owner_epoch==request.expected_owner_epoch)
     };
+    if !authorized_owner {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     let registration = plurx_core::sharing_ingress_custody::IngressRegistration {
         node_id: state.node_id.clone(),
         boot_id: request.driver.boot_id,
@@ -600,11 +605,11 @@ pub(crate) async fn close_http(
             .allowed_owners
             .lock()
             .expect("accepted ingress owners");
-        if !owners.contains(&route.owner_node_id) {
+        if !owners.contains(&auth.node_id) {
             if owners.len() >= 256 {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
-            owners.push(route.owner_node_id);
+            owners.push(auth.node_id.clone());
         }
     }
     match state

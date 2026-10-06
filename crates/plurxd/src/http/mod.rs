@@ -2015,7 +2015,8 @@ pub fn router(state: AppState) -> Router {
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
             )),
-        );
+        )
+        .merge(shared_source_playback::internal_forwarding_router());
 
     Router::new()
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.

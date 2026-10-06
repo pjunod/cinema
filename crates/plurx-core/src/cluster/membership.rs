@@ -9597,6 +9597,26 @@ impl MembershipManager {
         }
     }
 
+    /// Publish the actual registry boot before accepting protected requests.
+    /// Startup may publish the binary capability earlier, without a registry.
+    pub async fn publish_ingress_custody_boot(&self) -> Result<(), MembershipError> {
+        let Some(inner) = self.inner.as_ref() else {
+            return Ok(());
+        };
+        if inner
+            .ingress_custody_boot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_none()
+        {
+            return Err(MembershipError::Incompatible);
+        }
+        let mut committed = inner.heartbeat_writes.last_committed.lock().await;
+        self.commit_heartbeat(inner).await?;
+        *committed = Some(tokio::time::Instant::now());
+        Ok(())
+    }
+
     pub async fn sharing_member_floor_ready(
         &self,
         required: SharingMemberFloor,

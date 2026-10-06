@@ -95,12 +95,18 @@ fn missing() -> ApiError {
 fn source_id(value: &str) -> Result<SourceId, ApiError> {
     SourceId::parse(value).map_err(|_| invalid())
 }
-pub(super) async fn authority(
+pub(super) async fn authority<
+    H: super::shared_source_playback::forwarding::AuthenticationHeaders + Send + Sync + ?Sized,
+>(
     state: &AppState,
-    headers: &HeaderMap,
+    headers: &H,
 ) -> Result<(String, uuid::Uuid), ApiError> {
-    let secret = sharing::credential(headers)?;
-    let hash = secret_hash(SecretDomain::Grant, &secret);
+    let hash = if let Some(hash) = headers.authenticated_hash() {
+        hash.to_owned()
+    } else {
+        let secret = sharing::credential(headers.raw_headers())?;
+        secret_hash(SecretDomain::Grant, &secret)
+    };
     let grant = state
         .store
         .sharing_grant_status(&hash)
@@ -137,6 +143,16 @@ pub(super) async fn authority(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "sharing_member_floor_unavailable",
             ));
+        }
+    }
+    if let Some(principal) = headers.authenticated_principal() {
+        let viewer = super::shared_source_playback::viewer_hash(headers)?;
+        if plurx_core::playback_principal::PlaybackPrincipal::sharing(grant.grant.id, &viewer)
+            .as_ref()
+            .ok()
+            != Some(principal)
+        {
+            return Err(missing());
         }
     }
     Ok((hash, grant.grant.id))
@@ -717,6 +733,7 @@ pub(super) async fn guard_source_response(
         .into_response();
     }
     let cancel = connection.0.clone();
+    let drain = connection.drain_token();
     let closed = connection.closed();
     // Cancelled by the body's drop, or with the connection as its parent.
     let live = connection.0.child_token();
@@ -730,13 +747,22 @@ pub(super) async fn guard_source_response(
         loop {
             tokio::select! {
                 () = body_live.cancelled() => break,
-                () = source_guard.cancelled() => { cancel.cancel(); break; },
+                () = source_guard.cancelled() => {
+                    let mode=source_guard.retirement_mode();
+                    match mode {crate::sharing_connection_custody::DriverCloseMode::Drain=>drain.cancel(),crate::sharing_connection_custody::DriverCloseMode::Revoke=>cancel.cancel()}
+                    let _=super::shared_source_playback::settle_ingress_custody(&state,source_guard.assignment(),source_guard.retirement_deadline(),mode).await;
+                    break;
+                },
                 _ = interval.tick() => {},
             }
             tokio::select! {
                 () = body_live.cancelled() => break,
                 current = source_content_current(&state, &authority) => {
-                    if !current { cancel.cancel(); break; }
+                    if !current {
+                        source_guard.request_revocation();cancel.cancel();
+                        let _=super::shared_source_playback::settle_ingress_custody(&state,source_guard.assignment(),source_guard.retirement_deadline(),crate::sharing_connection_custody::DriverCloseMode::Revoke).await;
+                        break;
+                    }
                 },
             }
         }
@@ -747,7 +773,9 @@ pub(super) async fn guard_source_response(
         tokio::select! {
             () = closed.wait() => {},
             () = source_guard.cancelled() => {
-                cancel.cancel();
+                let mode=source_guard.retirement_mode();
+                match mode {crate::sharing_connection_custody::DriverCloseMode::Drain=>drain.cancel(),crate::sharing_connection_custody::DriverCloseMode::Revoke=>cancel.cancel()}
+                let _=super::shared_source_playback::settle_ingress_custody(&state,source_guard.assignment(),source_guard.retirement_deadline(),mode).await;
                 // A cancellation request is not an accepted-writer join receipt.
                 closed.wait().await;
             },

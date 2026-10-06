@@ -42,7 +42,9 @@ pub use sharing_receiver_progress::SharingReceiverProgressStore;
 #[cfg(feature = "hiqlite-store")]
 pub(crate) mod sharing_source_schema;
 pub use sharing_receiver_sessions::SharingReceiverSessionStore;
+pub mod sharing_source_ingress_custody;
 pub mod sharing_source_sessions;
+pub use sharing_source_ingress_custody::SharingSourceIngressCustodyStore;
 pub use sharing_source_sessions::SharingSourceSessionStore;
 pub mod classification;
 #[cfg(feature = "hiqlite-store")]
@@ -5389,6 +5391,7 @@ pub trait Store:
     + SharingReceiverProgressStore
     + SharingReceiverRetirementStore
     + SharingSourceSessionStore
+    + SharingSourceIngressCustodyStore
     + SettingsStore
     + BackgroundJobStore
     + DvConversionStore
@@ -5439,6 +5442,7 @@ impl<T> Store for T where
         + SharingReceiverProgressStore
         + SharingReceiverRetirementStore
         + SharingSourceSessionStore
+        + SharingSourceIngressCustodyStore
         + SettingsStore
         + BackgroundJobStore
         + DvConversionStore

@@ -51,12 +51,16 @@ pub(crate) async fn read<T: Backend>(
     if row.revision <= 0 {
         return Err(invalid());
     }
+    let state = IngressCustodyState::decode(&row.custody)?;
+    if kind == "receiver" && state.source_routing().is_some() {
+        return Err(invalid());
+    }
     Ok(Some(IngressCustodySnapshot {
         principal_kind: kind.into(),
         incarnation_id: incarnation,
         owner_identity: owner.into(),
         revision: row.revision,
-        state: IngressCustodyState::decode(&row.custody)?,
+        state,
     }))
 }
 #[allow(dead_code)] // Complete CAS helper; Source/B same-write principal adapters integrate next.
