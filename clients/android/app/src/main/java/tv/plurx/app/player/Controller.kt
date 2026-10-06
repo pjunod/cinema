@@ -5118,6 +5118,8 @@ internal class SharedPlayerController(private val context: android.content.Conte
     private val directSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
         androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(tv.plurx.app.data.Net.capabilityClient))
     private var reachedTimeline = false
+    private var framePresented = false
+    private var retainedFramePresented = false
     private var authorizationObserver: Long? = null
     private var stopped = false
 
@@ -5142,12 +5144,12 @@ internal class SharedPlayerController(private val context: android.content.Conte
 
     private val renderer: SharedRenderer = object : SharedRenderer {
         override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) {
-            reachedTimeline = false
+            reachedTimeline = false; framePresented = false
             val media = MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build()
             active.setMediaItem(media, positionMs); active.prepare(); active.playWhenReady = playWhenReady
         }
         override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) {
-            reachedTimeline = false
+            reachedTimeline = false; framePresented = false
             active.setMediaSource(directSource.createMediaSource(MediaItem.fromUri(url)), positionMs); active.prepare(); active.playWhenReady = playWhenReady
         }
         override fun seekTo(positionMs: Long) = active.seekTo(positionMs)
@@ -5161,7 +5163,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
                 androidx.media3.common.Player.STATE_ENDED -> RenderState.ENDED
                 else -> RenderState.STARTING
             },
-            playbackRate = active.playbackParameters.speed.toDouble(),
+            playbackRate = active.playbackParameters.speed.toDouble(), framePresented = framePresented,
         )
         override fun release() {
             dropSuccessor()
@@ -5211,7 +5213,8 @@ internal class SharedPlayerController(private val context: android.content.Conte
             next.playWhenReady = previous.playWhenReady
             previous.playWhenReady = false
             next.addListener(activeListener)
-            retained = previous
+            retained = previous; retainedFramePresented = framePresented
+            framePresented = false
             active = next
             reachedTimeline = true
             surfacePlayer.value = next
@@ -5224,7 +5227,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
             previous.playWhenReady = dropped.playWhenReady
             dropped.playWhenReady = false
             previous.addListener(activeListener)
-            active = previous
+            active = previous; framePresented = retainedFramePresented
             retained = null; successor = null
             surfacePlayer.value = previous
             retire(dropped)
@@ -5264,6 +5267,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
         preparedHandoff = vm.preferences.value.preparedReplacement)
 
     private val activeListener: androidx.media3.common.Player.Listener = object : androidx.media3.common.Player.Listener {
+        override fun onRenderedFirstFrame() { framePresented = true }
         override fun onPlaybackStateChanged(state: Int) {
             if (state == androidx.media3.common.Player.STATE_READY && !reachedTimeline) { reachedTimeline = true; owner.timelineReached() }
             if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { if (!stopped) { stop(watched = true); ended.value = true } }

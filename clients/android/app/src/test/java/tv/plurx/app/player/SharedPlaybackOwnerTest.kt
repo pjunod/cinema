@@ -14,12 +14,12 @@ import tv.plurx.app.data.SharedStartedDirect
 // Protocol and ordering evidence only: no Source, relay or device playback.
 class SharedPlaybackOwnerTest {
     private class Renderer(private val log: MutableList<String>, private val rejectAttach: Boolean = false) : SharedRenderer {
-        var position = 0L; var active = false
+        var position = 0L; var active = false; var presented = true
         override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) { if (rejectAttach) error("decoder allocation failed"); log += "attach hls $url @$positionMs"; position = positionMs; active = playWhenReady }
         override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) { if (rejectAttach) error("decoder allocation failed"); log += "attach direct $url @$positionMs"; position = positionMs; active = playWhenReady }
         override fun seekTo(positionMs: Long) { log += "seek $positionMs"; position = positionMs }
         override fun setPlaying(playing: Boolean) { log += "playing $playing"; active = playing }
-        override fun snapshot() = SharedRendererSnapshot(position, position + 4_000, 90_000, active, RenderState.RENDERING)
+        override fun snapshot() = SharedRendererSnapshot(position, position + 4_000, 90_000, active, RenderState.RENDERING, framePresented = presented)
         override fun release() { log += "release" }
         // These owners never declare a Shared successor, so nothing primes one.
         override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean) = error("no successor without the declaration")
@@ -41,6 +41,18 @@ class SharedPlaybackOwnerTest {
             assertNull(owner.currentSession)
             owner.stop()
         }
+    }
+
+    @Test fun noRenderedFrameNeverWritesZeroHistoryOnTickOrClose(): Unit = runBlocking {
+        val f = SharedFixture("207"); f.login()
+        val renderer = Renderer(f.log).also { it.presented = false }
+        val owner = SharedPlaybackOwner(this, { SharedDecisionClient.forTest(f.transport()) }, renderer)
+        owner.start(f.plan(f.context()))
+        renderer.position = 0
+        owner.tickNow(progress = true)
+        owner.stop()
+        assertFalse(f.log.any { it.startsWith("progress") })
+        assertEquals("delete ${f.session(1)}", f.log.last())
     }
 
     @Test fun seekPauseAndPlayReachTheRendererOnlyAfterBAccepts(): Unit = runBlocking {
