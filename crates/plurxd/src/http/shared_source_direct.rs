@@ -21,6 +21,7 @@ pub(crate) struct PreparedSourceDirect {
     playback_id: String,
     request_id: String,
     fingerprint: String,
+    invocation_fingerprint: Option<String>,
     file: plurx_core::domain::MediaFile,
     object_version: String,
     length: u64,
@@ -42,7 +43,7 @@ impl PreparedSourceDirect {
             && binding.file_revision() == &self.target.revision
             && binding.playback_id() == self.playback_id
             && binding.request_id() == self.request_id
-            && binding.request_fingerprint() == self.fingerprint
+            && self.invocation_fingerprint.as_deref() == Some(binding.request_fingerprint())
     }
     pub(crate) fn into_direct_file(self) -> SourceDirectFile {
         SourceDirectFile::new(
@@ -229,6 +230,7 @@ pub(super) async fn prepare_source_direct(
         playback_id: session.playback_id.clone(),
         request_id: session.request_id.clone().ok_or(refused)?,
         fingerprint,
+        invocation_fingerprint: None,
         file,
         object_version,
         length,
@@ -244,6 +246,34 @@ pub(super) enum PreparedSourceStart {
     Direct(Box<PreparedSourceDirect>),
 }
 impl PreparedSourceStart {
+    pub(super) fn bind_invocation(
+        &mut self,
+        binding: &plurx_core::sharing_source_sessions::SourceBindingHandle,
+    ) -> Result<(), SourceStartFailure> {
+        if self.principal() != binding.principal() || self.playback_id() != binding.playback_id() {
+            return Err(SourceStartFailure::Unresolved);
+        }
+        match self {
+            Self::Hls(prepared) => prepared
+                .bind_source_invocation(binding)
+                .map_err(|_| SourceStartFailure::Unresolved),
+            Self::Direct(prepared) => {
+                let target = &prepared.target;
+                if binding.request_id() != prepared.request_id
+                    || binding.source_server_id() != target.server_id
+                    || binding.catalogue_epoch() != target.catalogue_epoch
+                    || binding.library_id() != &target.library_id
+                    || binding.item_id() != &target.item_id
+                    || binding.file_id() != &target.file_id
+                    || binding.file_revision() != &target.revision
+                {
+                    return Err(SourceStartFailure::Unresolved);
+                }
+                prepared.invocation_fingerprint = Some(binding.request_fingerprint().to_owned());
+                Ok(())
+            }
+        }
+    }
     pub(super) fn principal(&self) -> &PlaybackPrincipal {
         match self {
             Self::Hls(prepared) => prepared.principal(),
@@ -253,7 +283,10 @@ impl PreparedSourceStart {
     pub(super) fn fingerprint(&self) -> &str {
         match self {
             Self::Hls(prepared) => prepared.fingerprint(),
-            Self::Direct(prepared) => &prepared.fingerprint,
+            Self::Direct(prepared) => prepared
+                .invocation_fingerprint
+                .as_deref()
+                .unwrap_or(&prepared.fingerprint),
         }
     }
     pub(super) fn playback_id(&self) -> &str {
@@ -284,7 +317,7 @@ pub(super) async fn prepare_source_start(
         ApiError::Unprocessable(_) => SourceStartFailure::Unsupported,
         _ => SourceStartFailure::Unavailable,
     })?;
-    // The delivery policy is decided here, before any claim, from the
+    // The delivery policy is decided here, after a fresh claim, from the
     // Source's own prepared request (the player's real caps through the
     // shared planner) and its own scanned file facts. B is never trusted.
     match crate::transcode::source_actor::source_delivery_refusal(

@@ -48,8 +48,6 @@ struct SourceStartTask {
 enum SourceStartTaskStage {
     #[default]
     Registered,
-    Preparing,
-    Prepared,
     ReadingIntent {
         planned_incarnation: Uuid,
     },
@@ -110,7 +108,7 @@ impl SourceUninvokedCleanup {
 impl SourceStartTaskStage {
     fn incarnation(&self) -> Option<Uuid> {
         match self {
-            Self::Registered | Self::Preparing | Self::Prepared => None,
+            Self::Registered => None,
             Self::ReadingIntent {
                 planned_incarnation,
             }
@@ -224,7 +222,7 @@ enum SourceStartFailure {
     Unresolved,
     Unsupported,
     /// A Dolby Vision delivery this Source does not build yet: refused with
-    /// its own typed code before any claim, so a viewer is told why.
+    /// its own typed code after a fresh invocation claim, before admission.
     DolbyVisionUnsupported,
     Deadline,
 }
@@ -371,8 +369,6 @@ impl SourceStartEntry {
                         ) && matches!(
                             *self.task.stage.lock().expect("Source start stage"),
                             SourceStartTaskStage::Registered
-                                | SourceStartTaskStage::Preparing
-                                | SourceStartTaskStage::Prepared
                                 | SourceStartTaskStage::ReadingIntent { .. }
                                 | SourceStartTaskStage::IntentReady { .. }
                         ))
@@ -1425,7 +1421,6 @@ async fn start(
         .await
         .map_err(|_| invalid())?;
     let input = parse_start_request(&bytes, &item, &file)?;
-    validate_initial_source_start(&input.session).map_err(SourceStartFailure::response)?;
     let viewer = viewer_hash(&headers)?;
     let (authenticated_hash, grant) = current_reference(&state, &headers, &input.reference).await?;
     let target = input.reference.clone();
@@ -1532,19 +1527,14 @@ async fn own_start(
     use plurx_core::sharing_source_sessions::{
         SourceClaimOutcome, SourceIntentRead, SourceSessionRequest, SourceWriteAuthorityRead,
     };
-    validate_initial_source_start(&input.session)?;
     let reference = input.reference.clone();
-    entry.retain_stage(SourceStartTaskStage::Preparing);
-    // The presentation branches only here: direct play recomputes the actual
-    // decision and refuses anything but direct play of this exact file.
-    let prepared = Box::pin(direct::prepare_source_start(
-        &state,
-        &headers,
-        reference.clone(),
-        input.session,
-    ))
-    .await?;
-    entry.retain_stage(SourceStartTaskStage::Prepared);
+    // v2 identifies this complete canonical wire invocation, before fallible
+    // physical preparation. Engine normalization remains in prepared inputs.
+    use sha2::Digest;
+    let mut invocation = sha2::Sha256::new();
+    invocation.update(b"plurx.sharing-source-invocation.v2\0");
+    invocation.update(&input.canonical_recipe);
+    let invocation_fingerprint = format!("{:x}", invocation.finalize());
     let (hash, current_grant) = current_reference(&state, &headers, &reference)
         .await
         .map_err(|_| SourceStartFailure::Unavailable)?;
@@ -1564,10 +1554,14 @@ async fn own_start(
         .store
         .prepare_source_session_intent(
             SourceSessionRequest {
-                principal: prepared.principal().clone(),
+                principal: plurx_core::playback_principal::PlaybackPrincipal::sharing(
+                    grant,
+                    &entry.viewer,
+                )
+                .map_err(|_| SourceStartFailure::Unavailable)?,
                 request_id: input.request_id.to_string(),
-                request_fingerprint: prepared.fingerprint().into(),
-                playback_id: prepared.playback_id().to_owned(),
+                request_fingerprint: invocation_fingerprint.clone(),
+                playback_id: input.session.playback_id.clone(),
                 incarnation_id: planned_incarnation,
                 now_ms: now,
                 claim_expires_at_ms: now + remaining,
@@ -1616,6 +1610,20 @@ async fn own_start(
         SourceClaimOutcome::Capacity(_) => return Err(SourceStartFailure::Capacity),
     };
     entry.retain_stage(SourceStartTaskStage::Acquired(binding.clone()));
+    // Only this fresh Acquired factory may cover preparation refusal. A
+    // historical or commit-unknown claim never reaches this stage.
+    validate_initial_source_start(&input.session)?;
+    let mut prepared = Box::pin(direct::prepare_source_start(
+        &state,
+        &headers,
+        reference.clone(),
+        input.session,
+    ))
+    .await?;
+    prepared.bind_invocation(&binding)?;
+    if prepared.fingerprint() != invocation_fingerprint {
+        return Err(SourceStartFailure::Unresolved);
+    }
     let members = state
         .membership
         .observe_source_admission_members()
@@ -2985,7 +2993,7 @@ mod tests {
         Box::pin(actual_source_resource_delivery(SourceFixtureMode::Hdr10)).await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn sharing_source_http_dolby_vision_encode_refuses_before_claim() {
+    async fn sharing_source_http_dolby_vision_refusal_fresh_claim_confirms_exact_end() {
         use axum::response::IntoResponse;
         let fixture =
             real_source_start_fixture_with(SourceFixtureMode::DolbyVisionEncoded, None).await;
@@ -3023,10 +3031,57 @@ mod tests {
         assert!(
             matches!(
                 *entries[0].task.stage.lock().expect("stage"),
-                SourceStartTaskStage::Preparing
+                SourceStartTaskStage::Acquired(_)
             ),
-            "refusal precedes intent creation, claim and physical admission"
+            "fresh invocation is claimed before preparation but never dispatched"
         );
+        let request = entries[0].identity.request_id.to_string();
+        let first = end(
+            axum::extract::State((*fixture.state).clone()),
+            fixture.headers.clone(),
+            axum::extract::Path((
+                fixture.reference.item_id.as_str().to_owned(),
+                fixture.reference.file_id.as_str().to_owned(),
+                request.clone(),
+            )),
+            axum::body::Body::from(fixture.request.clone()),
+        )
+        .await
+        .expect("authenticated exact g0 cleanup")
+        .0;
+        assert!(first.session_id.is_none());
+        assert!(
+            entries[0].actual_finished(),
+            "accounting released only after exact cleanup"
+        );
+        for _ in 0..3 {
+            start(
+                axum::extract::State((*fixture.state).clone()),
+                fixture.headers.clone(),
+                axum::extract::Path((
+                    fixture.reference.item_id.as_str().to_owned(),
+                    fixture.reference.file_id.as_str().to_owned(),
+                )),
+                axum::body::Body::from(fixture.request.clone()),
+            )
+            .await
+            .expect_err("exact refusal retry");
+            let replay = end(
+                axum::extract::State((*fixture.state).clone()),
+                fixture.headers.clone(),
+                axum::extract::Path((
+                    fixture.reference.item_id.as_str().to_owned(),
+                    fixture.reference.file_id.as_str().to_owned(),
+                    request.clone(),
+                )),
+                axum::body::Body::from(fixture.request.clone()),
+            )
+            .await
+            .expect("same cleanup receipt")
+            .0;
+            assert_eq!(replay.confirmation_id, first.confirmation_id);
+            assert_eq!(replay.incarnation_id, first.incarnation_id);
+        }
         fixture.shutdown().await;
     }
     async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
@@ -3038,6 +3093,7 @@ mod tests {
         );
         let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");
         unsupported["session"]["previous_session_id"] = json!(Uuid::new_v4());
+        unsupported["session"]["request_id"] = json!(Uuid::new_v4());
         let denied = start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
@@ -3063,7 +3119,8 @@ mod tests {
             .entries
             .lock()
             .expect("registry")
-            .is_empty());
+            .iter()
+            .all(|entry| entry.actual_finished()));
         let response = start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),

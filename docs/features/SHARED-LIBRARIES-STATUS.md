@@ -30,7 +30,7 @@ existing warm target. Paul's checkout is not used for changes.
 | Native/web handoff and burn/HDR | Integrated through `32a556f7b` | Native plan parity, web refusal reopen under original account, Android renderer failure cleanup |
 | Native catalogue/history audit | Integrated through `32a556f7b` | Frame evidence before progress; Source-separated Continue Watching UI; next-episode membership race fixed |
 | Android frame identity follow-up | Integrated `a062ce299` | Prepared successor carries its proved frame; late old attachment callbacks cannot mark the new attachment; Android sources compiled |
-| Failed Source Start | Integrated `12a856ea9` | Private pre-admission factory receipt, exact g0/g1 cleanup, ambiguous failures retain custody; execution deferred |
+| Failed Source Start | Integrated through `e0fd7b898` | Fresh invocation claim precedes fallible preparation; private pre-admission factory receipt and exact g0/g1 cleanup; ambiguous failures retain custody; execution deferred |
 | Busy predecessor transport | Integrated `9789741b2` | Graceful H2 drain preserves existing successor writes; actual closure still required; no runtime receipt yet |
 | Approved endpoint cleanup | First checkpoint `7a9aad07e` integrated | Exact import lineage permits new approved endpoints after dial failure; full End-exchange fallback is being completed |
 | Linux Docker bridge hosting | Profile and recipe integrated through `6ab554659` | Rust check/Clippy and actual Compose render/preflight passed, including explicit default gateway; runtime qualification remains open |
@@ -46,7 +46,7 @@ current. Each builder has an isolated clone from `d4d2ec8e4`.
 
 | Builder | Owned work | State |
 |---|---|---|
-| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Migration checkpoint integrated; fresh invocation claim checkpoint compiling; Source custody adapter next |
+| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Migration and fresh invocation checkpoints integrated; Source custody adapter and fresh worker placement next |
 | Source forwarding / completed clients | Dedicated Source owner transport; native/web, hosting and Windows compiler | Client/Docker/harness checkpoints complete; reassigned to Source forwarding in parallel |
 | Receiver/cluster | Shared accepted-driver custody, B owner forwarding and endpoint cleanup | H2 drain checkpoint complete; building distributed closure acknowledgements and endpoint fallback |
 | Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |
@@ -75,7 +75,7 @@ correct or releasable is made.
 
 | Requirement | Next acceptance boundary |
 |---|---|
-| Failed or ambiguous Source Start | Finish fresh invocation custody before fallible preparation, then qualify exact g0/g1 cleanup |
+| Failed or ambiguous Source Start | Runtime qualification of fresh invocation custody, private factory refusal and exact g0/g1 cleanup |
 | Source worker forwarding | Authenticated non-owner ingress reaches its assigned physical worker |
 | B cluster ingress and owner transition | Physical ownership proof; SQL metadata alone cannot authorize adoption |
 | Endpoint and pin changes | Authenticated rotation preserves cleanup reachability |

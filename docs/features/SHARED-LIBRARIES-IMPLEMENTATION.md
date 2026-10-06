@@ -6294,3 +6294,29 @@ release its admission while extraction or font work was still running.
 Native subtitles beside HDR and downloaded subtitle burns remain typed
 unsupported shapes until their Source-owned preparation is implemented.
 They do not justify a hidden feature gate or a disabled Developer switch.
+
+### Fresh Source invocation custody before preparation (2026-10-06)
+
+**Status:** implemented in `e0fd7b898`; pinned compile and Clippy passed on
+the builder checkpoint. Runtime regression execution remains deferred.
+
+Preparation could reject a valid, authenticated Start before the Source had
+claimed the invocation. B had already dispatched the request, so the Source
+could neither prove a fresh refusal nor confirm End. The Source now claims
+the complete canonical reference and request under the domain
+`plurx.sharing-source-invocation.v2` before fallible preparation. Only a fresh
+`Acquired` result owns the undispatched g0 cleanup receipt. An old claim,
+commit-unknown result or missing actor remains unresolved.
+
+The durable invocation fingerprint is separate from the planner's normalized
+recipe and engine/cache identity. A private binder checks the complete
+principal, request, playback and Source file tuple before factory admission.
+Both HLS and direct factories require that explicit binding; a historical
+normalized fingerprint cannot admit an unbound prepared request.
+
+Typed preparation failures, including unsupported Dolby Vision encoding, can
+therefore confirm exact End after releasing the fresh claim. Regression
+definitions cover stable refusal/End retries and rejection of an unbound
+normalized preparation. This closes the preparation-refusal gap; cluster
+forwarding and distributed ingress cleanup remain separate work recorded on
+the status page.
