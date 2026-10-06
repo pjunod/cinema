@@ -236,6 +236,11 @@ final class SharedPlaybackControlTests: XCTestCase {
         let direct = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play"), caps: caps, quality: .auto, playbackId: "player-1")
         XCTAssertEqual(direct.request.presentation, "direct"); XCTAssertEqual(direct.request.playbackId, "player-1")
         XCTAssertEqual(direct.request.start, 61.5)
+        var injected = direct.request
+        injected.subtitleBurn = 4
+        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: direct.decision, caps: caps, request: injected))
+        injected = direct.request; injected.hdr10 = true
+        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: direct.decision, caps: caps, request: injected))
         XCTAssertNil(direct.request.copy); XCTAssertNil(direct.request.height); XCTAssertNil(direct.request.aac); XCTAssertNil(direct.request.audio)
         XCTAssertNil(direct.request.previousSessionId); XCTAssertNil(direct.request.reopenReason); XCTAssertNil(direct.request.controlSequence); XCTAssertNil(direct.request.intent)
         let again = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play"), caps: caps, quality: .auto, playbackId: "player-1")

@@ -330,6 +330,7 @@ struct SharedPlaybackPlan {
               request.height.map({ $0 > 0 && $0 <= 8192 }) ?? true,
               direct ? Self.directEligible(decision) && request.copy == nil && request.height == nil && request.aac == nil
                     && request.audio == nil && request.nativeSubtitles == nil && request.subtitle == nil
+                    && request.subtitleBurn == nil && request.hdr10 != true && request.blockBudgetSecs == nil
                 : (decision.method == "transcode" || request.subtitleBurn != nil ? request.copy != true : request.copy == true)
         else { throw APIError.transport("This Shared HLS plan is not available yet.") }
         self.subject = subject; self.decision = decision; self.caps = caps; self.request = request

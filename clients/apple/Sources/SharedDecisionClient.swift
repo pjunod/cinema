@@ -50,7 +50,7 @@ struct SharedDecisionClient {
         let direct = body.presentation == "direct"
         if direct {
             guard body.copy == nil, body.height == nil, body.nativeSubtitles == nil, body.subtitle == nil,
-                  body.aac == nil, body.blockBudgetSecs == nil
+                  body.aac == nil, body.blockBudgetSecs == nil, body.subtitleBurn == nil, body.hdr10 != true
             else { throw APIError.transport("This Shared direct play is not available.") }
         }
         guard body.caps?.v == 2, body.presentation == "vod" || direct, !body.playbackId.isEmpty,
