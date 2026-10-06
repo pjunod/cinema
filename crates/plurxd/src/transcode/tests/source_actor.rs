@@ -55,6 +55,11 @@ async fn source_factory_refusal_returns_exact_invocation_receipt_before_admissio
     Box::pin(source_copy_preadmission_fixture(48)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_factory_refuses_unbound_normalized_preparation_before_admission() {
+    Box::pin(source_copy_preadmission_fixture(49)).await;
+}
+
 fn source_fixture_state() -> Arc<crate::state::AppState> {
     Arc::new(crate::http::source_actor_test_state())
 }
@@ -426,7 +431,7 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         "Source preparation future: {} bytes",
         std::mem::size_of_val(preparation.as_ref().get_ref())
     );
-    let prepared = preparation.await.expect("actual Source engine preparation");
+    let mut prepared = preparation.await.expect("actual Source engine preparation");
     if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
         assert!(
             matches!(prepared.request().kind, SessionKind::Transcode { .. }),
@@ -467,6 +472,11 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     else {
         panic!("canonical claim")
     };
+    if mode != 49 {
+        prepared
+            .bind_source_invocation(&binding)
+            .expect("bind actual fresh fixture invocation before factory admission");
+    }
     let assignment = store
         .assign_source_dispatch(&binding, &master, &members)
         .await
@@ -831,12 +841,18 @@ async fn source_actual_actor(
     else {
         panic!("activation hint")
     };
-    if mode == 48 {
+    if mode == 48 || mode == 49 {
         // A real factory validation refusal, with a genuine acquired/assigned
         // Source claim and activation authority. No registry flag or SQL
         // absence is used to manufacture its no-admission receipt.
-        let other = source_fixture_state();
-        assert!(!Arc::ptr_eq(&state.store, &other.store));
+        let other = if mode == 49 {
+            Arc::clone(&state)
+        } else {
+            source_fixture_state()
+        };
+        if mode == 48 {
+            assert!(!Arc::ptr_eq(&state.store, &other.store));
+        }
         let refusal = manager
             .start_source_worker(
                 other,

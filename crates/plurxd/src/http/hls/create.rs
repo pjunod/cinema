@@ -4144,6 +4144,7 @@ pub(crate) struct PreparedSourcePlayback {
     file: MediaFile,
     resolved: ResolvedPlan,
     source_fingerprint: String,
+    source_invocation_fingerprint: Option<String>,
     decision: super::super::stream::DecisionResponse,
 }
 #[allow(dead_code)]
@@ -4169,8 +4170,29 @@ impl PreparedSourcePlayback {
             self.resolved.native_subtitle,
         )
     }
+    pub(crate) fn bind_source_invocation(
+        &mut self,
+        binding: &plurx_core::sharing_source_sessions::SourceBindingHandle,
+    ) -> Result<(), ()> {
+        if binding.principal() != &self.principal
+            || binding.source_server_id() != self.target.server_id
+            || binding.catalogue_epoch() != self.target.catalogue_epoch
+            || binding.library_id() != &self.target.library_id
+            || binding.item_id() != &self.target.item_id
+            || binding.file_id() != &self.target.file_id
+            || binding.file_revision() != &self.target.revision
+            || binding.playback_id() != self.resolved.request.playback_id
+            || Some(binding.request_id()) != self.resolved.request.request_id.as_deref()
+        {
+            return Err(());
+        }
+        self.source_invocation_fingerprint = Some(binding.request_fingerprint().to_owned());
+        Ok(())
+    }
     pub(crate) fn fingerprint(&self) -> &str {
-        &self.source_fingerprint
+        self.source_invocation_fingerprint
+            .as_deref()
+            .unwrap_or(&self.source_fingerprint)
     }
     /// Build the complete durable HLS response from the admitted engine facts.
     /// This describes the pending session; it grants neither readiness nor
@@ -4293,7 +4315,7 @@ impl PreparedSourcePlayback {
             && binding.file_revision() == &self.target.revision
             && binding.playback_id() == self.resolved.request.playback_id
             && Some(binding.request_id()) == self.resolved.request.request_id.as_deref()
-            && binding.request_fingerprint() == self.source_fingerprint
+            && self.source_invocation_fingerprint.as_deref() == Some(binding.request_fingerprint())
     }
 }
 
@@ -4470,6 +4492,7 @@ pub(crate) async fn prepare_source_playback(
     );
     Ok(PreparedSourcePlayback {
         source_fingerprint,
+        source_invocation_fingerprint: None,
         target,
         principal,
         file,
