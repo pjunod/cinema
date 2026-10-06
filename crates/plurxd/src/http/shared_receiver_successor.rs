@@ -283,7 +283,6 @@ pub(super) fn successor_request(
             "control_sequence",
             "reopen_reason",
             "intent",
-            "subtitle_burn",
         ]
         .iter()
         .any(|key| object.get(*key).is_some_and(|value| !value.is_null()))
@@ -345,12 +344,21 @@ pub(super) fn successor_request(
     };
     object.insert("audio_offset_ms".into(), selection.audio_offset_ms.into());
     match selection.subtitle.mode {
-        SubtitleMode::Burn => return None,
+        SubtitleMode::Burn => {
+            object.remove("native_subtitles");
+            object.remove("subtitle");
+            object.insert("subtitle_burn".into(), selection.subtitle.track?.into());
+            object.insert("copy".into(), false.into());
+            if let Some(Value::Object(overrides)) = object.get_mut("overrides") {
+                overrides.insert("force".into(), "transcode".into());
+            }
+        }
         SubtitleMode::Native => {
             object.insert("native_subtitles".into(), true.into());
             object.insert("subtitle".into(), selection.subtitle.track?.into());
         }
         SubtitleMode::Off | SubtitleMode::Overlay => {
+            object.remove("native_subtitles");
             object.remove("subtitle");
         }
     }
@@ -367,7 +375,7 @@ fn successor_effective(request_json: &str, start: &StartResponse) -> EffectiveSe
         quality_auto: request["quality_auto"].as_bool().unwrap_or(false),
         height: start.height,
         audio_track: request["audio"].as_i64(),
-        subtitle_burn: None,
+        subtitle_burn: request["subtitle_burn"].as_i64(),
         audio_offset_ms: request["audio_offset_ms"].as_i64().unwrap_or(0),
         codec: if request["copy"].as_bool() == Some(true) {
             "source"

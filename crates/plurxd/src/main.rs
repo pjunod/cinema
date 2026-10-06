@@ -97,7 +97,6 @@ use clap::{Parser, Subcommand};
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
-use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use plurx_core::cluster::coordination::StoreCoordinator;
 use plurx_core::cluster::migration::{
@@ -3157,6 +3156,7 @@ pub(crate) struct SharingConnectionCancellation(
     pub(crate) tokio_util::sync::CancellationToken,
     std::sync::Arc<SharingConnectionMonitors>,
     tokio_util::sync::CancellationToken,
+    tokio_util::sync::CancellationToken,
 );
 /// Read-only observer of actual accepted writer closure; it cannot request it.
 #[derive(Clone)]
@@ -3184,7 +3184,13 @@ impl SharingConnectionCancellation {
             tokio_util::sync::CancellationToken::new(),
             std::sync::Arc::new(SharingConnectionMonitors(std::sync::Mutex::new(Vec::new()))),
             tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
         )
+    }
+    /// Stop accepting new streams, while completing existing accepted writers.
+    /// Only actual connection closure supplies the settlement observation.
+    pub(crate) fn drain_token(&self) -> tokio_util::sync::CancellationToken {
+        self.3.clone()
     }
     /// Opaque weak ownership identity for deduplicating per-actor monitors.
     /// Holding it cannot keep the connection or monitor owner alive.
@@ -3232,7 +3238,8 @@ async fn serve_http<A: HttpAcceptor>(
         // that behavior while taking ownership of the connection builder.
         .enable_connect_protocol();
 
-    let graceful = GracefulShutdown::new();
+    let connection_shutdown = tokio_util::sync::CancellationToken::new();
+    let mut connections = tokio::task::JoinSet::new();
     tokio::pin!(shutdown);
     loop {
         let accepted = tokio::select! {
@@ -3270,14 +3277,33 @@ async fn serve_http<A: HttpAcceptor>(
         let connection = builder
             .serve_connection_with_upgrades(TokioIo::new(stream), TowerToHyperService::new(service))
             .into_owned();
-        let connection = graceful.watch(connection);
-        tokio::spawn(async move {
+        let shutdown_connection = connection_shutdown.clone();
+        // Reap completed accepted drivers on each admission; the JoinSet owns
+        // every remaining writer through daemon drain.
+        while connections.try_join_next().is_some() {}
+        connections.spawn(async move {
             let _cancel_on_close = connection_cancel.0.clone().drop_guard();
             // Declared before the owned connection so unwinding also drops the
             // actual writer before signalling closure to capacity monitors.
             let _closed_after_writer = connection_cancel.2.clone().drop_guard();
             let mut connection = Box::pin(connection);
             tokio::select! {
+                () = async {
+                    tokio::select! {
+                        () = connection_cancel.3.cancelled() => {},
+                        () = shutdown_connection.cancelled() => {},
+                    }
+                } => {
+                    connection.as_mut().graceful_shutdown();
+                    tokio::select! {
+                        () = connection_cancel.0.cancelled() => {},
+                        result = &mut connection => {
+                            if let Err(error) = result {
+                                tracing::debug!(%error, %remote, "HTTP connection drain ended with an error");
+                            }
+                        }
+                    }
+                },
                 ()=connection_cancel.0.cancelled()=>{},
                 result=&mut connection=> {if let Err(error)=result {tracing::debug!(%error,%remote,"HTTP connection closed with an error");}},
             }
@@ -3287,7 +3313,8 @@ async fn serve_http<A: HttpAcceptor>(
     }
 
     let _ = drain_started.send(());
-    let connections_drained = graceful.shutdown();
+    connection_shutdown.cancel();
+    let connections_drained = async { while connections.join_next().await.is_some() {} };
     tokio::pin!(connections_drained);
     tokio::select! {
         () = &mut connections_drained => {
@@ -4357,6 +4384,128 @@ mod startup_tests {
 
         expect_header_timer_close(&mut stream, "an idle keep-alive connection").await;
         stop_timeout_test_server(stop, served).await;
+    }
+
+    #[tokio::test]
+    async fn sharing_h2_graceful_predecessor_drain_preserves_existing_successor_writer() {
+        use http_body_util::BodyExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let (first_tx, first_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
+        let (second_tx, second_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
+        let streams = Arc::new(std::sync::Mutex::new([Some(first_rx), Some(second_rx)]));
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(2);
+        let app = axum::Router::new().route(
+            "/{index}",
+            axum::routing::get({
+                move |axum::extract::Path(index): axum::extract::Path<usize>,
+                      axum::Extension(connection): axum::Extension<
+                    SharingConnectionCancellation,
+                >| {
+                    let receiver = streams.lock().expect("streams")[index]
+                        .take()
+                        .expect("stream");
+                    let accepted = accepted_tx.clone();
+                    async move {
+                        accepted.send(connection).await.expect("observer");
+                        let stream =
+                            futures_util::stream::unfold(receiver, |mut receiver| async move {
+                                receiver
+                                    .recv()
+                                    .await
+                                    .map(|bytes| (Ok::<_, std::io::Error>(bytes), receiver))
+                            });
+                        axum::body::Body::from_stream(stream)
+                    }
+                }
+            }),
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        // Test server owns accepted drivers; explicit stop and join close it.
+        let served = tokio::spawn(serve_http(
+            listener,
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            HTTP_TIMEOUTS,
+        ));
+        let socket = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        let (mut client, driver) = hyper::client::conn::http2::handshake::<_, _, axum::body::Body>(
+            TokioExecutor::new(),
+            TokioIo::new(socket),
+        )
+        .await
+        .expect("h2 handshake");
+        // Client driver is joined after GOAWAY and actual accepted closure.
+        let driven = tokio::spawn(driver);
+        let mut predecessor = client
+            .send_request(
+                Request::builder()
+                    .uri(format!("http://{address}/0"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("predecessor headers")
+            .into_body();
+        let connection = accepted_rx.recv().await.expect("accepted predecessor");
+        let mut successor = client
+            .send_request(
+                Request::builder()
+                    .uri(format!("http://{address}/1"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("successor headers")
+            .into_body();
+        let same = accepted_rx.recv().await.expect("accepted successor");
+        assert!(std::sync::Weak::ptr_eq(
+            &connection.ownership_key(),
+            &same.ownership_key()
+        ));
+        connection.drain_token().cancel();
+        second_tx
+            .send(axum::body::Bytes::from_static(b"successor survives"))
+            .await
+            .expect("write");
+        let frame = tokio::time::timeout(Duration::from_secs(5), successor.frame())
+            .await
+            .expect("successor read deadline")
+            .expect("frame")
+            .expect("successor DATA");
+        assert_eq!(frame.into_data().expect("data"), "successor survives");
+        assert!(
+            !connection.0.is_cancelled(),
+            "graceful drain never hard-cuts either stream"
+        );
+        assert!(
+            !connection.closed().is_closed(),
+            "queued predecessor ownership is unsettled"
+        );
+        drop(first_tx);
+        assert!(predecessor.frame().await.is_none());
+        assert!(
+            !connection.closed().is_closed(),
+            "successor still owns its accepted writer"
+        );
+        drop(second_tx);
+        assert!(successor.frame().await.is_none());
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), connection.closed().wait())
+            .await
+            .expect("actual accepted writer closure");
+        driven
+            .await
+            .expect("driver joined")
+            .expect("graceful h2 result");
+        stop.send(()).expect("stop");
+        served.await.expect("server joined").expect("server result");
     }
 
     #[tokio::test]

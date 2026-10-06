@@ -1764,6 +1764,8 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# Shared H2 drain: the accepted driver moves to JoinSet.spawn; two finite
+# regression drivers are explicitly stopped and joined (+1 net).
 # Durable queue: background_jobs.rs adds one ActiveJob-owned heartbeat (joined
 # before retirement), plus two joined race/process fixtures; ffmpeg.rs adds a
 # joined cancellation fixture. main.rs starts the daemon-owned consumer loop.
@@ -2503,7 +2505,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # +1 Shared burn sidecar creation: the Source probe owns and awaits the
 # blocking tempfile job; its anonymous file closes on failure or rendition
 # settlement. No timer or detached recovery owner is added.
-expected_occurrences = 808
+expected_occurrences = 809
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2540,6 +2542,8 @@ expected_occurrences = 808
 
 [[module_structures]]
 id = "method-spawn"
+# Shared H2 drain: the HTTP server JoinSet owns every accepted driver through
+# daemon drain; each driver drops its socket before publishing actual closure.
 # Durable queue removes the state.rs fragment JoinSet launcher. The common
 # consumer now awaits each admitted execution and owns its fence through reap.
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
@@ -2677,7 +2681,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # terminated and reaped it for foreground, download, ownership and deadline yields.
 # Shared libraries S2: the lost-response fixture JoinSet owns and aborts
 # accepted TLS connections; this is the same in-process task inventoried above.
-expected_occurrences = 53
+expected_occurrences = 54
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2694,6 +2698,8 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Shared H2 drain: retirement bounds its actual writer join without treating
+# timeout as closure; two finite regression waits bound frame and socket evidence.
 # Durable queue: background_jobs.rs adds four claim/heartbeat lease timers and
 # three bounded fixture waits (+7); ffmpeg replaces timeout with sleep and adds
 # three fixture waits (+3); fragindex removes two outer waits in favor of the
@@ -3706,7 +3712,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the hand-over transport test's waits (busy and revoked transports cut, idle
 # custody released). The commit hand-off itself adds no task or timer: it runs
 # when the commit answer's writer is released.
-expected_occurrences = 1319
+expected_occurrences = 1322
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -4057,6 +4063,8 @@ expected_occurrences = 215
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# Shared H2 drain: JoinSet.spawn starts the accepted HTTP task described above,
+# not an operating-system process.
 # Durable queue removes state.rs JoinSet.spawn for the fragment worker. This
 # is the same removed task counted by method-spawn, not an OS child.
 pattern = "\\.(?:spawn|output|status)\\s*\\("
@@ -4546,7 +4554,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +4 Shared burns/HDR: filter-listing output uses Source-owned run_child;
 # fixture subtitle mux output is awaited; two HTTP status assertions inspect
 # responses only. None creates an additional detached owner.
-expected_occurrences = 575
+expected_occurrences = 576
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
@@ -4562,6 +4570,8 @@ expected_occurrences = 0
 
 [[module_structures]]
 id = "process-lifecycle-method"
+# Shared H2 regression awaits the accepted connection closure observer; this
+# wait observes a driver already owned by the server JoinSet, not a child process.
 # Durable queue adds start_kill and an awaited wait to the ffmpeg collector.
 # Cancellation/expiry retains the child job and caller admission until reap;
 # the normal completion wait remains. There is no second process owner.
@@ -4785,7 +4795,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # the fixture sleeper.
 # +1: the Source direct byte route awaits its Start entry (`entry.wait`), the
 # same in-process outcome wait every Source operation uses. No child process.
-expected_occurrences = 284
+expected_occurrences = 285
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
