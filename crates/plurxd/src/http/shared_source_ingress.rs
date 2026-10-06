@@ -272,10 +272,34 @@ pub(super) async fn resolve_forward_route(
             cleanup_only,
         })));
     }
+    if let Some((principal, node, boot)) = state
+        .transcode
+        .source_http_starts
+        .forwarding
+        .pending_cleanup_route(
+            &hash,
+            &viewer,
+            input.request_id,
+            target,
+            &input.canonical_recipe,
+        )
+    {
+        if node == state.node_id {
+            return Ok(ForwardRoute::Local);
+        }
+        return Ok(ForwardRoute::Pending(Box::new(FreshAuthority {
+            credential_hash: hash,
+            principal,
+            candidate_node_id: node,
+            expected_registry_boot: Some(boot),
+            reference: input.reference,
+            request_id: input.request_id,
+        })));
+    }
     // NULL/absent assignment never permits another candidate after dispatch.
     let (_, grant) = current_reference(state, headers, target).await?;
     let principal = PlaybackPrincipal::sharing(grant, &viewer).map_err(|_| unavailable())?;
-    if let Some(node) = state
+    if let Some((node, boot)) = state
         .transcode
         .source_http_starts
         .forwarding
@@ -286,11 +310,18 @@ pub(super) async fn resolve_forward_route(
             &input.canonical_recipe,
         )
     {
-        // A pin without original boot cannot become cross-process authority.
         if node == state.node_id {
             return Ok(ForwardRoute::Local);
         }
-        return Err(unavailable());
+        let boot = boot.ok_or_else(unavailable)?;
+        return Ok(ForwardRoute::Pending(Box::new(FreshAuthority {
+            credential_hash: hash,
+            principal,
+            candidate_node_id: node,
+            expected_registry_boot: Some(boot),
+            reference: input.reference,
+            request_id: input.request_id,
+        })));
     }
     if !path.ends_with("/sessions") {
         return Err(unavailable());

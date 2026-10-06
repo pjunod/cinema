@@ -1338,6 +1338,13 @@ pub trait SharingSourceSessionStore: Send + Sync {
         intent: &SourceSessionIntent,
         members: &SourceAdmissionMembers,
     ) -> Result<SourceClaimOutcome, StoreError>;
+    /// Fence only the planned incarnation retained by an actually joined local
+    /// pre-factory invocation after an uncertain claim. Absence and historical
+    /// replay confer no authority; only an exact g0 mutation can settle it.
+    async fn release_source_uncertain_uninvoked_claim(
+        &self,
+        intent: &SourceSessionIntent,
+    ) -> Result<SourceReleaseOutcome, StoreError>;
     /// This callback is limited to the immutable, provably undispatched CAS.
     async fn release_source_never_dispatched(
         &self,
@@ -1569,55 +1576,93 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
         }
     }
 
+    async fn release_source_uncertain_uninvoked_claim(
+        &self,
+        intent: &SourceSessionIntent,
+    ) -> Result<SourceReleaseOutcome, StoreError> {
+        // This is a planned identity, never a persisted/adopted factory handle.
+        // The exact mutation below must find this same boot/hash-bound g0 row.
+        let binding = SourceBindingHandle {
+            incarnation_id: intent.request.incarnation_id,
+            principal: intent.request.principal.clone(),
+            request_id: intent.request.request_id.clone(),
+            request_fingerprint: intent.request.request_fingerprint.clone(),
+            playback_id: intent.request.playback_id.clone(),
+            source_server_id: intent.witness.server,
+            catalogue_epoch: intent.witness.epoch,
+            library_id: intent.witness.library.clone(),
+            item_id: intent.witness.item.clone(),
+            file_id: intent.witness.file.clone(),
+            file_revision: intent.request.file_revision.clone(),
+            released: false,
+        };
+        release_never_dispatched(self, &binding, Some(intent)).await
+    }
+
     async fn release_source_never_dispatched(
         &self,
         binding: &SourceBindingHandle,
     ) -> Result<SourceReleaseOutcome, StoreError> {
-        if !present(self).await? {
-            return Ok(SourceReleaseOutcome::Refused);
-        }
-        let PlaybackPrincipal::Sharing {
-            grant_id,
-            viewer_key,
-        } = &binding.principal
-        else {
-            return Err(invalid());
-        };
-        let receipt = format!(
-            "{:x}",
-            Sha256::digest(
-                format!(
-                    "sharing-source-never-dispatched-v1:{}:{}:{}:{}",
-                    binding.incarnation_id,
-                    binding.principal.owner_key(),
-                    binding.request_id,
-                    binding.request_fingerprint
-                )
-                .as_bytes()
+        release_never_dispatched(self, binding, None).await
+    }
+}
+
+async fn release_never_dispatched<T: Backend>(
+    store: &T,
+    binding: &SourceBindingHandle,
+    uncertain: Option<&SourceSessionIntent>,
+) -> Result<SourceReleaseOutcome, StoreError> {
+    if !present(store).await? {
+        return Ok(SourceReleaseOutcome::Refused);
+    }
+    let PlaybackPrincipal::Sharing {
+        grant_id,
+        viewer_key,
+    } = &binding.principal
+    else {
+        return Err(invalid());
+    };
+    let receipt = format!(
+        "{:x}",
+        Sha256::digest(
+            format!(
+                "sharing-source-never-dispatched-v1:{}:{}:{}:{}",
+                binding.incarnation_id,
+                binding.principal.owner_key(),
+                binding.request_id,
+                binding.request_fingerprint
             )
-        );
-        let now = now_ms()?;
-        let values = vec![
-            binding.incarnation_id.into(),
-            binding.principal.owner_key().into(),
-            (*grant_id).into(),
-            viewer_key.as_str().to_owned().into(),
-            binding.request_id.clone().into(),
-            binding.request_fingerprint.clone().into(),
-            binding.playback_id.clone().into(),
-            binding.source_server_id.into(),
-            binding.catalogue_epoch.into(),
-            binding.library_id.as_str().to_owned().into(),
-            binding.item_id.as_str().to_owned().into(),
-            binding.file_id.as_str().to_owned().into(),
-            binding.file_revision.as_str().to_owned().into(),
-            now.into(),
-            receipt.clone().into(),
-        ];
-        let exact="incarnation_id=$1 AND owner_key=$2 AND share_grant_id=$3 AND share_viewer_key=$4 AND request_id=$5 AND request_fingerprint=$6 AND playback_id=$7 AND source_server_id=$8 AND catalogue_epoch=$9 AND library_id=$10 AND item_id=$11 AND file_id=$12 AND file_revision=$13";
-        let custody = "EXISTS(SELECT 1 FROM sharing_ingress_custody c WHERE c.principal_kind='source' AND c.incarnation_id=$1 AND json_extract(c.custody_json,'$.source_routing') IS NOT NULL AND json_extract(c.custody_json,'$.sealed')=1 AND NOT EXISTS(SELECT 1 FROM json_each(c.custody_json,'$.slots') slot WHERE json_extract(slot.value,'$.closed_confirmation') IS NULL))";
-        let seal=format!("UPDATE sharing_ingress_custody SET custody_json=json_set(custody_json,'$.sealed',json('true')),revision=revision+1 WHERE principal_kind='source' AND incarnation_id=$1 AND json_extract(custody_json,'$.source_routing') IS NOT NULL AND json_extract(custody_json,'$.sealed')=0 AND json_array_length(custody_json,'$.slots')=0 AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='held' AND dispatch_generation=0 AND start_resolved_at_ms IS NULL AND $14>0 AND length($15)=64)");
-        let release=format!("UPDATE sharing_source_session_bindings SET reservation_state='released',start_resolved_at_ms=$14,released_at_ms=$14,release_fingerprint=$15 WHERE {exact} AND {custody} AND reservation_state='held' AND dispatch_generation=0 AND start_resolved_at_ms IS NULL AND ({})
+            .as_bytes()
+        )
+    );
+    let now = now_ms()?;
+    let values = vec![
+        binding.incarnation_id.into(),
+        binding.principal.owner_key().into(),
+        (*grant_id).into(),
+        viewer_key.as_str().to_owned().into(),
+        binding.request_id.clone().into(),
+        binding.request_fingerprint.clone().into(),
+        binding.playback_id.clone().into(),
+        binding.source_server_id.into(),
+        binding.catalogue_epoch.into(),
+        binding.library_id.as_str().to_owned().into(),
+        binding.item_id.as_str().to_owned().into(),
+        binding.file_id.as_str().to_owned().into(),
+        binding.file_revision.as_str().to_owned().into(),
+        now.into(),
+        receipt.clone().into(),
+    ];
+    let exact="incarnation_id=$1 AND owner_key=$2 AND share_grant_id=$3 AND share_viewer_key=$4 AND request_id=$5 AND request_fingerprint=$6 AND playback_id=$7 AND source_server_id=$8 AND catalogue_epoch=$9 AND library_id=$10 AND item_id=$11 AND file_id=$12 AND file_revision=$13";
+    let retained_routing = uncertain.map(|intent| format!(
+            "EXISTS(SELECT 1 FROM sharing_ingress_custody c WHERE c.principal_kind='source' AND c.incarnation_id=$1 AND json_extract(c.custody_json,'$.source_routing.registry_boot_id')={} AND json_extract(c.custody_json,'$.source_routing.initial_credential_hash')={})",
+            quote(&intent.request.ingress_registry_boot_id.to_string()),
+            quote(&intent.request.credential_hash),
+        )).unwrap_or_else(|| "1".into());
+    let exact = format!("({exact}) AND ({retained_routing})");
+    let custody = "EXISTS(SELECT 1 FROM sharing_ingress_custody c WHERE c.principal_kind='source' AND c.incarnation_id=$1 AND json_extract(c.custody_json,'$.source_routing') IS NOT NULL AND json_extract(c.custody_json,'$.sealed')=1 AND NOT EXISTS(SELECT 1 FROM json_each(c.custody_json,'$.slots') slot WHERE json_extract(slot.value,'$.closed_confirmation') IS NULL))";
+    let seal=format!("UPDATE sharing_ingress_custody SET custody_json=json_set(custody_json,'$.sealed',json('true')),revision=revision+1 WHERE principal_kind='source' AND incarnation_id=$1 AND json_extract(custody_json,'$.source_routing') IS NOT NULL AND json_extract(custody_json,'$.sealed')=0 AND json_array_length(custody_json,'$.slots')=0 AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='held' AND dispatch_generation=0 AND start_resolved_at_ms IS NULL AND $14>0 AND length($15)=64)");
+    let release=format!("UPDATE sharing_source_session_bindings SET reservation_state='released',start_resolved_at_ms=$14,released_at_ms=$14,release_fingerprint=$15 WHERE {exact} AND {custody} AND reservation_state='held' AND dispatch_generation=0 AND start_resolved_at_ms IS NULL AND ({})
  AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$1)
  AND NOT EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$1)
  AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id=$1)
@@ -1625,24 +1670,23 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
  AND NOT EXISTS(SELECT 1 FROM library_channel_session_recipes WHERE incarnation_id=$1)
  AND NOT EXISTS(SELECT 1 FROM media_playback_pointers WHERE current_incarnation_id=$1)
  AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE (incarnation_id=$1 OR(owner_key=$2 AND request_id=$5)) AND NOT(owner_key=$2 AND principal_kind='sharing' AND user_id IS NULL AND share_grant_id=$3 AND share_viewer_key=$4 AND request_id=$5 AND request_fingerprint=$6 AND playback_id=$7 AND incarnation_id=$1 AND owner_node_id IS NULL AND state IN('starting','failed')))",schema_guard());
-        let settle=format!("UPDATE media_session_requests SET state='failed',updated_at_ms=$14 WHERE owner_key=$2 AND request_id=$5 AND incarnation_id=$1 AND state='starting' AND owner_node_id IS NULL AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='released' AND released_at_ms=$14 AND release_fingerprint=$15)");
-        let counts = self
-            .sharing_txn(vec![
-                (seal, values.clone()),
-                (release, values.clone()),
-                (settle, values.clone()),
-            ])
-            .await?;
-        if counts.get(1) == Some(&1) {
-            return Ok(SourceReleaseOutcome::Released);
-        }
-        let rows=self.sharing_read(&format!("SELECT json_quote(count(*)) AS payload FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='released' AND release_fingerprint=$15 AND $14>0"),values).await?;
-        Ok(if rows.first().map(String::as_str) == Some("1") {
-            SourceReleaseOutcome::ExactReplay
-        } else {
-            SourceReleaseOutcome::Refused
-        })
+    let settle=format!("UPDATE media_session_requests SET state='failed',updated_at_ms=$14 WHERE owner_key=$2 AND request_id=$5 AND incarnation_id=$1 AND state='starting' AND owner_node_id IS NULL AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='released' AND released_at_ms=$14 AND release_fingerprint=$15)");
+    let counts = store
+        .sharing_txn(vec![
+            (seal, values.clone()),
+            (release, values.clone()),
+            (settle, values.clone()),
+        ])
+        .await?;
+    if counts.get(1) == Some(&1) {
+        return Ok(SourceReleaseOutcome::Released);
     }
+    let rows=store.sharing_read(&format!("SELECT json_quote(count(*)) AS payload FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='released' AND dispatch_generation=0 AND release_fingerprint=$15 AND $14>0"),values).await?;
+    Ok(if rows.first().map(String::as_str) == Some("1") {
+        SourceReleaseOutcome::ExactReplay
+    } else {
+        SourceReleaseOutcome::Refused
+    })
 }
 
 async fn prepare_intent<T: Backend>(
