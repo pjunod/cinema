@@ -55,7 +55,7 @@ fun SharedSharingSettingsScreen(onBack: () -> Unit, onLibraries: () -> Unit, onD
         Text("Sharing", style = MaterialTheme.typography.headlineMedium)
         SharedLibrariesEntry(onLibraries)
         TextButton(onClick = onDeveloper) { Text("Sharing enablement in Developer") }
-        Text("Shared playback and physical-device qualification are still pending. Enablement remains your choice.")
+        Text("Shared playback is implemented; private network, cluster recovery and physical-device qualification remain pending. Enablement remains your choice.")
         summaries.forEach { (label, value) -> Text("$label: $value") }
         errors.forEach { Text(it) }
         TextButton(enabled = !busy, onClick = { scope.launch { load() } }) { Text("Refresh status") }
@@ -96,7 +96,7 @@ fun SharedSharingDeveloperCard() {
             Text("Enable Shared libraries", Modifier.padding(top = 12.dp))
         }
         saved?.let { Text(if (it) "Saved choice: Enabled" else "Saved choice: Disabled") }
-        Text("Source-labelled browsing is implemented. Shared playback and physical Apple TV/Google TV playback still await qualification.")
+        Text("Source-labelled browsing and Shared playback are implemented. Private network, cluster recovery and physical-device playback still await qualification.")
         Text("Unknown or unmet readiness never changes your selection or prevents Save.")
         Text("Leaves Developer when Shared playback, revocation, recovery and physical-device qualification pass; the permanent switch then moves to Settings → Sharing.")
         Text(message)
