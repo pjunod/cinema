@@ -26,8 +26,12 @@ existing warm target. Paul's checkout is not used for changes.
 | Web prepared successor | Integrated into the new batch | Claude's `5fe0b1782` series, retained as proper commits |
 | Purpose-key census, TLS permissions, deterministic receiver fixtures | Integrated into the new batch | Three completed commits from the unitfix branch |
 | Partial fd/artwork fixture repair | Integrated in `d4d2ec8e4` | Exact file-identity assertions and deterministic artwork timing; compiled/linted, execution deferred |
-| Burned subtitles and HDR | Implemented in `d4d2ec8e4`; runtime unqualified | Source-owned extraction/fonts; precise PQ/HLG claims; typed DV refusal; native client parity in progress |
-| Compiler and lint | Passed on `d4d2ec8e4` | Rust 1.97.1 all-target check; normal hook: workspace Clippy, rustfmt, catalog and JS syntax; web types unchanged. No tests executed |
+| Burned subtitles and HDR | Implemented in `d4d2ec8e4`; runtime unqualified | Source-owned extraction/fonts; precise PQ/HLG claims; typed DV refusal; native parity integrated |
+| Native/web handoff and burn/HDR | Integrated through `32a556f7b` | Native plan parity, web refusal reopen under original account, Android renderer failure cleanup |
+| Native catalogue/history audit | Integrated through `32a556f7b` | Frame evidence before progress; Source-separated Continue Watching UI; next-episode membership race fixed |
+| Failed Source Start | Integrated `12a856ea9` | Private pre-admission factory receipt, exact g0/g1 cleanup, ambiguous failures retain custody; execution deferred |
+| Busy predecessor transport | Integrated `9789741b2` | Graceful H2 drain preserves existing successor writes; actual closure still required; no runtime receipt yet |
+| Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed on integration `02c022f3d`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
 
 ## Parallel builders and management audit
 
@@ -37,9 +41,9 @@ current. Each builder has an isolated clone from `d4d2ec8e4`.
 
 | Builder | Owned work | State |
 |---|---|---|
-| Source lifecycle | Source Start/End, Source physical actor and Source store seams; failed-start proof and worker forwarding | Building exact pre-factory cleanup; found joined errors could evict unresolved ownership |
-| Clients | Apple, Android and web client code/tests; burn/HDR asks, prepared handoff recovery and advisory copy | Building native parity and post-switch refusal recovery; local Xcode available |
-| Receiver/cluster | B receiver handlers/store, peer endpoint cleanup and narrow accepted HTTP connection seam | Building owner forwarding and non-destructive H2 supersession |
+| Source lifecycle | Source worker forwarding, Source custody and coordinated schema/floor migration | Cleanup checkpoint complete; building adjunct custody persistence and Source forwarding |
+| Clients / hosting | Native and web completion, Windows compiler and explicit Docker bridge profile | Native work compiled; Windows compiler warm on m6; completing missing Docker hosting profile |
+| Receiver/cluster | Shared accepted-driver custody, B owner forwarding and endpoint cleanup | H2 drain checkpoint complete; building distributed closure acknowledgements and endpoint fallback |
 | Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |
 
 Rust builders serialize compilation with one owned lock on nuc4 and reuse
@@ -51,21 +55,28 @@ not a client-code failure. Inventory identifies m6 as `192.168.4.14`.
 inferred from task errors; B must forward a durable remote session to its
 actual live owner; a predecessor on shared H2 must not hard-cut a successor
 merely to prove retirement; clients and B must agree on explicit burn
-selection. No claim that the whole effort is correct or releasable is made.
+selection. The native audit additionally found missing Continue Watching and
+history updates before frame evidence; those fixes are integrated. Cluster
+forwarding cannot report End until the outer ingress writer, as well as the
+owner's internal writer, has actually closed. The builders share one custody
+mechanism for that boundary. Docker's planned bridge recipe was not implemented;
+the hosting builder is closing that gap. No claim that the whole effort is
+correct or releasable is made.
 
 ## Remaining build and qualification
 
 | Requirement | Next acceptance boundary |
 |---|---|
-| Failed or ambiguous Source Start | Private per-invocation negative-admission proof and g0/g1 cleanup |
+| Failed or ambiguous Source Start | Runtime qualification of the integrated private receipt and g0/g1 cleanup |
 | Source worker forwarding | Authenticated non-owner ingress reaches its assigned physical worker |
 | B cluster ingress and owner transition | Physical ownership proof; SQL metadata alone cannot authorize adoption |
 | Endpoint and pin changes | Authenticated rotation preserves cleanup reachability |
 | Cluster revocation and limits | Three-voter cases; preparations count toward four grant and eight Source slots |
 | Upgrade and restore | Historical binaries and active-session behavior; restore requires disable or re-pair |
-| Prepared handoff client gaps | Refused commit after switch; physical Android TV, Apple direct play and handoff |
-| Busy predecessor transport | Retirement must respect other sessions sharing the H2 connection |
-| Operator, API, security and Developer lifecycle | Describe implemented behavior and retain advisory readiness until qualification |
+| Prepared handoff client gaps | Integrated refusal recovery awaits runtime/device qualification; physical Android TV, Apple direct play and handoff |
+| Busy predecessor transport | Integrated graceful drain awaits actual H2 regression execution |
+| Docker bridge hosting | Explicit container listener/egress profile and loopback-only Compose recipe, then host isolation qualification |
+| Operator, API, security and Developer lifecycle | [Operator guide](SHARED-LIBRARIES-OPERATIONS.md) and security boundary updated; retain advisory readiness until qualification |
 | Live matrix | Tailscale, two NATs, relay, devices, cluster loss, revoke bounds and sustained playback remain unproved |
 
 ## Decisions and constraints

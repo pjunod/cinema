@@ -122,4 +122,17 @@ class SharedCatalogueActionsTest {
         childLibrary = foreign
         assertTrue(runCatching { client().nextEpisode(library.reference("12")) }.isFailure)
     }
+    @Test fun missingCurrentEpisodeNeverSkipsToTheNextSeason(): Unit = runBlocking {
+        handler = { request, body ->
+            val (status, reply) = route(request, body)
+            if (request.url.encodedPath.endsWith("/children")) {
+                status to JsonObject(reply + ("items" to JsonArray(reply.getValue("items").jsonArray.filter {
+                    it.jsonObject.getValue("reference").jsonObject.getValue("item_id").jsonPrimitive.content != "12"
+                })))
+            } else status to reply
+        }
+        assertNull(client().nextEpisode(library.reference("12")))
+        assertFalse(requests.any { it.url.encodedPath.endsWith("/9007199254740995") })
+    }
+
 }

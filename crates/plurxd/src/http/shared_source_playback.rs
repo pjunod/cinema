@@ -41,6 +41,8 @@ struct SourceStartEntry {
 struct SourceStartTask {
     stage: std::sync::Mutex<SourceStartTaskStage>,
     joined: std::sync::Mutex<Option<SourceStartTaskJoined>>,
+    cleanup: std::sync::Mutex<Option<SourceUninvokedCleanup>>,
+    cleanup_confirmation: std::sync::Mutex<Option<Uuid>>,
 }
 #[derive(Default)]
 enum SourceStartTaskStage {
@@ -66,10 +68,44 @@ enum SourceStartTaskStage {
     Assigned(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
     Activating(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
     InvokingFactory(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
+    FactoryRefused(crate::transcode::source_actor::SourceWorkerNoAdmission),
 }
 enum SourceStartTaskJoined {
     Returned,
     PanickedOrCancelled,
+}
+// Private invocation custody: only the supervisor that joined the actual Start
+// task can retain this receipt. It covers this acquired incarnation, never a
+// historical request or an assignment reconstructed from durable rows.
+#[derive(Clone)]
+enum SourceUninvokedCleanup {
+    G0(plurx_core::sharing_source_sessions::SourceBindingHandle),
+    G1(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
+}
+impl SourceUninvokedCleanup {
+    fn incarnation(&self) -> Uuid {
+        match self {
+            Self::G0(binding) => binding.incarnation_id(),
+            Self::G1(assignment) => assignment.binding().incarnation_id(),
+        }
+    }
+    async fn release(&self, state: &crate::state::AppState) -> Result<(), SourceStartFailure> {
+        use plurx_core::sharing_source_sessions::SourceReleaseOutcome;
+        let result = match self {
+            Self::G0(binding) => state.store.release_source_never_dispatched(binding).await,
+            Self::G1(assignment) => {
+                state
+                    .store
+                    .settle_source_assigned_without_activation(assignment)
+                    .await
+            }
+        }
+        .map_err(|_| SourceStartFailure::Unresolved)?;
+        match result {
+            SourceReleaseOutcome::Released | SourceReleaseOutcome::ExactReplay => Ok(()),
+            SourceReleaseOutcome::Refused => Err(SourceStartFailure::Unresolved),
+        }
+    }
 }
 impl SourceStartTaskStage {
     fn incarnation(&self) -> Option<Uuid> {
@@ -90,6 +126,7 @@ impl SourceStartTaskStage {
             Self::Assigned(assignment)
             | Self::Activating(assignment)
             | Self::InvokingFactory(assignment) => Some(assignment.binding().incarnation_id()),
+            Self::FactoryRefused(receipt) => Some(receipt.assignment().binding().incarnation_id()),
         }
     }
 }
@@ -110,6 +147,7 @@ impl SourceStartEntry {
         let entry = std::sync::Arc::clone(self);
         let worker_entry = std::sync::Arc::clone(self);
         let grant = self.grant;
+        let cleanup_state = std::sync::Arc::clone(&state);
         let worker = tokio::spawn(async move {
             Box::pin(own_start(
                 state,
@@ -139,6 +177,28 @@ impl SourceStartEntry {
                         .incarnation(),
                     Some(owned.assignment.binding().incarnation_id())
                 );
+            }
+            if result.is_err() && matches!(joined, SourceStartTaskJoined::Returned) {
+                // The exact future returned before dispatch; its prepared inputs
+                // have dropped. The acquired CAS handle proves exclusive g0
+                // ownership. Assignment ambiguity is fenced by the g0 release
+                // CAS; refusal preserves custody rather than fabricating g1.
+                let cleanup = match &*entry.task.stage.lock().expect("Source start stage") {
+                    SourceStartTaskStage::Acquired(binding)
+                    | SourceStartTaskStage::Assigning(binding) => {
+                        Some(SourceUninvokedCleanup::G0(binding.clone()))
+                    }
+                    SourceStartTaskStage::Assigned(assignment)
+                    | SourceStartTaskStage::Activating(assignment) => {
+                        Some(SourceUninvokedCleanup::G1(assignment.clone()))
+                    }
+                    SourceStartTaskStage::FactoryRefused(receipt) => {
+                        Some(SourceUninvokedCleanup::G1(receipt.assignment().clone()))
+                    }
+                    _ => None,
+                };
+                *entry.task.cleanup.lock().expect("uninvoked Source custody") = cleanup;
+                let _ = entry.release_uninvoked(&cleanup_state).await;
             }
             *entry.task.joined.lock().expect("actual Source task join") = Some(joined);
             *entry.result.lock().expect("Source HTTP outcome") = Some(result);
@@ -289,20 +349,70 @@ impl SourceStartEntry {
                     .is_ok_and(|owned| owned.actor.settlement_status() == Some(Ok(())))
             })
     }
-    /// Nothing in this process still owns work for this start. The outcome
-    /// is published only after the worker joined, so a failure handed no
-    /// actor to this entry; durable claim and assignment rows it may have
-    /// left are reclaimed by their own lease expiry. A started actor counts
-    /// once it has finished settlement, successfully or not.
+    /// A joined error may still own an ambiguous durable/physical obligation.
+    /// Only an exact cleanup receipt allows that acquired obligation to leave
+    /// admission capacity. Failure before any claim owns no durable work here.
     fn actual_finished(&self) -> bool {
         self.result
             .lock()
             .expect("Source HTTP outcome")
             .as_ref()
             .is_some_and(|result| match result {
-                Ok(owned) => owned.actor.settlement_final(),
-                Err(_) => true,
+                Ok(owned) => owned.actor.settlement_status() == Some(Ok(())),
+                Err(_) => {
+                    self.task
+                        .cleanup_confirmation
+                        .lock()
+                        .expect("Source cleanup confirmation")
+                        .is_some()
+                        || (matches!(
+                            *self.task.joined.lock().expect("Source joined task"),
+                            Some(SourceStartTaskJoined::Returned)
+                        ) && matches!(
+                            *self.task.stage.lock().expect("Source start stage"),
+                            SourceStartTaskStage::Registered
+                                | SourceStartTaskStage::Preparing
+                                | SourceStartTaskStage::Prepared
+                                | SourceStartTaskStage::ReadingIntent { .. }
+                                | SourceStartTaskStage::IntentReady { .. }
+                        ))
+                }
             })
+    }
+    async fn release_uninvoked(
+        &self,
+        state: &crate::state::AppState,
+    ) -> Result<(Uuid, Uuid), SourceStartFailure> {
+        let cleanup = self
+            .task
+            .cleanup
+            .lock()
+            .expect("uninvoked Source custody")
+            .clone()
+            .ok_or(SourceStartFailure::Unresolved)?;
+        if self
+            .task
+            .cleanup_confirmation
+            .lock()
+            .expect("Source cleanup confirmation")
+            .is_none()
+        {
+            cleanup.release(state).await?;
+            let mut confirmation = self
+                .task
+                .cleanup_confirmation
+                .lock()
+                .expect("Source cleanup confirmation");
+            confirmation.get_or_insert_with(Uuid::new_v4);
+        }
+        Ok((
+            cleanup.incarnation(),
+            self.task
+                .cleanup_confirmation
+                .lock()
+                .expect("Source cleanup confirmation")
+                .expect("actual cleanup receipt"),
+        ))
     }
     fn remember_authenticated_hash(&self, hash: &str) -> Result<(), SourceStartFailure> {
         if hash.len() != 64
@@ -367,7 +477,10 @@ impl SourceStartEntry {
         }
         Ok(())
     }
-    fn end(self: &std::sync::Arc<Self>) -> std::sync::Arc<SourceEndOwner> {
+    fn end(
+        self: &std::sync::Arc<Self>,
+        state: std::sync::Arc<crate::state::AppState>,
+    ) -> std::sync::Arc<SourceEndOwner> {
         let mut ending = self.ending.lock().expect("Source End owner");
         if let Some(owner) = ending.as_ref() {
             // The actor retains its actual physical proof and retries failed
@@ -378,7 +491,15 @@ impl SourceStartEntry {
                 *owner.result.lock().expect("Source End outcome"),
                 Some(Err(_))
             );
-            if !failed || !self.actual_settled() {
+            if !failed
+                || (!self.actual_settled()
+                    && self
+                        .task
+                        .cleanup
+                        .lock()
+                        .expect("uninvoked Source custody")
+                        .is_none())
+            {
                 return std::sync::Arc::clone(owner);
             }
         }
@@ -393,9 +514,26 @@ impl SourceStartEntry {
         // Disconnect loses only the HTTP waiter, never this actual obligation.
         tokio::spawn(async move {
             let result = async {
-                let owned = entry
+                let owned = match entry
                     .wait(std::time::Instant::now() + std::time::Duration::from_secs(305))
-                    .await?;
+                    .await
+                {
+                    Ok(owned) => owned,
+                    Err(_) => {
+                        let (incarnation_id, confirmation_id) =
+                            entry.release_uninvoked(&state).await?;
+                        return Ok(SourceEndReceipt {
+                            reference: entry.identity.reference.clone(),
+                            request_id: entry.identity.request_id,
+                            incarnation_id,
+                            session_id: None,
+                            control_epoch: None,
+                            state: "settled",
+                            confirmation_id,
+                            settled: true,
+                        });
+                    }
+                };
                 owned
                     .actor
                     .retire()
@@ -857,7 +995,7 @@ async fn end(
     entry
         .validate_known(input.known.as_ref())
         .map_err(SourceStartFailure::response)?;
-    let owner = entry.end();
+    let owner = entry.end(std::sync::Arc::new(state));
     let receipt = owner
         .wait(std::time::Instant::now() + std::time::Duration::from_secs(305))
         .await
@@ -1510,7 +1648,7 @@ async fn own_start(
         SourceWriteAuthorityRead::Capacity => return Err(SourceStartFailure::Capacity),
     };
     entry.retain_stage(SourceStartTaskStage::InvokingFactory(assignment.clone()));
-    let actor = direct::start_prepared_worker(
+    let actor = match direct::start_prepared_worker(
         std::sync::Arc::clone(&state),
         assignment.clone(),
         activation,
@@ -1518,7 +1656,14 @@ async fn own_start(
         deadline,
     )
     .await
-    .map_err(SourceStartFailure::from)?;
+    {
+        Ok(actor) => actor,
+        Err(receipt) => {
+            let reason = receipt.reason();
+            entry.retain_stage(SourceStartTaskStage::FactoryRefused(receipt));
+            return Err(SourceStartFailure::from(reason));
+        }
+    };
     Ok(SourceStartOwned { actor, assignment })
 }
 
@@ -2354,7 +2499,7 @@ mod tests {
         // Inject a real transactional failure at the actual release write. No
         // Source actor flags/proofs or physical settlement results are forged.
         client.execute("CREATE TRIGGER fixture_source_release_failure BEFORE UPDATE OF reservation_state ON sharing_source_session_bindings WHEN NEW.reservation_state='released' BEGIN SELECT RAISE(ABORT,'fixture release temporarily unavailable'); END",hiqlite::params![]).await.expect("actual transient SQL failure fixture");
-        let first = entry.end();
+        let first = entry.end(std::sync::Arc::clone(&fixture.state));
         assert_eq!(
             first
                 .wait(Instant::now() + Duration::from_secs(10))
@@ -2369,7 +2514,7 @@ mod tests {
             ))
         );
         assert!(
-            std::sync::Arc::ptr_eq(&first, &entry.end()),
+            std::sync::Arc::ptr_eq(&first, &entry.end(std::sync::Arc::clone(&fixture.state))),
             "failed proof remains retained before actual successful retry"
         );
         client
@@ -2386,7 +2531,7 @@ mod tests {
         })
         .await
         .expect("same actor physically/SQL settles through owned retry");
-        let recovered = entry.end();
+        let recovered = entry.end(std::sync::Arc::clone(&fixture.state));
         assert!(!std::sync::Arc::ptr_eq(&first, &recovered));
         let receipt = recovered
             .wait(Instant::now() + Duration::from_secs(5))
@@ -2398,7 +2543,7 @@ mod tests {
             owned.assignment.binding().incarnation_id()
         );
         assert_eq!(receipt.confirmation_id.get_version_num(), 4);
-        let replay = entry.end();
+        let replay = entry.end(std::sync::Arc::clone(&fixture.state));
         assert!(std::sync::Arc::ptr_eq(&recovered, &replay));
         assert_eq!(
             replay
@@ -2484,14 +2629,25 @@ mod tests {
                     .err(),
                 Some(SourceStartFailure::Unresolved)
             );
-            let end = entry.end();
-            assert_eq!(
-                end.wait(Instant::now() + Duration::from_secs(1))
+            let end = entry.end(std::sync::Arc::clone(&fixture.state));
+            if assignment_failure {
+                let receipt = end
+                    .wait(Instant::now() + Duration::from_secs(1))
                     .await
-                    .err(),
-                Some(SourceStartFailure::Unresolved),
-                "joined failure is not a no-admission/settlement proof"
-            );
+                    .expect("exact acquired g0 cleanup");
+                assert_eq!(receipt.incarnation_id, incarnation);
+                assert!(receipt.session_id.is_none());
+                assert!(entry.actual_finished());
+            } else {
+                assert_eq!(
+                    end.wait(Instant::now() + Duration::from_secs(1))
+                        .await
+                        .err(),
+                    Some(SourceStartFailure::Unresolved),
+                    "unknown claim is never no-admission"
+                );
+                assert!(!entry.actual_finished());
+            }
             client
                 .execute(
                     "DROP TRIGGER fixture_source_task_failure",
@@ -2516,26 +2672,119 @@ mod tests {
                     .incarnation(),
                 Some(incarnation)
             );
-            // The joined failure owns no in-process work, so it leaves start
-            // capacity; its receipt stays in the settled cache, where the exact
-            // retry above found it instead of dispatching again.
             let registry = &fixture.state.transcode.source_http_starts;
-            assert!(registry.entries.lock().expect("start capacity").is_empty());
-            let after = registry
-                .settled
-                .lock()
-                .expect("settled receipts")
-                .iter()
-                .find(|settled| std::sync::Arc::ptr_eq(settled, &entry))
-                .cloned()
-                .expect("same entry");
-            assert!(std::sync::Arc::ptr_eq(&entry, &after));
+            if assignment_failure {
+                assert!(registry.entries.lock().expect("start capacity").is_empty());
+                assert!(registry
+                    .settled
+                    .lock()
+                    .expect("settled receipts")
+                    .iter()
+                    .any(|settled| std::sync::Arc::ptr_eq(settled, &entry)));
+            } else {
+                assert!(registry
+                    .entries
+                    .lock()
+                    .expect("unresolved custody")
+                    .iter()
+                    .any(|retained| std::sync::Arc::ptr_eq(retained, &entry)));
+                assert!(registry
+                    .settled
+                    .lock()
+                    .expect("settled receipts")
+                    .is_empty());
+            }
             assert!(
-                std::sync::Arc::ptr_eq(&end, &entry.end()),
-                "no failed task receipt can overwrite End ownership"
+                std::sync::Arc::ptr_eq(&end, &entry.end(std::sync::Arc::clone(&fixture.state))),
+                "exact retry preserves unresolved or settled End ownership"
             );
             fixture.shutdown().await;
         }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_uninvoked_g0_cleanup_retains_failed_release_and_retries_exact_end()
+    {
+        use std::time::{Duration, Instant};
+        let fixture = real_source_start_fixture().await;
+        let client = fixture.selected.local_client().expect("actual voter");
+        client.execute("CREATE TRIGGER fixture_source_assignment_failure BEFORE UPDATE OF dispatch_generation ON sharing_source_session_bindings WHEN NEW.dispatch_generation=1 BEGIN SELECT RAISE(ABORT,'fixture assignment unavailable'); END", hiqlite::params![]).await.expect("actual failed assignment");
+        client.execute("CREATE TRIGGER fixture_source_g0_release_failure BEFORE UPDATE OF reservation_state ON sharing_source_session_bindings WHEN NEW.reservation_state='released' BEGIN SELECT RAISE(ABORT,'fixture release unavailable'); END", hiqlite::params![]).await.expect("actual failed cleanup");
+        start(
+            axum::extract::State((*fixture.state).clone()),
+            fixture.headers.clone(),
+            axum::extract::Path((
+                fixture.reference.item_id.as_str().to_owned(),
+                fixture.reference.file_id.as_str().to_owned(),
+            )),
+            axum::body::Body::from(fixture.request.clone()),
+        )
+        .await
+        .expect_err("failed assignment");
+        let entry = fixture
+            .state
+            .transcode
+            .source_http_starts
+            .entries
+            .lock()
+            .expect("retained owner")
+            .first()
+            .cloned()
+            .expect("actual fresh acquired owner");
+        let incarnation = entry
+            .task
+            .stage
+            .lock()
+            .expect("retained stage")
+            .incarnation()
+            .expect("acquired lineage");
+        assert!(!entry.actual_finished());
+        let first = entry.end(std::sync::Arc::clone(&fixture.state));
+        assert_eq!(
+            first
+                .wait(Instant::now() + Duration::from_secs(1))
+                .await
+                .err(),
+            Some(SourceStartFailure::Unresolved)
+        );
+        assert!(entry
+            .task
+            .cleanup_confirmation
+            .lock()
+            .expect("cleanup receipt")
+            .is_none());
+        client
+            .execute(
+                "DROP TRIGGER fixture_source_g0_release_failure",
+                hiqlite::params![],
+            )
+            .await
+            .expect("restore cleanup");
+        let recovered = entry.end(std::sync::Arc::clone(&fixture.state));
+        let receipt = recovered
+            .wait(Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("actual g0 cleanup");
+        assert_eq!(receipt.incarnation_id, incarnation);
+        assert!(receipt.session_id.is_none());
+        assert!(entry.actual_finished());
+        let replay = entry.end(std::sync::Arc::clone(&fixture.state));
+        assert!(std::sync::Arc::ptr_eq(&recovered, &replay));
+        assert_eq!(
+            replay
+                .wait(Instant::now() + Duration::from_secs(1))
+                .await
+                .expect("same receipt")
+                .confirmation_id,
+            receipt.confirmation_id
+        );
+        client
+            .execute(
+                "DROP TRIGGER fixture_source_assignment_failure",
+                hiqlite::params![],
+            )
+            .await
+            .expect("restore assignment");
+        fixture.shutdown().await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sharing_source_http_lost_start_end_uses_actual_assignment_without_inventing_session() {

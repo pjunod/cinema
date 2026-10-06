@@ -127,6 +127,37 @@ pub(crate) enum SourceWorkerError {
     Unsupported,
 }
 
+/// One actual factory invocation returned before registry insertion or spawn.
+/// No wire decoder or HTTP task-stage observer can mint this receipt. The
+/// coordinator must separately retain its fresh acquired claim: this receipt
+/// describes this invocation, never another process's historical admission.
+#[derive(Clone)]
+pub(crate) struct SourceWorkerNoAdmission {
+    assignment: Box<SourceDispatchAssignment>,
+    reason: SourceWorkerError,
+}
+impl std::fmt::Debug for SourceWorkerNoAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceWorkerNoAdmission")
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+impl SourceWorkerNoAdmission {
+    fn refused(assignment: &SourceDispatchAssignment, reason: SourceWorkerError) -> Self {
+        Self {
+            assignment: Box::new(assignment.clone()),
+            reason,
+        }
+    }
+    pub(crate) fn assignment(&self) -> &SourceDispatchAssignment {
+        &self.assignment
+    }
+    pub(crate) fn reason(&self) -> SourceWorkerError {
+        self.reason
+    }
+}
+
 /// How long a Source owner waits before retrying a settlement that a Store or
 /// physical fault left unresolved, and how many attempts it makes in all. The
 /// same bounded detached-owner shape as the rolling scratch conversion. Past
@@ -281,12 +312,6 @@ impl SourceViewerActor {
     /// result; a missing actor, lease expiry or acknowledgement cannot mint it.
     pub(crate) fn settlement_status(&self) -> Option<Result<(), SourceWorkerError>> {
         self.0.state.lock().expect("Source worker state").settled
-    }
-    /// Whether the owner has stopped for good: settled, refused a witness that
-    /// can never settle, or exhausted its bounded retries. Nothing in this
-    /// process still works for it once this is true.
-    pub(crate) fn settlement_final(&self) -> bool {
-        self.0.state.lock().expect("Source worker state").finished
     }
     pub(crate) async fn wait_ready(
         &self,
@@ -839,12 +864,15 @@ impl TranscodeManager {
         activation: SourceSessionWriteAuthority,
         prepared: crate::http::hls::PreparedSourcePlayback,
         deadline: Instant,
-    ) -> Result<SourceViewerActor, SourceWorkerError> {
+    ) -> Result<SourceViewerActor, SourceWorkerNoAdmission> {
         if !Arc::ptr_eq(&self.store, &state.store)
             || !prepared.matches_assignment(&assignment)
             || !activation.assignment().same_identity(&assignment)
         {
-            return Err(SourceWorkerError::Conflict);
+            return Err(SourceWorkerNoAdmission::refused(
+                &assignment,
+                SourceWorkerError::Conflict,
+            ));
         }
         let mut registry = self.source_workers.entries.lock().expect("Source workers");
         if let Some(owner) = registry
@@ -854,7 +882,10 @@ impl TranscodeManager {
             return Ok(SourceViewerActor(Arc::clone(owner)));
         }
         if registry.len() >= 8 {
-            return Err(SourceWorkerError::Capacity);
+            return Err(SourceWorkerNoAdmission::refused(
+                &assignment,
+                SourceWorkerError::Capacity,
+            ));
         }
         let owner = Arc::new(SourceViewerInner {
             control_target_duration_ms: i64::from(match prepared.request().kind {

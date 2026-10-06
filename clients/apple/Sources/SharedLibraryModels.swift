@@ -145,3 +145,44 @@ struct SharedBrowseAccumulator {
         nextCursor = page.nextCursor
     }
 }
+
+
+struct SharedContinueGroup: Decodable, Identifiable {
+    let importId: String
+    let serverId: String
+    let catalogueEpoch: String
+    let sourceName: String
+    let count: Int
+    var id: String { [importId, serverId, catalogueEpoch].joined(separator: "|") }
+    func validate() throws {
+        try SharedLibraryIdentity(importId: importId, serverId: serverId, catalogueEpoch: catalogueEpoch, libraryId: "0").validate()
+        guard (0...200).contains(count), sourceName.utf8.count <= 512 else { throw APIError.badURL }
+    }
+}
+struct SharedContinueEntry: Decodable, Identifiable {
+    var item: SharedLibraryItem
+    let watch: SharedLibraryWatch
+    var id: String { item.id }
+}
+struct SharedContinueItems: Decodable {
+    let importId: String
+    let serverId: String
+    let catalogueEpoch: String
+    let sourceName: String
+    let count: Int
+    let availability: String
+    var items: [SharedContinueEntry]
+    func validate(group: SharedContinueGroup, assigned: [SharedLibraryAssignment]) throws {
+        guard [importId, serverId, catalogueEpoch].joined(separator: "|") == group.id,
+              (0...200).contains(count), items.count <= count, Set(items.map(\.id)).count == items.count,
+              ["online", "unavailable", "busy"].contains(availability), availability == "online" || items.isEmpty else { throw APIError.badURL }
+        for entry in items {
+            guard let assignment = assigned.first(where: { $0.identity.contains(entry.item.reference) }) else { throw APIError.badURL }
+            try entry.item.validate(in: assignment.identity)
+            let watch = entry.watch
+            guard !watch.watched, (0...9_007_199_254_740_991).contains(watch.positionMs),
+                  (0...9_007_199_254_740_991).contains(watch.sequence), watch.updatedAtMs >= 0,
+                  watch.durationMs.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true else { throw APIError.badURL }
+        }
+    }
+}

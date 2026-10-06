@@ -10923,6 +10923,8 @@ final class SharedPlayerController: ObservableObject {
     private var timeObserver: Any?
     private var ticks = 0
     private var lastPositionMs = 0
+    private var historyFrameObserved = false
+    private var historyOutput: AVPlayerItemVideoOutput?
     private var authorizationObserver: UUID?
     private var itemObservers: [NSObjectProtocol] = []
     private var statusObservation: NSKeyValueObservation?
@@ -11059,6 +11061,9 @@ final class SharedPlayerController: ObservableObject {
         }
         // Direct play reads the signed alias with no account header.
         let item = AVPlayerItem(url: url)
+        historyFrameObserved = false
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
+        item.add(output); historyOutput = output
         observe(item)
         player.replaceCurrentItem(with: item)
         self.plan = plan; playback = media; channel = nextChannel
@@ -11291,6 +11296,13 @@ final class SharedPlayerController: ObservableObject {
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1000), queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let position = self.positionMs() else { return }
+                if !self.historyFrameObserved, let output = self.historyOutput {
+                    let time = output.itemTime(forHostTime: ProcessInfo.processInfo.systemUptime)
+                    if time.isValid, output.hasNewPixelBuffer(forItemTime: time),
+                       output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) != nil {
+                        self.historyFrameObserved = true
+                    }
+                }
                 self.lastPositionMs = Int(position)
                 self.ticks += 1
                 if self.ticks % 10 == 0 { self.reportProgress() }
@@ -11312,7 +11324,7 @@ final class SharedPlayerController: ObservableObject {
     }
 
     private func reportProgress() {
-        guard !closing, progressTask == nil, operation == nil, let client, let media = playback, let plan,
+        guard !closing, historyFrameObserved, progressTask == nil, operation == nil, let client, let media = playback, let plan,
               let position = positionMs() else { return }
         let duration = durationMs(media)
         progressTask = Task { [weak self] in
@@ -11340,7 +11352,7 @@ final class SharedPlayerController: ObservableObject {
         discardPreparedSuccessor(); preparation = nil
         await progressTask?.value
         if let client, let media = playback, let plan {
-            if let position = positionMs() {
+            if historyFrameObserved, let position = positionMs() {
                 let duration = durationMs(media)
                 let result = try? await client.orderedProgress(media: media, initialWatchSequence: plan.subject.watchSequence,
                     positionMs: position, durationMs: duration, watched: watched)
@@ -11356,7 +11368,7 @@ final class SharedPlayerController: ObservableObject {
         // commit whose answer was lost, it may be the session B now serves.
         if let staged = preparedAdoption?.playback { unreleased.append(.hls(staged)); preparedAdoption = nil }
         if let client { await releaseUnreleased(client) }
-        player.replaceCurrentItem(with: nil); playback = nil; channel = nil; statusSummary = nil
+        player.replaceCurrentItem(with: nil); historyOutput = nil; playback = nil; channel = nil; statusSummary = nil
     }
 }
 
@@ -11547,6 +11559,8 @@ extension SharedPlayerController {
                                                    capabilities: capabilities)
         else { failure = "This Shared change could not continue."; return }
         plan = adoption.plan; playback = .hls(adoption.playback); channel = next
+        // The prepared commit already proved its successor frame.
+        historyFrameObserved = true; historyOutput = nil
         statusSummary = nil; sessionEnded = false; restartAllowance = true
     }
 

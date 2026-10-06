@@ -123,7 +123,7 @@ tailscale serve --bg --tcp=32443 tcp://127.0.0.1:32444
 tailscale serve status --json
 ```
 
-`init-tls` is to be implemented; it creates a node key and self-signed
+`init-tls` is implemented; it creates a node key and self-signed
 certificate with owner-only access and refuses to overwrite an existing key.
 Initial issuance and renewal set `notBefore = now - 1 hour`, allowing bounded
 receiver clock skew without disabling validity checks.
@@ -6245,7 +6245,7 @@ successor), and the Apple and Android fixture suites with the four new rows.
 
 ### Source-owned burns and HDR — completion design (2026-10-06)
 
-**Status:** implementation in progress; compiler evidence pending; runtime
+**Status:** implemented in `d4d2ec8e4`, with Rust check and denied Clippy passed; runtime
 qualification deferred under Paul's 2026-10-06 test policy. Track the batch
 and unproved boundaries in [the status page](SHARED-LIBRARIES-STATUS.md).
 

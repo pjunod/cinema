@@ -3583,3 +3583,53 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOw
 source_anchor = "kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { runCatching { client.end(direct) } }"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
 test_anchor = "rendererSetupFailureEndsTheStartedSessionForHlsAndDirect"
+
+[[fixes]]
+id = "sharing.native-history-requires-a-rendered-frame"
+commits = ["3490ed451"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "val framePresented: Boolean = false,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "noRenderedFrameNeverWritesZeroHistoryOnTickOrClose"
+
+[[fixes]]
+id = "sharing.native-continue-watching-source-groups"
+commits = ["3bfdbcf66"]
+source = "clients/apple/Sources/SharedLibraryClient.swift"
+source_anchor = "func continueGroups() async throws -> [SharedContinueGroup] {"
+test = "clients/apple/Tests/SharedLibraryTests.swift"
+test_anchor = "testSharedContinueWatchingKeepsFullSourceIdentityOrderAndRefusesOfflineMetadata"
+
+[[fixes]]
+id = "sharing.android-continue-watching-source-groups"
+commits = []
+supplements = "sharing.native-continue-watching-source-groups"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedLibraryClient.kt"
+source_anchor = "suspend fun continueGroups(): List<SharedContinueGroup> {"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "sharedContinueWatchingKeepsFullSourceIdentityOrderAndRefusesOfflineMetadata"
+
+[[fixes]]
+id = "sharing.android-advisory-qualification-status"
+commits = ["3dd492f8c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingSettingsScreen.kt"
+source_anchor = "Shared playback is implemented; private network, cluster recovery and physical-device qualification remain pending."
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "savedChoiceAndPendingEditSurviveUnknownReadiness"
+
+[[fixes]]
+id = "sharing.native-next-episode-current-membership"
+commits = ["32a556f7b"]
+source = "clients/apple/Sources/SharedLibraryClient.swift"
+source_anchor = "guard let at = episodes.firstIndex(of: reference) else { return nil }"
+test = "clients/apple/Tests/SharedCatalogueActionsTests.swift"
+test_anchor = "testMissingCurrentEpisodeNeverSkipsToTheNextSeason"
+
+[[fixes]]
+id = "sharing.android-next-episode-current-membership"
+commits = []
+supplements = "sharing.native-next-episode-current-membership"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedLibraryClient.kt"
+source_anchor = "if (at < 0) return null"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedCatalogueActionsTest.kt"
+test_anchor = "missingCurrentEpisodeNeverSkipsToTheNextSeason"

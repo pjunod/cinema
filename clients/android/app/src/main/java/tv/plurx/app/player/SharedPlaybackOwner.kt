@@ -66,6 +66,7 @@ internal interface SharedRenderer {
 internal data class SharedRendererSnapshot(
     val positionMs: Long, val bufferedMs: Long, val durationMs: Long?,
     val playing: Boolean, val renderState: RenderState, val playbackRate: Double = 1.0,
+    val framePresented: Boolean = false,
 )
 
 internal data class SharedSuccessorSnapshot(
@@ -202,7 +203,7 @@ internal class SharedPlaybackOwner(
         val view = renderer.snapshot()
         exchange(state(view))
         if (!progress) return
-        runCatching { client.orderedProgress(current, plan.subject.watchSequence, view.positionMs.coerceAtLeast(0), durationOf(current, view)) }
+        if (view.framePresented) runCatching { client.orderedProgress(current, plan.subject.watchSequence, view.positionMs.coerceAtLeast(0), durationOf(current, view)) }
         if (current is SharedStartedPlayback && !sessionEnded) {
             val status = runCatching { client.status(current) }.getOrNull()
             // Bound to the retained playback: an answer for a session this
@@ -631,7 +632,7 @@ internal class SharedPlaybackOwner(
             val view = renderer.snapshot()
             val position = view.positionMs.coerceAtLeast(0)
             val duration = durationOf(current, view)
-            val result = runCatching { client.orderedProgress(current, plan.subject.watchSequence, position, duration, watched) }.getOrNull()
+            val result = if (view.framePresented) runCatching { client.orderedProgress(current, plan.subject.watchSequence, position, duration, watched) }.getOrNull() else null
             if (result == SharedProgressResult.PreviousBeatAcknowledged) runCatching { client.orderedProgress(current, plan.subject.watchSequence, position, duration, watched) }
         }
         renderer.release()

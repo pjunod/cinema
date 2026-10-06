@@ -78,3 +78,31 @@ internal data class SharedBrowseAccumulator(val items: List<SharedLibraryItem> =
         return SharedBrowseAccumulator(items + additions, page.next_cursor, keys)
     }
 }
+
+
+@Serializable
+internal data class SharedContinueGroup(val import_id: String, val server_id: String, val catalogue_epoch: String, val source_name: String, val count: Int) {
+    val id get() = listOf(import_id, server_id, catalogue_epoch).joinToString("|")
+    fun validate() {
+        SharedLibraryIdentity(import_id, server_id, catalogue_epoch, "0").validate()
+        require(count in 0..200 && source_name.toByteArray().size <= 512)
+    }
+}
+@Serializable
+internal data class SharedContinueEntry(val item: SharedLibraryItem, val watch: SharedLibraryWatch)
+@Serializable
+internal data class SharedContinueItems(val import_id: String, val server_id: String, val catalogue_epoch: String, val source_name: String,
+    val count: Int, val availability: String, val items: List<SharedContinueEntry>) {
+    fun validate(group: SharedContinueGroup, assigned: List<SharedLibraryAssignment>) {
+        require(listOf(import_id, server_id, catalogue_epoch).joinToString("|") == group.id)
+        require(count in 0..200 && items.size <= count && items.map { it.item.reference }.toSet().size == items.size)
+        require(availability in setOf("online", "unavailable", "busy") && (availability == "online" || items.isEmpty()))
+        items.forEach { entry ->
+            val assignment = requireNotNull(assigned.firstOrNull { it.identity.contains(entry.item.reference) })
+            entry.item.validate(assignment.identity)
+            val watch = entry.watch
+            require(!watch.watched && watch.position_ms in 0..9_007_199_254_740_991L && watch.sequence in 0..9_007_199_254_740_991L && watch.updated_at_ms >= 0)
+            require(watch.duration_ms?.let { it in 0..9_007_199_254_740_991L } != false)
+        }
+    }
+}
