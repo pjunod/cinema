@@ -3371,6 +3371,7 @@ mod tests {
                 SharingNetworkConfig {
                     bind: "127.0.0.1:32444".parse().expect("unused bind"),
                     egress: SharingEgressConfig::LocalAddress { address },
+                    ..SharingNetworkConfig::default()
                 },
             ));
             receiver
@@ -3802,6 +3803,7 @@ mod tests {
                     SharingNetworkConfig {
                         bind: "127.0.0.1:32444".parse().expect("unused bind"),
                         egress: SharingEgressConfig::LocalAddress { address },
+                        ..SharingNetworkConfig::default()
                     },
                 ));
                 receiver
@@ -4435,6 +4437,7 @@ mod tests {
                     SharingNetworkConfig {
                         bind: "127.0.0.1:32444".parse().expect("unused bind"),
                         egress: SharingEgressConfig::LocalAddress { address },
+                        ..SharingNetworkConfig::default()
                     },
                 ));
                 receiver

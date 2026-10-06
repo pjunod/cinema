@@ -81,6 +81,19 @@ internal data class SharedSuccessorSnapshot(
     val firstFrameUnixMs: Long?,
 )
 
+/** Frame proof belongs to one renderer attachment, including prepared adoption. */
+internal class SharedFrameEvidence {
+    var generation: Long = 0; private set
+    var presented: Boolean = false; private set
+    fun attach(alreadyPresented: Boolean = false): Long {
+        generation += 1
+        presented = alreadyPresented
+        return generation
+    }
+    fun accepts(attachment: Long): Boolean = attachment == generation
+    fun frameRendered(attachment: Long) { if (accepts(attachment)) presented = true }
+}
+
 /**
  * One Shared playback, from the first Start to the last DELETE.
  *

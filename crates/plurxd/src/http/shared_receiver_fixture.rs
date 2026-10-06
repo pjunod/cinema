@@ -71,6 +71,7 @@ async fn build_receiver_fixture(address: IpAddr, mode: SourceFixtureMode) -> Rea
         SharingNetworkConfig {
             bind: (address, 0).into(),
             egress: SharingEgressConfig::LocalAddress { address },
+            ..SharingNetworkConfig::default()
         },
     ));
     state.transcode = Arc::new(crate::transcode::TranscodeManager::new(

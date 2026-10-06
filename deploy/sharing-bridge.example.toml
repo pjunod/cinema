@@ -1,0 +1,9 @@
+# This is node-local hosting config. Shared enablement remains in Settings.
+# Preserve any existing [server], [storage], or [cluster] config in this file.
+[sharing]
+listener_profile = "docker_bridge"
+bind = "0.0.0.0:32444"
+
+[sharing.egress]
+mode = "local_address"
+address = "172.30.44.2" # the container's static IP in the Compose sharing bridge

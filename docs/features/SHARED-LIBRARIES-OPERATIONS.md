@@ -8,11 +8,12 @@ cluster, topology and device work, and the
 
 ## Prepare the private listener
 
-The current runtime accepts a loopback sharing listener. On a Linux bare
-host, the node-local configuration is:
+The default hosting profile accepts a loopback sharing listener. On a Linux
+bare host, the node-local configuration is:
 
 ```toml
 [sharing]
+listener_profile = "host_loopback"
 bind = "127.0.0.1:32444"
 
 [sharing.egress]
@@ -45,12 +46,14 @@ The contract requires private Tailscale reachability and approved pins. The
 app does not install Tailscale or change tailnet policy. The two-home,
 shared-machine and relay-path acceptance receipts remain outstanding.
 
-**Docker remains open:** the current listener rejects a wildcard container
-bind with `unqualified_listener_profile`. Publishing host loopback to a
-container port does not fix a process bound to container loopback. Do not use
-the proposed Docker configuration in the design as if it were a completed
-deployment recipe. The normal Compose deployment is unchanged while the
-container listener and egress profile are completed and qualified.
+**Linux Docker bridge hosting:** use the explicit `docker_bridge` profile and
+[opt-in deployment recipe](../../deploy/README.md#sharing-uses-an-explicit-linux-bridge-profile).
+It binds the process inside its namespace, publishes the sharing port only on
+host loopback, and binds outbound sockets to the chosen static container
+address. The normal deployment preflight checks the readable rendered recipe.
+The ordinary Compose deployment and saved sharing choice are unchanged.
+Configuration checks and compilation have passed; running-host isolation,
+private egress and real Tailscale playback still require qualification.
 
 ## Pair and assign viewers
 

@@ -29,8 +29,11 @@ existing warm target. Paul's checkout is not used for changes.
 | Burned subtitles and HDR | Implemented in `d4d2ec8e4`; runtime unqualified | Source-owned extraction/fonts; precise PQ/HLG claims; typed DV refusal; native parity integrated |
 | Native/web handoff and burn/HDR | Integrated through `32a556f7b` | Native plan parity, web refusal reopen under original account, Android renderer failure cleanup |
 | Native catalogue/history audit | Integrated through `32a556f7b` | Frame evidence before progress; Source-separated Continue Watching UI; next-episode membership race fixed |
+| Android frame identity follow-up | Integrated `a062ce299` | Prepared successor carries its proved frame; late old attachment callbacks cannot mark the new attachment; Android sources compiled |
 | Failed Source Start | Integrated `12a856ea9` | Private pre-admission factory receipt, exact g0/g1 cleanup, ambiguous failures retain custody; execution deferred |
 | Busy predecessor transport | Integrated `9789741b2` | Graceful H2 drain preserves existing successor writes; actual closure still required; no runtime receipt yet |
+| Approved endpoint cleanup | First checkpoint `7a9aad07e` integrated | Exact import lineage permits new approved endpoints after dial failure; full End-exchange fallback is being completed |
+| Linux Docker bridge hosting | Profile and recipe integrated through `8f7a2dac5` | Rust check/Clippy and actual Compose render/preflight passed; deterministic gateway refinement and runtime qualification remain open |
 | Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed on integration `02c022f3d`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
 
 ## Parallel builders and management audit
@@ -42,7 +45,7 @@ current. Each builder has an isolated clone from `d4d2ec8e4`.
 | Builder | Owned work | State |
 |---|---|---|
 | Source lifecycle | Source worker forwarding, Source custody and coordinated schema/floor migration | Cleanup checkpoint complete; building adjunct custody persistence and Source forwarding |
-| Clients / hosting | Native and web completion, Windows compiler and explicit Docker bridge profile | Native work compiled; Windows compiler warm on m6; completing missing Docker hosting profile |
+| Clients / hosting | Native and web completion, Windows compiler and explicit Docker bridge profile | Native work compiled; Docker profile/recipe compiled; gateway selection refinement; Windows compiler warm on m6 |
 | Receiver/cluster | Shared accepted-driver custody, B owner forwarding and endpoint cleanup | H2 drain checkpoint complete; building distributed closure acknowledgements and endpoint fallback |
 | Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |
 
@@ -75,7 +78,7 @@ correct or releasable is made.
 | Upgrade and restore | Historical binaries and active-session behavior; restore requires disable or re-pair |
 | Prepared handoff client gaps | Integrated refusal recovery awaits runtime/device qualification; physical Android TV, Apple direct play and handoff |
 | Busy predecessor transport | Integrated graceful drain awaits actual H2 regression execution |
-| Docker bridge hosting | Explicit container listener/egress profile and loopback-only Compose recipe, then host isolation qualification |
+| Docker bridge hosting | Complete deterministic gateway selection, then running-host isolation/private-egress qualification |
 | Operator, API, security and Developer lifecycle | [Operator guide](SHARED-LIBRARIES-OPERATIONS.md) and security boundary updated; retain advisory readiness until qualification |
 | Live matrix | Tailscale, two NATs, relay, devices, cluster loss, revoke bounds and sustained playback remain unproved |
 

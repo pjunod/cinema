@@ -99,21 +99,29 @@ container does not own the host's Tailscale interface. Follow the shipped
 [Compose deployment](../../deploy/docker-compose.yml), with an opt-in sharing
 override; do not change the ordinary app's network mode.
 
-Proposed node-local configuration:
+Implemented node-local bare-host configuration:
 
 ```toml
 [sharing]
-transport = "tailscale-serve"
-bind = "127.0.0.1:32444" # bare host; container override is 0.0.0.0:32444
-peer_port = 32443
-key_directory = "/var/lib/plurx/sharing-tls"
+listener_profile = "host_loopback"
+bind = "127.0.0.1:32444"
+
+[sharing.egress]
+mode = "interface"
+name = "tailscale0"
 ```
 
-For containers publish only `127.0.0.1:32444:32444`; the process binds the
-container interface so Docker can reach it. The container interface is not
-a public-host wildcard. Treat other containers on that bridge as network
-peers with no application authority. Do not use host `100.x` publication:
-Docker must start successfully before Tailscale obtains an address.
+For Linux Docker bridge hosting, select `listener_profile = "docker_bridge"`,
+bind the process to `0.0.0.0:32444` or its static container IPv4 address, and
+set `sharing.egress.mode = "local_address"` with that concrete RFC1918 address.
+Publish only host `127.0.0.1:32444:32444`. The
+[opt-in deployment recipe](../../deploy/README.md#sharing-uses-an-explicit-linux-bridge-profile)
+and normal startup preflight check the rendered configuration; running-host
+isolation and private egress remain qualification requirements. Treat other
+containers as network peers without application authority. Do not use host
+`100.x` publication: Docker must start before Tailscale obtains an address.
+TLS files remain under the daemon's data directory at `sharing-tls`; `transport`,
+`peer_port` and `key_directory` are not configuration fields.
 
 Proposed initialization command and existing Tailscale commands:
 

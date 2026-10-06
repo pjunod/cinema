@@ -3633,3 +3633,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedLibraryClien
 source_anchor = "if (at < 0) return null"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedCatalogueActionsTest.kt"
 test_anchor = "missingCurrentEpisodeNeverSkipsToTheNextSeason"
+
+[[fixes]]
+id = "sharing.android-frame-proof-belongs-to-attachment"
+commits = ["a062ce299"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "internal class SharedFrameEvidence {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "frameEvidenceCarriesPreparedProofAndRejectsOldAttachmentCallbacks"
