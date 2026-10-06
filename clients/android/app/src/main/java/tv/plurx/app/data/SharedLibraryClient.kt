@@ -116,7 +116,8 @@ internal class SharedLibraryClient private constructor(private val auth: Session
         val season = current.parent ?: return null
         val episodes = children(library, season, "episode")
         val at = episodes.indexOf(reference)
-        if (at >= 0 && at + 1 < episodes.size) return episodes[at + 1]
+        if (at < 0) return null
+        if (at + 1 < episodes.size) return episodes[at + 1]
         val show = detail(season).item.parent ?: return null
         val seasons = children(library, show, "season")
         val next = seasons.indexOf(season).takeIf { it >= 0 }?.let { seasons.getOrNull(it + 1) } ?: return null

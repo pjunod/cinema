@@ -156,4 +156,17 @@ final class SharedCatalogueActionsTests: XCTestCase {
         do { _ = try await client().nextEpisode(after: library.reference("302")); XCTFail("followed a repeated cursor") } catch {}
         XCTAssertEqual(calls, 2)
     }
+    func testMissingCurrentEpisodeNeverSkipsToTheNextSeason() async throws {
+        CatalogueHTTP.respond = { request, _ in
+            if request.url!.path.hasSuffix("/301") {
+                return (200, ["item": try self.item("301", kind: "episode", parent: "201"), "files": [], "delivery_status": "available"])
+            }
+            XCTAssertTrue(request.url!.path.hasSuffix("/201/children"))
+            return (200, self.page([try self.item("302", kind: "episode", parent: "201")]))
+        }
+        let next = try await client().nextEpisode(after: library.reference("301"))
+        XCTAssertNil(next)
+        XCTAssertEqual(CatalogueHTTP.requests.count, 2)
+    }
+
 }

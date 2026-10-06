@@ -126,7 +126,8 @@ struct SharedLibraryClient {
         let current = try await detail(reference).item
         guard current.kind == "episode", let season = current.parent else { return nil }
         let episodes = try await children(of: season, kind: "episode", in: library)
-        if let at = episodes.firstIndex(of: reference), episodes.indices.contains(at + 1) { return episodes[at + 1] }
+        guard let at = episodes.firstIndex(of: reference) else { return nil }
+        if episodes.indices.contains(at + 1) { return episodes[at + 1] }
         guard let series = try await detail(season).item.parent else { return nil }
         let seasons = try await children(of: series, kind: "season", in: library)
         guard let index = seasons.firstIndex(of: season), seasons.indices.contains(index + 1) else { return nil }
