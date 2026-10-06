@@ -3063,6 +3063,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |
 | POST | `/internal/cluster/media/sessions/abort`, `/internal/cluster/media/sessions/relay` | 96 KiB | Settles an abort; relays one owned HLS resource |
 | POST | `/internal/cluster/media/sessions/control` | 20 KiB | Relays one playback-control exchange |
+| POST | `/internal/media-sessions/sharing-ingress-close` | 2 KiB | Exact-request member authentication and current durable ownership authorize closure of one registered Source/B ingress driver. Binds principal, incarnation, owner identity/epoch, ingress boot, physical driver and registration sequence. Returns a receipt only after actual accepted-driver closure; absence, restart and timeout remain unavailable. |
 
 The five path prefixes are historical, not a versioning scheme. In particular,
 the `/api/v1/internal/…` ones are inside the API prefix **by spelling only** —

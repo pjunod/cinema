@@ -57,6 +57,7 @@ pub(crate) struct StrandedReceiver {
     pub observed_at_ms: i64,
 }
 pub(crate) struct SharingManager {
+    pub(crate) accepted_drivers: crate::sharing_connection_custody::AcceptedDriverRegistry,
     #[allow(dead_code)] // Receiver HTTP registration follows relay qualification.
     pub(crate) receiver_starts: crate::http::shared_receiver_playback::ReceiverStartRegistry,
     pub key: Arc<CredentialKey>,
@@ -274,6 +275,7 @@ impl SharingManager {
     ) -> Self {
         Self {
             receiver_starts: Default::default(),
+            accepted_drivers: Default::default(),
             key,
             key_directory,
             status: RwLock::new(SharingStatus {

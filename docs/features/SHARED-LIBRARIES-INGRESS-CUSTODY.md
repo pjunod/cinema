@@ -42,14 +42,22 @@ durable obligations for Source and B playback:
    registry entries, an unreachable ingress, a new process boot and elapsed
    deadlines are unresolved states, not successful closure receipts.
 5. Deduplicate by accepted connection and session, not by HLS segment. Bound
-   active obligations per route/node. Retain a per-node registration high-water
-   mark so reclaiming a closed slot cannot let a late register retry reopen it.
-   Check an exact active registration before rejecting an older sequence;
-   serialize ambiguous registration outcomes until reconciled.
+   active obligations per route/node. A principal registration ordinal is
+   separate from physical driver identity: an existing keepalive connection
+   can register for a later playback. Retain a per-node registration high-water
+   mark so reclaiming a closed slot cannot let a late retry reopen it. Check
+   exact active replay before rejecting older ordinals. An unresolved register
+   holds that principal's pending reservation, including after physical close;
+   it neither blocks unrelated principals nor admits a later ordinal until
+   reconciled. No registry mutex is held across the network exchange.
 
 Status/control responses also need ownership if their accepted writes carry
 the session binding. The existing actor/retirement owners and change signals
-own this work; there is no independent playback watchdog.
+own this work; there is no independent playback watchdog. An End request on
+a driver it must close returns a closing/unresolved answer first, permitting
+that response to finish and the connection to drain. Only a later exact retry
+can report confirmed End after actual closure; graceful retirement cannot
+wait indefinitely for its own response-held connection.
 
 ## Options considered
 

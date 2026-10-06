@@ -2001,6 +2001,10 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::sharing_connection_custody::CLOSE_PATH,
+            post(crate::sharing_connection_custody::close_http).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
             crate::media_sessions::RELAY_PATH,
             post(internal_media_sessions::relay).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
