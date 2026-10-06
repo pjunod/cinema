@@ -908,11 +908,11 @@ function attachSession(v, t, info, wantSec){
 // hardware slot held for nobody — every time a player closes or replaces its
 // stream. `keepalive` is what makes it survive the page going away, and is
 // also why the route authenticates by session id rather than by header.
-function releaseSession(sessionId){
+function releaseSession(sessionId,token=TOKEN){
   if(!sessionId) return;
   try{
     fetch(API+`/hls/${sessionId}`,{method:"DELETE",keepalive:true,
-      headers:TOKEN?{"authorization":"Bearer "+TOKEN}:{}}).catch(()=>{});
+      headers:token?{"authorization":"Bearer "+token}:{}}).catch(()=>{});
   }catch(e){}
 }
 // A Shared direct session ends with the attachment that reads it: the same

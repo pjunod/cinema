@@ -207,13 +207,14 @@ function recoverSharedCommittedReplacement(p,pending){
   if(PLAYER!==p||p.preparedControlPending!==pending) return false;
   p.preparedControlPending=null;
   stopPlaybackControl(p);
+  const accountToken=TOKEN;
   const predecessor=p.fileContext?.session_id;
   const successor=pending.sessionId;
   const position=positionForPlaybackIntent(document.getElementById("video"),p);
   const reopening=play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
   Promise.resolve(reopening).finally(()=>{
-    releaseSession(predecessor);
-    if(successor!==predecessor) releaseSession(successor);
+    releaseSession(predecessor,accountToken);
+    if(successor!==predecessor) releaseSession(successor,accountToken);
   }).catch(()=>{});
   return true;
 }

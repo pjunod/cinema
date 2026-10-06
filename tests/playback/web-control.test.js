@@ -7262,9 +7262,9 @@ test("Shared visible commit refusal reopens once and ends both old sessions even
   const pending={sessionId:"successor",sharedContext:{}},released=[];
   const p={preparedControlPending:pending,fileContext:{session_id:"predecessor"},fileId:7,title:"Shared",meta:{},knownDur:60};
   let starts=0,stops=0;
-  const recover=new Function("PLAYER","document","stopPlaybackControl","positionForPlaybackIntent","play","releaseSession",
-    `${shippedSource("recoverSharedCommittedReplacement")};return recoverSharedCommittedReplacement;`)(p,{getElementById:()=>({})},()=>stops++,()=>12.5,
-    (...args)=>{starts++;assert.equal(args[2],12500);return Promise.reject(new Error("Start refused"));},id=>released.push(id));
+  const recover=new Function("PLAYER","TOKEN","document","stopPlaybackControl","positionForPlaybackIntent","play","releaseSession",
+    `${shippedSource("recoverSharedCommittedReplacement")};return recoverSharedCommittedReplacement;`)(p,"captured-account",{getElementById:()=>({})},()=>stops++,()=>12.5,
+    (...args)=>{starts++;assert.equal(args[2],12500);return Promise.reject(new Error("Start refused"));},(id,token)=>{assert.equal(token,"captured-account");released.push(id);});
   assert.equal(recover(p,pending),true);
   assert.equal(recover(p,pending),false);
   await new Promise(resolve=>setImmediate(resolve));
