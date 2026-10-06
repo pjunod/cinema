@@ -1,9 +1,10 @@
 # Shared libraries — the Tailscale build contract for Opus and Sol
 
-**Status:** implementation in progress; S1 implemented; S2 topology
-qualification pending; S3–S7 partially implemented; S8 live validation open;
-task gates pending · **Revised:** 2026-10-03 ·
-**Source rechecked:** `15e36f7f4` ·
+**Status:** implementation in progress; S1 integrated; S2 topology
+qualification pending; S3–S7 implemented in part with completion work active;
+S8 live validation open · **Revised:** 2026-10-06 ·
+**Current status:** [build and acceptance ledger](SHARED-LIBRARIES-STATUS.md) ·
+**Source rechecked:** `d4d2ec8e4` ·
 **Executes:** the Cinema-to-Cinema and private-Tailscale decisions in
 [SHARED-LIBRARIES-DESIGN.md](SHARED-LIBRARIES-DESIGN.md) ·
 **Implementation lane:** `effort/shared-libraries`, created from current main

@@ -3,6 +3,8 @@
 **Status:** building on the effort branch · **Updated:** 2026-10-06 ·
 **Owner:** Sol, continuing Claude's Root lane · **Promotion:** held for Paul.
 
+**Batch:** [draft PR #827](http://192.168.4.7:3000/noirr/plurx/pulls/827).
+
 Companion to [the implementation contract](SHARED-LIBRARIES-IMPLEMENTATION.md)
 (the authority, ownership and acceptance rules). This page records what is
 integrated, what is being built and what is still unproved. A compiler pass
@@ -23,9 +25,33 @@ existing warm target. Paul's checkout is not used for changes.
 | Prepared successor, catalogue and protocol parity | PR #816 open | Head `551f18c8a`; run 4159 passed Rust, Android, web and preflight; Windows failed, Apple cancelled |
 | Web prepared successor | Integrated into the new batch | Claude's `5fe0b1782` series, retained as proper commits |
 | Purpose-key census, TLS permissions, deterministic receiver fixtures | Integrated into the new batch | Three completed commits from the unitfix branch |
-| Partial fd/artwork fixture repair | Awaiting completion | Review the retained WIP; no WIP commit will be landed |
-| Burned subtitles and HDR | Next implementation | Review Source-owned artifact and child lifetimes before adopting the partial branch |
-| Local compiler loop | Baseline passed | Rust 1.97.1: `cargo check -p plurxd -p plurx-core --all-targets --locked`, 2m 06s; burn/HDR draft compiling; no tests executed |
+| Partial fd/artwork fixture repair | Integrated in `d4d2ec8e4` | Exact file-identity assertions and deterministic artwork timing; compiled/linted, execution deferred |
+| Burned subtitles and HDR | Implemented in `d4d2ec8e4`; runtime unqualified | Source-owned extraction/fonts; precise PQ/HLG claims; typed DV refusal; native client parity in progress |
+| Compiler and lint | Passed on `d4d2ec8e4` | Rust 1.97.1 all-target check; normal hook: workspace Clippy, rustfmt, catalog and JS syntax; web types unchanged. No tests executed |
+
+## Parallel builders and management audit
+
+Paul requested parallel GPT-6.1 Sol builders on 2026-10-06. Root manages the
+integration branch, reviews implementation and evidence, and keeps this page
+current. Each builder has an isolated clone from `d4d2ec8e4`.
+
+| Builder | Owned work | State |
+|---|---|---|
+| Source lifecycle | Source Start/End, Source physical actor and Source store seams; failed-start proof and worker forwarding | Building exact pre-factory cleanup; found joined errors could evict unresolved ownership |
+| Clients | Apple, Android and web client code/tests; burn/HDR asks, prepared handoff recovery and advisory copy | Building native parity and post-switch refusal recovery; local Xcode available |
+| Receiver/cluster | B receiver handlers/store, peer endpoint cleanup and narrow accepted HTTP connection seam | Building owner forwarding and non-destructive H2 supersession |
+| Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |
+
+Rust builders serialize compilation with one owned lock on nuc4 and reuse
+the warm target. Apple and Android compile independently. The old mba address
+`192.168.5.115` timed out on 2026-10-06; this is an unavailable build surface,
+not a client-code failure. Inventory identifies m6 as `192.168.4.14`.
+
+**Audit findings being addressed:** failed Source Start cleanup cannot be
+inferred from task errors; B must forward a durable remote session to its
+actual live owner; a predecessor on shared H2 must not hard-cut a successor
+merely to prove retirement; clients and B must agree on explicit burn
+selection. No claim that the whole effort is correct or releasable is made.
 
 ## Remaining build and qualification
 
