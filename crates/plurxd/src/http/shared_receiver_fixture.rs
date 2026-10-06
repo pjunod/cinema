@@ -345,7 +345,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
                 address,
                 h2,
                 SourceFixtureMode::Copy,
-                false,
+                None,
             )),
         )
         .await
@@ -357,11 +357,22 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
             address,
             false,
             SourceFixtureMode::Copy,
-            true,
+            Some(false),
         )),
     )
     .await
     .expect("retained TLS End refusal reaches approved replacement");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(330),
+        Box::pin(actual_pinned_playback(
+            address,
+            false,
+            SourceFixtureMode::Copy,
+            Some(true),
+        )),
+    )
+    .await
+    .expect("retained End stall leaves approved replacement useful budget");
 }
 
 #[tokio::test]
@@ -376,7 +387,7 @@ async fn sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b(
         for h2 in [false, true] {
             tokio::time::timeout(
                 std::time::Duration::from_secs(330),
-                Box::pin(actual_pinned_playback(address, h2, mode, false)),
+                Box::pin(actual_pinned_playback(address, h2, mode, None)),
             )
             .await
             .expect("bounded real playback fixture");
@@ -431,7 +442,7 @@ async fn actual_pinned_playback(
     address: IpAddr,
     h2: bool,
     mode: SourceFixtureMode,
-    endpoint_failure: bool,
+    endpoint_failure: Option<bool>,
 ) {
     use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
@@ -460,6 +471,8 @@ async fn actual_pinned_playback(
     // Actual HTTP-arrival diagnostics only, never no-admission/settlement proof.
     let source_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let source_start_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stalled_end_release = tokio_util::sync::CancellationToken::new();
+    let observed_stall_release = stalled_end_release.clone();
     let end_refusal = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let refused_end_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
     let observed_refusal = end_refusal.clone();
@@ -469,6 +482,7 @@ async fn actual_pinned_playback(
     let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
         axum::middleware::from_fn(
             move |request: Request<Body>, next: axum::middleware::Next| {
+                let release = observed_stall_release.clone();
                 let refusal = observed_refusal.clone();
                 let end_bodies = observed_end_bodies.clone();
                 let starts = observed_starts.clone();
@@ -481,6 +495,12 @@ async fn actual_pinned_playback(
                             .await
                             .expect("bounded immutable End ask");
                         end_bodies.lock().expect("End observations").push(bytes);
+                        if endpoint_failure == Some(true) {
+                            // The actual accepted request owns this stall. The
+                            // fixture releases it after replacement settlement
+                            // and joins its server; no detached timer/poller.
+                            release.cancelled().await;
+                        }
                         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
                     }
                     let is_start = request.method() == axum::http::Method::POST
@@ -511,7 +531,7 @@ async fn actual_pinned_playback(
     ));
     fixture.pair(endpoint.clone()).await;
     let replacement_end_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let replacement = if endpoint_failure {
+    let replacement = if endpoint_failure.is_some() {
         let listener = tokio::net::TcpListener::bind((address, 0))
             .await
             .expect("replacement Source listener");
@@ -1030,6 +1050,7 @@ async fn actual_pinned_playback(
         );
         assert!(bytes.is_empty());
     }
+    stalled_end_release.cancel();
     if let Some((_, stop, task)) = replacement {
         {
             let old = refused_end_bodies

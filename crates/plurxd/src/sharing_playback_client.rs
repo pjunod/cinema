@@ -16,6 +16,8 @@ const MAX_EPOCH: i64 = 9_007_199_254_740_991;
 /// transit, so a slow Source settlement is answered once rather than timed
 /// out into another dial.
 const SOURCE_END_DEADLINE: Duration = Duration::from_secs(315);
+const CLEANUP_IMPORT_LOOKUP_DEADLINE: Duration = Duration::from_secs(3);
+const CLEANUP_ALTERNATIVE_ATTEMPT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// No Deref or access to catalogue, Start or resource methods. The retained
 /// approved SPKI authenticates TLS; the exact authenticated End echo binds
@@ -44,9 +46,11 @@ impl CleanupPeerConnection {
     ) -> Result<SourceEndReceipt, PeerError> {
         let deadline = tokio::time::Instant::now() + SOURCE_END_DEADLINE;
         let mut endpoints = vec![retained.clone()];
-        if let Ok(Ok(Some(import))) =
-            tokio::time::timeout_at(deadline, state.store.sharing_import(intent.scope.import_id))
-                .await
+        if let Ok(Ok(Some(import))) = tokio::time::timeout_at(
+            (tokio::time::Instant::now() + CLEANUP_IMPORT_LOOKUP_DEADLINE).min(deadline),
+            state.store.sharing_import(intent.scope.import_id),
+        )
+        .await
         {
             if cleanup_import_matches(&import.summary, intent) {
                 for endpoint in import.summary.endpoints {
@@ -57,21 +61,35 @@ impl CleanupPeerConnection {
             }
         }
         let mut last = PeerError::Unavailable;
-        for endpoint in endpoints {
-            if tokio::time::Instant::now() >= deadline {
+        let candidate_count = endpoints.len();
+        for (index, endpoint) in endpoints.into_iter().enumerate() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 return Err(PeerError::Unavailable);
             }
-            let attempt = tokio::time::timeout_at(deadline, async {
+            // Preserve useful budget for approved alternatives even if a
+            // retained peer accepts TLS and then never answers End. The last
+            // candidate receives the remainder, allowing a real slow owner to
+            // finish the same immutable End; timeout never means settlement.
+            let remaining_candidates =
+                u32::try_from(candidate_count - index).map_err(|_| PeerError::Unavailable)?;
+            let remaining = deadline.saturating_duration_since(now);
+            let allowance = if remaining_candidates == 1 {
+                remaining
+            } else {
+                (remaining / remaining_candidates).min(CLEANUP_ALTERNATIVE_ATTEMPT_DEADLINE)
+            };
+            let attempt = tokio::time::timeout_at(now + allowance, async {
                 let mut connection = Self::connect(&state.sharing, &endpoint).await?;
                 connection
                     .end(credential, viewer_hash, session, known)
                     .await
             })
-            .await
-            .map_err(|_| PeerError::Unavailable)?;
+            .await;
             match attempt {
-                Ok(receipt) => return Ok(receipt),
-                Err(error) => last = error,
+                Ok(Ok(receipt)) => return Ok(receipt),
+                Ok(Err(error)) => last = error,
+                Err(_) => last = PeerError::Unavailable,
             }
         }
         Err(last)
