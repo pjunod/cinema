@@ -23,7 +23,8 @@ Use a new disposable source directory and a dedicated warm compiler directory:
 export PATH=/Users/pjunod/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH
 python3 scripts/qualify-sharing-coordinated-upgrade.py \
   --source-dir /private/tmp/plurx-coordinated-qualification-source \
-  --target-dir /private/tmp/plurx-coordinated-qualification-target
+  --target-dir /private/tmp/plurx-coordinated-qualification-target \
+  --active-media-fixture /path/to/supplied-long-video.mp4
 ```
 
 The runner refuses an existing source directory or unpinned compiler. It
@@ -96,6 +97,39 @@ pre-upgrade retained rows, with those same required cleanup outcomes.
 This is a test-only whole-topology restore drill. It does not qualify the
 portable backup API or an operator migration coordinator.
 
+### Separate active Local playback drill (added, not executed)
+
+`--active-media-fixture` supplies a real long video; the runner copies it into
+an owned home library and records its SHA-256. Omission explicitly records
+active playback as unqualified. Supply FFmpeg on PATH and media long enough
+that an encoder remains active after the first segment is fetched and decoded.
+An absent worker, scan failure, unavailable encoder or undecodable frame fails
+the drill rather than substituting a ledger seed for playback.
+
+A separate single-voter topology uses allocated loopback ports and the same
+archived historical and candidate executables. Each historical, candidate and
+restored stage scans or reuses the real file, creates a Local HLS session,
+fetches its playlist and first complete segment, and decodes a video frame with
+FFmpeg. Playlist references must stay on that isolated node; fixture account
+credentials are never sent to another authority. The stage records session,
+status, delivered-media hash, decoded-frame hash and descendant encoder PIDs.
+It refuses pre-existing encoders that would make ownership evidence ambiguous.
+
+Without sending End, it observes a live owned encoder and signals SIGTERM,
+requires bounded successful daemon exit and verifies the observed encoder PIDs
+are gone. After the historical stage stops, it copies the complete data
+directory. The candidate restarts that legacy store and must refuse the old
+session before opening fresh playback. After candidate shutdown the runner
+parks its complete directory, restores the stopped historical backup and
+repeats historical playback; the old session must still be terminal or absent.
+Logs and before-drain evidence survive failure. Original media is read only.
+
+This extension has only syntax evidence so far. It adds a real Local media
+worker case for a future qualification run; it does not qualify physical client
+presentation, shared relay drain, the three-voter principal rebuild with active
+media, or rolling upgrade. Those require a compatible shared-playback baseline,
+real Source/receiver peers and admitted grants, and a separately recorded run.
+
 ## 4. Close, rebuild and restore a SQLite Store
 
 The separate SQLite Store fixture starts with the real legacy schema and the
@@ -154,8 +188,9 @@ factory guards before principal or allocator markers, require transition
 absence in the installation transaction, and restart only compatible members.
 Missing or partial guard/marker state must fail closed.
 
-The empty-workload fixtures do not qualify active playback, relay, worker or
-recovery drain, interruption during installation, a production backup tool,
+The recorded empty-workload receipt does not qualify active playback, relay,
+worker or recovery drain. The added Local workload has not been executed and
+does not supply that missing receipt. Other open cases include interruption during installation, a production backup tool,
 physical hardware, Tailscale, CGNAT, or rolling upgrade. Sharing stays behind its
 saved advisory Developer switch; readiness never overrides the saved choice.
 S3 remains incomplete until those relevant rollout and write-admission proofs

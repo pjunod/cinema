@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 
 BASELINE = "971265536a259dea38b0f7a9a8752a5a74e8c025"
 ROOT = Path(__file__).resolve().parent.parent
@@ -93,7 +94,8 @@ class Daemon:
         self.log = node["config"].parent / f"{label}-node-{node['number']}.log"
         self.output = self.log.open("w")
         self.process = subprocess.Popen([str(binary), "--config", str(node["config"]), "run"],
-                        stdin=subprocess.DEVNULL, stdout=self.output, stderr=subprocess.STDOUT)
+                        stdin=subprocess.DEVNULL, stdout=self.output, stderr=subprocess.STDOUT,
+                        start_new_session=True)
 
     def ready(self):
         deadline = time.monotonic() + 90
@@ -125,8 +127,12 @@ class Daemon:
             raise RuntimeError(f"daemon shutdown was {status}; inspect {self.log}")
 
     def kill(self):
-        if self.process.poll() is None:
-            self.process.kill()
+        # Only this launched daemon's fresh process group: failed drills must
+        # not strand an encoder after its parent has already exited.
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         self.process.wait()
         self.output.close()
 
@@ -366,6 +372,151 @@ def cluster_fixture(old_binary, new_binary, helper, root):
             child.kill()
 
 
+def owned_workers(pid):
+    """Observe actual descendant encoder processes, never unrelated fleet PIDs."""
+    rows = subprocess.check_output(["ps", "-axo", "pid=,ppid=,comm="], text=True)
+    processes = {}
+    for line in rows.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) == 3:
+            processes[int(fields[0])] = (int(fields[1]), fields[2])
+    descendants = {pid}
+    while True:
+        found = {child for child, (parent, _) in processes.items() if parent in descendants}
+        if found <= descendants:
+            break
+        descendants.update(found)
+    return {child: command for child, (_, command) in processes.items()
+            if child in descendants and Path(command).name == "ffmpeg"}
+
+
+class NoMediaRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError("active fixture media redirect refused")
+
+
+def media_object(node, route, token):
+    url = urllib.parse.urljoin(node["base"] + "/", route)
+    # Playlists are untrusted input: never send fixture credentials off-node.
+    if (urllib.parse.urlsplit(url).scheme, urllib.parse.urlsplit(url).netloc) != (
+            urllib.parse.urlsplit(node["base"]).scheme, urllib.parse.urlsplit(node["base"]).netloc):
+        raise RuntimeError("active fixture playlist escaped its isolated node")
+    operation = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    with urllib.request.build_opener(NoMediaRedirect).open(operation, timeout=10) as response:
+        data = response.read(32 * 1024 * 1024 + 1)
+        if len(data) > 32 * 1024 * 1024:
+            raise RuntimeError("active fixture media object exceeds evidence budget")
+        return url, data
+
+
+def first_segment(node, playlist, token):
+    for _ in range(3):
+        url, data = media_object(node, playlist, token)
+        text = data.decode("utf-8")
+        entries = [line.strip() for line in text.splitlines()
+                   if line.strip() and not line.startswith("#")]
+        if not entries:
+            raise RuntimeError("active fixture playlist has no media")
+        if "#EXT-X-STREAM-INF" in text:
+            playlist = urllib.parse.urljoin(url, entries[0])
+            continue
+        initial = re.search(r'#EXT-X-MAP:.*URI="([^"\n]+)"', text)
+        initialization = media_object(node, urllib.parse.urljoin(url, initial[1]), token)[1] if initial else b""
+        segment_url, segment = media_object(node, urllib.parse.urljoin(url, entries[0]), token)
+        return initialization + segment, segment_url
+    raise RuntimeError("active fixture playlist nesting exceeds evidence budget")
+
+
+def drain_active(daemon, workers):
+    daemon.stop()  # No End: SIGTERM must drain this active playback owner.
+    daemon.wait()
+    remaining = subprocess.check_output(["ps", "-axo", "pid="], text=True)
+    live = {int(line.strip()) for line in remaining.splitlines() if line.strip()}
+    if live.intersection(workers):
+        raise RuntimeError("active playback encoder survived daemon shutdown")
+
+
+def active_local_stage(binary, node, label, file_id=None, previous_session=None):
+    daemon = Daemon(binary, node, label)
+    try:
+        daemon.ready()
+        route = "/api/v1/setup" if label == "active-historical" else "/api/v1/auth/login"
+        token = request(node, route, {"username": "owner", "password": "coordinated-fixture-only"})["token"]
+        if file_id is None:
+            library = request(node, "/api/v1/libraries", {"name": "active-upgrade-fixture", "kind": "home",
+                              "paths": [str(node["media"])]}, token)
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                items = request(node, f"/api/v1/libraries/{library['id']}/items", token=token)["items"]
+                for item in items:
+                    detail = request(node, f"/api/v1/items/{item['id']}", token=token)
+                    if detail["files"]:
+                        file_id = detail["files"][0]["id"]
+                        break
+                if file_id is not None:
+                    break
+                time.sleep(0.25)
+            if file_id is None:
+                raise RuntimeError("active media fixture never scanned a playable file")
+        if previous_session:
+            try:
+                request(node, f"/api/v1/hls/{previous_session}/status", token=token)
+            except urllib.error.HTTPError as error:
+                if error.code not in (404, 410):
+                    raise
+            else:
+                raise RuntimeError("prior active session survived stopped-state restart")
+        if owned_workers(daemon.process.pid):
+            raise RuntimeError("unrelated scan encoder still active; playback worker evidence would be ambiguous")
+        session = request(node, f"/api/v1/files/{file_id}/hls/sessions",
+                          {"playback_id": label, "request_id": label, "copy": False,
+                           "height": 360, "quality_auto": False, "start": 0}, token)
+        session_id = session["session_id"]
+        media, url = first_segment(node, session["playlist_url"], token)
+        decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-frames:v", "1",
+                                  "-f", "framemd5", "pipe:1"], input=media,
+                                 capture_output=True, timeout=30, check=True)
+        (node["config"].parent / f"{label}-decoded-frame.log").write_bytes(decoded.stdout + decoded.stderr)
+        frames = [line for line in decoded.stdout.decode().splitlines() if line and not line.startswith("#")]
+        if not frames:
+            raise RuntimeError("active fixture delivered no decodable video frame")
+        status = request(node, f"/api/v1/hls/{session_id}/status", token=token)
+        workers = owned_workers(daemon.process.pid)
+        if not workers:
+            raise RuntimeError("active fixture has no live owned encoder at shutdown; supply longer media")
+        started = time.monotonic()
+        (node["config"].parent / f"{label}-before-drain.json").write_text(json.dumps(
+            {"session_id": session_id, "owned_encoder_pids": sorted(workers), "status": status}, indent=2) + "\n")
+        drain_active(daemon, workers)
+        return {"file_id": file_id, "session_id": session_id, "decoded_frame": frames[0],
+                "media_sha256": hashlib.sha256(media).hexdigest(), "segment_url": url,
+                "status_before_sigterm": status, "owned_encoder_pids": sorted(workers),
+                "shutdown_seconds": time.monotonic() - started, "encoder_exit": True}
+    finally:
+        daemon.kill()
+
+
+def active_local_fixture(old_binary, new_binary, root, media):
+    """Separate real Local runtime drill; never seed ledger rows to fake activity."""
+    root.mkdir()
+    node = config(root, 1, ports(3))
+    node["media"] = root / "media"
+    node["media"].mkdir()
+    fixture = node["media"] / ("upgrade-fixture" + media.suffix)
+    shutil.copyfile(media, fixture)
+    historical = active_local_stage(old_binary, node, "active-historical")
+    backup = root / "stopped-historical-backup"
+    shutil.copytree(node["data"], backup)
+    candidate = active_local_stage(new_binary, node, "active-candidate", historical["file_id"], historical["session_id"])
+    node["data"].rename(root / "parked-candidate")
+    shutil.copytree(backup, node["data"])
+    restored = active_local_stage(old_binary, node, "active-restored", historical["file_id"], historical["session_id"])
+    return {"scope": "Local HLS single-voter legacy-store binary upgrade and whole-directory restore",
+            "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
+            "historical": historical, "candidate": candidate, "restored": restored,
+            "shared_relay_drain": "not qualified", "principal_rebuild_active_drain": "not qualified"}
+
+
 def sqlite_store_drill(helper, root):
     outcome = subprocess.run([str(helper), "sqlite-drill", str(root)],
                              capture_output=True, text=True, timeout=45, check=False)
@@ -387,7 +538,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", type=Path, required=True, help="new source and fixture directory")
     parser.add_argument("--target-dir", type=Path, required=True, help="dedicated warm compiler directory")
+    parser.add_argument("--active-media-fixture", type=Path,
+                        help="supplied long video for real Local HLS drain; omission leaves active drain unqualified")
     args = parser.parse_args()
+    if args.active_media_fixture:
+        args.active_media_fixture = args.active_media_fixture.resolve()
+        if not args.active_media_fixture.is_file():
+            parser.error("active-media-fixture must be an existing readable video")
     args.source_dir = args.source_dir.resolve()
     if args.source_dir.exists():
         parser.error("source-dir must not exist; never overlay user data or source")
@@ -419,6 +576,9 @@ def main():
                  for binary, label in [(old_binary, "historical-replicated-future"), (new_binary, "candidate-replicated-future")]]
     print("FUTURE REPLICATED " + json.dumps(receipt["future_replicated"], sort_keys=True), flush=True)
     receipt["three_voter"] = cluster_fixture(old_binary, new_binary, helper, args.source_dir / "three-voter")
+    receipt["active_local_media"] = (active_local_fixture(old_binary, new_binary,
+        args.source_dir / "active-local-media", args.active_media_fixture)
+        if args.active_media_fixture else {"status": "not qualified; no active media supplied"})
     receipt["sqlite_store"] = sqlite_store_drill(helper, args.source_dir / "sqlite-store")
     (args.source_dir / "qualification-receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print("COORDINATED FIXTURE " + json.dumps(receipt, sort_keys=True), flush=True)
