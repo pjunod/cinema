@@ -71,7 +71,7 @@ fn direct_fingerprint(session: &CreateSession) -> Result<String, SourceStartFail
 /// refuse unless it is direct play of this exact current file.
 pub(super) async fn prepare_source_direct(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
     target: SourcePlaybackTarget,
     session: CreateSession,
 ) -> Result<PreparedSourceDirect, SourceStartFailure> {
@@ -115,11 +115,8 @@ pub(super) async fn prepare_source_direct(
     let (hash, grant) = super::super::shared_library::authority(state, headers)
         .await
         .map_err(|_| refused)?;
-    let viewer = headers
-        .get("cinemashare-viewer")
-        .and_then(|value| value.to_str().ok())
-        .ok_or(refused)?;
-    let principal = PlaybackPrincipal::sharing(grant, viewer).map_err(|_| refused)?;
+    let viewer = super::viewer_hash(headers).map_err(|_| refused)?;
+    let principal = PlaybackPrincipal::sharing(grant, &viewer).map_err(|_| refused)?;
     let read_witness = || {
         state.store.source_item_file_witness(
             &hash,
@@ -298,7 +295,7 @@ impl PreparedSourceStart {
 }
 pub(super) async fn prepare_source_start(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
     reference: SourcePlaybackTarget,
     session: CreateSession,
 ) -> Result<PreparedSourceStart, SourceStartFailure> {
@@ -338,6 +335,7 @@ pub(super) async fn start_prepared_worker(
     state: std::sync::Arc<crate::state::AppState>,
     assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
     activation: plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+    ingress: plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission,
     prepared: PreparedSourceStart,
     deadline: std::time::Instant,
 ) -> Result<SourceViewerActor, crate::transcode::source_actor::SourceWorkerNoAdmission> {
@@ -345,12 +343,12 @@ pub(super) async fn start_prepared_worker(
     match prepared {
         PreparedSourceStart::Hls(prepared) => {
             manager
-                .start_source_worker(state, assignment, activation, *prepared, deadline)
+                .start_source_worker(state, assignment, activation, ingress, *prepared, deadline)
                 .await
         }
-        PreparedSourceStart::Direct(prepared) => {
-            manager.start_source_direct_worker(state, assignment, activation, *prepared, deadline)
-        }
+        PreparedSourceStart::Direct(prepared) => manager.start_source_direct_worker(
+            state, assignment, activation, ingress, *prepared, deadline,
+        ),
     }
 }
 
@@ -380,13 +378,14 @@ fn observe_direct_published(
 /// owner's response guard. Status renews the lease, never viewer activity.
 pub(super) async fn published_reply(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
     entry: &SourceStartEntry,
     owned: &SourceStartOwned,
     target: &SourcePlaybackTarget,
     grant: Uuid,
     deadline: std::time::Instant,
 ) -> Result<axum::response::Response, ApiError> {
+    super::ingress::publication_allowed(state, &owned.assignment).await?;
     let (start, guard) = owned
         .actor
         .open_direct_start(deadline)
@@ -405,7 +404,7 @@ pub(super) async fn published_reply(
     Ok(hold_start_body(response, guard))
 }
 
-fn parse_direct_request(
+pub(super) fn parse_direct_request(
     bytes: &[u8],
     item: &str,
     file: &str,
@@ -443,7 +442,7 @@ fn parse_direct_request(
 /// Source reader behind the owner's revocable response guard.
 pub(super) async fn direct_bytes(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: super::SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     #[cfg(test)] read_gate: Option<axum::Extension<std::sync::Arc<SourceReadJobGate>>>,
@@ -468,6 +467,13 @@ pub(super) async fn direct_bytes(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
+    super::ingress::register_local(
+        &state,
+        &connection.as_ref().ok_or_else(unavailable)?.0,
+        &entry,
+        &owned.assignment,
+    )
+    .await?;
     if !owned.actor.is_direct() {
         return Err(SourceStartFailure::Unsupported.response());
     }
@@ -483,6 +489,7 @@ pub(super) async fn direct_bytes(
     let (file, length, mime, guard) = opened.into_parts();
     let guard = std::sync::Arc::new(guard);
     let method = demand.method();
+    super::ingress::publication_allowed(&state, &owned.assignment).await?;
     let plan = plan_file_range(&demand.headers().map_err(|_| invalid())?, &method, length);
     let (status, planned) = file_range_head(plan, length, mime);
     let body_length = planned_body_length(plan, &method, length);

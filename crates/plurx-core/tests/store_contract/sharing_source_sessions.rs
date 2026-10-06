@@ -64,6 +64,8 @@ async fn intent_hash(
                 request_fingerprint: "d".repeat(64),
                 playback_id: format!("p-{name}"),
                 incarnation_id: Uuid::new_v4(),
+                ingress_registry_boot_id: Uuid::parse_str("01a1128a-944d-4f11-9bf2-c7599d355213")
+                    .expect("routing metadata boot, not physical proof"),
                 now_ms: now,
                 claim_expires_at_ms: now + 60000,
                 credential_hash: hash,
@@ -224,6 +226,20 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             )
             .await
             .expect("Source candidate fixture operation");
+    }
+    for id in 1_i64..=3 {
+        client
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$4),($1,$3,$4)",
+                hiqlite::params!(
+                    format!("node-{id}"),
+                    plurx_core::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY,
+                    "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213",
+                    now
+                ),
+            )
+            .await
+            .expect("routing metadata only; no physical registry proof");
     }
     exec(&client,"INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1) ON CONFLICT(key) DO UPDATE SET value='true'").await;
     for result in client

@@ -7,6 +7,16 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
 
+#[path = "shared_source_forwarding.rs"]
+pub(crate) mod forwarding;
+use forwarding::{AuthenticationHeaders, SourceHeaders};
+#[path = "shared_source_ingress.rs"]
+mod ingress;
+use ingress::{
+    apply_forward_custody, execute_forward_unassigned_cleanup, prepare_forward_start,
+    resolve_forward_route, source_forward_locality, validate_retained_forward,
+};
+
 #[path = "shared_source_direct.rs"]
 pub(crate) mod direct;
 
@@ -20,6 +30,7 @@ struct SourceStartInput {
 }
 #[derive(Default)]
 pub(crate) struct SourceStartRegistry {
+    forwarding: forwarding::ForwardingRegistry,
     entries: std::sync::Mutex<Vec<std::sync::Arc<SourceStartEntry>>>,
     settled: std::sync::Mutex<std::collections::VecDeque<std::sync::Arc<SourceStartEntry>>>,
 }
@@ -30,6 +41,8 @@ struct SourceStartEntry {
     authenticated_hashes: std::sync::Mutex<Vec<String>>,
     published: std::sync::Mutex<Option<SourcePublishedLineage>>,
     ending: std::sync::Mutex<Option<std::sync::Arc<SourceEndOwner>>>,
+    end_deadline: std::sync::OnceLock<std::time::Instant>,
+    local_custody: std::sync::Mutex<Vec<ingress::LocalCustody>>,
     changed: tokio::sync::Notify,
     result: std::sync::Mutex<Option<Result<SourceStartOwned, SourceStartFailure>>>,
     task: SourceStartTask,
@@ -43,6 +56,7 @@ struct SourceStartTask {
     joined: std::sync::Mutex<Option<SourceStartTaskJoined>>,
     cleanup: std::sync::Mutex<Option<SourceUninvokedCleanup>>,
     cleanup_confirmation: std::sync::Mutex<Option<Uuid>>,
+    supervisor: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 #[derive(Default)]
 enum SourceStartTaskStage {
@@ -131,15 +145,16 @@ impl SourceStartTaskStage {
 impl SourceStartEntry {
     fn retain_stage(&self, stage: SourceStartTaskStage) {
         *self.task.stage.lock().expect("Source owned start stage") = stage;
+        self.changed.notify_waiters();
     }
     fn start_owned_task(
         self: &std::sync::Arc<Self>,
         state: std::sync::Arc<crate::state::AppState>,
-        headers: HeaderMap,
+        headers: SourceHeaders,
         input: SourceStartInput,
         deadline: std::time::Instant,
     ) {
-        // The detached supervisor owns the actual JoinHandle. Waiter loss
+        // The entry retains its supervisor, which owns the actual JoinHandle. Waiter loss
         // cannot drop this task or replace its retained claim/assignment stage.
         // Publish an outcome only after this exact worker future has joined.
         let entry = std::sync::Arc::clone(self);
@@ -157,7 +172,7 @@ impl SourceStartEntry {
             ))
             .await
         });
-        tokio::spawn(async move {
+        let supervisor = tokio::spawn(async move {
             let (result, joined) = match worker.await {
                 Ok(result) => (result, SourceStartTaskJoined::Returned),
                 Err(_) => (
@@ -202,6 +217,11 @@ impl SourceStartEntry {
             *entry.result.lock().expect("Source HTTP outcome") = Some(result);
             entry.changed.notify_waiters();
         });
+        *self
+            .task
+            .supervisor
+            .lock()
+            .expect("Source start supervisor owner") = Some(supervisor);
     }
 }
 struct SourceStartIdentity {
@@ -284,6 +304,8 @@ impl SourceStartRegistry {
             authenticated_hashes: std::sync::Mutex::new(Vec::new()),
             published: std::sync::Mutex::new(None),
             ending: std::sync::Mutex::new(None),
+            end_deadline: std::sync::OnceLock::new(),
+            local_custody: Default::default(),
             changed: tokio::sync::Notify::new(),
             result: std::sync::Mutex::new(None),
             task: SourceStartTask::default(),
@@ -314,6 +336,7 @@ struct SourceEndReceipt {
     settled: bool,
 }
 struct SourceEndOwner {
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     changed: tokio::sync::Notify,
     result: std::sync::Mutex<Option<Result<SourceEndReceipt, SourceStartFailure>>>,
 }
@@ -499,7 +522,11 @@ impl SourceStartEntry {
                 return std::sync::Arc::clone(owner);
             }
         }
+        let deadline = *self
+            .end_deadline
+            .get_or_init(|| std::time::Instant::now() + std::time::Duration::from_secs(305));
         let owner = std::sync::Arc::new(SourceEndOwner {
+            task: std::sync::Mutex::new(None),
             changed: tokio::sync::Notify::new(),
             result: std::sync::Mutex::new(None),
         });
@@ -508,12 +535,15 @@ impl SourceStartEntry {
         let task = std::sync::Arc::clone(&owner);
         // Insertion and detached spawn precede every wait/retirement await.
         // Disconnect loses only the HTTP waiter, never this actual obligation.
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let result = async {
-                let owned = match entry
-                    .wait(std::time::Instant::now() + std::time::Duration::from_secs(305))
-                    .await
-                {
+                if let Some(assignment) = ingress::actual_assignment(&entry) {
+                    ingress::retire_custody(&state, &assignment, deadline)
+                        .await
+                        .map_err(|_| SourceStartFailure::Unresolved)?;
+                    entry.changed.notify_waiters();
+                }
+                let owned = match entry.wait(deadline).await {
                     Ok(owned) => owned,
                     Err(_) => {
                         let (incarnation_id, confirmation_id) =
@@ -532,7 +562,7 @@ impl SourceStartEntry {
                 };
                 owned
                     .actor
-                    .retire()
+                    .retire_with_deadline(deadline)
                     .await
                     .map_err(SourceStartFailure::from)?;
                 if owned.actor.settlement_status() != Some(Ok(())) {
@@ -561,6 +591,7 @@ impl SourceStartEntry {
             *task.result.lock().expect("Source End outcome") = Some(result);
             task.changed.notify_waiters();
         });
+        *owner.task.lock().expect("Source End task owner") = Some(handle);
         owner
     }
 }
@@ -727,8 +758,9 @@ fn parse_live_operation(
 }
 async fn live_operation_owner(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &SourceHeaders,
     input: &SourceOperationInput,
+    connection: Option<&crate::SharingConnectionCancellation>,
     deadline: std::time::Instant,
 ) -> Result<(std::sync::Arc<SourceStartEntry>, SourceStartOwned), ApiError> {
     let viewer = viewer_hash(headers)?;
@@ -745,11 +777,18 @@ async fn live_operation_owner(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
+    ingress::register_local(
+        state,
+        connection.ok_or_else(unavailable)?,
+        &entry,
+        &owned.assignment,
+    )
+    .await?;
     Ok((entry, owned))
 }
 async fn live_operation_response(
     state: crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &SourceHeaders,
     input: SourceOperationInput,
     entry: &SourceStartEntry,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
@@ -760,6 +799,8 @@ async fn live_operation_response(
     ),
 ) -> Result<axum::response::Response, ApiError> {
     let (field, value, guard) = content;
+    let assignment = ingress::actual_assignment(entry).ok_or_else(unavailable)?;
+    ingress::publication_allowed(&state, &assignment).await?;
     let (_, grant) = current_reference(&state, headers, &input.start.reference).await?;
     if grant != entry.grant {
         return Err(unavailable());
@@ -785,7 +826,7 @@ async fn live_operation_response(
 }
 async fn vod_status(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
@@ -795,7 +836,14 @@ async fn vod_status(
         .await
         .map_err(|_| invalid())?;
     let (input, _) = parse_live_operation(&bytes, &item, &file, &request, false)?;
-    let (entry, owned) = live_operation_owner(&state, &headers, &input, deadline).await?;
+    let (entry, owned) = live_operation_owner(
+        &state,
+        &headers,
+        &input,
+        connection.as_ref().map(|value| &value.0),
+        deadline,
+    )
+    .await?;
     let (status, guard) = owned
         .actor
         .open_status(deadline)
@@ -819,7 +867,7 @@ async fn vod_status(
 }
 async fn control(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
@@ -830,7 +878,14 @@ async fn control(
         .map_err(|_| invalid())?;
     let (input, control) = parse_live_operation(&bytes, &item, &file, &request, true)?;
     let request = control.ok_or_else(invalid)?;
-    let (entry, owned) = live_operation_owner(&state, &headers, &input, deadline).await?;
+    let (entry, owned) = live_operation_owner(
+        &state,
+        &headers,
+        &input,
+        connection.as_ref().map(|value| &value.0),
+        deadline,
+    )
+    .await?;
     // A dropped HTTP waiter cannot discard an accepted actor exchange or its
     // nested observations. The exact owned task retains the physical guard.
     let command = request.clone();
@@ -872,7 +927,7 @@ async fn control(
 }
 async fn status(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
@@ -884,9 +939,7 @@ async fn status(
         .map_err(|_| invalid())?;
     let input = parse_operation_request(&bytes, &item, &file, &request)?;
     let viewer = viewer_hash(&headers)?;
-    let credential = super::sharing::credential(&headers)?;
-    let hash =
-        plurx_core::sharing::secret_hash(plurx_core::sharing::SecretDomain::Grant, &credential);
+    let hash = source_credential_hash(&headers)?;
     let current = current_reference(&state, &headers, &input.start.reference).await;
     let entry = match current.as_ref() {
         Ok((current_hash, current_grant)) => state.transcode.source_http_starts.current_entry(
@@ -908,7 +961,28 @@ async fn status(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
-    if let (Ok((_, current_grant)), true) = (current.as_ref(), owned.actor.is_direct()) {
+    let ledger = state
+        .store
+        .source_ingress_custody(&owned.assignment)
+        .await
+        .map_err(|_| unavailable())?
+        .ok_or_else(unavailable)?;
+    let cleanup_only = headers.cleanup_only()
+        || current.is_err()
+        || ledger.state.is_sealed()
+        || entry.ending.lock().expect("Source ending owner").is_some();
+    if !cleanup_only {
+        ingress::register_local(
+            &state,
+            &connection.as_ref().ok_or_else(unavailable)?.0,
+            &entry,
+            &owned.assignment,
+        )
+        .await?;
+    }
+    if let (Ok((_, current_grant)), true) =
+        (current.as_ref(), owned.actor.is_direct() && !cleanup_only)
+    {
         if let Ok(response) = direct::published_reply(
             &state,
             &headers,
@@ -928,8 +1002,9 @@ async fn status(
             .await);
         }
     }
-    if current.is_ok() {
+    if current.is_ok() && !cleanup_only {
         if let Ok((response, guard)) = owned.actor.open_start_response(deadline).await {
+            ingress::publication_allowed(&state, &owned.assignment).await?;
             entry
                 .observe_published(&owned, &response)
                 .map_err(SourceStartFailure::response)?;
@@ -969,8 +1044,9 @@ async fn status(
 }
 async fn end(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
+    connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
 ) -> Result<axum::Json<SourceEndReceipt>, ApiError> {
     let bytes = axum::body::to_bytes(body, 128 * 1024)
@@ -978,9 +1054,7 @@ async fn end(
         .map_err(|_| invalid())?;
     let input = parse_operation_request(&bytes, &item, &file, &request)?;
     let viewer = viewer_hash(&headers)?;
-    let credential = super::sharing::credential(&headers)?;
-    let hash =
-        plurx_core::sharing::secret_hash(plurx_core::sharing::SecretDomain::Grant, &credential);
+    let hash = source_credential_hash(&headers)?;
     // Cleanup authenticates only the exact previously owned obligation. It
     // grants no resource/status content permission and reads no expired grant.
     let entry = state
@@ -991,9 +1065,33 @@ async fn end(
     entry
         .validate_known(input.known.as_ref())
         .map_err(SourceStartFailure::response)?;
-    let owner = entry.end(std::sync::Arc::new(state));
+    let owner = entry.end(std::sync::Arc::new(state.clone()));
+    let driver = if let Some(ingress) = headers.forwarded_ingress() {
+        Some(ingress.driver.clone())
+    } else {
+        connection
+            .as_ref()
+            .and_then(|connection| {
+                state
+                    .sharing
+                    .accepted_drivers
+                    .capture(&connection.0, &state.node_id)
+                    .ok()
+            })
+            .map(|captured| captured.id().clone())
+    };
+    if let Some(driver) = driver {
+        if ingress::end_uses_registered_driver(&state, &entry, &driver).await? {
+            // The retained cleanup owner runs, while this response releases its
+            // own driver immediately rather than waiting for itself to close.
+            return Err(SourceStartFailure::Unresolved.response());
+        }
+    }
     let receipt = owner
-        .wait(std::time::Instant::now() + std::time::Duration::from_secs(305))
+        // The waiter may share a registered H2 driver with media. Returning
+        // unresolved lets that response finish so graceful drain can close it;
+        // the entry retains the same owned cleanup task and original budget.
+        .wait(headers.deadline(std::time::Duration::from_secs(9)))
         .await
         .map_err(SourceStartFailure::response)?;
     Ok(axum::Json(receipt))
@@ -1055,6 +1153,45 @@ impl SourceStartEntry {
         }
     }
 }
+pub(crate) async fn settle_ingress_custody(
+    state: &crate::state::AppState,
+    assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    deadline: std::time::Instant,
+    mode: crate::sharing_connection_custody::DriverCloseMode,
+) -> Result<(), ApiError> {
+    ingress::retire_custody_with_mode(state, assignment, deadline, mode).await
+}
+pub(crate) fn internal_forwarding_router() -> axum::Router<crate::state::AppState> {
+    axum::Router::new()
+        .route(
+            forwarding::LOCATE_PATH,
+            axum::routing::post(forwarding::locate)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            forwarding::PREPARE_PATH,
+            axum::routing::post(forwarding::prepare),
+        )
+        .route(
+            forwarding::CONTROL_PATH,
+            axum::routing::post(forwarding::receive_control),
+        )
+        .route(
+            forwarding::FORWARD_PATH,
+            axum::routing::post(forwarding::receive),
+        )
+        .route(
+            forwarding::REGISTER_PATH,
+            axum::routing::post(forwarding::register_http),
+        )
+        .route(
+            forwarding::ACK_PATH,
+            axum::routing::post(forwarding::ack_http),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            forwarding::MAX_WIRE_BYTES,
+        ))
+}
 pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::state::AppState> {
     axum::Router::new()
         .route(
@@ -1062,7 +1199,7 @@ pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::
             axum::routing::post(start),
         )
         .route_layer(axum::middleware::from_fn_with_state(
-            state,
+            state.clone(),
             super::shared_library::source_content_guard,
         ))
         .merge(
@@ -1092,6 +1229,10 @@ pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::
                     axum::routing::post(direct::direct_bytes),
                 ),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            forwarding::route_to_owner,
+        ))
 }
 #[cfg(test)]
 #[derive(Default)]
@@ -1280,7 +1421,7 @@ fn parse_resource_request(
 }
 async fn resources(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     #[cfg(test)] read_gate: Option<axum::Extension<std::sync::Arc<SourceReadJobGate>>>,
@@ -1307,6 +1448,13 @@ async fn resources(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
+    ingress::register_local(
+        &state,
+        &connection.as_ref().ok_or_else(unavailable)?.0,
+        &entry,
+        &owned.assignment,
+    )
+    .await?;
     let opened = owned
         .actor
         .open_resource(&input.resource, deadline)
@@ -1314,6 +1462,7 @@ async fn resources(
         .map_err(|e| SourceStartFailure::from(e).response())?;
     let (_, current_grant) =
         current_reference(&state, &headers, &input.operation.start.reference).await?;
+    ingress::publication_allowed(&state, &owned.assignment).await?;
     if current_grant != grant {
         return Err(unavailable());
     }
@@ -1412,8 +1561,9 @@ async fn resources(
 
 async fn start(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     axum::extract::Path((item, file)): axum::extract::Path<(String, String)>,
+    connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: axum::body::Body,
 ) -> Result<axum::response::Response, ApiError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(305);
@@ -1435,6 +1585,9 @@ async fn start(
         let state = std::sync::Arc::new(state.clone());
         entry.start_owned_task(state, headers.clone(), input, deadline);
     }
+    let assignment = ingress::assigned(&state, &entry, deadline).await?;
+    let connection = connection.ok_or_else(unavailable)?;
+    ingress::register_local(&state, &connection.0, &entry, &assignment).await?;
     let owned = entry
         .wait(deadline)
         .await
@@ -1452,6 +1605,7 @@ async fn start(
     if current_grant != grant {
         return Err(unavailable());
     }
+    ingress::publication_allowed(&state, &owned.assignment).await?;
     entry
         .observe_published(&owned, &response)
         .map_err(SourceStartFailure::response)?;
@@ -1518,7 +1672,7 @@ fn validate_initial_source_start(session: &CreateSession) -> Result<(), SourceSt
 }
 async fn own_start(
     state: std::sync::Arc<crate::state::AppState>,
-    headers: HeaderMap,
+    headers: SourceHeaders,
     input: SourceStartInput,
     grant: Uuid,
     deadline: std::time::Instant,
@@ -1563,6 +1717,7 @@ async fn own_start(
                 request_fingerprint: invocation_fingerprint.clone(),
                 playback_id: input.session.playback_id.clone(),
                 incarnation_id: planned_incarnation,
+                ingress_registry_boot_id: state.sharing.accepted_drivers.boot_id(),
                 now_ms: now,
                 claim_expires_at_ms: now + remaining,
                 credential_hash: hash,
@@ -1638,9 +1793,43 @@ async fn own_start(
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
     entry.retain_stage(SourceStartTaskStage::Assigned(assignment.clone()));
+    state
+        .store
+        .initialize_source_ingress_custody(&assignment)
+        .await
+        .map_err(|_| SourceStartFailure::Unresolved)?;
+    loop {
+        let changed = entry.changed.notified();
+        let ledger = state
+            .store
+            .source_ingress_custody(&assignment)
+            .await
+            .map_err(|_| SourceStartFailure::Unresolved)?
+            .ok_or(SourceStartFailure::Unresolved)?;
+        if ledger.state.is_sealed() {
+            return Err(SourceStartFailure::Unresolved);
+        }
+        if ledger.state.open().next().is_some() {
+            break;
+        }
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), changed)
+            .await
+            .map_err(|_| SourceStartFailure::Unresolved)?;
+    }
+
     let members = state
         .membership
         .observe_source_admission_members()
+        .await
+        .map_err(|_| SourceStartFailure::Unresolved)?
+        .ok_or(SourceStartFailure::Unresolved)?;
+    let ingress_permission = state
+        .store
+        .prepare_source_ingress_admission(
+            &assignment,
+            state.sharing.accepted_drivers.boot_id(),
+            &members,
+        )
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
@@ -1660,6 +1849,7 @@ async fn own_start(
         std::sync::Arc::clone(&state),
         assignment.clone(),
         activation,
+        *ingress_permission,
         prepared,
         deadline,
     )
@@ -1677,9 +1867,9 @@ async fn own_start(
 
 // Read-only current authentication can precede owner insertion. It owns no
 // durable or physical obligation and binds a stable grant across rotation.
-async fn current_reference(
+async fn current_reference<H: AuthenticationHeaders + Send + Sync + ?Sized>(
     state: &crate::state::AppState,
-    headers: &HeaderMap,
+    headers: &H,
     target: &SourcePlaybackTarget,
 ) -> Result<(String, Uuid), ApiError> {
     use plurx_core::{
@@ -1796,7 +1986,27 @@ fn closed_provided_fields(input: &Value, typed: &Value) -> bool {
         _ => input == typed,
     }
 }
-fn viewer_hash(headers: &HeaderMap) -> Result<String, ApiError> {
+fn source_credential_hash<H: AuthenticationHeaders + ?Sized>(
+    headers: &H,
+) -> Result<String, ApiError> {
+    if let Some(hash) = headers.authenticated_hash() {
+        return Ok(hash.to_owned());
+    }
+    let credential = super::sharing::credential(headers.raw_headers())?;
+    Ok(plurx_core::sharing::secret_hash(
+        plurx_core::sharing::SecretDomain::Grant,
+        &credential,
+    ))
+}
+pub(in crate::http) fn viewer_hash<H: AuthenticationHeaders + ?Sized>(
+    headers: &H,
+) -> Result<String, ApiError> {
+    if let Some(plurx_core::playback_principal::PlaybackPrincipal::Sharing { viewer_key, .. }) =
+        headers.authenticated_principal()
+    {
+        return Ok(viewer_key.as_str().to_owned());
+    }
+    let headers = headers.raw_headers();
     let mut values = headers.get_all("cinemashare-viewer").iter();
     let value = values
         .next()
@@ -1813,6 +2023,71 @@ fn viewer_hash(headers: &HeaderMap) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
+#[cfg(test)]
+async fn fixture_start(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    headers: HeaderMap,
+    axum::extract::Path((item, file)): axum::extract::Path<(String, String)>,
+    body: axum::body::Body,
+) -> Result<axum::response::Response, ApiError> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("actual Source fixture listener");
+    let address = listener
+        .local_addr()
+        .expect("actual Source fixture address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::sharing::peer_router(state),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let bytes = axum::body::to_bytes(body, 128 * 1024)
+        .await
+        .map_err(|_| invalid())?;
+    let url = format!("http://{address}/sharing/v1/items/{item}/files/{file}/sessions");
+    let response =
+        tests::actual_resource_request(address, false, &url, headers, bytes.to_vec()).await;
+    let _ = stop.send(());
+    server
+        .await
+        .expect("actual fixture accept owner joined")
+        .expect("actual fixture server drain");
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .map_err(|_| invalid())?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let code = [
+        "sharing_start_conflict",
+        "sharing_start_capacity",
+        "sharing_start_unsupported",
+        SHARING_START_DOLBY_VISION_UNSUPPORTED,
+        "sharing_start_unresolved",
+        "sharing_start_unavailable",
+        "sharing_start_deadline",
+        "sharing_invalid_request",
+        "sharing_playback_authority_unavailable",
+        "sharing_body_authority_unavailable",
+    ]
+    .into_iter()
+    .find(|code| Some(*code) == value.get("code").and_then(Value::as_str))
+    .unwrap_or("sharing_source_fixture_refusal");
+    Err(ApiError::typed(
+        status,
+        code,
+        value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Source refused actual fixture HTTP request"),
+    ))
+}
 #[cfg(test)]
 pub(crate) struct RealSourceStartFixture {
     pub state: std::sync::Arc<crate::state::AppState>,
@@ -1938,12 +2213,27 @@ pub(crate) fn real_source_start_fixture_with(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
-    Box::pin(build_real_source_start_fixture(mode, recipient_server_id))
+    Box::pin(build_real_source_start_fixture(
+        mode,
+        recipient_server_id,
+        None,
+    ))
+}
+#[cfg(test)]
+fn real_source_start_fixture_at(
+    address: std::net::SocketAddr,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
+    Box::pin(build_real_source_start_fixture(
+        SourceFixtureMode::Copy,
+        None,
+        Some(address),
+    ))
 }
 #[cfg(test)]
 async fn build_real_source_start_fixture(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
+    advertised_http: Option<std::net::SocketAddr>,
 ) -> RealSourceStartFixture {
     use plurx_core::{
         cluster::migration::select_daemon_store,
@@ -1957,6 +2247,10 @@ async fn build_real_source_start_fixture(
     let directory = crate::test_tempdir().expect("real Source fixture");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
+    if let Some(address) = advertised_http {
+        config.server.bind = address;
+        config.cluster.artwork_url = format!("http://{address}");
+    }
     let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("Raft port");
     let api = std::net::TcpListener::bind("127.0.0.1:0").expect("API port");
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
@@ -1989,6 +2283,16 @@ async fn build_real_source_start_fixture(
         config.storage.data_dir.clone(),
         config.sharing.clone(),
     ));
+    state_mut.node_id = selected.identity.node_id.clone();
+    state_mut
+        .membership
+        .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
+    state_mut
+        .membership
+        .publish_ingress_custody_boot()
+        .await
+        .expect("actual registry boot publication before admission");
+
     let store = Arc::clone(&state.store);
     store
         .put_setting(keys::SW_POOL_THREADS, "4")
@@ -2472,7 +2776,7 @@ mod tests {
     async fn actual_source_end_sql_recovery() {
         use std::time::{Duration, Instant};
         let fixture = real_source_start_fixture().await;
-        let response = start(
+        let response = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -2582,7 +2886,7 @@ mod tests {
                 .await
                 .expect("actual transactional failure");
             let invoke = || {
-                start(
+                fixture_start(
                     axum::extract::State((*fixture.state).clone()),
                     fixture.headers.clone(),
                     axum::extract::Path((
@@ -2717,7 +3021,7 @@ mod tests {
         let client = fixture.selected.local_client().expect("actual voter");
         client.execute("CREATE TRIGGER fixture_source_assignment_failure BEFORE UPDATE OF dispatch_generation ON sharing_source_session_bindings WHEN NEW.dispatch_generation=1 BEGIN SELECT RAISE(ABORT,'fixture assignment unavailable'); END", hiqlite::params![]).await.expect("actual failed assignment");
         client.execute("CREATE TRIGGER fixture_source_g0_release_failure BEFORE UPDATE OF reservation_state ON sharing_source_session_bindings WHEN NEW.reservation_state='released' BEGIN SELECT RAISE(ABORT,'fixture release unavailable'); END", hiqlite::params![]).await.expect("actual failed cleanup");
-        start(
+        fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -2997,7 +3301,7 @@ mod tests {
         use axum::response::IntoResponse;
         let fixture =
             real_source_start_fixture_with(SourceFixtureMode::DolbyVisionEncoded, None).await;
-        let denied = start(
+        let denied = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -3038,12 +3342,13 @@ mod tests {
         let request = entries[0].identity.request_id.to_string();
         let first = end(
             axum::extract::State((*fixture.state).clone()),
-            fixture.headers.clone(),
+            fixture.headers.clone().into(),
             axum::extract::Path((
                 fixture.reference.item_id.as_str().to_owned(),
                 fixture.reference.file_id.as_str().to_owned(),
                 request.clone(),
             )),
+            None,
             axum::body::Body::from(fixture.request.clone()),
         )
         .await
@@ -3055,7 +3360,7 @@ mod tests {
             "accounting released only after exact cleanup"
         );
         for _ in 0..3 {
-            start(
+            fixture_start(
                 axum::extract::State((*fixture.state).clone()),
                 fixture.headers.clone(),
                 axum::extract::Path((
@@ -3068,12 +3373,13 @@ mod tests {
             .expect_err("exact refusal retry");
             let replay = end(
                 axum::extract::State((*fixture.state).clone()),
-                fixture.headers.clone(),
+                fixture.headers.clone().into(),
                 axum::extract::Path((
                     fixture.reference.item_id.as_str().to_owned(),
                     fixture.reference.file_id.as_str().to_owned(),
                     request.clone(),
                 )),
+                None,
                 axum::body::Body::from(fixture.request.clone()),
             )
             .await
@@ -3094,7 +3400,7 @@ mod tests {
         let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");
         unsupported["session"]["previous_session_id"] = json!(Uuid::new_v4());
         unsupported["session"]["request_id"] = json!(Uuid::new_v4());
-        let denied = start(
+        let denied = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -3121,7 +3427,7 @@ mod tests {
             .expect("registry")
             .iter()
             .all(|entry| entry.actual_finished()));
-        let response = start(
+        let response = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -3668,7 +3974,7 @@ mod tests {
             time::{Duration, Instant},
         };
         let fixture = real_source_start_fixture().await;
-        let response = start(
+        let response = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -3878,7 +4184,7 @@ mod tests {
             time::{Duration, Instant},
         };
         let fixture = real_source_start_fixture().await;
-        let response = start(
+        let response = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -4247,7 +4553,7 @@ mod tests {
         assert!(entry.ending.lock().expect("End owner").is_none());
         // This is an actual actor-created metadata Body guard, not a projected
         // readiness flag. End cannot certify terminal settlement while held.
-        let held = start(
+        let held = fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
             axum::extract::Path((
@@ -4975,7 +5281,7 @@ mod tests {
             plurx_core::transcode::EncoderCaps::default(),
             plurx_core::transcode::Pipeline::Cpu,
         ));
-        let unknown = Box::pin(start(
+        let unknown = Box::pin(fixture_start(
             axum::extract::State(untracked.clone()),
             rotated.clone(),
             axum::extract::Path((
@@ -5006,7 +5312,7 @@ mod tests {
         // Hold the actual returned HTTP Body, not an invented publication
         // flag. The actor cannot settle physical/body/SQL obligations while
         // the complete Start transport still owns this response guard.
-        let held = Box::pin(start(
+        let held = Box::pin(fixture_start(
             axum::extract::State((*fixture.state).clone()),
             rotated.clone(),
             axum::extract::Path((
@@ -5266,3 +5572,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sharing_source_adapter_tests.rs"]
 mod actor_adapter_tests;
+
+#[cfg(test)]
+#[path = "shared_source_forwarding_tests.rs"]
+mod actual_forwarding_tests;

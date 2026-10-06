@@ -255,18 +255,31 @@ impl TranscodeManager {
         state: Arc<crate::state::AppState>,
         assignment: SourceDispatchAssignment,
         activation: SourceSessionWriteAuthority,
+        ingress: SourceIngressAdmissionPermission,
         prepared: crate::http::shared_source_playback::direct::PreparedSourceDirect,
         deadline: Instant,
     ) -> Result<SourceViewerActor, SourceWorkerNoAdmission> {
         if !Arc::ptr_eq(&self.store, &state.store)
             || !prepared.matches_assignment(&assignment)
             || !activation.assignment().same_identity(&assignment)
+            || !ingress.assignment().same_identity(&assignment)
+            || ingress.registry_boot_id() != state.sharing.accepted_drivers.boot_id()
         {
             return Err(SourceWorkerNoAdmission::refused(
                 &assignment,
                 SourceWorkerError::Conflict,
             ));
         }
+        if ingress
+            .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+            .is_err()
+        {
+            return Err(SourceWorkerNoAdmission::refused(
+                &assignment,
+                SourceWorkerError::Unavailable,
+            ));
+        }
+        let registry_boot_id = state.sharing.accepted_drivers.boot_id();
         let mut registry = self.source_workers.entries.lock().expect("Source workers");
         if let Some(owner) = registry
             .iter()
@@ -291,11 +304,15 @@ impl TranscodeManager {
                 store: Arc::clone(&self.store),
                 membership: state.membership.clone(),
                 master: Arc::clone(&state.sharing.key),
+                registry_boot_id,
+                ingress,
             }),
+            retirement_deadline: Default::default(),
             direct: Some(Arc::new(prepared.into_direct_file())),
             state: std::sync::Mutex::new(SourceViewerState {
                 start: None,
                 retirement_requested: false,
+                retirement_mode: crate::sharing_connection_custody::DriverCloseMode::Drain,
                 settled: None,
                 finished: false,
                 bodies: 0,
@@ -491,7 +508,7 @@ impl TranscodeManager {
                         }
                         match owner.gate.current_owned(&owner.assignment).await {
                             Ok(proof) if owner.gate.renew_with(&owner.assignment, &proof).await.is_ok() => {},
-                            _ => break,
+                            _ => {owner.state.lock().expect("Source retirement cause").retirement_mode=crate::sharing_connection_custody::DriverCloseMode::Revoke;break},
                         }
                     }
                 }
@@ -500,6 +517,7 @@ impl TranscodeManager {
         actor.request_retirement();
         self.finish_source_owner(
             &owner,
+            &state,
             shutdown,
             unowned_existing,
             None,

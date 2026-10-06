@@ -362,7 +362,14 @@ async fn authorized<T: Backend>(
     Ok(rows.first().map(String::as_str) == Some("1"))
 }
 
-fn fresh_statements(guard: &str, values: Vec<Value>) -> Vec<Statement> {
+fn fresh_statements(
+    guard: &str,
+    values: Vec<Value>,
+    routing_identity: &str,
+    routing_json: &str,
+) -> Vec<Statement> {
+    let routing_identity = quote(routing_identity);
+    let routing_json = quote(routing_json);
     let exact="b.incarnation_id=$10 AND b.owner_key=$4 AND b.share_grant_id=$5 AND b.share_viewer_key=$6 AND b.request_id=$7 AND b.request_fingerprint=$8 AND b.playback_id=$9 AND b.source_server_id=$11 AND b.catalogue_epoch=$12 AND b.library_id=$13 AND b.item_id=$14 AND b.file_id=$15 AND b.file_revision=$16 AND b.reservation_state='held' AND b.dispatch_generation=0 AND b.start_resolved_at_ms IS NULL";
     vec![
       (format!("{OCCUPANCY} INSERT INTO sharing_source_session_bindings(incarnation_id,owner_key,share_grant_id,share_viewer_key,request_id,request_fingerprint,playback_id,source_server_id,catalogue_epoch,library_id,item_id,file_id,file_revision,reservation_state,start_resolved_at_ms,dispatch_generation,created_at_ms)
@@ -381,11 +388,12 @@ fn fresh_statements(guard: &str, values: Vec<Value>) -> Vec<Statement> {
       (format!("INSERT INTO media_session_requests(owner_key,principal_kind,user_id,share_grant_id,share_viewer_key,request_id,request_fingerprint,playback_id,state,claim_expires_at_ms,incarnation_id,owner_node_id,response_json,updated_at_ms)
  SELECT b.owner_key,'sharing',NULL,b.share_grant_id,b.share_viewer_key,b.request_id,b.request_fingerprint,b.playback_id,'starting',$19,b.incarnation_id,NULL,NULL,$3 FROM sharing_source_session_bindings b
  WHERE {exact} AND {guard} AND $19>$3 ON CONFLICT(owner_key,request_id) DO NOTHING"),values.clone()),
+      (format!("INSERT INTO sharing_ingress_custody(principal_kind,incarnation_id,owner_identity,custody_json,revision) SELECT 'source',$10,{routing_identity},{routing_json},1 FROM sharing_source_session_bindings b WHERE {exact} AND {guard} AND EXISTS(SELECT 1 FROM media_session_requests r WHERE r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.owner_node_id IS NULL AND r.state='starting')"),values.clone()),
       // Only this named NOT NULL failure is recognized as a lost guarded
       // proposal. Every other database failure remains an error.
       (format!("INSERT INTO sharing_source_session_bindings(incarnation_id,owner_key,share_grant_id,share_viewer_key,request_id,request_fingerprint,playback_id,source_server_id,catalogue_epoch,library_id,item_id,file_id,file_revision,reservation_state,start_resolved_at_ms,dispatch_generation,created_at_ms)
  SELECT NULL,$4,$5,$6,$7,$8,$9,$11,$12,$13,$14,$15,$16,'held',NULL,0,$3
- WHERE NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key AND r.state='starting' AND r.owner_node_id IS NULL AND r.claim_expires_at_ms=$19 WHERE {exact} AND {guard})"),values),
+ WHERE NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key AND r.state='starting' AND r.owner_node_id IS NULL AND r.claim_expires_at_ms=$19 WHERE {exact} AND {guard} AND EXISTS(SELECT 1 FROM sharing_ingress_custody c WHERE c.principal_kind='source' AND c.incarnation_id=b.incarnation_id AND c.owner_identity={routing_identity} AND c.custody_json={routing_json} AND c.revision=1))"),values),
     ]
 }
 
@@ -611,12 +619,18 @@ async fn assign_dispatch_prepared<T: Backend>(
     {
         return Ok(DispatchPreparedRead::Unavailable);
     }
+    let Some(routing) =
+        super::sharing_source_ingress_custody::routing(backend, binding, &current.node).await?
+    else {
+        return Ok(DispatchPreparedRead::Unavailable);
+    };
     let request = SourceSessionRequest {
         principal: binding.principal.clone(),
         request_id: binding.request_id.clone(),
         request_fingerprint: binding.request_fingerprint.clone(),
         playback_id: binding.playback_id.clone(),
         incarnation_id: binding.incarnation_id,
+        ingress_registry_boot_id: routing.registry_boot_id,
         now_ms: now,
         claim_expires_at_ms: current.expires,
         credential_hash: current.hash,
@@ -813,12 +827,22 @@ async fn prepare_publication_route<T: Backend>(
         if !matches!(current.pending, 0 | 1) || !is_hash(&current.hash) {
             return Ok(SourcePublicationAuthorityRead::Unavailable);
         }
+        let Some(routing) = super::sharing_source_ingress_custody::routing(
+            backend,
+            binding,
+            assignment.owner_node_id(),
+        )
+        .await?
+        else {
+            return Ok(SourcePublicationAuthorityRead::Unavailable);
+        };
         let request = SourceSessionRequest {
             principal: binding.principal.clone(),
             request_id: binding.request_id.clone(),
             request_fingerprint: binding.request_fingerprint.clone(),
             playback_id: binding.playback_id.clone(),
             incarnation_id: binding.incarnation_id,
+            ingress_registry_boot_id: routing.registry_boot_id,
             now_ms: now,
             claim_expires_at_ms: current.expires,
             credential_hash: current.hash,
@@ -1042,7 +1066,8 @@ async fn settle_assigned_without_activation<T: Backend>(
     );
     let exact = "incarnation_id=$1 AND owner_key=$2 AND share_grant_id=$3 AND share_viewer_key=$4 AND request_id=$5 AND request_fingerprint=$6 AND playback_id=$7 AND source_server_id=$8 AND catalogue_epoch=$9 AND library_id=$10 AND item_id=$11 AND file_id=$12 AND file_revision=$13 AND dispatch_generation=$15";
     let request = "owner_key=$2 AND principal_kind='sharing' AND user_id IS NULL AND share_grant_id=$3 AND share_viewer_key=$4 AND request_id=$5 AND request_fingerprint=$6 AND playback_id=$7 AND incarnation_id=$1 AND owner_node_id=$14";
-    let condition = format!("({}) AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='held' AND start_resolved_at_ms IS NULL)
+    let custody = format!("EXISTS(SELECT 1 FROM sharing_ingress_custody c WHERE c.principal_kind='source' AND c.incarnation_id=$1 AND c.owner_identity='{}' AND json_extract(c.custody_json,'$.sealed')=1 AND NOT EXISTS(SELECT 1 FROM json_each(c.custody_json,'$.slots') slot WHERE json_extract(slot.value,'$.closed_confirmation') IS NULL))", assignment.custody_identity());
+    let condition = format!("({}) AND {custody} AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='held' AND start_resolved_at_ms IS NULL)
         AND EXISTS(SELECT 1 FROM media_session_requests WHERE {request} AND state IN('starting','failed') AND updated_at_ms=$18)
         AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE (incarnation_id=$1 OR(owner_key=$2 AND request_id=$5)) AND NOT({request} AND state IN('starting','failed')))
         AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$1)
@@ -1207,7 +1232,8 @@ async fn settle_terminal_worker<T: Backend>(
     {
         return Ok(SourceReleaseOutcome::ExactReplay);
     }
-    let condition=format!("{shape} AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='held') AND EXISTS(SELECT 1 FROM media_sessions WHERE {route}) AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$1 AND NOT({route})) AND EXISTS(SELECT 1 FROM media_session_requests WHERE {request} AND state IN('starting','failed','resolved') AND updated_at_ms=$18) AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE (incarnation_id=$1 OR(owner_key=$2 AND request_id=$5)) AND NOT({request} AND state IN('starting','failed','resolved'))) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$1 AND NOT({lease_guard})) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id=$1 AND consumer_epoch<>$20) AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=$1) AND NOT EXISTS(SELECT 1 FROM library_channel_session_recipes WHERE incarnation_id=$1) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers WHERE current_incarnation_id=$1)");
+    let custody = format!("EXISTS(SELECT 1 FROM sharing_ingress_custody c WHERE c.principal_kind='source' AND c.incarnation_id=$1 AND c.owner_identity='{}' AND json_extract(c.custody_json,'$.sealed')=1 AND NOT EXISTS(SELECT 1 FROM json_each(c.custody_json,'$.slots') slot WHERE json_extract(slot.value,'$.closed_confirmation') IS NULL))", assignment.custody_identity());
+    let condition=format!("{shape} AND {custody} AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='held') AND EXISTS(SELECT 1 FROM media_sessions WHERE {route}) AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$1 AND NOT({route})) AND EXISTS(SELECT 1 FROM media_session_requests WHERE {request} AND state IN('starting','failed','resolved') AND updated_at_ms=$18) AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE (incarnation_id=$1 OR(owner_key=$2 AND request_id=$5)) AND NOT({request} AND state IN('starting','failed','resolved'))) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$1 AND NOT({lease_guard})) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id=$1 AND consumer_epoch<>$20) AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=$1) AND NOT EXISTS(SELECT 1 FROM library_channel_session_recipes WHERE incarnation_id=$1) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers WHERE current_incarnation_id=$1)");
     let statements=vec![
         (format!("{input}INSERT INTO sharing_source_session_bindings(incarnation_id) SELECT NULL WHERE NOT({condition})"),values.clone()),
         (format!("{input}DELETE FROM job_leases WHERE resource='session:'||$1 AND ({lease_guard})"),values.clone()),
@@ -1451,11 +1477,67 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
         if let Some(row) = binding_row(self, &owner, &intent.request.request_id).await? {
             return replay(self, row, intent, &guard, values).await;
         }
+        let raft = i64::try_from(members.actual_local_raft_id()).map_err(|_| invalid())?;
+        let boot = intent.request.ingress_registry_boot_id;
+        let marker = format!("sharing_ingress_boot_v1:{boot}");
+        let rows=self.sharing_read("SELECT json_quote(n.node_id) AS payload FROM cluster_nodes n JOIN cluster_node_capabilities c ON c.node_id=n.node_id AND c.last_seen_at=n.last_seen_at WHERE n.raft_id=$1 AND n.removed_at IS NULL AND c.capability=$2 LIMIT 2",vec![raft.into(),marker.clone().into()]).await?;
+        let [node] = rows.as_slice() else {
+            return Ok(SourceClaimOutcome::Unavailable);
+        };
+        let node: String = serde_json::from_str(node).map_err(|_| invalid())?;
+        let mut routing = crate::sharing_ingress_custody::IngressCustodyState::default();
+        if routing.bind_source_routing(crate::sharing_ingress_custody::SourceIngressRouting {
+            owner_node_id: node.clone(),
+            registry_boot_id: boot,
+            initial_credential_hash: intent.request.credential_hash.clone(),
+        }) != crate::sharing_ingress_custody::CustodyMutation::Applied
+        {
+            return Err(invalid());
+        }
+        let PlaybackPrincipal::Sharing {
+            grant_id,
+            viewer_key,
+        } = &intent.request.principal
+        else {
+            return Err(invalid());
+        };
+        let identity = crate::sharing_source_sessions::custody_identity_fields([
+            owner.clone(),
+            grant_id.to_string(),
+            viewer_key.as_str().to_owned(),
+            intent.request.request_id.clone(),
+            intent.request.request_fingerprint.clone(),
+            intent.request.playback_id.clone(),
+            intent.request.incarnation_id.to_string(),
+            node.clone(),
+            "1".into(),
+            intent.witness.server.to_string(),
+            intent.witness.epoch.to_string(),
+            intent.witness.library.as_str().to_owned(),
+            intent.witness.item.as_str().to_owned(),
+            intent.witness.file.as_str().to_owned(),
+            intent.request.file_revision.as_str().to_owned(),
+        ]);
+        #[cfg(feature = "hiqlite-store")]
+        let ingress_floor = crate::cluster::membership::sharing_member_guard_predicate(
+            crate::cluster::membership::SharingMemberFloor::IngressCustody,
+            1,
+            2,
+            3,
+        );
+        #[cfg(not(feature = "hiqlite-store"))]
+        let ingress_floor = "0".to_owned();
+        let guard=format!("({guard}) AND ({ingress_floor}) AND EXISTS(SELECT 1 FROM cluster_nodes n JOIN cluster_node_capabilities c ON c.node_id=n.node_id AND c.last_seen_at=n.last_seen_at WHERE n.raft_id={raft} AND n.node_id={} AND n.removed_at IS NULL AND c.capability={})",quote(&node),quote(&marker));
         match self
-            .sharing_txn(fresh_statements(&guard, values.clone()))
+            .sharing_txn(fresh_statements(
+                &guard,
+                values.clone(),
+                &identity,
+                &routing.encode()?,
+            ))
             .await
         {
-            Ok(counts) if counts.as_slice() == [1, 1, 0] => {
+            Ok(counts) if counts.as_slice() == [1, 1, 1, 0] => {
                 let row = binding_row(self, &owner, &intent.request.request_id)
                     .await?
                     .ok_or_else(invalid)?;
@@ -1533,7 +1615,9 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
             receipt.clone().into(),
         ];
         let exact="incarnation_id=$1 AND owner_key=$2 AND share_grant_id=$3 AND share_viewer_key=$4 AND request_id=$5 AND request_fingerprint=$6 AND playback_id=$7 AND source_server_id=$8 AND catalogue_epoch=$9 AND library_id=$10 AND item_id=$11 AND file_id=$12 AND file_revision=$13";
-        let release=format!("UPDATE sharing_source_session_bindings SET reservation_state='released',start_resolved_at_ms=$14,released_at_ms=$14,release_fingerprint=$15 WHERE {exact} AND reservation_state='held' AND dispatch_generation=0 AND start_resolved_at_ms IS NULL AND ({})
+        let custody = "EXISTS(SELECT 1 FROM sharing_ingress_custody c WHERE c.principal_kind='source' AND c.incarnation_id=$1 AND json_extract(c.custody_json,'$.source_routing') IS NOT NULL AND json_extract(c.custody_json,'$.sealed')=1 AND NOT EXISTS(SELECT 1 FROM json_each(c.custody_json,'$.slots') slot WHERE json_extract(slot.value,'$.closed_confirmation') IS NULL))";
+        let seal=format!("UPDATE sharing_ingress_custody SET custody_json=json_set(custody_json,'$.sealed',json('true')),revision=revision+1 WHERE principal_kind='source' AND incarnation_id=$1 AND json_extract(custody_json,'$.source_routing') IS NOT NULL AND json_extract(custody_json,'$.sealed')=0 AND json_array_length(custody_json,'$.slots')=0 AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='held' AND dispatch_generation=0 AND start_resolved_at_ms IS NULL AND $14>0 AND length($15)=64)");
+        let release=format!("UPDATE sharing_source_session_bindings SET reservation_state='released',start_resolved_at_ms=$14,released_at_ms=$14,release_fingerprint=$15 WHERE {exact} AND {custody} AND reservation_state='held' AND dispatch_generation=0 AND start_resolved_at_ms IS NULL AND ({})
  AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$1)
  AND NOT EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$1)
  AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id=$1)
@@ -1543,9 +1627,13 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
  AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE (incarnation_id=$1 OR(owner_key=$2 AND request_id=$5)) AND NOT(owner_key=$2 AND principal_kind='sharing' AND user_id IS NULL AND share_grant_id=$3 AND share_viewer_key=$4 AND request_id=$5 AND request_fingerprint=$6 AND playback_id=$7 AND incarnation_id=$1 AND owner_node_id IS NULL AND state IN('starting','failed')))",schema_guard());
         let settle=format!("UPDATE media_session_requests SET state='failed',updated_at_ms=$14 WHERE owner_key=$2 AND request_id=$5 AND incarnation_id=$1 AND state='starting' AND owner_node_id IS NULL AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='released' AND released_at_ms=$14 AND release_fingerprint=$15)");
         let counts = self
-            .sharing_txn(vec![(release, values.clone()), (settle, values.clone())])
+            .sharing_txn(vec![
+                (seal, values.clone()),
+                (release, values.clone()),
+                (settle, values.clone()),
+            ])
             .await?;
-        if counts.first() == Some(&1) {
+        if counts.get(1) == Some(&1) {
             return Ok(SourceReleaseOutcome::Released);
         }
         let rows=self.sharing_read(&format!("SELECT json_quote(count(*)) AS payload FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='released' AND release_fingerprint=$15 AND $14>0"),values).await?;

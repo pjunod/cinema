@@ -4320,9 +4320,11 @@ impl PreparedSourcePlayback {
 }
 
 #[allow(dead_code)]
-pub(crate) async fn prepare_source_playback(
+pub(crate) async fn prepare_source_playback<
+    H: super::super::shared_source_playback::forwarding::AuthenticationHeaders + Send + Sync + ?Sized,
+>(
     state: &AppState,
-    headers: &HeaderMap,
+    headers: &H,
     target: SourcePlaybackTarget,
     body: CreateSession,
 ) -> Result<PreparedSourcePlayback, ApiError> {
@@ -4367,11 +4369,8 @@ pub(crate) async fn prepare_source_playback(
         .ok_or_else(|| refused("caps"))?;
     super::super::stream::validate_device_caps(&caps)?;
     let (hash, grant) = super::super::shared_library::authority(state, headers).await?;
-    let viewer = headers
-        .get("cinemashare-viewer")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| refused("viewer_header"))?;
-    let principal = plurx_core::playback_principal::PlaybackPrincipal::sharing(grant, viewer)
+    let viewer = super::super::shared_source_playback::viewer_hash(headers)?;
+    let principal = plurx_core::playback_principal::PlaybackPrincipal::sharing(grant, &viewer)
         .map_err(|_| refused("viewer_shape"))?;
     let read_witness = || {
         state.store.source_item_file_witness(
