@@ -667,6 +667,7 @@ mod tests {
                 SharingNetworkConfig {
                     bind: "127.0.0.1:32444".parse().expect("bind"),
                     egress: SharingEgressConfig::LocalAddress { address },
+                    ..SharingNetworkConfig::default()
                 },
             ));
             let receiver = tokio::net::TcpListener::bind((address, 0))

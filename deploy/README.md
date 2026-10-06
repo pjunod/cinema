@@ -67,6 +67,69 @@ named the same way — every node of one logical server reports the same
 apart. A node with neither falls back to the first twelve characters of its
 node id, which is the only case where a picker shows a UUID.
 
+### Sharing uses an explicit Linux bridge profile
+
+The ordinary Compose service stays on Docker networking. Shared libraries use
+a separate TLS listener; the default node-local `host_loopback` profile binds
+only loopback. To make that listener reachable through Docker's loopback-only
+host publication, select `docker_bridge` explicitly in a node-local TOML file.
+The hosting profile does not change the saved Settings → Developer → Sharing
+switch or make readiness a condition of saving it.
+
+Start from [the opt-in Compose recipe](docker-compose.sharing.example.yml) and
+[the matching node-local config](sharing-bridge.example.toml). Choose a free
+RFC1918 bridge subnet and keep its static container address identical to
+`sharing.egress.address`. Preserve any existing server, storage and cluster
+sections when preparing the config file.
+
+```sh
+cp deploy/docker-compose.sharing.example.yml deploy/docker-compose.sharing.yml
+cp deploy/sharing-bridge.example.toml deploy/sharing-bridge.toml
+$EDITOR deploy/sharing-bridge.toml deploy/docker-compose.sharing.yml
+export COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.sharing.yml
+make docker-startup-budget-check  # renders Compose and checks the chosen bridge recipe
+```
+
+The recipe binds the process to `0.0.0.0:32444` inside its namespace and
+publishes exactly `127.0.0.1:32444:32444/tcp` on the host. It mounts the TOML
+file read-only at `/etc/plurx/plurx.toml`, keeps the ordinary app network,
+and adds an explicit bridge with a static IPv4 address. Do not publish the
+sharing port on a host wildcard or host Tailscale address. Do not move
+`plurxd` to host networking or mount the tailscaled socket.
+
+The existing `make docker-up` and `make docker-image-up` preflight checks
+readable node-local `docker_bridge` config against the rendered publication,
+static address, bridge declaration and read-only config mount. A failure
+refuses that deployment before replacement. This is configuration evidence:
+it cannot prove the running host's port isolation, firewall, Tailscale route,
+or no-WAN behavior. An opaque config baked into an image or supplied through
+an unreadable mount is outside this recipe's evidence.
+
+Provision a node-only TLS identity in the existing data directory before
+starting Sharing. The CLI refuses to overwrite existing identity files:
+
+```sh
+cd deploy
+docker compose run --rm --no-deps plurxd sharing init-tls --key-directory /var/lib/plurx/sharing-tls
+```
+
+The host operator configures raw TCP Serve to preserve the Cinema TLS pin:
+
+```sh
+tailscale serve --bg --tcp=32443 tcp://127.0.0.1:32444
+tailscale serve status --json
+```
+
+Outbound peer sockets bind the configured container address and still accept
+only verified numeric Tailscale destinations, pinned TLS and authenticated
+Source identities. The host must provide and qualify forwarding/SNAT from
+that bridge to Tailscale. Qualify from inside the actual container, including
+rejection of a WAN route when Tailscale is unavailable. If private name
+resolution cannot reach Tailscale's resolver, provision the verified numeric
+endpoint hint through Sharing administration. There is no public DNS,
+redirect or environment-proxy fallback. Network qualification remains open
+until its runtime receipt exists; choosing this profile does not certify it.
+
 ### Writable media is a narrow, explicit opt-in
 
 Every shipped media mount remains read-only. Keep permanent Dolby Vision

@@ -485,5 +485,50 @@ class DockerStartupBudgetTests(unittest.TestCase):
         self.assertIn("start period", result.stderr)
 
 
+class DockerSharingBridgeRecipeTests(unittest.TestCase):
+    def bridge_document(self, path):
+        document = compose_document(environment={"PLURX_CONFIG": "/etc/plurx/plurx.toml"}, volumes=[
+            {"type": "bind", "source": str(path), "target": "/etc/plurx/plurx.toml", "read_only": True},
+        ])
+        service = document["services"]["plurxd"]
+        service["ports"] = [{"target": 32444, "published": "32444", "host_ip": "127.0.0.1", "protocol": "tcp"}]
+        service["networks"] = {"sharing": {"ipv4_address": "172.30.44.2"}}
+        document["networks"] = {"sharing": {"driver": "bridge"}}
+        return document
+
+    def test_bridge_sharing_requires_loopback_publication_and_static_local_egress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plurx.toml"
+            path.write_text((ROOT / "deploy/sharing-bridge.example.toml").read_text())
+            document = self.bridge_document(path)
+            CHECKER["validate_document"](document)
+            service = document["services"]["plurxd"]
+            service["ports"][0]["host_ip"] = "0.0.0.0"
+            with self.assertRaisesRegex(BudgetError, "127.0.0.1"):
+                CHECKER["validate_document"](document)
+            service["ports"][0]["host_ip"] = "127.0.0.1"
+            service["networks"]["sharing"]["ipv4_address"] = "172.30.44.3"
+            with self.assertRaisesRegex(BudgetError, "static address"):
+                CHECKER["validate_document"](document)
+
+    def test_bridge_sharing_rejects_host_network_and_writable_node_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plurx.toml"
+            path.write_text((ROOT / "deploy/sharing-bridge.example.toml").read_text())
+            document = self.bridge_document(path)
+            service = document["services"]["plurxd"]
+            service["network_mode"] = "host"
+            with self.assertRaisesRegex(BudgetError, "network_mode"):
+                CHECKER["validate_document"](document)
+            del service["network_mode"]
+            service["volumes"][0]["read_only"] = False
+            with self.assertRaisesRegex(BudgetError, "read-only"):
+                CHECKER["validate_document"](document)
+            service["volumes"][0]["read_only"] = True
+            document["networks"]["sharing"]["external"] = True
+            with self.assertRaisesRegex(BudgetError, "explicit Compose bridge"):
+                CHECKER["validate_document"](document)
+
+
 if __name__ == "__main__":
     unittest.main()

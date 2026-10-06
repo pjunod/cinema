@@ -12149,6 +12149,7 @@ mod tests {
         let network = SharingNetworkConfig {
             bind: "127.0.0.1:32444".parse().expect("unused listener config"),
             egress: SharingEgressConfig::LocalAddress { address },
+            ..SharingNetworkConfig::default()
         };
         let restart = |state: &AppState| {
             Arc::new(crate::sharing::SharingManager::new(

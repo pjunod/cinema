@@ -7,6 +7,7 @@ import argparse
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import json
+import ipaddress
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
@@ -546,11 +547,79 @@ def start_period_for_deployment(
     )
 
 
+def validate_sharing_bridge_recipe(document: dict[str, Any], service: dict[str, Any]) -> None:
+    """Validate an explicit readable bridge recipe, not runtime host isolation."""
+    environment = service_environment(service)
+    explicit = service_config_argument(service) or environment.get(CONFIG_ENV, "")
+    names = (explicit,) if explicit else DEFAULT_CONFIG_PATHS
+    working = str(service.get("working_dir") or "/")
+    configuration = None
+    wanted = None
+    for name in names:
+        candidate = container_path(name, working)
+        mapped, opaque = mapped_config_file(document, service, candidate)
+        if opaque:
+            # The ordinary startup-budget checker owns opaque configurations.
+            # This cannot claim evidence for a hidden listener profile.
+            return
+        if mapped is not None and mapped.is_file():
+            try:
+                configuration = tomllib.loads(mapped.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError) as error:
+                raise BudgetError(f"cannot read sharing node config {mapped}: {error}") from error
+            wanted = candidate
+            break
+    if configuration is None:
+        return
+    sharing = configuration.get("sharing", {})
+    if not isinstance(sharing, dict) or sharing.get("listener_profile", "host_loopback") != "docker_bridge":
+        return
+    if service.get("network_mode"):
+        raise BudgetError("Docker Sharing bridge profile forbids network_mode")
+    egress = sharing.get("egress", {})
+    try:
+        address = ipaddress.IPv4Address(egress.get("address", ""))
+        private = any(address in ipaddress.IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+        bind_ip, separator, port = str(sharing.get("bind", "")).rpartition(":")
+        listener = ipaddress.IPv4Address(bind_ip)
+        target = int(port)
+    except (ValueError, AttributeError) as error:
+        raise BudgetError("Docker Sharing needs an IPv4 bind and concrete local_address egress") from error
+    if not private or egress.get("mode") != "local_address" or listener not in (address, ipaddress.IPv4Address("0.0.0.0")) or not 1 <= target <= 65535:
+        raise BudgetError("Docker Sharing bind/egress does not match the explicit bridge profile")
+    matches = [port for port in service.get("ports", []) if isinstance(port, dict) and port.get("target") == target]
+    if len(matches) != 1 or matches[0].get("host_ip") != "127.0.0.1" or matches[0].get("protocol", "tcp") != "tcp":
+        raise BudgetError("Docker Sharing must publish its listener exactly once on host 127.0.0.1 over TCP")
+    try:
+        published = int(matches[0].get("published", ""))
+    except (ValueError, TypeError) as error:
+        raise BudgetError("Docker Sharing needs one explicit host port") from error
+    if not 1 <= published <= 65535:
+        raise BudgetError("Docker Sharing needs one explicit host port")
+    networks = service.get("networks", {})
+    declared = document.get("networks", {})
+    if not isinstance(networks, dict) or not any(
+        isinstance(settings, dict) and settings.get("ipv4_address") == str(address)
+        and isinstance(declared.get(name), dict) and declared[name].get("driver") == "bridge"
+        and not declared[name].get("external")
+        for name, settings in networks.items()
+    ):
+        raise BudgetError("Docker Sharing egress must match a static address on an explicit Compose bridge")
+    readonly = any(
+        isinstance(volume, dict) and volume.get("type") == "bind" and volume.get("read_only") is True
+        and container_path(str(volume.get("target", "")), "/") == wanted
+        for volume in service.get("volumes", [])
+    )
+    if not readonly:
+        raise BudgetError("Docker Sharing node config must be an explicit read-only file bind")
+
+
 def validate_document(
     document: dict[str, Any], limits: SourceLimits | None = None
 ) -> Budget:
     limits = limits or load_source_limits()
     service = plurxd_service(document)
+    validate_sharing_bridge_recipe(document, service)
     health_seconds = resolved_health_seconds(service)
     (
         (chunk_seconds, chunk_source),
