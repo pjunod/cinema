@@ -5118,7 +5118,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
     private val directSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
         androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(tv.plurx.app.data.Net.capabilityClient))
     private var reachedTimeline = false
-    private var framePresented = false
+    private val frameEvidence = SharedFrameEvidence()
     private var retainedFramePresented = false
     private var authorizationObserver: Long? = null
     private var stopped = false
@@ -5130,26 +5130,30 @@ internal class SharedPlayerController(private val context: android.content.Conte
     private var successorSeekLanded = false
     private var successorFailed = false
     private var successorFirstFrameUnixMs: Long? = null
-    private val successorListener: androidx.media3.common.Player.Listener = object : androidx.media3.common.Player.Listener {
-        override fun onPlayerError(error: androidx.media3.common.PlaybackException) { successorFailed = true }
+    private var successorListener: androidx.media3.common.Player.Listener? = null
+    private fun successorListenerFor(expected: ExoPlayer): androidx.media3.common.Player.Listener = object : androidx.media3.common.Player.Listener {
+        override fun onPlayerError(error: androidx.media3.common.PlaybackException) { if (successor === expected) successorFailed = true }
         override fun onPositionDiscontinuity(old: androidx.media3.common.Player.PositionInfo, new: androidx.media3.common.Player.PositionInfo, reason: Int) {
-            if (reason == androidx.media3.common.Player.DISCONTINUITY_REASON_SEEK) successorSeekLanded = true
+            if (successor === expected && reason == androidx.media3.common.Player.DISCONTINUITY_REASON_SEEK) successorSeekLanded = true
         }
         override fun onRenderedFirstFrame() {
             // Only a frame rendered on the surface is proof; before the switch
             // the successor has none and cannot render.
-            if (retained != null && successorFirstFrameUnixMs == null) successorFirstFrameUnixMs = System.currentTimeMillis()
+            if (successor === expected && active === expected && retained != null && successorFirstFrameUnixMs == null) {
+                successorFirstFrameUnixMs = System.currentTimeMillis()
+                frameEvidence.frameRendered(frameEvidence.generation)
+            }
         }
     }
 
     private val renderer: SharedRenderer = object : SharedRenderer {
         override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) {
-            reachedTimeline = false; framePresented = false
+            reachedTimeline = false; bindActiveFrameEvidence()
             val media = MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build()
             active.setMediaItem(media, positionMs); active.prepare(); active.playWhenReady = playWhenReady
         }
         override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) {
-            reachedTimeline = false; framePresented = false
+            reachedTimeline = false; bindActiveFrameEvidence()
             active.setMediaSource(directSource.createMediaSource(MediaItem.fromUri(url)), positionMs); active.prepare(); active.playWhenReady = playWhenReady
         }
         override fun seekTo(positionMs: Long) = active.seekTo(positionMs)
@@ -5163,7 +5167,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
                 androidx.media3.common.Player.STATE_ENDED -> RenderState.ENDED
                 else -> RenderState.STARTING
             },
-            playbackRate = active.playbackParameters.speed.toDouble(), framePresented = framePresented,
+            playbackRate = active.playbackParameters.speed.toDouble(), framePresented = frameEvidence.presented,
         )
         override fun release() {
             dropSuccessor()
@@ -5178,7 +5182,8 @@ internal class SharedPlayerController(private val context: android.content.Conte
             successor = built
             try {
                 successorSeekLanded = false; successorFailed = false; successorFirstFrameUnixMs = null
-                built.addListener(successorListener)
+                successorListener = successorListenerFor(built)
+                built.addListener(requireNotNull(successorListener))
                 built.trackSelectionParameters = built.trackSelectionParameters.buildUpon()
                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !textEnabled).setSelectUndeterminedTextLanguage(textEnabled).build()
                 // Parked from the start: a successor that runs keeps whatever lead
@@ -5212,10 +5217,9 @@ internal class SharedPlayerController(private val context: android.content.Conte
             next.playbackParameters = previous.playbackParameters
             next.playWhenReady = previous.playWhenReady
             previous.playWhenReady = false
-            next.addListener(activeListener)
-            retained = previous; retainedFramePresented = framePresented
-            framePresented = false
+            retained = previous; retainedFramePresented = frameEvidence.presented
             active = next
+            bindActiveFrameEvidence(successorFirstFrameUnixMs != null)
             reachedTimeline = true
             surfacePlayer.value = next
         }
@@ -5223,18 +5227,19 @@ internal class SharedPlayerController(private val context: android.content.Conte
             val previous = retained ?: return
             val dropped = active
             dropped.removeListener(activeListener)
-            dropped.removeListener(successorListener)
+            successorListener?.let(dropped::removeListener)
             previous.playWhenReady = dropped.playWhenReady
             dropped.playWhenReady = false
-            previous.addListener(activeListener)
-            active = previous; framePresented = retainedFramePresented
+            active = previous
+            bindActiveFrameEvidence(retainedFramePresented)
             retained = null; successor = null
             surfacePlayer.value = previous
             retire(dropped)
         }
         override fun releasePredecessor() {
             val previous = retained ?: return
-            active.removeListener(successorListener)
+            if (successorFirstFrameUnixMs != null) frameEvidence.frameRendered(frameEvidence.generation)
+            successorListener?.let(active::removeListener); successorListener = null
             retained = null; successor = null
             retire(previous)
         }
@@ -5246,7 +5251,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
         val next = successor ?: return
         if (next === active) return
         successor = null
-        next.removeListener(successorListener)
+        successorListener?.let(next::removeListener); successorListener = null
         next.release()
     }
 
@@ -5266,14 +5271,24 @@ internal class SharedPlayerController(private val context: android.content.Conte
     val owner: SharedPlaybackOwner = SharedPlaybackOwner(scope, { tv.plurx.app.data.SharedDecisionClient.create() }, renderer,
         preparedHandoff = vm.preferences.value.preparedReplacement)
 
-    private val activeListener: androidx.media3.common.Player.Listener = object : androidx.media3.common.Player.Listener {
-        override fun onRenderedFirstFrame() { framePresented = true }
+    private var activeListener = activeListenerFor(active, frameEvidence.generation)
+    private fun bindActiveFrameEvidence(alreadyPresented: Boolean = false) {
+        active.removeListener(activeListener)
+        val generation = frameEvidence.attach(alreadyPresented)
+        activeListener = activeListenerFor(active, generation)
+        active.addListener(activeListener)
+    }
+    private fun activeListenerFor(expected: ExoPlayer, generation: Long): androidx.media3.common.Player.Listener = object : androidx.media3.common.Player.Listener {
+        private fun current() = active === expected && frameEvidence.accepts(generation)
+        override fun onRenderedFirstFrame() { if (current()) frameEvidence.frameRendered(generation) }
         override fun onPlaybackStateChanged(state: Int) {
+            if (!current()) return
             if (state == androidx.media3.common.Player.STATE_READY && !reachedTimeline) { reachedTimeline = true; owner.timelineReached() }
-            if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { if (!stopped) { stop(watched = true); ended.value = true } }
+            if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { if (!stopped && current()) { stop(watched = true); ended.value = true } }
         }
-        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { playing.value = playWhenReady }
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { if (current()) playing.value = playWhenReady }
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            if (!current()) return
             val status = generateSequence(error.cause) { it.cause }
                 .filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>().firstOrNull()?.responseCode
             owner.rendererFailed(status, error.message)

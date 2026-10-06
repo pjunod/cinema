@@ -55,6 +55,25 @@ class SharedPlaybackOwnerTest {
         assertEquals("delete ${f.session(1)}", f.log.last())
     }
 
+    @Test fun frameEvidenceCarriesPreparedProofAndRejectsOldAttachmentCallbacks() {
+        val evidence = SharedFrameEvidence()
+        val predecessor = evidence.attach()
+        evidence.frameRendered(predecessor)
+        val retained = evidence.presented
+        val successor = evidence.attach(alreadyPresented = true)
+        assertTrue(evidence.presented) // No second callback is required after a proven switch.
+        val rollback = evidence.attach(alreadyPresented = retained)
+        assertTrue(evidence.presented)
+        assertFalse(evidence.accepts(successor))
+        val reopened = evidence.attach()
+        evidence.frameRendered(predecessor)
+        evidence.frameRendered(successor)
+        evidence.frameRendered(rollback)
+        assertFalse(evidence.presented) // Late old-item callbacks cannot save a new session's zero.
+        evidence.frameRendered(reopened)
+        assertTrue(evidence.presented)
+    }
+
     @Test fun seekPauseAndPlayReachTheRendererOnlyAfterBAccepts(): Unit = runBlocking {
         val f = SharedFixture("201"); f.login()
         val renderer = Renderer(f.log)
