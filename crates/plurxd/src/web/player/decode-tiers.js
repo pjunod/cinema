@@ -1075,12 +1075,23 @@ function choosePlayRoute(attempt,decided,prepared,initialAudio){
     &&preBurn==null&&decision.method==='direct_play'&&initialRoute==='direct'){
     initialRoute='shared_direct';
   }else if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"){
+    // A burn always encodes (the Source owns its sidecar and fonts), and an
+    // HDR10/HLG grade is the Source's own answer to this browser's caps.
+    // Dolby Vision is not built for shared playback: not preserved, not
+    // converted, and a Dolby Vision source is never re-encoded or burned.
     const grade=decision.delivered_dynamic_range;
-    const supported=decision.method==='transcode'
+    const encoded=decision.method==='transcode'||preBurn!=null;
+    const supported=encoded
       ?!noSegments()&&(nativeHls||!!(window.Hls&&Hls.isSupported())):hlsAvailable;
-    if(preBurn!=null||!supported||grade&&grade!=='sdr'||decision.preserve_dolby_vision===true){
+    if(grade==='dolby_vision'||decision.preserve_dolby_vision===true||decision.convert_dolby_vision===true
+      ||decision.source?.hdr==='dolby_vision'&&encoded){
+      failPreparation(Object.assign(new Error("Dolby Vision is not available for shared playback yet."),{code:"sharing_start_dolby_vision_unsupported"}),attempt);return null;
+    }
+    if(!supported||grade&&!['sdr','hdr10','hlg'].includes(grade)){
       failPreparation(Object.assign(new Error("This shared delivery is not available yet."),{code:"sharing_start_unsupported"}),attempt);return null;
     }
+    // A copy decision with a burn becomes a transcode just below, exactly as
+    // it does for a local file.
     initialRoute=decision.method==='transcode'?'transcode_hls':'copy_hls';
   }
   // A burn is a transcode whatever the plan said. The server's plan is a remux

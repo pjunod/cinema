@@ -120,6 +120,26 @@ pub(crate) fn decode_source_start_response(
     DecodedSourceHlsStart::parse(bytes, expected)
 }
 
+/// B's own check of a decoded Source Start against the request it retained:
+/// an HDR range is accepted only when the player's own caps document — the
+/// one B forwarded, unchanged — presents HDR. B never re-derives a decision;
+/// it only refuses a delivery its viewer did not say it can show.
+pub(crate) fn delivered_range_presentable(request_json: &str, response: &StartResponse) -> bool {
+    let Some(caps) = serde_json::from_str::<serde_json::Value>(request_json)
+        .ok()
+        .and_then(|request| request.get("caps").cloned())
+        .and_then(|caps| serde_json::from_value::<plurx_core::playback::DeviceCaps>(caps).ok())
+    else {
+        return false;
+    };
+    let profile = plurx_core::playback::DeviceProfile::from_caps_v2(&caps);
+    match response.delivered_dynamic_range.as_deref() {
+        None | Some("sdr") => true,
+        Some("hdr10" | "hlg") => profile.supports_hdr,
+        Some(_) => false,
+    }
+}
+
 fn v4(id: Uuid) -> bool {
     id.get_version_num() == 4 && id.get_variant() == Variant::RFC4122 && !id.is_nil()
 }
@@ -174,6 +194,16 @@ fn validate_response(response: &StartResponse, incarnation: Uuid) -> Result<()> 
     {
         return Err(SharingResourceUnsupported);
     }
+    // Closed dynamic-range vocabulary. A shared Start never carries Dolby
+    // Vision: the Source refuses every Dolby Vision delivery before a claim,
+    // so a profile or a `dolby_vision` range here is a protocol violation.
+    if !matches!(
+        response.delivered_dynamic_range.as_deref(),
+        None | Some("sdr" | "hdr10" | "hlg")
+    ) || response.delivered_dolby_vision_profile.is_some()
+    {
+        return Err(SharingResourceUnsupported);
+    }
     if let Some(status) = &response.quality_catalog_status {
         let decoded: CatalogStatus =
             serde_json::from_value(status.clone()).map_err(|_| SharingResourceUnsupported)?;
@@ -209,7 +239,7 @@ mod tests {
             "session_id":session,"playlist_url":format!("/api/v1/hls/{session}/index.m3u8?native=1&subtitle=2"),
             "duration_ms":100000,"start_seconds":30.0,"media_origin_ms":29800,"height":2160,"encoder":"fixture-encoder","vod":true,
             "ladder":[{"height":2160,"total_kbps":22000,"peak_kbps":32000}],"prior_kbps":50000,
-            "delivered_dynamic_range":"dolby_vision","delivered_dolby_vision_profile":8,"plan_notes":["fixture override"]
+            "delivered_dynamic_range":"hdr10","plan_notes":["fixture override"]
         })).expect("whole actual HTTP DTO");
         response.control = crate::playback_control::ControlBootstrap::new(
             &session.to_string(),
@@ -244,6 +274,71 @@ mod tests {
             response.control.expect("control").generation,
             incarnation.to_string()
         );
+    }
+    #[test]
+    fn sharing_start_decoder_closes_dynamic_range_and_refuses_dolby_vision() {
+        let (expected, good) = fixture();
+        for range in ["sdr", "hdr10", "hlg"] {
+            let mut v = good.clone();
+            v["response"]["delivered_dynamic_range"] = json!(range);
+            assert!(decode(&v, &expected).is_ok(), "{range}");
+        }
+        let mut absent = good.clone();
+        absent["response"]
+            .as_object_mut()
+            .expect("response")
+            .remove("delivered_dynamic_range");
+        assert!(decode(&absent, &expected).is_ok());
+        for range in ["dolby_vision", "HDR10", "pq", ""] {
+            let mut v = good.clone();
+            v["response"]["delivered_dynamic_range"] = json!(range);
+            assert!(decode(&v, &expected).is_err(), "{range}");
+        }
+        for profile in [5, 7, 8] {
+            let mut v = good.clone();
+            v["response"]["delivered_dolby_vision_profile"] = json!(profile);
+            assert!(decode(&v, &expected).is_err(), "profile {profile}");
+        }
+    }
+    #[test]
+    fn sharing_start_receiver_accepts_hdr_only_when_the_retained_caps_present_it() {
+        let (_, good) = fixture();
+        let response: StartResponse =
+            serde_json::from_value(good["response"].clone()).expect("fixture response");
+        let request = |present: Value, display: Option<bool>| {
+            let mut caps = json!({"v":2,"video":[{"codec":"hevc","profiles":["main10"],"max_height":2160,"present":present}],"audio":["aac"],"containers":["mp4"],"transports":["hls"]});
+            if let Some(hdr) = display {
+                caps["display"] = json!({"hdr":hdr});
+            }
+            json!({"caps":caps,"hdr10":true}).to_string()
+        };
+        let mut sdr = response.clone();
+        sdr.delivered_dynamic_range = Some("sdr".into());
+        assert!(delivered_range_presentable(&request(json!(["sdr"]), None), &sdr));
+        assert!(delivered_range_presentable(
+            &request(json!(["sdr", "pq"]), None),
+            &response
+        ));
+        // An SDR player, including one whose display overrides its decoder,
+        // is never handed an HDR stream, whatever the Source answered.
+        assert!(!delivered_range_presentable(
+            &request(json!(["sdr"]), None),
+            &response
+        ));
+        assert!(!delivered_range_presentable(
+            &request(json!(["sdr", "pq"]), Some(false)),
+            &response
+        ));
+        let mut hlg = response.clone();
+        hlg.delivered_dynamic_range = Some("hlg".into());
+        assert!(!delivered_range_presentable(&request(json!(["sdr"]), None), &hlg));
+        let mut dv = response.clone();
+        dv.delivered_dynamic_range = Some("dolby_vision".into());
+        assert!(!delivered_range_presentable(
+            &request(json!(["sdr", "pq"]), None),
+            &dv
+        ));
+        assert!(!delivered_range_presentable("{}", &sdr));
     }
     #[test]
     fn sharing_start_decoder_refuses_whole_dto_field_drift_and_wrong_shapes() {

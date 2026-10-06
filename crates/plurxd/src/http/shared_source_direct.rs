@@ -276,12 +276,32 @@ pub(super) async fn prepare_source_start(
             .await
             .map(|prepared| PreparedSourceStart::Direct(Box::new(prepared)));
     }
-    Box::pin(super::super::hls::prepare_source_playback(
+    let prepared = Box::pin(super::super::hls::prepare_source_playback(
         state, headers, reference, session,
     ))
     .await
-    .map(|prepared| PreparedSourceStart::Hls(Box::new(prepared)))
-    .map_err(|_| SourceStartFailure::Unavailable)
+    .map_err(|error| match error {
+        // The shared planner's own refusal of a burn that would cost this
+        // session its HDR grade: a definite answer, not an outage.
+        ApiError::Unprocessable(_) => SourceStartFailure::Unsupported,
+        _ => SourceStartFailure::Unavailable,
+    })?;
+    // The delivery policy is decided here, before any claim, from the
+    // Source's own prepared request (the player's real caps through the
+    // shared planner) and its own scanned file facts. B is never trusted.
+    match crate::transcode::source_actor::source_delivery_refusal(
+        prepared.request(),
+        prepared.file(),
+        prepared.native_subtitles(),
+    ) {
+        Some(crate::transcode::source_actor::SourceDeliveryRefusal::DolbyVision) => {
+            Err(SourceStartFailure::DolbyVisionUnsupported)
+        }
+        Some(crate::transcode::source_actor::SourceDeliveryRefusal::Unsupported) => {
+            Err(SourceStartFailure::Unsupported)
+        }
+        None => Ok(PreparedSourceStart::Hls(Box::new(prepared))),
+    }
 }
 pub(super) async fn start_prepared_worker(
     state: std::sync::Arc<crate::state::AppState>,

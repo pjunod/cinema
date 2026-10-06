@@ -1254,11 +1254,17 @@ async fn run_owner(
     if entry.stop.is_cancelled() {
         return Err(ReceiverStartError::Unresolved);
     }
-    // The presentation received must be the one this recipe asked for.
+    // The presentation received must be the one this recipe asked for, and
+    // an HDR grade must be one the viewer's own retained caps present.
     if entry.direct != received.direct().is_some()
-        || received
-            .hls()
-            .is_some_and(|response| response.media_origin_ms != Some(0) || !response.vod)
+        || received.hls().is_some_and(|response| {
+            response.media_origin_ms != Some(0)
+                || !response.vod
+                || !crate::http::sharing_start_decode::delivered_range_presentable(
+                    &intent.recipe.request_json,
+                    response,
+                )
+        })
     {
         return Err(ReceiverStartError::Unresolved);
     }

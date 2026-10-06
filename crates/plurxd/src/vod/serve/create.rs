@@ -371,14 +371,16 @@ impl VodServe {
         deadline: Instant,
         encoding: Option<Arc<crate::vodencode::Encoding>>,
     ) -> Result<AdmittedSourceVodRendition, String> {
+        // A burn is always encoded; its sidecar is owned by the encoding the
+        // Source preparation built, never looked up here.
         if !source.matches_assignment(assignment)
             || (encoding.is_some()
-                != matches!(source.request().kind, SessionKind::Transcode { .. }))
-            || source.request().subtitle_burn.is_some()
+                != crate::transcode::source_actor::source_recipe_is_encoded(source.request()))
+            || encoding.as_ref().is_some_and(|encoding| {
+                source.request().subtitle_burn.is_some() != encoding.subtitle.is_some()
+            })
         {
-            return Err(
-                "Source VOD preparation requires its exact unburned recipe assignment".into(),
-            );
+            return Err("Source VOD preparation requires its exact recipe assignment".into());
         }
         // One live wait, bounded by the start deadline and the foreground
         // queue wait together. Either way the waiter stays registered across

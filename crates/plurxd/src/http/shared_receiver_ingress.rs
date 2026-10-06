@@ -124,6 +124,16 @@ fn parse_request(bytes: &[u8]) -> Result<RetainedRequest, ApiError> {
     }) {
         return Err(invalid());
     }
+    // A shared Dolby Vision delivery is not built yet. The Source refuses it
+    // with the same typed reason; B answers the viewer's explicit ask itself
+    // rather than dispatch work that can only be refused.
+    if typed.preserve_dolby_vision == Some(true) {
+        return Err(ApiError::typed(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            super::shared_source_playback::SHARING_START_DOLBY_VISION_UNSUPPORTED,
+            "Shared Dolby Vision playback is not available",
+        ));
+    }
     let caps = typed.caps.ok_or_else(invalid)?;
     super::stream::validate_device_caps(&caps)?;
     if caps.v != plurx_core::playback::DeviceCaps::VERSION || caps.is_empty() {

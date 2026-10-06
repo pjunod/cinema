@@ -242,12 +242,18 @@ where
 /// Freeze the live closure under `runtime_cache`, or reuse the environment
 /// another recipe froze from the same closure if it is still exactly as
 /// captured.
+///
+/// `execution` is a Source operation's owned child executor: when present,
+/// every proof child below runs as that operation's work (its permit,
+/// deadline, cancellation and per-spawn authority), never as an unowned
+/// capability probe.
 pub(crate) async fn freeze(
     runtime_cache: &Path,
     sources: FontSources<'_>,
+    execution: Option<&crate::transcode::source_preparation::SourceCommandExecutor<'_>>,
 ) -> (Result<Arc<FontEnvironment>, String>, FreezeCost) {
     let mut cost = FreezeCost::default();
-    let result = freeze_charged(runtime_cache, sources, &mut cost).await;
+    let result = freeze_charged(runtime_cache, sources, &mut cost, execution).await;
     (result, cost)
 }
 
@@ -271,6 +277,7 @@ async fn freeze_charged(
     runtime_cache: &Path,
     sources: FontSources<'_>,
     cost: &mut FreezeCost,
+    execution: Option<&crate::transcode::source_preparation::SourceCommandExecutor<'_>>,
 ) -> Result<Arc<FontEnvironment>, String> {
     if sources.fonts.is_empty() {
         return Err("Fontconfig listed no font files".to_owned());
@@ -337,6 +344,7 @@ async fn freeze_charged(
             },
             sources,
             cost,
+            execution,
         )
         .await?,
     );
@@ -374,6 +382,7 @@ async fn build(
     frozen: Frozen,
     sources: FontSources<'_>,
     cost: &mut FreezeCost,
+    execution: Option<&crate::transcode::source_preparation::SourceCommandExecutor<'_>>,
 ) -> Result<FontEnvironment, String> {
     let started = Instant::now();
     let materialised = {
@@ -402,7 +411,7 @@ async fn build(
     let probe = |command: tokio::process::Command, what: &'static str| {
         let started = Instant::now();
         async move {
-            let output = crate::ffmpeg::font_probe_output(command).await;
+            let output = crate::ffmpeg::font_probe_output(command, execution).await;
             (
                 output.map_err(|error| format!("{what}: {error}")),
                 started.elapsed(),

@@ -47,6 +47,9 @@ const SHARED_DECISION=(()=>{
     if(watch!=null)state.sequence=Math.max(state.sequence,integer(watch.sequence));return state;
   }
   function unsupported(){throw Object.assign(new Error("This shared playback change is not available yet."),{code:"sharing_start_unsupported"});}
+  // Shared Dolby Vision delivery is not built yet; the Source and B refuse it
+  // with this same typed reason, so the viewer is told why before any Start.
+  function dolbyVisionUnsupported(){throw Object.assign(new Error("Dolby Vision is not available for shared playback yet."),{code:"sharing_start_dolby_vision_unsupported"});}
   // A started session is never replaced in place: the Source stages no
   // successor. A fresh Start from a bound context -- a directed quality, audio
   // or subtitle change B declined with `preparation: none`, an expired direct
@@ -61,9 +64,13 @@ const SHARED_DECISION=(()=>{
     if(!c||!base||base.session_id||(restart?!authorized(c):!current(c)))fail();playbackFileContext(base);
     if(!body||typeof body!=="object"||Array.isArray(body))fail();
     for(const field of ["previous_session_id","control_sequence","reopen_reason","intent","candidate_id"])if(body[field]!=null)unsupported();
-    if(body.subtitle_burn!=null||body.hdr10===true||body.preserve_dolby_vision===true)unsupported();
+    // A burn and an HDR10 ask ride the ordinary Start: the Source owns the
+    // burn's sidecar and fonts and decides the grade from these caps itself.
+    if(body.preserve_dolby_vision===true)dolbyVisionUnsupported();
+    if(body.subtitle_burn!=null&&(!Number.isSafeInteger(body.subtitle_burn)||body.subtitle_burn<0||body.subtitle_burn>4095||body.native_subtitles===true))unsupported();
+    if(body.hdr10!=null&&typeof body.hdr10!=="boolean")unsupported();
     const direct=body.presentation==="direct";
-    if(body.presentation!=null&&body.presentation!=="vod"&&!direct||direct&&body.native_subtitles===true)unsupported();
+    if(body.presentation!=null&&body.presentation!=="vod"&&!direct||direct&&(body.native_subtitles===true||body.subtitle_burn!=null))unsupported();
     if(body.caps?.v!==2||typeof body.playback_id!=="string"||!body.playback_id||body.playback_id.length>128||/[\u0000-\u001f\u007f]/.test(body.playback_id)
       ||typeof body.request_id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.request_id))fail();
     const text=JSON.stringify(body);if(new TextEncoder().encode(text).length>24*1024)fail();

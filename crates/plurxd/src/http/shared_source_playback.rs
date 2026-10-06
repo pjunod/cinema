@@ -152,6 +152,10 @@ struct SourceStartIdentity {
     reference: SourcePlaybackTarget,
     recipe_hash: [u8; 32],
 }
+/// The typed refusal of a shared Dolby Vision delivery, on the Source and on
+/// B's own Start validation alike.
+pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
+    "sharing_start_dolby_vision_unsupported";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceStartFailure {
     Unavailable,
@@ -159,6 +163,9 @@ enum SourceStartFailure {
     Conflict,
     Unresolved,
     Unsupported,
+    /// A Dolby Vision delivery this Source does not build yet: refused with
+    /// its own typed code before any claim, so a viewer is told why.
+    DolbyVisionUnsupported,
     Deadline,
 }
 impl SourceStartRegistry {
@@ -884,6 +891,10 @@ impl SourceStartFailure {
             Self::Unsupported => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "sharing_start_unsupported",
+            ),
+            Self::DolbyVisionUnsupported => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                SHARING_START_DOLBY_VISION_UNSUPPORTED,
             ),
             Self::Unresolved => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unresolved"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable"),
@@ -1714,6 +1725,29 @@ impl RealSourceStartFixture {
             .expect("actual voter shutdown");
     }
 }
+/// PGS display sets from the fuzz corpus's real `mkpgs` capture, retimed to
+/// show one bitmap from `start_ms` to `end_ms`.
+#[cfg(test)]
+fn source_fixture_pgs(start_ms: u32, end_ms: u32) -> Vec<u8> {
+    let fixture = include_bytes!("../../../../fuzz/corpus/inspect_sup/mkpgs-1920x1080.sup");
+    let mut sup = Vec::new();
+    let mut cursor = 0;
+    while cursor + 13 <= fixture.len() {
+        assert_eq!(&fixture[cursor..cursor + 2], b"PG");
+        let pts = u32::from_be_bytes(fixture[cursor + 2..cursor + 6].try_into().expect("PTS"));
+        let len = usize::from(u16::from_be_bytes(
+            fixture[cursor + 11..cursor + 13].try_into().expect("PGS length"),
+        )) + 13;
+        if pts == 90_000 || pts == 630_000 {
+            let mut segment = fixture[cursor..cursor + len].to_vec();
+            let at = if pts == 90_000 { start_ms } else { end_ms };
+            segment[2..6].copy_from_slice(&(at * 90).to_be_bytes());
+            sup.extend(segment);
+        }
+        cursor += len;
+    }
+    sup
+}
 #[cfg(test)]
 pub(crate) fn real_source_start_fixture(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
@@ -1728,6 +1762,21 @@ pub(crate) enum SourceFixtureMode {
     NativeEncoded,
     /// The Copy fixture's MP4 started as direct play.
     Direct,
+    /// A Matroska with one embedded SubRip track, started as a copy that
+    /// burns it (a burn always encodes).
+    BurnText,
+    /// A Matroska with one embedded PGS track, started as a 144-row encode
+    /// that burns it.
+    BurnBitmap,
+    /// A PQ-tagged HEVC Main10 source started by an SDR-only player: the
+    /// Source tone-maps.
+    Hdr10Sdr,
+    /// A 1080p PQ-tagged HEVC Main10 source started by a player that presents
+    /// PQ on HEVC Main10 and asks HDR10, on a node with the HDR10 passthrough
+    /// proof: the Source encodes Main10 PQ.
+    Hdr10,
+    /// The Encoded fixture scanned as Dolby Vision: refused before a claim.
+    DolbyVisionEncoded,
 }
 #[cfg(test)]
 pub(crate) fn real_source_start_fixture_with(
@@ -1820,25 +1869,65 @@ async fn build_real_source_start_fixture(
         mode,
         SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
     );
+    let burn = matches!(
+        mode,
+        SourceFixtureMode::BurnText | SourceFixtureMode::BurnBitmap
+    );
+    let hdr = matches!(mode, SourceFixtureMode::Hdr10Sdr | SourceFixtureMode::Hdr10);
     let encoded = matches!(
         mode,
-        SourceFixtureMode::Encoded | SourceFixtureMode::NativeEncoded
+        SourceFixtureMode::Encoded
+            | SourceFixtureMode::NativeEncoded
+            | SourceFixtureMode::BurnText
+            | SourceFixtureMode::BurnBitmap
+            | SourceFixtureMode::Hdr10Sdr
+            | SourceFixtureMode::Hdr10
+            | SourceFixtureMode::DolbyVisionEncoded
     );
-    let file = directory
-        .path()
-        .join(if native { "source.mkv" } else { "source.mp4" });
+    let (width, height) = if matches!(mode, SourceFixtureMode::Hdr10) {
+        (1920, 1080)
+    } else {
+        (320, 180)
+    };
+    let file = directory.path().join(if native || burn {
+        "source.mkv"
+    } else {
+        "source.mp4"
+    });
     // 180 rows so both recipes stay inside the v1 control contract
     // (heights 144..=2160): Copy names 180 and Encoded a real 144 encode.
     // A client controls with the rung it started, so a sub-144 fixture
     // could start but never be controlled.
-    let generated = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
-        .args([
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=s=320x180:r=24",
+    let mut generate = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    generate.args(["-v", "error", "-f", "lavfi", "-i"]);
+    if hdr {
+        // Real HEVC Main10 with PQ/BT.2020 signalled in the bitstream, so the
+        // scan, the held probe and the Source's grade all read actual facts.
+        generate
+            .arg(format!("testsrc2=s={width}x{height}:r=24"))
+            .args([
+                "-t",
+                "2",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p10le",
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "smpte2084",
+                "-colorspace",
+                "bt2020nc",
+                "-x265-params",
+                "log-level=error:hdr10=1:repeat-headers=1",
+                "-tag:v",
+                "hvc1",
+                "-y",
+            ]);
+    } else {
+        generate.arg("color=s=320x180:r=24").args([
             "-t",
             "2",
             "-c:v",
@@ -1846,7 +1935,9 @@ async fn build_real_source_start_fixture(
             "-pix_fmt",
             "yuv420p",
             "-y",
-        ])
+        ]);
+    }
+    let generated = generate
         .arg(&file)
         .output()
         .await
@@ -1892,6 +1983,36 @@ async fn build_real_source_start_fixture(
         );
         std::fs::rename(muxed, &file).expect("actual captioned Source");
     }
+    if burn {
+        let muxed = directory.path().join("burnable.mkv");
+        let mut mux = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+        mux.args(["-v", "error", "-i"]).arg(&file);
+        if matches!(mode, SourceFixtureMode::BurnText) {
+            let caption = directory.path().join("burn.srt");
+            std::fs::write(
+                &caption,
+                "1\n00:00:00,000 --> 00:00:02,000\nBURNED SHARED CAPTION\n\n",
+            )
+            .expect("actual burn subtitle");
+            mux.arg("-i").arg(&caption).args(["-c:s", "subrip"]);
+        } else {
+            let sup = directory.path().join("burn.sup");
+            std::fs::write(&sup, source_fixture_pgs(100, 1900)).expect("actual PGS display sets");
+            mux.args(["-f", "sup", "-i"]).arg(&sup).args(["-c:s", "copy"]);
+        }
+        let result = mux
+            .args(["-map", "0:v:0", "-map", "1:s:0", "-c:v", "copy", "-y"])
+            .arg(&muxed)
+            .output()
+            .await
+            .expect("actual burn mux");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::rename(muxed, &file).expect("actual burnable Source");
+    }
     let metadata = std::fs::metadata(&file).expect("actual file");
     let mtime = metadata
         .modified()
@@ -1914,7 +2035,7 @@ async fn build_real_source_start_fixture(
         .await
         .expect("actual probe");
     assert!(probe.status.success());
-    let native_tracks = if native {
+    let native_tracks = if native || burn {
         let observed: serde_json::Value =
             serde_json::from_slice(&probe.stdout).expect("actual native scan JSON");
         let tracks: Vec<_> = observed["streams"]
@@ -1923,9 +2044,14 @@ async fn build_real_source_start_fixture(
             .iter()
             .filter(|stream| stream["codec_type"] == "subtitle")
             .collect();
-        assert_eq!(tracks.len(), 2, "actual generated embedded track count");
+        let (count, codec) = match mode {
+            SourceFixtureMode::BurnText => (1, "subrip"),
+            SourceFixtureMode::BurnBitmap => (1, "hdmv_pgs_subtitle"),
+            _ => (2, "subrip"),
+        };
+        assert_eq!(tracks.len(), count, "actual generated embedded track count");
         assert!(
-            tracks.iter().all(|track| track["codec_name"] == "subrip"),
+            tracks.iter().all(|track| track["codec_name"] == codec),
             "facts must match actual ffprobe"
         );
         Some(
@@ -1959,6 +2085,22 @@ async fn build_real_source_start_fixture(
             )
             .await
             .expect("actual scanned Source subtitle");
+    }
+    if hdr {
+        // The scan's facts for the generated HEVC Main10 PQ source.
+        client
+            .execute(
+                "UPDATE files SET video_codec='hevc',width=$1,height=$2,bit_depth=10,hdr='hdr10' WHERE id=1",
+                hiqlite::params!(width, height),
+            )
+            .await
+            .expect("actual scanned HDR10 facts");
+    }
+    if matches!(mode, SourceFixtureMode::DolbyVisionEncoded) {
+        client
+            .execute("UPDATE files SET hdr='dolby_vision' WHERE id=1", hiqlite::params!())
+            .await
+            .expect("Dolby Vision scan facts");
     }
     let now = crate::state::clock_ms();
     let grant = Uuid::new_v4();
@@ -2040,12 +2182,17 @@ async fn build_real_source_start_fixture(
     }
     Arc::get_mut(&mut state)
         .expect("sole State before listeners")
-        .transcode = Arc::new(crate::transcode::TranscodeManager::new(
-        Arc::clone(&store),
-        directory.path().join("workers"),
-        plurx_core::transcode::EncoderCaps::default(),
-        plurx_core::transcode::Pipeline::Cpu,
-    ));
+        .transcode = Arc::new(
+        crate::transcode::TranscodeManager::new(
+            Arc::clone(&store),
+            directory.path().join("workers"),
+            plurx_core::transcode::EncoderCaps::default(),
+            plurx_core::transcode::Pipeline::Cpu,
+        )
+        // The boot proof the HDR10 rung needs; the planner still decides the
+        // grade from the player's caps.
+        .with_hdr10_passthrough(matches!(mode, SourceFixtureMode::Hdr10)),
+    );
     let mut headers = HeaderMap::new();
     headers.insert(
         "authorization",
@@ -2067,6 +2214,23 @@ async fn build_real_source_start_fixture(
     if native {
         recipe["session"]["native_subtitles"] = serde_json::json!(true);
         recipe["session"]["subtitle"] = serde_json::json!(0);
+    }
+    match mode {
+        SourceFixtureMode::BurnText => {
+            // A copy ask that burns: the Source encodes at source height.
+            recipe["session"]["copy"] = serde_json::json!(true);
+            recipe["session"]["height"] = serde_json::json!(180);
+            recipe["session"]["subtitle_burn"] = serde_json::json!(0);
+        }
+        SourceFixtureMode::BurnBitmap => {
+            recipe["session"]["subtitle_burn"] = serde_json::json!(0);
+        }
+        SourceFixtureMode::Hdr10 => {
+            recipe["session"]["height"] = serde_json::json!(1080);
+            recipe["session"]["hdr10"] = serde_json::json!(true);
+            recipe["session"]["caps"] = serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"]},{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"display":{"hdr":true}});
+        }
+        _ => {}
     }
     if matches!(mode, SourceFixtureMode::Direct) {
         let session = recipe["session"].as_object_mut().expect("session");
