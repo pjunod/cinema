@@ -1,9 +1,9 @@
 # Shared libraries — build status and remaining acceptance
 
-**Status:** final batch validation for the effort branch · **Updated:** 2026-10-06 ·
+**Status:** implementation batch complete; qualification held · **Updated:** 2026-10-06 ·
 **Owner:** Sol, continuing Claude's Root lane · **Promotion:** held for Paul.
 
-**Batch:** [draft PR #827](http://192.168.4.7:3000/noirr/plurx/pulls/827).
+**Batch:** [completion PR #827](http://192.168.4.7:3000/noirr/plurx/pulls/827).
 
 Companion to [the implementation contract](SHARED-LIBRARIES-IMPLEMENTATION.md)
 (the authority, ownership and acceptance rules). This page records what is
@@ -22,7 +22,7 @@ existing warm target. Paul's checkout is not used for changes.
 | B relay, Source playback, ownership repair | Merged into effort | PR #794; earlier receipts in the contract |
 | Crash recovery, assets and direct play | Merged into effort | PR #804 |
 | Directed reopen and native controls | Merged into effort | PR #809 |
-| Prepared successor, catalogue and protocol parity | PR #816 open | Head `551f18c8a`; run 4159 passed Rust, Android, web and preflight; Windows failed, Apple cancelled |
+| Prepared successor, catalogue and protocol parity | Included in completion PR #827 | Supersedes PR #816; original `551f18c8a` receipts remain historical |
 | Web prepared successor | Integrated into the new batch | Claude's `5fe0b1782` series, retained as proper commits |
 | Purpose-key census, TLS permissions, deterministic receiver fixtures | Integrated into the new batch | Three completed commits from the unitfix branch |
 | Partial fd/artwork fixture repair | Integrated in `d4d2ec8e4` | Exact file-identity assertions and deterministic artwork timing; compiled/linted, execution deferred |
@@ -38,7 +38,7 @@ existing warm target. Paul's checkout is not used for changes.
 | Receiver ingress authority | Runtime and fixture integrated through `696ffb9ec` | Fresh receiver read proof, independent ingress member floor and explicit backend identity; guarded registration/cleanup metadata; no physical closure inferred from Store reads |
 | Custody schema and upgrade floor | Integrated `69876dfce` | SQLite 93; replicated baseline 72 / Source 73; frozen Source layout 71 unchanged; old held obligations refuse upgrade; compiled, execution deferred |
 | Active upgrade harness | Integrated through `cdf18d7f5`; unexecuted | Historical/candidate/restored Local HLS, actual video decode and live encoder drain; does not qualify Shared relay or active principal rebuild |
-| Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed through combined integration `6c30fa1df`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
+| Compiler and lint | Final combined compilation passed | Final combined hook passed at `0ba500735` (2m24s); Core contract-feature targets compiled in 45.89s without execution; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Final Windows MSVC workspace/all-target check passed on `0ba500735` in 2m09s on m6, Rust 1.97.1, 4 CPUs / 8 GiB; compiler warnings remain. No tests executed |
 
 ## Parallel builders and management audit
 
@@ -48,10 +48,10 @@ current. Each builder has an isolated clone from `d4d2ec8e4`.
 
 | Builder | Owned work | State |
 |---|---|---|
-| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Completed through `8b885f707`; final concurrent-close correction included in combined validation |
-| Forwarding / completed clients | Source and B transport modules; native/web, hosting and Windows compiler | Source/B transport, per-owner permission, rewrap refresh and real non-owner fixture definitions delivered; final combined Windows compilation next |
-| Receiver/cluster | Shared accepted-driver custody, B authority and retirement, endpoint cleanup | Completed through `696ffb9ec`; final serialized-acknowledgment correction included in combined validation |
-| Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |
+| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Completed through `8b885f707`; concurrent-close correction compiled in `0ba500735` |
+| Forwarding / completed clients | Source and B transport modules; native/web, hosting and Windows compiler | Complete; exact `0ba500735` Windows workspace/all-target check passed |
+| Receiver/cluster | Shared accepted-driver custody, B authority and retirement, endpoint cleanup | Completed through `696ffb9ec`; serialized-acknowledgment correction compiled in `0ba500735` |
+| Root | Integration, API/operator/security docs, central ownership census, status and review | Integration and compiler evidence complete; one batched effort PR, with unproved acceptance cells preserved |
 
 Rust builders install source and compile inside one owned lock on nuc4. Remote checks
 use one canonical source directory with checksum copies and current write
@@ -80,7 +80,7 @@ Returned physical closure receipts are authenticated as exact member responses.
 No claim that the whole effort is correct or
 releasable is made.
 
-## Remaining build and qualification
+## Remaining qualification
 
 | Requirement | Next acceptance boundary |
 |---|---|
@@ -121,8 +121,11 @@ releasable is made.
 
 ## Cleanup ledger
 
-Retain active source, compiler cache and evidence until the batch is safely
-published. Remove session scripts and source extractions at completion.
+The Source and receiver builder clones were removed after their clean commits
+and final corrections were verified in published `0ba500735`; their owned
+patch/check scratch was removed too. Retain the clean Root checkout and shared
+compiler cache while promotion is held. Final platform scratch is removed after
+its receipt is recorded.
 Claude's host workspaces listed in the handoff remain preserved until their
 unmerged work and receipts have been incorporated. Do not remove files owned
 by other sessions or Paul's transfer directory.

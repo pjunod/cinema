@@ -6324,8 +6324,10 @@ the status page.
 ### Cluster forwarding and physical ingress custody (2026-10-06)
 
 **Status:** Source runtime checkpoint `d32be9ca8` and receiver runtime checkpoint
-`2e4fd9e21` compiled and linted; integration and final lost-reply follow-ups are
-recorded on the [status page](SHARED-LIBRARIES-STATUS.md). No new runtime or
+`2e4fd9e21` compiled and linted. Combined integration `0ba500735`, including the final
+lost-reply follow-ups and bounded closure fanout, passed its pinned normal hook
+and Core contract-feature compilation. Platform receipts are recorded on the
+[status page](SHARED-LIBRARIES-STATUS.md). No new runtime or
 topology acceptance receipt is claimed. Paul deferred test execution until main
 promotion after its adversarial review.
 
