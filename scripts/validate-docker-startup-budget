@@ -598,13 +598,17 @@ def validate_sharing_bridge_recipe(document: dict[str, Any], service: dict[str, 
         raise BudgetError("Docker Sharing needs one explicit host port")
     networks = service.get("networks", {})
     declared = document.get("networks", {})
-    if not isinstance(networks, dict) or not any(
-        isinstance(settings, dict) and settings.get("ipv4_address") == str(address)
+    selected = [
+        name for name, settings in networks.items()
+        if isinstance(settings, dict) and settings.get("ipv4_address") == str(address)
         and isinstance(declared.get(name), dict) and declared[name].get("driver") == "bridge"
         and not declared[name].get("external")
-        for name, settings in networks.items()
-    ):
+    ] if isinstance(networks, dict) and isinstance(declared, dict) else []
+    if len(selected) != 1:
         raise BudgetError("Docker Sharing egress must match a static address on an explicit Compose bridge")
+    priorities = {name: settings.get("gw_priority", 0) if isinstance(settings, dict) else 0 for name, settings in networks.items()}
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in priorities.values()) or priorities[selected[0]] <= max([0] + [value for name, value in priorities.items() if name != selected[0]]):
+        raise BudgetError("Docker Sharing bridge must have an explicit gw_priority higher than every other attached network")
     readonly = any(
         isinstance(volume, dict) and volume.get("type") == "bind" and volume.get("read_only") is True
         and container_path(str(volume.get("target", "")), "/") == wanted

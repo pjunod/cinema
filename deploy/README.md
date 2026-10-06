@@ -93,13 +93,17 @@ make docker-startup-budget-check  # renders Compose and checks the chosen bridge
 The recipe binds the process to `0.0.0.0:32444` inside its namespace and
 publishes exactly `127.0.0.1:32444:32444/tcp` on the host. It mounts the TOML
 file read-only at `/etc/plurx/plurx.toml`, keeps the ordinary app network,
-and adds an explicit bridge with a static IPv4 address. Do not publish the
+and adds an explicit bridge with a static IPv4 address. Its `gw_priority: 1`
+selects that bridge as the default gateway; any other attached network must
+have a lower gateway priority. Use Compose 2.33.1 or newer (the recipe was
+rendered with 2.40.3). Do not publish the
 sharing port on a host wildcard or host Tailscale address. Do not move
 `plurxd` to host networking or mount the tailscaled socket.
 
 The existing `make docker-up` and `make docker-image-up` preflight checks
 readable node-local `docker_bridge` config against the rendered publication,
-static address, bridge declaration and read-only config mount. A failure
+static address, explicit default-gateway selection, bridge declaration and
+read-only config mount. A failure
 refuses that deployment before replacement. This is configuration evidence:
 it cannot prove the running host's port isolation, firewall, Tailscale route,
 or no-WAN behavior. An opaque config baked into an image or supplied through

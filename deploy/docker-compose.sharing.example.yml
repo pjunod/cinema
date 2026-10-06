@@ -12,6 +12,7 @@ services:
     networks:
       default: {}
       sharing:
+        gw_priority: 1 # select this bridge as the default gateway (Compose >=2.33.1)
         ipv4_address: "172.30.44.2"
 networks:
   sharing:
