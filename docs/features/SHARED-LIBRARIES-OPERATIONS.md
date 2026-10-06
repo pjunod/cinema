@@ -92,7 +92,12 @@ missing keys require restoring authenticated reachability or reviewing the
 recorded failure, not fabricating a completed End.
 
 When rotating endpoints, retain an approved reachable endpoint while the
-authenticated manifest propagates. Address hints cannot introduce a new pin.
+authenticated manifest propagates. Cleanup first tries its retained endpoint,
+then current approved replacements from the same import lineage. It retries
+the exact End identity after a dial failure, refused End or stalled exchange,
+reserving time for alternatives within one 315-second budget. A re-paired
+import cannot supply replacement pins for an older obligation. Deadline expiry
+leaves cleanup unresolved. Address hints cannot introduce a new pin.
 If every trusted endpoint/key is lost, use explicit administrator confirmation
 and the pairing recovery flow. Never paste a peer credential into a client URL
 or an operator log.

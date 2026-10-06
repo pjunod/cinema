@@ -444,6 +444,9 @@ mod tests {
     }
     #[async_trait]
     impl Backend for ImportTransition<'_> {
+        fn sharing_is_replicated(&self) -> bool {
+            self.store.sharing_is_replicated()
+        }
         async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError> {
             self.store.sharing_purpose_archive_rows().await
         }

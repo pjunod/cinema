@@ -155,6 +155,9 @@ pub(crate) struct ProgressSnapshotRace<'a> {
 #[cfg(test)]
 #[async_trait]
 impl Backend for ProgressSnapshotRace<'_> {
+    fn sharing_is_replicated(&self) -> bool {
+        self.store.sharing_is_replicated()
+    }
     async fn sharing_read(&self, sql: &str, values: Vec<Value>) -> Result<Vec<String>, StoreError> {
         let rows = self.store.sharing_read(sql, values).await?;
         if sql.starts_with("SELECT coalesce(")

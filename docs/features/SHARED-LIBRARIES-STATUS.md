@@ -35,9 +35,10 @@ existing warm target. Paul's checkout is not used for changes.
 | Approved endpoint cleanup | Integrated through `f7962bd2d` | Exact immutable End retries approved endpoints/pins after refusal or stall, preserving time for replacements; real pinned fixtures defined, execution deferred |
 | Linux Docker bridge hosting | Profile and recipe integrated through `6ab554659` | Rust check/Clippy and actual Compose render/preflight passed, including explicit default gateway; runtime qualification remains open |
 | Common ingress custody | Primitives integrated `cebc6d2e5`; adapters still building | Actual accepted-driver identity/closure, bounded per-principal registration and immutable retry identity; no forwarded playback admitted by this checkpoint |
+| Receiver ingress authority | Foundation integrated `124d911f9`; runtime adapter building | Fresh receiver read proof, independent ingress member floor and explicit backend identity; guarded registration/cleanup metadata; no physical closure inferred from Store reads |
 | Custody schema and upgrade floor | Integrated `69876dfce` | SQLite 93; replicated baseline 72 / Source 73; frozen Source layout 71 unchanged; old held obligations refuse upgrade; compiled, execution deferred |
 | Active upgrade harness | Integrated through `cdf18d7f5`; unexecuted | Historical/candidate/restored Local HLS, actual video decode and live encoder drain; does not qualify Shared relay or active principal rebuild |
-| Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed on integration `1e3496056`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
+| Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed on integration `cb2e10e87`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
 
 ## Parallel builders and management audit
 
@@ -48,8 +49,8 @@ current. Each builder has an isolated clone from `d4d2ec8e4`.
 | Builder | Owned work | State |
 |---|---|---|
 | Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Migration and fresh invocation checkpoints integrated; Source custody adapter and fresh worker placement next |
-| Source forwarding / completed clients | Dedicated Source owner transport; native/web, hosting and Windows compiler | Client/Docker/harness checkpoints complete; reassigned to Source forwarding in parallel |
-| Receiver/cluster | Shared accepted-driver custody, B owner forwarding and endpoint cleanup | Common driver/registration checkpoint integrated; endpoint fallback integrated; building B custody/forwarding |
+| Forwarding / completed clients | Source and B transport modules; native/web, hosting and Windows compiler | Source transport draft awaiting wired runtime compilation; B forwarding assigned as the next parallel slice |
+| Receiver/cluster | Shared accepted-driver custody, B authority and retirement, endpoint cleanup | Common custody and endpoint fallback integrated; building B durable adapter while the forwarding builder handles transport |
 | Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |
 
 Rust builders install source and compile inside one owned lock on nuc4. Remote checks
@@ -96,7 +97,10 @@ correct or releasable is made.
    this on 2026-10-06, overriding the per-task test requirements. Compile and
    lint during development. Retain existing passing evidence; after the main
    adversarial review, execute the required tests once on the merging code
-   and rerun only failures.
+   and rerun only failures. The optional effort CI workflow also executes
+   contract tests despite its compile-only description, so its dispatch is
+   deferred; compilation and lint run separately. No green CI gate is inferred
+   from those local compiler receipts.
 2. **Keep the effort isolated.** Batch commits into effort PRs. Main promotion
    remains held by the handoff's explicit instruction until Paul lifts it.
 3. **Preserve the Tailscale acceptance contract.** The proposed nuc4/m6 pair

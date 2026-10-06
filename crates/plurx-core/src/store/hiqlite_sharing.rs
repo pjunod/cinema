@@ -21,6 +21,9 @@ impl From<&mut hiqlite::Row<'_>> for Payload {
 }
 #[async_trait]
 impl Backend for HiqliteAuthStore {
+    fn sharing_is_replicated(&self) -> bool {
+        true
+    }
     async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError> {
         // These are individual consistent reads, not one schema/data snapshot.
         // Candidate activation/rewrap must hold coordinated quiescence around

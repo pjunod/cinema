@@ -33,6 +33,8 @@ pub mod sharing_ingress_custody;
 mod sharing_receiver_delivery;
 pub use sharing_ingress_custody::SharingIngressCustodyStore;
 pub use sharing_receiver_delivery::SharingReceiverDeliveryStore;
+mod sharing_receiver_ingress;
+pub use sharing_receiver_ingress::SharingReceiverIngressStore;
 pub mod sharing_receiver_orphans;
 pub mod sharing_receiver_progress;
 pub mod sharing_receiver_retirement;
@@ -5386,6 +5388,7 @@ pub trait Store:
     + SharingReceiverSessionStore
     + SharingIngressCustodyStore
     + SharingReceiverDeliveryStore
+    + SharingReceiverIngressStore
     + SharingReceiverProgressStore
     + SharingReceiverRetirementStore
     + SharingSourceSessionStore
@@ -5436,6 +5439,7 @@ impl<T> Store for T where
         + SharingReceiverSessionStore
         + SharingIngressCustodyStore
         + SharingReceiverDeliveryStore
+        + SharingReceiverIngressStore
         + SharingReceiverProgressStore
         + SharingReceiverRetirementStore
         + SharingSourceSessionStore
