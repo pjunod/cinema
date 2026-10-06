@@ -10,9 +10,7 @@ use crate::http::{
     },
     stream::{file_range_head, plan_file_range, FileRangePlan},
 };
-use crate::transcode::source_actor::{
-    direct::SourceDirectFile, SourceViewerActor, SourceWorkerError,
-};
+use crate::transcode::source_actor::{direct::SourceDirectFile, SourceViewerActor};
 use plurx_core::playback_principal::PlaybackPrincipal;
 
 /// Prepared by current Source authority and the actual decision engine with
@@ -309,7 +307,7 @@ pub(super) async fn start_prepared_worker(
     activation: plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
     prepared: PreparedSourceStart,
     deadline: std::time::Instant,
-) -> Result<SourceViewerActor, SourceWorkerError> {
+) -> Result<SourceViewerActor, crate::transcode::source_actor::SourceWorkerNoAdmission> {
     let manager = std::sync::Arc::clone(&state.transcode);
     match prepared {
         PreparedSourceStart::Hls(prepared) => {

@@ -50,6 +50,11 @@ async fn source_copy_cold_index_refuses_expired_original_observation_before_chil
     Box::pin(source_copy_preadmission_fixture(9)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_factory_refusal_returns_exact_invocation_receipt_before_admission() {
+    Box::pin(source_copy_preadmission_fixture(48)).await;
+}
+
 fn source_fixture_state() -> Arc<crate::state::AppState> {
     Arc::new(crate::http::source_actor_test_state())
 }
@@ -826,6 +831,40 @@ async fn source_actual_actor(
     else {
         panic!("activation hint")
     };
+    if mode == 48 {
+        // A real factory validation refusal, with a genuine acquired/assigned
+        // Source claim and activation authority. No registry flag or SQL
+        // absence is used to manufacture its no-admission receipt.
+        let other = source_fixture_state();
+        assert!(!Arc::ptr_eq(&state.store, &other.store));
+        let refusal = manager
+            .start_source_worker(
+                other,
+                assignment.clone(),
+                *activation,
+                prepared,
+                Instant::now() + Duration::from_secs(15),
+            )
+            .await
+            .err()
+            .expect("actual factory refusal");
+        assert_eq!(
+            refusal.reason(),
+            crate::transcode::source_actor::SourceWorkerError::Conflict
+        );
+        assert!(refusal.assignment().same_identity(&assignment));
+        assert_eq!(
+            state
+                .store
+                .settle_source_assigned_without_activation(refusal.assignment())
+                .await
+                .expect("exact g1 accounting cleanup after real factory receipt"),
+            SourceReleaseOutcome::Released
+        );
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        return;
+    }
     let index_pause = match mode {
         6 => Some(manager.source_workers.index_hooks.pause_after_spawn()),
         7 | 9 | 10 | 11 => Some(manager.source_workers.index_hooks.pause_before_spawn()),

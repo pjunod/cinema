@@ -257,12 +257,15 @@ impl TranscodeManager {
         activation: SourceSessionWriteAuthority,
         prepared: crate::http::shared_source_playback::direct::PreparedSourceDirect,
         deadline: Instant,
-    ) -> Result<SourceViewerActor, SourceWorkerError> {
+    ) -> Result<SourceViewerActor, SourceWorkerNoAdmission> {
         if !Arc::ptr_eq(&self.store, &state.store)
             || !prepared.matches_assignment(&assignment)
             || !activation.assignment().same_identity(&assignment)
         {
-            return Err(SourceWorkerError::Conflict);
+            return Err(SourceWorkerNoAdmission::refused(
+                &assignment,
+                SourceWorkerError::Conflict,
+            ));
         }
         let mut registry = self.source_workers.entries.lock().expect("Source workers");
         if let Some(owner) = registry
@@ -272,7 +275,10 @@ impl TranscodeManager {
             return Ok(SourceViewerActor(Arc::clone(owner)));
         }
         if registry.len() >= 8 {
-            return Err(SourceWorkerError::Capacity);
+            return Err(SourceWorkerNoAdmission::refused(
+                &assignment,
+                SourceWorkerError::Capacity,
+            ));
         }
         let owner = Arc::new(SourceViewerInner {
             control_target_duration_ms: 0,
