@@ -1194,6 +1194,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::PLAYBACK_INPUT_SCHEMA,
     // v92: directional sharing authority and sealed outbound material.
     super::sharing::SCHEMA,
+    // v93: exact Source/receiver outer-ingress custody; preserved across restore.
+    super::sharing_ingress_custody::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

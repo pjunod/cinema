@@ -162,9 +162,12 @@ const PLAYBACK_INPUT_SCHEMA_VERSION: i64 = 69;
 const PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE: i64 = DV_REQUEST_PROVENANCE_SCHEMA_VERSION;
 const SHARING_SCHEMA_VERSION: i64 = 70;
 const SHARING_SCHEMA_MIGRATION_SOURCE: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
-/// Ordinary bootstrap remains v70; the startup-only Source factory activates v71.
-pub const AUTH_SCHEMA_BASELINE_VERSION: i64 = SHARING_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = 71;
+/// Ordinary custody bootstrap is72; Source startup preserves layout71 and
+/// activates committed schema73.71 is solely the frozen installed predecessor.
+const SHARING_INGRESS_SCHEMA_VERSION: i64 = 72;
+const LEGACY_SOURCE_SCHEMA_VERSION: i64 = 71;
+pub const AUTH_SCHEMA_BASELINE_VERSION: i64 = SHARING_INGRESS_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = 73;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1652,6 +1655,9 @@ impl HiqliteAuthStore {
             .map_err(database_error)?;
 
         for result in timeout_store(client.batch(super::sharing::SCHEMA)).await? {
+            result.map_err(database_error)?;
+        }
+        for result in timeout_store(client.batch(super::sharing_ingress_custody::SCHEMA)).await? {
             result.map_err(database_error)?;
         }
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
@@ -3167,12 +3173,84 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(SHARING_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    SHARING_SCHEMA_VERSION | LEGACY_SOURCE_SCHEMA_VERSION,
+                ) => {
+                    Box::pin(self.migrate_sharing_ingress_custody()).await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
                     )));
                 }
             }
+        }
+    }
+
+    /// Additive custody migration is separate from the frozen Source rebuild.
+    /// A71 marker must prove its complete exact installation before any write.
+    async fn migrate_sharing_ingress_custody(&self) -> Result<(), StoreError> {
+        let previous = self.committed_schema_version_unchecked().await?;
+        let (next, guard) = match previous {
+            SHARING_SCHEMA_VERSION => (
+                SHARING_INGRESS_SCHEMA_VERSION,
+                "NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sharing_ingress_custody')"
+                    .to_owned(),
+            ),
+            LEGACY_SOURCE_SCHEMA_VERSION => (
+                AUTH_SCHEMA_VERSION,
+                format!(
+                    "({}) AND ({})",
+                    super::sharing_source_schema::legacy_installed_guard(),
+                    super::sharing_source_schema::legacy_source_work_drained_guard()
+                ),
+            ),
+            _ => {
+                return Err(StoreError::Migration(
+                    "custody migration predecessor changed".into(),
+                ))
+            }
+        };
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
+                params!(),
+            )
+            .await?;
+        if !matches!(rows.as_slice(), [row] if row.count == 1) {
+            return Err(StoreError::Migration(
+                "custody migration requires its exact predecessor and original Source owners must retire all retained obligations".into(),
+            ));
+        }
+        let now = self.now()?;
+        // Guard failure must abort, rather than silently mark a partial shape.
+        let assertion = format!("INSERT INTO cluster_meta(singleton) SELECT NULL WHERE NOT (({guard}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version=$1))");
+        let shape = super::sharing_ingress_custody::schema_guard();
+        let attempt = self.schema_migration_transaction(vec![
+            (assertion, params!(previous)),
+            (super::sharing_ingress_custody::declaration().to_owned(), params!()),
+            ("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".into(), params!(next, now, previous)),
+            (format!("INSERT INTO cluster_meta(singleton) SELECT NULL WHERE NOT ({shape})"),params!()),
+        ]).await;
+        self.settle_migration_attempt(previous, attempt).await?;
+        let observed = self.committed_schema_version_unchecked().await?;
+        if observed != next {
+            return Err(StoreError::Migration(
+                "custody migration did not commit its exact target".into(),
+            ));
+        }
+        self.verify_compatibility(ClusterCompatibility::CURRENT)
+            .await
+    }
+    async fn committed_schema_version_unchecked(&self) -> Result<i64, StoreError> {
+        let rows=self.client().query_consistent_map::<CompatibilityRow,_>(
+            "SELECT schema_version,protocol_min,protocol_max FROM cluster_meta WHERE singleton=1",params!()).await?;
+        match rows.as_slice() {
+            [row] => Ok(row.schema_version),
+            _ => Err(StoreError::Migration(
+                "missing cluster schema marker".into(),
+            )),
         }
     }
 
@@ -3362,9 +3440,13 @@ impl HiqliteAuthStore {
     async fn verify_source_schema_version(client: &Client) -> Result<(), StoreError> {
         let rows=client.query_consistent_map::<CompatibilityRow,_>(
             "SELECT schema_version,protocol_min,protocol_max FROM cluster_meta WHERE singleton=1",params!()).await.map_err(database_error)?;
-        if matches!(rows.as_slice(),[row] if row.schema_version==super::sharing_source_schema::SOURCE_SCHEMA_VERSION)
+        if matches!(rows.as_slice(),[row] if matches!(row.schema_version, super::sharing_source_schema::SOURCE_SCHEMA_VERSION | LEGACY_SOURCE_SCHEMA_VERSION))
         {
-            let guard = super::sharing_source_schema::installed_guard();
+            let guard = if rows[0].schema_version == LEGACY_SOURCE_SCHEMA_VERSION {
+                super::sharing_source_schema::legacy_installed_guard()
+            } else {
+                super::sharing_source_schema::installed_guard()
+            };
             let shape = client
                 .query_consistent_map::<CountRow, _>(
                     format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
@@ -3375,6 +3457,21 @@ impl HiqliteAuthStore {
             if !matches!(shape.as_slice(),[row] if row.count==1) {
                 return Err(StoreError::Migration(
                     "Source schema marker requires the complete exact installed layout".to_owned(),
+                ));
+            }
+        }
+        if matches!(rows.as_slice(), [row] if row.schema_version == AUTH_SCHEMA_BASELINE_VERSION) {
+            let guard = super::sharing_ingress_custody::schema_guard();
+            let shape = client
+                .query_consistent_map::<CountRow, _>(
+                    format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
+                    params!(),
+                )
+                .await
+                .map_err(database_error)?;
+            if !matches!(shape.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "custody baseline marker requires its complete exact adjunct".into(),
                 ));
             }
         }
@@ -5293,7 +5390,9 @@ fn schema_migration_action(
         | PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE
         | DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE
         | PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE
-        | SHARING_SCHEMA_MIGRATION_SOURCE => {
+        | SHARING_SCHEMA_MIGRATION_SOURCE
+        | SHARING_SCHEMA_VERSION
+        | LEGACY_SOURCE_SCHEMA_VERSION => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5315,7 +5414,12 @@ fn verify_compatibility_rows(
     };
     if meta.schema_version != supported.schema_version
         && !(supported.schema_version == AUTH_SCHEMA_VERSION
-            && meta.schema_version == AUTH_SCHEMA_BASELINE_VERSION)
+            && matches!(
+                meta.schema_version,
+                AUTH_SCHEMA_BASELINE_VERSION
+                    | SHARING_SCHEMA_VERSION
+                    | LEGACY_SOURCE_SCHEMA_VERSION
+            ))
     {
         return Err(StoreError::Migration(format!(
             "cluster schema {} is incompatible with voter schema {}",
@@ -5790,6 +5894,40 @@ dump_row!(MediaSessionTerminalAckDumpRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sharing_custody_migration_dispatch_keeps_frozen_source71_separate_from_local70() {
+        let row = |schema_version| CompatibilityRow {
+            schema_version,
+            protocol_min: AUTH_PROTOCOL_VERSION,
+            protocol_max: AUTH_PROTOCOL_VERSION,
+        };
+        for previous in [SHARING_SCHEMA_VERSION, LEGACY_SOURCE_SCHEMA_VERSION] {
+            assert_eq!(
+                schema_migration_action(&[row(previous)], ClusterCompatibility::CURRENT)
+                    .expect("explicit legacy upgrade input"),
+                SchemaMigrationAction::MigrateFrom(previous)
+            );
+        }
+        for current in [AUTH_SCHEMA_BASELINE_VERSION, AUTH_SCHEMA_VERSION] {
+            assert_eq!(
+                schema_migration_action(&[row(current)], ClusterCompatibility::CURRENT)
+                    .expect("current exact marker"),
+                SchemaMigrationAction::Current
+            );
+        }
+        assert!(schema_migration_action(
+            &[row(AUTH_SCHEMA_VERSION + 1)],
+            ClusterCompatibility::CURRENT
+        )
+        .is_err());
+        assert_eq!(
+            super::super::sharing_source_schema::SOURCE_LAYOUT_VERSION,
+            71
+        );
+        assert!(super::super::sharing_source_schema::INSTALLATION_SCHEMA
+            .contains("CHECK(schema_version=71)"));
+    }
 
     #[test]
     fn playback_generation_covers_tied_updates_deletes_import_and_rollback() {
@@ -7392,9 +7530,9 @@ mod tests {
             "v67 advances exactly one step to request provenance"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 65,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 67,
             AUTH_SCHEMA_BASELINE_VERSION,
-            "this implementation contains every additive v5→v70 step, ending at baseline v70"
+            "ordinary v70 advances to custody72, skipping frozen Source installation71"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
