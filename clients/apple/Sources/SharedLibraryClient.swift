@@ -150,6 +150,19 @@ struct SharedLibraryClient {
         return SharedArtworkSubject(reference: item.reference, descriptors: item.art ?? [], poster: item.posterUrl,
             backdrop: item.backdropUrl, origin: origin, token: token, generation: generation, configuration: transport.configuration)
     }
+    func continueGroups() async throws -> [SharedContinueGroup] {
+        struct Reply: Decodable { let groups: [SharedContinueGroup] }
+        let groups = try decode(Reply.self, await request("shared/continue-watching", query: [URLQueryItem(name: "limit", value: "200")])).groups
+        guard groups.count <= 32, Set(groups.map(\.id)).count == groups.count else { throw APIError.badURL }
+        try groups.forEach { try $0.validate() }; try requireCurrent(); return groups
+    }
+    func continueItems(_ group: SharedContinueGroup, assigned: [SharedLibraryAssignment]) async throws -> SharedContinueItems {
+        try group.validate()
+        var reply = try decode(SharedContinueItems.self, await request("shared/imports/\(group.importId)/continue-watching", query: [URLQueryItem(name: "limit", value: "200")]))
+        try reply.validate(group: group, assigned: assigned); try requireCurrent()
+        for index in reply.items.indices { try reply.items[index].item.bindArtwork(artworkSubject(reply.items[index].item)) }
+        return reply
+    }
     func settings() async throws -> Bool { try decode(SharingSetting.self, await request("sharing/settings")).enabled }
     func save(enabled: Bool) async throws -> Bool {
         let saved = try decode(SharingSetting.self, await request("sharing/settings", enabled: enabled)).enabled

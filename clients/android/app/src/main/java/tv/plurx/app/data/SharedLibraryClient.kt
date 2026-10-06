@@ -139,6 +139,24 @@ internal class SharedLibraryClient private constructor(private val auth: Session
     private fun artworkSubject(item: SharedLibraryItem): SharedArtworkSubject {
         requireCurrent(); return CapturedSharedArtwork(auth, transport, item)
     }
+    suspend fun continueGroups(): List<SharedContinueGroup> {
+        val rows = request("shared/continue-watching", mapOf("limit" to "200")).getValue("groups").jsonArray
+        require(rows.size <= 32)
+        val groups = rows.map { value ->
+            val wire = value.jsonObject
+            listOf("import_id", "server_id", "catalogue_epoch").forEach { wire.string(it) }
+            json.decodeFromJsonElement<SharedContinueGroup>(wire).also { it.validate() }
+        }
+        require(groups.map { it.id }.toSet().size == groups.size); requireCurrent(); return groups
+    }
+    suspend fun continueItems(group: SharedContinueGroup, assigned: List<SharedLibraryAssignment>): SharedContinueItems {
+        group.validate()
+        val wire = request("shared/imports/${group.import_id}/continue-watching", mapOf("limit" to "200"))
+        listOf("import_id", "server_id", "catalogue_epoch").forEach { wire.string(it) }
+        wire.getValue("items").jsonArray.forEach { strictItem(it.jsonObject.getValue("item").jsonObject) }
+        val reply = json.decodeFromJsonElement<SharedContinueItems>(wire).also { it.validate(group, assigned) }
+        requireCurrent(); return reply.copy(items = reply.items.map { entry -> entry.copy(item = entry.item.copy(artworkSubject = artworkSubject(entry.item))) })
+    }
     suspend fun settings(): Boolean = json.decodeFromJsonElement<SharingSetting>(request("sharing/settings")).enabled
     suspend fun save(enabled: Boolean): Boolean = json.decodeFromJsonElement<SharingSetting>(request("sharing/settings", enabled = enabled)).enabled.also { require(it == enabled) }
     suspend fun management(kind: String): JsonObject { require(kind in setOf("status", "imports", "exports")); return request("sharing/$kind") }
