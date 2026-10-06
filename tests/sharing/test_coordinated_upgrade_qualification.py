@@ -1,6 +1,7 @@
 """Safety and retained-data contracts for the isolated upgrade runner."""
 import contextlib
 import importlib.util
+import hashlib
 import io
 from pathlib import Path
 import subprocess
@@ -153,6 +154,17 @@ class CoordinatedUpgradeQualificationTests(unittest.TestCase):
         self.assertEqual(calls, ["signal", "wait", "observe"])
         with patch.object(module.subprocess, "check_output", return_value="200\n"):
             module.drain_active(daemon, {101: "ffmpeg"})
+
+    def test_fixture_hash_reads_bounded_chunks(self):
+        module = load_runner()
+        path = Mock()
+        source = Mock()
+        source.read.side_effect = [b"first", b"second", b""]
+        path.open.return_value.__enter__ = Mock(return_value=source)
+        path.open.return_value.__exit__ = Mock(return_value=False)
+        self.assertEqual(module.file_sha256(path), hashlib.sha256(b"firstsecond").hexdigest())
+        self.assertEqual([call.args for call in source.read.call_args_list],
+                         [(1024 * 1024,)] * 3)
 
     def test_active_fixture_restores_complete_stopped_historical_directory(self):
         module = load_runner()

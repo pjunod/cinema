@@ -473,7 +473,7 @@ def active_local_stage(binary, node, label, file_id=None, previous_session=None)
                            "height": 360, "quality_auto": False, "start": 0}, token)
         session_id = session["session_id"]
         media, url = first_segment(node, session["playlist_url"], token)
-        decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-frames:v", "1",
+        decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-map", "0:v:0", "-an", "-frames:v", "1",
                                   "-f", "framemd5", "pipe:1"], input=media,
                                  capture_output=True, timeout=30, check=True)
         (node["config"].parent / f"{label}-decoded-frame.log").write_bytes(decoded.stdout + decoded.stderr)
@@ -496,6 +496,14 @@ def active_local_stage(binary, node, label, file_id=None, previous_session=None)
         daemon.kill()
 
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def active_local_fixture(old_binary, new_binary, root, media):
     """Separate real Local runtime drill; never seed ledger rows to fake activity."""
     root.mkdir()
@@ -512,7 +520,7 @@ def active_local_fixture(old_binary, new_binary, root, media):
     shutil.copytree(backup, node["data"])
     restored = active_local_stage(old_binary, node, "active-restored", historical["file_id"], historical["session_id"])
     return {"scope": "Local HLS single-voter legacy-store binary upgrade and whole-directory restore",
-            "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
+            "fixture_sha256": file_sha256(fixture),
             "historical": historical, "candidate": candidate, "restored": restored,
             "shared_relay_drain": "not qualified", "principal_rebuild_active_drain": "not qualified"}
 

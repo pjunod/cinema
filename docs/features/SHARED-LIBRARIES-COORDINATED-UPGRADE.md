@@ -190,8 +190,20 @@ Missing or partial guard/marker state must fail closed.
 
 The recorded empty-workload receipt does not qualify active playback, relay,
 worker or recovery drain. The added Local workload has not been executed and
-does not supply that missing receipt. Other open cases include interruption during installation, a production backup tool,
+does not supply that missing receipt. Other open cases include interruption
+during installation, a production backup tool,
 physical hardware, Tailscale, CGNAT, or rolling upgrade. Sharing stays behind its
 saved advisory Developer switch; readiness never overrides the saved choice.
+The installed legacy Source 71 → 73 migration requires coordinated drain of
+all held Source bindings, starting sharing requests, active or non-ended
+sharing media routes, and sharing preparations before atomic additive custody
+migration. Its exact Source layout marker remains 71 while the committed
+version advances to 73. Live or held old obligations refuse migration; this
+transition is not rolling safe and the Local drill above does not qualify it.
+Restore retains custody rows under the old principal, incarnation and owner
+identity for diagnosis, disables sharing and requires re-pairing. Interrupted
+restore can retain capacity debt until actual old-owner teardown or fencing is
+proved; resets, missing rows and lease expiry do not prove capacity recovery.
+
 S3 remains incomplete until those relevant rollout and write-admission proofs
 are recorded against the current integrated candidate.
