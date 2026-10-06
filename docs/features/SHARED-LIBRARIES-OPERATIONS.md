@@ -50,7 +50,9 @@ shared-machine and relay-path acceptance receipts remain outstanding.
 [opt-in deployment recipe](../../deploy/README.md#sharing-uses-an-explicit-linux-bridge-profile).
 It binds the process inside its namespace, publishes the sharing port only on
 host loopback, and binds outbound sockets to the chosen static container
-address. The normal deployment preflight checks the readable rendered recipe.
+address. Compose 2.33.1 or later selects that bridge as the default gateway
+with `gw_priority`; the normal deployment preflight requires its priority to
+exceed every other attached network and checks the readable rendered recipe.
 The ordinary Compose deployment and saved sharing choice are unchanged.
 Configuration checks and compilation have passed; running-host isolation,
 private egress and real Tailscale playback still require qualification.

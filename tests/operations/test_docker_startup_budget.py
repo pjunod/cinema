@@ -492,7 +492,7 @@ class DockerSharingBridgeRecipeTests(unittest.TestCase):
         ])
         service = document["services"]["plurxd"]
         service["ports"] = [{"target": 32444, "published": "32444", "host_ip": "127.0.0.1", "protocol": "tcp"}]
-        service["networks"] = {"sharing": {"ipv4_address": "172.30.44.2"}}
+        service["networks"] = {"default": {}, "sharing": {"ipv4_address": "172.30.44.2", "gw_priority": 1}}
         document["networks"] = {"sharing": {"driver": "bridge"}}
         return document
 
@@ -509,6 +509,22 @@ class DockerSharingBridgeRecipeTests(unittest.TestCase):
             service["ports"][0]["host_ip"] = "127.0.0.1"
             service["networks"]["sharing"]["ipv4_address"] = "172.30.44.3"
             with self.assertRaisesRegex(BudgetError, "static address"):
+                CHECKER["validate_document"](document)
+
+    def test_bridge_sharing_requires_its_declared_default_gateway(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plurx.toml"
+            path.write_text((ROOT / "deploy/sharing-bridge.example.toml").read_text())
+            document = self.bridge_document(path)
+            CHECKER["validate_document"](document)
+            service = document["services"]["plurxd"]
+            for priority in (1, 2):
+                service["networks"]["default"]["gw_priority"] = priority
+                with self.assertRaisesRegex(BudgetError, "gw_priority"):
+                    CHECKER["validate_document"](document)
+            service["networks"]["default"]["gw_priority"] = 0
+            del service["networks"]["sharing"]["gw_priority"]
+            with self.assertRaisesRegex(BudgetError, "gw_priority"):
                 CHECKER["validate_document"](document)
 
     def test_bridge_sharing_rejects_host_network_and_writable_node_config(self):

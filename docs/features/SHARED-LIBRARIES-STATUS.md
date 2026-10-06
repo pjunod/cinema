@@ -33,8 +33,8 @@ existing warm target. Paul's checkout is not used for changes.
 | Failed Source Start | Integrated `12a856ea9` | Private pre-admission factory receipt, exact g0/g1 cleanup, ambiguous failures retain custody; execution deferred |
 | Busy predecessor transport | Integrated `9789741b2` | Graceful H2 drain preserves existing successor writes; actual closure still required; no runtime receipt yet |
 | Approved endpoint cleanup | First checkpoint `7a9aad07e` integrated | Exact import lineage permits new approved endpoints after dial failure; full End-exchange fallback is being completed |
-| Linux Docker bridge hosting | Profile and recipe integrated through `8f7a2dac5` | Rust check/Clippy and actual Compose render/preflight passed; deterministic gateway refinement and runtime qualification remain open |
-| Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed on integration `02c022f3d`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
+| Linux Docker bridge hosting | Profile and recipe integrated through `6ab554659` | Rust check/Clippy and actual Compose render/preflight passed, including explicit default gateway; runtime qualification remains open |
+| Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed on integration `5cfb165f0`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
 
 ## Parallel builders and management audit
 
@@ -45,7 +45,7 @@ current. Each builder has an isolated clone from `d4d2ec8e4`.
 | Builder | Owned work | State |
 |---|---|---|
 | Source lifecycle | Source worker forwarding, Source custody and coordinated schema/floor migration | Cleanup checkpoint complete; building adjunct custody persistence and Source forwarding |
-| Clients / hosting | Native and web completion, Windows compiler and explicit Docker bridge profile | Native work compiled; Docker profile/recipe compiled; gateway selection refinement; Windows compiler warm on m6 |
+| Clients / hosting | Native and web completion, Windows compiler and explicit Docker bridge profile | Native and Docker profile/recipe compiled; extending historical active-playback qualification harness; Windows compiler warm on m6 |
 | Receiver/cluster | Shared accepted-driver custody, B owner forwarding and endpoint cleanup | H2 drain checkpoint complete; building distributed closure acknowledgements and endpoint fallback |
 | Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |
 
@@ -63,14 +63,14 @@ history updates before frame evidence; those fixes are integrated. Cluster
 forwarding cannot report End until the outer ingress writer, as well as the
 owner's internal writer, has actually closed. The builders share one custody
 mechanism for that boundary. Docker's planned bridge recipe was not implemented;
-the hosting builder is closing that gap. No claim that the whole effort is
+the explicit profile, recipe and gateway selection are now integrated. No claim that the whole effort is
 correct or releasable is made.
 
 ## Remaining build and qualification
 
 | Requirement | Next acceptance boundary |
 |---|---|
-| Failed or ambiguous Source Start | Runtime qualification of the integrated private receipt and g0/g1 cleanup |
+| Failed or ambiguous Source Start | Finish fresh invocation custody before fallible preparation, then qualify exact g0/g1 cleanup |
 | Source worker forwarding | Authenticated non-owner ingress reaches its assigned physical worker |
 | B cluster ingress and owner transition | Physical ownership proof; SQL metadata alone cannot authorize adoption |
 | Endpoint and pin changes | Authenticated rotation preserves cleanup reachability |
@@ -78,7 +78,7 @@ correct or releasable is made.
 | Upgrade and restore | Historical binaries and active-session behavior; restore requires disable or re-pair |
 | Prepared handoff client gaps | Integrated refusal recovery awaits runtime/device qualification; physical Android TV, Apple direct play and handoff |
 | Busy predecessor transport | Integrated graceful drain awaits actual H2 regression execution |
-| Docker bridge hosting | Complete deterministic gateway selection, then running-host isolation/private-egress qualification |
+| Docker bridge hosting | Running-host isolation/private-egress qualification of the explicit bridge and default gateway |
 | Operator, API, security and Developer lifecycle | [Operator guide](SHARED-LIBRARIES-OPERATIONS.md) and security boundary updated; retain advisory readiness until qualification |
 | Live matrix | Tailscale, two NATs, relay, devices, cluster loss, revoke bounds and sustained playback remain unproved |
 
