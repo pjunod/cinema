@@ -851,25 +851,35 @@ mod tests {
         network.bind = "0.0.0.0:32444".parse().expect("wildcard");
         assert!(!network.listener_bind_is_allowed());
         network.listener_profile = SharingListenerProfile::DockerBridge;
-        assert!(!network.listener_bind_is_allowed(), "host-interface egress is not bridge config");
+        assert!(
+            !network.listener_bind_is_allowed(),
+            "host-interface egress is not bridge config"
+        );
         network.egress = SharingEgressConfig::LocalAddress {
             address: "172.30.44.2".parse().expect("container address"),
         };
-        assert_eq!(network.listener_bind_is_allowed(), cfg!(target_os = "linux"));
+        assert_eq!(
+            network.listener_bind_is_allowed(),
+            cfg!(target_os = "linux")
+        );
         network.bind = "192.168.1.2:32444".parse().expect("foreign address");
         assert!(!network.listener_bind_is_allowed());
         network.bind = "0.0.0.0:0".parse().expect("ephemeral bind");
         assert!(!network.listener_bind_is_allowed());
         network.bind = "0.0.0.0:32444".parse().expect("wildcard");
         for address in ["0.0.0.0", "127.0.0.1", "100.127.90.2", "8.8.8.8", "::1"] {
-            network.egress = SharingEgressConfig::LocalAddress { address: address.parse().expect("address") };
+            network.egress = SharingEgressConfig::LocalAddress {
+                address: address.parse().expect("address"),
+            };
             assert!(!network.listener_bind_is_allowed());
         }
         let parsed: SharingNetworkConfig = toml::from_str(
             "listener_profile = \"docker_bridge\"\nbind = \"0.0.0.0:32444\"\n[egress]\nmode = \"local_address\"\naddress = \"172.30.44.2\"\n"
         ).expect("explicit node-local bridge config");
-        assert_eq!(parsed.listener_profile, SharingListenerProfile::DockerBridge);
+        assert_eq!(
+            parsed.listener_profile,
+            SharingListenerProfile::DockerBridge
+        );
         assert_eq!(parsed.listener_bind_is_allowed(), cfg!(target_os = "linux"));
     }
-
 }
