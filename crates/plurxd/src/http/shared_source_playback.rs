@@ -72,8 +72,8 @@ enum SourceStartTaskStage {
     Claiming {
         planned_incarnation: Uuid,
         // Preserve the actual opaque prepared intent across an unknown claim
-        // outcome, even though the HTTP layer cannot turn it into authority.
-        _intent: plurx_core::sharing_source_sessions::SourceSessionIntent,
+        // outcome, never as an adopted factory or physical-admission authority.
+        intent: plurx_core::sharing_source_sessions::SourceSessionIntent,
     },
     Acquired(plurx_core::sharing_source_sessions::SourceBindingHandle),
     Assigning(plurx_core::sharing_source_sessions::SourceBindingHandle),
@@ -91,12 +91,20 @@ enum SourceStartTaskJoined {
 // historical request or an assignment reconstructed from durable rows.
 #[derive(Clone)]
 enum SourceUninvokedCleanup {
+    UncertainG0 {
+        planned_incarnation: Uuid,
+        intent: Box<plurx_core::sharing_source_sessions::SourceSessionIntent>,
+    },
     G0(plurx_core::sharing_source_sessions::SourceBindingHandle),
     G1(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
 }
 impl SourceUninvokedCleanup {
     fn incarnation(&self) -> Uuid {
         match self {
+            Self::UncertainG0 {
+                planned_incarnation,
+                ..
+            } => *planned_incarnation,
             Self::G0(binding) => binding.incarnation_id(),
             Self::G1(assignment) => assignment.binding().incarnation_id(),
         }
@@ -104,6 +112,12 @@ impl SourceUninvokedCleanup {
     async fn release(&self, state: &crate::state::AppState) -> Result<(), SourceStartFailure> {
         use plurx_core::sharing_source_sessions::SourceReleaseOutcome;
         let result = match self {
+            Self::UncertainG0 { intent, .. } => {
+                state
+                    .store
+                    .release_source_uncertain_uninvoked_claim(intent)
+                    .await
+            }
             Self::G0(binding) => state.store.release_source_never_dispatched(binding).await,
             Self::G1(assignment) => {
                 state
@@ -193,10 +207,22 @@ impl SourceStartEntry {
             }
             if result.is_err() && matches!(joined, SourceStartTaskJoined::Returned) {
                 // The exact future returned before dispatch; its prepared inputs
-                // have dropped. The acquired CAS handle proves exclusive g0
-                // ownership. Assignment ambiguity is fenced by the g0 release
-                // CAS; refusal preserves custody rather than fabricating g1.
+                // have dropped. A fresh acquired handle or this invocation's
+                // retained planned nonce can fence only its exact g0 attempt;
+                // refusal retains custody instead of fabricating g1 proof.
                 let cleanup = match &*entry.task.stage.lock().expect("Source start stage") {
+                    SourceStartTaskStage::Claiming {
+                        planned_incarnation,
+                        intent,
+                    } => {
+                        // Only this joined invocation's fresh planned nonce and
+                        // opaque intent survive an unknown claim; an exact g0
+                        // CAS may fence it, never release an adopted g1 owner.
+                        Some(SourceUninvokedCleanup::UncertainG0 {
+                            planned_incarnation: *planned_incarnation,
+                            intent: Box::new(intent.clone()),
+                        })
+                    }
                     SourceStartTaskStage::Acquired(binding)
                     | SourceStartTaskStage::Assigning(binding) => {
                         Some(SourceUninvokedCleanup::G0(binding.clone()))
@@ -1066,31 +1092,29 @@ async fn end(
         .validate_known(input.known.as_ref())
         .map_err(SourceStartFailure::response)?;
     let owner = entry.end(std::sync::Arc::new(state.clone()));
-    let driver = if let Some(ingress) = headers.forwarded_ingress() {
-        Some(ingress.driver.clone())
-    } else {
-        connection
-            .as_ref()
-            .and_then(|connection| {
-                state
-                    .sharing
-                    .accepted_drivers
-                    .capture(&connection.0, &state.node_id)
-                    .ok()
-            })
-            .map(|captured| captured.id().clone())
-    };
-    if let Some(driver) = driver {
+    let mut drivers = Vec::with_capacity(2);
+    if let Some(ingress) = headers.forwarded_ingress() {
+        drivers.push(ingress.driver.clone());
+    }
+    if let Some(connection) = connection.as_ref() {
+        if let Ok(captured) = state
+            .sharing
+            .accepted_drivers
+            .capture(&connection.0, &state.node_id)
+        {
+            drivers.push(captured.id().clone());
+        }
+    }
+    for driver in drivers {
         if ingress::end_uses_registered_driver(&state, &entry, &driver).await? {
-            // The retained cleanup owner runs, while this response releases its
-            // own driver immediately rather than waiting for itself to close.
+            // Either the ingress writer or a pooled internal writer may carry
+            // existing media debt. Return before waiting for that same writer.
             return Err(SourceStartFailure::Unresolved.response());
         }
     }
     let receipt = owner
-        // The waiter may share a registered H2 driver with media. Returning
-        // unresolved lets that response finish so graceful drain can close it;
-        // the entry retains the same owned cleanup task and original budget.
+        // A different driver may await the retained owner for a bounded reply;
+        // retries preserve the same task and original retirement budget.
         .wait(headers.deadline(std::time::Duration::from_secs(9)))
         .await
         .map_err(SourceStartFailure::response)?;
@@ -1746,7 +1770,7 @@ async fn own_start(
         .ok_or(SourceStartFailure::Unavailable)?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
         planned_incarnation,
-        _intent: (*intent).clone(),
+        intent: (*intent).clone(),
     });
     let binding = match state
         .store

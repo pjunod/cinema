@@ -91,6 +91,21 @@ A lost reply may be retried with the same identity. Unreachable peers and
 missing keys require restoring authenticated reachability or reviewing the
 recorded failure, not fabricating a completed End.
 
+In a cluster, the node accepting the client connection forwards to the
+retained playback owner. Source placement probes the exact authorized file
+before claiming a new invocation; a lost response retains that selected
+worker and process identity. It does not select a second worker for the same
+uncertain Start. Receiver failover likewise cannot adopt playback from a
+database row when the physical owner is absent.
+
+End may first return a closing/unresolved response when it arrives over a
+connection that still owns playback bytes. The owner seals new registrations,
+closes the actual transports and records authenticated closure acknowledgments
+before confirming End. Retry the same End identity on a fresh connection.
+A completed HTTP response, changed owner row or expired deadline alone does
+not prove closure. Cleanup retains one absolute deadline; retrying does not
+restart that budget.
+
 When rotating endpoints, retain an approved reachable endpoint while the
 authenticated manifest propagates. Cleanup first tries its retained endpoint,
 then current approved replacements from the same import lineage. It retries
@@ -101,6 +116,12 @@ leaves cleanup unresolved. Address hints cannot introduce a new pin.
 If every trusted endpoint/key is lost, use explicit administrator confirmation
 and the pairing recovery flow. Never paste a peer credential into a client URL
 or an operator log.
+
+Rewrapping a retained receiver obligation preserves its exact Source identity.
+The live actor authenticates the current encrypted capsule against its held
+Source before using the replacement ciphertext for cleanup. Preserve wrapping
+keys until existing obligations have been rewrapped; changing a credential or
+Source tuple is not an equivalent rewrap.
 
 ## Upgrade, restore and qualification
 
@@ -120,3 +141,26 @@ The feature stays in Developer until the network, cluster and device matrix
 is qualified. The saved choice remains available throughout. Main promotion
 is still held for Paul; this session has run compiler/lint checks and has
 deferred test execution until promotion under his explicit instruction.
+
+## Qualification handoff
+
+When Paul releases the main-promotion hold, use this prompt for the remaining
+device and topology work:
+
+> Continue plurx shared-library qualification from the current status page and
+> implementation contract. Use your own clone and the exact promotion candidate.
+> First obtain the one adversarial review, address its findings, and run the
+> required fast-lane checks once, rerunning only failures. Preserve receipts
+> against the code they cover. Qualify isolated instances on nuc4
+> (192.168.4.8) and m6 (192.168.4.14), with separate ports and data directories;
+> do not replace their fleet services. Establish approved Tailscale access and
+> a real second-NAT/relay topology before claiming those cells. Use permitted
+> Apple devices, excluding Paul's iPhone 18 Pro and Apple TV, and the Android
+> Google TV Streamer available through nuc3. Exercise native direct play,
+> prepared handoff and refusal recovery, subtitle burn/HDR, revocation, cluster
+> loss, remote-only file placement and active Shared upgrade/restore. A Local
+> HLS harness or same-host two-node fixture cannot stand in for those receipts.
+> Record unsupported or unavailable cells honestly. Promote only under the
+> required main gate and qualification receipt; use the repository's Ansible
+> and versioning workflow for any subsequent authorized deployment. Remove
+> only the qualification resources you created.

@@ -429,6 +429,8 @@ struct FreshPin {
     reference: SourcePlaybackTarget,
     body_hash: [u8; 32],
     candidate: String,
+    registry_boot: Option<Uuid>,
+    credential_hash: String,
 }
 #[derive(Clone, Default)]
 pub(super) struct ForwardingRegistry {
@@ -448,6 +450,7 @@ impl ForwardingRegistry {
                 return Err(invalid());
             }
             authority.candidate_node_id.clone_from(&pin.candidate);
+            authority.expected_registry_boot = pin.registry_boot;
         } else {
             if pins.len() >= HELD_MAX {
                 return Err(unavailable());
@@ -458,6 +461,8 @@ impl ForwardingRegistry {
                 reference: authority.reference.clone(),
                 body_hash,
                 candidate: authority.candidate_node_id.clone(),
+                registry_boot: authority.expected_registry_boot,
+                credential_hash: authority.credential_hash.clone(),
             });
         }
         Ok(())
@@ -468,7 +473,7 @@ impl ForwardingRegistry {
         request: Uuid,
         reference: &SourcePlaybackTarget,
         canonical_recipe: &[u8],
-    ) -> Option<String> {
+    ) -> Option<(String, Option<Uuid>)> {
         use sha2::Digest;
         let body_hash: [u8; 32] = sha2::Sha256::digest(canonical_recipe).into();
         self.fresh
@@ -481,7 +486,37 @@ impl ForwardingRegistry {
                     && &pin.reference == reference
                     && pin.body_hash == body_hash
             })
-            .map(|pin| pin.candidate.clone())
+            .map(|pin| (pin.candidate.clone(), pin.registry_boot))
+    }
+    pub(super) fn pending_cleanup_route(
+        &self,
+        hash: &str,
+        viewer: &str,
+        request: Uuid,
+        reference: &SourcePlaybackTarget,
+        canonical_recipe: &[u8],
+    ) -> Option<(PlaybackPrincipal, String, Uuid)> {
+        use sha2::Digest;
+        let body_hash: [u8; 32] = sha2::Sha256::digest(canonical_recipe).into();
+        self.fresh
+            .lock()
+            .expect("Source candidate pins")
+            .iter()
+            .find_map(|pin| {
+                let PlaybackPrincipal::Sharing { viewer_key, .. } = &pin.principal else {
+                    return None;
+                };
+                (pin.credential_hash == hash
+                    && viewer_key.as_str() == viewer
+                    && pin.request == request
+                    && &pin.reference == reference
+                    && pin.body_hash == body_hash)
+                    .then(|| {
+                        pin.registry_boot
+                            .map(|boot| (pin.principal.clone(), pin.candidate.clone(), boot))
+                    })
+                    .flatten()
+            })
     }
     fn unpin_assigned(&self, authority: &FreshAuthority) {
         self.fresh
@@ -866,6 +901,41 @@ fn end_to_end(headers: &HeaderMap) -> HeaderMap {
     }
     result
 }
+// Only a signed exact-target control response may retire routing cache state.
+// This produces no admission, driver closure, or principal settlement proof.
+fn settled_cleanup_reply(authority: &FreshAuthority, body: &[u8]) -> bool {
+    let Ok(reply) = serde_json::from_slice::<ControlReply>(body) else {
+        return false;
+    };
+    if !(200..300).contains(&reply.status) {
+        return false;
+    }
+    let Ok(bytes) = hex::decode(reply.body_hex) else {
+        return false;
+    };
+    if bytes.len() > 24 * 1024 {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    value.get("settled").and_then(serde_json::Value::as_bool) == Some(true)
+        && value.get("state").and_then(serde_json::Value::as_str) == Some("settled")
+        && value.get("reference").is_some_and(|actual| {
+            serde_json::to_value(&authority.reference).is_ok_and(|expected| *actual == expected)
+        })
+        && value.get("request_id").and_then(serde_json::Value::as_str)
+            == Some(authority.request_id.to_string().as_str())
+        && ["incarnation_id", "confirmation_id"]
+            .into_iter()
+            .all(|field| {
+                value
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|raw| Uuid::parse_str(raw).ok())
+                    .is_some_and(valid_uuid)
+            })
+}
 fn decode_control(body: &[u8]) -> Result<Response, ApiError> {
     let reply: ControlReply = serde_json::from_slice(body).map_err(|_| unavailable())?;
     let status = StatusCode::from_u16(reply.status).map_err(|_| unavailable())?;
@@ -1022,7 +1092,18 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
             )
             .await?;
             if op != Operation::Start || !prepared.status.is_success() {
-                return decode_control(&prepared.body);
+                let response = decode_control(&prepared.body)?;
+                if op == Operation::End
+                    && prepared.status.is_success()
+                    && settled_cleanup_reply(&fresh, &prepared.body)
+                {
+                    state
+                        .transcode
+                        .source_http_starts
+                        .forwarding
+                        .unpin_assigned(&fresh);
+                }
+                return Ok(response);
             }
             let assigned: ForwardAuthority =
                 serde_json::from_slice(&prepared.body).map_err(|_| unavailable())?;
@@ -1552,14 +1633,28 @@ mod tests {
     fn uncertain_fresh_candidate_stays_pinned_without_assignment_authority() {
         let registry = ForwardingRegistry::default();
         let mut authority = fresh();
+        let original_boot = Uuid::new_v4();
+        authority.expected_registry_boot = Some(original_boot);
         registry
             .pin(&mut authority, b"canonical complete recipe")
             .expect("initial pin");
         authority.candidate_node_id = "worker-b".into();
+        authority.expected_registry_boot = Some(Uuid::new_v4());
         registry
             .pin(&mut authority, b"canonical complete recipe")
             .expect("exact retry");
         assert_eq!(authority.candidate_node_id, "worker-a");
+        assert_eq!(authority.expected_registry_boot, Some(original_boot));
+        let cleanup = registry
+            .pending_cleanup_route(
+                &authority.credential_hash,
+                &"b".repeat(64),
+                authority.request_id,
+                &authority.reference,
+                b"canonical complete recipe",
+            )
+            .expect("exact original cleanup pin");
+        assert_eq!((cleanup.1, cleanup.2), ("worker-a".into(), original_boot));
         assert_eq!(
             registry.pending_candidate(
                 &authority.principal,
@@ -1567,7 +1662,7 @@ mod tests {
                 &authority.reference,
                 b"canonical complete recipe"
             ),
-            Some("worker-a".into())
+            Some(("worker-a".into(), Some(original_boot)))
         );
         assert!(registry
             .pending_candidate(
@@ -1914,5 +2009,49 @@ mod locality_tests {
         assert!(!reply.exact(&authority.candidate_node_id, &wrong_reference));
         reply.node_id = "different-peer".into();
         assert!(!reply.exact(&authority.candidate_node_id, &authority.reference));
+    }
+    #[test]
+    fn authenticated_exact_settled_end_reclaims_only_its_bounded_routing_pin() {
+        use super::tests::fresh;
+        let registry = ForwardingRegistry::default();
+        let mut first = fresh();
+        first.expected_registry_boot = Some(Uuid::new_v4());
+        registry.pin(&mut first, b"recipe").expect("first pin");
+        for _ in 1..HELD_MAX {
+            let mut next = fresh();
+            next.expected_registry_boot = Some(Uuid::new_v4());
+            registry
+                .pin(&mut next, b"recipe")
+                .expect("bounded pending pin");
+        }
+        let mut overflow = fresh();
+        assert!(registry.pin(&mut overflow, b"recipe").is_err());
+        let mut receipt = serde_json::json!({"reference": first.reference,
+            "request_id": first.request_id,"incarnation_id":Uuid::new_v4(),
+            "confirmation_id":Uuid::new_v4(),"state":"settled","settled":true});
+        let control = |value: &serde_json::Value| {
+            serde_json::to_vec(&ControlReply {
+                status: 200,
+                headers: Vec::new(),
+                body_hex: hex::encode(serde_json::to_vec(value).expect("receipt JSON")),
+            })
+            .expect("signed control payload fixture")
+        };
+        assert!(settled_cleanup_reply(&first, &control(&receipt)));
+        receipt["request_id"] = serde_json::json!(Uuid::new_v4());
+        assert!(!settled_cleanup_reply(&first, &control(&receipt)));
+        assert_eq!(
+            registry.fresh.lock().expect("pins").len(),
+            HELD_MAX,
+            "mismatch/unknown cannot reclaim routing authority"
+        );
+        receipt["request_id"] = serde_json::json!(first.request_id);
+        if settled_cleanup_reply(&first, &control(&receipt)) {
+            registry.unpin_assigned(&first);
+        }
+        registry
+            .pin(&mut overflow, b"recipe")
+            .expect("settled exact cache slot reclaimed");
+        assert_eq!(registry.fresh.lock().expect("pins").len(), HELD_MAX);
     }
 }

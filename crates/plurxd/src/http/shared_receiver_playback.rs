@@ -2023,6 +2023,61 @@ pub(super) async fn receiver_media_actor(
 }
 
 #[cfg(test)]
+pub(crate) struct PausedActualReceiverActor<'a> {
+    registry: &'a ReceiverStartRegistry,
+    entry: Option<Arc<ReceiverStartInner>>,
+    position: usize,
+}
+#[cfg(test)]
+impl Drop for PausedActualReceiverActor<'_> {
+    fn drop(&mut self) {
+        let Some(entry) = self.entry.take() else {
+            return;
+        };
+        let mut entries = self
+            .registry
+            .entries
+            .lock()
+            .expect("fixture actual registry");
+        assert!(
+            !entries
+                .iter()
+                .any(|other| other.intent.user_id == entry.intent.user_id
+                    && other.request_id == entry.request_id),
+            "fixture cannot replace an actual retained invocation while its registry entry is paused"
+        );
+        let position = self.position.min(entries.len());
+        entries.insert(position, entry);
+    }
+}
+#[cfg(test)]
+impl ReceiverStartRegistry {
+    /// Temporarily remove only the actual retained Arc, keeping its physical
+    /// owner alive in the guard. Restoration never reads or adopts SQL facts.
+    pub(crate) fn pause_actual_actor_for_fixture(
+        &self,
+        session: Uuid,
+    ) -> Option<PausedActualReceiverActor<'_>> {
+        let mut entries = self.entries.lock().expect("fixture actual registry");
+        let position = entries.iter().position(|entry| {
+            let owned = entry.state.lock().expect("fixture actual owner");
+            !owned.retirement_started
+                && matches!(owned.start, Some(Ok(_)))
+                && owned
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.session_id == session)
+        })?;
+        let entry = entries.remove(position);
+        Some(PausedActualReceiverActor {
+            registry: self,
+            entry: Some(entry),
+            position,
+        })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use plurx_core::{

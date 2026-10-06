@@ -6320,3 +6320,45 @@ definitions cover stable refusal/End retries and rejection of an unbound
 normalized preparation. This closes the preparation-refusal gap; cluster
 forwarding and distributed ingress cleanup remain separate work recorded on
 the status page.
+
+### Cluster forwarding and physical ingress custody (2026-10-06)
+
+**Status:** Source runtime checkpoint `d32be9ca8` and receiver runtime checkpoint
+`2e4fd9e21` compiled and linted; integration and final lost-reply follow-ups are
+recorded on the [status page](SHARED-LIBRARIES-STATUS.md). No new runtime or
+topology acceptance receipt is claimed. Paul deferred test execution until main
+promotion after its adversarial review.
+
+The concrete missing proof was the outer accepted connection: forwarding an
+HTTP response through the playback owner did not make that owner's internal
+writer own the ingress node's queued bytes. Source and receiver now use the
+same private accepted-driver registry, bounded per-principal durable ledger,
+sealed registration and authenticated actual-closure acknowledgments. End
+retains its original deadline and cannot confirm from SQL ownership, stream
+EOF, missing actors or elapsed time. A same-driver End first returns closing
+so it does not wait for the connection carrying its own response.
+
+Source placement uses signed read-only observations of the exact authorized
+file, without requiring a warm fragment index or a legacy MPEG-TS offer.
+The g0 claim records the chosen process and original credential hash before
+fallible preparation. Fresh producer admission requires an opaque permission
+backed by a registered ingress; subsequent renewal revalidates each retained
+session owner's permission without requiring a continuously open HTTP
+connection between requests. Receiver forwarding uses fresh read authority
+and the actual retained owner. Its orphan cleanup closes original ingress
+obligations before Source End; no database-only actor adoption is introduced.
+
+The [custody decision](SHARED-LIBRARIES-INGRESS-CUSTODY.md) describes the schema,
+retry and compatibility boundaries. Real non-owner HTTP regression definitions
+cover signed placement/forwarding and same-driver End, with test-owned finite
+servers and transport tasks. Their execution is deferred. Same-host fixtures
+cannot establish remote-only mounts, Tailscale, independent NATs, physical
+players, revocation bounds or active Shared restore qualification.
+
+The final Source follow-up `8b885f707` narrows the earlier commit-unknown
+limitation: only the actual joined invocation retains its private fresh intent
+and planned incarnation. A same-write guard may clear that exact undispatched
+g0, bound to the original worker boot and initial credential hash. Absence, a
+foreign intent, g1 dispatch or historical metadata still cannot supply cleanup
+proof. Pending forwarding retains the original process identity and releases
+its bounded routing pin only after an authenticated exact settled End.

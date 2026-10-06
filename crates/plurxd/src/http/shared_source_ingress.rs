@@ -272,10 +272,34 @@ pub(super) async fn resolve_forward_route(
             cleanup_only,
         })));
     }
+    if let Some((principal, node, boot)) = state
+        .transcode
+        .source_http_starts
+        .forwarding
+        .pending_cleanup_route(
+            &hash,
+            &viewer,
+            input.request_id,
+            target,
+            &input.canonical_recipe,
+        )
+    {
+        if node == state.node_id {
+            return Ok(ForwardRoute::Local);
+        }
+        return Ok(ForwardRoute::Pending(Box::new(FreshAuthority {
+            credential_hash: hash,
+            principal,
+            candidate_node_id: node,
+            expected_registry_boot: Some(boot),
+            reference: input.reference,
+            request_id: input.request_id,
+        })));
+    }
     // NULL/absent assignment never permits another candidate after dispatch.
     let (_, grant) = current_reference(state, headers, target).await?;
     let principal = PlaybackPrincipal::sharing(grant, &viewer).map_err(|_| unavailable())?;
-    if let Some(node) = state
+    if let Some((node, boot)) = state
         .transcode
         .source_http_starts
         .forwarding
@@ -286,11 +310,18 @@ pub(super) async fn resolve_forward_route(
             &input.canonical_recipe,
         )
     {
-        // A pin without original boot cannot become cross-process authority.
         if node == state.node_id {
             return Ok(ForwardRoute::Local);
         }
-        return Err(unavailable());
+        let boot = boot.ok_or_else(unavailable)?;
+        return Ok(ForwardRoute::Pending(Box::new(FreshAuthority {
+            credential_hash: hash,
+            principal,
+            candidate_node_id: node,
+            expected_registry_boot: Some(boot),
+            reference: input.reference,
+            request_id: input.request_id,
+        })));
     }
     if !path.ends_with("/sessions") {
         return Err(unavailable());
@@ -684,64 +715,98 @@ pub(super) async fn retire_custody_with_mode(
         .await
         .map_err(|_| unavailable())?
         .ok_or_else(unavailable)?;
-    for slot in ledger.state.open() {
-        let left = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis()
-            .min(305_000);
-        if left == 0 {
-            return Err(unavailable());
-        }
-        let request = DriverCloseRequest {
-            driver: AcceptedDriverId {
-                boot_id: slot.boot_id,
-                connection_id: slot.connection_id,
-                driver_sequence: slot.driver_sequence,
-            },
-            registration_sequence: slot.registration_sequence,
-            principal_kind: "source".into(),
-            incarnation_id: value.binding().incarnation_id(),
-            owner_identity: value.custody_identity(),
-            expected_owner_epoch: value.dispatch_generation(),
-            mode,
-            deadline_unix_ms: crate::state::clock_ms()
-                + i64::try_from(left).map_err(|_| unavailable())?,
-        };
-        let receipt = if slot.node_id == state.node_id {
-            state
-                .sharing
-                .accepted_drivers
-                .close(value.owner_node_id(), &request)
+    use futures_util::{stream::FuturesUnordered, StreamExt};
+    let mut closures = FuturesUnordered::new();
+    for slot in ledger.state.open().cloned() {
+        closures.push(async move {
+            let left = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(305_000);
+            if left == 0 {
+                return Err(unavailable());
+            }
+            let request = DriverCloseRequest {
+                driver: AcceptedDriverId {
+                    boot_id: slot.boot_id,
+                    connection_id: slot.connection_id,
+                    driver_sequence: slot.driver_sequence,
+                },
+                registration_sequence: slot.registration_sequence,
+                principal_kind: "source".into(),
+                incarnation_id: value.binding().incarnation_id(),
+                owner_identity: value.custody_identity(),
+                expected_owner_epoch: value.dispatch_generation(),
+                mode,
+                deadline_unix_ms: crate::state::clock_ms()
+                    + i64::try_from(left).map_err(|_| unavailable())?,
+            };
+            let close = async {
+                if slot.node_id == state.node_id {
+                    state
+                        .sharing
+                        .accepted_drivers
+                        .close(value.owner_node_id(), &request)
+                        .await
+                        .map_err(|_| unavailable())
+                } else {
+                    state
+                        .media_sessions
+                        .close_sharing_ingress(&slot.node_id, &request)
+                        .await
+                        .map_err(|_| unavailable())
+                }
+            };
+            let receipt = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), close)
                 .await
-                .map_err(|_| unavailable())?
-        } else {
-            state
-                .media_sessions
-                .close_sharing_ingress(&slot.node_id, &request)
-                .await
-                .map_err(|_| unavailable())?
-        };
-        if !receipt.matches(&request.driver) {
-            return Err(unavailable());
-        }
-        match state
-            .store
-            .acknowledge_source_ingress_custody(value, slot, receipt.confirmation())
-            .await
-            .map_err(|_| unavailable())?
-        {
-            SourceCustodyWrite::Applied
-            | SourceCustodyWrite::ExactReplay
-            | SourceCustodyWrite::ReconciledClosed => {}
-            SourceCustodyWrite::Refused => return Err(unavailable()),
+                .map_err(|_| unavailable())??;
+            if !receipt.matches(&request.driver) {
+                return Err(unavailable());
+            }
+            Ok((slot, receipt))
+        });
+    }
+    // Poll every bounded close exchange under the same inherited deadline.
+    // One unreachable ingress cannot prevent the other actual drivers from
+    // receiving their drain/revoke signal. No independently spawned work.
+    let mut closed = Vec::new();
+    let mut failed = false;
+    while let Some(outcome) = closures.next().await {
+        match outcome {
+            Ok(receipt) => closed.push(receipt),
+            Err(_) => failed = true,
         }
     }
-    let ledger = state
-        .store
-        .source_ingress_custody(value)
-        .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+    // Serialize ledger acknowledgements after actual closure aggregation so
+    // this fanout cannot create optimistic CAS contention against itself.
+    for (slot, receipt) in closed {
+        let ack = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            state
+                .store
+                .acknowledge_source_ingress_custody(value, &slot, receipt.confirmation()),
+        )
+        .await;
+        if !matches!(
+            ack,
+            Ok(Ok(SourceCustodyWrite::Applied
+                | SourceCustodyWrite::ExactReplay
+                | SourceCustodyWrite::ReconciledClosed))
+        ) {
+            failed = true;
+        }
+    }
+    if failed {
+        return Err(unavailable());
+    }
+    let ledger = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state.store.source_ingress_custody(value),
+    )
+    .await
+    .map_err(|_| unavailable())?
+    .map_err(|_| unavailable())?
+    .ok_or_else(unavailable)?;
     if !ledger.state.is_sealed() || !ledger.state.settled() {
         return Err(unavailable());
     }

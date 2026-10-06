@@ -1,6 +1,6 @@
 # Shared libraries — build status and remaining acceptance
 
-**Status:** building on the effort branch · **Updated:** 2026-10-06 ·
+**Status:** final batch validation for the effort branch · **Updated:** 2026-10-06 ·
 **Owner:** Sol, continuing Claude's Root lane · **Promotion:** held for Paul.
 
 **Batch:** [draft PR #827](http://192.168.4.7:3000/noirr/plurx/pulls/827).
@@ -30,15 +30,15 @@ existing warm target. Paul's checkout is not used for changes.
 | Native/web handoff and burn/HDR | Integrated through `32a556f7b` | Native plan parity, web refusal reopen under original account, Android renderer failure cleanup |
 | Native catalogue/history audit | Integrated through `32a556f7b` | Frame evidence before progress; Source-separated Continue Watching UI; next-episode membership race fixed |
 | Android frame identity follow-up | Integrated `a062ce299` | Prepared successor carries its proved frame; late old attachment callbacks cannot mark the new attachment; Android sources compiled |
-| Failed Source Start | Integrated through `e0fd7b898` | Fresh invocation claim precedes fallible preparation; private pre-admission factory receipt and exact g0/g1 cleanup; ambiguous failures retain custody; execution deferred |
+| Failed Source Start | Integrated through `8b885f707` | Fresh invocation precedes preparation; exact retained intent can fence only its original undispatched g0 after an ambiguous commit; absent, foreign or g1 claims remain unresolved; execution deferred |
 | Busy predecessor transport | Integrated `9789741b2` | Graceful H2 drain preserves existing successor writes; actual closure still required; no runtime receipt yet |
 | Approved endpoint cleanup | Integrated through `f7962bd2d` | Exact immutable End retries approved endpoints/pins after refusal or stall, preserving time for replacements; real pinned fixtures defined, execution deferred |
 | Linux Docker bridge hosting | Profile and recipe integrated through `6ab554659` | Rust check/Clippy and actual Compose render/preflight passed, including explicit default gateway; runtime qualification remains open |
-| Common ingress custody | Primitives integrated `cebc6d2e5`; adapters still building | Actual accepted-driver identity/closure, bounded per-principal registration and immutable retry identity; no forwarded playback admitted by this checkpoint |
-| Receiver ingress authority | Foundation integrated `124d911f9`; runtime adapter building | Fresh receiver read proof, independent ingress member floor and explicit backend identity; guarded registration/cleanup metadata; no physical closure inferred from Store reads |
+| Common ingress custody | Source `d32be9ca8` and B `2e4fd9e21` integrated | Actual accepted-driver identity/closure, bounded per-principal registration and immutable retry identity; Both forwarding paths wired; concurrent actual closure under one deadline, serialized acknowledgments and exact lost-reply retries |
+| Receiver ingress authority | Runtime and fixture integrated through `696ffb9ec` | Fresh receiver read proof, independent ingress member floor and explicit backend identity; guarded registration/cleanup metadata; no physical closure inferred from Store reads |
 | Custody schema and upgrade floor | Integrated `69876dfce` | SQLite 93; replicated baseline 72 / Source 73; frozen Source layout 71 unchanged; old held obligations refuse upgrade; compiled, execution deferred |
 | Active upgrade harness | Integrated through `cdf18d7f5`; unexecuted | Historical/candidate/restored Local HLS, actual video decode and live encoder drain; does not qualify Shared relay or active principal rebuild |
-| Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed on integration `cb2e10e87`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
+| Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed through combined integration `6c30fa1df`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
 
 ## Parallel builders and management audit
 
@@ -48,9 +48,9 @@ current. Each builder has an isolated clone from `d4d2ec8e4`.
 
 | Builder | Owned work | State |
 |---|---|---|
-| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Migration and fresh invocation checkpoints integrated; Source custody adapter and fresh worker placement next |
-| Forwarding / completed clients | Source and B transport modules; native/web, hosting and Windows compiler | Source transport draft awaiting wired runtime compilation; B forwarding assigned as the next parallel slice |
-| Receiver/cluster | Shared accepted-driver custody, B authority and retirement, endpoint cleanup | Common custody and endpoint fallback integrated; building B durable adapter while the forwarding builder handles transport |
+| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Completed through `8b885f707`; final concurrent-close correction included in combined validation |
+| Forwarding / completed clients | Source and B transport modules; native/web, hosting and Windows compiler | Source/B transport, per-owner permission, rewrap refresh and real non-owner fixture definitions delivered; final combined Windows compilation next |
+| Receiver/cluster | Shared accepted-driver custody, B authority and retirement, endpoint cleanup | Completed through `696ffb9ec`; final serialized-acknowledgment correction included in combined validation |
 | Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |
 
 Rust builders install source and compile inside one owned lock on nuc4. Remote checks
@@ -72,16 +72,21 @@ history updates before frame evidence; those fixes are integrated. Cluster
 forwarding cannot report End until the outer ingress writer, as well as the
 owner's internal writer, has actually closed. The builders share one custody
 mechanism for that boundary. Docker's planned bridge recipe was not implemented;
-the explicit profile, recipe and gateway selection are now integrated. No claim that the whole effort is
-correct or releasable is made.
+the explicit profile, recipe and gateway selection are now integrated. The runtime fixes cover reconnect gaps, independent admission proof for
+each owner of a shared rendition, and explicit closure signals rather than new
+per-connection SQL polling. Cold-file placement uses a signed read-only file
+observation, independent of the legacy MPEG-TS offer and warm index state.
+Returned physical closure receipts are authenticated as exact member responses.
+No claim that the whole effort is correct or
+releasable is made.
 
 ## Remaining build and qualification
 
 | Requirement | Next acceptance boundary |
 |---|---|
 | Failed or ambiguous Source Start | Runtime qualification of fresh invocation custody, private factory refusal and exact g0/g1 cleanup |
-| Source worker forwarding | Authenticated non-owner ingress reaches its assigned physical worker |
-| B cluster ingress and owner transition | Physical ownership proof; SQL metadata alone cannot authorize adoption |
+| Source worker forwarding | Implemented and fixture defined; runtime and remote-only mount qualification deferred |
+| B cluster ingress and owner transition | Implemented and fixture defined; actual-owner, member-loss and full topology execution deferred |
 | Endpoint and pin changes | Authenticated rotation preserves cleanup reachability |
 | Cluster revocation and limits | Three-voter cases; preparations count toward four grant and eight Source slots |
 | Upgrade and restore | Historical binaries and active-session behavior; restore requires disable or re-pair |

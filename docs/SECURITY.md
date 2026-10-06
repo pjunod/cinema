@@ -52,6 +52,17 @@ request alone cannot prove that media production stopped. Restore and clone
 handling disable sharing and require re-pairing; replaying old database state
 must not silently restore a revoked relationship.
 
+Within each cluster, non-owner forwarding uses a current member's signed
+request bound to the target, method, path and body. It carries the exact
+sharing principal and invocation identity, never the raw peer bearer or a
+filesystem path. The owner independently checks current playback authority;
+cleanup uses the retained original obligation. File-location observations are
+bounded, signed metadata and cannot authorize producer creation. Actual ingress
+closure receipts are also signed for the requesting member and exact request.
+Neither a forwarded header nor a database-only owner change grants physical
+ownership. See the [ingress custody design](features/SHARED-LIBRARIES-INGRESS-CUSTODY.md)
+for registration, lost-reply and retirement boundaries.
+
 The contract requires new Source and recipient delivery to stop within 30
 seconds of revocation, excluding bytes already buffered by a player. That is
 an acceptance requirement, not a completed live-topology measurement. Consult

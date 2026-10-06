@@ -2507,7 +2507,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # settlement. No timer or detached recovery owner is added.
 # +1 approved-endpoint fixture: its replacement TLS server is stopped and
 # joined by the fixture after the real immutable End settles.
-expected_occurrences = 810
+# 810 -> 821, shared cluster forwarding completion (2026-10-06).
+# Source/receiver forwarding completion: actual Source HTTP and factory fixtures own
+# their finite servers, H2 drivers and closure monitors, cancelling and joining
+# them during teardown. Production Source Start/End keep their existing tasks
+# in retained entry/retirement owners; no periodic monitor was introduced.
+expected_occurrences = 821
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2683,7 +2688,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # terminated and reaped it for foreground, download, ownership and deadline yields.
 # Shared libraries S2: the lost-response fixture JoinSet owns and aborts
 # accepted TLS connections; this is the same in-process task inventoried above.
-expected_occurrences = 54
+# 54 -> 55, shared cluster forwarding completion (2026-10-06).
+# Receiver retirement owns the bounded JoinSet of actual ingress close exchanges;
+# it joins every result, or shuts the set down at the original retirement deadline.
+# Source uses awaited FuturesUnordered, with no independently spawned close task.
+expected_occurrences = 55
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2696,7 +2705,10 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # the drop and slot-termination reap fixtures, and the fd-6 closure fixture).
 # None of them is a task call, and the five shipped callers reach the builder by
 # its `crate::producer_spawn::` path, which the namespaced sentinel counts.
-expected_occurrences = 10
+# 10 -> 11, shared cluster forwarding completion (2026-10-06).
+# The Source non-owner fixture adds its server constructor named spawn; the
+# fixture retains the server task and cancels/joins it on teardown.
+expected_occurrences = 11
 
 [[module_structures]]
 id = "namespaced-time-constructor"
@@ -3720,7 +3732,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +4 approved-endpoint cleanup: bounded import lookup and total-budget
 # endpoint attempt replace the old unbounded dial loop; two fixture bounds
 # cover an actual End refusal and an accepted request stalled until settlement.
-expected_occurrences = 1329
+# 1329 -> 1380, shared cluster forwarding completion (2026-10-06).
+# Forwarded control, admission, close and ACK operations inherit bounded request
+# or retirement deadlines. Response owners retain delivery/no-progress budgets;
+# test fixtures own finite wait/teardown deadlines. No periodic SQL poller or
+# playback watchdog is added, and retries do not renew retirement deadlines.
+expected_occurrences = 1380
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -4563,7 +4580,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # fixture subtitle mux output is awaited; two HTTP status assertions inspect
 # responses only. None creates an additional detached owner.
 # +1 approved-endpoint fixture server launch, owned and joined by the fixture.
-expected_occurrences = 577
+# 577 -> 594, shared cluster forwarding completion (2026-10-06).
+# Forwarding adds response status builders/readers and finite fixture server
+# launches to this conservative method-shape census. B retirement owns and
+# joins its close-task fanout. No additional media child-process factory is added.
+expected_occurrences = 594
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
@@ -4809,7 +4830,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # the fixture sleeper.
 # +1: the Source direct byte route awaits its Start entry (`entry.wait`), the
 # same in-process outcome wait every Source operation uses. No child process.
-expected_occurrences = 293
+# 293 -> 297, shared cluster forwarding completion (2026-10-06).
+# Source non-owner and actual-driver fixture waits use retained Start/End or
+# closure owners. Fixture teardown cancels and joins its finite transport tasks;
+# these method shapes do not add an independent media-process lifecycle.
+expected_occurrences = 297
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

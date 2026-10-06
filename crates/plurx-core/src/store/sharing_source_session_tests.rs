@@ -1898,3 +1898,88 @@ async fn sharing_source_index_permission_and_bounded_evidence_preserve_lineage()
         );
     }
 }
+
+#[tokio::test]
+async fn sharing_source_retained_planned_intent_fences_only_exact_boot_bound_uninvoked_g0() {
+    let dir = tempfile::tempdir().expect("Source g0 fixture");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory Source"),
+        SqliteStore::open(&dir.path().join("uncertain-g0.db")).expect("file Source"),
+    ] {
+        let (grant, credential) = setup(&store).await;
+        let planned = intent(&store, grant, &credential, "uncertain-g0").await;
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&planned)
+                .await
+                .expect("missing exact claim"),
+            SourceReleaseOutcome::Refused,
+            "absence cannot discharge an uncertain invocation"
+        );
+        let acquired = match store
+            .claim_source_media_session(&planned, &proof())
+            .await
+            .expect("actual claim mutation")
+        {
+            SourceClaimOutcome::Acquired(value) => value,
+            _ => panic!("fresh fixture claim"),
+        };
+        // These definitions exercise the exact SQL fence. Only the daemon's
+        // joined actual pre-factory invocation can retain its cleanup receipt.
+        let adopted = intent(&store, grant, &credential, "uncertain-g0").await;
+        assert_ne!(adopted.request.incarnation_id, acquired.incarnation_id());
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&adopted)
+                .await
+                .expect("historical nonce refusal"),
+            SourceReleaseOutcome::Refused
+        );
+        let mut wrong_boot = planned.clone();
+        wrong_boot.request.ingress_registry_boot_id = Uuid::new_v4();
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&wrong_boot)
+                .await
+                .expect("foreign boot refusal"),
+            SourceReleaseOutcome::Refused
+        );
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&planned)
+                .await
+                .expect("exact retained planned fence"),
+            SourceReleaseOutcome::Released
+        );
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&planned)
+                .await
+                .expect("exact retry"),
+            SourceReleaseOutcome::ExactReplay
+        );
+
+        let assigned_intent = intent(&store, grant, &credential, "historical-g1").await;
+        let binding = match store
+            .claim_source_media_session(&assigned_intent, &proof())
+            .await
+            .expect("second claim")
+        {
+            SourceClaimOutcome::Acquired(value) => value,
+            _ => panic!("fresh assigned fixture"),
+        };
+        store
+            .assign_source_dispatch(&binding, &credential, &proof())
+            .await
+            .expect("actual dispatch assignment")
+            .expect("assigned");
+        assert_eq!(
+            store
+                .release_source_uncertain_uninvoked_claim(&assigned_intent)
+                .await
+                .expect("g1 remains owned"),
+            SourceReleaseOutcome::Refused,
+            "a joined pre-factory intent cannot settle an already assigned incarnation"
+        );
+    }
+}

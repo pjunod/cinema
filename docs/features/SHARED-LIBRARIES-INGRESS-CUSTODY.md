@@ -1,6 +1,6 @@
 # Shared ingress custody — ownership across a cluster hop
 
-**Status:** accepted design; implementation and qualification open  
+**Status:** implemented in the completion batch; qualification open
 **Date:** 2026-10-06  
 **Decision owner:** Root, coordinating the Source and receiver builders under
 Paul's instruction to resolve architectural causes.
@@ -37,7 +37,9 @@ durable obligations for Source and B playback:
    every outstanding ingress obligation and waits for the exact acknowledgement
    produced after the captured driver actually closes. Supersession drains;
    revocation/deletion can hard-close. Source End and final retirement follow
-   those joins.
+   those joins. Close exchanges fan out within the existing bounded ledger
+   under one inherited deadline; the owner serializes acknowledgments so its
+   own close requests do not contend over the same ledger revision.
 4. Retry lost registration/closure replies with the same identity. Missing
    registry entries, an unreachable ingress, a new process boot and elapsed
    deadlines are unresolved states, not successful closure receipts.
@@ -59,6 +61,15 @@ that response to finish and the connection to drain. Only a later exact retry
 can report confirmed End after actual closure; graceful retirement cannot
 wait indefinitely for its own response-held connection.
 
+Fresh producer admission requires an opaque Core-issued permission backed by
+an open, registered ingress obligation. Later producer renewal retains that
+issued permission and revalidates its exact assignment, boot, unsealed ledger
+and current authority. It does not require an HTTP connection to stay open
+between requests. A shared rendition retains the permission for each actual
+session owner; retiring one owner cannot substitute its proof for, or revoke,
+a surviving owner's permission. Sealing prevents new admission and renewal
+for that owner while actual closure remains a separate retirement condition.
+
 ## Options considered
 
 | Option | Complexity and cost | Result |
@@ -66,7 +77,7 @@ wait indefinitely for its own response-held connection.
 | Forward through the existing media relay only | Small code change and one internal hop | Rejected: internal EOF does not prove outer accepted-writer closure |
 | Add timeout-based release or infer closure from missing owner state | Small implementation, uncertain physical lifetime | Rejected: admits premature settlement and loses cleanup custody |
 | Principal-bound durable obligations plus shared actual-driver close RPC | Adds persistence, exact retry state and one bounded close exchange per active ingress connection | Selected: preserves the existing End proof across a cluster hop |
-| Refuse all non-owner ingress | Smallest safe interim behavior | Retained while implementation is incomplete; does not satisfy the cluster routing contract |
+| Refuse all non-owner ingress | Smallest safe interim behavior | Rejected as the completed behavior: does not satisfy the cluster routing contract |
 
 ## Persistence and compatibility
 
@@ -74,6 +85,28 @@ Custody is a dedicated adjunct to session ownership, not a generic settings
 blob. It has no deletion cascade that can erase an unresolved writer debt
 when a stale route is removed. Both Store backends need guarded registration,
 seal and acknowledgement behavior, with current-member capability checks.
+The receiver's ingress capability proof reuses the current committed roster
+and membership generation without requiring Source-purpose readiness. A
+receiver-only cluster can use baseline v72; enabling reception does not install
+the Source-principal v73 layout. Source admission additionally keeps its
+existing Source authority and purpose-key checks.
+
+A fresh Source Start locates an authorized exact file through bounded signed
+read-only member observations before claiming g0. Placement does not require
+an existing fragment index or legacy MPEG-TS encoder eligibility. The selected
+worker performs the actual player-capability and recipe planning. A placement
+observation creates no factory, producer or session claim.
+
+Fresh Source routing is recorded atomically with the g0 claim: the adjunct
+binds the selected worker, its actual registry boot and the initial credential
+hash before preparation can fail or a prepare reply can be lost. Its identity is the same binding planned
+for g1 dispatch. A retry through another ingress uses that retained owner;
+current file locality cannot redirect an uncertain invocation. The retained
+hash lets an exact old-credential cleanup find that worker after rotation; the
+worker still independently authenticates its retained obligation. No plaintext
+credential is added to the adjunct. A historical claim without this routing
+evidence stays unresolved. The g0 route authorizes
+neither publication nor registration.
 
 The existing replicated v71 is reserved for Source-principal installation;
 it cannot be reused as an ordinary additive migration. The selected migration

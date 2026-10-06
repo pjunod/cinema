@@ -101,6 +101,11 @@ fn source_fixture_store(
     Box::pin(plurx_core::cluster::migration::select_daemon_store(config))
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn source_unknown_local_register_actual_closure_and_exact_ack_clear_pending_before_new_driver(
+) {
+    Box::pin(source_copy_preadmission_fixture(55)).await;
+}
 async fn source_copy_preadmission_fixture(mode: u8) {
     use crate::http::hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget};
     use plurx_core::{
@@ -946,6 +951,10 @@ async fn source_actual_actor(
     mode: u8,
     client: hiqlite::Client,
 ) {
+    if mode == 55 {
+        source_actual_unknown_register_reconciliation(state, manager, assignment).await;
+        return;
+    }
     if matches!(mode, 3 | 19 | 28) {
         state
             .store
@@ -2330,6 +2339,13 @@ impl SourceFactoryIngressFixture {
         state: Arc<crate::state::AppState>,
         assignment: &SourceDispatchAssignment,
     ) -> Self {
+        Self::new_registration_outcome(state, assignment, false).await
+    }
+    async fn new_registration_outcome(
+        state: Arc<crate::state::AppState>,
+        assignment: &SourceDispatchAssignment,
+        lose_register_reply: bool,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("factory ingress bind");
@@ -2421,7 +2437,14 @@ impl SourceFactoryIngressFixture {
             .await
             .expect("guarded actual driver registration");
         assert!(matches!(registered, plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::Applied | plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::ExactReplay));
-        permit.complete();
+        if lose_register_reply {
+            // The real durable Register succeeded; cancel its waiter before it
+            // records definitive success. Dropping the permit retains the exact
+            // principal reservation instead of pretending the row was absent.
+            drop(permit);
+        } else {
+            permit.complete();
+        }
         Self {
             state,
             assignment: assignment.clone(),
@@ -2633,4 +2656,134 @@ async fn source_two_owner_generation_fixture(
         .await
         .expect("second retirement deadline")
         .expect("second actual retirement");
+}
+
+async fn source_actual_unknown_register_reconciliation(
+    state: Arc<crate::state::AppState>,
+    manager: Arc<TranscodeManager>,
+    assignment: SourceDispatchAssignment,
+) {
+    use plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite;
+    let fixture = Box::pin(SourceFactoryIngressFixture::new_registration_outcome(
+        Arc::clone(&state),
+        &assignment,
+        true,
+    ))
+    .await;
+    let obligation = fixture.obligation.clone();
+    let registration = fixture.registration.clone();
+    // Exact pending metadata remains visible through the common gate after a
+    // canceled reply, despite the positive durable Source registration.
+    drop(
+        state
+            .sharing
+            .accepted_drivers
+            .reconcile_guard(&obligation)
+            .await
+            .expect("unknown Register retained pending fence"),
+    );
+    let snapshot = state
+        .store
+        .source_ingress_custody(&assignment)
+        .await
+        .expect("Source guarded snapshot")
+        .expect("Source ledger");
+    assert!(snapshot
+        .state
+        .open()
+        .any(|slot| slot.same_driver(&registration)));
+    assert_eq!(snapshot.owner_identity, assignment.custody_identity());
+    fixture.close_transport(false).await;
+    let receipt = obligation.joined().await;
+    let snapshot = state
+        .store
+        .source_ingress_custody(&assignment)
+        .await
+        .expect("actual closure Source snapshot")
+        .expect("retained ledger");
+    assert!(snapshot.state.open().next().is_none());
+    let encoded: serde_json::Value =
+        serde_json::from_str(&snapshot.state.encode().expect("exact Source state"))
+            .expect("Source JSON");
+    assert!(encoded["slots"]
+        .as_array()
+        .expect("Source slots")
+        .iter()
+        .any(
+            |slot| slot["closed_confirmation"].as_str() == Some(receipt.confirmation())
+                && slot["registration_sequence"].as_u64()
+                    == Some(registration.registration_sequence)
+        ));
+    let permit = state
+        .sharing
+        .accepted_drivers
+        .reconcile_guard(&obligation)
+        .await
+        .expect("ACK waiter resumes exact canceled registration");
+    let ack = state
+        .store
+        .acknowledge_source_ingress_custody(&assignment, &registration, receipt.confirmation())
+        .await
+        .expect("same-boot exact Source ACK fence");
+    assert!(matches!(
+        ack,
+        SourceCustodyWrite::ExactReplay | SourceCustodyWrite::ReconciledClosed
+    ));
+    // This is deliberately after actual joined closure and positive same-write
+    // Source ACK, never after row absence, lease expiry or canceled Register.
+    permit.complete();
+    assert!(
+        state
+            .sharing
+            .accepted_drivers
+            .reconcile_guard(&obligation)
+            .await
+            .is_err(),
+        "definitive Source ACK cleared local unknown reservation"
+    );
+    let next = Box::pin(SourceFactoryIngressFixture::new(
+        Arc::clone(&state),
+        &assignment,
+    ))
+    .await;
+    assert_ne!(next.registration.connection_id, registration.connection_id);
+    assert!(next.registration.registration_sequence > registration.registration_sequence);
+    assert_ne!(
+        next.registration.driver_sequence,
+        registration.driver_sequence
+    );
+    assert_eq!(
+        state
+            .store
+            .acknowledge_source_ingress_custody(&assignment, &registration, receipt.confirmation())
+            .await
+            .expect("actual old receipt reconciles against retained Source highwater"),
+        SourceCustodyWrite::ReconciledClosed
+    );
+    let members = state
+        .membership
+        .observe_source_admission_members()
+        .await
+        .expect("current members")
+        .expect("actual floor");
+    assert!(state
+        .store
+        .prepare_source_ingress_admission(
+            &assignment,
+            state.sharing.accepted_drivers.boot_id(),
+            &members
+        )
+        .await
+        .expect("positive guarded next driver permission")
+        .is_some());
+    next.close().await;
+    assert_eq!(
+        state
+            .store
+            .settle_source_assigned_without_activation(&assignment)
+            .await
+            .expect("exact sealed actual driver closure"),
+        SourceReleaseOutcome::Released
+    );
+    assert!(manager.lookup_source_worker(&assignment).is_none());
 }

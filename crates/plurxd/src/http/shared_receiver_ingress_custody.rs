@@ -366,6 +366,19 @@ pub(super) async fn receiver_forward_admit(
         })
         .cloned();
     if let Some(entry) = existing {
+        let unresolved = matches!(
+            *entry.admitted.lock().expect("receiver ingress admission"),
+            Some(Err(_))
+        );
+        if unresolved {
+            reconcile_principal(
+                state.clone(),
+                connection,
+                &tuple,
+                deadline.min(Instant::now() + Duration::from_secs(1)),
+            )
+            .await?;
+        }
         wait_admission(&entry, deadline).await?;
         return Ok(ReceiverIngressGuard {
             ingress: entry.ingress.clone(),
@@ -624,43 +637,16 @@ pub(super) async fn close_receiver_ingress(
             if !receipt.matches(&driver) {
                 return Err(ReceiverStartError::Unresolved);
             }
-            for _ in 0..8 {
-                if Instant::now() >= deadline {
-                    return Err(ReceiverStartError::Deadline);
-                }
-                let snapshot = state
-                    .store
-                    .receiver_ingress_snapshot(&route)
-                    .await
-                    .map_err(|_| ReceiverStartError::Unresolved)?
-                    .ok_or(ReceiverStartError::Unresolved)?;
-                if snapshot.owner_identity != original_identity || !snapshot.state.is_sealed() {
-                    return Err(ReceiverStartError::Conflict);
-                }
-                match state
-                    .store
-                    .acknowledge_receiver_ingress(
-                        &route,
-                        &snapshot,
-                        &registration,
-                        receipt.confirmation(),
-                    )
-                    .await
-                    .map_err(|_| ReceiverStartError::Unresolved)?
-                {
-                    CustodyMutation::Applied | CustodyMutation::Replay => return Ok(()),
-                    CustodyMutation::Refused => {}
-                }
-            }
-            Err(ReceiverStartError::Unresolved)
+            Ok((registration, receipt))
         });
     }
     let mut result = Ok(());
+    let mut receipts = Vec::new();
     while !closes.is_empty() {
         match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), closes.join_next())
             .await
         {
-            Ok(Some(Ok(Ok(())))) => {}
+            Ok(Some(Ok(Ok(receipt)))) => receipts.push(receipt),
             Ok(Some(Ok(Err(error)))) => {
                 result = Err(error);
             }
@@ -672,6 +658,48 @@ pub(super) async fn close_receiver_ingress(
                 closes.shutdown().await;
                 return Err(ReceiverStartError::Deadline);
             }
+        }
+    }
+    // Physical closes fan out; this owner serializes mutations of one ledger.
+    // Natural close monitors may race, so retain the existing bounded CAS loop.
+    for (registration, receipt) in receipts {
+        let acknowledgement =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                for _ in 0..8 {
+                    if Instant::now() >= deadline {
+                        return Err(ReceiverStartError::Deadline);
+                    }
+                    let snapshot = state
+                        .store
+                        .receiver_ingress_snapshot(route)
+                        .await
+                        .map_err(|_| ReceiverStartError::Unresolved)?
+                        .ok_or(ReceiverStartError::Unresolved)?;
+                    if snapshot.owner_identity != original_identity || !snapshot.state.is_sealed() {
+                        return Err(ReceiverStartError::Conflict);
+                    }
+                    match state
+                        .store
+                        .acknowledge_receiver_ingress(
+                            route,
+                            &snapshot,
+                            &registration,
+                            receipt.confirmation(),
+                        )
+                        .await
+                        .map_err(|_| ReceiverStartError::Unresolved)?
+                    {
+                        CustodyMutation::Applied | CustodyMutation::Replay => return Ok(()),
+                        CustodyMutation::Refused => {}
+                    }
+                }
+                Err(ReceiverStartError::Unresolved)
+            })
+            .await;
+        match acknowledgement {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => result = Err(error),
+            Err(_) => result = Err(ReceiverStartError::Deadline),
         }
     }
     result?;
