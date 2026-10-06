@@ -4570,6 +4570,8 @@ expected_occurrences = 0
 
 [[module_structures]]
 id = "process-lifecycle-method"
+# Source failed-Start receipt fixtures add four net waits on exact Start/End
+# owners. They join existing owners and create no process or background loop.
 # Shared H2 regression awaits the accepted connection closure observer; this
 # wait observes a driver already owned by the server JoinSet, not a child process.
 # Durable queue adds start_kill and an awaited wait to the ffmpeg collector.
@@ -4795,7 +4797,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # the fixture sleeper.
 # +1: the Source direct byte route awaits its Start entry (`entry.wait`), the
 # same in-process outcome wait every Source operation uses. No child process.
-expected_occurrences = 285
+expected_occurrences = 289
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

@@ -1026,8 +1026,9 @@ impl ReceiverStartActor {
             .map(|source| source.lineage())
             .transpose()
             .map_err(|_| RetirementStep::Refused)?;
-        let mut connection = crate::sharing_client::CleanupPeerConnection::connect(
-            &state.sharing,
+        let mut connection = crate::sharing_client::CleanupPeerConnection::connect_for_session(
+            state,
+            &self.0.intent,
             &dispatched.endpoint,
         )
         .await
