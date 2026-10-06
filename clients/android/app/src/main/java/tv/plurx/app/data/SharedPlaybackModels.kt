@@ -331,15 +331,14 @@ internal data class SharedPlaybackSubject(val context: PlaybackFileContext, val 
     }
 }
 /** Retains the raw original desired ask, not normalized delivered dimensions. */
-internal class SharedPlaybackPlan(val subject: SharedPlaybackSubject, val decision: SharedDecision, val caps: DeviceCaps, val request: CreateSessionReq) {
+internal class SharedPlaybackPlan(val subject: SharedPlaybackSubject, val decision: SharedDecision, val caps: DeviceCaps, val request: CreateSessionReq, private val adopted: Boolean = false) {
     /** Original bytes from B's direct relay; no status or control exchange exists for it. */
     val direct: Boolean get() = request.presentation == "direct"
     init {
         subject.validate(); decision.validated(subject.context)
         require(caps.v == 2 && "hls" in caps.transports && request.caps == caps)
         require(request.presentation in setOf("vod", "direct") && request.intent == null && request.previous_session_id == null && request.control_sequence == null && request.reopen_reason == null)
-        require(request.subtitle_burn == null && request.preserve_dolby_vision != true && request.hdr10 != true)
-        require(decision.presentation.delivered_dynamic_range?.let { it == "sdr" } != false)
+        require(request.preserve_dolby_vision != true)
         require((request.start ?: 0.0) == subject.resumeMs.toDouble() / 1000)
         require(request.height?.let { it in 1..8192 } != false)
         if (direct) {
@@ -347,7 +346,7 @@ internal class SharedPlaybackPlan(val subject: SharedPlaybackSubject, val decisi
             // direct play, a rung, a remux flag or a subtitle ask for raw bytes.
             require(decision.method == "direct_play" && request.copy == null && request.height == null && request.native_subtitles == null &&
                 request.subtitle == null && request.audio == null && (request.audio_offset_ms ?: 0L) == 0L && request.aac != true)
-        } else require(if (decision.method == "transcode") request.copy != true else request.copy == true)
+        } else if (!adopted) require(if (decision.method == "transcode" || request.subtitle_burn != null) request.copy != true else request.copy == true)
     }
     /** The viewer's raw ask, as the Start request carries it. */
     val selection: SharedSelection get() = SharedSelection(
@@ -356,7 +355,7 @@ internal class SharedPlaybackPlan(val subject: SharedPlaybackSubject, val decisi
             request.height == null -> PlaybackQuality.Original
             else -> PlaybackQuality.entries.firstOrNull { it.rungHeight == request.height } ?: PlaybackQuality.Auto
         },
-        audio = request.audio, subtitle = request.subtitle?.takeIf { request.native_subtitles == true },
+        audio = request.audio, subtitle = request.subtitle_burn ?: request.subtitle?.takeIf { request.native_subtitles == true }, burn = request.subtitle_burn != null,
     )
 }
 
@@ -375,7 +374,9 @@ internal fun SharedPlaybackPlan.frozenControlSelection(): JsonObject = buildJson
     put("audio_track", request.audio?.let(::JsonPrimitive) ?: JsonNull)
     put("audio_offset_ms", request.audio_offset_ms ?: 0)
     put("subtitle", buildJsonObject {
-        if (request.native_subtitles == true && request.subtitle != null) {
+        if (request.subtitle_burn != null) {
+            require(request.subtitle_burn in 0..1024); put("mode", "burn"); put("track", request.subtitle_burn)
+        } else if (request.native_subtitles == true && request.subtitle != null) {
             require(request.subtitle in 0..1024); put("mode", "native"); put("track", request.subtitle)
         } else put("mode", "off")
     })

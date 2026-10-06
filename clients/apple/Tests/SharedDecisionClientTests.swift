@@ -277,13 +277,12 @@ final class SharedDecisionClientTests: XCTestCase {
         let context = try await context(), client = try SharedDecisionClient(testConfiguration: configuration); var calls = 0
         DecisionHTTP.answer = { _ in calls += 1; return nil }
         let base = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot().document)
-        for index in 0..<6 {
+        for index in [0, 1, 2, 4, 5] {
             var request = base
             switch index {
             case 0: request.previousSessionId = ""
             case 1: request.controlSequence = 0
             case 2: request.reopenReason = "stall"
-            case 3: request.subtitleBurn = 0
             case 4: request.preserveDolbyVision = true
             default: request.requestId = request.requestId!.uppercased()
             }

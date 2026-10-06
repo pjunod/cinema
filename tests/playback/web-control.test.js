@@ -7256,3 +7256,20 @@ test("late control terminal and typed 410 preserve authority retirement before n
     h.error();assert.equal(h.reopens.length,1);assert.equal(h.rescues.length,0);
   }
 });
+
+
+test("Shared visible commit refusal reopens once and ends both old sessions even when Start fails", async()=>{
+  const pending={sessionId:"successor",sharedContext:{}},released=[];
+  const p={preparedControlPending:pending,fileContext:{session_id:"predecessor"},fileId:7,title:"Shared",meta:{},knownDur:60,preplay:{audio:2,subtitle:4},qualityOverride:720,curSub:4};
+  let starts=0,stops=0;
+  const recover=new Function("PLAYER","TOKEN","document","stopPlaybackControl","positionForPlaybackIntent","play","releaseSession",
+    `${shippedSource("recoverSharedCommittedReplacement")};return recoverSharedCommittedReplacement;`)(p,"captured-account",{getElementById:()=>({})},()=>stops++,()=>12.5,
+    (...args)=>{starts++;assert.equal(args[2],12500);assert.equal(args[4],p.meta);
+      assert.deepEqual(p.preplay,{audio:2,subtitle:4});assert.equal(p.qualityOverride,720);assert.equal(p.curSub,4);
+      return Promise.reject(new Error("Start refused"));},(id,token)=>{assert.equal(token,"captured-account");released.push(id);});
+  assert.equal(recover(p,pending),true);
+  assert.equal(recover(p,pending),false);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(starts,1);assert.equal(stops,1);
+  assert.deepEqual(released,["predecessor","successor"]);
+});

@@ -13,10 +13,10 @@ import tv.plurx.app.data.SharedStartedDirect
 // Synthetic B through the actual authenticated client and a recording renderer.
 // Protocol and ordering evidence only: no Source, relay or device playback.
 class SharedPlaybackOwnerTest {
-    private class Renderer(private val log: MutableList<String>) : SharedRenderer {
+    private class Renderer(private val log: MutableList<String>, private val rejectAttach: Boolean = false) : SharedRenderer {
         var position = 0L; var active = false
-        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) { log += "attach hls $url @$positionMs"; position = positionMs; active = playWhenReady }
-        override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) { log += "attach direct $url @$positionMs"; position = positionMs; active = playWhenReady }
+        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) { if (rejectAttach) error("decoder allocation failed"); log += "attach hls $url @$positionMs"; position = positionMs; active = playWhenReady }
+        override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) { if (rejectAttach) error("decoder allocation failed"); log += "attach direct $url @$positionMs"; position = positionMs; active = playWhenReady }
         override fun seekTo(positionMs: Long) { log += "seek $positionMs"; position = positionMs }
         override fun setPlaying(playing: Boolean) { log += "playing $playing"; active = playing }
         override fun snapshot() = SharedRendererSnapshot(position, position + 4_000, 90_000, active, RenderState.RENDERING)
@@ -29,6 +29,18 @@ class SharedPlaybackOwnerTest {
         override fun restorePredecessor() = error("no successor")
         override fun releasePredecessor() = error("no successor")
         override fun releaseSuccessor() = error("no successor")
+    }
+
+    @Test fun rendererSetupFailureEndsTheStartedSessionForHlsAndDirect(): Unit = runBlocking {
+        for (direct in listOf(false, true)) {
+            val f = SharedFixture(if (direct) "206" else "205"); f.login()
+            val owner = SharedPlaybackOwner(this, { SharedDecisionClient.forTest(f.transport()) }, Renderer(f.log, rejectAttach = true))
+            val plan = f.plan(f.context(), if (direct) "direct_play" else "remux", allowDirect = direct)
+            assertTrue(runCatching { owner.start(plan) }.isFailure)
+            assertEquals(listOf("start", "delete ${f.session(1)}"), f.log)
+            assertNull(owner.currentSession)
+            owner.stop()
+        }
     }
 
     @Test fun seekPauseAndPlayReachTheRendererOnlyAfterBAccepts(): Unit = runBlocking {

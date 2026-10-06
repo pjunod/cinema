@@ -11037,7 +11037,13 @@ final class SharedPlayerController: ObservableObject {
             switch media {
             case .hls(let started):
                 url = try client.playlistURL(playback: started)
-                var capabilities = Caps.controlCapabilities()
+                let measured = Caps.controlCapabilities()
+                var capabilities = Caps.controlCapabilities(
+                    hevc: plan.caps.video.contains { $0.codec == "hevc" },
+                    av1: plan.caps.video.contains { $0.codec == "av1" },
+                    displayHDR: plan.caps.display.hdr,
+                    dolbyVision: plan.caps.display.dolbyVision,
+                    dualPlayerPreparation: measured.dualPlayerPreparation)
                 // The same Developer switch Local reads. A source without video
                 // has no frame to prove a switch with, so it keeps the reopen.
                 capabilities.dualPlayerPreparation = capabilities.dualPlayerPreparation

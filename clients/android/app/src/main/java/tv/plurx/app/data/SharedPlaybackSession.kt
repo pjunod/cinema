@@ -74,7 +74,7 @@ internal class SharedStartedDirect private constructor(
 }
 
 /** What the viewer asked for, raw. Never the delivered rendition. */
-internal data class SharedSelection(val quality: PlaybackQuality, val audio: Int? = null, val subtitle: Int? = null) {
+internal data class SharedSelection(val quality: PlaybackQuality, val audio: Int? = null, val subtitle: Int? = null, val burn: Boolean = false) {
     init {
         require(audio == null || audio in 0..1024)
         require(subtitle == null || subtitle in 0..1024)
@@ -102,7 +102,7 @@ internal data class SharedSelection(val quality: PlaybackQuality, val audio: Int
         put("audio_track", audio?.let(::JsonPrimitive) ?: JsonNull)
         put("audio_offset_ms", 0)
         put("subtitle", buildJsonObject {
-            if (subtitle != null) { put("mode", "native"); put("track", subtitle) } else put("mode", "off")
+            if (subtitle != null) { put("mode", if (burn) "burn" else "native"); put("track", subtitle) } else put("mode", "off")
         })
         put("codec", "auto"); put("dynamic_range", "auto")
     }
@@ -124,6 +124,8 @@ internal fun sharedPlaybackPlan(
     val presentation = decision.presentation
     val direct = allowDirect && decision.method == "direct_play" && selection.audio == null && selection.subtitle == null &&
         presentation.audio_offset_ms == 0L && !presentation.transcode_audio
+    val track = selection.subtitle?.let { index -> presentation.subtitles.firstOrNull { it.index == index.toLong() } }
+    val burn = selection.burn || track?.isNativeHls == false
     val start = subject.resumeMs.toDouble() / 1000
     val body = if (direct) CreateSessionReq(
         playback_id = playbackId, request_id = requestId, start = start,
@@ -131,8 +133,10 @@ internal fun sharedPlaybackPlan(
     ) else CreateSessionReq(
         playback_id = playbackId, request_id = requestId, height = selection.quality.rungHeight,
         quality_auto = selection.quality == PlaybackQuality.Auto, start = start, audio = selection.audio,
-        native_subtitles = selection.subtitle?.let { true }, subtitle = selection.subtitle,
-        copy = decision.method != "transcode", aac = presentation.transcode_audio, caps = result.caps,
+        native_subtitles = selection.subtitle?.takeUnless { burn }?.let { true }, subtitle = selection.subtitle?.takeUnless { burn },
+        subtitle_burn = selection.subtitle?.takeIf { burn },
+        copy = !burn && decision.method != "transcode", aac = presentation.transcode_audio,
+        hdr10 = if (decision.method == "transcode" && presentation.delivered_dynamic_range == "hdr10") true else null, caps = result.caps,
     )
     return SharedPlaybackPlan(subject, decision, result.caps, body)
 }
@@ -156,7 +160,13 @@ internal fun sharedControlCapabilities(caps: DeviceCaps, dualPlayer: Boolean = f
     codecs = caps.video.mapNotNull {
         when (it.codec.lowercase()) { "h264" -> CodecPolicy.H264; "hevc" -> CodecPolicy.HEVC; "av1" -> CodecPolicy.AV1; else -> null }
     }.distinct().ifEmpty { listOf(CodecPolicy.H264) },
-    dynamicRanges = listOf(DynamicRangePolicy.SDR), dualPlayerPreparation = dualPlayer,
+    dynamicRanges = buildList {
+        add(DynamicRangePolicy.SDR)
+        val present = caps.video.flatMap { it.present }
+        if (caps.display.hdr && "pq" in present) add(DynamicRangePolicy.HDR10)
+        if (caps.display.hdr && "hlg" in present) add(DynamicRangePolicy.HLG)
+        if (caps.display.dolby_vision && caps.video.any { !it.dv_profiles.isNullOrEmpty() }) add(DynamicRangePolicy.DOLBY_VISION)
+    }, dualPlayerPreparation = dualPlayer,
 )
 
 /** What the renderer is doing when an exchange is built. */

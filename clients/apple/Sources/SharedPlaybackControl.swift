@@ -294,7 +294,8 @@ extension SharedPlaybackPlan {
         if let subtitle = change.subtitleIndex {
             if let subtitle, subtitle >= 0 {
                 guard (0...1024).contains(subtitle) else { throw APIError.badURL }
-                object["subtitle"] = .object(["mode": .string("native"), "track": .integer(Int64(subtitle))])
+                let burn = decision.presentation.subtitles?.first(where: { $0.index == subtitle })?.isNativeHLS == false
+                object["subtitle"] = .object(["mode": .string(burn ? "burn" : "native"), "track": .integer(Int64(subtitle))])
             } else {
                 object["subtitle"] = .object(["mode": .string("off")])
             }
@@ -326,7 +327,7 @@ extension SharedPlaybackPlan {
         switch object["audio_track"] { case .null?: break; case let value? where bounded(value, 0...1024): break; default: throw APIError.badURL }
         switch subtitleMode {
         case "off": guard subtitle.keys.count == 1 else { throw APIError.badURL }
-        case "native": guard subtitle.keys.count == 2, bounded(subtitle["track"], 0...1024) else { throw APIError.badURL }
+        case "native", "burn": guard subtitle.keys.count == 2, bounded(subtitle["track"], 0...1024) else { throw APIError.badURL }
         default: throw APIError.badURL
         }
     }
@@ -448,8 +449,9 @@ enum SharedPreparedHandoff {
         default: request.qualityAuto = false; request.copy = false; request.height = integer(quality["height"])
         }
         request.audio = integer(object["audio_track"])
-        if subtitle["mode"]?.string == "native" { request.nativeSubtitles = true; request.subtitle = integer(subtitle["track"]) }
-        else { request.nativeSubtitles = nil; request.subtitle = nil }
+        request.nativeSubtitles = nil; request.subtitle = nil
+        if subtitle["mode"]?.string == "burn" { request.subtitleBurn = integer(subtitle["track"]); request.copy = false }
+        else if subtitle["mode"]?.string == "native" { request.nativeSubtitles = true; request.subtitle = integer(subtitle["track"]) }
         return request
     }
 }
@@ -489,8 +491,8 @@ extension SharedPlaybackPlan {
     init(adopting predecessor: SharedPlaybackPlan, subject: SharedPlaybackSubject, request: CreateSessionRequest) throws {
         try subject.validate()
         guard request.presentation == "vod", request.intent == nil, request.previousSessionId == nil,
-              request.controlSequence == nil, request.reopenReason == nil, request.subtitleBurn == nil,
-              request.preserveDolbyVision != true, request.hdr10 != true, request.caps == predecessor.caps,
+              request.controlSequence == nil, request.reopenReason == nil,
+              request.preserveDolbyVision != true, request.caps == predecessor.caps,
               request.playbackId == predecessor.request.playbackId, subject.context == predecessor.subject.context
         else { throw APIError.transport("This Shared successor does not match its player.") }
         self.subject = subject; decision = predecessor.decision; caps = predecessor.caps; self.request = request

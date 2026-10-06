@@ -3542,3 +3542,44 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContex
 source_anchor = "if (reference != null) require(sharedFileSuffix(resource))"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedProtocolCasesTest.kt"
 test_anchor = "sharedFileSuffixesFollowTheClosedSharedGrammar"
+
+[[fixes]]
+id = "sharing.web-source-owned-burn-and-hdr-request"
+commits = ["d4d2ec8e4"]
+source = "crates/plurxd/src/web/core/shared-decision.js"
+source_anchor = "if(body.preserve_dolby_vision===true)dolbyVisionUnsupported();"
+test = "tests/web/shared-decision.test.js"
+test_anchor = "synthetic B Start carries a burn and an HDR10 ask unchanged and refuses Dolby Vision before sending"
+
+[[fixes]]
+id = "sharing.native-burn-hdr-and-closed-direct-request"
+commits = ["ec9b12a0f", "316f21c33"]
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "let burn = subtitleIndex.flatMap"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testSharedBurnAndHDRPlanUseSourceOwnedStartFields"
+
+[[fixes]]
+id = "sharing.android-source-owned-burn-and-hdr-request"
+commits = []
+supplements = "sharing.native-burn-hdr-and-closed-direct-request"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedPlaybackSession.kt"
+source_anchor = "val burn = selection.burn || track?.isNativeHls == false"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedPlaybackSessionTest.kt"
+test_anchor = "sharedBurnAndHdrPlanUseSourceOwnedStartFields"
+
+[[fixes]]
+id = "sharing.web-refused-handoff-original-account-cleanup"
+commits = ["da2e407a2"]
+source = "crates/plurxd/src/web/player/prepared-replacement.js"
+source_anchor = "releaseSession(predecessor,accountToken);"
+test = "tests/playback/web-control.test.js"
+test_anchor = "Shared visible commit refusal reopens once and ends both old sessions even when Start fails"
+
+[[fixes]]
+id = "sharing.android-failed-renderer-start-cleanup"
+commits = ["9dbd35ea3", "432a4e3bc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { runCatching { client.end(direct) } }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "rendererSetupFailureEndsTheStartedSessionForHlsAndDirect"
