@@ -60,6 +60,7 @@ mod serving_fence;
 mod shared_cache;
 mod sharing;
 mod sharing_client;
+mod sharing_connection_custody;
 #[cfg(test)]
 mod sharing_protocol_fixture;
 mod source_probe;
@@ -3165,7 +3166,6 @@ impl SharingConnectionClosure {
     pub(crate) async fn wait(&self) {
         self.0.cancelled().await;
     }
-    #[cfg(test)]
     pub(crate) fn is_closed(&self) -> bool {
         self.0.is_cancelled()
     }
@@ -3202,13 +3202,31 @@ impl SharingConnectionCancellation {
     pub(crate) fn closed(&self) -> SharingConnectionClosure {
         SharingConnectionClosure(self.2.clone())
     }
+    /// After the actual writer has closed, let accepted-driver-owned closure
+    /// acknowledgements finish their finite exchange before dropping owners.
+    async fn join_monitors(&self) {
+        // Keep pending handles in their owner even if daemon shutdown cancels
+        // this join future. The owner's Drop can then abort remaining work.
+        futures_util::future::poll_fn(|cx| {
+            let mut tasks = self.1 .0.lock().expect("sharing monitor owner");
+            tasks.retain_mut(|task| {
+                std::future::Future::poll(std::pin::Pin::new(task), cx).is_pending()
+            });
+            if tasks.is_empty() {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
     pub(crate) fn monitor(
         &self,
         future: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), ()> {
         let mut monitors = self.1 .0.lock().expect("sharing monitor owner");
         monitors.retain(|monitor| !monitor.is_finished());
-        if monitors.len() >= 32 || self.0.is_cancelled() {
+        if monitors.len() >= 32 || self.0.is_cancelled() || self.2.is_cancelled() {
             return Err(());
         }
         monitors.push(tokio::spawn(future));
@@ -3309,6 +3327,7 @@ async fn serve_http<A: HttpAcceptor>(
             }
             drop(connection);
             connection_cancel.2.cancel();
+            connection_cancel.join_monitors().await;
         });
     }
 
@@ -4395,7 +4414,13 @@ mod startup_tests {
         let address = listener.local_addr().expect("address");
         let (first_tx, first_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
         let (second_tx, second_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
-        let streams = Arc::new(std::sync::Mutex::new([Some(first_rx), Some(second_rx)]));
+        let (third_tx, third_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
+        drop(third_tx);
+        let streams = Arc::new(std::sync::Mutex::new([
+            Some(first_rx),
+            Some(second_rx),
+            Some(third_rx),
+        ]));
         let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(2);
         let app = axum::Router::new().route(
             "/{index}",
@@ -4454,6 +4479,29 @@ mod startup_tests {
             .expect("predecessor headers")
             .into_body();
         let connection = accepted_rx.recv().await.expect("accepted predecessor");
+        let custody = crate::sharing_connection_custody::AcceptedDriverRegistry::default();
+        let captured = custody
+            .capture(&connection, "owner")
+            .expect("physical capture");
+        assert_eq!(captured.id().boot_id, custody.boot_id());
+        let principal_incarnation = uuid::Uuid::new_v4();
+        let owner_identity = "a".repeat(64);
+        let mut registration = custody
+            .registration_guard()
+            .await
+            .expect("registration gate");
+        let obligation = captured
+            .prepare_obligation(
+                &mut registration,
+                "receiver",
+                principal_incarnation,
+                &owner_identity,
+            )
+            .expect("independently retained registration obligation");
+        // Model the lost durable-registration answer while retaining exact
+        // node-local custody. Actual closure below comes only from Hyper.
+        drop(registration);
+
         let mut successor = client
             .send_request(
                 Request::builder()
@@ -4469,6 +4517,13 @@ mod startup_tests {
             &connection.ownership_key(),
             &same.ownership_key()
         ));
+        assert_eq!(
+            custody
+                .capture(&same, "owner")
+                .expect("same actual driver")
+                .id(),
+            captured.id()
+        );
         connection.drain_token().cancel();
         second_tx
             .send(axum::body::Bytes::from_static(b"successor survives"))
@@ -4500,6 +4555,75 @@ mod startup_tests {
         tokio::time::timeout(Duration::from_secs(5), connection.closed().wait())
             .await
             .expect("actual accepted writer closure");
+        let receipt = obligation.joined().await;
+        assert!(receipt.matches(captured.id()));
+        assert!(!receipt.confirmation().is_empty());
+        let close = crate::sharing_connection_custody::DriverCloseRequest {
+            driver: captured.id().clone(),
+            registration_sequence: obligation.registration_sequence(),
+            principal_kind: "receiver".into(),
+            incarnation_id: principal_incarnation,
+            owner_identity,
+            expected_owner_epoch: 1,
+            mode: crate::sharing_connection_custody::DriverCloseMode::Drain,
+            deadline_unix_ms: crate::media_sessions::unix_ms() + 5_000,
+        };
+        assert!(custody.close("foreign-owner", &close).await.is_err());
+        assert!(custody
+            .close("owner", &close)
+            .await
+            .expect("exact lost-close replay")
+            .matches(captured.id()));
+        obligation
+            .release_after_ack(&receipt)
+            .expect("only actual closure allows durable ack release");
+        let recovered = custody
+            .existing_obligation(
+                captured.id(),
+                "receiver",
+                principal_incarnation,
+                &close.owner_identity,
+            )
+            .expect("exact reservation survives actual closure and ack");
+        custody
+            .reconcile_guard(&recovered)
+            .await
+            .expect("mutable ack does not change pending identity")
+            .complete();
+        let mut next_socket = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("fresh actual transport");
+        next_socket
+            .write_all(b"GET /2 HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .expect("new writer request");
+        let next_connection = accepted_rx.recv().await.expect("fresh accepted driver");
+        let next_driver = custody
+            .capture(&next_connection, "owner")
+            .expect("fresh physical capture");
+        let mut next_permit = custody
+            .registration_guard()
+            .await
+            .expect("registration gate");
+        let next = next_driver
+            .prepare_obligation(
+                &mut next_permit,
+                "receiver",
+                principal_incarnation,
+                &close.owner_identity,
+            )
+            .expect("new driver admitted after exact unknown reconciliation");
+        assert!(next.registration_sequence() > recovered.registration_sequence());
+        next_permit.complete();
+        drop(next_socket);
+        tokio::time::timeout(Duration::from_secs(5), next_connection.closed().wait())
+            .await
+            .expect("fresh accepted driver actually joined");
+        let restarted = crate::sharing_connection_custody::AcceptedDriverRegistry::default();
+        assert!(
+            restarted.close("owner", &close).await.is_err(),
+            "restart cannot manufacture closure"
+        );
         driven
             .await
             .expect("driver joined")

@@ -2966,6 +2966,55 @@ impl MediaSessionCoordinator {
         relay_response(response)
     }
 
+    /// Exact authenticated closure of an outer accepted driver. No request
+    /// timeout or missing registry entry is interpreted as physical closure.
+    #[allow(dead_code)] // Complete authenticated close RPC; Source/B principal retirement adapters integrate next.
+    pub(crate) async fn close_sharing_ingress(
+        &self,
+        ingress_node: &str,
+        request: &crate::sharing_connection_custody::DriverCloseRequest,
+    ) -> Result<crate::sharing_connection_custody::DriverClosureReceipt, PeerTransportError> {
+        use crate::sharing_connection_custody::{DriverClosureReceipt, CLOSE_PATH};
+        let remaining = request.deadline_unix_ms.saturating_sub(unix_ms());
+        if !request.driver.valid()
+            || !(1..=9_007_199_254_740_991).contains(&request.registration_sequence)
+            || request.expected_owner_epoch <= 0
+            || !matches!(request.principal_kind.as_str(), "source" | "receiver")
+            || request.incarnation_id.is_nil()
+            || !crate::sharing_connection_custody::owner_identity_valid(&request.owner_identity)
+            || !(1..=315_000).contains(&remaining)
+        {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let deadline = deadline_after(Duration::from_millis(
+            u64::try_from(remaining).map_err(|_| PeerTransportError::InvalidResponse)?,
+        ));
+        let base = self.peer_base(ingress_node, deadline).await?;
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        let response = self
+            .transport
+            .request(
+                ingress_node,
+                &base,
+                reqwest::Method::POST,
+                CLOSE_PATH,
+                body,
+                deadline,
+                2048,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        if !response.status.is_success() {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let receipt: DriverClosureReceipt = serde_json::from_slice(&response.body)
+            .map_err(|_| PeerTransportError::InvalidResponse)?;
+        if !receipt.matches(&request.driver) {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        Ok(receipt)
+    }
+
     /// Mutating playback control uses its own exact-auth endpoint. It must not
     /// inherit the generic relay's read authorization merely because the M1
     /// action happens to be `none`.
