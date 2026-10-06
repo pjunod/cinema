@@ -5175,15 +5175,15 @@ internal class SharedPlayerController(private val context: android.content.Conte
             // Register ownership before any setup that can throw on a TV.
             successor = built
             try {
-            successorSeekLanded = false; successorFailed = false; successorFirstFrameUnixMs = null
-            built.addListener(successorListener)
-            built.trackSelectionParameters = built.trackSelectionParameters.buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !textEnabled).setSelectUndeterminedTextLanguage(textEnabled).build()
-            // Parked from the start: a successor that runs keeps whatever lead
-            // it lands with. It still loads while paused.
-            built.playWhenReady = false
-            built.setMediaItem(MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build(), positionMs)
-            built.prepare()
+                successorSeekLanded = false; successorFailed = false; successorFirstFrameUnixMs = null
+                built.addListener(successorListener)
+                built.trackSelectionParameters = built.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !textEnabled).setSelectUndeterminedTextLanguage(textEnabled).build()
+                // Parked from the start: a successor that runs keeps whatever lead
+                // it lands with. It still loads while paused.
+                built.playWhenReady = false
+                built.setMediaItem(MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build(), positionMs)
+                built.prepare()
             } catch (error: Throwable) {
                 dropSuccessor()
                 throw error

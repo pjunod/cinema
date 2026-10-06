@@ -19,6 +19,7 @@ import tv.plurx.app.data.SharedDecisionClient
 import tv.plurx.app.data.SharedPlaybackPlan
 import tv.plurx.app.data.SharedPlaybackSubject
 import tv.plurx.app.data.SharedProgressResult
+import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.SharedSelection
 import tv.plurx.app.data.SharedStart
 import tv.plurx.app.data.SharedStartedDirect
@@ -575,8 +576,13 @@ internal class SharedPlaybackOwner(
             val direct = client.startDirect(next.subject.context, next.request)
             if (direct.playable) {
                 started = direct
-                renderer.attachDirect(client.directUrl(direct), positionMs, playWhenReady)
-                commit(next, direct, null)
+                try {
+                    renderer.attachDirect(client.directUrl(direct), positionMs, playWhenReady)
+                    commit(next, direct, null)
+                } catch (error: Throwable) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { runCatching { client.end(direct) } }
+                    throw error
+                }
             } else {
                 // A type ExoPlayer cannot read as a file: release it and take
                 // the same decision as Copy HLS once.
@@ -592,10 +598,10 @@ internal class SharedPlaybackOwner(
     private suspend fun attachHls(next: SharedPlaybackPlan, positionMs: Long, playWhenReady: Boolean): SharedStartedPlayback {
         val started = client.start(next.subject.context, next.request)
         try {
-        renderer.attachHls(client.playlistUrl(started), positionMs, playWhenReady)
-        commit(next, started, SharedControlChannel(client, started, clientInstanceId,
-            sharedControlCapabilities(next.caps, preparedHandoff), prepared = preparedHandoff))
-        return started
+            renderer.attachHls(client.playlistUrl(started), positionMs, playWhenReady)
+            commit(next, started, SharedControlChannel(client, started, clientInstanceId,
+                sharedControlCapabilities(next.caps, preparedHandoff), prepared = preparedHandoff))
+            return started
         } catch (error: Throwable) {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { runCatching { client.end(started) } }
             throw error
