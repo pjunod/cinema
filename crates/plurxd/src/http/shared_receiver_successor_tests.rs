@@ -263,6 +263,7 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         "an empty override is dropped"
     );
     assert!(built.get("subtitle").is_none() && built.get("audio").is_none());
+    assert!(built.get("native_subtitles").is_none());
     let original_ask = ClientSelection {
         quality: QualitySelection::Original,
         ..selection()
@@ -277,7 +278,8 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
     );
     assert!(built.get("height").is_none());
 
-    // What a shared Start cannot carry is a typed decline, never a guess.
+    // Burn has its own explicit Source ask; codec and dynamic-range policy
+    // changes that cannot be represented remain typed declines.
     let burn = ClientSelection {
         subtitle: pc::SubtitleSelection {
             mode: SubtitleMode::Burn,
@@ -293,7 +295,14 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         dynamic_range: DynamicRangePolicy::Hdr10,
         ..selection()
     };
-    for refused in [burn, codec, grade] {
+    let built: Value =
+        serde_json::from_str(&successor_request(&original, &burn, 0, id).expect("burn"))
+            .expect("burn JSON");
+    assert_eq!(built["subtitle_burn"], 1);
+    assert_eq!(built["copy"], false);
+    assert!(built.get("native_subtitles").is_none());
+    assert!(built.get("subtitle").is_none());
+    for refused in [codec, grade] {
         assert!(successor_request(&original, &refused, 0, id).is_none());
     }
     let direct =

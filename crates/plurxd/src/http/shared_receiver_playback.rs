@@ -815,6 +815,7 @@ impl ReceiverStartActor {
         // Capture tokens and the closure observer only: capturing the monitor
         // owner itself would form an Arc -> JoinHandle -> Arc cycle.
         let cancel = connection.0.clone();
+        let drain = connection.drain_token();
         let closed = connection.closed();
         let actor = self.clone();
         let retained = guard.clone();
@@ -843,11 +844,16 @@ impl ReceiverStartActor {
             // carrying the commit answer or the successor's own media, so it
             // is released, not cut. Admission is already closed, so no writer
             // can join after this count. Every other reason, or a writer still
-            // in flight, cuts the transport as before.
+            // in flight, preserves every accepted stream through graceful
+            // drain; hard revocation still cuts the transport.
             if !actor.0.retirement_cuts_transports() && Arc::strong_count(&custody) == 1 {
                 return;
             }
-            cancel.cancel();
+            if actor.0.retirement_cuts_transports() {
+                cancel.cancel();
+            } else {
+                drain.cancel();
+            }
             closed.wait().await;
         }).is_err() {
             connection.0.cancel();

@@ -12,6 +12,9 @@ pub(crate) use orphans::receiver_recovery_loop;
 /// How many failed attempts one retirement owner makes before it stops.
 /// Bounded work on a detached owner, never on an admission path.
 const RETIREMENT_ATTEMPTS: u32 = 6;
+/// Bound an actual writer join without inventing a closure or cutting another
+/// session on its multiplexed connection when supersession cannot settle.
+const RECEIVER_WRITER_JOIN_DEADLINE: Duration = Duration::from_secs(315);
 /// The first retry delay; each further failure doubles it up to the cap.
 const RETIREMENT_RETRY: Duration = Duration::from_secs(5);
 const RETIREMENT_MAX_BACKOFF: Duration = Duration::from_secs(80);
@@ -381,7 +384,9 @@ impl ReceiverStartActor {
             .join_start_for_cleanup()
             .await
             .map_err(|_| RetirementStall::Unjoined)?;
-        let bodies = self.0.bodies.join().await;
+        let bodies = tokio::time::timeout(RECEIVER_WRITER_JOIN_DEADLINE, self.0.bodies.join())
+            .await
+            .map_err(|_| RetirementStall::Unjoined)?;
         // Sealed resource admissions plus actual last guard release are needed
         // even for a no-send outcome. No elapsed timeout can construct this.
         if !Arc::ptr_eq(&bodies.0, &self.0.bodies) {
@@ -746,7 +751,7 @@ mod tests {
         assert!(Arc::ptr_eq(&joined.0, &registry));
     }
     #[tokio::test]
-    async fn receiver_handover_releases_idle_transports_and_cuts_busy_or_revoked_ones() {
+    async fn receiver_handover_drains_busy_transports_without_cutting_successor_streams() {
         use super::super::tests::registered;
         let state = Arc::new(crate::http::source_actor_test_state());
         let registry = ReceiverStartRegistry::default();
@@ -774,7 +779,11 @@ mod tests {
         );
         revoked.begin_retirement(state, ReceiverRetirementReason::Revoked);
         tokio::time::timeout(Duration::from_secs(5), async {
-            busy.0.cancelled().await;
+            busy.drain_token().cancelled().await;
+            assert!(
+                !busy.0.is_cancelled(),
+                "predecessor drain preserves accepted successor streams"
+            );
             // Revocation still cuts every transport it was retained on.
             quiet.0.cancelled().await;
             loop {
@@ -788,7 +797,7 @@ mod tests {
             }
         })
         .await
-        .expect("the busy and revoked transports are cut and the idle custody released");
+        .expect("busy transport drains, revoked transport cuts, and idle custody releases");
         assert!(
             !idle.0.is_cancelled(),
             "a hand-over never cuts a transport it has no writer on"
