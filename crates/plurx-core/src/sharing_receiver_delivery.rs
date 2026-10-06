@@ -1,4 +1,22 @@
 //! B-session delivery grant metadata; never a Source or physical-body proof.
+#[cfg(feature = "hiqlite-store")]
+pub use crate::cluster::membership::IngressCustodyMembers;
+#[cfg(not(feature = "hiqlite-store"))]
+#[derive(Clone)]
+pub enum IngressCustodyMembers {}
+#[cfg(not(feature = "hiqlite-store"))]
+impl IngressCustodyMembers {
+    pub fn write_guard(
+        &self,
+        _now_ms: i64,
+        _members: usize,
+        _cutoff: usize,
+        _observed: usize,
+    ) -> Result<(String, String, i64, i64), crate::error::StoreError> {
+        match *self {}
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceiverDeliveryGrant {
     /// SHA-256 verifier only; the raw bearer stays in the daemon.
@@ -10,6 +28,59 @@ pub enum ReceiverDeliveryWrite {
     Applied,
     Replay,
     Refused,
+}
+
+/// Fresh metadata authority for one ingress relay. It cannot attach, renew,
+/// publish, adopt, or settle a producer; the receiver owner supplies all of
+/// those physical obligations. The private binding fingerprint prevents a
+/// parked response from acquiring authority over a replaced upstream.
+#[derive(Clone)]
+pub struct ReceiverRelayReadAuthority {
+    pub owner: crate::sharing_receiver_sessions::ReceiverSourceOwner,
+    pub deadline_ms: i64,
+    pub(crate) binding_fingerprint: [u8; 32],
+    pub(crate) authority: crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority,
+    pub(crate) attachment: crate::sharing_receiver_sessions::ReceiverSourceAttachment,
+}
+impl ReceiverRelayReadAuthority {
+    /// Immutable metadata identity only. Encryption rewrap and lease renewal
+    /// cannot change the principal's durable outer-writer obligation identity.
+    pub fn owner_identity(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let owner = &self.owner;
+        let mut digest = Sha256::new();
+        digest.update(b"plurx.receiver.ingress.owner.v1\0");
+        digest.update(owner.incarnation_id.as_bytes());
+        digest.update(owner.session_id.as_bytes());
+        digest.update((owner.owner_node_id.len() as u64).to_be_bytes());
+        digest.update(owner.owner_node_id.as_bytes());
+        digest.update(owner.owner_epoch.to_be_bytes());
+        digest.update((owner.request_id.len() as u64).to_be_bytes());
+        digest.update(owner.request_id.as_bytes());
+        digest.update(self.binding_fingerprint);
+        format!("{:x}", digest.finalize())
+    }
+    pub fn viewer_id(&self) -> i64 {
+        self.authority.intent.user_id
+    }
+    pub fn binds_file(
+        &self,
+        reference: &crate::sharing_file_locators::FileLocatorReference,
+    ) -> bool {
+        let recipe = &self.authority.intent.recipe;
+        recipe.reference == reference.item
+            && recipe.lifecycle_generation == reference.lifecycle_generation
+            && recipe.file_id == reference.file_id
+            && recipe.file_revision == reference.revision
+    }
+    pub fn same_lineage(&self, other: &Self) -> bool {
+        self.owner.incarnation_id == other.owner.incarnation_id
+            && self.owner.session_id == other.owner.session_id
+            && self.owner.owner_node_id == other.owner.owner_node_id
+            && self.owner.owner_epoch == other.owner.owner_epoch
+            && self.owner.request_id == other.owner.request_id
+            && self.binding_fingerprint == other.binding_fingerprint
+    }
 }
 
 /// Metadata-only contract exerciser over an actual guarded published B fixture.

@@ -1164,6 +1164,7 @@ paths = [
   "crates/plurx-core/src/store/sharing_ingress_custody.rs",
   "crates/plurx-core/src/store/sharing_ingress_custody_schema.sql",
   "crates/plurx-core/src/store/sharing_receiver_delivery.rs",
+  "crates/plurx-core/src/store/sharing_receiver_ingress.rs",
   "crates/plurx-core/src/sharing_receiver_progress.rs",
   "crates/plurx-core/src/store/sharing_receiver_progress.rs",
   "crates/plurx-core/src/store/sharing_receiver_sessions.rs",

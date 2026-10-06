@@ -130,6 +130,8 @@ pub(crate) fn ordered(sql: &str, values: Vec<Value>) -> Result<Statement, StoreE
 }
 #[async_trait]
 pub(crate) trait Backend: Send + Sync {
+    /// Actual selected backend, independent of compiled optional features.
+    fn sharing_is_replicated(&self) -> bool;
     async fn sharing_read(&self, sql: &str, values: Vec<Value>) -> Result<Vec<String>, StoreError>;
     async fn sharing_txn(&self, statements: Vec<Statement>) -> Result<Vec<usize>, StoreError>;
     /// Optional candidate table. SQLite reads its shape and rows in one

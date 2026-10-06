@@ -2869,6 +2869,30 @@ impl SourceAdmissionMembers {
     }
 }
 
+/// Opaque current roster for outer-ingress custody, independent of Source
+/// principal installation and Source purpose-key factory readiness.
+#[derive(Clone)]
+pub struct IngressCustodyMembers {
+    members: SourceAdmissionMembers,
+}
+impl IngressCustodyMembers {
+    pub fn write_guard(
+        &self,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
+        self.members.write_guard_for(
+            SharingMemberFloor::IngressCustody,
+            now_ms,
+            members_parameter,
+            cutoff_parameter,
+            observed_at_parameter,
+        )
+    }
+}
+
 /// Actual current-roster witness exclusively for purpose-key factory writes.
 /// It cannot be substituted for the Source session observation.
 #[derive(Clone)]
@@ -9608,6 +9632,20 @@ impl MembershipManager {
     /// Observe the actual serving member and both Source writer capabilities.
     /// The opaque result can supply guarded write inputs, never a cached
     /// readiness permission. Missing factories and unresolved intents refuse.
+    pub async fn observe_ingress_custody_members(
+        &self,
+    ) -> Result<Option<IngressCustodyMembers>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        Ok(sharing_member_floor_observation(
+            &inner.client,
+            inner.identity.raft_id,
+            SharingMemberFloor::IngressCustody,
+            true,
+        )
+        .await?
+        .map(|members| IngressCustodyMembers { members }))
+    }
+
     pub async fn observe_source_admission_members(
         &self,
     ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {

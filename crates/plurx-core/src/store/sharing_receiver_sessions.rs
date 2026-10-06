@@ -1812,6 +1812,58 @@ mod tests {
                     .await;
                 use crate::sharing_receiver_delivery::ReceiverDeliveryWrite;
                 use crate::store::SharingReceiverDeliveryStore;
+                // A relay proof is read authority over the actual published
+                // owner, never a route-only recipe or stale owner epoch.
+                let route = store
+                    .media_session_route_by_incarnation(
+                        &attachment.owner.incarnation_id.to_string(),
+                    )
+                    .await
+                    .expect("published route")
+                    .expect("retained route");
+                let relay_grant = crate::sharing_receiver_delivery::ReceiverDeliveryGrant {
+                    token_hash: crate::auth::hash_token(&route.session_id),
+                    deadline_ms: attachment.owner.lease_expires_at_ms,
+                };
+                assert_eq!(
+                    store
+                        .issue_receiver_delivery(&current, &attachment, &relay_grant)
+                        .await
+                        .expect("relay grant"),
+                    ReceiverDeliveryWrite::Applied
+                );
+                let proof = store
+                    .receiver_relay_read_authority(&route)
+                    .await
+                    .expect("fresh relay read")
+                    .expect("actual published binding");
+                assert_eq!(proof.viewer_id(), intent.user_id);
+                let mut stale = route.clone();
+                stale.owner_epoch += 1;
+                assert!(store
+                    .receiver_relay_read_authority(&stale)
+                    .await
+                    .expect("stale owner refuses")
+                    .is_none());
+                let mut changed = route.clone();
+                changed.recipe_json.push(' ');
+                assert!(store
+                    .receiver_relay_read_authority(&changed)
+                    .await
+                    .expect("changed retained recipe refuses")
+                    .is_none());
+                assert_eq!(
+                    store
+                        .revoke_receiver_delivery(&current, &attachment, &relay_grant.token_hash)
+                        .await
+                        .expect("relay grant revoke"),
+                    ReceiverDeliveryWrite::Applied
+                );
+                assert!(store
+                    .receiver_relay_read_authority(&route)
+                    .await
+                    .expect("revoked relay read refuses")
+                    .is_none());
                 store.sharing_txn(vec![("CREATE TRIGGER delivery_ignore_update BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("delivery trigger fixture");
                 assert_eq!(
                     store

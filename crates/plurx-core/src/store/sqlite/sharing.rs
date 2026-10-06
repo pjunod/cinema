@@ -15,6 +15,9 @@ fn values(values: Vec<Value>) -> Vec<rusqlite::types::Value> {
 }
 #[async_trait]
 impl Backend for SqliteStore {
+    fn sharing_is_replicated(&self) -> bool {
+        false
+    }
     async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError> {
         self.with_read(|connection| {
             let snapshot=connection.unchecked_transaction()?;
