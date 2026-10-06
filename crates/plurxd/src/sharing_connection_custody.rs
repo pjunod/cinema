@@ -81,7 +81,6 @@ impl DriverClosureReceipt {
     pub(crate) fn matches(&self, expected: &AcceptedDriverId) -> bool {
         self.driver == *expected && self.confirmation == Self::closed(expected.clone()).confirmation
     }
-    #[allow(dead_code)] // Complete physical-receipt accessor; Source/B durable-ack adapters integrate next.
     pub(crate) fn confirmation(&self) -> &str {
         &self.confirmation
     }
@@ -127,13 +126,11 @@ struct RegistrationGateState {
 }
 /// Cancellation retains an exact unresolved reservation, without holding a gate.
 /// New ordinals refuse admission until that reservation is reconciled.
-#[allow(dead_code)] // Complete cancellation-safe admission API; adapters integrate next.
 pub(crate) struct RegistrationPermit {
     gate: Arc<Mutex<RegistrationGateState>>,
     bound: Option<(AcceptedDriverId, PrincipalObligationKey)>,
     next_registration: Arc<AtomicU64>,
 }
-#[allow(dead_code)] // Source/B adapters consume definitive and reconciliation APIs next.
 impl RegistrationPermit {
     pub(crate) fn complete(mut self) {
         if let Some(bound) = self.bound.take() {
@@ -150,7 +147,6 @@ pub(crate) struct CapturedIngressObligation {
     driver: Arc<DriverEntry>,
     identity: PrincipalObligation,
 }
-#[allow(dead_code)] // Complete obligation API; Source/B registration and durable-ack adapters integrate next.
 impl CapturedIngressObligation {
     pub(crate) fn registration_sequence(&self) -> u64 {
         self.identity.registration_sequence
@@ -158,6 +154,14 @@ impl CapturedIngressObligation {
     pub(crate) async fn joined(&self) -> DriverClosureReceipt {
         self.driver.closed.wait().await;
         DriverClosureReceipt::closed(self.driver.id.clone())
+    }
+    /// Synchronous observation of the same actual driver completion. This is
+    /// never constructed from ledger state, a timeout, or a requested drain.
+    pub(crate) fn closed_receipt(&self) -> Option<DriverClosureReceipt> {
+        self.driver
+            .closed
+            .is_closed()
+            .then(|| DriverClosureReceipt::closed(self.driver.id.clone()))
     }
     /// Caller invokes only after its exact durable closure ack applied/replayed.
     /// Local actual closure is checked independently; a supplied hash is never
@@ -193,13 +197,13 @@ impl CapturedIngressObligation {
 }
 #[derive(Clone)]
 pub(crate) struct CapturedDriver(Arc<DriverEntry>);
-#[allow(dead_code)] // Complete capture/closure API; Source/B principal adapters integrate next.
 impl CapturedDriver {
     pub(crate) fn id(&self) -> &AcceptedDriverId {
         &self.0.id
     }
     /// Recover metadata for an exact already prepared reservation after actual
     /// closure. This never creates an obligation or authorizes a new writer.
+    #[cfg(test)]
     pub(crate) fn existing_obligation(
         &self,
         kind: &str,
@@ -304,11 +308,6 @@ impl CapturedDriver {
             identity,
         })
     }
-    /// Awaited by an accepted-connection-owned monitor, not a detached poller.
-    pub(crate) async fn joined(&self) -> DriverClosureReceipt {
-        self.0.closed.wait().await;
-        DriverClosureReceipt::closed(self.0.id.clone())
-    }
 }
 pub(crate) struct AcceptedDriverRegistry {
     boot_id: Uuid,
@@ -328,8 +327,34 @@ impl Default for AcceptedDriverRegistry {
         }
     }
 }
-#[allow(dead_code)] // Complete physical registry; Source/B capture and boot publication integrate next.
 impl AcceptedDriverRegistry {
+    /// Read-only self-wait detection. It neither captures a new connection nor
+    /// mints a principal ordinal for an End response.
+    pub(crate) fn connection_owes_principal(
+        &self,
+        connection: &SharingConnectionCancellation,
+        kind: &str,
+        incarnation: Uuid,
+    ) -> bool {
+        let key = connection.ownership_key();
+        self.entries
+            .lock()
+            .expect("accepted ingress custody")
+            .iter()
+            .any(|entry| {
+                Weak::ptr_eq(&entry.owner_key, &key)
+                    && entry
+                        .obligations
+                        .lock()
+                        .expect("accepted principal obligations")
+                        .iter()
+                        .any(|obligation| {
+                            obligation.kind == kind
+                                && obligation.incarnation == incarnation
+                                && !obligation.acknowledged
+                        })
+            })
+    }
     /// Reserve under a short node-local mutex, never retain a gate over an
     /// exchange. Pending immutable identities fence only their own principal.
     pub(crate) async fn registration_guard(&self) -> Result<RegistrationPermit, ()> {
@@ -363,6 +388,7 @@ impl AcceptedDriverRegistry {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn existing_obligation(
         &self,
         driver: &AcceptedDriverId,
@@ -463,6 +489,48 @@ impl AcceptedDriverRegistry {
         entries.push(Arc::clone(&entry));
         Ok(CapturedDriver(entry))
     }
+    /// Caller already verified exact current cleanup owner/epoch and original
+    /// durable principal obligation. This authorizes close only; it never
+    /// captures a writer, creates an actor, or supplies closure evidence.
+    pub(crate) fn authorize_current_cleanup_owner(
+        &self,
+        owner: &str,
+        request: &DriverCloseRequest,
+    ) -> Result<(), ()> {
+        if owner.is_empty() || owner.len() > 256 || owner.chars().any(char::is_control) {
+            return Err(());
+        }
+        let entries = self.entries.lock().expect("accepted ingress custody");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.id == request.driver)
+            .ok_or(())?;
+        if !entry
+            .obligations
+            .lock()
+            .expect("accepted principal obligations")
+            .iter()
+            .any(|obligation| {
+                obligation.kind == request.principal_kind
+                    && obligation.incarnation == request.incarnation_id
+                    && obligation.owner_identity == request.owner_identity
+                    && obligation.registration_sequence == request.registration_sequence
+            })
+        {
+            return Err(());
+        }
+        let mut owners = entry
+            .allowed_owners
+            .lock()
+            .expect("accepted ingress owners");
+        if !owners.iter().any(|node| node == owner) {
+            if owners.len() >= 256 {
+                return Err(());
+            }
+            owners.push(owner.to_owned());
+        }
+        Ok(())
+    }
     pub(crate) async fn close(
         &self,
         owner_node: &str,
@@ -550,6 +618,9 @@ pub(crate) async fn close_http(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    // Source dispatch generation1 may owe ingress before any media route exists.
+    // This guard authorizes cleanup only; actual retained registry debt and
+    // authenticated joined receipt remain required below.
     let authorized_owner = if request.principal_kind == "source" {
         state
             .store
@@ -562,8 +633,10 @@ pub(crate) async fn close_http(
             .await
             .unwrap_or(false)
     } else {
-        matches!(state.store.media_session_route_by_incarnation(&request.incarnation_id.to_string()).await,
-            Ok(Some(route)) if route.owner_node_id==auth.node_id && route.owner_epoch==request.expected_owner_epoch)
+        matches!(state.store.media_session_route_by_incarnation(
+            &request.incarnation_id.to_string()).await,
+            Ok(Some(route)) if route.owner_node_id == auth.node_id
+                && route.owner_epoch == request.expected_owner_epoch)
     };
     if !authorized_owner {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -589,28 +662,15 @@ pub(crate) async fn close_http(
     {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    // Recovery may own a newer fence. Exact current durable ownership plus the
-    // original registered driver authorizes closure, never actor adoption.
+    // Current authenticated cleanup fence may differ from initial admission;
+    // the exact original principal/driver stays retained in the local registry.
+    if state
+        .sharing
+        .accepted_drivers
+        .authorize_current_cleanup_owner(&auth.node_id, &request)
+        .is_err()
     {
-        let entries = state
-            .sharing
-            .accepted_drivers
-            .entries
-            .lock()
-            .expect("accepted ingress custody");
-        let Some(entry) = entries.iter().find(|entry| entry.id == request.driver) else {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-        };
-        let mut owners = entry
-            .allowed_owners
-            .lock()
-            .expect("accepted ingress owners");
-        if !owners.contains(&auth.node_id) {
-            if owners.len() >= 256 {
-                return StatusCode::SERVICE_UNAVAILABLE.into_response();
-            }
-            owners.push(auth.node_id.clone());
-        }
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     match state
         .sharing
@@ -618,7 +678,29 @@ pub(crate) async fn close_http(
         .close(&auth.node_id, &request)
         .await
     {
-        Ok(receipt) => axum::Json(receipt).into_response(),
+        Ok(receipt) => {
+            let Ok(body) = serde_json::to_vec(&receipt) else {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            let payload = crate::http::peer_transport::signed_response_payload(200, &body);
+            let Ok(signature) = state.membership.sign_internal_peer_response(
+                &auth.node_id,
+                &auth.nonce,
+                CLOSE_PATH,
+                &payload,
+            ) else {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .header(
+                    crate::http::peer_transport::RESPONSE_SIGNATURE_HEADER,
+                    signature,
+                )
+                .body(axum::body::Body::from(body))
+                .expect("validated close response headers")
+        }
         Err(()) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }

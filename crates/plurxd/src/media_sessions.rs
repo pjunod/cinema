@@ -2788,7 +2788,63 @@ impl MediaSessionCoordinator {
             .ok_or(PeerTransportError::Unreachable)
     }
 
-    #[allow(dead_code)] // Wired by the coordinated Source forwarding module checkpoint.
+    /// Shared receiver bytes retain the existing authenticated streaming driver.
+    pub(crate) async fn receiver_forward_stream(
+        &self,
+        owner_node_id: &str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<reqwest::Response, PeerTransportError> {
+        if body.len() > 128 * 1024 || tokio::time::Instant::now() >= deadline {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request_stream(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                "/internal/cluster/sharing/receiver/forward",
+                body,
+                deadline,
+                PeerAuthMode::ExactRequest,
+            )
+            .await
+    }
+
+    /// Only the named receiver control/custody operations use signed replies.
+    pub(crate) async fn receiver_forward_bounded(
+        &self,
+        owner_node_id: &str,
+        path: &'static str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<crate::http::peer_transport::PeerResponse, PeerTransportError> {
+        if !matches!(
+            path,
+            "/internal/cluster/sharing/receiver/control"
+                | "/internal/cluster/sharing/receiver/register"
+                | "/internal/cluster/sharing/receiver/ack"
+        ) || body.len() > 128 * 1024
+            || tokio::time::Instant::now() >= deadline
+        {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                path,
+                body,
+                deadline,
+                64 * 1024,
+                PeerAuthMode::ExactRequestAndMemberResponse,
+            )
+            .await
+    }
+
     /// Source body relay: keep byte backpressure and accepted-writer custody.
     pub(crate) async fn source_forward_stream(
         &self,
@@ -2813,7 +2869,6 @@ impl MediaSessionCoordinator {
             .await
     }
 
-    #[allow(dead_code)] // Wired by the coordinated Source forwarding module checkpoint.
     /// Bounded Source control and custody answers authenticate status/body too.
     pub(crate) async fn source_forward_bounded(
         &self,

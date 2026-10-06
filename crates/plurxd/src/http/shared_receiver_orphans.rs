@@ -271,6 +271,48 @@ async fn retire_claimed(
     let orphan = claimed.orphan();
     let owner = orphan.owner().clone();
     let mut budget = RetirementBudget::new(shutdown.clone());
+    let route = match state
+        .store
+        .media_session_route_by_incarnation(&owner.incarnation_id.to_string())
+        .await
+    {
+        Ok(Some(route))
+            if route.owner_node_id == state.node_id && route.owner_epoch == owner.owner_epoch =>
+        {
+            route
+        }
+        _ => return OrphanOutcome::Deferred("cleanup_owner_changed"),
+    };
+    let snapshot = match state.store.receiver_ingress_snapshot(&route).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => return OrphanOutcome::Deferred("ingress_custody_unavailable"),
+    };
+    let original = match snapshot {
+        Some(snapshot) => snapshot.owner_identity,
+        None if orphan.binding().is_some() => {
+            return OrphanOutcome::Stranded("ingress_custody_missing")
+        }
+        None => plurx_core::auth::hash_token(&format!(
+            "plurx.receiver.unpublished.ingress.v1\0{}\0{}\0{}\0{}\0{}",
+            route.incarnation_id,
+            route.session_id,
+            route.owner_node_id,
+            route.owner_epoch,
+            route.recipe_json
+        )),
+    };
+    if ingress_custody::close_receiver_ingress(
+        Arc::new(state.clone()),
+        &route,
+        &original,
+        crate::sharing_connection_custody::DriverCloseMode::Revoke,
+        budget.deadline,
+    )
+    .await
+    .is_err()
+    {
+        return OrphanOutcome::Stranded("ingress_custody_unresolved");
+    }
     let (disposition, confirmation, source) = match plan {
         EndPlan::NeverDispatched => {
             // The claim advanced the epoch, so the dead owner's dispatch
@@ -309,6 +351,7 @@ async fn retire_claimed(
                 viewer_hash,
                 session,
                 lineage.as_ref(),
+                tokio::time::Instant::from_std(budget.deadline),
             )
             .await;
             match attempt {

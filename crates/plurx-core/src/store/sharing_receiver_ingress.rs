@@ -19,6 +19,13 @@ use uuid::Uuid;
 
 #[async_trait]
 pub trait SharingReceiverIngressStore: Send + Sync {
+    async fn receiver_cleanup_capsules(
+        &self,
+        route: &MediaSessionRoute,
+        owner: &crate::sharing_receiver_sessions::ReceiverSourceOwner,
+        binding: Option<&crate::sharing_receiver_sessions::ReceiverSourceBinding>,
+        intent: &crate::sharing_receiver_sessions::ReceiverSessionIntent,
+    ) -> Result<Option<super::ReceiverCleanupCapsules>, StoreError>;
     async fn register_receiver_ingress(
         &self,
         authority: &ReceiverRelayReadAuthority,
@@ -31,6 +38,14 @@ pub trait SharingReceiverIngressStore: Send + Sync {
     async fn receiver_ingress_snapshot(
         &self,
         route: &MediaSessionRoute,
+    ) -> Result<Option<IngressCustodySnapshot>, StoreError>;
+    /// Install a sealed fence even when no ingress has registered yet. A
+    /// retirement owner must complete this before it may send Source End;
+    /// absent metadata cannot race an already-authorized late registration.
+    async fn seal_receiver_ingress_route(
+        &self,
+        route: &MediaSessionRoute,
+        original_owner_identity: &str,
     ) -> Result<Option<IngressCustodySnapshot>, StoreError>;
     async fn seal_receiver_ingress(
         &self,
@@ -54,7 +69,7 @@ pub trait SharingReceiverIngressStore: Send + Sync {
         snapshot: &IngressCustodySnapshot,
     ) -> Result<CustodyMutation, StoreError>;
 }
-fn route_guard(route: &MediaSessionRoute) -> Result<Statement, StoreError> {
+pub(super) fn route_guard(route: &MediaSessionRoute) -> Result<Statement, StoreError> {
     let Some(user) = route.principal.local_user_id() else {
         return Err(invalid());
     };
@@ -111,6 +126,19 @@ async fn observed<T: Backend>(
 }
 #[async_trait]
 impl<T: Backend> SharingReceiverIngressStore for T {
+    async fn receiver_cleanup_capsules(
+        &self,
+        route: &MediaSessionRoute,
+        owner: &crate::sharing_receiver_sessions::ReceiverSourceOwner,
+        binding: Option<&crate::sharing_receiver_sessions::ReceiverSourceBinding>,
+        intent: &crate::sharing_receiver_sessions::ReceiverSessionIntent,
+    ) -> Result<Option<super::ReceiverCleanupCapsules>, StoreError> {
+        super::sharing_receiver_capsule_refresh::cleanup_capsules(
+            self, route, owner, binding, intent,
+        )
+        .await
+    }
+
     async fn register_receiver_ingress(
         &self,
         proof: &ReceiverRelayReadAuthority,
@@ -155,7 +183,7 @@ impl<T: Backend> SharingReceiverIngressStore for T {
         };
         let predicate=format!("({}) AND ({}) AND ({floor}) AND EXISTS(SELECT 1 FROM sharing_delivery_grants g WHERE g.token_hash=$20 AND g.incarnation_id=$6 AND g.source_token_hash=$1 AND g.state='active' AND g.deadline_ms>$14)",source_current(ATTACHED,PUBLISHED),ledger::schema_guard());
         let guard = source_assert(predicate, values);
-        let inc = proof.owner.incarnation_id;
+        let inc = proof.attachment.owner.incarnation_id;
         let owner = proof.owner_identity();
         match apply(
             self,
@@ -191,6 +219,46 @@ impl<T: Backend> SharingReceiverIngressStore for T {
         &self,
         route: &MediaSessionRoute,
     ) -> Result<Option<IngressCustodySnapshot>, StoreError> {
+        observed(self, route).await
+    }
+    async fn seal_receiver_ingress_route(
+        &self,
+        route: &MediaSessionRoute,
+        original_owner_identity: &str,
+    ) -> Result<Option<IngressCustodySnapshot>, StoreError> {
+        let inc = Uuid::parse_str(&route.incarnation_id).map_err(|_| invalid())?;
+        let mut sealed = crate::sharing_ingress_custody::IngressCustodyState::default();
+        sealed.seal();
+        let mut create = ledger::create("receiver", inc, original_owner_identity)?;
+        create.1[3] = sealed.encode()?.into();
+        // A missing row is born sealed in this exact route-fenced write.
+        // Existing rows retain their immutable original principal identity.
+        match self.sharing_txn(vec![route_guard(route)?, create]).await {
+            Ok(_) => {}
+            Err(error) if source_write_refused(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        let Some(snapshot) = observed(self, route).await? else {
+            return Ok(None);
+        };
+        if snapshot.owner_identity != original_owner_identity {
+            return Ok(None);
+        }
+        let mut next = snapshot.state.clone();
+        next.seal();
+        if apply(
+            self,
+            vec![
+                route_guard(route)?,
+                ledger::compare_and_swap(&snapshot, &next)?,
+            ],
+            1,
+        )
+        .await?
+            != CustodyMutation::Applied
+        {
+            return Ok(None);
+        }
         observed(self, route).await
     }
     async fn seal_receiver_ingress(
@@ -235,7 +303,29 @@ impl<T: Backend> SharingReceiverIngressStore for T {
         let mut next = snapshot.state.clone();
         let mutation = next.acknowledge(registration, confirmation);
         if mutation == CustodyMutation::Refused {
-            return Ok(mutation);
+            // Caller already owns actual joined or authenticated exact close.
+            // This same-write metadata fence handles ACK-before-register and
+            // lost ACK after reclamation; it constructs no physical receipt.
+            if snapshot.state.contains_driver(registration)
+                || next.fence_closed_registration(registration, confirmation)
+                    == CustodyMutation::Refused
+            {
+                return Ok(mutation);
+            }
+            let result = apply(
+                self,
+                vec![
+                    route_guard(route)?,
+                    ledger::compare_and_swap(snapshot, &next)?,
+                ],
+                1,
+            )
+            .await?;
+            return Ok(if result == CustodyMutation::Applied {
+                CustodyMutation::Replay
+            } else {
+                result
+            });
         };
         let result = apply(
             self,
@@ -266,7 +356,15 @@ impl<T: Backend> SharingReceiverIngressStore for T {
         };
         let guard = route_guard(route)?;
         let terminal=("INSERT INTO sharing_relay_upstream(incarnation_id,import_id,lifecycle_generation,assignment_generation,remote_library_id,remote_item_id,remote_file_id,remote_revision,source_request_id,endpoint_revision,source_position_ms) SELECT json_extract('receiver_source_authority_refused','$'),'',1,1,'0','0','0','','',1,0 WHERE NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$1 AND state='ended' AND terminal_reason IS NOT NULL AND publication_ready_at_ms=0) OR EXISTS(SELECT 1 FROM sharing_relay_upstream WHERE incarnation_id=$1) OR EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$1)".into(),vec![route.incarnation_id.clone().into()]);
-        let delete=("DELETE FROM sharing_ingress_custody WHERE principal_kind='receiver' AND incarnation_id=$1 AND owner_identity=$2 AND revision=$3 AND custody_json=$4".into(),vec![snapshot.incarnation_id.into(),snapshot.owner_identity.clone().into(),snapshot.revision.into(),snapshot.state.encode()?.into()]);
-        apply(self, vec![guard, terminal, delete], 2).await
+        let mut next = snapshot.state.clone();
+        next.compact_settled();
+        // Preserve a small exact principal terminal fence for ingress release
+        // reconciliation; missing metadata never constructs an acknowledgement.
+        apply(
+            self,
+            vec![guard, terminal, ledger::compare_and_swap(snapshot, &next)?],
+            2,
+        )
+        .await
     }
 }

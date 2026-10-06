@@ -1838,6 +1838,43 @@ mod tests {
                     .expect("fresh relay read")
                     .expect("actual published binding");
                 assert_eq!(proof.viewer_id(), intent.user_id);
+                use crate::store::SharingReceiverIngressStore;
+                assert!(store
+                    .receiver_ingress_snapshot(&route)
+                    .await
+                    .expect("no fabricated custody")
+                    .is_none());
+                let sealed = store
+                    .seal_receiver_ingress_route(&route, &proof.owner_identity())
+                    .await
+                    .expect("install absent retirement fence")
+                    .expect("sealed fence");
+                assert!(sealed.state.is_sealed());
+                let boot = Uuid::new_v4();
+                let late = crate::sharing_ingress_custody::IngressRegistration {
+                    node_id: route.owner_node_id.clone(),
+                    boot_id: boot,
+                    connection_id: Uuid::new_v4(),
+                    driver_sequence: 1,
+                    registration_sequence: 1,
+                    closed_confirmation: None,
+                };
+                // This proof was authorized before absent-ledger sealing. The
+                // late same-write Register must never create a new obligation.
+                assert_eq!(
+                    store
+                        .register_receiver_ingress(&proof, None, boot, &late)
+                        .await
+                        .expect("late authorized write refused"),
+                    crate::sharing_ingress_custody::CustodyMutation::Refused
+                );
+                let after = store
+                    .receiver_ingress_snapshot(&route)
+                    .await
+                    .expect("retained sealed fence")
+                    .expect("never missing-row proof");
+                assert!(after.state.is_sealed());
+                assert!(!after.state.contains_driver(&late));
                 let mut stale = route.clone();
                 stale.owner_epoch += 1;
                 assert!(store

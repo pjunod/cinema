@@ -33,6 +33,8 @@ pub mod sharing_ingress_custody;
 mod sharing_receiver_delivery;
 pub use sharing_ingress_custody::SharingIngressCustodyStore;
 pub use sharing_receiver_delivery::SharingReceiverDeliveryStore;
+mod sharing_receiver_capsule_refresh;
+pub use sharing_receiver_capsule_refresh::ReceiverCleanupCapsules;
 mod sharing_receiver_ingress;
 pub use sharing_receiver_ingress::SharingReceiverIngressStore;
 pub mod sharing_receiver_orphans;
