@@ -34,6 +34,7 @@ existing warm target. Paul's checkout is not used for changes.
 | Busy predecessor transport | Integrated `9789741b2` | Graceful H2 drain preserves existing successor writes; actual closure still required; no runtime receipt yet |
 | Approved endpoint cleanup | First checkpoint `7a9aad07e` integrated | Exact import lineage permits new approved endpoints after dial failure; full End-exchange fallback is being completed |
 | Linux Docker bridge hosting | Profile and recipe integrated through `6ab554659` | Rust check/Clippy and actual Compose render/preflight passed, including explicit default gateway; runtime qualification remains open |
+| Custody schema and upgrade floor | Integrated `69876dfce` | SQLite 93; replicated baseline 72 / Source 73; frozen Source layout 71 unchanged; old held obligations refuse upgrade; compiled, execution deferred |
 | Active upgrade harness | Integrated through `cdf18d7f5`; unexecuted | Historical/candidate/restored Local HLS, actual video decode and live encoder drain; does not qualify Shared relay or active principal rebuild |
 | Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed on integration `5cfb165f0`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
 
@@ -45,7 +46,7 @@ current. Each builder has an isolated clone from `d4d2ec8e4`.
 
 | Builder | Owned work | State |
 |---|---|---|
-| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Migration checkpoint compiling; moving ownership claim before fallible preparation |
+| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Migration checkpoint integrated; fresh invocation claim checkpoint compiling; Source custody adapter next |
 | Source forwarding / completed clients | Dedicated Source owner transport; native/web, hosting and Windows compiler | Client/Docker/harness checkpoints complete; reassigned to Source forwarding in parallel |
 | Receiver/cluster | Shared accepted-driver custody, B owner forwarding and endpoint cleanup | H2 drain checkpoint complete; building distributed closure acknowledgements and endpoint fallback |
 | Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |

@@ -1067,6 +1067,9 @@ pub(crate) fn fence_restored_sharing(connection: &rusqlite::Connection) -> Resul
     )?;
     tx.execute("UPDATE sharing_imports SET state='disabled',lifecycle_generation=lifecycle_generation+1 WHERE state NOT IN ('disabled','revoked')",[])?;
     tx.execute("UPDATE sharing_delivery_grants SET state='revoked'", [])?;
+    // Preserve sharing_ingress_custody unchanged: restored boot/route metadata
+    // cannot mint actual closure or adopt an old accepted driver. Its full
+    // owner identity remains fenced, while disable/re-pair prevents new use.
     tx.execute("DELETE FROM sharing_identity", [])?;
     tx.commit()?;
     Ok(())

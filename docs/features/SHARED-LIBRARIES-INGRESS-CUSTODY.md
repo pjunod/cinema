@@ -76,8 +76,8 @@ shape and membership/floor checks apply before mutation. Legacy v71 must have
 no held Source bindings, starting requests, non-ended Source routes or Source
 preparations in the same atomic migration guard. Original owners must settle
 those obligations before upgrade; lease expiry is insufficient. This is a
-coordinated transition, with no claim of rolling compatibility. These version
-numbers describe the chosen build plan until the migration checkpoint is integrated.
+coordinated transition, with no claim of rolling compatibility. The migration is integrated in `69876dfce`; runtime upgrade qualification
+remains open.
 
 Restore/import must explicitly retain or fence old custody without adopting a
 prior boot or synthesizing a receipt. Supported restore still disables sharing
