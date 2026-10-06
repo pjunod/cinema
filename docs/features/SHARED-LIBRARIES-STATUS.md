@@ -14,7 +14,7 @@ is not playback or topology evidence.
 
 The isolated checkout is `/private/tmp/plurx-shared-sol/repo`, on
 `codex/shared-libraries-completion`. Source-only archives compile on nuc4 in
-`~/work/codex-shared-sol/src` using the verified Rust 1.97.1 compiler and the
+`~/work/codex-shared-sol/compiler-source` using the verified Rust 1.97.1 compiler and the
 existing warm target. Paul's checkout is not used for changes.
 
 | Work | State | Evidence or next action |
@@ -34,6 +34,7 @@ existing warm target. Paul's checkout is not used for changes.
 | Busy predecessor transport | Integrated `9789741b2` | Graceful H2 drain preserves existing successor writes; actual closure still required; no runtime receipt yet |
 | Approved endpoint cleanup | First checkpoint `7a9aad07e` integrated | Exact import lineage permits new approved endpoints after dial failure; full End-exchange fallback is being completed |
 | Linux Docker bridge hosting | Profile and recipe integrated through `6ab554659` | Rust check/Clippy and actual Compose render/preflight passed, including explicit default gateway; runtime qualification remains open |
+| Active upgrade harness | Integrated through `cdf18d7f5`; unexecuted | Historical/candidate/restored Local HLS, actual video decode and live encoder drain; does not qualify Shared relay or active principal rebuild |
 | Compiler and lint | Per-checkpoint passes; integrated checks continue | Normal hooks passed on integration `5cfb165f0`; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Windows MSVC all-target check passed at that agent revision. No tests executed |
 
 ## Parallel builders and management audit
@@ -44,13 +45,16 @@ current. Each builder has an isolated clone from `d4d2ec8e4`.
 
 | Builder | Owned work | State |
 |---|---|---|
-| Source lifecycle | Source worker forwarding, Source custody and coordinated schema/floor migration | Cleanup checkpoint complete; building adjunct custody persistence and Source forwarding |
-| Clients / hosting | Native and web completion, Windows compiler and explicit Docker bridge profile | Native and Docker profile/recipe compiled; extending historical active-playback qualification harness; Windows compiler warm on m6 |
+| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Migration checkpoint compiling; moving ownership claim before fallible preparation |
+| Source forwarding / completed clients | Dedicated Source owner transport; native/web, hosting and Windows compiler | Client/Docker/harness checkpoints complete; reassigned to Source forwarding in parallel |
 | Receiver/cluster | Shared accepted-driver custody, B owner forwarding and endpoint cleanup | H2 drain checkpoint complete; building distributed closure acknowledgements and endpoint fallback |
 | Root | Integration, API/operator/security docs, central ownership census, status and review | Auditing completed behavior against the contract; preserving unproved acceptance cells |
 
-Rust builders serialize compilation with one owned lock on nuc4 and reuse
-the warm target. Apple and Android compile independently. The old mba address
+Rust builders install source and compile inside one owned lock on nuc4. All
+use one canonical source directory with checksum copies and current write
+timestamps, retaining the warm dependency target. Separate source paths had
+reused stale workspace artifacts; the two workspace packages were cleaned
+once before this transition. Apple and Android compile independently. The old mba address
 `192.168.5.115` timed out on 2026-10-06; this is an unavailable build surface,
 not a client-code failure. Inventory identifies m6 as `192.168.4.14`.
 

@@ -1,6 +1,7 @@
 """Safety and retained-data contracts for the isolated upgrade runner."""
 import contextlib
 import importlib.util
+import hashlib
 import io
 from pathlib import Path
 import subprocess
@@ -117,6 +118,81 @@ class CoordinatedUpgradeQualificationTests(unittest.TestCase):
         after["media_sessions"]["rows"].append(before["media_sessions"]["rows"][1])
         with self.assertRaisesRegex(RuntimeError, "expected terminal cleanup missing"):
             module.compare_retained(before, after, terminal_cleanup=True)
+
+    def test_active_media_never_sends_fixture_credentials_off_node(self):
+        module = load_runner()
+        with patch.object(module.urllib.request, "build_opener") as opened:
+            with self.assertRaisesRegex(RuntimeError, "escaped its isolated node"):
+                module.media_object({"base": "http://127.0.0.1:32400"},
+                                    "http://elsewhere.invalid/segment.m4s", "fixture-token")
+            opened.assert_not_called()
+
+    def test_active_media_redirect_refuses_before_forwarding_credentials(self):
+        module = load_runner()
+        with self.assertRaisesRegex(RuntimeError, "redirect refused"):
+            module.NoMediaRedirect().redirect_request(None, None, 302, "redirect", {},
+                                                      "http://elsewhere.invalid/media")
+
+    def test_active_worker_evidence_only_includes_owned_descendants(self):
+        module = load_runner()
+        inventory = "100 1 plurxd\n101 100 ffmpeg\n102 101 ffmpeg\n200 1 ffmpeg\n"
+        with patch.object(module.subprocess, "check_output", return_value=inventory):
+            self.assertEqual(module.owned_workers(100), {101: "ffmpeg", 102: "ffmpeg"})
+
+    def test_active_drain_waits_for_daemon_and_rejects_surviving_encoder(self):
+        module = load_runner()
+        daemon = Mock()
+        calls = []
+        daemon.stop.side_effect = lambda: calls.append("signal")
+        daemon.wait.side_effect = lambda: calls.append("wait")
+        def inventory(*args, **kwargs):
+            calls.append("observe")
+            return "101\n"
+        with patch.object(module.subprocess, "check_output", side_effect=inventory):
+            with self.assertRaisesRegex(RuntimeError, "encoder survived"):
+                module.drain_active(daemon, {101: "ffmpeg"})
+        self.assertEqual(calls, ["signal", "wait", "observe"])
+        with patch.object(module.subprocess, "check_output", return_value="200\n"):
+            module.drain_active(daemon, {101: "ffmpeg"})
+
+    def test_fixture_hash_reads_bounded_chunks(self):
+        module = load_runner()
+        path = Mock()
+        source = Mock()
+        source.read.side_effect = [b"first", b"second", b""]
+        path.open.return_value.__enter__ = Mock(return_value=source)
+        path.open.return_value.__exit__ = Mock(return_value=False)
+        self.assertEqual(module.file_sha256(path), hashlib.sha256(b"firstsecond").hexdigest())
+        self.assertEqual([call.args for call in source.read.call_args_list],
+                         [(1024 * 1024,)] * 3)
+
+    def test_active_fixture_restores_complete_stopped_historical_directory(self):
+        module = load_runner()
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            media = parent / "supplied.mp4"
+            media.write_bytes(b"supplied fixture")
+            root = parent / "owned-fixture"
+            observed = []
+            def stage(binary, node, label, file_id=None, previous_session=None):
+                state = node["data"] / "whole-state"
+                if label == "active-historical":
+                    state.write_text("historical stopped state")
+                else:
+                    observed.append((label, state.read_text(), file_id, previous_session))
+                    state.write_text("candidate mutated state")
+                return {"file_id": 17, "session_id": label}
+            with patch.object(module, "ports", return_value=[1, 2, 3]), patch.object(
+                module, "active_local_stage", side_effect=stage
+            ):
+                result = module.active_local_fixture("old", "new", root, media)
+            self.assertEqual(observed, [
+                ("active-candidate", "historical stopped state", 17, "active-historical"),
+                ("active-restored", "historical stopped state", 17, "active-historical")])
+            self.assertEqual((root / "parked-candidate" / "whole-state").read_text(),
+                             "candidate mutated state")
+            self.assertEqual(result["shared_relay_drain"], "not qualified")
+            self.assertEqual(media.read_bytes(), b"supplied fixture")
 
 
 if __name__ == "__main__":

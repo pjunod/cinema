@@ -72,13 +72,19 @@ it cannot be reused as an ordinary additive migration. The selected migration
 plan advances ordinary baseline v70 to v72 and installed Source v71 to v73;
 Source installation then advances v72 to v73. The frozen Source layout marker
 v71 remains distinct from the current committed schema. Exact predecessor
-shape and membership/floor checks apply before mutation. These version numbers
-describe the chosen build plan until the migration checkpoint is integrated.
+shape and membership/floor checks apply before mutation. Legacy v71 must have
+no held Source bindings, starting requests, non-ended Source routes or Source
+preparations in the same atomic migration guard. Original owners must settle
+those obligations before upgrade; lease expiry is insufficient. This is a
+coordinated transition, with no claim of rolling compatibility. These version
+numbers describe the chosen build plan until the migration checkpoint is integrated.
 
 Restore/import must explicitly retain or fence old custody without adopting a
 prior boot or synthesizing a receipt. Supported restore still disables sharing
 and requires re-pairing. A restart with no genuine retained closure evidence
-can leave a diagnostic stranded obligation; availability must not silently
+can leave a diagnostic stranded obligation. Interrupted restore can retain
+admission capacity debt until actual old-owner teardown or fencing is proved;
+re-pairing alone does not erase that debt. Availability must not silently
 override that boundary.
 
 ## Consequences and acceptance
