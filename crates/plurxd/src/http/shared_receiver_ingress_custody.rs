@@ -366,6 +366,19 @@ pub(super) async fn receiver_forward_admit(
         })
         .cloned();
     if let Some(entry) = existing {
+        let unresolved = matches!(
+            *entry.admitted.lock().expect("receiver ingress admission"),
+            Some(Err(_))
+        );
+        if unresolved {
+            reconcile_principal(
+                state.clone(),
+                connection,
+                &tuple,
+                deadline.min(Instant::now() + Duration::from_secs(1)),
+            )
+            .await?;
+        }
         wait_admission(&entry, deadline).await?;
         return Ok(ReceiverIngressGuard {
             ingress: entry.ingress.clone(),

@@ -29,13 +29,28 @@ pub(crate) fn real_receiver_fixture(
     address: IpAddr,
     mode: SourceFixtureMode,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealReceiverFixture> + Send>> {
-    Box::pin(build_receiver_fixture(address, mode))
+    Box::pin(build_receiver_fixture(address, mode, None))
 }
 
-async fn build_receiver_fixture(address: IpAddr, mode: SourceFixtureMode) -> RealReceiverFixture {
+fn real_receiver_fixture_at(
+    address: IpAddr,
+    mode: SourceFixtureMode,
+    advertised_http: std::net::SocketAddr,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealReceiverFixture> + Send>> {
+    Box::pin(build_receiver_fixture(address, mode, Some(advertised_http)))
+}
+async fn build_receiver_fixture(
+    address: IpAddr,
+    mode: SourceFixtureMode,
+    advertised_http: Option<std::net::SocketAddr>,
+) -> RealReceiverFixture {
     let directory = crate::test_tempdir().expect("real B directory");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
+    if let Some(address) = advertised_http {
+        config.server.bind = address;
+        config.cluster.artwork_url = format!("http://{address}");
+    }
     let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("B Raft port");
     let api = std::net::TcpListener::bind("127.0.0.1:0").expect("B API port");
     config.cluster.raft_bind = raft.local_addr().expect("B Raft address");
@@ -74,6 +89,14 @@ async fn build_receiver_fixture(address: IpAddr, mode: SourceFixtureMode) -> Rea
             ..SharingNetworkConfig::default()
         },
     ));
+    state
+        .membership
+        .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
+    state
+        .membership
+        .publish_ingress_custody_boot()
+        .await
+        .expect("actual B fixture registry boot");
     state.transcode = Arc::new(crate::transcode::TranscodeManager::new(
         Arc::clone(&state.store),
         directory.path().join("workers"),
@@ -2165,3 +2188,6 @@ async fn b_raw_request(
     let _ = driver.await;
     (parts.status, parts.headers, bytes)
 }
+
+#[path = "shared_receiver_forwarding_fixture.rs"]
+mod forwarding_fixture;

@@ -1225,6 +1225,7 @@ paths = [
   "crates/plurxd/src/http/shared_playback.rs",
   "crates/plurxd/src/http/shared_receiver_playback.rs",
   "crates/plurxd/src/http/shared_receiver_forwarding.rs",
+  "crates/plurxd/src/http/shared_receiver_forwarding_fixture.rs",
   "crates/plurxd/src/http/shared_receiver_ingress_custody.rs",
   "crates/plurxd/src/http/shared_receiver_retirement.rs",
   "crates/plurxd/src/http/shared_receiver_orphans.rs",
