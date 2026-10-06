@@ -711,7 +711,7 @@ struct PeerEndpointManifest {
     endpoints: Vec<plurx_core::sharing::Endpoint>,
 }
 impl SharingManager {
-    async fn refresh_active_import(
+    pub(crate) async fn refresh_active_import(
         &self,
         state: &AppState,
         import: plurx_core::sharing::StoredImport,

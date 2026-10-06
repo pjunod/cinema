@@ -30,41 +30,51 @@ impl CleanupPeerConnection {
             .await
             .map(Self)
     }
-    /// Retained cleanup remains reachable after an authenticated manifest edit.
-    /// A re-paired import is a new lineage and cannot supply replacement pins.
-    /// This opens only End; it never admits work under the old viewer authority.
-    pub(crate) async fn connect_for_session(
+    /// Own one immutable End across approved endpoints under one total budget.
+    /// A retained node can keep TLS alive while refusing/losing its End route;
+    /// only a successful authenticated exact echo settles the obligation.
+    pub(crate) async fn end_for_session(
         state: &crate::state::AppState,
         intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
         retained: &Endpoint,
-    ) -> Result<Self, PeerError> {
-        match Self::connect(&state.sharing, retained).await {
-            Ok(connection) => return Ok(connection),
-            Err(PeerError::Unavailable) => {}
-            Err(error) => return Err(error),
-        }
-        let import = state
-            .store
-            .sharing_import(intent.scope.import_id)
-            .await
-            .map_err(|_| PeerError::Unavailable)?
-            .ok_or(PeerError::Unavailable)?;
-        if !cleanup_import_matches(&import.summary, intent) {
-            return Err(PeerError::Unavailable);
-        }
-        for endpoint in import
-            .summary
-            .endpoints
-            .iter()
-            .filter(|endpoint| *endpoint != retained)
+        credential: &Secret,
+        viewer_hash: &str,
+        session: &SourcePeerSession,
+        known: Option<&SourcePeerLineage>,
+    ) -> Result<SourceEndReceipt, PeerError> {
+        let deadline = tokio::time::Instant::now() + SOURCE_END_DEADLINE;
+        let mut endpoints = vec![retained.clone()];
+        if let Ok(Ok(Some(import))) =
+            tokio::time::timeout_at(deadline, state.store.sharing_import(intent.scope.import_id))
+                .await
         {
-            match Self::connect(&state.sharing, endpoint).await {
-                Ok(connection) => return Ok(connection),
-                Err(PeerError::Unavailable) => {}
-                Err(error) => return Err(error),
+            if cleanup_import_matches(&import.summary, intent) {
+                for endpoint in import.summary.endpoints {
+                    if !endpoints.contains(&endpoint) {
+                        endpoints.push(endpoint);
+                    }
+                }
             }
         }
-        Err(PeerError::Unavailable)
+        let mut last = PeerError::Unavailable;
+        for endpoint in endpoints {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(PeerError::Unavailable);
+            }
+            let attempt = tokio::time::timeout_at(deadline, async {
+                let mut connection = Self::connect(&state.sharing, &endpoint).await?;
+                connection
+                    .end(credential, viewer_hash, session, known)
+                    .await
+            })
+            .await
+            .map_err(|_| PeerError::Unavailable)?;
+            match attempt {
+                Ok(receipt) => return Ok(receipt),
+                Err(error) => last = error,
+            }
+        }
+        Err(last)
     }
     pub(crate) async fn end(
         &mut self,

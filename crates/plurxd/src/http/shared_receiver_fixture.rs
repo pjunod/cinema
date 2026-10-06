@@ -3,7 +3,7 @@
 use super::shared_source_playback::{
     real_source_start_fixture_with, RealSourceStartFixture, SourceFixtureMode,
 };
-use axum::{body::Body, http::Request};
+use axum::{body::Body, http::Request, response::IntoResponse};
 use plurx_core::{
     cluster::migration::{select_daemon_store, SelectedStore},
     config::{Config, SharingEgressConfig, SharingNetworkConfig},
@@ -341,11 +341,27 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
     for h2 in [false, true] {
         tokio::time::timeout(
             std::time::Duration::from_secs(330),
-            Box::pin(actual_pinned_playback(address, h2, SourceFixtureMode::Copy)),
+            Box::pin(actual_pinned_playback(
+                address,
+                h2,
+                SourceFixtureMode::Copy,
+                false,
+            )),
         )
         .await
         .expect("bounded real playback fixture");
     }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(330),
+        Box::pin(actual_pinned_playback(
+            address,
+            false,
+            SourceFixtureMode::Copy,
+            true,
+        )),
+    )
+    .await
+    .expect("retained TLS End refusal reaches approved replacement");
 }
 
 #[tokio::test]
@@ -360,7 +376,7 @@ async fn sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b(
         for h2 in [false, true] {
             tokio::time::timeout(
                 std::time::Duration::from_secs(330),
-                Box::pin(actual_pinned_playback(address, h2, mode)),
+                Box::pin(actual_pinned_playback(address, h2, mode, false)),
             )
             .await
             .expect("bounded real playback fixture");
@@ -411,7 +427,12 @@ fn original_selection(session: &Value) -> crate::playback_control::ClientSelecti
     }
 }
 
-async fn actual_pinned_playback(address: IpAddr, h2: bool, mode: SourceFixtureMode) {
+async fn actual_pinned_playback(
+    address: IpAddr,
+    h2: bool,
+    mode: SourceFixtureMode,
+    endpoint_failure: bool,
+) {
     use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
     let fixture = real_receiver_fixture(address, mode).await;
@@ -439,14 +460,29 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool, mode: SourceFixtureMo
     // Actual HTTP-arrival diagnostics only, never no-admission/settlement proof.
     let source_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let source_start_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let end_refusal = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refused_end_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_refusal = end_refusal.clone();
+    let observed_end_bodies = refused_end_bodies.clone();
     let observed_starts = source_starts.clone();
     let observed_status = source_start_status.clone();
     let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
         axum::middleware::from_fn(
             move |request: Request<Body>, next: axum::middleware::Next| {
+                let refusal = observed_refusal.clone();
+                let end_bodies = observed_end_bodies.clone();
                 let starts = observed_starts.clone();
                 let status = observed_status.clone();
                 async move {
+                    if refusal.load(std::sync::atomic::Ordering::Relaxed)
+                        && request.uri().path().ends_with("/end")
+                    {
+                        let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024)
+                            .await
+                            .expect("bounded immutable End ask");
+                        end_bodies.lock().expect("End observations").push(bytes);
+                        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
                     let is_start = request.method() == axum::http::Method::POST
                         && request.uri().path().ends_with("/sessions");
                     if is_start {
@@ -466,14 +502,67 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool, mode: SourceFixtureMo
     );
     let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
     let source_task = tokio::spawn(crate::serve_http(
-        SharingTlsListener::new(source_listener, tls),
+        SharingTlsListener::new(source_listener, tls.clone()),
         source_app,
         async move {
             let _ = source_stopped.await;
         },
         crate::HTTP_TIMEOUTS,
     ));
-    fixture.pair(endpoint).await;
+    fixture.pair(endpoint.clone()).await;
+    let replacement_end_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let replacement = if endpoint_failure {
+        let listener = tokio::net::TcpListener::bind((address, 0))
+            .await
+            .expect("replacement Source listener");
+        let mut approved = endpoint.clone();
+        approved.port = listener.local_addr().expect("replacement bind").port();
+        let replacement_tls = Arc::new(
+            LiveNodeTls::open(
+                &fixture.directory().join("source-replacement-tls"),
+                crate::state::clock_ms() / 1000,
+            )
+            .expect("approved replacement runtime TLS"),
+        );
+        approved.spki_sha256 = replacement_tls.status().expect("replacement SPKI").0;
+        assert_ne!(approved.spki_sha256, endpoint.spki_sha256);
+        let observed = replacement_end_bodies.clone();
+        let app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
+            axum::middleware::from_fn(
+                move |request: Request<Body>, next: axum::middleware::Next| {
+                    let observed = observed.clone();
+                    async move {
+                        if request.uri().path().ends_with("/end") {
+                            let (parts, body) = request.into_parts();
+                            let bytes = axum::body::to_bytes(body, 64 * 1024)
+                                .await
+                                .expect("replacement immutable End ask");
+                            observed
+                                .lock()
+                                .expect("replacement End observations")
+                                .push(bytes.clone());
+                            next.run(Request::from_parts(parts, Body::from(bytes)))
+                                .await
+                        } else {
+                            next.run(request).await
+                        }
+                    }
+                },
+            ),
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(crate::serve_http(
+            SharingTlsListener::new(listener, replacement_tls),
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            crate::HTTP_TIMEOUTS,
+        ));
+        Some((approved, stop, task))
+    } else {
+        None
+    };
     let app = fixture_router(fixture.state.clone());
     let b_listener = tokio::net::TcpListener::bind((address, 0))
         .await
@@ -887,6 +976,42 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool, mode: SourceFixtureMo
         assert_eq!(refusal["code"], code);
         assert_eq!(refusal["generation"], generation.as_str());
     }
+    if let Some((approved, _, _)) = &replacement {
+        let current = fixture
+            .source
+            .state
+            .store
+            .sharing_endpoint_manifest()
+            .await
+            .expect("manifest snapshot");
+        assert_eq!(
+            fixture
+                .source
+                .state
+                .store
+                .set_sharing_endpoint_manifest(
+                    current.map_or(0, |manifest| manifest.revision),
+                    vec![endpoint.clone(), approved.clone()],
+                )
+                .await
+                .expect("Source approves replacement"),
+            plurx_core::sharing::MutationOutcome::Applied
+        );
+        let import = fixture
+            .state
+            .store
+            .sharing_import(fixture.import_id)
+            .await
+            .expect("import")
+            .expect("paired import");
+        fixture
+            .state
+            .sharing
+            .refresh_active_import(&fixture.state, import)
+            .await
+            .expect("authenticated endpoint refresh");
+        end_refusal.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let end_path = format!("/api/v1/hls/{session}");
     for _ in 0..2 {
         let (status, _, bytes) = b_request(
@@ -904,6 +1029,25 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool, mode: SourceFixtureMo
             "actual physically confirmed End/retry; H2={h2}"
         );
         assert!(bytes.is_empty());
+    }
+    if let Some((_, stop, task)) = replacement {
+        {
+            let old = refused_end_bodies
+                .lock()
+                .expect("retained End observations");
+            let new = replacement_end_bodies
+                .lock()
+                .expect("replacement End observations");
+            assert_eq!(old.len(), 1, "retained TLS succeeded but End route refused");
+            assert_eq!(
+                *old, *new,
+                "fallback preserves immutable End identity bytes"
+            );
+        }
+        let _ = stop.send(());
+        task.await
+            .expect("replacement joined")
+            .expect("replacement server result");
     }
     let _ = b_stop.send(());
     b_task
