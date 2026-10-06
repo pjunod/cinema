@@ -92,7 +92,8 @@ impl SourceResourceReadCustody {
 #[derive(Default)]
 pub(super) struct SourceResourceJobPause {
     opened: std::sync::atomic::AtomicBool,
-    fd: std::sync::atomic::AtomicI32,
+    #[cfg(unix)]
+    descriptor: std::sync::Mutex<Option<JobDescriptor>>,
     changed: tokio::sync::Notify,
     released: std::sync::Mutex<bool>,
     wake: std::sync::Condvar,
@@ -104,8 +105,13 @@ impl ResourceReadHooks for SourceResourceJobPause {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
-            self.fd
-                .store(file.as_raw_fd(), std::sync::atomic::Ordering::Release);
+            *self
+                .descriptor
+                .lock()
+                .expect("actual Source job descriptor") = Some(JobDescriptor {
+                number: file.as_raw_fd(),
+                pinned: file.try_clone().expect("pin the actual Source job file"),
+            });
         }
         #[cfg(not(unix))]
         let _ = file;
@@ -150,8 +156,40 @@ impl SourceResourceJobPause {
             notified.await;
         }
     }
-    pub(super) fn actual_fd(&self) -> i32 {
-        self.fd.load(std::sync::atomic::Ordering::Acquire)
+    /// Whether the descriptor the parked job opened is still open.
+    #[cfg(unix)]
+    pub(super) fn job_descriptor_open(&self) -> bool {
+        self.descriptor
+            .lock()
+            .expect("actual Source job descriptor")
+            .as_ref()
+            .expect("the parked job recorded its descriptor")
+            .is_open()
+    }
+}
+/// The parked job's descriptor number, with a duplicate that keeps the file it
+/// names allocated. The census compares the file behind the number with the
+/// pinned one, so once the job closes its descriptor a number that a parallel
+/// test reopened on another file can never read as the job's descriptor.
+#[cfg(all(test, unix))]
+struct JobDescriptor {
+    number: i32,
+    pinned: std::fs::File,
+}
+#[cfg(all(test, unix))]
+impl JobDescriptor {
+    fn is_open(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let mut current = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fstat only writes the stat buffer; an invalid descriptor
+        // number returns an error and leaves nothing to read.
+        if unsafe { libc::fstat(self.number, current.as_mut_ptr()) } != 0 {
+            return false;
+        }
+        // SAFETY: fstat succeeded, so it initialised the buffer.
+        let current = unsafe { current.assume_init() };
+        let pinned = self.pinned.metadata().expect("pinned Source job file");
+        current.st_dev as u64 == pinned.dev() && current.st_ino as u64 == pinned.ino()
     }
 }
 #[cfg(test)]
