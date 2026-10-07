@@ -2741,7 +2741,7 @@ class Controller internal constructor(
                         compatibilityTranscode = recipe.recipe.compatibilityTranscode,
                         delivery = recipe.recipe.subtitleDelivery,
                     ),
-                ).let(::applyAutoIntent)
+                ).let(::applyQualityIntent)
                 val hls = try {
                     sessionCreateCoordinator.reopenAfterStall(
                         body = body,
@@ -2845,22 +2845,21 @@ class Controller internal constructor(
             compatibilityTranscode = recipe.compatibilityTranscode,
             delivery = recipe.subtitleDelivery,
         ),
-    ).let(::applyAutoIntent)
+    ).let(::applyQualityIntent)
 
-    private fun applyAutoIntent(body: CreateSessionReq): CreateSessionReq =
-        if (tv.plurx.app.data.Session.displayAwareAuto &&
-            tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1" &&
-            plan.displayAwareAutoProtocol == "route-v1") body.copy(
-                caps = decisionCaps.copy(display = decisionCaps.display.copy(presentation_target = autoPresentationTarget)),
-                intent = playbackIntent.mediaIntent(playbackControlSelection()),
-                height = if (playbackIntent.desiredQuality == PlaybackQuality.Auto)
-                    playbackIntent.automaticCandidateId?.let {
-                        playbackIntent.automaticCandidateHeight?.takeIf { height ->
-                            height in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT
-                        }
-                    } ?: if (playbackIntent.automaticCandidateId == null) body.height else null
-                else body.height,
-            ).let(::applyAutoRecoveryCause) else body
+    private fun applyQualityIntent(body: CreateSessionReq): CreateSessionReq {
+        val bound = playbackIntent.bindSessionIntent(
+            body = body,
+            caps = decisionCaps,
+            serverProtocol = Session.displayAwareAutoProtocol,
+            planProtocol = plan.displayAwareAutoProtocol,
+            displayAwareAuto = Session.displayAwareAuto,
+            selection = playbackControlSelection(),
+            presentationTarget = autoPresentationTarget,
+        )
+        return if (Session.displayAwareAuto && Session.displayAwareAutoProtocol == "route-v1" &&
+            plan.displayAwareAutoProtocol == "route-v1") applyAutoRecoveryCause(bound) else bound
+    }
 
     private fun currentAutoRecoveryCause(): AutoRecoveryCauseTicket? = autoRecoveryCause?.takeIf {
         playbackIntent.desiredQuality == PlaybackQuality.Auto &&

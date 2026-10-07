@@ -9,9 +9,73 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tv.plurx.app.data.ClientInfo
+import tv.plurx.app.data.CreateSessionReq
+import tv.plurx.app.data.DeviceCaps
+import tv.plurx.app.data.DisplayCaps
 import tv.plurx.app.data.PlaybackQuality
+import tv.plurx.app.data.PresentationTarget
+import tv.plurx.app.data.VideoEntry
 
 class PlaybackIntentTest {
+    private val caps = DeviceCaps(
+        v = 2, client = ClientInfo("android", "test", "owned test device"),
+        video = listOf(VideoEntry(codec = "h264", present = listOf("sdr"))),
+        audio = listOf("aac"), containers = listOf("mp4"), transports = listOf("hls"),
+        display = DisplayCaps(hdr = false, dolby_vision = false),
+    )
+    private fun selection(quality: QualitySelection) = ClientSelection(
+        quality = quality, audioTrack = 0, subtitle = SubtitleSelection(SubtitleMode.OFF),
+        audioOffsetMs = 0, codec = CodecPolicy.AUTO, dynamicRange = DynamicRangePolicy.AUTO,
+    )
+
+    @Test fun manualSessionCarriesIntentWithDisplayAwareAutoDisabled() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Q720)
+        intent.setPlaybackRequested(false)
+        intent.noteViewerDestination()
+        val body = CreateSessionReq(playback_id = intent.playbackId, height = 720, caps = caps)
+        val request = intent.bindSessionIntent(body, caps, "route-v1", "route-v1", false,
+            selection(QualitySelection.Manual(720)), PresentationTarget(1920, 1080, 1))
+        assertEquals(720, request.height)
+        assertEquals(caps, request.caps)
+        assertNull(request.caps?.display?.presentation_target)
+        assertEquals(intent.playbackId, request.intent?.lifetime_id)
+        assertEquals(2L, request.intent?.destination_revision)
+        assertEquals(QualitySelection.Manual(720), request.intent?.selection?.quality)
+        assertEquals(intent.mediaIntent(selection(QualitySelection.Manual(720))), request.intent)
+    }
+
+    @Test fun unnegotiatedSessionKeepsTheLegacyBodyWithoutMintingIntent() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Q720)
+        val body = CreateSessionReq(playback_id = intent.playbackId, height = 720, caps = caps)
+        for ((server, plan) in listOf(null to "route-v1", "route-v1" to null, "old" to "route-v1")) {
+            assertSame(body, intent.bindSessionIntent(body, caps, server, plan, false,
+                selection(QualitySelection.Manual(720)), null))
+        }
+        assertNull(body.intent)
+        assertEquals(1L, intent.mediaIntent(selection(QualitySelection.Original)).recipe_revision)
+    }
+
+    @Test fun onlyEnabledAutoRebindsTheCandidateHeightAndMeasuredDisplay() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val id = "a".repeat(32)
+        intent.requestAutomaticCandidate(id, 720)
+        val body = CreateSessionReq(playback_id = intent.playbackId, height = 1080, caps = caps)
+        val target = PresentationTarget(1280, 720, 2)
+        val plain = intent.bindSessionIntent(body, caps, "route-v1", "route-v1", false,
+            selection(QualitySelection.Auto), target)
+        assertEquals(1080, plain.height)
+        assertEquals(QualitySelection.Auto, plain.intent?.selection?.quality)
+        assertNull(plain.caps?.display?.presentation_target)
+        val automatic = intent.bindSessionIntent(body, caps, "route-v1", "route-v1", true,
+            selection(QualitySelection.AutoCandidate(720, id)), target)
+        assertEquals(720, automatic.height)
+        assertEquals(target, automatic.caps?.display?.presentation_target)
+        assertEquals(QualitySelection.AutoCandidate(720, id), automatic.intent?.selection?.quality)
+        assertEquals(plain.intent?.lifetime_id, automatic.intent?.lifetime_id)
+        assertEquals((plain.intent?.recipe_revision ?: 0) + 1, automatic.intent?.recipe_revision)
+    }
+
     @Test fun aPresentedContinuousQualityKeepsLaterSeeksOnTheRetainedPlan() {
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
         val replacement = PlaybackPlanReplacement(PlaybackQuality.Auto)

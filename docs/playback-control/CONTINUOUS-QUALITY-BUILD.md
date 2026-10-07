@@ -7254,3 +7254,51 @@ previously approved source-only lab directory is absent and must be rebuilt
 from committed source without Git history or credentials. Apple CoreDevice
 inventory currently fails with a service-initialization timeout, not evidence
 that any physical device is locked or unavailable.
+
+**Environment restored.** Current-main `plurxd` all-target compile passed
+locally in 1m54s. The normal continuation hook passed catalog, Rust formatting,
+workspace all-target Clippy and 77 served-script syntax checks; no units ran.
+Exact committed main `9023815cb` source-only Linux build passed on verified
+Rust 1.97.1 in 4m37s. A disposable browser image contains Firefox
+153.4.0esr, geckodriver 0.36.0 and Node 22.23.3. Host packages and services
+are unchanged. Browser and daemon stay in separate runtimes because the
+host's newer glibc is incompatible with the browser image's older glibc.
+
+Native Safari input was refused because the Mac is locked. The generated
+loopback fixture was never opened by this attempt, and its owned server was
+retired. This is a blocked measurement, not a playback failure or acceptance
+result. A device-availability question is pending while Linux work continues.
+
+### 10.240 Android negotiated manual intent is independent of Auto (2026-10-07)
+
+Current Android `applyAutoIntent` omits the entire media intent when the
+display-aware Auto preference is off. `ContinuousEnrollment` then declines
+with `no_intent`, including manual selections, despite both the bootstrap and
+decision advertising route-v1. This is a hidden dependency on an unrelated
+policy preference, not a protocol capability requirement.
+
+`PlaybackIntent.bindSessionIntent` now attaches the standing viewer intent
+whenever both protocol floors are negotiated. The display-aware preference
+still controls the measured display target, automatic candidate-height
+binding and Auto recovery causes. An older/unnegotiated server keeps the
+original request unchanged. No setting is forcibly enabled and no new toggle
+or gate is introduced. The Controller uses this same request builder for
+initial creation, replacement and subsequent transport requests.
+
+Authored regressions in `PlaybackIntentTest.kt`: manual creation with Auto
+off retains lifetime/destination/selection and does not invent a display
+measurement; unknown negotiation leaves the request and envelope state alone;
+only enabled Auto rebinds its candidate height and measured display. Final production/test-source compilation and debug APK assembly passed in
+18 seconds; no units executed. Runtime enrollment verification is still pending.
+
+**Current-source Firefox probe.** The first attempt failed before session
+creation because the restored lab omitted its dedicated static parser. Its
+failed receipt stays failed. The corrected attempt used the shipped static
+FFprobe 8.1.3 (SHA-256
+`25d4b5a1a9e403cfc0299b923fae84d40516a4f00c2343363108ad942fb64f51`).
+Two manual changes passed on exact main `9023815cb` in the same session and
+player: first frame 3.172s, clock 0.999x, zero hitches/stalls, video gaps
+57.72ms and 84.14ms. Receipts: ignored reports
+`firefox-9023815cb-focus{1,2}*`. This is a headless browser probe, not an
+independent optical or physical output pass. One full default-CPU campaign
+is running; it does not replace the missing whole-window optical measurement.
