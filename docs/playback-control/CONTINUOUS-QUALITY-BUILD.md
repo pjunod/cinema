@@ -7719,3 +7719,91 @@ that disposable path and retaining the production module name lets the
 production/test-source compile pass. No device or unit execution is
 implied. Physical failure diagnosis still needs the pending TV output and
 phone automation readiness windows.
+
+### 10.255 Exact candidate producer-byte reference (2026-10-07)
+
+The committed candidate `198b37330` passed its pinned Linux build in 2m26s
+with no debug information or incremental caches. A bounded eight-second
+headless half-speed reference advances at 0.499x without browser hitches or
+stalls. This is byte acquisition, not an independent display/audio pass.
+Before runtime retirement, only stable encoded media was copied, with a
+64 MiB limit and SHA256 inventory (42.03 MB / 115 artifacts); no runtime
+configuration, database or credential was copied.
+
+Independent decoding verifies 480 consecutive 1080p counters (0–479) and
+192 available 720p counters (0–191), with zero unknown, backward, repeated or
+skipped values. The generated input's first 480 counters also decode without
+those faults. This rules out counter duplication in these reference bytes,
+not every prior encode or the display path. Preserve
+`firefox-198b37330-producer-byte-reference1*`; the exact daemon retired.
+
+The isolated Safari session-readiness check still times out after 30 seconds;
+its owned driver retires. No current Safari playback qualification is claimed,
+and the read-only Mac lock-state query returns unavailable rather than proving
+a lock. No Chrome binary or reusable browser image exists in the isolated lab.
+A portable official browser dependency is being extracted only inside the
+owned lab for a focused same-host comparison, without a global install or
+rerunning the passed manual/Auto campaign.
+
+The isolated pitch-preservation experiment also fails the unchanged optical
+criterion (complete sampling; 178.39ms lower / 187.47ms upper hold). Disabling
+pitch preservation is not a proposed production fix or an audio qualification.
+Preserve `firefox-e4c367634-half-speed-optical-pitch-experiment1*`; its daemon
+and display retired.
+
+### 10.256 Same-host browser comparison calibration (2026-10-07)
+
+Official portable Chrome 155.0.8059.39 is extracted only inside the owned lab;
+its downloaded package/intermediate archive is removed. The comparison uses
+the same committed backend, fixture, Xvfb host, shared CPU allocation and
+100ms optical criterion. Chrome's viewport origin is measured with a unique
+20×16 pixel marker, removed before the scoring window, rather than guessed
+from toolbar dimensions.
+
+The first two attempts fail calibration, not playback qualification. The
+second bounded capture shows the marker at the viewport corner is partly
+clipped (180 exact-color pixels rather than 320). Its screen and DOM geometry
+receipts remain in `chrome-198b37330-half-speed-optical-reference{1,2}*`. The
+corrected attempt places the marker 40px inward, subtracting its known CSS
+position from the observed screen position, and preserves every optical
+threshold. Its runtime guard is attached before the case starts.
+
+The corrected Chrome run fails the strict half-speed criterion: 4,590
+readable samples, no backward/skipped counters, two capture gaps and
+116.49ms lower / 124.99ms upper held-picture bounds. The failure is not
+limited to Firefox. Its owned daemon and display retired.
+
+### 10.257 Minimal playback isolates the remaining streaming failure (2026-10-07)
+
+A 20-second copy-remux of checksum-verified candidate producer video/audio
+runs through a minimal native MP4 element, without live encoding or Plurx
+controls. Both browser references pass unchanged optical limits with complete
+4,802-sample windows: Firefox upper hold 96.03ms, Chrome 99.95ms, zero
+unknown samples, capture gaps, backward counters or skipped counters. This
+is a scoped diagnostic rather than Plurx or physical audio qualification.
+Preserve `minimal-198b37330-half-speed-{firefox,chrome}1*`; the owned display
+retired.
+
+The next isolation uses the same saved fragments through fully buffered MSE,
+with no live encoder or application controls. Its first attempt omits the
+owned display environment and fails browser startup before playback; preserve
+that failed harness receipt and correct the environment before repeating.
+Native readiness questions, Safari session creation, the broader acceptance
+matrix, final adversarial review and the subsequent external Fable review
+stop remain open. No unit test has executed in this continuation.
+
+The explicit prebuffer preparation reference passes both browsers: Firefox
+4,801 samples / 96.00ms upper hold, Chrome 4,802 / 96.04ms; both have complete
+sampling and zero unknown, backward or skipped counters. Preserve
+`minimal-mse-198b37330-half-speed-{firefox,chrome}5*`. Earlier setup attempts
+remain failed: buffer creation ordering/codec spelling, unsupported async
+syntax in the synchronous Firefox helper, and video colors contaminating the
+calibration marker. The final harness creates both buffers before appending,
+polls preparation explicitly and hides the video only during calibration,
+restoring it before the scoring window. No production code or limits change.
+
+A saved-segment HLS comparison is now running with the repository's exact
+player library. Its checksum-verified fragments are prebuffered and loading
+stopped before playback; it removes the live encoder and application controls
+while retaining HLS parsing and fragment timestamps. Neither the MP4 nor MSE
+reference discharges the actual streaming or physical-output acceptance rows.
