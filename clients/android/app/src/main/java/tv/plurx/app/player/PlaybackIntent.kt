@@ -27,6 +27,14 @@ class PlaybackIntent(
     /** The newest quality the viewer asked for, even before its plan exists. */
     var desiredQuality: PlaybackQuality = initialQuality
         private set
+    /** A failed optional choice preserves the incumbent's standing wire recipe. */
+    var retainedControlQuality: QualitySelection? = null
+        private set
+    private var retainedExecutionQuality: PlaybackQuality? = null
+
+    @Synchronized
+    fun qualityForMedia(): PlaybackQuality = retainedExecutionQuality ?: desiredQuality
+
     /** Viewer transport intent survives plan/controller replacement too. */
     var playbackRequested: Boolean = true
         private set
@@ -86,6 +94,7 @@ class PlaybackIntent(
         val sequence: Long,
         val quality: PlaybackQuality,
         val tappedAtMs: Long,
+        val incumbentQuality: PlaybackQuality,
     )
 
     var pendingQualityChange: PendingQualityChange? = null
@@ -95,6 +104,8 @@ class PlaybackIntent(
     @Synchronized
     fun adoptQuality(quality: PlaybackQuality) {
         desiredQuality = quality
+        retainedControlQuality = null
+        retainedExecutionQuality = null
     }
 
     /**
@@ -116,8 +127,11 @@ class PlaybackIntent(
         quality: PlaybackQuality,
         tappedAtMs: Long = monotonicNowMs(),
     ): PendingQualityChange {
+        val incumbentQuality = qualityForMedia()
         desiredQuality = quality
-        return PendingQualityChange(++nextSequence, quality, tappedAtMs)
+        retainedControlQuality = null
+        retainedExecutionQuality = null
+        return PendingQualityChange(++nextSequence, quality, tappedAtMs, incumbentQuality)
             .also { pendingQualityChange = it }
     }
 
@@ -132,6 +146,16 @@ class PlaybackIntent(
         if (controlSequence != null && controlSequence > 0L) {
             controlSequenceFloor = maxOf(controlSequenceFloor ?: 0L, controlSequence)
         }
+        return true
+    }
+
+    /** Settle only the exact failed request; the saved preference remains intact. */
+    @Synchronized
+    fun retainFailedQuality(pending: PendingQualityChange, incumbent: QualitySelection): Boolean {
+        if (!retainQualityChange(pending, null)) return false
+        retainedControlQuality = incumbent
+        retainedExecutionQuality = pending.incumbentQuality
+        pendingQualityChange = null
         return true
     }
 
@@ -506,7 +530,7 @@ internal class PlaybackControlBootstrapFence {
 }
 
 /** A later transport/track command carries an outstanding plan change with it. */
-internal class PlaybackPlanReplacement(private val activeQuality: PlaybackQuality) {
+internal class PlaybackPlanReplacement(private var activeQuality: PlaybackQuality) {
     private var reload: ((Long, PlaybackQuality) -> Unit)? = null
     private var publishedGeneration: Long? = null
 
@@ -514,9 +538,12 @@ internal class PlaybackPlanReplacement(private val activeQuality: PlaybackQualit
         reload = callback
     }
 
+    /** A retained source may present a new quality without replacing its plan. */
+    fun presented(quality: PlaybackQuality) { activeQuality = quality }
+
     fun route(intent: PlaybackIntent, force: Boolean = false, retry: Boolean = false): Boolean {
         val pending = intent.pendingSeek ?: return false
-        val desired = intent.desiredQuality
+        val desired = intent.qualityForMedia()
         if (!force && desired == activeQuality) return false
         val callback = reload ?: return false
         if (retry || publishedGeneration != pending.sequence) {

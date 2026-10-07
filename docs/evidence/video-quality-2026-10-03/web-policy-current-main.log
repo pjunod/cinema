@@ -1,0 +1,213 @@
+PASS held ArrowRight 375/90 ms commits only the final target
+PASS held ArrowRight 500/90 ms commits only the final target
+PASS held ArrowRight 225/90 ms commits only the final target
+PASS held-key ownership survives opposite-direction overlap and commits once
+PASS held-key blur commits while cancellation discards
+PASS playback info exposes and remembers the shared playback-info levels
+PASS Activity renders explicit lease and demand-window instrumentation
+PASS playback info explicitly separates playback mode from delivery method
+PASS playback info keeps readiness unknown distinct from measured zero
+PASS the wait detail is sampled live and only for the owning player
+PASS the sampling tick resamples the wait sentence before the presenter paints
+PASS the health poll runs for a live media wait as well as for the panel
+PASS a media wait renders the live detail; every other fault renders its own
+PASS a stream rejection reports what the server handed over, not just that it failed
+PASS the rejection report carries the join, whatever the path built it
+PASS the document this browser actually builds is one the server can read
+PASS the caps document stays bounded now that every create carries it
+PASS the VOD fetch contract stays below hls.js and beyond the producer watchdog
+PASS an initial VOD refusal stays visible instead of closing the player
+PASS VOD diagnostics describe materialization instead of claiming a cache hit
+PASS analysis controls are first-class settings separate from playback mode controls
+PASS analysis settings render the numeric retry policy returned by the API
+PASS estimated skip markers are hedged without rebuilding each tick
+PASS auto-skip only seeks exact marker provenance
+PASS a preview is offered but never auto-skipped
+PASS only a tail kind that runs to the end finishes playback
+PASS every server verdict reaches exactly one initial web transport
+PASS required_hls_never_falls_back_to_progressive
+PASS native HLS is Safari-only unless MSE is unavailable
+PASS copy-HLS audio compatibility follows the newly selected track
+PASS manual quality and rescue height preserve the viewer's promise
+PASS Auto starts from the server ladder, prior, and persisted last-good rung
+PASS the player-height ceiling uses backing pixels rather than CSS pixels
+PASS an outgoing hls.js estimate survives a restart and outranks the cold prior
+PASS a completed fragment provides a fresh severe-pressure estimate
+PASS learned decode identity is versioned, deterministic, and bitrate-bucketed
+PASS a learned limit applies only to the exact media load and Auto
+PASS clearing an exact learned limit restores the ordinary HDR remux
+PASS learned HDR fallback names client performance and the range loss
+PASS a bandwidth cliff drops from 1080p to the sustainable rung in one move
+PASS the two measured A-04 cliffs select encoded low rungs with peak headroom
+PASS fresh 2.2 Mb/s cliff evidence carries the 360p peak in one move
+PASS a low-rung transfer below nominal is urgent despite a deep buffer
+PASS a high-rung mixed fragment waits for a clean cliff sample
+PASS an active supply stall without a completed slow transfer retains quality
+PASS an empty buffer with a fast completed transfer retains quality
+PASS near-empty runway alone is not a bandwidth verdict
+PASS an emergency downgrade cannot be stranded by the player-height ceiling
+PASS one cliff episode uses fresh throughput and cannot restart twice
+PASS three unattributed supply stalls and decode stalls never choose a rung
+PASS producer, authority, and loader causes suppress the 149180 kbps floor choice
+PASS empty runway with unknown or stale health is bounded insufficient evidence
+PASS two long supply-stall episodes do not satisfy the three-stall rescue
+PASS the shipped counter records one event per pause reported at both edges
+PASS every shipped stall report carries the wait's start as its identity
+PASS the disabled Auto controller leaves every manual ladder rung available
+PASS every remaining row 17/18 site raises rather than toasts
+PASS mild pressure needs two samples plus cooldown, dwell, and switch gain
+PASS a slow server with draining runway is actionable before a stall
+PASS healthy producer capacity evidence survives an empty-runway urgency signal
+PASS recovery holds for 45 seconds, moves up once, and respects pixel height
+PASS Auto upgrade needs fresh peak headroom and successor runway
+PASS completed main fragments give a bounded delivery window without burst optimism
+PASS native element transfer errors never spend a compatibility transcode
+PASS a rejected cheap stream gets one compatibility transcode
+PASS a persistent stall gets one bounded method-aware recovery
+PASS a persistent supply stall spends its one restart on the sustainable rung
+PASS only measured capacity adaptation sends the legacy rung-lowering stall reason
+PASS fallback swaps preserve healthy playback until the replacement exists
+PASS a persistent-stall prompt survives later waiting events
+PASS HDR subtitle burns keep the current delivery instead
+PASS a bitmap default is never auto-applied, whatever the server sent
+PASS directional seeks use horizontal steps only
+PASS desktop input routing matches every shared contract row
+PASS preview acceleration matches the shared contract ladder
+PASS the shipped player adapter applies state precedence and preview-then-commit
+PASS every contract case reaches the shipped render as the kind it names
+PASS the shipped presenter step is the only thing that renders, and it renders every step
+PASS surface kind x class x input is a fixed cross-product
+PASS the shipped canplay listener feeds an inert event and nothing else
+PASS Keep waiting re-arms the ladder, and does nothing else
+PASS every other action is still its own effect
+PASS exhausted and stopped prompts offer executable recovery actions
+PASS the stall-recovery prompt stops the player before it raises
+PASS every former setLoading site now raises a source the fixture declares
+PASS a failed change reaches the shipped glue as a banner beside a playing picture
+PASS the shipped glue resolves a disagreement in favour of the picture
+PASS a refusal no source row claims still reaches the surface as the server's sentence
+PASS every blocking raise in the page takes the owner's stop first
+PASS the shipped progress tick reports the advance it measured, not that it ran
+PASS a stream that starts again after the owner stopped it gets its sampler back
+PASS attachment and retirement are what the presenter is told about identity
+PASS the waiting listener raises one fault per wait, not one per boundary
+PASS playback-info row builders follow the shared web field list in fixture order
+PASS playback info labels tone-map peak provenance without calling policy source truth
+PASS every available diagnostic field is rendered in a named disclosure
+PASS missing stream frame stays explicit beside source and player facts
+PASS decode rescue uses lost frames over a long window, not pipeline latency
+PASS each refusal the server names reaches the overlay as itself
+PASS a still-starting stream is never reported as a permanent failure
+PASS a lost owner is reported as a stopped stream, not a startup failure
+PASS an owner transition that may still recover still reads as still preparing
+PASS an illegible refusal explains nothing rather than guessing
+PASS the legacy error body is still read
+PASS a refusal only explains a failure it is contemporary with
+PASS a successful playlist retry immediately clears its 503 explanation
+PASS book bylines escape provider text and edition rows use only server relations
+PASS the detail screen names every subtitle track, its format and its markers
+PASS the detail screen names the supported HLS mode before playback
+PASS a partly analysed file says so rather than reading as ready
+PASS the detail screen keeps only the selected subtitle visible until expanded
+PASS one subtitle track needs no expand control
+PASS the detail screen keeps only the selected audio track visible until expanded
+PASS one audio track needs no expand control
+PASS a file with no subtitle tracks says so instead of showing an empty row
+PASS an audiobook part is not asked about subtitles it could never have
+PASS the preferred-language sentence keeps `unknown` distinct from `missing`
+PASS a scanning viewer learns 'English audio, no English subtitles'
+PASS both pickers offer the server default, every track, and Off
+PASS an untouched picker changes the decision request by nothing at all
+PASS a pre-play choice is per file and does not survive leaving the item
+PASS a pre-play burn rides the first session open rather than a restart
+PASS a pre-play text subtitle is a <track>, not a second session
+PASS the HDR guard refuses a pre-play burn before the stream exists
+PASS an audio-only choice never burns the subtitle the server merely echoed
+PASS a burn this browser needs is honoured even when the plan omits it
+PASS closing the player ends its track choice instead of arming the next play
+PASS a picker changed after a playback is not overruled by that playback
+PASS a quality change still reproduces the tracks that are playing
+PASS the reported height is one every claimed HEVC profile actually decodes
+PASS an 8-bit-only decoder is never reported to the server as Main10
+PASS no HEVC decoder means no maxheight, so an HEVC cap never caps H.264
+PASS the synchronous fallback cannot prove PQ, so it never claims hdr10t
+PASS a converted Dolby Vision stream names the profile it is playing as
+PASS every surface paints the badge from the same four answers
+PASS a session that lands on a different range repaints the badge
+PASS every web transcode reopen preserves the decision's HDR10 request
+PASS HDR10 Auto leaves the cold-start height to the grade-aware server
+PASS control lease labels distinguish legacy, explicit, and VOD delivery
+PASS an upgrade needs encode headroom, not just a bandwidth estimate
+PASS the caps document says the two things the flat query could not
+PASS a learned limit reaches the server with the identity it was keyed by
+PASS the browser and the server key a learned limit identically
+PASS the create-retry ladder is one set of numbers on all three clients
+PASS only the fixture's `create_503_not_yet` codes are retried
+PASS every fixture `segment_503_not_yet` code recovers an attached playback
+PASS an attached 503 the row does not list falls through to the code's own row
+PASS the create-retry deadline is absolute and never schedules past itself
+PASS the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is finite-only
+PASS hls.js media recovery is fenced by the shared attach and item budgets
+PASS web HLS startup has one bounded manifest policy and terminal precedence
+PASS the final manifest-send gate rejects pause, stale ownership, deadline and ceiling
+PASS the Android failover predicate reads the status and defaults to refusing
+PASS the Android failover call site actually consults the status
+PASS the Android policy module stays free of ExoPlayer and Android
+PASS the Auto-quality fixture's defaults are the browser's own constants
+PASS every evidence class and every section 3.5 row has at least one fixture case
+PASS the Auto-quality fixture drives decideRung, and records every disagreement
+PASS every controller gate the fixture names is still in the shipped tick
+PASS route Auto preserves original and fits both axes with exact ten percent enlargement
+PASS route Auto refuses cached paced incomplete and expired transfer proof
+PASS natural boundary recovers original after expired cliff but honors fresh link veto
+PASS midplay original trial needs continuous headroom and respects failed trial backoff
+PASS unproved 1440 encode is trial eligible but not an initial playable route
+PASS active encode proof requires exact route complete intervals and freshness including transit
+PASS unknown source peak requires distinct completed successor segment margins
+PASS viewer recipe edits do not send an incumbent candidate under new tracks or offset
+PASS severe route pressure skips intermediate rungs despite voluntary budget
+PASS unknown peak original downshifts from fresh demand without inventing upgrade proof
+PASS cold original recovery can try an unproved compatible lower route within measured link
+PASS recovery allowance rearms only after continuous observed health
+PASS VOD activity distinguishes actual zero, missing control, stale control and producer hold
+PASS watch delivery follows attachment rather than catalogue status
+PASS peer VOD Activity cell preserves measured control and producer facts
+PASS fenced retirement followed by native error 3 reopens once without codec blame
+PASS fenced recovery cannot inherit a predecessor attachment or session
+PASS every web HLS session requests the bounded VOD presentation
+PASS every web create carries the capabilities its plan was derived from
+PASS the decision and the create it acts on ask one question
+PASS a create never sends an empty capabilities document
+PASS a temporary live recovery presentation remains playable
+PASS the Auto switch gates an automatic rung change
+PASS a decode verdict and the third supply stall in one interval open one session
+PASS a decode verdict during an in-flight supply rescue opens no second session
+PASS a failed automatic session-open releases the claim
+PASS an Auto rung that attached says so as a degraded fault
+PASS an Auto rung that did not attach says nothing
+PASS the decode rescue raises its notice as a degraded fault
+PASS the supply rescue raises its notice once the switch has landed
+PASS a supply rescue that did not land says nothing
+PASS unattributed remux starvation cannot invent a transcode rescue
+[cinema] playback stall diagnosis {
+  method: 'remux',
+  resource_class: 'playback_source',
+  networkState: 0,
+  readyState: 0,
+  error: undefined,
+  verdict: "Playback hasn't started."
+}
+PASS the diagnosed-stall site stops before it raises
+PASS a burn session-open refusal reaches the surface as a refused change
+PASS hdr10t needs a PQ answer AND an HDR display, and says so on the wire
+PASS a browser with no MediaCapabilities degrades without crashing or over-claiming
+PASS mse_support_does_not_claim_progressive_hev1
+PASS packaging_claim_covers_every_advertised_hevc_tier
+PASS packaging_claim_rejects_a_hole_below_the_advertised_ceiling
+PASS main10_only_success_still_requires_the_emitted_main_profile
+PASS mse_only_pq_does_not_authorize_progressive_hevc
+PASS progressive packaging falls back only when file probes are unavailable
+PASS the Dolby Vision probe is unchanged by the tiering
+PASS new_caps_failure_does_not_retry_legacy_decision
+(node:36561) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)

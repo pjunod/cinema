@@ -107,6 +107,127 @@ pub(crate) struct DeveloperReadiness {
     pub items: Vec<DeveloperEnableItem>,
 }
 
+/// The clock guard's enable switch. Every row is advisory: an operator can
+/// turn enforcement on with any of them unmet, and off at any time.
+fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
+    use plurx_core::cluster::clock::{ClusterClockState, CLOCK_OFFSET_REFUSAL_MS};
+    let guard = state.membership.clock_guard();
+    let snapshot = guard.snapshot();
+    let would_refuse = guard.check_evidence().err();
+    let peers = snapshot.peers.len();
+    let learners = snapshot.unobserved_learners;
+    // Unobserved learners are reported but never required: a non-voting
+    // member's stopped clock does not refuse any guarded decision.
+    let learner_note = if learners == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {learners} unobserved learner(s) reported but not required (no vote; \
+             a measured learner still counts, and promotion needs its own bound)"
+        )
+    };
+    let measured = peers.saturating_sub(learners);
+    let (coverage_status, coverage, worst) = match snapshot.state {
+        ClusterClockState::NoPeers => (
+            RequirementStatus::Met,
+            "No committed remote members to observe".to_owned(),
+            None,
+        ),
+        ClusterClockState::Bounded { worst_abs_upper_us } => (
+            RequirementStatus::Met,
+            format!(
+                "{measured} / {peers} committed remote members reachable and bounded{learner_note}"
+            ),
+            (measured > 0).then_some(worst_abs_upper_us),
+        ),
+        ClusterClockState::Incomplete {
+            unknown_peers,
+            worst_abs_upper_us,
+        } => (
+            RequirementStatus::Unmet,
+            format!(
+                "{} / {peers} committed remote members bounded; {unknown_peers} unreachable, \
+                 unanswered or roster unproved{learner_note}",
+                peers.saturating_sub(unknown_peers + learners)
+            ),
+            (peers > unknown_peers + learners).then_some(worst_abs_upper_us),
+        ),
+    };
+    let limit_us = CLOCK_OFFSET_REFUSAL_MS * 1_000;
+    let (bound_status, bound) = match worst {
+        Some(value) => (
+            if value <= limit_us {
+                RequirementStatus::Met
+            } else {
+                RequirementStatus::Unmet
+            },
+            format!(
+                "{} ms worst |offset| + uncertainty among bounded members; the limit is \
+                 {CLOCK_OFFSET_REFUSAL_MS} ms",
+                value as f64 / 1_000.0
+            ),
+        ),
+        None => (
+            RequirementStatus::Unobservable,
+            "No member offset observation applies; an unknown member has no numeric offset"
+                .to_owned(),
+        ),
+    };
+    let current = match would_refuse {
+        None => "current evidence would admit every guarded decision".to_owned(),
+        Some(cause) => format!("current evidence would refuse guarded decisions ({cause})"),
+    };
+    DeveloperEnableItem {
+        id: "cluster_clock",
+        title: "Cluster clock guard enforcement",
+        enabled: Some(enforced),
+        setting: Some("cluster_clock_guard_enforced"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "coverage",
+                title: "Every voter reachable and observed",
+                status: coverage_status,
+                evidence: coverage,
+            },
+            DeveloperRequirement {
+                id: "upper_bound",
+                title: "Worst observed offset within 2 s",
+                status: bound_status,
+                evidence: bound,
+            },
+            DeveloperRequirement {
+                id: "ntp",
+                title: "NTP running on every node",
+                status: RequirementStatus::Unobservable,
+                evidence: "This process measures offsets but does not read any node's time \
+                           synchronisation daemon; check chronyd or systemd-timesyncd on each \
+                           node"
+                    .to_owned(),
+            },
+            DeveloperRequirement {
+                id: "consequence",
+                title: "What enforcement refuses",
+                status: if would_refuse.is_none() {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: format!(
+                    "While enforced, one down or unreachable voter makes coverage unknown, \
+                     which refuses session takeover, the expired-session scan and membership \
+                     changes on every node (fenced removal of that member still works); a down \
+                     learner is reported and refuses only its own promotion and the takeover \
+                     or expiry of the sessions it owns, until it returns or is removed; and \
+                     two consecutive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms make /readyz \
+                     answer 503. Startup is never refused. Now: {current}; \
+                     plurx_cluster_clock_advisory_refusals_total counts what it would have \
+                     refused while off"
+                ),
+            },
+        ],
+    }
+}
+
 /// `GET /api/v1/developer/readiness` — admin, read-only, advisory.
 pub(crate) async fn readiness(
     _admin: AdminUser,
@@ -137,11 +258,14 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         true,
     );
+    // Missing is off: the key's own contract, and what the queue worker and
+    // the serving path read. A `true` default here showed this card enabled
+    // on a node whose creates answered "shared preparation is disabled".
     let content_analysis_on = plurx_core::store::stored_switch(
         settings
             .get(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
             .map(String::as_str),
-        true,
+        false,
     );
 
     // Parsed exactly the way the engine parses it. That was the point when all
@@ -198,6 +322,19 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         false,
     );
+    // Missing is off, exactly as the session-create reads parse it.
+    let sdr_master_codecs_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
+            .map(String::as_str),
+        false,
+    );
+    let clock_guard_enforced = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
+            .map(String::as_str),
+        false,
+    );
     let display_mode_events = state
         .store
         .playback_events(&PlaybackEventQuery {
@@ -221,6 +358,16 @@ pub(crate) async fn readiness(
                     false,
                 ),
             ),
+            DeveloperEnableItem {
+                id:"jellyfin_compatibility",title:"Jellyfin client compatibility",
+                enabled:Some(plurx_core::store::stored_switch(settings.get(plurx_core::store::keys::JELLYFIN_COMPATIBILITY_ENABLED).map(String::as_str),false)),
+                setting:Some("jellyfin_compatibility_enabled"),
+                requirements:vec![DeveloperRequirement { id:"client_qualification",title:"Pinned clients qualified",
+                    status:RequirementStatus::Unobservable,
+                    evidence:"The frozen-candidate browsing, playback, tracks and recovery qualification receipt is not visible to this daemon. The saved choice remains authoritative.".into() },
+                    jellyfin_standard_port(&state)],
+            },
+            clock_measurement(&state, clock_guard_enforced),
             durable_cluster_work(&state).await,
             bounded_catalogue_reads(
                 &state,
@@ -254,6 +401,7 @@ pub(crate) async fn readiness(
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(prepared_handoff_on),
+            sdr_master_codecs(sdr_master_codecs_on),
             content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
@@ -274,8 +422,451 @@ pub(crate) async fn readiness(
             chapter_thumbnails(&state).await,
             dolby_vision_convert(convert_on),
             source_probe_comparison().await,
+            output_preparation(&state, &settings).await,
+            rolling_retention(&state, &settings).await,
+            display_aware_auto(&state, &settings).await,
+            network_priors_item(playback_switch(
+                &settings,
+                plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS,
+            )),
         ],
     }))
+}
+
+/// The playback switches are parsed with `trim() == "1"` by every engine site
+/// that reads them (`system.rs`, `hls/create.rs`, `hls/link_receipts.rs`,
+/// `network.rs`), not with `stored_switch`. A row that accepted `true` here
+/// would report a switch on that the engine treats as off.
+fn playback_switch(settings: &std::collections::BTreeMap<String, String>, key: &str) -> bool {
+    settings.get(key).is_some_and(|value| value.trim() == "1")
+}
+
+/// How many nodes could own a playback session, as far as this node can read.
+/// `Ok(1)` for a standalone install, which has no roster to read.
+async fn session_owner_candidates(state: &AppState) -> Result<usize, String> {
+    if !state.membership.is_replicated() {
+        return Ok(1);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(3), state.membership.status()).await {
+        Ok(Ok(status)) => Ok(status.nodes.len()),
+        Ok(Err(error)) => Err(format!("the local roster could not be read ({error})")),
+        Err(_) => Err(
+            "the local roster did not answer within the three-second observation budget".to_owned(),
+        ),
+    }
+}
+
+/// Fit Auto to display (`playback.display_aware_auto`), and what it silently
+/// depends on (defect D6). Five server paths that let Auto move *up* — link
+/// receipts, their acknowledgement, the candidate veto and the stored prior —
+/// return early unless `playback.network_priors` is `"1"`, so with priors off
+/// display-aware Auto can only move quality down. Receipts are accepted only
+/// by the node that owns the session, and network identity is IPv4-only.
+/// None of that is changed here: this card says it out loud. Every row is
+/// advisory and nothing reads it on Save.
+async fn display_aware_auto(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> DeveloperEnableItem {
+    display_aware_auto_item(
+        playback_switch(
+            settings,
+            plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO,
+        ),
+        playback_switch(settings, plurx_core::store::keys::PLAYBACK_AUTO_ABR),
+        playback_switch(settings, plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS),
+        session_owner_candidates(state).await,
+    )
+}
+
+fn display_aware_auto_item(
+    enabled: bool,
+    auto_abr_on: bool,
+    priors_on: bool,
+    owner_candidates: Result<usize, String>,
+) -> DeveloperEnableItem {
+    let (owner_status, owner_evidence) = match owner_candidates {
+        Ok(nodes) if nodes <= 1 => (
+            RequirementStatus::Met,
+            "One node: every session is placed on this node, which is the node that accepts \
+             its link receipts"
+                .to_owned(),
+        ),
+        Ok(nodes) => (
+            RequirementStatus::Unknown,
+            format!(
+                "{nodes} nodes in the local roster: sessions placed on a peer get no link \
+                 receipts, so for those sessions Auto behaves as if network priors were off. \
+                 This route cannot see where any one session was placed"
+            ),
+        ),
+        Err(error) => (
+            RequirementStatus::Unavailable,
+            format!("Whether sessions can be placed on a peer is unknown: {error}"),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "display_aware_auto",
+        title: "Fit Auto to display",
+        enabled: Some(enabled),
+        setting: Some("playback_display_aware_auto"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "auto_abr",
+                title: "Adaptive Auto quality is on",
+                status: if auto_abr_on {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: if auto_abr_on {
+                    "playback.auto_abr is on: clients may change rungs after playback starts"
+                        .to_owned()
+                } else {
+                    "playback.auto_abr is off: Fit Auto to display chooses the starting rung, \
+                     but nothing adapts during playback. Turning off one switch does not stop \
+                     the other"
+                        .to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "network_priors",
+                title: "Network priors are on",
+                status: if priors_on {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: if priors_on {
+                    "On: link receipts are accepted, so Auto may upgrade and a link stall may \
+                     step quality down"
+                        .to_owned()
+                } else {
+                    "Off: Auto never upgrades and a link stall retries the same quality; \
+                     producer and decoder recovery still work"
+                        .to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "local_session_owner",
+                title: "Sessions are owned by the node that serves them",
+                status: owner_status,
+                evidence: owner_evidence,
+            },
+            DeveloperRequirement {
+                id: "ipv4_client",
+                title: "Clients reach the server over IPv4",
+                status: RequirementStatus::Unknown,
+                evidence: "Network identity is an IPv4 /24, from Forwarded, X-Forwarded-For or \
+                           X-Real-IP, otherwise the socket peer. A client that connects over \
+                           IPv6 with no forwarded IPv4 address gets no network identity, so it \
+                           never gets link evidence and Auto never upgrades for it. This route \
+                           cannot see which clients connect over IPv6"
+                    .to_owned(),
+            },
+        ],
+    }
+}
+
+/// `playback.network_priors`: the switch display-aware Auto needs in order to
+/// move up. Until now it had no Settings control at all. Both rows are
+/// statements about this build, not about the deployment.
+fn network_priors_item(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "network_priors",
+        title: "Network priors",
+        enabled: Some(enabled),
+        setting: Some("playback_network_priors"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "priors_history",
+                title: "What turning it on stores",
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "Per user, client class and IPv4 /24 network: a conservative throughput \
+                     estimate and the lowest rung that starved there, kept on this node for {} \
+                     days. Nothing new is folded in while this is off",
+                    plurx_core::store::keys::NETWORK_PRIOR_RETAIN_DAYS
+                ),
+            },
+            DeveloperRequirement {
+                id: "priors_cold_start",
+                title: "What it changes for Auto's starting rung",
+                status: RequirementStatus::Met,
+                evidence: "With history for the viewer's network, Auto starts below a rung that \
+                           starved there or at the highest peak-safe rung; with none it keeps \
+                           today's start. It also lets link receipts through, which is what \
+                           allows Fit Auto to display to upgrade"
+                    .to_owned(),
+            },
+        ],
+    }
+}
+
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / f64::from(1_u32 << 30))
+}
+
+/// Complete-output preparation queued by VOD starts (`vod.output_preparation`).
+///
+/// No `setting`: the switch is three-valued (`off`, `copy`,
+/// `copy_and_encoded`) and the readiness switch walk PUTs booleans. The card
+/// has its own selector. Every row is advisory.
+async fn output_preparation(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> DeveloperEnableItem {
+    use plurx_core::store::background_jobs::{JobKind, JobQuery, JobState};
+    let mode = crate::vodserve::OutputPreparation::parse(
+        settings
+            .get(plurx_core::store::keys::VOD_OUTPUT_PREPARATION)
+            .map(String::as_str),
+    );
+    let budget = crate::cachekeep::cache_budget(
+        settings
+            .get(plurx_core::store::keys::CACHE_MAX_GB)
+            .map(String::as_str),
+    );
+    let mut counts = Vec::new();
+    let mut unavailable = None;
+    for kind in [JobKind::CopyOutputPrepare, JobKind::EncodedOutputPrepare] {
+        for job_state in [JobState::Queued, JobState::Running] {
+            match state
+                .store
+                .list_jobs(JobQuery {
+                    node_id: None,
+                    state: Some(job_state),
+                    kind: Some(kind),
+                    after_id: None,
+                    limit: plurx_core::store::background_jobs::MAX_PAGE_SIZE,
+                })
+                .await
+            {
+                Ok(page) => counts.push((
+                    kind,
+                    job_state,
+                    page.jobs.len(),
+                    page.next_after_id.is_some(),
+                )),
+                Err(error) => unavailable = Some(error.to_string()),
+            }
+        }
+    }
+    let count_of = |kind: JobKind, job_state: JobState| {
+        counts
+            .iter()
+            .find(|(k, s, _, _)| *k == kind && *s == job_state)
+            .map_or_else(
+                || "?".to_owned(),
+                |(_, _, n, more)| format!("{n}{}", if *more { "+" } else { "" }),
+            )
+    };
+    let queued_evidence = match &unavailable {
+        Some(error) => format!("The job list could not be read: {error}"),
+        None => format!(
+            "Copy: {} queued, {} running. Encoded: {} queued, {} running. \
+              Settings → Jobs filtered by kind lists them; turning a kind off cancels its \
+              queued rows within a minute (plurx_output_preparation_drained_total)",
+            count_of(JobKind::CopyOutputPrepare, JobState::Queued),
+            count_of(JobKind::CopyOutputPrepare, JobState::Running),
+            count_of(JobKind::EncodedOutputPrepare, JobState::Queued),
+            count_of(JobKind::EncodedOutputPrepare, JobState::Running),
+        ),
+    };
+    let idle = state.transcode.pretranscode_worker_idle();
+    DeveloperEnableItem {
+        id: "output_preparation",
+        title: "Complete-output preparation from VOD starts",
+        enabled: Some(mode != crate::vodserve::OutputPreparation::Off),
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "output_mode",
+                title: "Which preparation a VOD start may queue",
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "{}: off queues nothing, copy queues remux preparation, copy_and_encoded \
+                      also queues a whole-title background encode. A preparation runs whether \
+                      or not the pre-transcode schedule is on",
+                    mode.as_str()
+                ),
+            },
+            DeveloperRequirement {
+                id: "output_budget",
+                title: "A retained-output budget",
+                status: if budget.is_some() {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: match budget {
+                    Some(bytes) => format!(
+                        "cache.max_gb allows {} of retained output (unset means the 50 GB \
+                          default the settings page shows)",
+                        gib(bytes)
+                    ),
+                    None => {
+                        "cache.max_gb is 0: preparations would have nowhere to publish".to_owned()
+                    }
+                },
+            },
+            DeveloperRequirement {
+                id: "output_jobs",
+                title: "Queued and running preparation",
+                status: if unavailable.is_some() {
+                    RequirementStatus::Unavailable
+                } else {
+                    RequirementStatus::Met
+                },
+                evidence: queued_evidence,
+            },
+            DeveloperRequirement {
+                id: "output_node_idle",
+                title: "This node's background encoder is idle",
+                status: if idle {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: if idle {
+                    "Idle now: a claimed preparation may start".to_owned()
+                } else {
+                    "Busy with foreground or offline work: preparation yields until it is idle"
+                        .to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "output_stop",
+                title: "What Stop in Activity does",
+                status: RequirementStatus::Met,
+                evidence: "It cancels the preparation running on the node that answers the \
+                  request (not one running on a peer), and the next play of that title \
+                  may queue it again"
+                    .to_owned(),
+            },
+        ],
+    }
+}
+
+/// Retaining a rolling session's complete output (`vod.rolling_retention`).
+async fn rolling_retention(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> DeveloperEnableItem {
+    let enabled = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::VOD_ROLLING_RETENTION)
+            .map(String::as_str),
+        false,
+    );
+    let budget = crate::cachekeep::cache_budget(
+        settings
+            .get(plurx_core::store::keys::CACHE_MAX_GB)
+            .map(String::as_str),
+    );
+    let facts = state.transcode.rolling_retention_facts().await;
+    let live_bytes = facts
+        .rows
+        .iter()
+        .fold(0_u64, |sum, row| sum.saturating_add(row.bytes));
+    let reserve = crate::scratch_ledger::RETAINED_HEADROOM_RESERVE_BYTES;
+    DeveloperEnableItem {
+        id: "rolling_retention",
+        title: "Retain rolling sessions' complete output",
+        enabled: Some(enabled),
+        setting: Some("vod_rolling_retention"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "retention_same_filesystem",
+                title: "Session scratch and the retained namespace share a filesystem",
+                status: match facts.same_filesystem {
+                    Some(true) => RequirementStatus::Met,
+                    Some(false) => RequirementStatus::Unmet,
+                    None => RequirementStatus::Unavailable,
+                },
+                evidence: match facts.same_filesystem {
+                    Some(true) => "Same device: segments can be hard-linked".to_owned(),
+                    Some(false) if cfg!(windows) => {
+                        "Windows: no device identity to prove one filesystem, so retention \
+                          stays off on this node"
+                            .to_owned()
+                    }
+                    Some(false) => "Different devices: a link would fail with EXDEV, so a \
+                      collection is refused before it reserves anything"
+                        .to_owned(),
+                    None => "The scratch or namespace directory could not be read".to_owned(),
+                },
+            },
+            DeveloperRequirement {
+                id: "retention_budget",
+                title: "A retained-output budget",
+                status: if budget.is_some() {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: match budget {
+                    Some(bytes) => format!(
+                        "cache.max_gb allows {} (unset means the 50 GB default)",
+                        gib(bytes)
+                    ),
+                    None => "cache.max_gb is 0: nothing can be retained".to_owned(),
+                },
+            },
+            DeveloperRequirement {
+                id: "retention_headroom",
+                title: "Free space beyond everything scratch may write",
+                status: match facts.admits {
+                    Ok(()) => RequirementStatus::Met,
+                    Err("headroom_unsampled") => RequirementStatus::Unknown,
+                    Err(_) => RequirementStatus::Unmet,
+                },
+                evidence: match facts.slack {
+                    Some(slack) => format!(
+                        "Slack {} against a {} reserve ({}); sampled every 30 s, and a sample \
+                          older than 60 s refuses",
+                        if slack < 0 {
+                            format!("-{}", gib(slack.unsigned_abs()))
+                        } else {
+                            gib(slack.unsigned_abs())
+                        },
+                        gib(reserve.unsigned_abs()),
+                        match facts.admits {
+                            Ok(()) => "captures may link",
+                            Err(reason) => reason,
+                        }
+                    ),
+                    None => {
+                        "No free-space sample yet: retention refuses until one exists".to_owned()
+                    }
+                },
+            },
+            DeveloperRequirement {
+                id: "retention_live_bytes",
+                title: "What retention holds on this node",
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "{} across {} artifacts; Activity lists each with a Stop (this node only)",
+                    gib(live_bytes),
+                    facts.rows.len()
+                ),
+            },
+            DeveloperRequirement {
+                id: "retention_cleanup_pending",
+                title: "Nothing waiting on the collector",
+                status: if facts.cleanup_pending == 0 {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: format!(
+                    "{} orphan or retired directories still to delete; the collector spends up \
+                      to 250 ms per 30 s tick on them",
+                    facts.cleanup_pending
+                ),
+            },
+        ],
+    }
 }
 
 async fn bounded_catalogue_reads(state: &AppState, enabled: bool) -> DeveloperEnableItem {
@@ -1501,6 +2092,33 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
     }
 }
 
+/// S-10's SDR master `CODECS`. The switch is the whole decision; its one row
+/// says what nobody has measured yet and never refuses the save. It is
+/// `unknown` by construction — no observation this daemon can make proves it:
+/// whether AVPlayer still offers every SDR variant once the master names its
+/// codecs is a physical-device result, and a daemon that served such a master
+/// has no way to see a rung the player silently dropped before fetching it.
+fn sdr_master_codecs(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "sdr_master_codecs",
+        title: "CODECS on SDR master playlists",
+        enabled: Some(enabled),
+        setting: Some("playback_sdr_master_codecs"),
+        requirements: vec![DeveloperRequirement {
+            id: "sdr_codecs_device_requalification",
+            title: "Apple TV and iPhone keep every SDR variant with CODECS printed",
+            status: RequirementStatus::Unknown,
+            evidence: "Not recorded: the S-10 device re-qualification \
+                       (HONEST-MASTER-PLAYLIST \u{a7}5.4) is a physical-device result this \
+                       daemon cannot read, and a variant AVPlayer drops on CODECS is never \
+                       fetched, so no server counter can see it. Advisory only. The value is \
+                       fixed when a session is created; a session rebuilt after an owner \
+                       takeover or VOD resurrection reads the current value."
+                .to_owned(),
+        }],
+    }
+}
+
 fn prepared_quality_handoff(enabled: bool) -> DeveloperEnableItem {
     let staged = crate::playback_control::preparation_staged_snapshot();
     let prepare_capable = crate::playback_control::prepare_capable_snapshot();
@@ -1740,7 +2358,7 @@ fn subtitle_not_ready_503(enabled: bool) -> DeveloperEnableItem {
                 "hlsjs_survives_subtitle_refusal",
                 "hls.js keeps the picture through a subtitle 503",
                 "hls.js retries subtitle fragments on its own schedule and escalates to a fatal \
-                 network error after its retry budget. Whether the bundled 1.6.16 build treats a \
+                 network error after its retry budget. Whether the bundled 1.6.19 build treats a \
                  503 with `Retry-After` on a subtitle rendition as recoverable is a browser \
                  measurement."
                     .to_owned(),
@@ -2049,6 +2667,38 @@ fn cinema_sharing(state: &AppState, enabled: bool) -> DeveloperEnableItem {
     ]}
 }
 
+/// Whether a Jellyfin client given only this server's host can connect: that
+/// is Jellyfin's standard port at the root, which this process opens beside
+/// its own. It reads only this process's listener; a container host's port
+/// publishing is outside its view, and the evidence says so.
+fn jellyfin_standard_port(state: &AppState) -> DeveloperRequirement {
+    use crate::http::JellyfinStandardPort;
+    let (status, evidence) = match state.jellyfin_standard_port.current() {
+        JellyfinStandardPort::Listening(address) => (
+            RequirementStatus::Met,
+            format!(
+                "This process answers Jellyfin clients at the root of {address}, so a client given only this server's host connects. Whether a container host publishes that port is outside this process's view."
+            ),
+        ),
+        JellyfinStandardPort::Unavailable { address, error } => (
+            RequirementStatus::Unmet,
+            format!(
+                "This process could not listen on {address} ({error}). Until that port is free, or server.jellyfin_port names another, clients need this server's /jellyfin address."
+            ),
+        ),
+        JellyfinStandardPort::Off => (
+            RequirementStatus::Unmet,
+            "This process opened no Jellyfin standard-port listener: server.jellyfin_port is 0 or names the main port, or startup has not reached it. Clients need this server's /jellyfin address.".into(),
+        ),
+    };
+    DeveloperRequirement {
+        id: "standard_port",
+        title: "Reachable by host alone",
+        status,
+        evidence,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2149,5 +2799,114 @@ mod tests {
             matched.requirements[0].status,
             RequirementStatus::Met
         ));
+    }
+
+    /// D6: display-aware Auto moves up only with `playback.network_priors`
+    /// on, and until this card that dependency was invisible. The card names
+    /// it, reads it, and the priors switch is a Developer switch of its own.
+    #[test]
+    fn display_aware_auto_lists_network_priors_and_reports_its_state() {
+        let priors_off = display_aware_auto_item(true, true, false, Ok(1));
+        assert_eq!(priors_off.id, "display_aware_auto");
+        assert_eq!(priors_off.setting, Some("playback_display_aware_auto"));
+        assert_eq!(
+            priors_off
+                .requirements
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [
+                "auto_abr",
+                "network_priors",
+                "local_session_owner",
+                "ipv4_client"
+            ]
+        );
+        let priors_row = |item: &DeveloperEnableItem| {
+            item.requirements
+                .iter()
+                .find(|row| row.id == "network_priors")
+                .map(|row| (row.status, row.evidence.clone()))
+                .expect("the network priors row")
+        };
+        let (status, evidence) = priors_row(&priors_off);
+        assert_eq!(status, RequirementStatus::Unmet);
+        assert!(
+            evidence.contains("Auto never upgrades")
+                && evidence.contains("a link stall retries the same quality")
+                && evidence.contains("producer and decoder recovery still work"),
+            "{evidence}"
+        );
+
+        let priors_on = display_aware_auto_item(true, true, true, Ok(1));
+        assert_eq!(priors_row(&priors_on).0, RequirementStatus::Met);
+
+        // Adaptive Auto is read, not assumed.
+        assert_eq!(priors_on.requirements[0].status, RequirementStatus::Met);
+        assert_eq!(
+            display_aware_auto_item(true, false, true, Ok(1)).requirements[0].status,
+            RequirementStatus::Unmet
+        );
+
+        // A single node owns every session; a roster with peers cannot say
+        // where a given session landed, and an unreadable roster says so.
+        assert_eq!(priors_on.requirements[2].status, RequirementStatus::Met);
+        let clustered = display_aware_auto_item(true, true, true, Ok(3));
+        assert_eq!(clustered.requirements[2].status, RequirementStatus::Unknown);
+        assert!(
+            clustered.requirements[2]
+                .evidence
+                .contains("sessions placed on a peer get no link receipts"),
+            "{}",
+            clustered.requirements[2].evidence
+        );
+        let unread = display_aware_auto_item(true, true, true, Err("roster down".to_owned()));
+        assert_eq!(
+            unread.requirements[2].status,
+            RequirementStatus::Unavailable
+        );
+        assert!(unread.requirements[2].evidence.contains("roster down"));
+
+        // IPv6 is a limit this route cannot observe, whatever else is true.
+        assert_eq!(clustered.requirements[3].status, RequirementStatus::Unknown);
+        assert!(clustered.requirements[3].evidence.contains("IPv6"));
+
+        for saved in [false, true] {
+            let priors = network_priors_item(saved);
+            assert_eq!(priors.id, "network_priors");
+            assert_eq!(priors.setting, Some("playback_network_priors"));
+            assert_eq!(priors.enabled, Some(saved));
+            assert!(priors
+                .requirements
+                .iter()
+                .all(|row| row.evidence.len() > 20));
+        }
+    }
+
+    /// Readiness reports; it never decides. Every combination of red rows
+    /// leaves the switch where the operator saved it, in both directions.
+    #[test]
+    fn display_aware_auto_readiness_never_refuses_the_switch() {
+        for saved in [false, true] {
+            for auto_abr in [false, true] {
+                for priors in [false, true] {
+                    for owners in [Ok(1), Ok(4), Err("unreadable".to_owned())] {
+                        let item = display_aware_auto_item(saved, auto_abr, priors, owners);
+                        assert_eq!(
+                            item.enabled,
+                            Some(saved),
+                            "rows never move the saved switch (auto_abr {auto_abr}, \
+                             priors {priors})"
+                        );
+                        assert_eq!(
+                            item.setting,
+                            Some("playback_display_aware_auto"),
+                            "the switch stays a switch the readiness walk can write"
+                        );
+                        assert!(item.requirements.iter().all(|row| row.evidence.len() > 20));
+                    }
+                }
+            }
+        }
     }
 }

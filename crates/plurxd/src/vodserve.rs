@@ -46,11 +46,11 @@ use plurx_core::segplan::{
 };
 use plurx_core::store::Store;
 use plurx_core::transcode::{
-    copy_pipe_args_with_dolby_vision, CopyVideoOptions, Pacing, COPY_FIRST_SEGMENT_SECONDS,
-    COPY_SEGMENT_MAX_BYTES, COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
+    CopyVideoOptions, Pacing, COPY_FIRST_SEGMENT_SECONDS, COPY_SEGMENT_MAX_BYTES,
+    COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
 };
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::copyseg::sanitize_stale_dolby_brand;
@@ -204,6 +204,86 @@ pub struct VodSettings {
     /// Node-wide ceiling on blocked segment GETs, from
     /// `playback.vod_blocked_get_cap`.
     pub blocked_get_cap: usize,
+    /// `playback.sdr_master_codecs`: the value the HTTP create froze from its
+    /// planning snapshot when the request carries one, else read in the same
+    /// batch as the rest of this policy. Each session records it at create
+    /// (beside its block budget) so its master keeps one shape for that
+    /// incarnation.
+    pub sdr_master_codecs: bool,
+    /// `playback.vod_index_cluster_cache`: whether a copy rendition may use a
+    /// peer's fragment index. Absent means off.
+    pub index_cluster_cache: bool,
+    /// `playback.hevc_unverified_copy`: whether an HEVC copy that drops its
+    /// in-band parameter sets may skip the per-node configuration proof.
+    /// Absent means off; a failed read fails the whole snapshot, so this
+    /// stays fail-closed.
+    pub hevc_unverified_copy: bool,
+    /// `playback.vod_live_recovery`: whether a typed VOD prerequisite refusal
+    /// may fall back to the live engine. Absent means on.
+    pub live_recovery: bool,
+    /// `vod.output_preparation`: which complete-output preparation a VOD
+    /// start may queue. Absent means off.
+    pub output_preparation: OutputPreparation,
+    /// What complete-output preparation may hold in the retained registry:
+    /// `cache.max_gb` through [`crate::cachekeep::cache_budget`], so unset is
+    /// the 50 GB the settings page shows. Distinct from
+    /// `completed_cache_bytes`, whose unset value keeps admission closed.
+    pub output_budget_bytes: u64,
+}
+
+/// The Developer switch for complete-output preparation queued by a VOD
+/// start (`vod.output_preparation`). Off by default: one play must not start
+/// a whole-title background encode nobody asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputPreparation {
+    #[default]
+    Off,
+    /// Copy (remux) preparation only.
+    Copy,
+    /// Copy and encoded preparation.
+    CopyAndEncoded,
+}
+
+impl OutputPreparation {
+    pub const OFF: &'static str = "off";
+    pub const COPY: &'static str = "copy";
+    pub const COPY_AND_ENCODED: &'static str = "copy_and_encoded";
+
+    /// Anything but the two enabling spellings is off.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some(Self::COPY) => Self::Copy,
+            Some(Self::COPY_AND_ENCODED) => Self::CopyAndEncoded,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => Self::OFF,
+            Self::Copy => Self::COPY,
+            Self::CopyAndEncoded => Self::COPY_AND_ENCODED,
+        }
+    }
+
+    /// Whether a start may queue preparation of this kind.
+    pub fn admits(self, encoded: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Copy => !encoded,
+            Self::CopyAndEncoded => true,
+        }
+    }
+
+    /// The durable job kinds this mode lets a node claim.
+    pub fn job_kinds(self) -> &'static [plurx_core::store::background_jobs::JobKind] {
+        use plurx_core::store::background_jobs::JobKind;
+        match self {
+            Self::Off => &[],
+            Self::Copy => &[JobKind::CopyOutputPrepare],
+            Self::CopyAndEncoded => &[JobKind::CopyOutputPrepare, JobKind::EncodedOutputPrepare],
+        }
+    }
 }
 
 /// Why a session ended for good. Every cause answers 410 and never resurrects.
@@ -304,12 +384,15 @@ pub struct VodHlsFacts {
     pub file: MediaFile,
     pub audio_index: Option<i64>,
     pub aac: bool,
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub preserve_dolby_vision: bool,
     /// Whether this session's copy rewrites Profile 7 RPUs to 8.1. Carried
     /// beside the preservation because the playlist has to describe what the
     /// copy produces — `hvc1` plus `SUPPLEMENTAL-CODECS: dvh1.08.LL` — and
     /// the source's own Dolby Vision record says profile 7.
     pub convert_dolby_vision: bool,
+    /// The session's frozen `playback.sdr_master_codecs` choice.
+    pub sdr_master_codecs: bool,
     pub(crate) encoding: Option<Arc<crate::vodencode::Encoding>>,
     pub(crate) response_owner: ResponseOwner,
 }
@@ -319,18 +402,29 @@ pub struct VodHlsFacts {
 /// session that reused the durable session id.
 #[derive(Clone)]
 pub(crate) struct ResponseOwner {
+    retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     lifecycle: Arc<Mutex<()>>,
     incarnation: Arc<()>,
     /// Present only for a live media owner. Terminal owners deliberately do
     /// not keep the heavyweight rendition graph alive after reader/commit
     /// cleanup has finished.
     rendition: Option<Arc<Rendition>>,
+    /// Exact private-reader ownership beneath the public parent, when a
+    /// response serves child media. Rebinding the same cached rendition must
+    /// not let an old body commit to its replacement reader.
+    media_child: Option<MediaReaderResponseOwner>,
     rendition_key: String,
     file: Arc<MediaFile>,
     /// Terminal snapshot at resolution. Status publication compares this
     /// exact value so a live error cannot be admitted after tombstoning and a
     /// tombstone from one incarnation cannot describe its replacement.
     tombstone: Option<Terminal>,
+}
+
+#[derive(Clone)]
+struct MediaReaderResponseOwner {
+    reader_id: String,
+    rendition: Arc<Rendition>,
 }
 
 impl std::fmt::Debug for ResponseOwner {
@@ -341,6 +435,65 @@ impl std::fmt::Debug for ResponseOwner {
             .field("rendition_key", &self.rendition_key)
             .field("tombstone", &self.tombstone)
             .finish_non_exhaustive()
+    }
+}
+
+/// A bounded, typed child resource; never interpreted as a filesystem path.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChildMediaRequest {
+    pub role: String,
+    pub rendition: String,
+    pub kind: String,
+    pub object: String,
+}
+
+impl ChildMediaRequest {
+    pub(crate) fn valid_identity(role: &str, rendition: &str) -> bool {
+        matches!(role, "video" | "audio")
+            && rendition.len() == 64
+            && rendition
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        let hash = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        Self::valid_identity(&self.role, &self.rendition)
+            && match self.kind.as_str() {
+                "init" => self.object.strip_suffix(".mp4").is_some_and(hash),
+                "segment" => self.object.strip_suffix(".m4s").is_some_and(|digits| {
+                    !digits.is_empty()
+                        && digits.len() <= 9
+                        && digits.bytes().all(|byte| byte.is_ascii_digit())
+                        && (digits == "0" || !digits.starts_with('0'))
+                        && digits.parse::<u32>().is_ok()
+                }),
+                _ => false,
+            }
+    }
+
+    pub(crate) fn media_name(&self) -> Option<String> {
+        if !self.is_valid() {
+            return None;
+        }
+        if self.kind == "init" {
+            return Some(INIT_NAME.to_owned());
+        }
+        let index = self.object.strip_suffix(".m4s")?.parse::<u32>().ok()?;
+        Some(segment_name(u64::from(index)))
+    }
+}
+
+impl ResponseOwner {
+    pub(crate) fn retained_output_facts(&self) -> Option<crate::transcode::RetainedOutputFacts> {
+        let artifact = self.retained_output.as_ref()?;
+        Some(artifact.facts())
     }
 }
 
@@ -557,20 +710,110 @@ pub struct VodStart {
     pub duration_ms: i64,
 }
 
-/// The durable request plus an already resolved encoder recipe. Plain copy
+/// Actual init-verified media and exact catalog provenance for one parent.
+pub(crate) struct VerifiedContinuousFamily {
+    pub controlled: bool,
+    pub family: plurx_core::transcode::VodPresentationFamily,
+    pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
+    pub audio_budget: Option<plurx_core::transcode::VodRenditionBandwidth>,
+    pub candidates: HashMap<String, plurx_core::playback::candidate::CandidateId>,
+}
+
+impl VerifiedContinuousFamily {
+    pub(crate) fn description(&self) -> Result<Vec<u8>, VodError> {
+        let mut video = Vec::new();
+        for rung in self.family.video().rungs() {
+            let candidate = self.candidates.get(rung.rendition_id()).ok_or_else(|| {
+                VodError::ProducerFailed("family rung has no retained catalog identity".into())
+            })?;
+            let budget = self
+                .video_budgets
+                .iter()
+                .find(|budget| budget.rendition_id == rung.rendition_id())
+                .ok_or_else(|| {
+                    VodError::ProducerFailed("family rung has no delivery budget".into())
+                })?;
+            video.push(serde_json::json!({
+                "candidate_id": candidate, "rendition_id": rung.rendition_id(),
+                "init_id": rung.init_id(), "width": rung.facts().width,
+                "height": rung.facts().height, "codec": rung.facts().codec,
+                "timescale": rung.grid().numerator, "frame_ticks": rung.grid().denominator,
+                "segment_ticks": rung.grid().segment_ticks(),
+                "peak_bps": budget.peak_bps,
+                "playlist": format!("video/{}/index.m3u8", rung.rendition_id()),
+            }));
+        }
+        let audio = self.family.audio().map(|audio| {
+            serde_json::json!({
+                "rendition_id": audio.rendition_id(), "init_id": audio.init_id(),
+                "codec": audio.facts().codec, "channels": audio.facts().channels,
+                "timescale": plurx_core::transcode::VOD_AUDIO_RATE,
+                "peak_bps": self.audio_budget.as_ref().map(|budget| budget.peak_bps),
+                "playlist": format!("audio/{}/index.m3u8", audio.rendition_id()),
+            })
+        });
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 1, "family_id": self.family.id(),
+            "mode": if self.controlled { "controlled" } else { "autonomous_reserved" }, "master": "master.m3u8", "video": video, "audio": audio,
+        }))
+        .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
+        if bytes.len() > 32 * 1024 {
+            return Err(VodError::ProducerFailed(
+                "family description exceeds its bound".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+/// The durable request plus already resolved encoder recipes. Plain copy
 /// callers need no encoder preparation and convert from their request alone.
 pub(crate) struct VodRecipeRequest<'a> {
+    pub(crate) measured_candidate: Option<RetainedCandidateBinding>,
+    pub(crate) retained_capture: RetainedOutputCapture,
     pub request: &'a SessionRequest,
     pub encoding: Option<Arc<crate::vodencode::Encoding>>,
+    /// Resolved shared AAC for a continuous video attachment, never a second
+    /// public session. Creation commits both private readers together.
+    pub soundtrack: Option<Arc<crate::vodencode::Encoding>>,
+    /// The second video of a two-rung autonomous attachment.
+    pub companion: Option<(SessionRequest, Arc<crate::vodencode::Encoding>)>,
 }
 
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
     fn from(request: &'a SessionRequest) -> Self {
         Self {
+            measured_candidate: None,
             request,
+            retained_capture: RetainedOutputCapture::New,
             encoding: None,
+            soundtrack: None,
+            companion: None,
         }
     }
+}
+
+/// Private dispatch-attested identity, never a client proof or catalog budget.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RetainedCandidateBinding {
+    pub(crate) kind: SessionKind,
+    pub(crate) normalized_geometry: bool,
+    pub(crate) profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
+    pub(crate) candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub(crate) recipe_digest: [u8; 32],
+    pub(crate) file_id: i64,
+    pub(crate) audio_index: Option<i64>,
+    pub(crate) audio_offset_ms: i64,
+    pub(crate) subtitle_burn: Option<i64>,
+    pub(crate) grade: plurx_core::transcode::OutputGrade,
+    pub(crate) route: plurx_core::playback::candidate::CandidateRoute,
+}
+
+#[derive(Clone)]
+pub(crate) enum RetainedOutputCapture {
+    New,
+    ReceiverUnavailable,
+    Restore(Option<crate::transcode::RetainedOutputFacts>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -703,6 +946,8 @@ pub enum VodSupersedeError {
 /// An open, verified segment ready to stream.
 #[derive(Debug)]
 pub struct SegmentReady {
+    /// Immutable plan duration, rounded outward to milliseconds; init is None.
+    pub observed_media_duration_ms: Option<u32>,
     pub file: tokio::fs::File,
     pub len: u64,
     /// Strong: rendition key + plan index + materialization instant + length.
@@ -714,6 +959,7 @@ pub struct SegmentReady {
     /// with. The delivery rate remains advisory preparation and fleet
     /// telemetry; a body served against no meter would silently lose it.
     pub delivery: Arc<crate::meter::Meter>,
+    pub(crate) retained_lease: Option<Arc<retained::RetainedVodArtifact>>,
 }
 
 // split: begin vod-reader
@@ -753,6 +999,7 @@ struct Shared {
     sessions: Mutex<HashMap<String, Session>>,
     /// Bounded by in-flight VOD request admission and cleaned by exact RAII.
     /// This closes lease loss against a slow resurrection before attachment.
+    passive_grants: passive_grant::Registry,
     preparing_sessions: StdMutex<HashMap<String, usize>>,
     /// Per-session-id transition gates survive the remove/reattach gap via a
     /// weak registry. A reaper holds the strong gate through reader detach;
@@ -767,9 +1014,16 @@ struct Shared {
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
     working_set: AtomicU64,
+    /// Only live reserved preparation media already included in working_set.
+    preparation_media: AtomicU64,
+    /// Observes successful foreground graph attachments, not admission attempts.
+    /// Lock order: this guard, private staged artifact, retained registry.
+    /// No await while held; issued immutable artifacts are never revoked here.
+    preparation_attachment: StdMutex<u64>,
     /// Bytes of admitted renditions, moved here from the working set at
     /// completion.
     completed_cache: AtomicU64,
+    retained_artifacts: retained::RetainedArtifactRegistry,
     /// Fair starting point for the bounded terminal route-confirmation batch.
     terminal_eviction_cursor: AtomicU64,
     /// The registry's test points (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8),
@@ -978,6 +1232,15 @@ use marker_dispatch::*;
 #[path = "vod/generation.rs"]
 mod generation;
 use generation::*;
+#[path = "vod/output_measurement.rs"]
+mod output_measurement;
+use output_measurement::PublishedOutputMeasurement;
+#[path = "vod/copy_preparation.rs"]
+mod copy_preparation;
+#[path = "vod/retained.rs"]
+pub(crate) mod retained;
+#[path = "vod/retained_manifest.rs"]
+mod retained_manifest;
 // split: end vod-generation
 
 // split: begin vod-plan
@@ -997,3 +1260,11 @@ use init::*;
 #[path = "vod/tests.rs"]
 mod tests;
 // split: end vod-tests
+
+#[path = "vod/serve/quality.rs"]
+mod vod_serve_quality;
+
+pub(crate) use vod_serve_quality::{QualityScheduleRequest, QualityScheduleResponse};
+
+#[path = "vod/passive_grant.rs"]
+mod passive_grant;

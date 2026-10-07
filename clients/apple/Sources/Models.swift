@@ -792,6 +792,32 @@ func manualCatalogHeights(_ candidates: [QualityCandidate]) -> [Int] {
         .map(\.targetHeight)).sorted(by: >)
 }
 
+/// HTTP-only cost provenance. It is advisory and never worker authority.
+struct MeasuredCandidateOutput: Codable {
+    let candidateId: String
+    let recipeDigest: [UInt8]
+    let route: String
+    let artifactId: String
+    let outputIdentity: String
+    let qualification: String
+    let averageBps: UInt64
+    let peakBps: UInt64
+    func matches(_ candidate: QualityCandidate) -> Bool {
+        candidate.hasValidIdentity && candidateId == candidate.id
+            && recipeDigest == candidate.recipeDigest && route == candidate.route
+            && UUID(uuidString: artifactId) != nil
+            && outputIdentity.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+            && qualification == "complete_full_mux_rfc8216_v1"
+            && averageBps > 0 && peakBps >= averageBps
+    }
+}
+
+func measuredCandidatePeak(_ candidate: QualityCandidate, outputs: [MeasuredCandidateOutput]?) -> UInt64? {
+    guard let outputs, outputs.count <= 64 else { return nil }
+    let matched = outputs.filter { $0.matches(candidate) }
+    return matched.count == 1 ? matched.first?.peakBps : nil
+}
+
 struct QualityRung: Codable, Identifiable {
     var id: Int { height }
     let height: Int
@@ -854,6 +880,7 @@ struct Decision: Codable {
     var declaredOffsetMs: Int?
     var ladder: [QualityRung]?
     var qualityCandidates: [QualityCandidate]?
+    var measuredCandidateOutputs: [MeasuredCandidateOutput]?
     var qualityCandidateId: String?
     var displayAwareAutoProtocol: String?
     /// The dynamic range of the bytes this delivery plan would put on the wire
@@ -890,6 +917,7 @@ struct HlsStart: Codable {
     var vod: Bool?
     var ladder: [QualityRung]?
     var qualityCandidates: [QualityCandidate]?
+    var measuredCandidateOutputs: [MeasuredCandidateOutput]?
     var qualityCandidateId: String?
     var displayAwareAutoProtocol: String?
     /// The normalized output height this session actually received — for a

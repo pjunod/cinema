@@ -556,6 +556,31 @@ data class SourceSummary(
     val frame_rate: String? = null,
 )
 
+/** HTTP-only provenance, never forwarded as worker execution authority. */
+@Serializable
+data class MeasuredCandidateOutput(
+    val candidate_id: String,
+    val recipe_digest: List<Int>,
+    val route: String,
+    val artifact_id: String,
+    val output_identity: String,
+    val qualification: String,
+    val average_bps: Long,
+    val peak_bps: Long,
+) {
+    fun matches(candidate: QualityCandidate): Boolean = candidate.hasValidIdentity &&
+        candidate_id == candidate.id && recipe_digest == candidate.recipe_digest && route == candidate.route &&
+        Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(artifact_id) &&
+        Regex("[0-9a-f]{64}").matches(output_identity) && qualification == "complete_full_mux_rfc8216_v1" &&
+        average_bps > 0 && peak_bps >= average_bps
+}
+
+internal fun measuredCandidatePeak(candidate: QualityCandidate, outputs: List<MeasuredCandidateOutput>): Long? {
+    if (outputs.size > 64) return null
+    val matched = outputs.filter { it.matches(candidate) }
+    return matched.singleOrNull()?.peak_bps
+}
+
 /**
  * One advertised rung of the server's quality ladder (`transcode::Rung`), top
  * rung first and already filtered to what the source can feed — so the client's
@@ -618,6 +643,7 @@ data class Decision(
     val markers: List<Marker> = emptyList(),
     val ladder: List<Rung> = emptyList(),
     val quality_candidates: List<QualityCandidate> = emptyList(),
+    val measured_candidate_outputs: List<MeasuredCandidateOutput> = emptyList(),
     val quality_candidate_id: String? = null,
     val display_aware_auto_protocol: String? = null,
     val audio_offset_ms: Long = 0,
@@ -696,6 +722,7 @@ data class HlsStart(
     /** The rungs this source can feed, top first — §5.6's quality menu. */
     val ladder: List<Rung> = emptyList(),
     val quality_candidates: List<QualityCandidate> = emptyList(),
+    val measured_candidate_outputs: List<MeasuredCandidateOutput> = emptyList(),
     val quality_candidate_id: String? = null,
     val display_aware_auto_protocol: String? = null,
     /**
@@ -813,6 +840,11 @@ data class PlaybackSessionStatus(
 @Serializable
 enum class ReopenReason {
     @kotlinx.serialization.SerialName("stall") Stall,
+    @kotlinx.serialization.SerialName("link") Link,
+    @kotlinx.serialization.SerialName("encode") Encode,
+    @kotlinx.serialization.SerialName("decode") Decode,
+    @kotlinx.serialization.SerialName("hold") Hold,
+    @kotlinx.serialization.SerialName("authority") Authority,
 }
 
 /**

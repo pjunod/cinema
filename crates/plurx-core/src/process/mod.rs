@@ -29,13 +29,15 @@ pub struct ChildJob {
 /// The one launcher every production child goes through.
 ///
 /// Spawn without giving the child a chance to create descendants before its
-/// lifetime is tied to the daemon. On Unix the setup calls are no-ops; on
-/// Windows the child starts suspended, enters a kill-on-close Job Object, and
+/// lifetime is tied to the daemon. Linux spawns on a persistent owner thread
+/// and installs a parent-death SIGKILL before exec, including stopped children.
+/// Other Unix platforms retain their existing lifetime behavior. On Windows the child starts suspended, enters a kill-on-close Job Object, and
 /// only then resumes.
 ///
 /// `work` names the child's [`ChildClass`] and purpose: the child lowers its
 /// own CPU, I/O and OOM priority to the class's policy before `exec`
-/// ([`priority::apply`]; a failure there never fails the spawn), and it is
+/// ([`priority::apply`]; priority refusals never fail the spawn, but Linux
+/// ownership setup must succeed), and it is
 /// listed in [`priority::running`] until the returned job is dropped.
 /// `process::census::every_production_spawn_goes_through_the_launcher` fails
 /// on any production spawn that does not come through here.
@@ -46,7 +48,11 @@ pub fn spawn_job_owned(
     priority::apply(command, work.class);
     configure_suspended(command);
     #[allow(clippy::disallowed_methods)] // the launcher itself
-    let mut child = command.spawn()?;
+    let mut child = spawn_on_owner(
+        command,
+        || tokio::process::Command::new(""),
+        |command| command.spawn(),
+    )?;
     let mut job = ChildJob::attach(&child).inspect_err(|_| {
         let _ = child.start_kill();
     })?;
@@ -70,7 +76,7 @@ pub fn spawn_job_owned(
 /// | `transcode.rs` | 1 | stdout and stderr |
 /// | `subtitles.rs` | 1 | whole-track status and stderr |
 /// | `live_tv.rs` | 1 | status and stderr |
-/// | `live_tv/caption_audit_tests.rs` | 1 | status, stdout and stderr |
+/// | `live_tv/caption_probe.rs` | 1 | status, stdout and stderr |
 /// | `subtitle_ride_along.rs` | 1 | status, stdout and stderr |
 ///
 /// Subtitle window extraction uses the bounded diagnostic child instead of
@@ -114,7 +120,11 @@ pub fn output_job_owned_blocking(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     #[allow(clippy::disallowed_methods)] // the blocking launcher itself
-    let mut child = command.spawn()?;
+    let mut child = spawn_on_owner(
+        command,
+        || std::process::Command::new(""),
+        |command| command.spawn(),
+    )?;
     let mut job = match ChildJob::attach_pid(child.id()) {
         Ok(job) => job,
         Err(error) => {
@@ -127,6 +137,61 @@ pub fn output_job_owned_blocking(
     let output = child.wait_with_output();
     drop(job);
     output
+}
+
+/// Linux parent-death signals follow the thread that forks, so an idle Tokio
+/// blocking worker cannot own a long-lived child. Keep one spawn thread for
+/// the process lifetime; enter the caller's runtime only for its spawn so the
+/// returned Tokio child remains bound to the caller's I/O reactor.
+fn spawn_on_owner<C, T>(
+    command: &mut C,
+    replacement: impl FnOnce() -> C,
+    spawn: impl FnOnce(&mut C) -> io::Result<T> + Send + 'static,
+) -> io::Result<T>
+where
+    C: Send + 'static,
+    T: Send + 'static,
+{
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::{mpsc, LazyLock};
+        type Request = Box<dyn FnOnce() + Send>;
+        static OWNER: LazyLock<Result<mpsc::SyncSender<Request>, String>> = LazyLock::new(|| {
+            let (sender, receiver) = mpsc::sync_channel::<Request>(0);
+            std::thread::Builder::new()
+                .name("plurx-child-owner".into())
+                .spawn(move || {
+                    while let Ok(request) = receiver.recv() {
+                        request();
+                    }
+                })
+                .map(|_| sender)
+                .map_err(|error| error.to_string())
+        });
+        let owner = OWNER
+            .as_ref()
+            .map_err(|error| io::Error::other(error.clone()))?;
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        let mut owned = std::mem::replace(command, replacement());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        owner
+            .send(Box::new(move || {
+                let _runtime = runtime.as_ref().map(tokio::runtime::Handle::enter);
+                let result = spawn(&mut owned);
+                let _ = sender.send((owned, result));
+            }))
+            .map_err(|_| io::Error::other("child owner thread stopped"))?;
+        let (owned, result) = receiver
+            .recv()
+            .map_err(|_| io::Error::other("child owner thread lost spawn result"))?;
+        *command = owned;
+        result
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = replacement;
+        spawn(command)
+    }
 }
 
 #[cfg(unix)]
@@ -414,7 +479,7 @@ mod tests {
         let expected = BTreeMap::from([
             ("ffmpeg.rs".to_owned(), 4),
             ("live_tv.rs".to_owned(), 1),
-            ("live_tv/caption_audit_tests.rs".to_owned(), 1),
+            ("live_tv/caption_probe.rs".to_owned(), 1),
             ("pipeprobe.rs".to_owned(), 2),
             ("subtitle_ride_along.rs".to_owned(), 1),
             ("subtitles.rs".to_owned(), 1),

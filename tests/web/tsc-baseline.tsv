@@ -65,8 +65,8 @@ crates/plurxd/src/web/player/autoplay-next.js	TS2339	1
 crates/plurxd/src/web/player/autoplay-next.js	TS2551	1
 crates/plurxd/src/web/player/decode-margin.js	TS2339	6
 crates/plurxd/src/web/player/decode-tiers.js	TS2322	1
-crates/plurxd/src/web/player/decode-tiers.js	TS2339	12
-crates/plurxd/src/web/player/directed-change.js	TS2339	8
+crates/plurxd/src/web/player/decode-tiers.js	TS2339	11
+crates/plurxd/src/web/player/directed-change.js	TS2339	6
 crates/plurxd/src/web/player/measurements.js	TS2339	7
 crates/plurxd/src/web/player/measurements.js	TS2345	1
 crates/plurxd/src/web/player/menus.js	TS2339	3

@@ -4,7 +4,7 @@
   "documented_in": "docs/features/LIVE-TV-GUIDE-AND-UI-PLAN.md",
   "ruled": "2026-09-07",
   "notes": [
-    "Every client answers now/next/progress, grid layout, filtering and channel adjacency from these cases. Three reducers, one fixture \u2014 the way tests/playback/player-input-contract.json already works.",
+    "Every client answers now/next/progress, grid layout, filtering, channel adjacency and station logos from these cases. Three reducers, one fixture \u2014 the way tests/playback/player-input-contract.json already works.",
     "Times are unix seconds. The base instant 1789000800 is the plan's 8:00 PM; every offset is a whole number of half-hours from it unless a case says otherwise.",
     "`progress` is (now - start) / (end - start), and is null exactly when no programme is on."
   ],
@@ -587,5 +587,232 @@
       "delta": 1,
       "expect": null
     }
-  ]
+  ],
+  "station_logo": {
+    "rule": "A channel's logo is its guide channel's image_url, matched by lineup id and returned when it is 1-512 printable-ASCII characters (0x21-0x7E), begins https:// (scheme compared case-insensitively), and has an authority \u2014 everything up to the first '/', '?' or '#' \u2014 that is a host of letters, digits, '.' and '-' or a bracketed IPv6 literal, with an optional port of 1-5 digits no greater than 65535. The accepted value is returned with its scheme spelled 'https://' and otherwise verbatim. Anything else is null and the client draws the callsign. A logo that is accepted and then fails to load also leaves the callsign.",
+    "match": [
+      {
+        "name": "a channel with station artwork",
+        "channel": "2.1",
+        "expect": "https://example.invalid/cbs.png"
+      },
+      {
+        "name": "a channel the guide has no artwork for",
+        "channel": "4.1",
+        "expect": null
+      },
+      {
+        "name": "the matching channel's artwork, not a neighbour's",
+        "channel": "7.1",
+        "expect": "https://example.invalid/abc.png"
+      },
+      {
+        "name": "a lineup channel the guide does not carry",
+        "channel": "11.1",
+        "expect": null
+      },
+      {
+        "name": "a channel id nobody has",
+        "channel": "99.9",
+        "expect": null
+      }
+    ],
+    "no_guide": {
+      "name": "a cold or unavailable guide leaves every callsign",
+      "channel": "2.1",
+      "expect": null
+    },
+    "values_note": "Each value is the image_url of a single guide channel with id 'logo' and no programmes; the client answers stationLogoUrl(guide, 'logo'). A case without image_url omits the key.",
+    "values": [
+      {
+        "name": "an HDHomeRun station image",
+        "image_url": "https://img.hdhomerun.com/channels/US28717.png",
+        "expect": "https://img.hdhomerun.com/channels/US28717.png"
+      },
+      {
+        "name": "a query string is kept verbatim",
+        "image_url": "https://images.example/cbs6.png?size=large&theme=color",
+        "expect": "https://images.example/cbs6.png?size=large&theme=color"
+      },
+      {
+        "name": "the scheme is case-insensitive and is the only part respelled",
+        "image_url": "HTTPS://Images.Example/Logo.png",
+        "expect": "https://Images.Example/Logo.png"
+      },
+      {
+        "name": "an explicit port",
+        "image_url": "https://images.example:8443/logo.png",
+        "expect": "https://images.example:8443/logo.png"
+      },
+      {
+        "name": "the largest port",
+        "image_url": "https://images.example:65535/logo.png",
+        "expect": "https://images.example:65535/logo.png"
+      },
+      {
+        "name": "a bracketed IPv6 host",
+        "image_url": "https://[2001:db8::1]/logo.png",
+        "expect": "https://[2001:db8::1]/logo.png"
+      },
+      {
+        "name": "a bare host",
+        "image_url": "https://images.example",
+        "expect": "https://images.example"
+      },
+      {
+        "name": "a query straight after the host",
+        "image_url": "https://images.example?id=7",
+        "expect": "https://images.example?id=7"
+      },
+      {
+        "name": "a mixed-case scheme",
+        "image_url": "hTtPs://images.example/logo.png",
+        "expect": "https://images.example/logo.png"
+      },
+      {
+        "name": "a bracketed IPv6 host with a port",
+        "image_url": "https://[2001:db8::1]:8443/logo.png",
+        "expect": "https://[2001:db8::1]:8443/logo.png"
+      },
+      {
+        "name": "a fragment straight after the host",
+        "image_url": "https://images.example#logo",
+        "expect": "https://images.example#logo"
+      },
+      {
+        "name": "exactly 512 characters",
+        "image_url": "https://images.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "expect": "https://images.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "name": "no image_url at all",
+        "expect": null
+      },
+      {
+        "name": "a null image_url",
+        "image_url": null,
+        "expect": null
+      },
+      {
+        "name": "an empty string",
+        "image_url": "",
+        "expect": null
+      },
+      {
+        "name": "513 characters",
+        "image_url": "https://images.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "expect": null
+      },
+      {
+        "name": "plain http",
+        "image_url": "http://images.example/logo.png",
+        "expect": null
+      },
+      {
+        "name": "a server-relative path",
+        "image_url": "/local.png",
+        "expect": null
+      },
+      {
+        "name": "a scheme-relative address",
+        "image_url": "//images.example/logo.png",
+        "expect": null
+      },
+      {
+        "name": "a script address",
+        "image_url": "javascript:alert(1)",
+        "expect": null
+      },
+      {
+        "name": "a data address",
+        "image_url": "data:image/svg+xml,test",
+        "expect": null
+      },
+      {
+        "name": "https with no slashes",
+        "image_url": "https:images.example/logo.png",
+        "expect": null
+      },
+      {
+        "name": "user and password",
+        "image_url": "https://user:secret@images.example/logo.png",
+        "expect": null
+      },
+      {
+        "name": "a user name",
+        "image_url": "https://user@images.example/logo.png",
+        "expect": null
+      },
+      {
+        "name": "an empty host",
+        "image_url": "https:///logo.png",
+        "expect": null
+      },
+      {
+        "name": "an underscore in the host",
+        "image_url": "https://images_example/logo.png",
+        "expect": null
+      },
+      {
+        "name": "an unterminated IPv6 host",
+        "image_url": "https://[2001:db8::1/logo.png",
+        "expect": null
+      },
+      {
+        "name": "text after a bracketed IPv6 host",
+        "image_url": "https://[2001:db8::1]x/logo.png",
+        "expect": null
+      },
+      {
+        "name": "two ports",
+        "image_url": "https://images.example:1:2/logo.png",
+        "expect": null
+      },
+      {
+        "name": "a port past 65535",
+        "image_url": "https://images.example:65536/logo.png",
+        "expect": null
+      },
+      {
+        "name": "a six-digit port",
+        "image_url": "https://images.example:000443/logo.png",
+        "expect": null
+      },
+      {
+        "name": "a port that is not a number",
+        "image_url": "https://images.example:https/logo.png",
+        "expect": null
+      },
+      {
+        "name": "an empty port",
+        "image_url": "https://images.example:/logo.png",
+        "expect": null
+      },
+      {
+        "name": "a space in the path",
+        "image_url": "https://images.example/my logo.png",
+        "expect": null
+      },
+      {
+        "name": "a leading space",
+        "image_url": " https://images.example/logo.png",
+        "expect": null
+      },
+      {
+        "name": "a trailing newline",
+        "image_url": "https://images.example/logo.png\n",
+        "expect": null
+      },
+      {
+        "name": "a tab in the host",
+        "image_url": "https://images.\texample/logo.png",
+        "expect": null
+      },
+      {
+        "name": "a non-ASCII character",
+        "image_url": "https://images.example/log\u00f3.png",
+        "expect": null
+      }
+    ]
+  }
 }

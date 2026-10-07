@@ -2827,7 +2827,63 @@ impl TerminalCommitReceipt {
 pub(crate) type GateAnswer<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
 
+/// Private observational origin; never serialized or used as control authority.
+#[derive(Clone, Debug)]
+pub(crate) struct AcceptedControlIdentity {
+    pub generation: String,
+    pub owner_epoch: u64,
+    pub client_instance_id: String,
+    pub sequence: u64,
+    pub fingerprint: String,
+    pub desired_digest: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AcceptedControlFence {
+    identity: AcceptedControlIdentity,
+    desired_lifetime: u64,
+    live: Arc<AtomicBool>,
+}
+
+impl AcceptedControlFence {
+    pub(crate) fn still_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) type ObservationAnswer<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<AcceptedControlFence>> + Send + 'a>>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct StagedObservationFence(Arc<AtomicBool>);
+impl StagedObservationFence {
+    pub(crate) fn still_live(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+pub(crate) type StagedObservationAnswer<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Option<StagedObservationFence>> + Send + 'a>,
+>;
+
 pub(crate) trait PreparationGate: Send + Sync {
+    fn staged_observation_is_current<'a>(
+        &'a self,
+        _fence: AcceptedControlFence,
+        _incarnation: String,
+        _deadline: i64,
+    ) -> StagedObservationAnswer<'a> {
+        Box::pin(async { None })
+    }
+    fn accepted_observation<'a>(
+        &'a self,
+        _identity: AcceptedControlIdentity,
+    ) -> ObservationAnswer<'a> {
+        Box::pin(async { None })
+    }
+
+    fn observation_is_current<'a>(&'a self, _fence: AcceptedControlFence) -> GateAnswer<'a> {
+        Box::pin(async { false })
+    }
     #[cfg(test)]
     fn stage_preparation<'a>(
         &'a self,
@@ -2910,6 +2966,55 @@ pub(crate) trait PreparationGate: Send + Sync {
 }
 
 impl PreparationGate for RollingControlHandle {
+    fn staged_observation_is_current<'a>(
+        &'a self,
+        fence: AcceptedControlFence,
+        incarnation: String,
+        deadline: i64,
+    ) -> StagedObservationAnswer<'a> {
+        Box::pin(async move {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            if self
+                .enqueue_command(RollingControlCommand::StagedObservationIsCurrent {
+                    fence,
+                    incarnation,
+                    deadline,
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                return None;
+            }
+            response.await.ok().flatten()
+        })
+    }
+    fn accepted_observation<'a>(
+        &'a self,
+        identity: AcceptedControlIdentity,
+    ) -> ObservationAnswer<'a> {
+        Box::pin(async move {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            self.enqueue_command(RollingControlCommand::AcceptedObservation { identity, reply })
+                .await
+                .ok()?;
+            response.await.ok().flatten()
+        })
+    }
+
+    fn observation_is_current<'a>(&'a self, fence: AcceptedControlFence) -> GateAnswer<'a> {
+        Box::pin(async move {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            if self
+                .enqueue_command(RollingControlCommand::ObservationIsCurrent { fence, reply })
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            response.await.unwrap_or(false)
+        })
+    }
     fn stage_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: String,
@@ -3396,6 +3501,10 @@ pub(crate) struct PersistDesired {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ControlState {
+    observational_stage_live: Arc<AtomicBool>,
+    // Exhaustion is permanently Unknown; desired lifetimes must never wrap.
+    observational_desired_lifetime: Option<u64>,
+    observational_live: Arc<AtomicBool>,
     generation: Option<String>,
     owner_epoch: u64,
     client_instance_id: Option<uuid::Uuid>,
@@ -3496,6 +3605,9 @@ pub(crate) struct ControlState {
 impl Default for ControlState {
     fn default() -> Self {
         Self {
+            observational_stage_live: Arc::new(AtomicBool::new(false)),
+            observational_desired_lifetime: Some(0),
+            observational_live: Arc::new(AtomicBool::new(true)),
             generation: None,
             owner_epoch: 0,
             client_instance_id: None,
@@ -3711,11 +3823,48 @@ impl Disposition {
 /// sites and two of the three `?` sites; the third, a missing client platform
 /// after the client is registered, cannot be reached because registration
 /// sets both together.
+///
+/// **Reading `state` and never writing it includes its liveness tokens.**
+/// `ControlState` is `Clone`, and a clone shares `observational_live` and
+/// `observational_stage_live` with the state it came from — that sharing is
+/// what lets a fence handed out earlier see the state retire it. So a step
+/// that ran the body on a plain clone would store `false` into the very
+/// tokens its caller still holds, retiring the caller's fences for an
+/// exchange the caller has not adopted (and, for a refused packet, may never
+/// adopt). The step therefore runs on private copies of both tokens; only
+/// [`ControlState::accept_at`], which adopts the result, carries a retirement
+/// back to the tokens the outstanding fences hold. Production reaches the
+/// step only through `accept_at`, which needs those private copies to adopt;
+/// this form, which drops them, is the one the step's own tests drive.
+#[cfg(test)]
 pub(crate) fn accept_step(
     state: &ControlState,
     now: Instant,
     request: ControlRequestView<'_>,
 ) -> (ControlState, Result<Disposition, ControlStateError>) {
+    let (next, result, _private) = accept_step_detached(state, now, request);
+    (next, result)
+}
+
+/// The liveness tokens [`accept_step_detached`] substituted for the caller's.
+///
+/// Kept so adoption can tell a token the step merely retired (still this
+/// private copy, now `false`) from one the step replaced with a new lifetime
+/// (a different `Arc` altogether).
+struct DetachedObservationTokens {
+    stage_live: Arc<AtomicBool>,
+    live: Arc<AtomicBool>,
+}
+
+fn accept_step_detached(
+    state: &ControlState,
+    now: Instant,
+    request: ControlRequestView<'_>,
+) -> (
+    ControlState,
+    Result<Disposition, ControlStateError>,
+    DetachedObservationTokens,
+) {
     let ControlRequestView {
         generation,
         owner_epoch,
@@ -3724,6 +3873,16 @@ pub(crate) fn accept_step(
         acceptance,
     } = request;
     let mut next = state.clone();
+    let private = DetachedObservationTokens {
+        stage_live: Arc::new(AtomicBool::new(
+            state.observational_stage_live.load(Ordering::Acquire),
+        )),
+        live: Arc::new(AtomicBool::new(
+            state.observational_live.load(Ordering::Acquire),
+        )),
+    };
+    next.observational_stage_live = Arc::clone(&private.stage_live);
+    next.observational_live = Arc::clone(&private.live);
     let result = next
         .accept_in_place(
             now,
@@ -3734,10 +3893,96 @@ pub(crate) fn accept_step(
             acceptance,
         )
         .map(Disposition::from_tuple);
-    (next, result)
+    (next, result, private)
+}
+
+/// Carry one liveness token across adoption of a step's result.
+///
+/// Tokens only ever go from live to retired, so the reconciliation is total:
+/// a token the step kept is reattached to the caller's `Arc` (so fences
+/// already handed out stay connected to the adopted state), retiring that
+/// `Arc` if the step retired its private copy; a token the step replaced
+/// means the caller's lifetime is over, and its `Arc` is retired.
+fn adopt_observation_token(
+    published: &Arc<AtomicBool>,
+    adopted: &mut Arc<AtomicBool>,
+    private: &Arc<AtomicBool>,
+) {
+    if Arc::ptr_eq(adopted, private) {
+        if !private.load(Ordering::Acquire) {
+            published.store(false, Ordering::Release);
+        }
+        *adopted = Arc::clone(published);
+    } else {
+        published.store(false, Ordering::Release);
+    }
 }
 
 impl ControlState {
+    pub(crate) fn invalidate_observational_attachment(&mut self) {
+        self.advance_observational_lifetime();
+    }
+    pub(crate) fn staged_observation_token(
+        &self,
+        fence: &AcceptedControlFence,
+        incarnation: &str,
+        deadline: i64,
+    ) -> Option<StagedObservationFence> {
+        (self.staged_observation_is_current(fence, incarnation, deadline)
+            && self.observational_stage_live.load(Ordering::Acquire))
+        .then(|| StagedObservationFence(Arc::clone(&self.observational_stage_live)))
+    }
+    pub(crate) fn staged_observation_is_current(
+        &self,
+        fence: &AcceptedControlFence,
+        incarnation: &str,
+        deadline: i64,
+    ) -> bool {
+        self.observation_is_current(fence)
+            && self.preparation_quality_current()
+            && matches!(&self.preparation, PreparationSlot::Staged { staged_incarnation_id, deadline_ms, desired_digest, .. }
+                if staged_incarnation_id == incarnation && *deadline_ms == deadline
+                    && *deadline_ms > crate::media_sessions::unix_ms()
+                    && desired_digest.as_deref() == Some(fence.identity.desired_digest.as_str()))
+    }
+    fn advance_observational_lifetime(&mut self) {
+        self.observational_stage_live
+            .store(false, Ordering::Release);
+        self.observational_live.store(false, Ordering::Release);
+        self.observational_desired_lifetime = self
+            .observational_desired_lifetime
+            .and_then(|n| n.checked_add(1));
+        self.observational_live = Arc::new(AtomicBool::new(
+            self.observational_desired_lifetime.is_some(),
+        ));
+    }
+
+    pub(crate) fn accepted_observation(
+        &self,
+        identity: AcceptedControlIdentity,
+    ) -> Option<AcceptedControlFence> {
+        let fence = AcceptedControlFence {
+            identity,
+            desired_lifetime: self.observational_desired_lifetime?,
+            live: Arc::clone(&self.observational_live),
+        };
+        (self.last_sequence == fence.identity.sequence
+            && self.prior_request_fingerprint.as_deref()
+                == Some(fence.identity.fingerprint.as_str())
+            && self.observation_is_current(&fence))
+        .then_some(fence)
+    }
+
+    pub(crate) fn observation_is_current(&self, fence: &AcceptedControlFence) -> bool {
+        fence.still_live()
+            && self.observational_desired_lifetime == Some(fence.desired_lifetime)
+            && self.generation.as_deref() == Some(fence.identity.generation.as_str())
+            && self.owner_epoch == fence.identity.owner_epoch
+            && self.client_instance_id.map(|id| id.to_string()).as_deref()
+                == Some(fence.identity.client_instance_id.as_str())
+            && self.last_sequence >= fence.identity.sequence
+            && self.desired_digest.as_deref() == Some(fence.identity.desired_digest.as_str())
+    }
     /// Apply the second, owner-local fence after ingress or relay has proved
     /// the same tuple against the durable route. Advancing an epoch resets the
     /// client sequence space; an older epoch can never renew the new owner.
@@ -3770,7 +4015,7 @@ impl ControlState {
         acceptance: ControlAcceptance,
     ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform, bool), ControlStateError>
     {
-        let (next, result) = accept_step(
+        let (mut next, result, private) = accept_step_detached(
             self,
             now,
             ControlRequestView {
@@ -3780,6 +4025,18 @@ impl ControlState {
                 sequence,
                 acceptance,
             },
+        );
+        // Adoption, on both arms (rejection has never been atomic): only now
+        // may the step's retirements reach the tokens outstanding fences hold.
+        adopt_observation_token(
+            &self.observational_stage_live,
+            &mut next.observational_stage_live,
+            &private.stage_live,
+        );
+        adopt_observation_token(
+            &self.observational_live,
+            &mut next.observational_live,
+            &private.live,
         );
         *self = next;
         result.map(Disposition::into_tuple)
@@ -3847,6 +4104,8 @@ impl ControlState {
                 None
             };
             if let Some(staged_incarnation_id) = &inherited {
+                self.observational_stage_live
+                    .store(false, Ordering::Release);
                 self.preparation = PreparationSlot::Aborting {
                     staged_incarnation_id: staged_incarnation_id.clone(),
                 };
@@ -3864,6 +4123,7 @@ impl ControlState {
             // action identity must survive too. Clearing only the binding
             // would let the same staged incarnation mint a second action id.
             self.last_selection = None;
+            self.advance_observational_lifetime();
             self.desired_digest = None;
             self.dispatched_digest = None;
             // Not cleared on an epoch rollover, deliberately. A new owner
@@ -3958,6 +4218,9 @@ impl ControlState {
         // wrong-instance packet was never accepted, and a rejected packet must
         // not be able to move what the viewer is understood to want.
         if let Some(desired_digest) = desired_digest {
+            if self.desired_digest.as_ref() != Some(&desired_digest) {
+                self.advance_observational_lifetime();
+            }
             self.desired_digest = Some(desired_digest);
         }
         let terminal_directive = rollover_preparation.or_else(|| {
@@ -4338,6 +4601,9 @@ impl ControlState {
             .last_capabilities
             .clone()
             .filter(|caps| caps.decoder_caps.is_some() || caps.presentation_target.is_some());
+        self.observational_stage_live
+            .store(false, Ordering::Release);
+        self.observational_stage_live = Arc::new(AtomicBool::new(true));
         self.preparation = PreparationSlot::Staged {
             staged_incarnation_id,
             predecessor_incarnation_id,
@@ -4390,6 +4656,8 @@ impl ControlState {
             return false;
         }
         let already = matches!(self.preparation, PreparationSlot::Aborting { .. });
+        self.observational_stage_live
+            .store(false, Ordering::Release);
         self.preparation = PreparationSlot::Aborting {
             staged_incarnation_id: staged_incarnation_id.to_owned(),
         };
@@ -4429,6 +4697,8 @@ impl ControlState {
                     .zip(self.desired_digest.as_ref())
                     .is_none_or(|(staged_for, wanted)| staged_for == wanted) =>
             {
+                self.observational_stage_live
+                    .store(false, Ordering::Release);
                 self.preparation = PreparationSlot::Committing {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
                     deadline_ms: *deadline_ms,
@@ -4492,6 +4762,8 @@ impl ControlState {
                 staged_incarnation_id: staged,
                 ..
             } if staged == staged_incarnation_id => {
+                self.observational_stage_live
+                    .store(false, Ordering::Release);
                 self.preparation = PreparationSlot::Aborting {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
                 };
@@ -4541,6 +4813,8 @@ impl ControlState {
         if self.preparation.staged_incarnation_id() != Some(staged_incarnation_id) {
             return false;
         }
+        self.observational_stage_live
+            .store(false, Ordering::Release);
         self.preparation = PreparationSlot::Empty;
         // Keep the action binding as a tombstone until the next successor is
         // staged. A client may acknowledge the Prepare after deadline cleanup
@@ -8174,6 +8448,20 @@ struct OwnedLocalControlRequest {
 }
 
 enum RollingControlCommand {
+    StagedObservationIsCurrent {
+        fence: AcceptedControlFence,
+        incarnation: String,
+        deadline: i64,
+        reply: tokio::sync::oneshot::Sender<Option<StagedObservationFence>>,
+    },
+    AcceptedObservation {
+        identity: AcceptedControlIdentity,
+        reply: tokio::sync::oneshot::Sender<Option<AcceptedControlFence>>,
+    },
+    ObservationIsCurrent {
+        fence: AcceptedControlFence,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     #[cfg(test)]
     Renew {
         kind: &'static str,
@@ -8389,6 +8677,9 @@ impl RollingControlCommand {
             Self::CommitMedia { .. } => Some(5),
             Self::CommitGenerationMetadata { .. } => Some(14),
             Self::Snapshot { .. } => Some(6),
+            Self::AcceptedObservation { .. }
+            | Self::ObservationIsCurrent { .. }
+            | Self::StagedObservationIsCurrent { .. } => None,
             Self::ClaimExpiry { .. } => Some(7),
             Self::Terminal { .. } => Some(8),
         }
@@ -12041,6 +12332,7 @@ impl RollingControlActor {
             );
         }
         self.retired = true;
+        self.control.advance_observational_lifetime();
         self.terminal = Some(cause);
         // A disconnect does not imply a commit. Whatever ended this playback --
         // an explicit end, a fence, or the lease simply expiring -- a successor
@@ -12592,6 +12884,35 @@ impl RollingControlActor {
                         },
                     );
                     let _ = reply.send(outcome);
+                }
+                RollingControlCommand::StagedObservationIsCurrent {
+                    fence,
+                    incarnation,
+                    deadline,
+                    reply,
+                } => {
+                    let answer = (!self.retired
+                        && published_at < self.snapshot_at(published_at).deadline)
+                        .then(|| {
+                            self.control
+                                .staged_observation_token(&fence, &incarnation, deadline)
+                        })
+                        .flatten();
+                    let _ = reply.send(answer);
+                }
+                RollingControlCommand::AcceptedObservation { identity, reply } => {
+                    let answer = (!self.retired
+                        && published_at < self.snapshot_at(published_at).deadline)
+                        .then(|| self.control.accepted_observation(identity))
+                        .flatten();
+                    let _ = reply.send(answer);
+                }
+                RollingControlCommand::ObservationIsCurrent { fence, reply } => {
+                    let _ = reply.send(
+                        !self.retired
+                            && published_at < self.snapshot_at(published_at).deadline
+                            && self.control.observation_is_current(&fence),
+                    );
                 }
                 RollingControlCommand::Snapshot { reply } => {
                     // A snapshot is an actor command, not an advisory timestamp
@@ -14549,20 +14870,21 @@ pub(crate) fn record_preparation_staged(staged: bool) {
 /// and thrown away, or which policy threw them.
 ///
 /// Index order is [`PREPARATION_CANCELLED_REASONS`].
-static PREPARATIONS_CANCELLED: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+static PREPARATIONS_CANCELLED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
 /// The label vocabulary for [`record_preparation_cancelled`], in index order.
 ///
 /// `other` is last and is deliberately not removable: it is what keeps the sum
 /// of this counter equal to the number of settlements, so a reason nobody
 /// mapped shows up as an unexplained teardown instead of vanishing.
-pub(crate) const PREPARATION_CANCELLED_REASONS: [&str; 7] = [
+pub(crate) const PREPARATION_CANCELLED_REASONS: [&str; 8] = [
     "predecessor_superseded",
     "incumbent_waiting",
     "foreground_claimed",
     "disabled",
     "expired",
     "ownership_cancelled",
+    "intent_cancelled",
     "other",
 ];
 
@@ -14582,6 +14904,9 @@ pub(crate) fn preparation_cancelled_label(reason: &str) -> &'static str {
         "prepared successor ownership was cancelled" | "prepared successor reservation refused" => {
             "ownership_cancelled"
         }
+        // The viewer's quality intent changed and its durable cancellation
+        // receipt retired the staged successor.
+        "quality intent cancelled" => "intent_cancelled",
         _ => "other",
     }
 }
@@ -15282,6 +15607,86 @@ pub(crate) fn prometheus() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a05_prepared_observation_survives_same_intent_poll_but_not_away_back_or_epoch_reset() {
+        let mut state = ControlState::default();
+        let client = uuid::Uuid::new_v4().to_string();
+        let selected = selection_at(QualitySelection::Auto {
+            height: Some(720),
+            candidate_id: None,
+        });
+        let away = selection_at(QualitySelection::Auto {
+            height: Some(1080),
+            candidate_id: None,
+        });
+        let started = Instant::now();
+        let accept = |state: &mut ControlState,
+                      sequence,
+                      epoch,
+                      selection: &ClientSelection,
+                      fingerprint: &str| {
+            state
+                .accept_at(
+                    started + Duration::from_secs(sequence),
+                    "incarnation",
+                    epoch,
+                    &client,
+                    sequence,
+                    ControlAcceptance::new(Some(ClientPlatform::Web), None)
+                        .asking(selection)
+                        .fingerprinted(fingerprint),
+                )
+                .expect("accepted")
+        };
+        assert_eq!(
+            accept(&mut state, 1, 1, &selected, "original").0,
+            ControlDisposition::Accepted
+        );
+        let identity = AcceptedControlIdentity {
+            generation: "incarnation".into(),
+            owner_epoch: 1,
+            client_instance_id: client.clone(),
+            sequence: 1,
+            fingerprint: "original".into(),
+            desired_digest: selected.desired().digest(),
+        };
+        let proof = state
+            .accepted_observation(identity.clone())
+            .expect("exact origin");
+        accept(&mut state, 2, 1, &selected, "poll-position");
+        assert!(
+            state.observation_is_current(&proof),
+            "new Poll fingerprint is not a new attachment"
+        );
+        assert!(
+            state.accepted_observation(identity.clone()).is_none(),
+            "old origin cannot be newly minted"
+        );
+        accept(&mut state, 3, 1, &away, "away");
+        accept(&mut state, 4, 1, &selected, "back");
+        assert!(
+            !state.observation_is_current(&proof),
+            "same digest cannot resurrect an old lifetime"
+        );
+        let latest = state
+            .accepted_observation(AcceptedControlIdentity {
+                sequence: 4,
+                fingerprint: "back".into(),
+                ..identity
+            })
+            .expect("new lifetime");
+        accept(&mut state, 1, 2, &selected, "new-owner");
+        assert!(!state.observation_is_current(&latest));
+        assert!(!ControlState::default().observation_is_current(&latest));
+        state.observational_desired_lifetime = Some(u64::MAX);
+        state.advance_observational_lifetime();
+        state.advance_observational_lifetime();
+        assert_eq!(
+            state.observational_desired_lifetime, None,
+            "overflow is permanently Unknown"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn terminal_commit_retry_starts_before_but_not_at_or_after_exact_expiry() {
@@ -25206,8 +25611,13 @@ mod tests {
 
     fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
         crate::transcode::SessionRequest {
+            sdr_master_codecs: None,
+            continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             file_id: 5615,
             playback_id: "player-a".to_owned(),
             request_id: None,
@@ -25218,6 +25628,8 @@ mod tests {
             kind,
             start_seconds: 12.5,
             audio_index: Some(0),
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -25815,8 +26227,13 @@ mod tests {
 
         fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
             SessionRequest {
+                sdr_master_codecs: None,
+                continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 file_id: 1,
                 playback_id: "player-a".to_owned(),
                 request_id: None,
@@ -25827,6 +26244,8 @@ mod tests {
                 kind,
                 start_seconds: 0.0,
                 audio_index: None,
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10,
@@ -26108,6 +26527,7 @@ mod tests {
         now_ms: i64,
     ) -> plurx_core::domain::MediaSessionPreparation {
         plurx_core::domain::MediaSessionPreparation {
+            quality_cancellation_key: None,
             expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -31933,7 +32353,8 @@ mod tests {
             /// its sequence or platform is judged.
             GenerationAdopted,
             /// Finding, preserved: the ask lands before the prepared-successor
-            /// observation can refuse the packet.
+            /// observation can refuse the packet — and with it the new
+            /// observational lifetime a changed ask opens.
             AskAdvanced,
             /// Finding, preserved: an owner-epoch advance resets the sequence
             /// space and registers the client before the observation refuses.
@@ -32365,6 +32786,11 @@ mod tests {
         );
         for row in rows.into_iter().chain(pairs) {
             let before = row.state.clone();
+            // Snapshotted, not re-read: `before` shares its liveness tokens
+            // with every clone below, and the in-place body and `accept_at`
+            // (which adopts) legitimately retire them. What the refused packet
+            // is measured against is the state as it was handed.
+            let handed = format!("{before:?}");
             let request = || ControlRequestView {
                 generation: &row.generation,
                 owner_epoch: row.owner_epoch,
@@ -32374,6 +32800,12 @@ mod tests {
             };
             let (next, result) = accept_step(&before, row.now, request());
             assert_eq!(result, Err(row.expected), "{}", row.site);
+            assert_eq!(
+                format!("{before:?}"),
+                handed,
+                "{}: the step wrote its input",
+                row.site
+            );
 
             let mut mutable = before.clone();
             assert_eq!(
@@ -32435,6 +32867,15 @@ mod tests {
                         row.site
                     );
                     residue.desired_digest = None;
+                    assert_eq!(
+                        residue.observational_desired_lifetime,
+                        before
+                            .observational_desired_lifetime
+                            .and_then(|lifetime| lifetime.checked_add(1)),
+                        "{}: a changed ask opens exactly one new observational lifetime",
+                        row.site
+                    );
+                    residue.observational_desired_lifetime = before.observational_desired_lifetime;
                 }
                 LeftBehind::EpochRolledOver => {
                     assert_eq!(
@@ -32456,7 +32897,7 @@ mod tests {
             }
             assert_eq!(
                 format!("{residue:?}"),
-                format!("{before:?}"),
+                handed,
                 "{}: the refused packet left state behind",
                 row.site
             );
@@ -32541,5 +32982,105 @@ mod tests {
             stepped = next;
         }
         assert_eq!(replays, 1, "the run exercises exactly one replay");
+    }
+
+    /// `ControlState` clones share their liveness tokens, so the step has to
+    /// run on private copies: a fence handed out before an exchange that opens
+    /// a new lifetime stays live until that exchange is **adopted**, and a
+    /// fence that outlives an adopted exchange which kept the lifetime is
+    /// still connected to the adopted state's token.
+    #[test]
+    fn accept_step_retires_outstanding_fences_only_on_adoption() {
+        let started = Instant::now();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let client = uuid::Uuid::new_v4().to_string();
+        let selected = selection_at(QualitySelection::Manual { height: 480 });
+        let away = selection_at(QualitySelection::Manual { height: 720 });
+        let identity =
+            |sequence, fingerprint: &str, selection: &ClientSelection| AcceptedControlIdentity {
+                generation: generation.clone(),
+                owner_epoch: 1,
+                client_instance_id: client.clone(),
+                sequence,
+                fingerprint: fingerprint.to_owned(),
+                desired_digest: selection.desired().digest(),
+            };
+        let mut state = ControlState::default();
+        state
+            .accept_at(
+                started,
+                &generation,
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), None)
+                    .asking(&selected)
+                    .fingerprinted("origin"),
+            )
+            .expect("sequence 1 accepted");
+        let origin = state
+            .accepted_observation(identity(1, "origin", &selected))
+            .expect("the accepted exchange mints a fence");
+
+        let moved_at = started + MIN_CONTROL_INTERVAL;
+        let moved = || {
+            ControlAcceptance::new(None, None)
+                .asking(&away)
+                .fingerprinted("away")
+        };
+        let (next, result) = accept_step(
+            &state,
+            moved_at,
+            ControlRequestView {
+                generation: &generation,
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence: 2,
+                acceptance: moved(),
+            },
+        );
+        assert!(result.is_ok(), "the changed ask is accepted");
+        assert!(
+            origin.still_live(),
+            "a step nobody adopted must not retire the caller's fence"
+        );
+        assert!(state.observation_is_current(&origin));
+        assert!(
+            !next.observation_is_current(&origin),
+            "the stepped state has opened a new lifetime"
+        );
+
+        state
+            .accept_at(moved_at, &generation, 1, &client, 2, moved())
+            .expect("sequence 2 adopted");
+        assert!(
+            !origin.still_live(),
+            "adopting the new lifetime retires the fence handed out before it"
+        );
+
+        let latest = state
+            .accepted_observation(identity(2, "away", &away))
+            .expect("the new lifetime mints a fence");
+        state
+            .accept_at(
+                moved_at + MIN_CONTROL_INTERVAL,
+                &generation,
+                1,
+                &client,
+                3,
+                ControlAcceptance::new(None, None)
+                    .asking(&away)
+                    .fingerprinted("poll"),
+            )
+            .expect("sequence 3 adopted");
+        assert!(
+            latest.still_live() && state.observation_is_current(&latest),
+            "an exchange that keeps the lifetime keeps its fences"
+        );
+        state.invalidate_observational_attachment();
+        assert!(
+            !latest.still_live(),
+            "the fence is still attached to the adopted state's token"
+        );
     }
 }

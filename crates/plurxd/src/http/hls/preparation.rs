@@ -27,6 +27,7 @@ pub(super) struct ActivePreparedSuccessor {
     executor: crate::playback_control::PreparationExecutor,
     pub(super) preparation: plurx_core::domain::MediaSessionPreparation,
     pub(super) purpose: PreparationPurpose,
+    quality_intent: Option<QualityIntentIdentity>,
     cancelled: tokio_util::sync::CancellationToken,
 }
 
@@ -74,7 +75,8 @@ pub(in crate::http) async fn prepared_handoff_write_guard() -> tokio::sync::Owne
 struct PendingPreparationCandidate {
     claim: u64,
     desired_digest: String,
-    cancelled: bool,
+    quality_intent: Option<QualityIntentIdentity>,
+    cancelled: tokio_util::sync::CancellationToken,
 }
 
 fn pending_preparation_candidates(
@@ -95,6 +97,10 @@ static NEXT_PENDING_CANDIDATE_CLAIM: std::sync::atomic::AtomicU64 =
 pub(super) struct PendingCandidateGuard {
     playback_id: String,
     claim: u64,
+    quality_intent: Option<QualityIntentIdentity>,
+    registered: Arc<std::sync::atomic::AtomicBool>,
+    settlement: Option<(AppState, String, i64)>,
+    cancelled: tokio_util::sync::CancellationToken,
 }
 
 impl PendingCandidateGuard {
@@ -102,9 +108,37 @@ impl PendingCandidateGuard {
     /// older one: there is one preparation slot per playback, so the older
     /// candidate is already doomed, and leaving its digest installed would make
     /// the emit rule answer `staging` about work nobody asked for any more.
+    #[cfg(test)]
     pub(super) fn begin(playback_id: &str, desired_digest: &str) -> Self {
+        Self::begin_owned(playback_id, desired_digest, None)
+    }
+
+    pub(super) fn begin_control(
+        state: &AppState,
+        route: &MediaSessionRoute,
+        request: &crate::playback_control::ControlRequestV1,
+    ) -> Self {
+        let mut pending = Self::begin_owned(
+            &route.playback_id,
+            &request.selection.desired().digest(),
+            QualityIntentIdentity::from_control(request),
+        );
+        pending.settlement = Some((
+            state.clone(),
+            route.owner_node_id.clone(),
+            route.owner_epoch,
+        ));
+        pending
+    }
+
+    fn begin_owned(
+        playback_id: &str,
+        desired_digest: &str,
+        quality_intent: Option<QualityIntentIdentity>,
+    ) -> Self {
         let claim = NEXT_PENDING_CANDIDATE_CLAIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        pending_preparation_candidates()
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let previous = pending_preparation_candidates()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
@@ -112,13 +146,25 @@ impl PendingCandidateGuard {
                 PendingPreparationCandidate {
                     claim,
                     desired_digest: desired_digest.to_owned(),
-                    cancelled: false,
+                    quality_intent: quality_intent.clone(),
+                    cancelled: cancelled.clone(),
                 },
             );
+        if let Some(previous) = previous {
+            previous.cancelled.cancel();
+        }
         Self {
             playback_id: playback_id.to_owned(),
             claim,
+            quality_intent,
+            registered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            settlement: None,
+            cancelled,
         }
+    }
+
+    pub(super) fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+        self.cancelled.clone()
     }
 
     /// Whether this candidate has been superseded since it was spawned.
@@ -131,12 +177,37 @@ impl PendingCandidateGuard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&self.playback_id)
-            .is_none_or(|pending| pending.claim != self.claim || pending.cancelled)
+            .is_none_or(|pending| pending.claim != self.claim || pending.cancelled.is_cancelled())
     }
 }
 
 impl Drop for PendingCandidateGuard {
     fn drop(&mut self) {
+        if self.cancelled.is_cancelled()
+            && !self.registered.load(std::sync::atomic::Ordering::Acquire)
+        {
+            if let (Some(identity), Some((state, owner, epoch))) =
+                (self.quality_intent.clone(), self.settlement.clone())
+            {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        let key = quality_cancellation_receipt_key(&identity);
+                        // Planning exited before registration. Durable admission
+                        // also checks this receipt, so late Store work cannot prime.
+                        // Best effort: an unsettled receipt still fences the
+                        // successor; settling only lets the client observe it.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::SettleQualityCancellation,
+                            crate::store_result::Discard::BestEffort,
+                            state
+                                .store
+                                .settle_quality_cancellation(&key, &owner, epoch, unix_ms())
+                                .await,
+                        );
+                    });
+                }
+            }
+        }
         let mut pending = pending_preparation_candidates()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -155,7 +226,7 @@ pub(super) fn pending_candidate_for_playback(playback_id: &str) -> Option<String
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(playback_id)
-        .filter(|pending| !pending.cancelled)
+        .filter(|pending| !pending.cancelled.is_cancelled())
         .map(|pending| pending.desired_digest.clone())
 }
 
@@ -169,7 +240,7 @@ fn cancel_pending_candidate(playback_id: &str) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get_mut(playback_id)
     {
-        pending.cancelled = true;
+        pending.cancelled.cancel();
     }
 }
 
@@ -207,7 +278,8 @@ pub(super) fn pending_candidate_superseded(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(playback_id)
         .is_some_and(|pending| {
-            pending.cancelled || desired_digest.is_some_and(|asked| pending.desired_digest != asked)
+            pending.cancelled.is_cancelled()
+                || desired_digest.is_some_and(|asked| pending.desired_digest != asked)
         })
 }
 
@@ -269,6 +341,7 @@ pub(super) fn register_test_preparation(
         executor,
         preparation,
         purpose,
+        quality_intent: None,
         cancelled: cancelled.clone(),
     });
     cancelled
@@ -278,7 +351,15 @@ fn arm_preparation_foreground_watch(active: ActivePreparedSuccessor) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                () = active.cancelled.cancelled() => return,
+                () = active.cancelled.cancelled() => {
+                    // A newer planning claim can cancel this token directly.
+                    // If cleanup has not already taken the registry entry,
+                    // this watcher owns retiring the registered successor.
+                    if let Some(active) = take_active_preparation(&active.preparation.incarnation_id) {
+                        settle_cancelled_preparation(active, "quality intent cancelled").await;
+                    }
+                    return;
+                },
                 () = tokio::time::sleep(Duration::from_millis(25)) => {}
             }
             if active_preparation(&active.preparation.incarnation_id).is_none() {
@@ -337,9 +418,13 @@ pub(super) async fn settle_cancelled_preparation(
     let _ = take_active_preparation(&active.preparation.incarnation_id);
     crate::playback_control::record_preparation_cancelled(reason);
     active.cancelled.cancel();
+    active.state.link_receipts.retire_staged(
+        &active.preparation.session_id,
+        &active.preparation.incarnation_id,
+    );
     let deadline = tokio::time::Instant::now() + PREPARATION_SETTLEMENT_RETRY_BUDGET;
     let mut delay = PREPARATION_SETTLEMENT_RETRY_MIN;
-    loop {
+    let durable_settled = loop {
         let now_ms = unix_ms();
         let settled = match active
             .executor
@@ -355,14 +440,14 @@ pub(super) async fn settle_cancelled_preparation(
             Err(_) => false,
         };
         if settled || tokio::time::Instant::now() >= deadline {
-            break;
+            break settled;
         }
         tokio::time::sleep(delay).await;
         delay = delay
             .saturating_mul(2)
             .min(PREPARATION_SETTLEMENT_RETRY_MAX);
-    }
-    retire_prepared_worker(
+    };
+    let retired = retire_prepared_worker(
         &active.state,
         &active.preparation.owner_node_id,
         &active.preparation.incarnation_id,
@@ -370,6 +455,27 @@ pub(super) async fn settle_cancelled_preparation(
         reason,
     )
     .await;
+    if durable_settled && retired {
+        if let Some(identity) = active.quality_intent.as_ref() {
+            let key = quality_cancellation_receipt_key(identity);
+            // Best effort: the durable cancellation already fences the
+            // successor; settling only lets the client observe `cancelled`.
+            crate::store_result::observe(
+                crate::store_result::Operation::SettleQualityCancellation,
+                crate::store_result::Discard::BestEffort,
+                active
+                    .state
+                    .store
+                    .settle_quality_cancellation(
+                        &key,
+                        &active.preparation.expected_predecessor_owner_node_id,
+                        active.preparation.expected_predecessor_owner_epoch,
+                        unix_ms(),
+                    )
+                    .await,
+            );
+        }
+    }
 }
 
 fn spawn_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static str) {
@@ -377,7 +483,66 @@ fn spawn_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static
     tokio::spawn(settle_cancelled_preparation(active, reason));
 }
 
+pub(super) fn quality_preparation_identity(playback_id: &str) -> Option<QualityIntentIdentity> {
+    if let Some(identity) = pending_preparation_candidates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(playback_id)
+        .and_then(|pending| pending.quality_intent.clone())
+    {
+        return Some(identity);
+    }
+    active_prepared_successors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .find(|active| active.preparation.playback_id == playback_id)
+        .and_then(|active| active.quality_intent.clone())
+}
+
+pub(super) fn cancel_quality_preparation(
+    playback_id: &str,
+    identity: &QualityIntentIdentity,
+) -> bool {
+    let pending_found = {
+        let pending = pending_preparation_candidates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending
+            .get(playback_id)
+            .filter(|candidate| candidate.quality_intent.as_ref() == Some(identity))
+            .is_some_and(|candidate| {
+                candidate.cancelled.cancel();
+                true
+            })
+    };
+    let matches = {
+        let mut active = active_prepared_successors()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ids = active
+            .iter()
+            .filter(|(_, candidate)| {
+                candidate.preparation.playback_id == playback_id
+                    && candidate.quality_intent.as_ref() == Some(identity)
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter_map(|id| active.remove(&id))
+            .collect::<Vec<_>>()
+    };
+    let found = pending_found || !matches.is_empty();
+    for active in matches {
+        spawn_cancelled_preparation(active, "quality intent cancelled");
+    }
+    found
+}
+
 pub(super) fn cancel_preparations_for_incumbent_wait(playback_id: &str) {
+    // A candidate can still be planning across Store awaits and have no
+    // registered successor yet. Stop it before it acquires spare capacity.
+    cancel_pending_candidate(playback_id);
     for active in take_active_preparations_for_playback(playback_id) {
         spawn_cancelled_preparation(active, "incumbent playback needed prepared capacity");
     }
@@ -663,6 +828,7 @@ pub(super) enum PreparationPurpose {
 }
 
 pub(super) struct PreparationCandidateInputs {
+    pub(super) accepted_observation: Option<super::prepared_link::AcceptedObservation>,
     /// The live session this exchange belongs to. Staging needs it twice: to
     /// reach the actor that owns the one successor slot, and to name the
     /// predecessor the commit CAS will fence against.
@@ -712,6 +878,73 @@ pub(super) struct PreparationCandidateInputs {
 /// whole. Recipes written before the durable response sidecar was retained use
 /// the legacy edit path so an upgrade never guesses capabilities that the
 /// client did not provide.
+pub(super) fn preserve_prepared_audio(
+    predecessor: &crate::transcode::SessionRequest,
+    candidate: &mut crate::transcode::SessionRequest,
+    source: &MediaFile,
+) -> Result<(), ApiError> {
+    use plurx_core::playback::audio::{resolve_audio, AudioAction, AudioRoute};
+    let same_track_and_route = candidate.audio_index == predecessor.audio_index
+        && candidate.audio_claim == predecessor.audio_claim
+        && candidate.audio_offset_ms == predecessor.audio_offset_ms;
+    let full_encode = matches!(
+        candidate.kind,
+        crate::transcode::SessionKind::Transcode { .. }
+    ) && candidate.presentation == crate::transcode::Presentation::Vod;
+    if same_track_and_route && !full_encode {
+        candidate.audio_delivery = predecessor.audio_delivery.clone();
+    } else if let Some(claim) = &candidate.audio_claim {
+        let selected = candidate
+            .audio_index
+            .and_then(|index| {
+                source
+                    .audio_streams
+                    .iter()
+                    .find(|track| track.index == index)
+            })
+            .or_else(|| source.audio_streams.first());
+        candidate.audio_delivery = Some(resolve_audio(
+            selected,
+            &claim.profile(),
+            if full_encode {
+                AudioRoute::EncodedVod
+            } else if matches!(candidate.kind, crate::transcode::SessionKind::Copy { .. }) {
+                AudioRoute::Progressive
+            } else {
+                AudioRoute::RollingHls
+            },
+            candidate.audio_offset_ms,
+        ));
+    }
+    // Compare what the incumbent's playlist told the client's audio decoder,
+    // not the encoder's bytes. A full-encode VOD successor can never copy
+    // audio, so a byte comparison refused every Original→rung switch from a
+    // copy session even when both deliver stereo AAC. The splice is a
+    // discontinuity; only a codec or channel-count change is unsafe there.
+    if candidate
+        .audio_delivery
+        .as_ref()
+        .and_then(|audio| audio.presentation_identity())
+        != predecessor
+            .audio_delivery
+            .as_ref()
+            .and_then(|audio| audio.presentation_identity())
+    {
+        return Err(ApiError::typed(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "prepared_output_unsupported",
+            "the audio codec or channel count changed; reopen instead of switching a prepared successor",
+        ));
+    }
+    if let (crate::transcode::SessionKind::Copy { aac, .. }, Some(audio)) =
+        (&mut candidate.kind, &candidate.audio_delivery)
+    {
+        *aac = matches!(audio.action, AudioAction::Encode { .. });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub(super) async fn plan_preparation_candidate(
     state: &AppState,
     predecessor: &RemoteStartRequest,
@@ -721,6 +954,34 @@ pub(super) async fn plan_preparation_candidate(
     source: &MediaFile,
     delivered_height: i64,
 ) -> Result<crate::transcode::SessionRequest, ApiError> {
+    plan_preparation_with_candidate(
+        state,
+        predecessor,
+        planning_caps,
+        planning_overrides,
+        selection,
+        source,
+        delivered_height,
+    )
+    .await
+    .map(|(request, _)| request)
+}
+
+async fn plan_preparation_with_candidate(
+    state: &AppState,
+    predecessor: &RemoteStartRequest,
+    planning_caps: Option<&plurx_core::playback::DeviceCaps>,
+    planning_overrides: Option<&CreateOverrides>,
+    selection: &crate::playback_control::ClientSelection,
+    source: &MediaFile,
+    delivered_height: i64,
+) -> Result<
+    (
+        crate::transcode::SessionRequest,
+        Option<plurx_core::playback::candidate::QualityCandidate>,
+    ),
+    ApiError,
+> {
     if let Some(caps) = planning_caps {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -768,7 +1029,7 @@ pub(super) async fn plan_preparation_candidate(
         // document (or one this build cannot parse) can still have a
         // successor staged as a burn that tone-maps the picture at the moment
         // it is committed, which is the failure this guard exists for.
-        let candidate = crate::playback_control::candidate_request(
+        let mut candidate = crate::playback_control::candidate_request(
             &predecessor.request,
             selection,
             height,
@@ -788,7 +1049,8 @@ pub(super) async fn plan_preparation_candidate(
                 "error": HDR_SUBTITLE_BURN_REFUSAL,
             })));
         }
-        return Ok(candidate);
+        preserve_prepared_audio(&predecessor.request, &mut candidate, source)?;
+        return Ok((candidate, None));
     };
 
     use plurx_core::playback::{DeviceProfile, Force, PlaybackMethod};
@@ -1030,12 +1292,15 @@ pub(super) async fn plan_preparation_candidate(
             file_id: predecessor.request.file_id,
             source: Some(source),
             network_prior: None,
+            network_identity: None,
+            incumbent_receipt: None,
         },
         Some(review),
         body,
     )
     .await?;
     let plan_height = plan.height;
+    let selected_candidate = plan.selected_candidate;
     let mut resolved = plan.request;
     validate_hevc_copy_transport(state, source, caps, &resolved).await?;
     // The same guard ordinary create runs, on the same function. This path
@@ -1068,6 +1333,7 @@ pub(super) async fn plan_preparation_candidate(
     // the incumbent use rolling has not changed merely because its quality or
     // tracks did. VOD stays VOD and rolling stays rolling.
     resolved.presentation = predecessor.request.presentation;
+    preserve_prepared_audio(&predecessor.request, &mut resolved, source)?;
     if resolved.quality_catalog.is_none()
         && predecessor.decoder_caps.is_some()
         && caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
@@ -1077,6 +1343,8 @@ pub(super) async fn plan_preparation_candidate(
             .quality_catalog(
                 state,
                 crate::media_pool::QualityCatalogRequest {
+                    audio_claim: resolved.audio_claim.clone(),
+                    audio_delivery: resolved.audio_delivery.clone(),
                     file_id: source.id,
                     source_size: source.size,
                     source_mtime: source.mtime,
@@ -1091,7 +1359,7 @@ pub(super) async fn plan_preparation_candidate(
             .await;
         resolved.quality_catalog = Some(Arc::new(catalog));
     }
-    Ok(resolved)
+    Ok((resolved, selected_candidate))
 }
 
 async fn prepared_relocation_owner(
@@ -1146,6 +1414,7 @@ pub(super) async fn process_preparation_candidate(
     exchange: PreparationCandidateInputs,
 ) {
     let PreparationCandidateInputs {
+        accepted_observation,
         session_id,
         route,
         mut recipe,
@@ -1160,6 +1429,11 @@ pub(super) async fn process_preparation_candidate(
         accepted_film_time_ms,
         purpose,
     } = exchange;
+    if let Ok(response) = serde_json::from_str::<StartResponse>(&route.response_json) {
+        if let Some(audio) = response.delivered_audio {
+            recipe.request.audio_delivery = Some(audio);
+        }
+    }
     let _finished = PreparationCandidateFinished {
         hooks: state.hls_route_hooks.get(),
         incarnation_id: &route.incarnation_id,
@@ -1250,7 +1524,7 @@ pub(super) async fn process_preparation_candidate(
             }
         }
     }
-    let candidate = match plan_preparation_candidate(
+    let (mut candidate, selected_candidate) = match plan_preparation_with_candidate(
         &state,
         &recipe,
         planning_caps.as_ref(),
@@ -1295,9 +1569,36 @@ pub(super) async fn process_preparation_candidate(
         selection: &proposed,
         grade: crate::playback_control::GradeIntent::from_request(&candidate),
     };
+    let candidate_auto = matches!(
+        selection.quality,
+        crate::playback_control::QualitySelection::Auto { .. }
+    ) && candidate.candidate_context.is_some();
+    let prepared_proof = if let Some(observation) = accepted_observation.as_ref() {
+        if let Some(selected) = selected_candidate.as_ref() {
+            // Advisory link evidence: one shared advisory deadline for the
+            // whole proof (prior, cost, live link, source fence), not a
+            // short per-read cap. A miss is Unknown and stages no proof.
+            let advisory = super::link_receipts::advisory_deadline();
+            tokio::time::timeout_at(
+                advisory,
+                observation.proposed_proof(&state, source, &mut candidate, selected, advisory),
+            )
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let conditions = crate::playback_control::PreparationConditions {
-        observed_download_bps,
-        delivered_bps,
+        observed_download_bps: if candidate_auto {
+            None
+        } else {
+            observed_download_bps
+        },
+        delivered_bps: if candidate_auto { None } else { delivered_bps },
     };
     let decision = crate::playback_control::decide_preparation(
         delivered_view,
@@ -1340,6 +1641,17 @@ pub(super) async fn process_preparation_candidate(
         }
         PreparationPurpose::PlannedRelocation(_) => None,
     };
+    // An implicit measured upgrade needs real incumbent Link and full-output
+    // cost proof. Unknown is not a feature/ordinary/manual/recovery refusal.
+    let successor_owner = if candidate_auto
+        && proposed.height > delivered.height
+        && prepared_proof.is_none()
+        && matches!(purpose, PreparationPurpose::SelectionChange)
+    {
+        None
+    } else {
+        successor_owner
+    };
     if let Some(successor_owner) = successor_owner {
         // Production always stages and primes. Hooks that decline priming (the
         // test hooks of `AppState::new` do, until a test calls
@@ -1363,8 +1675,12 @@ pub(super) async fn process_preparation_candidate(
             &successor_owner,
             purpose,
             AcceptedAsk {
+                prepared_proof,
                 film_time_ms: accepted_film_time_ms,
                 desired_digest: Some(selection.desired().digest()),
+                planning_cancellation: Some(pending.cancellation_token()),
+                quality_intent: pending.quality_intent.clone(),
+                planning_registration: Some(Arc::clone(&pending.registered)),
             },
             primes,
         )
@@ -1429,6 +1745,7 @@ const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 /// one exchange under the ask from another builds a successor for a moment and
 /// a selection that never coexisted.
 pub(super) struct AcceptedAsk {
+    pub(super) prepared_proof: Option<super::prepared_link::PreparedProof>,
     /// The absolute film time the accepted envelope settled on — the viewer's
     /// seek target where they asked for one, their playhead otherwise.
     pub(super) film_time_ms: i64,
@@ -1437,6 +1754,11 @@ pub(super) struct AcceptedAsk {
     /// current then. `None` where the caller stages without an observed
     /// selection.
     pub(super) desired_digest: Option<String>,
+    /// Exact planning ownership, retained across registration so a later
+    /// same-selection request cannot revive a cancelled earlier candidate.
+    pub(super) planning_cancellation: Option<tokio_util::sync::CancellationToken>,
+    pub(super) planning_registration: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) quality_intent: Option<QualityIntentIdentity>,
 }
 
 #[cfg(test)]
@@ -1494,9 +1816,32 @@ pub(super) async fn stage_prepared_successor_with_prime(
         return;
     }
     let AcceptedAsk {
+        prepared_proof,
         film_time_ms: accepted_film_time_ms,
         desired_digest,
+        planning_cancellation,
+        planning_registration,
+        quality_intent,
     } = accepted;
+    if let Some(identity) = quality_intent.as_ref() {
+        let cancelled = state
+            .store
+            .quality_intent_cancelled(
+                &identity.generation,
+                &identity.client_instance_id,
+                &identity.lifetime_id,
+                i64::try_from(identity.recipe_revision).unwrap_or(i64::MAX),
+            )
+            .await
+            .unwrap_or(true);
+        if cancelled {
+            if let Some(token) = planning_cancellation.as_ref() {
+                token.cancel();
+            }
+            crate::playback_control::record_preparation_staged(false);
+            return;
+        }
+    }
     if let PreparationPurpose::PlannedRelocation(fence) = purpose {
         if !state.serving.planned_outage_is_current(fence).await {
             crate::playback_control::record_preparation_staged(false);
@@ -1547,6 +1892,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // 00:01:30 out to 00:02:30.
     let resume_ms = accepted_film_time_ms;
     let staged_request = crate::transcode::SessionRequest {
+        sdr_master_codecs: None,
+        continuous_media: None,
         candidate_context: candidate.candidate_context.clone(),
         request_id: Some(staged_incarnation_id.clone()),
         start_seconds: resume_ms as f64 / 1_000.0,
@@ -1562,6 +1909,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
         return;
     };
     let staged_recipe = RemoteStartRequest {
+        retained_output: None,
+        retained_output_receiver: Some(1),
         candidate_catalog: candidate.candidate_context.as_ref().and_then(|context| {
             Some(crate::media_sessions::CandidateCatalogContext {
                 caps: context.canonical_caps.clone()?,
@@ -1596,6 +1945,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
     let response = StartResponse {
+        measured_candidate_outputs: None,
+        delivered_audio: staged_request.audio_delivery.clone(),
         quality_catalog_status: candidate.quality_catalog.as_ref().map(
             |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
         ),
@@ -1717,6 +2068,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // then rather than against the one that started the work.
     .asking(desired_digest.clone());
     let preparation = plurx_core::domain::MediaSessionPreparation {
+        quality_cancellation_key: quality_intent
+            .as_ref()
+            .map(quality_cancellation_receipt_key),
         incarnation_id: staged_incarnation_id,
         session_id: staged_session_id,
         principal: route.principal.clone(),
@@ -1770,7 +2124,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
             executor: executor.clone(),
             preparation: preparation.clone(),
             purpose,
-            cancelled: tokio_util::sync::CancellationToken::new(),
+            quality_intent,
+            cancelled: planning_cancellation
+                .unwrap_or_else(tokio_util::sync::CancellationToken::new),
         };
         // A test's only way to put a supersession into the window the comment
         // below names (`delay_preparation_registration`). Production's point
@@ -1783,6 +2139,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
         // Publish cancellation ownership before the Store future is polled.
         // A wait or settings disable may then cancel an in-flight reservation;
         // the detached reservation owner reconciles a late commit exactly.
+        if let Some(registered) = planning_registration.as_ref() {
+            registered.store(true, std::sync::atomic::Ordering::Release);
+        }
         register_active_preparation(active.clone());
         // Between this task's last await and the line above there is no
         // suspension point, so a supersession landing in that window is
@@ -1790,7 +2149,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
         // after the registry names the successor, is what closes it: from this
         // point on `cancel_preparations_for_superseded_predecessor` can see the
         // entry itself, and before it the guard could.
-        if pending_candidate_superseded(&preparation.playback_id, desired_digest.as_deref()) {
+        if active.cancelled.is_cancelled()
+            || pending_candidate_superseded(&preparation.playback_id, desired_digest.as_deref())
+        {
             if let Some(active) = take_active_preparation(&preparation.incarnation_id) {
                 spawn_cancelled_preparation(active, "predecessor superseded by a new session");
             }
@@ -1883,8 +2244,26 @@ pub(super) async fn stage_prepared_successor_with_prime(
         };
         if let Some(guard) = activated {
             let active = guard.disarm();
+            // Observations cannot delay the existing cleanup/deadline owner.
+            arm_preparation_deadline(active.clone());
+            if successor_owner == state.node_id {
+                if let Some(proof) = prepared_proof.as_ref() {
+                    // Bounded by the shared advisory stage; a registration
+                    // that misses it leaves the stage without link evidence.
+                    let _ = tokio::time::timeout_at(
+                        super::link_receipts::advisory_deadline(),
+                        proof.register(
+                            state,
+                            &active.preparation.session_id,
+                            &active.preparation.incarnation_id,
+                            active.preparation.deadline_ms,
+                            active.cancelled.clone(),
+                        ),
+                    )
+                    .await;
+                }
+            }
             crate::playback_control::record_preparation_staged(true);
-            arm_preparation_deadline(active);
         } else {
             crate::playback_control::record_preparation_staged(false);
         }
@@ -1908,27 +2287,34 @@ pub(super) async fn retire_prepared_worker(
     incarnation_id: &str,
     session_id: &str,
     reason: &'static str,
-) {
+) -> bool {
     if owner_node_id == state.node_id {
         state
             .transcode
             .begin_session_terminal(session_id, crate::vodserve::Terminal::Replaced, reason)
             .await;
         state.transcode.complete_session_release(session_id);
-    } else if let Err(error) = state
-        .media_sessions
-        .abort_remote(
-            owner_node_id,
-            &RemoteAbortRequest {
-                incarnation_id: incarnation_id.to_owned(),
-                session_id: session_id.to_owned(),
-                expected_owner_epoch: 1,
-                reason: None,
-            },
-        )
-        .await
-    {
-        tracing::warn!(target: "plurxd::http::hls", ?error, owner = %owner_node_id, %reason, "remote prepared worker cleanup did not settle");
+        true
+    } else {
+        match state
+            .media_sessions
+            .abort_remote(
+                owner_node_id,
+                &RemoteAbortRequest {
+                    incarnation_id: incarnation_id.to_owned(),
+                    session_id: session_id.to_owned(),
+                    expected_owner_epoch: 1,
+                    reason: None,
+                },
+            )
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(target: "plurxd::http::hls", ?error, owner = %owner_node_id, %reason, "remote prepared worker cleanup did not settle");
+                false
+            }
+        }
     }
 }
 
@@ -1945,4 +2331,51 @@ fn arm_preparation_deadline(active: ActivePreparedSuccessor) {
             settle_cancelled_preparation(active, "prepared successor expired").await;
         }
     });
+}
+
+#[cfg(test)]
+mod quality_cancellation_tests {
+    use super::*;
+
+    fn identity(sequence: u64) -> QualityIntentIdentity {
+        QualityIntentIdentity {
+            generation: uuid::Uuid::new_v4().to_string(),
+            control_epoch: 1,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            lifetime_id: "quality-test".to_owned(),
+            recipe_revision: 1,
+            accepted_sequence: sequence,
+        }
+    }
+
+    #[test]
+    fn cancellation_before_offer_is_exact_and_idempotent() {
+        let playback = uuid::Uuid::new_v4().to_string();
+        let identity = identity(3);
+        let pending = PendingCandidateGuard::begin_owned(&playback, "720p", Some(identity.clone()));
+        let mut wrong = identity.clone();
+        wrong.control_epoch += 1;
+        assert!(!cancel_quality_preparation(&playback, &wrong));
+        assert!(!pending.cancelled());
+        assert!(cancel_quality_preparation(&playback, &identity));
+        assert!(cancel_quality_preparation(&playback, &identity));
+        assert!(pending.cancelled());
+        assert!(pending_candidate_for_playback(&playback).is_none());
+    }
+
+    #[test]
+    fn late_cancel_does_not_cancel_a_same_selection_retry() {
+        let playback = uuid::Uuid::new_v4().to_string();
+        let earlier = identity(3);
+        let mut later = earlier.clone();
+        later.accepted_sequence = 5;
+        let old = PendingCandidateGuard::begin_owned(&playback, "720p", Some(earlier.clone()));
+        let current = PendingCandidateGuard::begin_owned(&playback, "720p", Some(later.clone()));
+        assert!(old.cancelled());
+        assert!(!cancel_quality_preparation(&playback, &earlier));
+        drop(old);
+        assert!(!current.cancelled());
+        assert!(cancel_quality_preparation(&playback, &later));
+        assert!(current.cancelled());
+    }
 }

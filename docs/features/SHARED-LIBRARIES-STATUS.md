@@ -1,9 +1,10 @@
 # Shared libraries — build status and remaining acceptance
 
-**Status:** implementation batch complete; qualification held · **Updated:** 2026-10-06 ·
-**Owner:** Sol, continuing Claude's Root lane · **Promotion:** held for Paul.
+**Status:** main integration in progress · **Updated:** 2026-10-06 ·
+**Owner:** Root coordinating GPT-6.1 Sol builders · **Promotion:** authorized.
 
 **Batch:** [completion PR #827](http://192.168.4.7:3000/noirr/plurx/pulls/827).
+**Promotion:** [draft PR #828](http://192.168.4.7:3000/noirr/plurx/pulls/828).
 
 Companion to [the implementation contract](SHARED-LIBRARIES-IMPLEMENTATION.md)
 (the authority, ownership and acceptance rules). This page records what is
@@ -11,6 +12,25 @@ integrated, what is being built and what is still unproved. A compiler pass
 is not playback or topology evidence.
 
 ## Current work
+
+Paul lifted the inherited promotion hold on 2026-10-06 and instructed the
+team to continue through completion. PR #827 is merged into
+`effort/shared-libraries` at `de2ece8e3`. The promotion integration merges
+current main `cca4a09b9` in the owned checkout
+`/private/tmp/plurx-shared-sol-promotion-integration`.
+
+The merge exposed 59 conflicted paths. Sol builders are resolving separate
+Core/schema, server playback, and native/web slices concurrently. Main and
+the effort allocated different migrations to the same version numbers;
+the composed sequence is SQLite 104/105 and replicated sharing 80, custody
+81, activated Source 82. Frozen Source installation layout 71 remains a
+separate identity, independent of migration order. Main's newer rolling playback
+and native link receipts must also survive the integration.
+
+Next: compile the combined candidate, run one independent adversarial review,
+address its findings, then run the fast lane and retry only failed tests.
+No promotion test has run yet. The previous compiler receipts below describe
+the effort batch, not the newly merged candidate.
 
 The isolated checkout is `/private/tmp/plurx-shared-sol/repo`, on
 `codex/shared-libraries-completion`. Source-only archives compile on nuc4 in
@@ -38,20 +58,22 @@ existing warm target. Paul's checkout is not used for changes.
 | Receiver ingress authority | Runtime and fixture integrated through `696ffb9ec` | Fresh receiver read proof, independent ingress member floor and explicit backend identity; guarded registration/cleanup metadata; no physical closure inferred from Store reads |
 | Custody schema and upgrade floor | Integrated `69876dfce` | SQLite 93; replicated baseline 72 / Source 73; frozen Source layout 71 unchanged; old held obligations refuse upgrade; compiled, execution deferred |
 | Active upgrade harness | Integrated through `cdf18d7f5`; unexecuted | Historical/candidate/restored Local HLS, actual video decode and live encoder drain; does not qualify Shared relay or active principal rebuild |
-| Compiler and lint | Final combined compilation passed | Final combined hook passed at `0ba500735` (2m24s); Core contract-feature targets compiled in 45.89s without execution; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Final Windows MSVC workspace/all-target check passed on `0ba500735` in 2m09s on m6, Rust 1.97.1, 4 CPUs / 8 GiB; compiler warnings remain. No tests executed |
+| Main integration compilation | In progress | Merged static web checks and catalog lint pass; Android app/unit sources compile. Apple prepared playback now shares main's actual frame-cadence evidence; compilation in progress. Rust compilation follows the resolved shared tree; no tests run |
+| Compiler and lint | Earlier effort batch compilation passed | Final combined hook passed at `0ba500735` (2m24s); Core contract-feature targets compiled in 45.89s without execution; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Final Windows MSVC workspace/all-target check passed on `0ba500735` in 2m09s on m6, Rust 1.97.1, 4 CPUs / 8 GiB; compiler warnings remain. No tests executed |
 
 ## Parallel builders and management audit
 
 Paul requested parallel GPT-6.1 Sol builders on 2026-10-06. Root manages the
 integration branch, reviews implementation and evidence, and keeps this page
-current. Each builder has an isolated clone from `d4d2ec8e4`.
+current. The completed batch used isolated builder clones. Promotion conflict resolution
+uses one owned integration clone with exclusive file ownership per builder.
 
 | Builder | Owned work | State |
 |---|---|---|
-| Source lifecycle | Fresh Start invocation custody, Source ledger and coordinated schema/floor migration | Completed through `8b885f707`; concurrent-close correction compiled in `0ba500735` |
-| Forwarding / completed clients | Source and B transport modules; native/web, hosting and Windows compiler | Complete; exact `0ba500735` Windows workspace/all-target check passed |
-| Receiver/cluster | Shared accepted-driver custody, B authority and retirement, endpoint cleanup | Completed through `696ffb9ec`; serialized-acknowledgment correction compiled in `0ba500735` |
-| Root | Integration, API/operator/security docs, central ownership census, status and review | Integration and compiler evidence complete; one batched effort PR, with unproved acceptance cells preserved |
+| Source lifecycle | Main schema/migration/store reconciliation and Source compatibility | Resolving composed migration versions and historical-layout refusal |
+| Clients / integration | Main integration ownership, native/web, docs and combined compiler loop | Static web/catalog checks and Android source compilation pass; Apple/server integration continues |
+| Receiver/cluster | Main media-session, HLS, transcode and VOD integration | Preserving main's rolling-generation ownership alongside Shared ingress custody |
+| Root | Coordination, status, promotion PR and eventual review/validation | Draft #828 opened; main-fast-lane run 4233 skipped because the PR is draft |
 
 Rust builders install source and compile inside one owned lock on nuc4. Remote checks
 use one canonical source directory with checksum copies and current write
@@ -106,8 +128,9 @@ releasable is made.
    contract tests despite its compile-only description, so its dispatch is
    deferred; compilation and lint run separately. No green CI gate is inferred
    from those local compiler receipts.
-2. **Keep the effort isolated.** Batch commits into effort PRs. Main promotion
-   remains held by the handoff's explicit instruction until Paul lifts it.
+2. **Keep the effort isolated.** Batch commits into effort PRs. Paul lifted
+   the handoff hold on 2026-10-06; main promotion is now authorized after
+   review, fixes and passing fast-lane evidence.
 3. **Preserve the Tailscale acceptance contract.** The proposed nuc4/m6 pair
    has no Tailscale according to the handoff. A pinned-TLS namespace fixture
    does not establish Tailscale or two-home acceptance. Use separate instance
@@ -124,7 +147,7 @@ releasable is made.
 The Source and receiver builder clones were removed after their clean commits
 and final corrections were verified in published `0ba500735`; their owned
 patch/check scratch was removed too. Retain the clean Root checkout and shared
-compiler cache while promotion is held. Final platform scratch is removed after
+compiler cache through promotion. Final platform scratch is removed after
 its receipt is recorded.
 Claude's host workspaces listed in the handoff remain preserved until their
 unmerged work and receipts have been incorporated. Do not remove files owned

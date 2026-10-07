@@ -1766,6 +1766,7 @@ dependencies = [
  "dotenvy",
  "fastwebsockets",
  "flume",
+ "fs4",
  "getrandom 0.4.3",
  "hex",
  "hiqlite-derive",
@@ -2856,6 +2857,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "plurx-compat-jellyfin"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
 name = "plurx-compat-plex"
 version = "0.3.0"
 dependencies = [
@@ -2956,6 +2967,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "mime_guess",
+ "plurx-compat-jellyfin",
  "plurx-compat-plex",
  "plurx-core",
  "plurx-pgs",

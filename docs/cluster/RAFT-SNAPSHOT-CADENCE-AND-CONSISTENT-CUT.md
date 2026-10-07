@@ -1,6 +1,10 @@
 # Raft snapshot cadence and the consistent cut — measure, then move the copy off the writer without moving the cut
 
-**Status:** in progress — M0 instrumentation implemented; fleet readout blocked
+**Status:** open — M0–M3 on `main` since 2026-10-04 (#793): fork patch 22
+(writer-fixed cut, off-writer copy) and storage admission run on every voter,
+with no switch, by design. Paul accepted the shipped path on 2026-10-04 and
+declined a 24-hour undisturbed readout; what remains is to observe one real
+snapshot on production data
 · **Executes:** S2, S5, F-sc-2, F-sc-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -16,6 +20,16 @@ not ship until its single-cut test (§5.3) is green on the fork. If a step
 seems to require changing `max_in_snapshot_log_to_keep`, letting a read-pool
 connection produce the snapshot without the writer fixing the cut, or turning
 a storage refusal into a builder `Err`, stop and flag it.
+
+**2026-09-30 execution amendment (owner ruling, with Astra consultation):**
+the original 24-hour M0 readout is a prerequisite for **changing N**, not for
+implementing M1's validated default plumbing, M3's specified size-based floor,
+or M2's tested consistent-cut correctness. Preserve N = 10,000 and retention
+1. Do not infer fleet B/E/S/W/A from unit tests or restart a voter to obtain
+them. The historical M0 stop below remains as a receipt of that earlier run;
+this amendment supersedes its instruction not to begin correctness work.
+These automatic correctness changes have no meaningful manual on/off and
+therefore do not acquire a Developer switch. Readiness remains advisory.
 
 **Correction to the review:** two placements are wrong, one nuance matters.
 
@@ -48,7 +62,12 @@ from that number, the disk, and the restart-replay it buys; then take the
 last-applied log id and the membership at one logical cut; and never let a
 full disk turn a routine snapshot into a dead voter without warning first.
 
-## 2. Contract today
+## 2. Contract at the assessment base — retained source evidence
+
+This section records the 2026-09-20 source boundary. The 2026-09-30 execution
+amendment and execution receipt below describe the implemented replacement;
+the old VACUUM writer sequence is evidence for the design, not a claim that
+the task branch still runs it.
 
 Re-verify each line at build time.
 
@@ -179,6 +198,10 @@ range (`1_000..=200_000`), default 10,000, validated at startup, applied
 through `production_hiqlite_defaults`, and OPERATIONS.md says it takes
 effect at the next restart on each voter and must match on all.
 
+The 2026-09-30 task implements this plumbing at the incumbent default; it
+does not select a new N. The allowed range is a validation envelope, not
+evidence that every value inside it is appropriate for this fleet.
+
 ### 3.3 M2 — off-writer copy, same cut
 
 Requirement (assessment correction 4): the image, the `_metadata` row inside
@@ -219,6 +242,12 @@ Why these pieces:
   in the read pool, `SQLITE_OPEN_READ_ONLY`. One outstanding copy at a time;
   a second `Snapshot` request while one is in flight waits for the ack (the
   builder already serializes on `snapshot_files`).
+
+  The implementation opens one dedicated read-only connection per copy
+  rather than retaining an idle connection between builds. At most one is
+  outstanding; all production builders share `snapshot_files`. The writer
+  pins its transaction before handing it to the blocking pool. Shutdown and
+  install wait for the outstanding copy to release its read mark.
 - **The pinned read mark stops WAL checkpoints from resetting past it** for
   the duration of the copy. The WAL grows by the writes applied during the
   copy; M3's floor accounts for that (`wal_growth ≈ apply_rate × copy_time ×
@@ -228,8 +257,16 @@ Why these pieces:
   cannot corrupt the live database. `last_snapshot_id` is set only in the
   ack path, after success.
 
+  Completion persists only the latest live metadata with the successful id;
+  it never replaces later applies or membership with the cut's older values.
+  A cancelled reply still owns its running copy and read mark. One successor
+  can wait locally without blocking ordinary applies; cancelled queued work
+  is discarded before fixing another cut. This closes the cancellation gap
+  where a builder has released `snapshot_files` but its copy is still running.
+
 Files touched: `writer.rs` (new arm shape, second connection),
-`snapshot_builder.rs` (unchanged contract), `PLURX-PATCH.md` (#16). The
+`snapshot_builder.rs` (unchanged publication contract), `PLURX-PATCH.md`
+(#22; #16 was already assigned to the deployed Backup ordinal). The
 `_metadata` contents, the snapshot file format and the install path do not
 change, so mixed-version fleets are unaffected.
 
@@ -268,6 +305,22 @@ The same `required` replaces `MIN_VOTER_STORAGE_HEADROOM_BYTES` in the
 promotion preflight and the heartbeat's `voter_storage_ready`, with the
 constant kept as the minimum (`max(512 MiB, required)`), so a learner is not
 promoted onto a disk that cannot take its first snapshot.
+
+The target computes the floor, not the coordinator. Its existing heartbeat
+durability probe and free-space sample both use the database parent, not a
+different root filesystem if the state-machine directory is separately mounted.
+Its existing heartbeat
+batch publishes the readiness boolean and the bounded capability
+`snapshot_storage_floor_v1`. Promotion requires the capability timestamp to
+equal both `cluster_node_progress.observed_at` and `cluster_nodes.last_seen_at`,
+in addition to the existing freshness, durability, and apply-barrier checks.
+This distinguishes an upgraded target's floor proof from a legacy target's
+512 MiB-only readiness without a new table, schema migration, or extra Raft
+proposal. A missing/stale marker refuses promotion as unknown; upgrade the
+target rather than treating the old boolean as proof. The diagnostic
+`required_bytes = 512 MiB` remains the minimum, not the measured target floor;
+the passive `plurx_raft_snapshot_required_storage_bytes` gauge reports the
+last known exact local floor. Its absence is unknown, not zero.
 
 ### 3.5 Alerts
 
@@ -324,49 +377,84 @@ Config key, validation, plumbing through `production_hiqlite_defaults`,
 OPERATIONS.md entry, and the decision recorded in the PR body with B, E, W,
 A and the chosen N.
 
+For the default-preserving 2026-09-30 implementation, record B/E/W/A as
+unmeasured and N = 10,000 unchanged. Those measurements remain required
+before an operational tuning change.
+
 Acceptance: `cargo test -p plurx-core cluster::migration::production_hiqlite`
 proves the default is 10,000 and the configured value reaches
 `raft_config.snapshot_policy`; the harness test
 `tests::a_legacy_launch_retains_the_production_snapshot_policy` in
 `plurx-cluster-check` still passes (`make cluster-harness-check`).
 
-### 5.3 M2 — off-writer copy (vendored patch #16)
+### 5.3 M2 — off-writer copy (vendored patch #22)
 
-Acceptance, all in `vendor/hiqlite` tests run by `make hiqlite-vendor-clippy`
-plus `cargo test -p hiqlite --features sqlite snapshot`:
+Acceptance, in `vendor/hiqlite` tests plus `make hiqlite-vendor-clippy`.
+Use the production `auto-heal,cache,macros,sqlite` features for the recovery
+group; a SQLite-only build deliberately lacks the auto-heal required by two
+retained recovery cases. The implemented focused names are:
 
-- `single_cut_under_concurrent_apply`: start a copy, apply 1,000 entries
+- `fixed_readmark_copy_allows_1000_applies_and_membership_without_cut_drift`:
+  start a copy, apply 1,000 entries
   while it runs (the test pauses the backup step), assert the image's
   `_metadata.last_applied` equals the acked `meta.last_log_id`, the image
   contains rows for every entry ≤ that index and none above it, and the
   writer's applied index advanced past it during the copy.
-- `membership_change_during_copy`: a `MetadataMembership` applied mid-copy
-  is absent from the image and from `meta.last_membership`.
-- `copy_failure_is_fatal_and_leaves_db_intact`: an injected step error acks
-  `Err`, the live database passes `integrity_check`, no `current` pointer
-  moved.
-- `wal_read_mark_released`: after the ack, a checkpoint truncates the WAL.
-- `make cluster-store-check` and `make cluster-daemon-check` unchanged.
+  The same case proves a mid-copy `MetadataMembership` is absent from the
+  image and returned membership, TRUNCATE is busy while pinned, and the WAL
+  truncates after completion.
+- `full_destination_copy_keeps_live_metadata_and_database_intact` and
+  `off_writer_copy_failure_preserves_published_generation_and_live_integrity`:
+  a real SQLite FULL error acks `Err`, live integrity remains `ok`, and the
+  actual builder's `current` pointer does not move.
+- `cancelled_copy_reply_retains_reader_and_queues_successor_without_blocking_apply`:
+  dropped replies neither detach a reader nor turn the successor into a fatal
+  busy error; ordinary applies finish while the first copy is paused.
+- `blank_entry_advances_the_actual_snapshot_cut`: the actual Raft apply path
+  acknowledges blank log ids before the snapshot cut.
+- The seven-case `snapshot_metrics_contracts` group retains the real
+  build/install, legacy-current and cancelled-promotion recovery checks.
+  Full `cluster-store-check`/`cluster-daemon-check` remain final-promotion work.
 
 ### 5.4 M3 — floor and deferral
 
-Acceptance: a fork unit test with an injected `statvfs` returns
-`available < required` → `deferrals_total` increments, no request reaches
-the writer, and after the bound the build proceeds; `cargo test -p plurx-core
-cluster::membership::promotion` proves `max(512 MiB, required)` in the
-preflight; `make storage-pressure-check` (root, Linux; see
-CLUSTER-PERFORMANCE-PLAN.md §6.6) records a real `ENOSPC` refusal that does
-**not** report a successful snapshot.
+Acceptance: `snapshot_admission::tests` proves the exact floor, ten-second
+insufficient-space retries, passive counter increments, successful release,
+and a ten-minute bound even when the filesystem is unknown. The builder
+awaits that admission before creating/sending its writer request. Core's
+`voter_snapshot_storage_floor_is_target_local_known_fresh_and_at_least_512_mib`
+pins the maximum floor and fail-closed unknown/stale durability. The
+`snapshot_floor_requires_current_process_heartbeat_proof` regression runs
+the production target SQL against real SQLite legacy, stale, and current
+capability rows (including unchanged removed-node lookup behavior).
+`real_enospc_on_an_owned_bounded_filesystem_preserves_live_state` is explicitly
+ignored without its agent-owned bounded filesystem; the recorded isolated
+OS ENOSPC run refuses success and retains live integrity. The broader Linux
+`storage-pressure-check` remains a separate promotion qualification, not
+permission to fill a host disk.
 
 ## 6. Verification and rollout
 
-Fast lane per PR: `make unit`; M2/M3 additionally `make
-hiqlite-vendor-clippy` and the named `cargo test -p hiqlite` filters; M1 runs
-`make cluster-harness-check`. Rollout order M0 → M1 → M3 → M2. M1 is a
-config change rolled voter by voter with identical values; a rollback is the
-previous value. M2 changes no on-disk format and can be rolled back by
-image; a fleet may run mixed M2/non-M2 voters because the cut semantics are
-identical. M3's deferral is observable only under low space.
+Each task branches from `effort/architecture-review-2026-09-20` and opens its
+PR back into that effort. Establish the pinned Rust 1.97.1 loop before edits;
+run the normal tracked hook, affected checks, vendor Clippy, and the smallest
+named regressions. Core storage regressions enable `hiqlite-store`. Record
+each `Regression-Test` in the task PR and landing message; the current
+`Effort development gate` blocks task merging. Full store/daemon suites and
+qualification belong to the final promotion, not a broad per-task unit sweep.
+When tasks finish, freeze merges, merge current `main` into the effort, and
+qualify the exact candidate through `Main promotion gate` plus its receipt.
+Neither a task test nor an effort gate authorizes production rollout.
+
+Implementation order is M1 default plumbing → M3 → M2; M0 tuning evidence
+continues independently. Any later cadence change requires fleet evidence,
+identical configured values, and separately authorized voter restarts. M2
+changes neither wire ordinals nor the image/install format; mixed M2/non-M2
+voters preserve the cut contract. M3 promotion intentionally requires the
+target's fresh floor capability, so an old target needs upgrading before
+promotion. M3's bounded deferral affects builds only under insufficient or
+unknown storage. Its default wait is ten minutes with ten-second rechecks;
+after expiry the original fatal-error semantics remain visible.
 
 ## 7. Open questions
 
@@ -393,10 +481,10 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 instrumentation | [#427](http://192.168.4.7:3000/noirr/plurx/pulls/427) | Four fixed-label filesystem gauges are sampled by the existing passive local-Raft tick without Store or network access; direct node status and the Cluster page carry the database byte count. Rust 1.97.1 compiled `plurx-core`, `plurxd`, and `plurx-cluster-check`; the focused filesystem, Prometheus, and web contracts passed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 fleet readout | [#427](http://192.168.4.7:3000/noirr/plurx/pulls/427) | Blocked, not estimated: this execution host could not resolve the plan's `media1`/`lab1`–`lab3` aliases; SSH to the documented current addresses for media1, lab3, lab4, and lab6 timed out, and the configured `billy` jump host could not reach their HTTP listeners. No voter was restarted. M1, M3, and therefore M2 remain unchanged until every current voter supplies the 24-hour B/E/S/W readout and an authorized follower restart supplies A. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 instrumentation | [#427](http://forge.lan:3000/noirr/plurx/pulls/427) | Four fixed-label filesystem gauges are sampled by the existing passive local-Raft tick without Store or network access; direct node status and the Cluster page carry the database byte count. Rust 1.97.1 compiled `plurx-core`, `plurxd`, and `plurx-cluster-check`; the focused filesystem, Prometheus, and web contracts passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 fleet readout | [#427](http://forge.lan:3000/noirr/plurx/pulls/427) | Blocked, not estimated: this execution host could not resolve the plan's `media1`/`lab1`–`lab3` aliases; SSH to the documented current addresses for media1, lab3, lab4, and lab6 timed out, and the configured `jump1` jump host could not reach their HTTP listeners. No voter was restarted. M1, M3, and therefore M2 remain unchanged until every current voter supplies the 24-hour B/E/S/W readout and an authorized follower restart supplies A. |
 
-### Current execution boundary
+### Historical execution boundary — 2026-09-21
 
 The implementation deliberately stops inside M0. The deployed fleet does not
 yet run the new size gauges, and this session has no network path to collect
@@ -413,3 +501,42 @@ authorization and record the applied-index catch-up rate. Put B, E, S, W, A,
 the voter roster, timestamps, and raw query or command receipts on this PR
 before beginning M1. This is an evidence dependency, not an invitation to use
 the stale host list or the appendix's proposed threshold.
+
+### 2026-09-30 correctness/default execution
+
+The owner/Astra ruling above supersedes the historical stop for correctness
+work only. The task retains N = 10,000, `max_in_snapshot_log_to_keep = 1`,
+16 MiB log segments, and all transfer/install/publication contracts. M1
+validates 1,000..=200,000 and threads the configured threshold into production
+Hiqlite. M3 measures the live local image/WAL, waits before enqueueing the
+writer, and publishes passive floor/deferral metrics. The existing heartbeat
+transaction carries the versioned proof; no replicated table is added.
+
+M2 persists cloned cut metadata, opens `BEGIN` and reads `_metadata` on the
+dedicated read-only WAL connection while still on the writer, then restores
+the live row's prior snapshot id. The blocking copy owns the pinned reader.
+Its completion updates only the live snapshot id on success, never rolling
+back later applied entries or membership. Blank Raft entries now acknowledge
+their last-applied index through the same writer boundary. Copy errors retain
+the old current generation and return the existing storage error.
+
+Focused fork regressions prove 1,000 concurrent applies and a mid-copy
+membership change cannot drift the image/metadata/returned cut; TRUNCATE is
+busy during the pin and truncates after completion; real SQLite FULL and
+builder-copy failures preserve live integrity and the current pointer; a
+blank entry reaches the actual snapshot cut. The explicit ignored ENOSPC
+regression requires an owned bounded filesystem and refuses a broad one.
+It is not a silent pass when the lab environment is absent. Exact commands
+and receipts belong to the task PR. No fleet 24-hour readout, B/E/S/W/A tuning,
+production rollout, restart, or release acceptance is claimed here.
+
+The isolated 2026-09-30 OS pressure receipt used a fresh 16 MiB HFS+ sparse
+volume on the compile host, not a host-disk fill or a production filesystem.
+Available bytes before the copy were 16,347,136; an owned synthetic 64 MiB
+SQLite blob forced `database or disk is full`, and the operating system
+returned errno 28. Live integrity remained `ok` and the read mark released.
+The first lab assertion incorrectly expected ENOSPC only on write, while
+the already-full volume refused file creation; the assertion was corrected
+to accept errno 28 at either boundary and the regression reran successfully.
+The volume was detached and synthetic leftovers removed. This is a local
+failure-semantics receipt, not the deferred fleet tuning or release drill.

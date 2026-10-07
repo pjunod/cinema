@@ -1,6 +1,7 @@
 # Codec and GPU qualification — widen the measured boundary, one graph at a time
 
-**Status:** blocked: M0 one-week deployed observation · **Executes:** Q12 (§3.1.3), Q6 / F-stream-10,
+**Status:** open: M1 corpus/M2 contract; sixteen internal M3 cells recorded,
+original qualification open, 2026-10-02 · **Executes:** Q12 (§3.1.3), Q6 / F-stream-10,
 Q8 / F-stream-16 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -15,6 +16,17 @@ rules), [VOD-ENCODING.md](VOD-ENCODING.md) (the immutable VOD recipe and
 what may not move inside it) and
 [TONE-MAP-CHAIN-CORRECTIONS.md](TONE-MAP-CHAIN-CORRECTIONS.md) (what the
 colour chain already got wrong once).
+
+**2026-09-30 prerequisite amendment:** Paul's ruling makes the organic-use
+week supplementary observation, not eligibility for M1 or M2. Current scoped
+hardware, compiled-family, boot-probe and selected-graph evidence determines
+which graphs to investigate. A zero process counter does not prove absence.
+All content, exact graph/device, quality, throughput and HDR acceptance bars
+below remain unchanged; no new HEVC default or qualification follows from
+this amendment. M7/M8 are inapplicable only for an inventory that actually
+proves the relevant hardware/family absent, and reopen when that inventory
+changes. Meaningful manual choices remain advisory, never readiness gates;
+automatic contract correctness does not acquire an unfinished-feature toggle.
 
 This is a **qualification programme**, not a set of argument edits. The
 review is explicit about that in all three items: Q12 is "qualify one more
@@ -57,6 +69,45 @@ Board id S-11. One draft implementation PR owns the whole plan under the fast
 lane. Milestones are logical commits and Execution-log rows in that PR; M0 and
 M6 are measurement milestones whose deliverable includes a table in this
 document.
+
+## Video-quality batch continuation — 2026-10-03
+
+[PR #766](http://forge.lan:3000/noirr/plurx/pulls/766) adds one candidate
+plain-HDR10 path: software decode/10-bit scale, P010 upload, `hevc_vaapi`
+Main10 at the existing 1080p rung. The installed lab6 Jellyfin encoder advertises
+that profile and P010 hardware surfaces; advertisement alone is not a
+qualification. Source implementation and compile checks precede the final
+adversarial review and once-only validation/measurement pass.
+
+The old coupling was concrete: grade selection knew only software/QSV,
+VAAPI's upload always selected 8-bit NV12, and the HDR argument builder applied
+software `-preset`/`-x265-params` to every non-QSV family. The new family recipe
+uses P010, Main10 and VAAPI IDR controls, with its own existing-style boot
+capability result threaded through system diagnostics, planning and ceilings.
+A refused graph uses the ordinary SDR route. No new playback retry or watchdog
+owns it. Its encoder, pipeline and grade remain inputs to existing immutable
+recipe/cache identity.
+
+The scope is plain PQ/BT.2020 at 1080p with known cadence at most 30 fps.
+The same source-facts contract informs grade selection and checks the final
+plan; high, variable or unknown rates retain SDR with their original cadence. Dolby RPU reshaping, 4K VAAPI HDR and
+HDR subtitle burn are not advertised: burning subtitles still selects SDR
+composition, avoiding nominal subtitle white at the PQ peak. The HDR ceiling
+now asks for the selected route's own proof; plain QSV HDR no longer
+accidentally requires the unrelated Dolby QSV proof. The output remains HEVC Main10/PQ. The isolated capture found VAAPI's
+actual non-packed constraint byte is `B0`, so its declaration is
+`hvc1.2.4.H120.B0`; software/QSV retain their existing measured declarations.
+The selected encoder now informs rolling, cached and VOD presentation facts.
+The diagnostic MP4 also exposed the muxer's default `hev1` entry. Encoded HEVC
+VOD now explicitly writes the advertised `hvc1` entry, through the existing
+parameter-set normalizer. Its actual argv already feeds immutable VOD identity,
+so old and corrected init contracts cannot share a rendition key.
+
+`encoder-calibration-args --grade hdr10 --family vaapi` exports the production
+encoder/upload arguments and 1080p plain-HDR filter for an isolated capture.
+The exporter is evidence plumbing, not a capability or qualification verdict.
+The execution ledger will distinguish encoder/decoded output evidence from
+physical panel or native-device evidence that has not been obtained.
 
 ## 2. Contract today
 
@@ -314,7 +365,7 @@ labels:
 
   # HELP plurx_tone_map_pipeline_sessions_total Sessions started on each tone-map pipeline.
   # TYPE plurx_tone_map_pipeline_sessions_total counter
-  plurx_tone_map_pipeline_sessions_total{pipeline="vpp_qsv|tonemap_vaapi|libplacebo|tonemap_opencl|dovi_tonemapx|dovi_passthrough|hdr10_passthrough|cpu"} N
+  plurx_tone_map_pipeline_sessions_total{pipeline="vpp_qsv|tonemap_vaapi|libplacebo_vaapi|libplacebo|tonemap_opencl|dovi_tonemapx|dovi_passthrough|hdr10_passthrough|cpu"} N
 ```
 
 Both label sets are closed enums (`Encoder`, `Pipeline`), so cardinality is
@@ -323,8 +374,11 @@ bounded by construction; `family` and `pipeline` come from
 the request supplies. The values come from `EncoderCaps` and from the same
 place `MediaNodeRuntime` reads. No settings key is added.
 
-The answer to "is NVENC in use?" is then `plurx_encoder_sessions_total{family="nvenc"}`
-over a week, not an inspection of hardware.
+The supplementary answer to "how much organic NVENC use was observed?" is
+reset-aware `plurx_encoder_sessions_total{family="nvenc"}` over a week.
+Eligibility to begin corpus/contract work instead uses the current scoped
+inventory: hardware, compiled families, accepted boot probes and selected
+graphs. Missing history is unknown, and a final zero is not absence evidence.
 
 ### 3.3 One fleet GPU first: QSV, and HEVC SDR where it measures a benefit
 
@@ -332,8 +386,9 @@ QSV is the fleet's GPU. [../OPERATIONS.md](../OPERATIONS.md) records the
 2026-08-14 D5 sweep on **media1** and says "media1 performs production
 encoding"; the Profile 5 / QSV Main10 measurements at `encoder.rs:233-238`
 are also media1's, and `PLURX_HWACCEL: "qsv"` is the documented preference
-for Arc-class GPUs. Confirm the current selection per node from M0's metric
-before starting M1 — the doc is the prior, the metric is the fact.
+for Arc-class GPUs. Confirm current accepted families and selected graphs
+from scoped M0 inventory before widening a graph — the doc is the prior,
+the current evidence is the fact. M1/M2 need no completed organic-use week.
 
 The widening, in order of what it buys:
 
@@ -359,9 +414,10 @@ comment — the way `HDR10_HLS_CODEC`'s was.
 
 ### 3.4 NVENC arguments and a CUDA graph — only if M0 finds an NVENC node
 
-Conditional on `plurx_encoder_sessions_total{family="nvenc"} > 0` over M0's
-window. If it is zero, M3 does not happen and this section is the record of
-why.
+Conditional on current scoped inventory identifying an applicable NVENC
+node/graph. The organic-use counter is supplementary; zero does not prove
+absence. If actual hardware/family/probe evidence proves no applicable node,
+M7 does not happen for that inventory and this section records why.
 
 If it does happen, two separable pieces:
 
@@ -396,7 +452,8 @@ If it does happen, two separable pieces:
    frame each way per frame today), not merely "it ran".
 
 VideoToolbox gets the same treatment on the Mac nodes (maca/macb) and only
-if M0 shows sessions there: `-hwaccel videotoolbox -hwaccel_output_format
+if the current M0 inventory identifies an applicable node/graph there:
+`-hwaccel videotoolbox -hwaccel_output_format
 videotoolbox` with the `scale_vt`/`tonemap_vt` graph where the build has
 it. Same probe, same acceptance, separate milestone, no shared recipe with
 NVENC.
@@ -573,8 +630,8 @@ attachment, or after the first publishable Live TV inventory crosses its
 serving fence. It does not claim first-media publication for rolling or VOD.
 Bounded labels only. No behaviour change.
 
-Then one week of reset-aware collection, then the GPT prompt in §6 to read it
-off every node. These counters are process-local. A final zero from a direct
+Collect a supplementary reset-aware usage week with the GPT prompt in §6;
+do not wait for it to begin M1/M2. These counters are process-local. A final zero from a direct
 scrape is never week-long absence evidence: use a continuously scraped
 Prometheus `increase(...[7d])` and verify the exact `plurx_build_info` series
 throughout that interval, or retain start/end scrapes and prove
@@ -586,17 +643,18 @@ Acceptance: a scrape from each current node prints one
 `plurx_encoder_sessions_total` counter that advances once at the accepted
 start boundary; focused rolling, VOD and Live TV seam tests prove one increment
 and pre-boundary failure/replay non-increments; `cargo test -p plurxd
-metrics_encoder` green; `make unit` green; and, one week later, the §6 table
-filled from reset-aware evidence for every node, stating for each: families
+metrics_encoder` green; and the current scoped §6 inventory table
+filled for every node, stating for each: families
 compiled, families the probe accepted, family actually selected, sessions
-per family and grade, tone-map pipelines used.
+per family and grade where observed, tone-map pipelines selected/used. The
+organic usage week is supplementary; unknown history remains labelled unknown.
 
 **This milestone decides whether M7 and M8 exist at all.**
 
 #### 2026-09-21 pre-instrumentation fleet inventory
 
-The maintained Ansible inventory currently names four Plurx nodes (`nynuc`,
-`m6`, `nuc4`, `nuc3`), rather than the historical host list in §6. The table
+The maintained Ansible inventory currently names four Plurx nodes (`media1`,
+`lab6`, `lab4`, `lab3`), rather than the historical host list in §6. The table
 below comes from read-only SSH discovery against those four nodes. It separates
 an encoder present in FFmpeg's build from one accepted by the boot probe. An
 unset preference means the existing automatic ordering selects the first
@@ -604,10 +662,10 @@ accepted family; it is not an operator enable switch.
 
 | Node | GPU / kernel driver | FFmpeg build exposes | Boot probe accepts | Automatic selection / tone-map | Historical use available? |
 |---|---|---|---|---|---|
-| `nynuc` | Intel Arrow Lake-P Arc Pro 130T/140T · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:18:48Z`; M0 metrics absent |
-| `m6` | AMD Phoenix1 · `amdgpu` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, VA-API | VA-API / CPU fallback | No: container started `2026-09-21T04:20:03Z`; M0 metrics absent |
-| `nuc4` | Intel Alder Lake-P Iris Xe · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:27:49Z`; M0 metrics absent |
-| `nuc3` | Intel Alder Lake-P Iris Xe · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:20:40Z`; M0 metrics absent |
+| `media1` | Intel Arrow Lake-P Arc Pro 130T/140T · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:18:48Z`; M0 metrics absent |
+| `lab6` | AMD Phoenix1 · `amdgpu` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, VA-API | VA-API / CPU fallback | No: container started `2026-09-21T04:20:03Z`; M0 metrics absent |
+| `lab4` | Intel Alder Lake-P Iris Xe · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:27:49Z`; M0 metrics absent |
+| `lab3` | Intel Alder Lake-P Iris Xe · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:20:40Z`; M0 metrics absent |
 
 All four images are `plurx/plurxd:latest`; none sets `PLURX_HWACCEL` or
 `PLURX_TONEMAP`. NVENC's symbols are compiled into the shipped FFmpeg, but its
@@ -622,12 +680,118 @@ The existing image exports none of the three M0 metric families, and its
 pre-change VOD logs do not preserve the resolved encoder as a countable
 session field. Recent container logs therefore cannot reconstruct a truthful
 one-week use table. This PR adds the bounded process counters, but M0 remains
-open until that image is deployed and continuously scraped for one reset-aware
-week. The direct-scrape fallback is valid only when start/end evidence proves
+open for supplementary organic-use evidence until that image is deployed and
+continuously scraped for one reset-aware week. The direct-scrape fallback is valid only when start/end evidence proves
 uninterrupted uptime; otherwise its window restarts. M1-M6 do not begin on an
-invented baseline.
+invented baseline. **Superseded 2026-09-30:** this historical waiting rule
+does not prevent M1/M2; use the current inventory and preserve unknowns.
 
 ### 5.2 M1 — extend the corpus to §3.1.3's content classes
+
+**2026-09-30 implementation scope:** the effort already contains
+`1080p-animation`, `sport` and the incumbent N1 eight-bit `dark-gradient`.
+Keep those byte identities unchanged. `dark-gradient-10bit` is a separate
+HEVC ten-bit input; `burn-pgs` muxes the existing deterministic `scripts/mkpgs`
+SUP as an actual copied subtitle stream, rather than pre-burning pixels.
+`dv-p5` requires `PLURX_DV_P5_FIXTURE` to name genuine media and verifies the
+HEVC Profile 5 / RPU-present probe record before copying it into the corpus.
+`scripts/bench fixtures --qualification` includes these acquisition-dependent
+inputs; the ordinary incumbent corpus remains unchanged. Missing media and failed generation fail the command, never count as a built
+class. No genuine P5 source is yet identified for this run.
+
+**2026-10-01 continuation:** a bounded read-only private-library header census
+identified a genuine HEVC Profile 5 / RPU-present candidate; private path and
+stat/prefix-hash facts stay in the owned receipt. Whole-source hash, acquisition
+and per-frame RPU evidence remain open. The independent
+[HDR reference scorer](../performance/HDR-REFERENCE-SCORING.md) adds matched
+decoded PQ-domain PSNR/SSIM, highlight/shadow code census and exact metadata
+checks, plus a separately pinned explicit BT.709 grade for SDR VMAF. Actual
+eight-frame authored-reference generation, a distinct lossy PQ comparison and
+bounded offline grade/model execution are diagnostics, not genuine-film,
+GPU, production-session or physical A/B acceptance. The incumbent generator,
+fixtures and SDR scorer are unchanged; HLG/unreshaped DV remain refused.
+
+M1 is **not accepted** by the generator or its mock tests. Actual generation,
+the intended per-class stream facts, production bitmap-burn selection and
+captured session matrix remain owed. The incumbent rate-control scorer refuses
+HDR references because it lacks a reference tone-map: do not bypass that
+refusal or score PQ/HLG against SDR as if the result meant quality. A versioned
+all-class corpus receipt requires genuine inputs and appropriate HDR-reference
+scoring, plus §3.6's independent fidelity checks. No manifest alone closes it.
+
+**2026-10-01 actual acquisition continuation:** unchanged 45-second animation,
+sport and PGS-track fixtures were generated in an owned CPU-only container on
+the frozen `4f243a01` tool image, using the current `b65be8773` harness. A
+small genuine P5 packet copy also yielded 50 actual Profile 5 RPUs; it is not
+a 45-second corpus input, decoded reshape or independently graded reference.
+The ten-bit gradient encoded but its unchanged checker refused it: the HEVC
+VUI contains unspecified primaries/transfer (2/2), with BT.709 matrix (1).
+An actual two-frame experiment showed explicit x265 `colorprim`, `transfer`,
+`colormatrix` and limited `range` alone still emitted unspecified transfer
+and primaries. The final narrow candidate also binds these properties on
+the frames with `setparams` after the existing GEQ expression: metadata only,
+not a pixel transform. Existing generic flags and the refusal remain; every
+other fixture argv is unchanged. The corrected committed `5ec437ea7` bench
+archive then passed a distinct two-frame probe and actual SPS check
+(primaries/transfer/matrix 1/1/1, limited range 0), followed by the unchanged
+45-second 1920×1080/24 fps gradient and its strict metadata checker. The
+626,292-byte corrected fixture SHA-256 is
+`853c3087e1fd650df536196123b6b0d8430526935b6c973bb2b545b5130c7249`;
+video is 45.000 s (AAC/container 45.023 s). Original refused bytes remain
+retained. This proves this fixture's metadata, not perceptual fidelity.
+No GPU, production bitmap-burn or physical HDR acceptance follows.
+
+A separate requested-45-second genuine P5 stream-copy then acquired 1,082
+packets and 1,082 actual Profile 5/CM v4.0 RPUs in a bounded owned CPU-only
+window. Packet PTS spans 0–45.167 s; GOP/container extent is 45.208 s, not
+exactly 45 s. The 104,533,274-byte acquired fixture SHA-256 is
+`7b8b1efbe6172783824b9dd3fff542473db7c9fe46faceff1c10e9f4b46fdbed`;
+the extracted 310,279-byte RPU SHA-256 is
+`d9c3f67b4d85196228b06ef8fa0b6784ce6bfe2c898ced4d5005d71166fbf780`.
+The private source's size/mtime/inode were unchanged before/after; this is
+not a full-source hash. This longer fixture supersedes no earlier limited
+sample receipt and has not been decoded, independently reshaped/graded or
+physically compared. M1's all-class corpus and fidelity acceptance stay open.
+
+**2026-10-02 M1 reference-association implementation — incomplete corpus:**
+`scripts/codec-qualification-corpus.json` now accounts for all thirteen existing
+generators, including the separate ten-bit gradient, real-PGS input and genuine
+P5 input. It is a versioned metadata plan, not a completed acquisition receipt.
+Known full acquired-fixture hashes retain their historical source identity;
+the separate 70-second H.264, grain, SDR4K and PQ4K inputs are not relabelled as
+the default 45-second generator output. Unknown hashes stay null. Current file
+availability, decoded grade, captured-session output and fidelity are unmeasured.
+
+Run `scripts/bench qualification-corpus` to validate this metadata without
+opening media, generating fixtures, probing tools or connecting to a server.
+`--require-associated` refuses missing reference associations only in this
+measurement command; it never controls ordinary playback. Metadata JSON reads
+are bounded to 1 MiB per regular no-follow file and 4 MiB total, with held-file
+identity and receipt-hash checks. The summary always reports
+`measurement_executed: false` and `qualified: false`, even when associations are
+complete. The existing capture, rate-control and scoring commands are unchanged.
+
+SDR source references remain in the BT.709 VMAF domain. PQ-to-PQ references
+remain in PQ code values; PQ-to-SDR requires a separately hash-bound independent
+BT.709 grade receipt matching the parent, reference and zero-start interval.
+An association validates those receipt fields, **not** its pixels or graph:
+the independent [HDR scorer](../performance/HDR-REFERENCE-SCORING.md) still
+validates decoded metadata, parent geometry, the exact grade graph and scoring
+execution. HLG and unreshaped DV explicitly retain unsupported/unmeasured
+associations; no SDR score is substituted. This does not complete §3.1.3's
+all-class corpus, §3.6's fidelity checks, the session matrix or M1 acceptance.
+The historical acceptance command below still needs a domain-aware measurement
+consumer; this metadata command does not pretend the SDR-only rate-control
+loader can consume PQ/HLG/DV references.
+
+For the unchanged 64-document local-unit receipt bound, this task retires only
+the inactive merged-PR671 discovery copy
+`validation/python-unit-local/1d47b568736d9e306fee3f643db49e9118b9b4b85598c6325df8e35d6c6d4b62.json`.
+Its exact 1,262-byte SHA-256 is the filename; Git blob is
+`963c29967b09561bc077844ac5a0f2f5838da190`. Original null-source attribution,
+authenticated comment6937 and landing history remain unchanged. Recover the
+original with `git show b353c4f8c0129b17e6217680f6bdf757a3ede65b:validation/python-unit-local/1d47b568736d9e306fee3f643db49e9118b9b4b85598c6325df8e35d6c6d4b62.json`.
+No active-task proof, receipt loader, cap or replay policy is changed.
 
 Code: five new `FIXTURES` entries (§3.5) in `scripts/bench`, a new
 `scripts/codec-qualification-corpus.json` at schema version 1 with
@@ -643,6 +807,38 @@ against a dev server and writes its JSON; the corpus JSON is committed and
 `make unit` is unaffected.
 
 ### 5.3 M2 — the explicit output-codec contract
+
+**2026-09-30 runtime:** `OutputCodecContract` lives in
+`transcode/encoder.rs`, not a parallel manifest. The pure production resolver
+stores it on the private `ResolvedTranscode` and derives the existing
+`PresentationContract` delivered codec/encoder from it. Session reporting and
+recipe identity continue consuming that presentation, so source `file.*` facts
+cannot substitute for delivered facts. `video_codec_for` delegates to the
+same measured codec/depth/grade/family table. The renderer pairing and grade
+are checked by `qualified()`; existing boot capability validation remains in
+the node's resolution path. No new tuple is admitted, no argv changes, and
+the plan/digest/recipe versions stay unchanged.
+
+**Sole review disposition, 2026-09-30 — [#649 review 22](http://forge.lan:3000/noirr/plurx/pulls/649#issuecomment-6639):**
+P2 accepted: the incumbent HDR10 builder always emits bitrate-bounded VBR,
+so the new delivered contract normalizes a supplied HDR10 QVBR preference
+to VBR and `qualified()` refuses a manually malformed HDR10/QVBR contract.
+SDR retains its supplied effective mode. The incumbent options and recipe
+field bytes remain unchanged, including their historical HDR10 option key
+space; no cache version bump or invalidation is smuggled into the correction.
+Focused regressions prove effective-mode truth, malformed-tuple refusal,
+byte-identical encoder argv and retained legacy options/identity. P3 accepted:
+the rollout paragraph now follows task PRs into the existing effort, focused
+regressions/current-head Effort gate and separate exact-tree final promotion.
+No second formal review or new media qualification is claimed.
+
+Focused proof:
+`cargo +1.97.1 test -p plurx-core --features hiqlite-store --lib output_codec_contract`
+covers all legacy family/grade pairs and renderer pairings, refused HEVC SDR
+and mismatched depth/grade, every supported legacy rate/forced-IDR encoder
+argv, actual source-HEVC-to-delivered-H264 resolution, codec-distinct recipe
+identity and the unchanged preexisting golden SHA-256. This is not new GPU or
+device qualification.
 
 Code: §3.1. `OutputCodecContract` plus `qualified()`, with
 `video_codec_for` reimplemented on top of it so behaviour is identical.
@@ -663,6 +859,225 @@ entry invalidates (the argv is byte-identical — assert that in a test that
 hashes the argument list before and after).
 
 ### 5.4 M3 — Q8a: does the rolling grid drift?
+
+**2026-10-01 offline evidence collector candidate:**
+`scripts/rolling-grid-census` captures only flat, owned, private copied
+MPEG-TS rolling-transcode outputs; it never starts a session or opens a server URL.
+It verifies the selected local ffprobe binary hash, retains bounded raw packet
+probes and media hashes, and consumes them again to report EXTINF spread,
+presentation-start spacing, distinct packet cadence, packet-span/EXTINF
+disagreement and keyframe-at-start counts. Duplicate timestamps or incomplete
+packet timelines refuse; truthful complete timelines off the two-second grid
+remain measured drift. Fractional cadence uses exact rational arithmetic and
+bounded actual-timebase quantization, not a nominal integer fps guess.
+Supplied source/daemon/graph provenance is recorded, not authenticated by
+this tool: the campaign owner must independently bind it to the actual
+executed session before using a result for M3 acceptance. Keyframe flags are
+not NAL IDR/CRA proof. One cell is not the full four-fixture×four-rung census.
+
+```bash
+# Read an already copied, owned mode700 directory; no encoder/server activity.
+python3 scripts/rolling-grid-census capture --root /private/owned/cell-input \
+  --output /private/owned/new-cell-evidence --ffprobe /absolute/ffprobe \
+  --provenance /private/owned/cell-provenance.json
+# Recompute the copied objects and raw probe hashes; do not trust a stored verdict.
+python3 scripts/rolling-grid-census validate --root /private/owned/new-cell-evidence
+```
+
+The provenance object requires `route: rolling-transcode`, source commit,
+source/graph-argv/daemon/tool SHA-256 identities, session/family/pipeline,
+fixture/rung, tool version, exact rational `output_cadence: [numerator,
+denominator]` and `output_geometry: [width,height]`. Unknown facts refuse.
+Every playlist URI must name one consecutive local `segN.ts`
+object; URLs, missing/duplicate segments, symlinks and changed copies refuse.
+`#EXT-X-MAP` and `.m4s` refuse explicitly: this collector does not yet capture
+the initialization context required to measure fMP4. This is an evidence
+format limit, not a production setting or gate.
+The completed-segment window requires 30–256 entries: do not substitute a
+short terminal segment or loop/relabel a 45-second corpus fixture to earn
+that count. Acquire separately identified ≥60-second measurement inputs.
+Bounded capture is ≤600 s aggregate, ≤20 s/probe, ≤512 MiB copied evidence,
+≤16 MiB/probe output and ≤1 MiB/probe stderr; existing destinations refuse.
+Every text/JSON input is capped before decoding/parsing using cap+1 reads:
+playlist/receipt 1 MiB, provenance/tool-version 64 KiB, raw probe 16 MiB.
+Failed partial captures retain their intent and files, not a completed receipt.
+No drift means every completed interval/start spacing lies within one actual
+output frame and every segment's first presented packet has a keyframe flag;
+extra internal keys are reported separately, not treated as grid drift.
+Physical/graph acceptance, authenticated campaign provenance and the original
+full census below remain open. No production GOP flag changes follow here.
+
+**2026-10-01 real-owner acquisition candidate:**
+[`scripts/rolling-grid-acquire`](../../scripts/rolling-grid-acquire) and the
+feature-enabled ignored `rolling_grid_campaign::owned_real_rolling_cell`
+entry point provide a private loopback acquisition path. They do not add a
+public Live create field, force a VOD refusal or change production flags.
+The internal Live request runs the existing manager/producer, then real
+in-memory Store claim/assign/activate APIs bind its active route. The bridge
+delegates to shipped playlist/segment handlers and their actual downstream
+EOF pump: buffering bridge bytes is never an extra delivery commit.
+
+The active viewport video runs at1× with vendored hls.js. Real
+`requestVideoFrameCallback` media time/presented-frame observations are sampled
+at500ms, not every33ms; two actually accepted advancing observations must
+satisfy the existing30s startup policy. No test-only presented marks, download
+frontier relabel or synthetic Rendering is permitted. Nonce, session,
+generation and producer attempt fence callbacks; absolute origin is applied
+once at server control ingestion. Missing callbacks, stalls, refusal or changed
+source preserve partial evidence, never a completed cell.
+
+**2026-10-02 reporting-cadence repair candidate:** the bridge's existing
+450ms acceptance floor starts when a control exchange settles, not when the
+browser's preceding500ms interval tick fired. A delayed accepted response can
+therefore make the next interval arrive too early. The page now waits at least
+500ms after the previous response/error settles before reporting again; busy,
+stale, paused, seeking and non-advancing observations still refuse. An actual
+409 remains a terminal failed cell, not an automatic retry or synthetic pass.
+One new synthetic contract executes the actual page with delayed responses
+and checks the cadence, single in-flight exchange and retained refusal. It
+passed once0.127s; this is not real-browser/corpus qualification. The prior
+codec-capable diagnostic preserved one actual accepted frame observation,
+then failed409 with no complete/bridge-final receipt. Its old5eb binary and
+new38026 launcher retain separate attribution; no current-tree pass is claimed.
+
+Supply an existing hash-pinned browser and reviewed feature-enabled test
+binary; no build/download/install occurs in this controller. Its manifest pins
+source, FFmpeg, ffprobe, browser, test binary and vendored hls.js. Source must
+provide≥64s without looping and support the requested360/480/720/1080 rung.
+Prepare the exact reviewed page only in a fresh owned mode700 root, then
+validate without launching:
+
+```bash
+python3 scripts/rolling-grid-acquire --page-template /private/tmp/owned-cell/page.html
+python3 scripts/rolling-grid-acquire /private/tmp/owned-cell/manifest.json
+```
+
+Operational `--execute` needs a separately authorized owned Linux cgroup
+ceiling≤2CPU/2GiB/256PID for the complete local producer/browser tree, with this
+controller as PID 1 in a fresh private PID namespace; bare-host, shared-PID or
+already populated namespace execution refuses. A normal owned container can
+provide this without writable cgroup delegation or privileged mounts. The
+independent PID 1 supervisor bounds synchronous browser/body/drain/close calls:
+585 s work plus a 15 s cleanup reserve within the absolute 600 s deadline.
+The deadline starts before cheap bounded owner/root admission and launch
+setup; full source/tool hashing, probe and page validation run only inside the
+supervised worker, with no deadline reset. At operational execution, the outer
+owner must also impose a 600 s container wall watchdog plus bounded exact-ID
+terminal cleanup, recording nonce/labels/container ID/start/deadline/exit and
+namespace termination. This protects against controller setup or filesystem
+syscalls themselves failing to return; an internal receipt cannot prove that
+external terminal condition. No operational container/watchdog ran here.
+Cleanup signals only pidfd-bound identities in the initially empty task-owned
+namespace, reaps descendants (including detached sessions), and refuses success
+unless only PID 1 remains. Kernel namespace teardown on PID 1 exit is the final
+backstop; the later operational owner must retain exact container identity and
+terminal state, not infer them from a worker receipt. Stop, receipt or browser
+errors cannot bypass subtree cleanup. Require successful `supervisor-final.json`
+alongside `complete.json`; completion alone is not clean terminal evidence.
+One browser/page/cell,≤4 concurrent media response bodies,
+≤4096 observations/snapshots,≤256 segments/512MiB media,64MiB logs and10min wall
+deadline. The fresh standalone child limiter caps file/CPU resources without
+threaded post-fork callbacks. The later16-cell serial campaign retains its
+160min aggregate bound; this tool does not authorize that campaign or reserve
+K06 hosts. Pin actual browser build separately in the operational receipt.
+
+Raw playlist revisions and exact served object names/hashes remain immutable;
+an accumulated sliding window is derived evidence, not an original server
+playlist. Completion requires≥30 distinct contiguous fully consumed segments,
+≥60s of their actual advertised durations and actual browser media progress.
+The census still measures packet/GOP facts; browser callbacks are not NAL IDR
+proof. This is test-binary/internal-manager/shipped-handler/headless-browser
+presentation evidence, NOT public create-route, physical, native, artist-HDR,
+GPU or whole-M3 qualification. No actual acquisition has run for this candidate.
+Two initial synthetic ownership contracts and two later supervisor failure
+contracts passed once. The latter model blocked operations and detached
+descendants; they do not execute browser, encoder or kernel namespace cleanup.
+The old candidate lacks the supervisor consumer and refuses those new tests;
+no previous unit successes repeated. Review 50's deadline and cleanup findings
+are repaired in this same candidate, pending independent disposition.
+
+**2026-10-02 internal acquisition continuation — not original M3 acceptance:**
+the [sanitized sixteen-cell ledger](S11-INTERNAL-ROLLING-CELLS-2026-10-02.md)
+records four separately hash-pinned synthetic 70.023-second inputs at
+360/480/720/1080, measured using source `fb4360792` / tree `cc943750`,
+lab binary SHA-256 `656e7589` and ARM64 runtime `b7bc6f79`. This is older
+measured-source evidence, not runtime qualification of the current effort.
+Each cell fetched 35 contiguous complete objects/70 advertised seconds,
+presented at least60 seconds at real1×, and independently censused1,680
+video packets at24fps. Probed outputs are640×360,854×480,1280×720 and
+1920×1080. EXTINF min/median/max is2/2/2 seconds,35/35 first-packet keyflags,
+maximum grid error0.0006666666666666666ms: no measured packet-grid drift.
+Grain720 has **two extra internal keyflags**, at13.958333s and38.000000s;
+the other15 cells have zero. Extra keys remain separate from grid drift.
+
+Actual NUL encoder argv/source-FD/executable/parent/PUT-socket ownership,
+complete served revisions, all35 fetched/retained/census byte equalities,
+raw probes and exact cleanup/terminal watchdog receipts are retained
+privately and bound by the ledger's hashes. Capability-bearing argv is not
+published. Original acquisition2CPU/2GiB/256PID/600s and offline
+2CPU/1GiB/64PID/690s bounds stayed unchanged. Distinct source-generation
+resource variants and failed-only verifier repairs retain separate failures;
+the PQ10-bit/BT.2020 source has actual frame/SPS-VUI evidence, but unspecified
+mastering/CLL and no calibrated HDR fidelity. All cells delivered software
+H264/yuv420p; PQ source class does not imply HDR output or tone-map fidelity.
+
+This is **16 internal cells /4 synthetic inputs /0 original fully-qualified
+public cells**. Every successful context ran once; no prior passing unit,
+source or cell was replayed. Exact owned containers/volumes and temporary
+watchdog/expiry owners were removed/terminal before each lease handback;
+original finite input/runtime expiries were not extended. Earlier failed
+acquisitions, OOM partials, missing raw verifier results and the reconstructed
+HDR360 admission-storage record remain honestly disclosed. No production
+GOP flags, qualified tuple, cache identity or gate changed. The original
+media1/public-create-route matrix, two hash-named real-film censuses,
+NAL-level IDR/CRA and applicable physical/native/GPU/fidelity acceptance
+remain open. The preceding "no actual acquisition" statements describe
+their dated candidate, not this separately authorized internal continuation.
+
+**2026-10-02 retained Grain720 NAL continuation — one header context only:**
+the [reviewable evidence ledger](../reviews/S11-GRAIN720-NAL-EVIDENCE-20261002.md)
+records one new offline parse of unchanged retained TS/probe bytes. Actual
+PAT/PMT/PES/Annex-B/AUD/picture/SPS-PPS/PTS parsing measured 1,680 access
+units, 35/35 first type-5 IDR headers and 37 total IDRs. The two extras at
+13.958333333…s and38s match the old Grain720 keyflags; no GOP code changed.
+Nine tiny new syntax controls and this one corpus attempt passed once;
+no producer/probe/decoder, old test or successful cell was replayed.
+
+Historical parser/control/wrapper, sanitized AU facts, ordered input hashes
+and actual process/cgroup/export/cleanup receipts are review snapshots, not
+registered tests or permanent tooling. Private audit-byte attachment retention
+is separate from unchanged original input/runtime expiry. The original raw
+receipt/result identities stay distinct from sanitized publication. The
+bounded parser proves header identity, not entropy/pixel decode, closed-GOP
+reference independence, decoder/device random access or current-effort
+runtime acceptance. Fifteen other internal NAL contexts remain unmeasured.
+The original public-route/media1/real-film/physical/native/GPU/fidelity bars
+and whole-S11 qualification remain open: 16 internal /4 synthetic /0 original
+fully-qualified public cells, with old measured fb436 provenance unchanged.
+
+**2026-10-02 retained-header continuation — sixteen contexts, original bars open:**
+the [additive ledger](../reviews/S11-RETAINED-NAL-CONTINUATION-20261002.md)
+retains three Grain successes and adds thirteen Linux x86_64 header passes,
+each35 complete objects/1,680 AUs/actual360–1080 geometry/35 first IDRs and
+exact3,750-tick presentation spacing. Only Grain720 has TWO extras, unchanged;
+all other15 have35 total IDRs. Old decimal key flags match within the unchanged
+one-tick tolerance (Linux maximum0.03tick), not post-hoc exact equality.
+Actual per-process limits, raw-private exported hashes and successful exact
+independent leaf/PID absence are separate from historical Docker/cgroup facts.
+All original #737 evidence remains unchanged.
+
+An earlier namespace-route predicate failure and local/prelaunch refusals
+remain failed. H264360 and PQ4K360 each refused actual fresh pressure BEFORE
+staging/census; no sample category/value or independent absence inventory is
+invented. Later separately authorized admission ran still-unmeasured contexts,
+not passing replays or cap/threshold relaxation. Header coverage is16/16;
+counts stay16 internal acquisitions /4 synthetic inputs /0 original fully
+qualified public cells. New raw/source snapshots remain private under root
+retention with direct local reviewer access, not portable raw evidence.
+Additional private capsule is optional; review/gate remain separate.
+No decoder/producer/probe/old control/
+unit replay, real-film/public/closed-GOP/device/physical/HDR-fidelity/current
+runtime or whole-S11 qualification; evidence-only documentation continuation.
 
 Measurement first, code only if it does. Run the §3.7 Q8a census on media1
 across the corpus at 360/480/720/1080, plus two real library titles (a
@@ -718,7 +1133,8 @@ recorded here — that is also a completed milestone.
 
 ### 5.8 M7 — NVENC arguments and `Pipeline::Cuda` (conditional on M0)
 
-Runs only if M0 found NVENC sessions. Code: §3.4, both pieces, each flag
+Runs only if the current scoped M0 inventory identifies an applicable NVENC
+node/graph; an organic-use week is not eligibility. Code: §3.4, both pieces, each flag
 probed and recorded in `EncoderCaps`; `Pipeline::Cuda` joins `CANDIDATES`
 only behind its own boot probe.
 
@@ -736,15 +1152,37 @@ instrument. Separate milestone and measurements, no shared recipe with M7.
 
 ## 6. Verification and rollout
 
-Fast lane for the plan PR: `make unit`. Focused per milestone as named in §5.
+#### 2026-09-30 current scoped inventory, without a new production probe
+
+Read-only SSH inspected PCI display/3D hardware, shipped FFmpeg encoder lists
+and existing startup validation logs. No encode/probe was initiated by this
+run, and no process-local zero was used as absence evidence.
+
+| Node | Hardware | Compiled H.264 families | Existing boot validation | Selection evidence |
+|---|---|---|---|---|
+| `media1` | Intel Arc Pro 130T/140T, `8086:7d51` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Existing production pre-transcode records name Intel QuickSync |
+| `lab6` | AMD Phoenix1, `1002:15bf` | NVENC, QSV, VA-API | VA-API accepted; QSV device creation refused; NVENC refused `libcuda.so.1`; VideoToolbox false | Existing boot caption graph records use VA-API |
+| `lab4` | Intel Iris Xe, `8086:46a6` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Accepted-family evidence; ordinary-session selection not independently sampled |
+| `lab3` | Intel Iris Xe, `8086:46a6` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Accepted-family evidence; ordinary-session selection not independently sampled |
+
+Container starts were respectively 16:34:55, 18:32:39, 18:43:58 and
+16:39:35 UTC on 2026-09-30. These are current capability observations, not
+a seven-day organic-use receipt. The four scoped Linux nodes have no NVIDIA
+display/3D hardware or accepted NVENC route and no VideoToolbox route; M7/M8
+are inapplicable for this inventory only. A new node or changed inventory
+reopens them. Generic HEVC encoder symbols are not qualified HEVC SDR graphs.
+
+Task PRs use the focused per-milestone regressions named in §5 and the
+blocking Effort development gate. Full-suite `make unit` evidence belongs
+to final qualification, not a claimed result of this scoped M2 task.
 `make benchmark-check` still gates the committed A/B coverage
 ([../BENCHMARKING.md](../BENCHMARKING.md)); M1's new fixtures do not enter
 that matrix and must not silently change it.
 
-**GPT prompt — fleet encoder inventory (M0, after one reset-aware week):**
+**GPT prompt — current fleet encoder inventory (M0; organic week supplementary):**
 
 ```text
-On the maintained Plurx nodes `nynuc`, `m6`, `nuc4`, and `nuc3`, with the
+On the maintained Plurx nodes `media1`, `lab6`, `lab4`, and `lab3`, with the
 exact candidate build running:
 1. From the continuously scraped Prometheus history, report seven-day
    `increase()` values for `plurx_encoder_sessions_total` and
@@ -769,6 +1207,9 @@ exact candidate build running:
 Report one row per host: compiled families, probe-accepted families,
 selected family, sessions per family and grade over the week, tone-map
 pipelines used, GPU model and driver version.
+Steps 3-5 establish today's scoped eligibility inventory immediately. Steps
+1-2 are supplementary organic-use observation, not a prerequisite to M1/M2.
+Do not infer absent hardware or an inapplicable M7/M8 from zero counters.
 ```
 
 **GPT prompt — rolling segment-grid census (M3):**
@@ -810,8 +1251,13 @@ Report one table. Name the OS/browser versions.
 playing an HEVC SDR transcode at 1080 and 2160 in both fMP4 and MPEG-TS,
 with the same four columns.
 
-Rollout: one draft plan PR into `main`, with logical milestone commits and
-Execution-log rows, then the fast lane. Metric names
+Rollout: reviewable milestone task PRs into the existing
+`effort/architecture-review-2026-09-20`, with logical commits and Execution-log
+rows, focused local regressions recorded in each PR and the blocking current-head
+Effort development gate. This M2 task did not run the full `make unit` suite.
+Final promotion is separate: freeze task merges, merge current main into the
+effort, qualify that exact tree and pass the Main promotion gate before merging
+the effort into main. A moved base requires new exact-tree evidence. Metric names
 and labels are fixed by §3.2 and are the only observability surface added.
 No settings key is added; `PLURX_HWACCEL` and `PLURX_TONEMAP` keep their
 current meaning. Cache identity, per milestone: M0 and M2 invalidate
@@ -872,4 +1318,17 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
+| 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 retained-header coverage16/16, original acceptance open | evidence-only continuation | [Additive ledger](../reviews/S11-RETAINED-NAL-CONTINUATION-20261002.md): three retained Grain contexts plus thirteen new Linux headers,35 first IDRs/1680AUs/actual rung geometry/exact3750ticks, old decimal keys≤1tick; Grain720's TWO extras retained. Actual per-process/export/independent cleanup hashes distinct from old Docker; route/local/H264-PQ pressure refusals preserved, no invented absence/sample. Privately retained raw/local reviewer access is not portable raw evidence; review/gate separate and original qualification open. No successful census/control/unit replay or gate waiver. |
+| 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 retained Grain720 header evidence, original qualification open | evidence-only continuation | [NAL ledger](../reviews/S11-GRAIN720-NAL-EVIDENCE-20261002.md): one old fb436 context,35 first IDRs/1680 actual AUs/37 total IDRs including TWO extras, matched to retained probes. Nine new syntax controls and one offline corpus success retained once; no media or test replay. Historical review snapshots, sanitized-not-raw provenance, durable private bytes and exact cleanup bounds recorded;15 other NAL contexts and original public/film/native/GPU/fidelity acceptance remain open. |
+| 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 internal acquisition/census evidence, original acceptance incomplete | evidence-only continuation | [Sixteen-cell sanitized ledger](S11-INTERNAL-ROLLING-CELLS-2026-10-02.md): four synthetic inputs,16 distinct internal once-successful cells at measured fb436 source/cc943750 tree/656e binary/b7bc runtime;35 objects/1680 packets/60+s real1× each,35 first keys/no drift. Grain720 has two internal extra keyflags, unchanged. Actual source-FD/PUT owner and four-way byte equality/exact cleanup retained privately; failures remain failed. No current-effort/public/NAL/physical/native/HDR-fidelity/GPU/full-M3 qualification or production GOP change. Independent review/current-head effort gate remain separate. |
+| 2026-10-02 | gpt-6.1-sol | codex://threads/01a0c165-d718-73a1-93e9-e81380017705 | M3 acquisition reporting cadence; incomplete | [#710](http://forge.lan:3000/noirr/plurx/pulls/710) | Wait500ms after each accepted response before another frame report; existing bridge450ms floor, refusal and real-frame guards unchanged. One NEW actual-page synthetic control passed once0.127s; normal hook79442 passed; sole independent review60 approved with controller/PAGE hash-label correction. Ten already-landed #690 local receipts are retired only after byte-identical private preservation and complete923-pass journal1539 coverage; immutable history retained, no cap change or unit replay. Current composition/gate and real browser/corpus/matrix qualification remain owed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://forge.lan:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M2 runtime; M1 generator seams, incomplete | pending | Typed contract drives the actual resolved plan/delivered presentation; all legacy selections and golden recipe identity preserved, five focused storage-enabled core regressions green. Three fixture-seam tests and all 59 existing harness tests green. No new HEVC qualification/default or production change. Current four-node hardware/compiled/existing-probe evidence above, with unknown ordinary-session observations retained. Organic week now supplementary by Paul's ruling; M1 remains open for genuine P5 acquisition, actual generation/session burn and HDR-aware scoring/fidelity evidence. |
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M1 bench metadata/acquisition continuation, incomplete | candidate | Two new focused guards passed once after negative controls; first is argument-only. Actual x265-parameter-only counterexample retained; final metadata-only frame tail proves tiny SPS and full unchanged 45-second ten-bit gradient metadata. Three other generated fixtures plus a distinct requested-45-second genuine P5/RPU fixture acquired; GOP extent and source-stat limits recorded above. Organic week is supplementary, not M1/M2 eligibility. No production encoder/default, GPU, independent HDR grade or whole-corpus qualification. |
+
+The batch's [isolated VAAPI receipt](../evidence/video-quality-2026-10-03/vaapi-qualification.json)
+verifies the actual sample entry, profile/tier/constraints, all 96 timestamps,
+PQ/BT.2020 tags, complete decode and a continuous neutral ramp on lab6. A separate
+discontinuous fixture exceeded its worst-pixel limit; see the
+[execution ledger](../performance/VIDEO-QUALITY-STATUS.md#final-qualification--retained-per-check-receipts)
+for that failed result and the exact limits of the passing capture.

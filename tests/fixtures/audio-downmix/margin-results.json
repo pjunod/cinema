@@ -1,0 +1,56 @@
+{
+  "5.1": [
+    {
+      "channel": 0,
+      "rms_dbfs": -5.017173594445753,
+      "sample_peak_dbfs": -1.2832146736804693,
+      "samples_at_or_above_full_scale": 0,
+      "integrated_lufs": -5.0,
+      "samples": 576512
+    },
+    {
+      "channel": 1,
+      "rms_dbfs": -5.017173594207397,
+      "sample_peak_dbfs": -1.2882879681707704,
+      "samples_at_or_above_full_scale": 0,
+      "integrated_lufs": -5.0,
+      "samples": 576512
+    }
+  ],
+  "5.1-side": [
+    {
+      "channel": 0,
+      "rms_dbfs": -5.017173594445753,
+      "sample_peak_dbfs": -1.2832146736804693,
+      "samples_at_or_above_full_scale": 0,
+      "integrated_lufs": -5.0,
+      "samples": 576512
+    },
+    {
+      "channel": 1,
+      "rms_dbfs": -5.017173594207397,
+      "sample_peak_dbfs": -1.2882879681707704,
+      "samples_at_or_above_full_scale": 0,
+      "integrated_lufs": -5.0,
+      "samples": 576512
+    }
+  ],
+  "7.1": [
+    {
+      "channel": 0,
+      "rms_dbfs": -5.017222997342673,
+      "sample_peak_dbfs": -1.8238420107380464,
+      "samples_at_or_above_full_scale": 0,
+      "integrated_lufs": -5.0,
+      "samples": 576512
+    },
+    {
+      "channel": 1,
+      "rms_dbfs": -5.017222996999472,
+      "sample_peak_dbfs": -1.8461889311097752,
+      "samples_at_or_above_full_scale": 0,
+      "integrated_lufs": -5.0,
+      "samples": 576512
+    }
+  ]
+}

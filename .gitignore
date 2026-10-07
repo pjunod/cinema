@@ -45,6 +45,10 @@ __pycache__/
 swarm/*/
 crates/*/pipe:1
 
+# Lab rosters for the measurement tools (scripts/*.fleet.example.json shows the
+# shape). The real ones name the real lab, which the public mirror never does.
+scripts/*.fleet.json
+
 # Agent scratch: a `tomllib` shim for hosts on python 3.10. Committed by
 # accident in `378167bc` and removed since; ignored so it cannot happen again.
 .pyshim/

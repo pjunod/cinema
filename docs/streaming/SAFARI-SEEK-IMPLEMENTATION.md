@@ -132,7 +132,7 @@ session-relative endpoint from a film position without converting them.
 | The missing-artifact path already enqueues a foreground artifact job after source attestation exists | Do not claim foreground artifact priority is new |
 | The play-time analysis helper uses `normal` / `background` | Add supported viewer urgency at this earlier stage |
 | Analysis validators allow `foreground` and `playback` only for `subtitle_source`; `foreground` is not an analysis trigger | The original proposal's string substitution is invalid |
-| At 21:17, nynuc had 157 queued normal new-engine requests and 164 queued forced old-engine requests | Filter worker compatibility before spending an execution attempt |
+| At 21:17, media1 had 157 queued normal new-engine requests and 164 queued forced old-engine requests | Filter worker compatibility before spending an execution attempt |
 | A stale forced request failed `pipeline_version_unavailable` at 21:15:38 | Old work was still consuming analysis dispatch opportunities |
 | At approximately 21:12, fragment jobs had 561 claim writes, 561 refusals and zero accepted claims since restart | Distinguish local capacity, shared-resource refusal and successful execution |
 | At 21:14 and 21:17, both shared `source_io` reservations belonged to subtitle extraction, started at 20:54:33 and 21:00:09 | Queue ordering cannot free a slot held by a running reader |
@@ -155,9 +155,9 @@ The sampled nodes reported the same application release
 
 | Node | Jellyfin FFmpeg package | Engine digest prefix |
 |---|---|---|
-| nynuc / media1 | `8.1.3-1-bookworm` | `85e6fa5e` |
-| nuc4 / lab4 | `8.1.2-5` | `953a7b12` |
-| m6 / lab6 | `8.1.2-5` | `953a7b12` |
+| media1 / media1 | `8.1.3-1-bookworm` | `85e6fa5e` |
+| lab4 / lab4 | `8.1.2-5` | `953a7b12` |
+| lab6 / lab6 | `8.1.2-5` | `953a7b12` |
 
 The engine digest includes version output, executable bytes and loaded
 dependency objects. Equal top-level package versions do not prove equal
@@ -612,7 +612,7 @@ if adding or moving another document.
 
 | Item | Result |
 |---|---|
-| Implementation base / effort / task branches | Started at `1869871ce`; [task PR #622](http://192.168.4.7:3000/noirr/plurx/pulls/622) landed on `effort/safari-seek` as `1fa576a05`; current `main` `38c917225` merged into the effort with the implementation record retained |
+| Implementation base / effort / task branches | Started at `1869871ce`; [task PR #622](http://forge.lan:3000/noirr/plurx/pulls/622) landed on `effort/safari-seek` as `1fa576a05`; current `main` `38c917225` merged into the effort with the implementation record retained |
 | Compiler version and baseline check | Rust 1.97.1; `rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` passed on 2026-09-29 |
 | M0 browser fixture and stage diagnostics | Bounded client route and settlement trace implemented; `scripts/playback-lab safari-seek-fixture` generated twenty six-second fMP4 segments with FFmpeg 9.0.1 and saved [four native Safari 27.0.1 reports](../evidence/safari-seek-native-2026-09-29.json). With target duration 16, unfinished and EVENT playlists had seekable end 72 s and landed at 72 s for a 100 s request; the finished VOD playlist landed at 100 s; the unfinished target-duration-6 playlist had seekable end 102 s and landed at 100 s. `scripts/playback-lab safari-seek-server` launches an isolated real daemon, forces native rolling HLS, and requires a served media playlist; two physical attempts stopped when Safari WebDriver timed out creating an automation session, so no real-server sample is claimed. Playback events correlate produced/published edges with accepted demand sequence and age. Request diagnostics separate shared I/O, local capacity, eligibility, attestation, build, hydration and local availability. |
 | M1 demand lifetime, promotion and engine eligibility | Engine-compatible claims and the exact enqueue wake are implemented. Expiring viewer waiters follow analysis into fragment work and targeted hydration; active playback sessions renew them and terminal sessions cancel them. Analysis source reads no longer own the artifact/delivery pass guard. Exact Store regressions passed on SQLite and three-voter Hiqlite, including viewer ownership through remote hydration. Physical first-frame evidence remains unavailable. |
@@ -622,7 +622,7 @@ if adding or moving another document.
 | M5 same-source measurements and unavailable evidence | Post-review route tests and Store fixtures cover selected paths. A real-server Safari attempt produced zero samples because WebDriver could not create a Safari automation session; first-frame latency, 20-seek p95, producer restarts, native full-cycle continuity, fleet throughput and NAS cache behavior remain unavailable. No cross-title latency comparison is claimed. |
 | Focused commands, selected counts, exit status and candidate SHA | `node --test tests/playback/seek-control.test.js tests/web/seek-telemetry.test.js`: 39 passed; `python3 -m unittest tests.operations.test_release_publication`: 17 passed; six exact `plurx-core` Store contracts each passed on SQLite and three-voter Hiqlite; `playback_preparation_wakes_idle_analysis_within_two_seconds` passed. `rolling_publication_budget`: 14 passed, 3 failed on the candidate; all 17 passed after withdrawal. `mkv_hls_schedule`: four passed after withdrawal. The exact final candidate SHA is pending. |
 | Review findings and resolution | Astra reviewed draft `6ba5c59de` against `38c917225` and found seven issues: trigger translation, learner artifact execution, cancellation-safe source reservation, attested artifact viewer joining, hydration viewer ownership, native server-fixture validity, and waiter cap. Commits `6f583c519`, `aacc9697c` and `9b403ba2e` addressed the seven; post-review Store testing found and `a4236f00c` corrected SQL scope and Hiqlite parameter order. |
-| PRs, final promotion evidence and merge | Task [PR #622](http://192.168.4.7:3000/noirr/plurx/pulls/622) merged into `effort/safari-seek`; final [PR #623](http://192.168.4.7:3000/noirr/plurx/pulls/623) is ready after the single adversarial review and focused regressions. Ready [run #3583](http://192.168.4.7:3000/noirr/plurx/actions/runs/3583) failed the task/timer ownership census; three spawns and two test timers were reviewed, the allowlist and joined consumer corrected, and seven inventory tests plus the wake regression passed locally. Ready [run #3584](http://192.168.4.7:3000/noirr/plurx/actions/runs/3584) passed that census but found one operations contract still tied to the old Jellyfin apt install; the contract now checks the pinned deb verification, install and cleanup order and passes its focused test. A new current-head Main promotion gate and main merge remain. |
+| PRs, final promotion evidence and merge | Task [PR #622](http://forge.lan:3000/noirr/plurx/pulls/622) merged into `effort/safari-seek`; final [PR #623](http://forge.lan:3000/noirr/plurx/pulls/623) is ready after the single adversarial review and focused regressions. Ready [run #3583](http://forge.lan:3000/noirr/plurx/actions/runs/3583) failed the task/timer ownership census; three spawns and two test timers were reviewed, the allowlist and joined consumer corrected, and seven inventory tests plus the wake regression passed locally. Ready [run #3584](http://forge.lan:3000/noirr/plurx/actions/runs/3584) passed that census but found one operations contract still tied to the old Jellyfin apt install; the contract now checks the pinned deb verification, install and cleanup order and passes its focused test. A new current-head Main promotion gate and main merge remain. |
 | Production authorization and deployment | Not requested by this handoff |
 
 Return the implementation commit/PR links, changed behavior, exact test

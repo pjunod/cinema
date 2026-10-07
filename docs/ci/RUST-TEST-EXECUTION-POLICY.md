@@ -128,25 +128,25 @@ and not the workspace.
 The intended cold/warm/warm plus media1 experiment could not be completed as
 named Forgejo runs. Temporary measurement workflows were committed to this
 branch and later removed. Forgejo dispatches
-[2382](http://192.168.4.7:3000/noirr/plurx/actions/runs/2382),
-[2384](http://192.168.4.7:3000/noirr/plurx/actions/runs/2384),
-[2386](http://192.168.4.7:3000/noirr/plurx/actions/runs/2386), and
-[2388](http://192.168.4.7:3000/noirr/plurx/actions/runs/2388) did not reach a
+[2382](http://forge.lan:3000/noirr/plurx/actions/runs/2382),
+[2384](http://forge.lan:3000/noirr/plurx/actions/runs/2384),
+[2386](http://forge.lan:3000/noirr/plurx/actions/runs/2386), and
+[2388](http://forge.lan:3000/noirr/plurx/actions/runs/2388) did not reach a
 measurement job. The registered fast-lane dispatch
-[2392](http://192.168.4.7:3000/noirr/plurx/actions/runs/2392) did reach
-`gha-nynuc-general-03`, then failed before measurement because that generic
+[2392](http://forge.lan:3000/noirr/plurx/actions/runs/2392) did reach
+`gha-media1-general-03`, then failed before measurement because that generic
 runner had FFmpeg 8 while the lane requires FFmpeg 6. No media1 runner was
 online. These URLs are failure evidence, not timing evidence.
 
 With no further dispatch retries, one source-only archive of branch
-`401d465f` was measured in an Ubuntu 24.04 container on `nynuc` (16 CPUs),
+`401d465f` was measured in an Ubuntu 24.04 container on `media1` (16 CPUs),
 then the container and archive were removed. The environment reported Rust
 1.97.1 and FFmpeg 6.1.1. This is relative sizing evidence only: it was not a
 Forgejo job and no warm or media1 result is claimed.
 
 | Environment | Compile + vendored Clippy | Workspace Clippy | `make unit` | Result |
 |---|---:|---:|---:|---|
-| `nynuc`, Ubuntu 24.04 container, source-only cold tree | 155 s | 85 s | ~610 s | green: 2,426 passed, 8 ignored, 0 failed; both serial restart fixtures passed |
+| `media1`, Ubuntu 24.04 container, source-only cold tree | 155 s | 85 s | ~610 s | green: 2,426 passed, 8 ignored, 0 failed; both serial restart fixtures passed |
 
 The measured Rust work totals about 14 minutes 10 seconds before checkout,
 package setup and cache finalization. The implemented 30-minute job timeout
@@ -505,7 +505,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | Commit / PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | Claim | `bab55a7e` / [#401](http://192.168.4.7:3000/noirr/plurx/pulls/401) | Claimed P-01 as one draft plan PR. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | Claim | `bab55a7e` / [#401](http://forge.lan:3000/noirr/plurx/pulls/401) | Claimed P-01 as one draft plan PR. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | Baseline repair | `763f05b2`, `9a17df1e` / #401 | Repaired 29 initial failures plus 12 later deterministic fixture failures; the bounded suite reached 2,380 passed / 12 failed before the final focused repairs, and every repaired exact test then passed. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | M3 | `53be36f9` / #401 | `unit-core` ran 1,142 tests; the 99,999 negative floor failed as designed; replicated-store guidance and count-floor contracts added. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | M4–M5 | `2f5fc142` / #401 | Web policy/control passed under Node 22.22.2 and 26.8.1; Android JVM tests and lint passed in 9m10s; no ordering implementation change was justified. |
@@ -513,4 +513,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | `10baad55`, `88f689bd` / #401 | Option (a) implemented with Node playback preflight, workspace Clippy, `make unit`, Ubuntu 24.04 / FFmpeg 6 pin, and a 30-minute bound; no schedule added. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | `f62eb0ab`–`75ed2823` / #401 | Temporary branch instrumentation was committed and removed. Runs 2382/2384/2386/2388 did not measure; run 2392 exposed FFmpeg drift. One bounded source-only fallback measured 155 s compile, 85 s Clippy and ~610 s unit, all green. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Exact-main reconciliation | final reconciliation / #401 | One 336-second workspace confirmation found four fixture failures after merging `882862e8`; all four exact tests then passed together, and Rustfmt plus workspace Clippy passed. No broad retry was spent. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Adversarial review P1 | review fix / [#401 comment 3187](http://192.168.4.7:3000/noirr/plurx/pulls/401#issuecomment-3187) | Replaced regex and suffix matching with lexical, attached-attribute scanning, stable source/module identities, duplicate rejection and exact Cargo-list reconciliation; executable positives and negatives cover every reported bypass. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Adversarial review P1 | review fix / [#401 comment 3187](http://forge.lan:3000/noirr/plurx/pulls/401#issuecomment-3187) | Replaced regex and suffix matching with lexical, attached-attribute scanning, stable source/module identities, duplicate rejection and exact Cargo-list reconciliation; executable positives and negatives cover every reported bypass. |

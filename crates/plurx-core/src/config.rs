@@ -12,6 +12,10 @@ use crate::error::ConfigError;
 /// Default HTTP port. Deliberately near — but never colliding with — the
 /// 32400-era ports ex-Plex users already have muscle memory for.
 pub const DEFAULT_PORT: u16 = 32400;
+/// Jellyfin's own default HTTP port. Jellyfin clients assume it, at the
+/// server root, when the user types only a host, so the compatibility
+/// facade answers there too (see [`ServerConfig::jellyfin_port`]).
+pub const DEFAULT_JELLYFIN_PORT: u16 = 8096;
 /// Default Raft replication port, adjacent to the public HTTP API.
 pub const DEFAULT_RAFT_PORT: u16 = 32401;
 /// Default authenticated node-to-node API port.
@@ -22,6 +26,10 @@ pub const DEFAULT_SCAN_PRUNE_PERCENT: u8 = 10;
 /// until an operator explicitly enables it cluster-wide.
 pub const DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 64;
 pub const MAX_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 10_000;
+/// Preserve incumbent cadence until measured disk/replay evidence chooses N.
+pub const DEFAULT_LOGS_UNTIL_SNAPSHOT: u64 = 10_000;
+pub const MIN_LOGS_UNTIL_SNAPSHOT: u64 = 1_000;
+pub const MAX_LOGS_UNTIL_SNAPSHOT: u64 = 200_000;
 /// Deadline for one non-final Raft snapshot chunk RPC.
 pub const DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS: u64 = 30;
 pub const MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS: u64 = 5;
@@ -117,6 +125,11 @@ pub struct ServerConfig {
     /// Reverse-proxy networks whose appended forwarding hops may be trusted
     /// for security-sensitive client-address decisions.
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// Port, on `bind`'s address, where the Jellyfin compatibility facade
+    /// also answers at the server root, so a Jellyfin client given only a
+    /// host name reaches it. `0` turns this listener off. Whether the facade
+    /// answers at all is still the Settings -> Developer switch.
+    pub jellyfin_port: u16,
 }
 
 impl Default for ServerConfig {
@@ -125,7 +138,18 @@ impl Default for ServerConfig {
             name: "plurx".to_owned(),
             bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
             trusted_proxies: Vec::new(),
+            jellyfin_port: DEFAULT_JELLYFIN_PORT,
         }
+    }
+}
+
+impl ServerConfig {
+    /// Where the Jellyfin standard-port listener binds: `bind`'s address on
+    /// `jellyfin_port`. `None` when it is off, or when it names the main
+    /// listener's own port, which already serves the facade at `/jellyfin`.
+    pub fn jellyfin_bind(&self) -> Option<SocketAddr> {
+        (self.jellyfin_port != 0 && self.jellyfin_port != self.bind.port())
+            .then(|| SocketAddr::new(self.bind.ip(), self.jellyfin_port))
     }
 }
 
@@ -209,6 +233,8 @@ pub struct ClusterConfig {
     /// Local Hiqlite read-only connection pool. Four is the measured/default
     /// baseline; the bounded knob permits retained 4/8/16 comparison runs.
     pub read_pool_size: usize,
+    /// Node-local Raft snapshot cadence; must match across voters at restart.
+    pub logs_until_snapshot: u64,
     /// Deadline for one non-final snapshot chunk RPC, including admission,
     /// frame delivery, and acknowledgement.
     pub snapshot_chunk_timeout_secs: u64,
@@ -234,6 +260,7 @@ impl Default for ClusterConfig {
             bounded_replica_reads: true,
             bounded_replica_max_lag_entries: DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES,
             read_pool_size: 4,
+            logs_until_snapshot: DEFAULT_LOGS_UNTIL_SNAPSHOT,
             snapshot_chunk_timeout_secs: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS,
             snapshot_transfer_timeout_secs: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
             install_snapshot_timeout_secs: DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS,
@@ -314,6 +341,14 @@ impl Config {
                 message: "must be between 1 and 16".to_owned(),
             });
         }
+        if !(MIN_LOGS_UNTIL_SNAPSHOT..=MAX_LOGS_UNTIL_SNAPSHOT)
+            .contains(&config.cluster.logs_until_snapshot)
+        {
+            return Err(ConfigError::Value {
+                key: "cluster.logs_until_snapshot".to_owned(),
+                message: format!("must be between {MIN_LOGS_UNTIL_SNAPSHOT} and {MAX_LOGS_UNTIL_SNAPSHOT} entries"),
+            });
+        }
         if !(MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS..=MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS)
             .contains(&config.cluster.install_snapshot_timeout_secs)
         {
@@ -379,6 +414,14 @@ impl Config {
                 message: format!("`{bind}` is not a socket address (e.g. 0.0.0.0:{DEFAULT_PORT})"),
             })?;
         }
+        if let Some(port) = env_var("PLURX_JELLYFIN_PORT") {
+            self.server.jellyfin_port = port.parse().map_err(|_| ConfigError::Env {
+                var: "PLURX_JELLYFIN_PORT".to_owned(),
+                message: format!(
+                    "`{port}` is not a port number (e.g. {DEFAULT_JELLYFIN_PORT}, or 0 for off)"
+                ),
+            })?;
+        }
         if let Some(value) = env_var("PLURX_TRUSTED_PROXIES") {
             self.server.trusted_proxies = value
                 .split(',')
@@ -435,6 +478,10 @@ impl Config {
                 message: format!("`{value}` is not an integer from 1 through 16"),
             })?;
         }
+        apply_snapshot_cadence_env(
+            &mut self.cluster,
+            env_var("PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT"),
+        )?;
         apply_install_snapshot_timeout_env(
             &mut self.cluster,
             env_var("PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS"),
@@ -462,6 +509,19 @@ fn apply_snapshot_chunk_timeout_env(
                 "`{value}` is not an integer from {MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS} through \
                  {MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS}"
             ),
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_snapshot_cadence_env(
+    cluster: &mut ClusterConfig,
+    value: Option<String>,
+) -> Result<(), ConfigError> {
+    if let Some(value) = value {
+        cluster.logs_until_snapshot = value.parse().map_err(|_| ConfigError::Env {
+            var: "PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT".to_owned(),
+            message: "must be an integer from 1000 through 200000".to_owned(),
         })?;
     }
     Ok(())
@@ -506,6 +566,33 @@ fn env_var(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Jellyfin clients given only a host assume port 8096 at the root. The
+    /// extra listener follows the main bind address, so a loopback-only
+    /// proxy install stays loopback-only, and can be moved or turned off.
+    #[test]
+    fn jellyfin_standard_port_follows_the_bind_address_and_can_be_turned_off() {
+        let mut server = ServerConfig::default();
+        assert_eq!(
+            server.jellyfin_bind(),
+            Some(SocketAddr::from(([0, 0, 0, 0], DEFAULT_JELLYFIN_PORT)))
+        );
+        server.bind = "127.0.0.1:32400".parse().expect("bind");
+        assert_eq!(
+            server.jellyfin_bind(),
+            Some("127.0.0.1:8096".parse().expect("loopback"))
+        );
+        server.jellyfin_port = 32400;
+        assert_eq!(
+            server.jellyfin_bind(),
+            None,
+            "the main port already serves it"
+        );
+        server.jellyfin_port = 0;
+        assert_eq!(server.jellyfin_bind(), None);
+        let parsed: Config = toml::from_str("[server]\njellyfin_port = 18096\n").expect("toml");
+        assert_eq!(parsed.server.jellyfin_port, 18096);
+    }
 
     #[test]
     fn defaults_are_sane() {
@@ -690,6 +777,46 @@ mod tests {
                 Config::load(Some(&path)),
                 Err(ConfigError::Value { key, .. }) if key == "cluster.read_pool_size"
             ));
+        }
+    }
+
+    #[test]
+    fn snapshot_cadence_loads_default_and_validates_the_documented_range() {
+        assert_eq!(ClusterConfig::default().logs_until_snapshot, 10_000);
+        let mut cluster = ClusterConfig::default();
+        apply_snapshot_cadence_env(&mut cluster, None).expect("absent override preserves default");
+        assert_eq!(cluster.logs_until_snapshot, 10_000);
+        apply_snapshot_cadence_env(&mut cluster, Some("200000".into()))
+            .expect("parse cadence override");
+        assert_eq!(cluster.logs_until_snapshot, 200_000);
+        assert!(
+            matches!(apply_snapshot_cadence_env(&mut cluster, Some("not-an-integer".into())), Err(ConfigError::Env { var, .. }) if var == "PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT")
+        );
+        let dir = tempfile::tempdir().expect("config fixture");
+        let path = dir.path().join("plurx.toml");
+        for entries in [1_000, 10_000, 200_000] {
+            std::fs::write(
+                &path,
+                format!("[cluster]\nlogs_until_snapshot = {entries}\n"),
+            )
+            .expect("write config");
+            assert_eq!(
+                Config::load(Some(&path))
+                    .expect("valid cadence")
+                    .cluster
+                    .logs_until_snapshot,
+                entries
+            );
+        }
+        for entries in [0, 999, 200_001] {
+            std::fs::write(
+                &path,
+                format!("[cluster]\nlogs_until_snapshot = {entries}\n"),
+            )
+            .expect("write config");
+            assert!(
+                matches!(Config::load(Some(&path)), Err(ConfigError::Value { key, .. }) if key == "cluster.logs_until_snapshot")
+            );
         }
     }
 

@@ -815,12 +815,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
-    async fn claim_analysis_request_compatible(
+    async fn claim_analysis_request_for_capacity(
         &self,
         node_id: &str,
         pipeline_version: Option<&str>,
         now_ms: i64,
         lease_expires_ms: i64,
+        viewer_only: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if node_id.is_empty()
             || node_id.len() > 128
@@ -833,6 +834,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let pipeline_version = pipeline_version.map(str::to_owned);
         self.with_conn(move |conn| {
             let capacity = super::super::fragment_index_cluster::analysis_source_capacity_clause("?3");
+            let viewer = if viewer_only {
+                super::super::fragment_index_cluster::analysis_live_viewer_clause("?3")
+            } else { "1".to_owned() };
             let max_attempts = configured_max_attempts(conn)?;
             let backoff_base_ms = configured_backoff_base_ms(conn)?;
             let backoff_max_ms = configured_backoff_max_ms(conn)?.max(backoff_base_ms);
@@ -885,7 +889,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                             AND component <> 'subtitle_source' AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
                             AND (?5 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?5)
-                            AND {capacity}
+                            AND {capacity} AND {viewer}
                           ORDER BY CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
                             OR (component = 'fragment_index' AND EXISTS (
                                 SELECT 1 FROM background_job_waiters waiter
@@ -919,7 +923,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                   WHERE request_id = ?4 AND fence = ?5
                     AND state = 'queued' AND not_before_ms <= ?3
                     AND (?6 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?6)
-                    AND {capacity}"),
+                    AND {capacity} AND {viewer}"),
                 params![
                     node_id,
                     lease_expires_ms,

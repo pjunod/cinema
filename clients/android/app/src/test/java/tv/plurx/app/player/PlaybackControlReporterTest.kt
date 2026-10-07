@@ -1728,6 +1728,283 @@ class PlaybackControlSettleTest {
 }
 
 class DisplayAwareAutoEvidenceTest {
+    @Test fun a05EvidenceAcknowledgementRequiresTheExactSingleEvent() {
+        val event = "12345678-1234-1234-1234-123456789abc"
+        assertTrue(autoNegativeLinkAcknowledgement(event, listOf(event), 204, true, 250))
+        assertFalse(autoNegativeLinkAcknowledgement(event, emptyList(), 204, true, 250))
+        assertFalse(autoNegativeLinkAcknowledgement(event, listOf(event, event), 204, true, 250))
+    }
+    @Test fun a05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline() {
+        val nonce = "12345678-1234-1234-1234-123456789abc"
+        assertTrue(autoNegativeLinkAcknowledgement(nonce, listOf(nonce), 204, true, 1))
+        for (values in listOf(emptyList(), listOf(nonce, nonce), listOf("$nonce,$nonce"), listOf("other"), listOf(nonce.uppercase()))) {
+            assertFalse(autoNegativeLinkAcknowledgement(nonce, values, 204, true, 1))
+        }
+        assertFalse(autoNegativeLinkAcknowledgement("malformed", listOf("malformed"), 204, true, 1))
+        assertFalse(autoNegativeLinkAcknowledgement(nonce, listOf(nonce), 200, true, 1))
+        assertFalse(autoNegativeLinkAcknowledgement(nonce, listOf(nonce), 204, false, 1))
+        assertFalse(autoNegativeLinkAcknowledgement(nonce, listOf(nonce), 204, true, 0))
+        val item = Any()
+        val ticket = AutoRecoveryCauseTicket("incumbent", item, "a", "b", tv.plurx.app.data.ReopenReason.Link, 100, nonce)
+        assertEquals(nonce, ticket.receiptForRequest("incumbent", "b", tv.plurx.app.data.ReopenReason.Link))
+        assertNull(ticket.receiptForRequest("other", "b", tv.plurx.app.data.ReopenReason.Link))
+        assertNull(ticket.receiptForRequest("incumbent", "c", tv.plurx.app.data.ReopenReason.Link))
+        assertNull(ticket.receiptForRequest("incumbent", "b", tv.plurx.app.data.ReopenReason.Decode))
+        assertFalse(ticket.isCurrent("incumbent", Any(), "a", "b", 200))
+        assertFalse(ticket.isCurrent("incumbent", item, "a", "b", 15_101))
+        assertFalse(ticket.isCurrent("incumbent", item, "a", "b", 99))
+    }
+    @Test fun a05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals() {
+        val player = Any()
+        val replacement = Any()
+        val window = AutoDecodePressureWindow()
+        fun sample(now: Long, position: Long, drops: Long, eligible: Boolean = true) =
+            window.observe(player, "full-recipe-a", now, position, drops, eligible)
+        assertFalse(sample(0, 0, 0))
+        assertFalse(sample(2_000, 2_000, 3))
+        assertTrue(sample(4_000, 4_000, 6))
+        assertEquals(AutoDecodePressureEvidence(4_000, 4_000, 6), window.evidence)
+        assertFalse(sample(6_000, 4_000, 10))
+        assertFalse(sample(8_000, 6_000, 13, false))
+        assertFalse(sample(10_000, 8_000, 16))
+        assertFalse(window.observe(replacement, "full-recipe-a", 12_000, 10_000, 20, true))
+        assertFalse(window.observe(replacement, "full-recipe-a", 11_000, 11_000, 23, true))
+        val ticket = AutoRecoveryCauseTicket("incumbent", player, "full-recipe-a", "full-recipe-b",
+            tv.plurx.app.data.ReopenReason.Decode, 100)
+        assertTrue(ticket.isCurrent("incumbent", player, "full-recipe-a", "full-recipe-b", 15_100))
+        assertFalse(ticket.isCurrent("incumbent", player, "full-recipe-a", "full-recipe-b", 15_101))
+        assertFalse(ticket.isCurrent("incumbent", replacement, "full-recipe-a", "full-recipe-b", 200))
+        assertFalse(ticket.isCurrent("incumbent", player, "other-recipe", "full-recipe-b", 200))
+        assertFalse(ticket.isCurrent("incumbent", player, "full-recipe-a", "full-recipe-b", 99))
+        val json = kotlinx.serialization.json.Json
+        val causes = tv.plurx.app.data.ReopenReason.entries.map {
+            json.encodeToString(tv.plurx.app.data.ReopenReason.serializer(), it)
+        }
+        assertEquals(listOf("\"stall\"", "\"link\"", "\"encode\"", "\"decode\"", "\"hold\"", "\"authority\""), causes)
+    }
+    @Test fun a05ViewerTransportRefusesStaleWrappers() {
+        val forwarded = mutableListOf<String>()
+        val delegate = java.lang.reflect.Proxy.newProxyInstance(
+            androidx.media3.common.Player::class.java.classLoader,
+            arrayOf(androidx.media3.common.Player::class.java),
+        ) { _, method, _ ->
+            forwarded.add(method.name)
+            when (method.returnType) {
+                java.lang.Boolean.TYPE -> false
+                java.lang.Integer.TYPE -> 0
+                java.lang.Long.TYPE -> 0L
+                java.lang.Float.TYPE -> 0f
+                else -> null
+            }
+        } as androidx.media3.common.Player
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        var current = true
+        var optionalOwner: Any? = null
+        val commands = mutableListOf<Boolean>()
+        val wrapper = autoViewerTransport(delegate, { current }) { requested ->
+            commands.add(requested)
+            intent.setPlaybackRequested(requested)
+            optionalOwner = if (requested) Any() else null
+            // A second explicit Pause must still reach this writer without an
+            // SDK edge, so it can revoke any optional boundary preparation.
+        }
+        wrapper.play()
+        assertTrue(intent.playbackRequested)
+        assertNotNull(optionalOwner)
+        wrapper.pause()
+        wrapper.pause()
+        assertFalse(intent.playbackRequested)
+        assertNull(optionalOwner)
+        assertEquals(listOf(true, false, false), commands)
+        wrapper.setPlayWhenReady(true)
+        assertTrue(intent.playbackRequested)
+        wrapper.seekTo(123L)
+        assertEquals(listOf("seekTo"), forwarded, "non-transport SDK forwarding is unchanged")
+        current = false
+        wrapper.play()
+        wrapper.pause()
+        wrapper.setPlayWhenReady(false)
+        assertEquals(listOf(true, false, false, true), commands)
+        assertTrue(intent.playbackRequested, "stale wrapper cannot pause the successor")
+
+        val manifest = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.000000,\nseg00000.m4s\n#EXTINF:1.000000,\nseg00001.m4s\n#EXT-X-ENDLIST\n"
+        assertTrue(autoImmutableVodPlaylist(manifest.toByteArray()))
+        assertFalse(autoImmutableVodPlaylist(manifest.replace("seg00001", "seg00000").toByteArray()))
+        assertFalse(autoImmutableVodPlaylist(manifest.replace("#EXT-X-ENDLIST", "#EXT-X-DISCONTINUITY").toByteArray()))
+    }
+
+    @Test fun playAfterALongPauseReachesThePlayerImmediately() {
+        // The delegate write is decided on the press. A long pause only arms
+        // the original-first re-plan; it never defers or withholds the Play.
+        val long = viewerTransportEdge(requested = true, wasRequested = false, pausedAtMs = 1_000L,
+            pauseOwnerCurrent = true, nowMs = 1_000L + LONG_VIEWER_PAUSE_MS)
+        assertTrue(long.delegatePlayWhenReady, "Play after a long pause is written at once")
+        assertTrue(long.armsAutoBoundaryReplan)
+        val far = viewerTransportEdge(true, false, 0L, true, 3_600_000L)
+        assertTrue(far.delegatePlayWhenReady)
+        assertTrue(far.armsAutoBoundaryReplan)
+
+        val short = viewerTransportEdge(true, false, 1_000L, true, LONG_VIEWER_PAUSE_MS)
+        assertTrue(short.delegatePlayWhenReady)
+        assertFalse(short.armsAutoBoundaryReplan, "59.999 s is not a long pause")
+        // A pause on another attachment, a clock that went backwards, or no
+        // explicit pause at all still plays at once and owes nothing.
+        for (edge in listOf(
+            viewerTransportEdge(true, false, 1_000L, false, 120_000L),
+            viewerTransportEdge(true, false, 120_000L, true, 1_000L),
+            viewerTransportEdge(true, false, null, true, 120_000L),
+            viewerTransportEdge(true, true, 1_000L, true, 120_000L),
+        )) {
+            assertTrue(edge.delegatePlayWhenReady)
+            assertFalse(edge.armsAutoBoundaryReplan)
+        }
+        val pause = viewerTransportEdge(false, true, null, false, 120_000L)
+        assertFalse(pause.delegatePlayWhenReady)
+        assertFalse(pause.armsAutoBoundaryReplan)
+    }
+
+    @Test fun optionalOriginalReplanNeverBlocksAndIsServedOnceBesideThePlayingIncumbent() {
+        val replan = AutoBoundaryReplan()
+        val lifetime = Any()
+        val original = "original"
+        var asked = 0
+        val produce = { asked += 1; original }
+        assertNull(replan.take(lifetime, 60_000L, produce), "nothing armed, nothing owed")
+        replan.arm(lifetime)
+        // The incumbent is already playing; the re-plan waits for runway on
+        // the ordinary Auto evaluation, not on the viewer.
+        assertNull(replan.take(lifetime, AutoBoundaryReplan.AUTO_BOUNDARY_RUNWAY_MS - 1, produce))
+        assertTrue(replan.isArmed, "short runway keeps the boundary owed")
+        assertEquals(0, asked, "no candidate is asked for without runway")
+        assertEquals(original, replan.take(lifetime, AutoBoundaryReplan.AUTO_BOUNDARY_RUNWAY_MS, produce))
+        assertFalse(replan.isArmed)
+        assertNull(replan.take(lifetime, 60_000L, produce), "served exactly once")
+        assertEquals(1, asked)
+
+        // A newer viewer edge renews the lifetime: the old boundary is stale
+        // and is dropped, with no timer involved.
+        replan.arm(lifetime)
+        assertNull(replan.take(Any(), 60_000L, produce))
+        assertFalse(replan.isArmed)
+        replan.arm(lifetime)
+        replan.clear()
+        assertNull(replan.take(lifetime, 60_000L, produce))
+    }
+
+    @Test fun boundaryReplanIsSpentOnlyOnACandidate() {
+        // Runway alone does not consume the boundary: with no fresh transfer
+        // sample (or every original blocked) there is no candidate, and the
+        // re-plan stays owed for the next evaluation.
+        val replan = AutoBoundaryReplan()
+        val lifetime = Any()
+        replan.arm(lifetime)
+        repeat(3) {
+            assertNull(replan.take<String>(lifetime, 60_000L) { null })
+            assertTrue(replan.isArmed, "no candidate, nothing spent")
+        }
+        assertEquals("original", replan.take(lifetime, 60_000L) { "original" })
+        assertFalse(replan.isArmed)
+        // What ends an unserved boundary is an event, not a clock.
+        replan.arm(lifetime)
+        assertNull(replan.take<String>(lifetime, 60_000L) { null })
+        replan.clear()
+        assertNull(replan.take(lifetime, 60_000L) { "original" })
+    }
+
+    @Test fun boundaryOfferThatBuildsNothingIsWithdrawn() {
+        // Refuse, Same for a settled staging, a closed controller and an
+        // action without a playlist all leave the boundary owning Auto with
+        // no pipeline: that is the one case that must withdraw.
+        assertTrue(autoBoundaryOfferBuiltNothing(boundaryStillOwns = true, built = false, switched = false))
+        assertFalse(autoBoundaryOfferBuiltNothing(true, built = true, switched = false), "a primed successor settles itself")
+        assertFalse(autoBoundaryOfferBuiltNothing(true, built = false, switched = true), "a switched successor is on screen")
+        assertFalse(autoBoundaryOfferBuiltNothing(false, built = false, switched = false), "a newer owner already settled it")
+
+        val source = controllerSource()
+        val begin = source.substringAfter("private fun beginAutoBoundaryPreparation(")
+            .substringBefore("/** Put Auto back where the boundary found it")
+        val prepare = begin.indexOf("onPrepareAction(step.action)")
+        val check = begin.indexOf("autoBoundaryOfferBuiltNothing(autoBoundaryAttempt === boundary")
+        assertTrue(prepare in 0 until check, "the build is checked after the offer was handed over")
+        assertTrue(begin.substring(check).contains("withdrawAutoBoundary(boundary)"))
+        // A Start for the boundary's own candidate keeps the boundary across
+        // the release of a superseded pipeline, so the check above and the
+        // poll's ownership test still see it.
+        val start = source.substringAfter("is PreparationOffer.Start -> {").substringBefore("private fun startSuccessor(")
+        assertTrue(start.contains("if (boundary != null) autoBoundaryAttempt = boundary"))
+    }
+
+    @Test fun armedBoundaryReplanEndsWithStallRecoveryAndQualityChangeAndSkipsBlockedCandidates() {
+        val source = controllerSource()
+        val stall = source.substringAfter("private suspend fun onStall(").substringBefore("selectAutoStallRecoveryCandidate(observation,")
+        val cleared = stall.indexOf("autoBoundaryReplan.clear()")
+        assertTrue(cleared >= 0 && cleared < stall.indexOf("applyStallVerdict(verdict, event)"),
+            "every stall recovery (hold, downgrade, reopen) ends the armed re-plan")
+        val manual = source.substringAfter("fun prepareReplacement(").substringBefore("planReplacement.retain(onPrepared)")
+        assertTrue(manual.contains("autoBoundaryReplan.clear()"), "a viewer quality change ends the armed re-plan")
+        val seek = source.substringAfter("private fun enqueueSeek(").substringBefore("stallGuard.viewerSeek {")
+        assertTrue(seek.contains("autoBoundaryReplan.arm(viewerTransportLifetime)"), "a seek still arms it")
+        val candidate = source.substringAfter("private fun autoOriginalBoundaryCandidate(")
+            .substringBefore("private fun autoBoundaryOwnerIsCurrent(")
+        assertTrue(candidate.contains("(autoBlockedUntil[candidate.id] ?: 0L) <= now"),
+            "a blocked original is not offered by a boundary either")
+    }
+
+    private fun controllerSource(): String = listOf(
+        java.io.File("app/src/main/java/tv/plurx/app/player/Controller.kt"),
+        java.io.File("src/main/java/tv/plurx/app/player/Controller.kt"),
+        java.io.File("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+    ).firstOrNull(java.io.File::isFile)?.readText() ?: error("Controller.kt source not found")
+
+    @Test fun viewerResumeAndSeekNeverWaitBehindTheOptionalOriginalStage() {
+        val source = listOf(
+            java.io.File("app/src/main/java/tv/plurx/app/player/Controller.kt"),
+            java.io.File("src/main/java/tv/plurx/app/player/Controller.kt"),
+            java.io.File("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+        ).firstOrNull(java.io.File::isFile)?.readText() ?: error("Controller.kt source not found")
+        val resume = source.substringAfter("private fun setViewerPlaybackRequested(requested: Boolean) {")
+            .substringBefore("private fun reopenAfterPausedRetirement(")
+        assertTrue(resume.contains("writeViewerDelegate(edge.delegatePlayWhenReady)"))
+        assertFalse(resume.contains("scope.launch"), "the viewer writer starts no optional work of its own")
+        val seek = source.substringAfter("private fun enqueueSeek(")
+            .substringBefore("private suspend fun publishIntent(")
+        assertTrue(seek.contains("executeSeek(pending.targetMs, pending.sequence)"))
+        assertFalse(seek.contains("Boundary(pending"), "the seek is not deferred behind an optional stage")
+        assertFalse(source.contains("attemptAutoOriginalBoundary"))
+        assertFalse(source.contains("autoBoundaryResumeJob"))
+        // The boundary is served by the ordinary Auto evaluation and handed
+        // off by the ordinary rendezvous, not by an exact-target hold.
+        val tick = source.substringAfter("private fun tickDisplayAwareAuto() {")
+            .substringBefore("private fun autoTransferOriginCurrent(")
+        assertTrue(tick.contains("autoBoundaryReplan.take(viewerTransportLifetime"))
+        assertFalse(source.contains("seekIssued"))
+    }
+
+    @Test fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDeadline() {
+        val pipeline = Any()
+        fun sample(index: Int) = AutoCompletedTransfer(100_000, 100, 1_000,
+            "https://node", true, false, false, "https://node/hls/staged/seg0000$index.m4s",
+            receipt = "00000000-0000-0000-0000-00000000000$index", etag = "object$index", statusCode = 200,
+            pipelineIdentity = pipeline, observedMediaDurationMs = 1_000,
+            mediaStartTimeMs = index * 1_000L, mediaEndTimeMs = (index + 1) * 1_000L, fullObject = true)
+        val first = sample(0)
+        val second = sample(1)
+        fun margin(samples: List<AutoCompletedTransfer>, now: Long = 2_000, owner: Any = pipeline) =
+            autoStagedEmpiricalMargin(samples, owner, "staged", now, 15_000)
+        assertTrue(margin(listOf(first, second)))
+        assertFalse(margin(listOf(first, first)))
+        assertFalse(margin(listOf(first, second), owner = Any()))
+        assertFalse(margin(listOf(first, second), now = 15_000))
+        assertFalse(margin(listOf(first, second), now = 999))
+        assertFalse(margin(listOf(first, second.copy(mediaStartTimeMs = 500, mediaEndTimeMs = 1_500))))
+        assertFalse(margin(listOf(first, second.copy(mediaStartTimeMs = null))))
+        assertFalse(margin(listOf(first, second.copy(observedMediaDurationMs = 1_003))))
+        assertFalse(margin(listOf(first, second.copy(fullObject = false))))
+        assertFalse(margin(listOf(first, second.copy(segmentId = "https://node/hls/staged/seg1.m4s"))))
+        assertFalse(margin(listOf(first, second.copy(receipt = first.receipt))))
+        assertFalse(margin(listOf(first, second.copy(etag = first.etag))))
+    }
+
     private fun candidate(height: Int, route: String = "encode", peak: Long? = 3_000_000L) =
         tv.plurx.app.data.QualityCandidate("0a7ba9bab6fbdd31bab5e5e362a3fac7", List(32) { 0 },
             route, height * 16 / 9, height, height, average_bps = 8_000_000L, peak_bps = peak,
@@ -1800,6 +2077,76 @@ class DisplayAwareAutoEvidenceTest {
         assertFalse(autoOriginalTransferMarginProven(listOf(sample("a"), sample("b")), "another", 2_000L))
     }
 
+    @Test fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence() {
+        val status = tv.plurx.app.data.PlaybackSessionStatus(id = "incumbent", producer_state = "held",
+            active_encode_candidate_id = "candidate", active_encode_milli_realtime = 2_000,
+            active_encode_age_ms = 1_000L, active_encode_active_ms = 2_000L, active_encode_segments = 2)
+        fun pressure(snapshot: tv.plurx.app.data.PlaybackSessionStatus?, session: String? = "incumbent", at: Long = 2_000L) =
+            autoActiveProductionPressure(snapshot, 1_000L, at, session, "candidate", 3_000L)
+        assertFalse(pressure(status), "paced wall delivery with actual 2x work is not pressure")
+        assertTrue(pressure(status.copy(active_encode_milli_realtime = 800)), "fresh saturation still counts while currently held")
+        assertFalse(pressure(status.copy(active_encode_milli_realtime = 800), at = 16_001L))
+        assertFalse(pressure(status.copy(active_encode_milli_realtime = 800), session = "replacement"))
+        assertFalse(pressure(null))
+        assertFalse(pressure(status.copy(active_encode_milli_realtime = 800, active_encode_active_ms = null)))
+        val item = Any(); val successor = Any()
+        val window = AutoUpgradeEvidenceWindow()
+        window.bind(item, 1, 0)
+        window.stalled(1_000L)
+        window.cliff(2_000L, 3_000L)
+        window.cliff(2_000L, 10_000L)
+        assertEquals(2_000L, window.lastCliffMs)
+        assertFalse(window.allowsUpgrade(60_999L))
+        assertFalse(window.allowsUpgrade(91_999L))
+        assertTrue(window.allowsUpgrade(92_000L))
+        assertFalse(window.allowsUpgrade(999L))
+        window.bind(successor, 1, 92_000)
+        assertNull(window.lastStallMs)
+        assertNull(window.lastCliffMs)
+        window.stalled(93_000L)
+        window.bind(successor, 2, 93_000)
+        assertNull(window.lastStallMs)
+        window.cliff(1, 93_000L)
+        assertNull(window.lastCliffMs)
+        window.bind(null, 2, 93_000)
+        assertFalse(window.allowsUpgrade(200_000L))
+    }
+
+    @Test fun a05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade() {
+        val item = Any(); val replacement = Any()
+        val window = AutoUpgradeEvidenceWindow()
+        assertFalse(window.allowsUpgrade(100_000), "unobserved attachment is Unknown")
+        window.bind(item, 1, 1_000)
+        val headroomStartedAt = 1_000L
+        assertTrue(46_000 - headroomStartedAt >= 45_000, "independent headroom is ready")
+        assertFalse(window.allowsUpgrade(46_000), "45s headroom cannot bypass 60s observation")
+        assertFalse(window.allowsProposal(46_000, headroomStartedAt))
+        window.bind(item, 1, 50_000)
+        assertFalse(window.allowsUpgrade(60_999))
+        assertTrue(window.allowsUpgrade(61_000), "same binding does not renew observation")
+        assertTrue(window.allowsProposal(61_000, headroomStartedAt), "concurrent windows first allow max(45s,60s), not 105s")
+        assertFalse(window.allowsProposal(61_000, null))
+        assertFalse(window.allowsProposal(61_000, 61_001))
+        assertFalse(window.allowsUpgrade(999), "clock rollback is Unknown")
+        window.stalled(62_000)
+        assertFalse(window.allowsUpgrade(121_999))
+        assertTrue(window.allowsUpgrade(122_000))
+        window.reset()
+        assertFalse(window.allowsUpgrade(200_000))
+        window.bind(item, 2, 123_000)
+        assertFalse(window.allowsUpgrade(182_999))
+        assertTrue(window.allowsUpgrade(183_000))
+        window.bind(replacement, 2, 184_000)
+        assertFalse(window.allowsUpgrade(243_999))
+        assertTrue(window.allowsUpgrade(244_000))
+        window.cliff(244_000, 245_000)
+        window.cliff(244_000, 250_000)
+        assertFalse(window.allowsUpgrade(333_999))
+        assertTrue(window.allowsUpgrade(334_000), "original EOF age is not renewed")
+        window.bind(null, 2, 335_000)
+        assertFalse(window.allowsUpgrade(500_000))
+    }
+
     @Test fun stagedProductionProofRequiresExactCandidateAndCombinedAge() {
         val status = tv.plurx.app.data.PlaybackSessionStatus(id = "staged", active_encode_candidate_id = "candidate",
             active_encode_milli_realtime = 1_150, active_encode_age_ms = 1_000L,
@@ -1853,4 +2200,191 @@ class DisplayAwareAutoIntentTest {
         assertTrue(wire.contains("\"mode\":\"auto\""))
         assertTrue(wire.contains("\"candidate_id\":\"$id\""))
     }
+}
+
+/**
+ * M4 / D5: a viewer seek whose coalesce ends while a prepared successor is
+ * switched onto the surface but has not rendered is held and run once, never
+ * dropped and never run on a successor a rollback failed to replace.
+ *
+ * The first case drives [SeekDeferredBehindSwitch] itself. The other three
+ * read `Controller.kt`, because the controller needs a `Context` and a real
+ * ExoPlayer and so cannot be built on the JVM lane; each pins the line a
+ * refactor would quietly drop.
+ */
+class SeekDeferredBehindSwitchTest {
+    @Test fun seekDeferredBehindASwitchRunsExactlyOnceAndOnlyWhileCurrent() {
+        val deferred = SeekDeferredBehindSwitch()
+        var current = 5L
+        val isCurrent: (Long) -> Boolean = { sequence -> sequence == current }
+        assertFalse(deferred.isHolding)
+        assertNull(deferred.take(isCurrent, epoch = 3), "nothing held, nothing to run")
+
+        deferred.hold(targetMs = 60_000L, sequence = 5L, epoch = 3L)
+        assertTrue(deferred.isHolding)
+        val taken = assertNotNull(deferred.take(isCurrent, epoch = 3))
+        assertEquals(60_000L, taken.targetMs)
+        assertEquals(5L, taken.sequence)
+        assertFalse(deferred.isHolding)
+        assertNull(deferred.take(isCurrent, epoch = 3), "exactly once")
+
+        // A stream mutation since the hold (an executed seek, a reopen, the
+        // target deadline) owns the destination now; the held seek is
+        // discarded, not kept for a later settle.
+        deferred.hold(60_000L, 5L, 3L)
+        assertNull(deferred.take(isCurrent, epoch = 4))
+        assertFalse(deferred.isHolding, "a stale seek is discarded, not retried")
+        assertNull(deferred.take(isCurrent, epoch = 3))
+
+        // A newer viewer seek supersedes it.
+        deferred.hold(60_000L, 5L, 3L)
+        current = 6L
+        assertNull(deferred.take(isCurrent, epoch = 3))
+        assertFalse(deferred.isHolding)
+
+        // The newest held seek replaces an older one still waiting.
+        deferred.hold(60_000L, 5L, 3L)
+        deferred.hold(90_000L, 6L, 3L)
+        assertEquals(90_000L, deferred.take(isCurrent, epoch = 3)?.targetMs)
+        assertNull(deferred.take(isCurrent, epoch = 3))
+
+        deferred.hold(90_000L, 6L, 3L)
+        deferred.clear()
+        assertFalse(deferred.isHolding)
+        assertNull(deferred.take(isCurrent, epoch = 3), "release clears it")
+    }
+
+    @Test fun seekPressedWhileSwitchedIsHeldNotDropped() {
+        val source = controllerSource()
+        val seek = source.substringAfter("private fun enqueueSeek(")
+            .substringBefore("private suspend fun publishIntent(")
+        // Held at the post-coalesce check and nowhere earlier: a seek pressed
+        // just before the commit is still coalescing when the switch happens.
+        val coalesce = seek.indexOf("delay(SEEK_COALESCE_MS)")
+        assertTrue(coalesce >= 0)
+        assertFalse(seek.substring(0, coalesce).contains("isSwitched"), "no press-time switch check")
+        assertFalse(seek.substring(0, coalesce).contains("seekDeferredBehindSwitch"), "no press-time hold")
+        val fence = seek.indexOf("mediaMutationEpoch != publicationEpoch")
+        val switched = seek.indexOf("if (preparedLedger.isSwitched) {")
+        val hold = seek.indexOf("seekDeferredBehindSwitch.hold(pending.targetMs, pending.sequence, publicationEpoch)")
+        val execute = seek.indexOf("executeSeek(pending.targetMs, pending.sequence)")
+        assertTrue(coalesce < fence && fence < switched, "fence, epoch and currency are checked before the hold")
+        assertTrue(switched < hold && hold < execute, "a switched successor holds the seek instead of executing it")
+        assertTrue(seek.substring(hold, execute).contains("return@launch"))
+        assertFalse(
+            seek.contains("!playbackIntent.isCurrent(pending.sequence) || preparedLedger.isSwitched"),
+            "the switched case no longer returns without recording the seek",
+        )
+        // Not the pre-effort behaviour either: abandoning a switched successor
+        // publishes FAILED and then seeks the session the server was told failed.
+        assertFalse(seek.contains("abandonPreparedReplacement"))
+
+        // It runs last in the first-frame settle, posted rather than inline.
+        val settle = source.substringAfter("private fun settleCommitOnFirstFrame(")
+            .substringBefore("private fun drainSeekDeferredBehindSwitch(")
+        val drainAt = settle.lastIndexOf("drainSeekDeferredBehindSwitch()")
+        assertTrue(drainAt > settle.indexOf("preparedLedger.committed(firstFrameUnixMs)"))
+        assertTrue(drainAt > settle.lastIndexOf("collectRetiredPlayer()"), "the drain is the settle's last step")
+        val drain = source.substringAfter("private fun drainSeekDeferredBehindSwitch() {")
+            .substringBefore("/**")
+        val launch = drain.indexOf("scope.launch")
+        assertTrue(launch >= 0, "posted: the settle runs inside onRenderedFirstFrame")
+        assertTrue(launch < drain.indexOf("seekDeferredBehindSwitch.take("))
+        assertTrue(drain.contains("epoch = mediaMutationEpoch"))
+        assertTrue(drain.indexOf("seekDeferredBehindSwitch.take(") < drain.indexOf("executeSeek(held.targetMs, held.sequence)"))
+        val release = source.substringAfter("    fun release() {").substringBefore("    fun switchAudio(")
+        assertTrue(release.contains("seekDeferredBehindSwitch.clear()"))
+    }
+
+    @Test fun switchedRollbackReopensAtTheViewerDestination() {
+        val source = controllerSource()
+        val poll = source.substringAfter("private fun pollPreparedReplacement()")
+            .substringBefore("val successor = preparedPlayer ?: return")
+        assertTrue(poll.contains("restartAt(positionForPlaybackIntent(), \"prepared successor rendered no frame\")"))
+        assertFalse(poll.contains("restartAt(realPosition()"), "the playhead would settle the pending seek at the wrong place")
+        // An Auto preparation "routes" by giving up, which reopens nothing, so
+        // an unrestored Auto rollback must still reopen.
+        assertTrue(poll.indexOf("val autoOwned = autoPreparing") in 0 until poll.indexOf("failSwitchedReplacement()"))
+        assertTrue(poll.contains("val reopened = routed && !autoOwned"))
+        assertTrue(poll.contains("if (!restored && !reopened) {"))
+        val collect = source.substringAfter("fun collectRetiredPlayer()")
+            .substringBefore("private var pendingAcknowledgement")
+        assertTrue(collect.contains("restartAt(playbackIntent.positionForPlaybackIntent(reopen.first), reopen.second)"))
+        assertFalse(collect.contains("restartAt(reopen.first"))
+        // The directed-change rollback already reopened at the pending target.
+        val directed = source.substringAfter("private fun fallBackDirectedChange(")
+            .substringBefore("private fun fallBackAfterPreparedFailure(")
+        assertTrue(directed.contains("playbackIntent.positionForPlaybackIntent(observed)"))
+    }
+
+    @Test fun deferredSeekIsNeverDrainedOntoAnUnrestoredSuccessor() {
+        val source = controllerSource()
+        val poll = source.substringAfter("private fun pollPreparedReplacement()")
+            .substringBefore("val successor = preparedPlayer ?: return")
+        val unrestored = poll.substringAfter("if (!restored && !reopened) {").substringBefore("} else if")
+        assertTrue(unrestored.contains("seekDeferredBehindSwitch.clear()"))
+        assertFalse(unrestored.contains("drainSeekDeferredBehindSwitch"))
+        val restoredAuto = poll.substringAfter("} else if (restored && autoOwned) {").substringBefore("} else {")
+        assertTrue(restoredAuto.contains("drainSeekDeferredBehindSwitch()"))
+        assertEquals(1, Regex("drainSeekDeferredBehindSwitch\\(\\)").findAll(poll).count())
+        // Exactly two callers in the whole controller: the first-frame settle
+        // and the restored Auto rollback.
+        val callers = Regex("(?<!fun )drainSeekDeferredBehindSwitch\\(\\)").findAll(source).count()
+        assertEquals(2, callers)
+        for (name in listOf(
+            "private fun rollbackSwitchedReplacement()",
+            "private fun failSwitchedReplacement()",
+            "fun collectRetiredPlayer()",
+        )) {
+            val body = source.substringAfter(name).substringBefore("\n    }\n")
+            assertFalse(body.contains("drainSeekDeferredBehindSwitch"), name)
+        }
+        // And the drain itself refuses while a switch is still outstanding.
+        val drain = source.substringAfter("private fun drainSeekDeferredBehindSwitch() {")
+            .substringBefore("/**")
+        assertTrue(drain.indexOf("if (preparedLedger.isSwitched) return@launch") in 0 until drain.indexOf("seekDeferredBehindSwitch.take("))
+    }
+
+    @Test fun deferredSeekIsNotStrandedWhenAnAbandonSettlesTheSwitch() {
+        val source = controllerSource()
+        // An abandon settles a switched successor as failed with no settle or
+        // rollback after it, so nothing would ever drain a held seek: it is
+        // cleared before the failure is published, never left behind.
+        val abandon = source.substringAfter("private fun abandonPreparedReplacement(failed: Boolean) {")
+            .substringBefore("\n    }\n")
+        val switched = abandon.substringAfter("if (preparedLedger.isSwitched) {").substringBefore("return")
+        assertTrue(switched.contains("seekDeferredBehindSwitch.clear()"))
+        assertTrue(switched.indexOf("seekDeferredBehindSwitch.clear()") < switched.indexOf("failSwitchedReplacement()"))
+        assertFalse(abandon.contains("drainSeekDeferredBehindSwitch"), "never drained onto the successor being failed")
+
+        // The node failover is the one caller that keeps the media epoch and
+        // re-attaches the switched successor itself. It takes the held seek
+        // first (exactly once, fenced by currency and epoch), then re-attaches
+        // at the viewer's destination rather than the successor's playhead,
+        // and settles that seek's sequence on the re-attach.
+        val retry = source.substringAfter("private fun retryMediaOnNextNode(error: PlaybackException): Boolean {")
+            .substringBefore("\n    }\n")
+        val take = retry.indexOf("seekDeferredBehindSwitch.take(")
+        val abandoned = retry.indexOf("abandonPreparedReplacement(failed = false)")
+        assertTrue(take in 0 until abandoned, "the held seek is taken before the abandon clears it")
+        assertTrue(retry.substring(0, take).contains("preparedLedger.isSwitched"))
+        assertTrue(retry.contains("epoch = mediaMutationEpoch"))
+        assertTrue(retry.contains("isCurrent = { sequence -> playbackIntent.isCurrent(sequence) }"))
+        assertTrue(retry.contains("val presentationSequence = heldSeek?.sequence ?: playbackIntent.executedSequence()"))
+        val attach = retry.substringAfter("val attachPosition = when {").substringBefore("playbackTelemetry.report(")
+        assertTrue(attach.contains("heldSeek != null -> playerTimelinePositionMs(positionForPlaybackIntent())"))
+        assertTrue(attach.indexOf("heldSeek != null") < attach.indexOf("player.currentPosition"),
+            "a held seek wins over the successor's playhead")
+        assertTrue(retry.indexOf("player.setMediaItem(MediaItem.fromUri(next), attachPosition)") >
+            retry.indexOf("val attachPosition = when {"))
+        assertTrue(retry.contains("markIntentExecuted(sequence, recipe)"))
+        // Still exactly two drains in the controller: this path takes, it does not drain.
+        assertFalse(retry.contains("drainSeekDeferredBehindSwitch"))
+    }
+
+    private fun controllerSource(): String = listOf(
+        java.io.File("app/src/main/java/tv/plurx/app/player/Controller.kt"),
+        java.io.File("src/main/java/tv/plurx/app/player/Controller.kt"),
+        java.io.File("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+    ).firstOrNull(java.io.File::isFile)?.readText() ?: error("Controller.kt source not found")
 }

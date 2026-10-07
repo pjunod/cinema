@@ -802,6 +802,13 @@ async fn own_rolling_retirement(
     committed: tokio::sync::oneshot::Sender<()>,
 ) -> Result<bool, String> {
     session.hooks.get().retirement_started();
+    // A session that stops before its producer finished the title will never
+    // publish complete output: release its retained links now rather than
+    // when the last reference to the session finally drops. A no-op once
+    // the collection published.
+    if let Some(collection) = &session.rolling_collection {
+        collection.abandon();
+    }
 
     let transition = match deadline {
         Some(deadline) => tokio::time::timeout_at(deadline, session.child_transition.lock())

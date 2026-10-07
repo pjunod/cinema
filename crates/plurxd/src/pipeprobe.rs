@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use plurx_core::transcode::{Encoder, Pipeline, PIPELINE_CANDIDATES};
+use plurx_core::transcode::{zscale_tone_map_filter, Encoder, Pipeline, PIPELINE_CANDIDATES};
 
 use crate::ffmpeg::{ffmpeg_bin, ffprobe_bin};
 
@@ -602,28 +602,26 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
         "error".into(),
         "-y".into(),
     ];
-    args.extend(encoder.init_args());
-    args.extend(candidate.init_args());
+    args.extend(candidate.device_args(encoder));
     args.extend(candidate.decode_args());
     args.push("-i".into());
     args.push(fixture.to_string_lossy().into_owned());
 
     let mut vf = match candidate.filters(None, PROBE_HEIGHT, Some("hdr10")) {
         Some(g) => g,
-        // The CPU reference: the exact chain `video_filters` builds for an
-        // HDR10 source, spelled here because a probe that measured a
+        // The CPU reference: the tone map `video_filters` builds for an
+        // HDR10 source at the 1,000-nit policy peak, taken from the one
+        // function that spells it, because a probe that measured a
         // *different* CPU chain would be comparing against a fiction.
         None => format!(
-            "zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,\
-             zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak=10,\
-             zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p,\
-             scale=-2:'min({PROBE_HEIGHT},ih)'"
+            "{},scale=-2:'min({PROBE_HEIGHT},ih)'",
+            zscale_tone_map_filter("smpte2084", 1_000)
         ),
     };
     // The CPU path uploads for a hardware encoder; the vendor graphs already
     // hand over surfaces of the right family. Same rule the real builder uses.
-    let vendor_gpu = matches!(candidate, Pipeline::VppQsv | Pipeline::TonemapVaapi);
-    if let Some(suffix) = encoder.filter_suffix().filter(|_| !vendor_gpu) {
+    let vendor_gpu = candidate.keeps_frames_off_the_cpu();
+    if let Some(suffix) = candidate.encoder_upload(encoder).filter(|_| !vendor_gpu) {
         vf.push(',');
         vf.push_str(suffix);
     }
@@ -1084,6 +1082,58 @@ mod tests {
         // picture at the same speed, so it fails on speed alone.
         let why = decide(&sample, &sample).expect_err("nothing beats itself");
         assert!(why.contains("the CPU chain"), "wrong rejection: {why}");
+    }
+
+    /// A decoded PQ frame that carries no primaries tag still tone-maps. With
+    /// `pin=` but no output `p=` on the linearising zscale, zimg took the
+    /// output primaries from the frame and refused the graph ("no path between
+    /// colorspaces"), producing no frames at all; the chain names `p=bt709`
+    /// there now. `testsrc2` frames carry no primaries, and `setparams` tags
+    /// everything else a PQ decode would.
+    #[tokio::test]
+    async fn the_cpu_tone_map_survives_a_frame_without_primaries() {
+        crate::transcode::require_ffmpeg();
+        if !has_filters(&["zscale", "tonemap", "setparams"]).await {
+            eprintln!(
+                "skipping the_cpu_tone_map_survives_a_frame_without_primaries: `{}` has \
+                 no zscale/tonemap/setparams",
+                ffmpeg_bin()
+            );
+            return;
+        }
+        let graph = format!(
+            "setparams=range=tv:color_trc=smpte2084:colorspace=bt2020nc,{}",
+            zscale_tone_map_filter("smpte2084", 1_000)
+        );
+        let output = tokio::process::Command::new(ffmpeg_bin())
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=24:duration=0.25,format=yuv420p10le",
+                "-vf",
+                &graph,
+                "-f",
+                "framemd5",
+                "-",
+            ])
+            .output()
+            .await
+            .expect("ffmpeg runs");
+        assert!(
+            output.status.success(),
+            "the chain refused an untagged-primaries frame: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let frames = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .count();
+        assert!(frames > 0, "no frames came out of the chain");
     }
 
     fn exit_status(code: u32) -> std::process::ExitStatus {
@@ -1778,7 +1828,10 @@ mod tests {
             .map(|i| args[i + 1].clone())
             .expect("a filter graph");
         assert!(vf.contains("tonemap=tonemap=hable"), "{vf}");
-        assert!(vf.contains("zscale=p=bt709,tonemap="), "{vf}");
+        assert!(
+            vf.contains(":t=linear:p=bt709:npl=100,format=gbrpf32le,tonemap="),
+            "gamut conversion on the linearising zscale, ahead of the curve: {vf}"
+        );
         assert!(vf.contains("peak=10"), "{vf}");
         assert!(vf.contains("dither=error_diffusion"), "{vf}");
         assert!(vf.contains("tin=smpte2084"), "{vf}");
@@ -1820,6 +1873,91 @@ mod tests {
             !vendor_graph.contains("hwupload"),
             "the VA-API graph already hands over VA-API surfaces: {vendor_graph}"
         );
+    }
+
+    #[tokio::test]
+    async fn vulkan_vaapi_is_probed_before_copying_and_keeps_safety_checks() {
+        for resident in [
+            Ok(sample(86.0, 3.0)),
+            Err("mapping unsupported".to_owned()),
+            Ok(sample(128.0, 1.0)),
+            Ok(sample(84.0, 9.0)),
+        ] {
+            let passes = resident
+                .as_ref()
+                .is_ok_and(|s| decide(s, &sample(84.0, 10.0)).is_ok());
+            let rec = Recorder::new(vec![
+                (Pipeline::Cpu, Ok(sample(84.0, 10.0))),
+                (Pipeline::TonemapVaapi, Err("HDR unsupported".to_owned())),
+                (Pipeline::LibplaceboVaapi, resident),
+                (Pipeline::Libplacebo, Ok(sample(86.0, 3.0))),
+            ]);
+            let r = &rec;
+            let report = probe_candidates(Encoder::Vaapi, |p| async move { r.run(p) }).await;
+            assert_eq!(
+                report.selected(),
+                if passes {
+                    Pipeline::LibplaceboVaapi
+                } else {
+                    Pipeline::Libplacebo
+                }
+            );
+            let mut expected = vec![
+                Pipeline::Cpu,
+                Pipeline::TonemapVaapi,
+                Pipeline::LibplaceboVaapi,
+            ];
+            if !passes {
+                expected.push(Pipeline::Libplacebo);
+            }
+            assert_eq!(*rec.asked.borrow(), expected);
+        }
+    }
+
+    #[test]
+    fn vulkan_vaapi_probe_keeps_decoded_frames_on_gpu() {
+        let args = probe_args(
+            Path::new("/f.mkv"),
+            Path::new("/o.mp4"),
+            Pipeline::LibplaceboVaapi,
+            Encoder::Vaapi,
+        );
+        assert!(args
+            .windows(2)
+            .any(|p| p == ["-hwaccel_output_format", "vaapi"]));
+        assert!(args
+            .windows(2)
+            .any(|p| p == ["-init_hw_device", "vulkan=vk@hw"]));
+        let graph = &args[args.iter().position(|a| a == "-vf").expect("graph") + 1];
+        assert!(graph.starts_with("libplacebo="), "{graph}");
+        assert!(
+            graph.ends_with("hwmap=derive_device=vaapi,format=vaapi"),
+            "{graph}"
+        );
+        assert!(!graph.contains("hwupload"), "{graph}");
+        assert!(!graph.contains("hwdownload"), "{graph}");
+    }
+
+    #[test]
+    fn vulkan_probe_returns_frames_to_the_vaapi_encoder() {
+        let args = probe_args(
+            Path::new("/f.mkv"),
+            Path::new("/o.mp4"),
+            Pipeline::Libplacebo,
+            Encoder::Vaapi,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-init_hw_device vaapi=hw:"), "{joined}");
+        assert!(joined.contains("-init_hw_device vulkan=vk@hw"), "{joined}");
+        assert!(joined.contains("-filter_hw_device vk"), "{joined}");
+        let vf = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("video filter graph")
+            + 1];
+        assert!(vf.contains("hwupload,libplacebo="), "{vf}");
+        assert!(vf.ends_with("hwupload=derive_device=vaapi"), "{vf}");
+        assert!(joined.contains("h264_vaapi"), "{joined}");
     }
 
     /// The fixture is the foundation: without PQ/BT.2020 signalling in the

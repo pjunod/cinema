@@ -514,6 +514,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setAppearance(appearance: Appearance) = updatePreferences { copy(appearance = appearance) }
 
+    fun setLibraryPresentation(value: tv.plurx.app.data.LibraryPresentation) = updatePreferences { copy(libraryPresentation = value) }
+
     fun setPosterSize(size: PosterSize) = updatePreferences { copy(posterSize = size) }
 
     fun setHomeGrouping(grouping: HomeGrouping) = updatePreferences { copy(homeGrouping = grouping) }
@@ -755,12 +757,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---- Suspend loaders used by individual screens --------------------------
 
     /**
-     * Walk a library's pages, handing each one over as it arrives.
+     * Walk every page of one library in the server's order, handing each page
+     * over as it arrives.
      *
-     * The grid used to wait for every page of a thousand-item library behind a
-     * spinner; it now paints the first page after one round trip and fills in
-     * behind. Sorting is the client's job (`sortMerged`), so the server sort is
-     * fixed and a sort change never re-fetches.
+     * No screen calls this any more. The library grid pages on demand through
+     * [LibraryPager] (built by [libraryPager]): it sends the grid's own sort to
+     * the server, merges the server-sorted cursors by the DTO's `sort_title`,
+     * and a sort change builds a new pager that re-fetches. `sortMerged` no
+     * longer exists. The whole-walk path for a server without `sort_title` is
+     * `LibraryPager.loadLegacyWholeCollection`, not this function.
+     * NATIVE-LIBRARY-PAGING §6 deletes that legacy walk one release after the
+     * 5.1 server; this function should go with it.
      */
     suspend fun libraryPages(id: Long, sort: String = "title", onPage: (List<Item>) -> Unit) {
         var offset = 0
@@ -795,6 +802,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         presentationTarget: PresentationTarget? = null,
         audioOffsetMs: Long = 0,
         fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId),
+        linkReceipt: String? = null,
     ): PlaybackDecision {
         fileContext.localId(fileId)
         val measured = Caps.snapshot(getApplication<Application>())
@@ -810,7 +818,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             preplayQueryParams(tracks) + if (Session.displayAwareAuto && Session.displayAwareAutoProtocol == "route-v1")
                 mapOf("audio_offset_ms" to audioOffsetMs.toString()) else emptyMap()
         val decision = try {
-            api().decisionV2ForContext(fileContext, request, DecisionCapsReq(snapshot.document))
+            api().decisionV2ForContext(fileContext, request, DecisionCapsReq(snapshot.document), validLinkReceipt(linkReceipt))
         } catch (error: HttpException) {
             if (!shouldFallBackToLegacyDecision(error.code())) throw error
             api().decisionForContext(fileContext, snapshot.legacyQuery + request)
@@ -890,6 +898,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
+    private fun validLinkReceipt(receipt: String?): String? = receipt?.takeIf {
+        Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(it)
+    }
+
     /** A Shared Start from fresh B details. A null [fileId] takes the first
      * launchable file of those details (the next episode); either way the
      * context, decision and playback id are new, never inherited. */
@@ -922,13 +934,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return next to prepareSharedPlayback(next, null)
     }
 
-    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq, fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId)): HlsStart {
+    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq, fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId), linkReceipt: String? = null): HlsStart {
         fileContext.localId(fileId)
         requireNotNull(body.caps) {
             "Playback session is missing its decision capabilities."
         }
         val started = try {
-            api().createHlsSessionForContext(fileContext, body)
+            api().createHlsSessionForContext(fileContext, body, validLinkReceipt(linkReceipt))
         } catch (error: HttpException) {
             // The surface adapter (PLAYBACK-SURFACE-CONTRACT.md §3.5): a
             // refusal the server explained reaches the presenter as its own

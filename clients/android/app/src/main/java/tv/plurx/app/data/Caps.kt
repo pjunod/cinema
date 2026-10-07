@@ -97,7 +97,10 @@ object Caps {
         }
         val video = videoCodecCaps(videoLimits)
 
-        val audio = audioCodecClaims(decoderMimes, sinkEncodings(context))
+        val encodings = sinkEncodings(context)
+        val audio = audioCodecClaims(decoderMimes, encodings)
+        val sinkFacts = liveSinkFacts(context)
+        val audioSinks = audioSinkClaims(decoderMimes, encodings, sinkFacts.aacChannels)
 
         val hdrTypes = displayHdrTypes(context)
         // Ask the same Media3 decoder selector that ExoPlayer uses. The raw
@@ -131,6 +134,7 @@ object Caps {
         Log.i(
             LOG_TAG,
             "model=${Build.MODEL} hdrTypes=${hdrTypes.sorted()} " +
+                "audioSinks=${audioSinks.joinToString { "${it.codec}:${it.max_channels}${if (it.passthrough) "p" else ""}" }} " +
                 "dvDecoders=${dolbyVisionDecoderProbe.names} " +
                 "rawDvProfiles=${rawDolbyVisionProfiles.sorted()} " +
                 "claimedDvProfiles=$dolbyVisionProfiles caps=$result",
@@ -148,6 +152,7 @@ object Caps {
                     build = BuildConfig.VERSION_CODE.toString().take(48),
                     ua = Build.MODEL.take(160),
                 ),
+                audioSinks = audioSinks,
             ).let { document ->
                 if (Session.decoderCompactionContract == DECODER_COMPACTION_CONTRACT && document.video.size <= MAX_CLIENT_DECODER_ENTRIES) {
                     document.copy(decoder_compaction = DECODER_COMPACTION_CONTRACT)
@@ -209,8 +214,7 @@ object Caps {
             LiveSinkFacts.MIN_AAC_CHANNELS
         } else {
             try {
-                val manager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-                hdmiPcmChannelsOf(manager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS).toList())
+                hdmiPcmChannelsOf(activeOutputDevices(context))
             } catch (_: Exception) {
                 LiveSinkFacts.MIN_AAC_CHANNELS
             }
@@ -219,6 +223,25 @@ object Caps {
             deinterlaces = television,
             aacChannels = channels.coerceIn(LiveSinkFacts.MIN_AAC_CHANNELS, LiveSinkFacts.MAX_AAC_CHANNELS),
         )
+    }
+
+    /**
+     * The outputs media would play to now. On API 33+ that is the active
+     * route, so Bluetooth headphones on a television are not mistaken for its
+     * HDMI receiver; older releases can only list every output.
+     */
+    private fun activeOutputDevices(context: Context): List<AudioDeviceInfo> {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            manager.getAudioDevicesForAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build(),
+            )
+        } else {
+            manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
+        }
     }
 
     /** The widest PCM channel count an HDMI-class output device advertises, or stereo. */

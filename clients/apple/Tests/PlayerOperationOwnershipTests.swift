@@ -284,6 +284,43 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         await load.value
     }
 
+    func testCancelledMediaSelectionPreparationCannotApplyLateTracks() async throws {
+        let decisionEntered = expectation(description: "decision suspended")
+        var decision: CheckedContinuation<(decision: Decision, caps: DeviceCaps), Error>?
+        let preparedAudio = expectation(description: "audio suspended")
+        var releaseAudio: CheckedContinuation<Void, Never>?
+        var audioCommits = 0
+        var subtitlePreparations = 0
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in
+            await withCheckedContinuation { releaseAudio = $0; preparedAudio.fulfill() }
+            return { audioCommits += 1 }
+        }
+        preparation.native = { _, _, _ in
+            subtitlePreparations += 1
+            return .init(hasSubtitleOptions: true, apply: { true })
+        }
+        let controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in
+            try await withCheckedThrowingContinuation { decision = $0; decisionEntered.fulfill() }
+        }, mediaSelectionPreparation: preparation)
+        let model = AppModel()
+        start(controller, model: model)
+        let load = try XCTUnwrap(controller.loadingTask)
+        await fulfillment(of: [decisionEntered], timeout: 3)
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/cancelled-selection-test"))
+        controller.player.replaceCurrentItem(with: item)
+        let selection = Task { await controller.reconcileNativeMediaSelections(to: item) }
+        await fulfillment(of: [preparedAudio], timeout: 3)
+        selection.cancel()
+        try XCTUnwrap(releaseAudio).resume()
+        await selection.value
+        XCTAssertEqual(audioCommits, 0)
+        XCTAssertEqual(subtitlePreparations, 0)
+        controller.stop()
+        try XCTUnwrap(decision).resume(throwing: CancellationError())
+        await load.value
+    }
+
     // MARK: - M5: the create "not yet" retry sequence
 
     /// The create endpoint, scripted. Each attempt takes the next answer; a
@@ -999,6 +1036,31 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             bytesTotal: nil, localAssetRelativePath: path, markers: [], positionMs: 0,
             recordedAt: nil, pendingProgress: false, errorMessage: nil, updatedAt: Date()
         )
+    }
+
+    /// The finite player's half of #818: the claim follows `decision` through
+    /// an open and the player's own transport, so a film holds the display
+    /// while it plays and lets go the moment the viewer pauses.
+    func testTheFinitePlayerHoldsTheDisplayWhilePlayingAndLetsGoOnPause() async throws {
+        let (path, url) = try makeOfflineAudio()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in nil }
+        preparation.native = { _, _, _ in .init(hasSubtitleOptions: true, apply: { true }) }
+        let recorder = DisplayWakeRecorder()
+        let owner = DisplayWakeOwner { recorder.applied.append($0) }
+        let controller = PlayerController(
+            mediaSelectionPreparation: preparation,
+            canPlayOffline: { _ in true },
+            displayWakeOwner: owner
+        )
+        controller.startOffline(model: AppModel(), item: offlineItem(path: path))
+        for _ in 0..<100 where !owner.isHeld { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertTrue(owner.isHeld, "a playing film holds the screensaver and auto-lock off")
+        controller.togglePlayPause()
+        for _ in 0..<100 where owner.isHeld { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertFalse(owner.isHeld, "a paused film lets the display sleep")
+        controller.stop()
     }
 
     func testOfflineAttachmentHonorsPauseAndSeeksWithoutAnOnlineRecipeReopen() async throws {

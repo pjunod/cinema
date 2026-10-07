@@ -12,6 +12,18 @@
 // exactly ONE reopen as the answer to every way it can go wrong.
 const PREPARED_OFFER_BOUND_MS=12000;
 const PREPARED_OFFER_CADENCE_MS=500;
+// A continuous change settles on presentation of its target rendition. §4.2
+// bounds the wait without promising a false 30-second presentation: until the
+// target holds a reservation, a 30-second active-time control budget applies;
+// after that, the deadline is the target boundary's presentation plus 2 s of
+// active play. Film time is that active clock -- it stops while paused or
+// waiting and moves at the playback rate -- so a healthy 60-second prebuffer
+// is never declared unobserved. Missing the deadline settles
+// `observation_unknown` (never retained_current, never a reopen), so a target
+// that is never observed cannot latch Auto or leave the change unsettled.
+const CONTINUOUS_CONTROL_BUDGET_MS=30000;
+const CONTINUOUS_OBSERVATION_GRACE_SECONDS=2;
+const CONTINUOUS_OBSERVATION_POLL_MS=500;
 // `askPlaybackControl` cannot serve this and cannot be made to. Its waiter
 // settles on the FIRST exchange at or after its floor, and a `Prepare` arrives
 // on a later exchange than the one that carried the ask -- the server has to
@@ -164,23 +176,60 @@ function settlePreparedOfferWaiter(p,waiter,mine,response,error){
     },PREPARED_OFFER_CADENCE_MS);
   }
 }
-// One owner per directed change, from the tap to a commit or ONE reopen.
-//
-// Every way this can fail converges on the same single answer -- reopen the
-// stream where the viewer actually is -- and `change.settled` is what keeps it
-// single. Without it a decline racing the bound, or a failed commit racing a
-// supersede, reopens twice.
+// One owner per directed change. Optional manual and Auto targets retain the
+// incumbent on failure; a recovery target keeps its existing single reopen.
+// `change.settled` prevents a decline, timeout and supersession from settling
+// the same request twice.
 //
 // `fallback` is optional and is how Auto keeps its own reopen: the automatic
 // controller goes through `requestPlaybackMediaChange` so the create carries
 // the rung, where the menu goes through `play()`.
-async function requestQualityChange(p,reason,fallback,autoMove){
+async function requestQualityChange(p,reason,fallback,autoMove,standingSelection){
   if(!p) return "superseded";
+  const retained=p.qualityRetainedSelection;
+  const previous=standingSelection||(retained&&retained.selection)||(p.controlLastRequest&&p.controlLastRequest.selection);
+  if(retained?.change?.noticeIntent) playbackSurfaceStep({intent_superseded:retained.change.noticeIntent});
+  supersedeDirectedChange(p);
+  p.qualityRetainedSelection=null;
   const change={intentGeneration:p.controlIntentGeneration||0,
+    incumbentSessionId:p.sessionId,standingSelection:previous||null,
+    retainIncumbent:reason==="manual"&&!!p.started&&playbackOwnsAttachedMedia(p),
     tappedAt:performance.now(),settled:false,reason:reason||"manual",
     fallback:fallback||null,autoMove:autoMove||null,commitTimer:null,
     outcome:null,outcomeAt:null};
   p.directedChange=change;
+  const selection=playbackControlSelection(p);
+  if(p.continuousQuality&&continuousQualitySelectionCompatible(p,selection)){
+    const candidate=continuousQualityCandidate(p,selection);
+    change.continuousOwner=p.continuousQuality;
+    change.continuousAttachment=p.mediaAttachment;
+    const outcome=await p.continuousQuality.choose(candidate.id,()=>p.directedChange===change
+      &&(p.controlIntentGeneration||0)===change.intentGeneration);
+    if(p.directedChange!==change)return "superseded";
+    if(outcome==="continuous"){
+      change.outcome=outcome;change.outcomeAt=performance.now();
+      change.continuousCandidateId=candidate.id;
+      const ledger=p.continuousQuality.protocol.ledger;
+      const newest=ledger?.transactions.find(tx=>tx.intent_revision===ledger.latest_intent_revision)?.transaction_id;
+      // Name the choice by its lineage root, so a later re-Prepare of the same
+      // target still settles it (settleContinuousDirectedChange).
+      change.continuousTransactionId=newest&&typeof p.continuousQuality.transactionRoot==="function"
+        ?p.continuousQuality.transactionRoot(newest):newest;
+      if(!settleContinuousDirectedChange(p))armContinuousObservation(p,change);
+      notifyPlaybackControl();return outcome;
+    }
+    // A newer intent fenced this ask while it was still this change's own:
+    // settle it, as the prepared path does, so nothing waits on it forever.
+    if(outcome==="superseded"){settleDirectedChange(p,change,"superseded");return outcome;}
+    fallBackDirectedChange(p,change,outcome);return outcome;
+  }
+  // Keep transport reports live while learning the owner's strict-reader
+  // floor. Publish the new recipe only after this negotiation turn settles.
+  if(previous) p.qualityNegotiatingSelection={change,selection:previous};
+  try{ await discoverQualityControl(p); }
+  finally{ if(p.qualityNegotiatingSelection&&p.qualityNegotiatingSelection.change===change) p.qualityNegotiatingSelection=null; }
+  if(p.directedChange!==change||(p.controlIntentGeneration||0)!==change.intentGeneration) return "superseded";
+  change.qualityIntent=qualityControlSupported(p)?qualityMediaIntent(p):null;
   let outcome="timed_out";
   try{ outcome=await awaitPreparedOffer(p,change.tappedAt); }catch(e){ outcome="timed_out"; }
   // A change already settled while the waiter confirmed -- a commit that beat
@@ -208,12 +257,43 @@ function fallBackDirectedChange(p,change,why){
   if(change.commitTimer!=null){ clearTimeout(change.commitTimer); change.commitTimer=null; }
   change.outcome=why;
   change.outcomeAt=performance.now();
+  if(change.retainIncumbent&&p.sessionId!==change.incumbentSessionId){
+    // Exposure already changed the authoritative session. Its presentation
+    // and recovery owner settle that state; this older optional ask cannot
+    // declare retention or reopen over it after an acknowledgement is lost.
+    change.cancellationOutcome="observation_unknown";
+    return true;
+  }
+  // Manual preferences survive a declined optional target. The wire follows
+  // the attached incumbent until Retry or an explicit restart owns a new ask.
+  if(change.retainIncumbent&&p.sessionId===change.incumbentSessionId
+    &&playbackOwnsAttachedMedia(p)&&change.standingSelection){
+    const staged=preparedState(p);
+    if(staged) abandonPreparedReplacement(p,"aborted","manual_quality_target_failed");
+    p.qualityRetainedSelection={selection:change.standingSelection,
+      intentGeneration:change.intentGeneration,sessionId:p.sessionId,change};
+    settleQualityCancellation(p,change).then(outcome=>{change.cancellationOutcome=outcome;});
+    change.noticeIntent="quality:"+change.intentGeneration+":"+change.tappedAt;
+    raisePlaybackSurface("change_failed",{context:"change",intent:change.noticeIntent,
+      title:"Quality change did not complete. Keeping the current stream.",
+      detail:"Your preference is saved. Retry, or choose Apply with restart in Quality.",actions:["retry"]});
+    notifyPlaybackControl();
+    clientLog(Object.assign({level:"info",event:"quality_switch",detail:why,reason:"manual",
+      message:"Optional manual quality target failed; keeping the current stream"},playbackContext()));
+    return true;
+  }
   // A voluntary trial may fail without interrupting a healthy incumbent.
   // Abort its one successor, restore the standing selection and back off.
   if(change.autoMove&&change.autoMove.retainIncumbent){
     const move=change.autoMove, now=performance.now();
     const staged=preparedState(p);
     if(staged) abandonPreparedReplacement(p,"aborted","auto_trial_failed");
+    const cancellation=settleQualityCancellation(p,change);
+    if(cancellation&&cancellation.then) cancellation.then(outcome=>{
+      change.cancellationOutcome=outcome;
+      clientLog(Object.assign({level:"info",event:"quality_cancellation",detail:outcome,
+        message:"Optional quality target cancellation: "+outcome},playbackContext()));
+    });
     p.autoRequestedHeight=null;
     if(p.abr){
       p.abr.requestedCandidateId=move.previousCandidateId||null;
@@ -256,6 +336,88 @@ function fallBackDirectedChange(p,change,why){
 }
 // A directed change that ended without a reopen: the successor took the
 // picture, or something newer replaced the whole ask.
+function retainedQualityChange(p){
+  const retained=p&&p.qualityRetainedSelection;
+  return retained&&retained.sessionId===p.sessionId
+    &&retained.intentGeneration===(p.controlIntentGeneration||0)?retained:null;
+}
+function retryQualityChange(){
+  const p=PLAYER, retained=retainedQualityChange(p);
+  if(!retained) return false;
+  closeMenu();
+  // Retry is a new media intent even when the saved preference is identical.
+  const holder=p.abr||p;
+  if(holder.mediaIntent) holder.mediaIntent.recipeKey=null;
+  playbackSurfaceStep({intent_superseded:retained.change.noticeIntent});
+  return requestQualityChange(p,"manual",null,null,retained.selection);
+}
+function applyQualityWithRestart(){
+  const p=PLAYER, retained=retainedQualityChange(p);
+  if(!retained||!p.fileId) return false;
+  closeMenu();
+  playbackSurfaceStep({intent_superseded:retained.change.noticeIntent});
+  p.qualityRetainedSelection=null;
+  const pos=positionForPlaybackIntent(document.getElementById("video"),p);
+  PENDING_ATTEMPT_REASON="quality";
+  beginPlaybackControlSeek(p,pos);
+  return play(p.fileId,p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
+}
+// The earliest film second the chosen target (or its re-Prepare lineage)
+// holds media for: the boundary whose presentation settles the choice.
+function continuousTargetBoundary(p,change){
+  const owner=p&&p.continuousQuality,ledger=owner&&owner.protocol&&owner.protocol.ledger;
+  if(!ledger||!change) return null;
+  const root=id=>typeof owner.transactionRoot==="function"?owner.transactionRoot(id):id;
+  let boundary=null;
+  for(const tx of ledger.transactions||[]){
+    if(root(tx.transaction_id)!==change.continuousTransactionId) continue;
+    for(const interval of [...(tx.reserved||[]),...(tx.appended||[])]){
+      const at=Number(interval.from_tick)/Number(interval.timescale);
+      if(Number.isFinite(at)&&(boundary===null||at<boundary)) boundary=at;
+    }
+  }
+  return boundary;
+}
+function continuousObservationDue(p,change,activeMs){
+  const boundary=continuousTargetBoundary(p,change);
+  if(boundary===null) return activeMs>=CONTINUOUS_CONTROL_BUDGET_MS;
+  const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
+  if(!v) return false;
+  const film=((p&&p.offset)||0)+(Number(v.currentTime)||0);
+  return film>=boundary+CONTINUOUS_OBSERVATION_GRACE_SECONDS*Math.max(Number(v.playbackRate)||1,0);
+}
+function armContinuousObservation(p,change){
+  let activeMs=0,last=performance.now();
+  const poll=()=>{
+    change.commitTimer=null;
+    if(p.directedChange!==change||change.settled||settleContinuousDirectedChange(p)) return;
+    const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video")),now=performance.now();
+    if(v&&!v.paused&&!v.seeking) activeMs+=now-last;
+    last=now;
+    if(continuousObservationDue(p,change,activeMs)){
+      settleDirectedChange(p,change,"observation_unknown","continuous");
+      return;
+    }
+    change.commitTimer=setTimeout(poll,CONTINUOUS_OBSERVATION_POLL_MS);
+  };
+  change.commitTimer=setTimeout(poll,CONTINUOUS_OBSERVATION_POLL_MS);
+}
+function settleContinuousDirectedChange(p){
+  const change=p?.directedChange,ledger=p?.continuousQuality?.protocol?.ledger;
+  if(!change||change.settled||change.outcome!=="continuous"||!ledger
+     ||p.continuousQualityPresented?.candidate_id!==change.continuousCandidateId) return false;
+  // The newest transaction settles this choice when it is the choice's own or
+  // the adapter's re-Prepare of that same target (its lineage root).
+  const owner=p.continuousQuality,root=id=>typeof owner.transactionRoot==="function"?owner.transactionRoot(id):id;
+  const transaction=ledger.transactions.find(tx=>tx.intent_revision===ledger.latest_intent_revision
+    &&root(tx.transaction_id)===change.continuousTransactionId);
+  if(!transaction||transaction.intent_revision!==ledger.latest_intent_revision
+     ||transaction.intent_superseded||transaction.cancel_requested
+     ||transaction.first_presented_tick==null||transaction.first_presented_at_ms==null) return false;
+  const committed=settleDirectedChange(p,change,"committed","continuous");
+  if(committed) p.autoRequestedHeight=null;
+  return committed;
+}
 function settleDirectedChange(p,change,why,detail){
   const owned=change||(p&&p.directedChange);
   if(!p||!owned||owned.settled||p.directedChange!==owned) return false;
@@ -269,7 +431,8 @@ function settleDirectedChange(p,change,why,detail){
   // exchange succeeds: changing to plain Auto here makes the server reject
   // the commit as a different ask and retire the stream we just exposed.
   if(why!=="committed"||!owned.autoMove) p.autoRequestedHeight=null;
-  if(why!=="committed"&&owned.autoMove&&owned.autoMove.candidateId&&p.abr)
+  // An unobserved continuous target is still the rung future loads request.
+  if(why!=="committed"&&why!=="observation_unknown"&&owned.autoMove&&owned.autoMove.candidateId&&p.abr)
     p.abr.requestedCandidateId=owned.autoMove.previousCandidateId||null;
   if(owned.autoMove&&p.abr){
     if(why==="committed"){
@@ -297,7 +460,10 @@ function settleDirectedChange(p,change,why,detail){
 // A viewer command, a teardown, a stream replacement. The ask is retired and
 // nothing owes it a reopen.
 function supersedeDirectedChange(p){
-  return settleDirectedChange(p,p&&p.directedChange,"superseded");
+  const change=p&&p.directedChange;
+  const settled=settleDirectedChange(p,change,"superseded");
+  if(settled&&change.qualityIntent) settleQualityCancellation(p,change).then(outcome=>{change.cancellationOutcome=outcome;});
+  return settled;
 }
 // The server cancels a preparation the moment the incumbent reports `waiting`
 // or `stalled`, so an automatic move made from a stalled picture would spend
@@ -372,7 +538,7 @@ function nativeHlsSubtitleOrdinal(player,index){
 //
 // The obvious move — re-select the rendition so hls.js fetches the segment
 // again — does not work, and that is measured rather than assumed. Against
-// the bundled hls.js 1.6.16, `subtitleTrack = -1` then back, the same wrapped
+// hls.js 1.6.16 (the build bundled when this was measured), `subtitleTrack = -1` then back, the same wrapped
 // in `subtitleDisplay` off/on, a bounce through a sibling rendition, a purge
 // of the fragment tracker, and a reselect with a nudge seek all leave the
 // cue count at zero and produce exactly ONE request for the segment. hls.js
@@ -450,8 +616,9 @@ function startPlaybackControl(v,p,bootstrap){
   if(!bootstrap || !window.PlurxPlaybackControl) return null;
   try{
     const attachment=p.mediaAttachment;
+    const generationOwner=/** @type {typeof startPlaybackControl & {captureGeneration?:number}} */ (startPlaybackControl);
     const owner=Object.freeze({lifecycleId:CONTROL_CLIENT_ID,
-      attachmentGeneration:startPlaybackControl.captureGeneration=(startPlaybackControl.captureGeneration||0)+1});
+      attachmentGeneration:generationOwner.captureGeneration=(generationOwner.captureGeneration||0)+1});
     // A prepared commit swaps the DOM video while retaining this reporter to
     // deliver the acknowledgement on the predecessor's control session.
     // Sample the visible successor after that swap, never the retired node.
@@ -464,7 +631,8 @@ function startPlaybackControl(v,p,bootstrap){
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
       clientInstanceId:CONTROL_CLIENT_ID,sharedSuccessor:shared,
       capture,
-      send:sendPlaybackControl,
+      send:(url,body,signal)=>sendPlaybackControl(url,body,signal,
+        p.controlReporter===reporter&&p.mediaAttachment===attachment?candidateLinkReceipt(p,p.fileId):null),
       onExchange:({request,response,error,capture:captured})=>{
         if(continueStoppingPlaybackControl(p,reporter,v,request,response,captured)) return;
         if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter
@@ -571,7 +739,7 @@ function startPlaybackControl(v,p,bootstrap){
 // recovers the session it already made instead of spawning a second encoder —
 // which is what makes retrying a "still building" 503 safe at all. Absent, a
 // fresh identity is minted, exactly as every caller had before.
-async function openSession(fileId, opts, signal=null, requestId=null){
+async function openSession(fileId, opts, signal=null, requestId=null, restartSessionId=null){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
     {playback_id:PLAYBACK_ID,request_id:requestId||newRequestId()},contract.session);
@@ -686,7 +854,15 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     PLAYER.libraryChannel=Object.assign({},following,result.library_channel);
     return result.playback;
   }
-  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal});
+  // A forced recovery creates a new attachment even while the failed one
+  // still owns its session id. Only that exact continuous predecessor may
+  // enroll a fresh family; healthy replacement paths keep their incumbent.
+  const continuous=body.transport==='hlsjs'&&(!player?.sessionId
+      ||player.sessionId===restartSessionId&&player.continuousQualityBootstrap)
+    ?await openContinuousQualitySession(playbackFileContext(fileId).source_ref.file_id,body,player,signal,restartSessionId):null;
+  if(continuous) return continuous;
+  const linkReceipt=typeof candidateLinkReceipt==='function'?candidateLinkReceipt(player,fileId):null;
+  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal,linkReceipt});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the
@@ -756,6 +932,7 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
   const requestId=newRequestId();
   const began=Date.now();
   const sequence={raised:false,refusal:null};
+  const pendingSessions=new Set();
   const superseded=()=>Object.assign(new Error("Playback preparation superseded."),
     {name:"AbortError"});
   // Two things about the raise below, both of them decisions rather than
@@ -796,10 +973,12 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
       if(signal&&signal.aborted) throw superseded();
       let info;
       try{
-        info=await openSession(fileId,opts,signal,requestId);
+        info=await openSession(fileId,opts,signal,requestId,settings.continuousRestartSessionId||null);
       }catch(error){
-        if(signal&&signal.aborted) throw superseded();
         const failure=error&&error.streamFailure;
+        if(failure?.code==='media_session_handoff_pending'&&failure.pending_session_id)
+          pendingSessions.add(failure.pending_session_id);
+        if(signal&&signal.aborted) throw superseded();
         if(answeredLocally&&failure&&answeredLocally(failure)) throw error;
         const source=failure?PlaybackPolicy.classifyStreamFailure({
           status:failure.status,code:failure.code,context:where}):null;
@@ -829,12 +1008,17 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
       // that the preparation deadline is the one that ends this: it aborts the
       // signal, and the create already in flight still lands.
       if(signal&&signal.aborted){
+        pendingSessions.delete(info&&info.session_id);
         releaseSession(info&&info.session_id);
         throw superseded();
       }
+      // The successful response transfers this same family's ownership to
+      // its attachment. Earlier refused families still belong to this owner.
+      pendingSessions.delete(info&&info.session_id);
       return info;
     }
   }finally{
+    for(const session of pendingSessions) releaseSession(session);
     // A hook left behind would answer the NEXT operation's deadline with this
     // sequence's exhaustion.
     preparation.expiry=null;
@@ -870,6 +1054,7 @@ function attachSession(v, t, info, wantSec){
   t.vod=!!info.vod;
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;
   t.qualityCandidates=Array.isArray(info.quality_candidates)?info.quality_candidates:null;
+  t.measuredCandidateOutputs=Array.isArray(info.measured_candidate_outputs)?info.measured_candidate_outputs:null;
   t.qualityCandidateId=info.quality_candidate_id||null;
   t.qualityProtocol=info.display_aware_auto_protocol==='route-v1'?'route-v1':null;
   if(t.abr){
@@ -895,6 +1080,7 @@ function attachSession(v, t, info, wantSec){
   // open — before the route is chosen and before the forced-burn override.
   // MEDIA-BADGES-PLAN.md requires the chip and the panel row to agree.
   if(t===PLAYER) renderPlayerInfo();
+  t.continuousQualityBootstrap=info.continuous_quality||null;
   t.probeUrl=info.playlist_url;
   const into = t.vod ? Math.max(0, wantSec||0) : 0;
   t.controlPositionHintSec=(t.offset||0)+into;

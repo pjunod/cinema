@@ -13,25 +13,12 @@ fn audio_track(
 /// RFC 6381 sample type for audio that is being *copied* into the HLS
 /// rendition.
 ///
-/// The `_` arm answers `mp4a.40.2` (AAC-LC) for anything unlisted, which
-/// **mislabels a genuinely copied FLAC, Opus or DTS track** — it claims AAC
-/// for bytes that are not AAC. The Apple client only ever claims codecs the
-/// arms above cover, but the web player claims `flac`/`opus` when the browser
-/// does, and Safari takes the copy-HLS path — so a FLAC-in-MKV remux reaches
-/// this arm today. Recorded rather than fixed
-/// (CLIENTS-REMEDIATION-PLAN §8.3) because the value has no consumer at all:
-/// the native master carries no `CODECS` attribute (see [`HlsContext`]), so
-/// the wrong label is currently written to nothing. It is one match arm, and
-/// it wants doing in the same change as whatever starts reading the result —
-/// a fix landed now would be untestable through any wire output.
-fn copied_audio_codec(file: &plurx_core::domain::MediaFile, selected: Option<i64>) -> &'static str {
-    match audio_track(file, selected).map(|track| track.codec.as_str()) {
-        Some("ac3" | "ac-3") => "ac-3",
-        Some("eac3" | "eac-3" | "ec-3") => "ec-3",
-        Some("alac") => "alac",
-        Some("mp3") => "mp4a.40.34",
-        _ => "mp4a.40.2",
-    }
+/// Unknown copied formats stay unknown; they are never labelled AAC.
+fn copied_audio_codec(
+    file: &plurx_core::domain::MediaFile,
+    selected: Option<i64>,
+) -> Option<&'static str> {
+    super::ladder::audio_sample_type(audio_track(file, selected).map(|track| track.codec.as_str()))
 }
 
 /// What a copy with no post-mux converter can actually deliver, given what
@@ -138,17 +125,18 @@ pub(super) fn copied_hls_codecs(
             }
         }
         Some("hevc" | "h265") => hevc_hls_codec(probe_json).unwrap_or_else(|| "hvc1".to_owned()),
-        Some("h264" | "avc") => {
-            avc_hls_codec(probe_json).unwrap_or_else(|| "avc1.640034".to_owned())
-        }
-        _ => "avc1.640034".to_owned(),
+        Some("h264" | "avc") => avc_hls_codec(probe_json).unwrap_or_else(|| "avc1".to_owned()),
+        _ => "unknown".to_owned(),
     };
     let audio = if options.transcode_audio {
-        "mp4a.40.2"
+        (!file.audio_streams.is_empty()).then_some("mp4a.40.2")
     } else {
         copied_audio_codec(file, audio_index)
     };
-    (format!("{video},{audio}"), supplemental)
+    (
+        audio.map_or_else(|| video.clone(), |audio| format!("{video},{audio}")),
+        supplemental,
+    )
 }
 
 /// AVPlayer accepts a media playlist without codec metadata, but a

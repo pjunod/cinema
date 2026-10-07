@@ -17,7 +17,7 @@ use super::LibraryStore;
 use crate::domain::{Library, LibraryKind, NewLibrary};
 use crate::error::StoreError;
 
-const CATALOG_SCHEMA: &str = r#"
+pub(super) const CATALOG_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS libraries (
     id                    INTEGER PRIMARY KEY,
     name                  TEXT NOT NULL UNIQUE,

@@ -137,13 +137,21 @@ async function saveLiveTvDeinterlace(btn){
 // F-1: the same replicated switch, moved to Developer. Every readiness row is
 // an observation or a dated qualification receipt; none is read on save or by
 // the player. Enabling remains an operator choice even when rows are red.
-function displayAwareAutoCard(settings){
+// D6: Auto moves quality up only on link evidence, and the server accepts link
+// receipts only while network priors are on, only on the node that owns the
+// session, and only for a client with an IPv4 network identity. The rows say
+// so; none of them changes what Save does.
+function displayAwareAutoCard(settings,readiness){
   const enabled=!!settings.playback_display_aware_auto;
   return setCard(`${cardHead("Fit Auto to display","Choose a useful sustainable encode size for the fitted picture.",`<span class="pill" id="daqstate">${enabled?"Enabled":"Disabled"}</span>`)}
       ${togRow("pdisplayauto","Fit Auto to display","Compatible smooth originals remain preferred. When encoding is needed, use the active render area with at most 10% enlargement. Manual quality stays selectable.",enabled)}
       <div class="hint">This saved choice is authoritative. Readiness is advisory and never disables this switch or rejects Save.</div>
+      ${devReq(readiness,"display_aware_auto","auto_abr","Adaptive Auto quality","Fit Auto to display chooses the starting rung. Changing rungs during playback is Adaptive Auto quality's switch; turning off one does not stop the other.")}
+      ${devReq(readiness,"display_aware_auto","network_priors","Network priors","Without priors Auto can only move down: it never upgrades, and a link stall retries the same quality. Producer and decoder recovery still work. The Network priors card below is its switch.")}
+      ${devReq(readiness,"display_aware_auto","local_session_owner","Sessions owned by the serving node","Only the node that owns a session accepts its link receipts, so a session placed on a peer gets none.")}
+      ${devReq(readiness,"display_aware_auto","ipv4_client","Clients on IPv4","Network identity is an IPv4 /24. A client on IPv6 with no forwarded IPv4 address gets no network identity and so never gets link evidence.")}
       ${devStaticReq("Combined source and runtime qualification","pending","Display-aware candidates, source-grade worker proofs and physical client recovery traces are being built and qualified together.","warn")}
-      ${devGraduation("the combined display-aware Auto effort passes source-grade, device and runtime qualification on its exact candidate.","this control graduates to Playback if a permanent toggle remains useful, otherwise fitting Auto becomes the default.")}
+      ${devGraduation("the combined display-aware Auto effort passes source-grade, device and runtime qualification on its exact candidate, and D6 (link evidence only with network priors on, only on the owning node, only for IPv4 clients) is fixed or accepted.","this control graduates to Playback if a permanent toggle remains useful, otherwise fitting Auto becomes the default.")}
       <div class="err" id="daqerr" role="alert"></div>${setCardFoot("saveDisplayAwareAuto")}`);
 }
 
@@ -162,6 +170,27 @@ async function saveDisplayAwareAuto(btn){
     const state=document.getElementById("daqstate");if(state)state.textContent=saved.playback_display_aware_auto?"Enabled":"Disabled";
     toast("Display Auto saved");if(btn)setCardSaved(btn);
   }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
+}
+
+// `playback.network_priors`, which had no Settings control before this card.
+// Display-aware Auto needs it to move up (D6). Off by default.
+function networkPriorsCard(settings,readiness){
+  const enabled=!!settings.playback_network_priors;
+  return setCard(`${cardHead("Network priors","Remember how each network has played, and let Auto use it.",enabled?`<span class="pill ok">on</span>`:`<span class="pill">off</span>`)}
+    ${togRow("network-priors","Use network priors","Stores playback history per user, client and IPv4 /24 network on each node: a conservative throughput estimate and the lowest rung that starved. Turning it on also changes Auto's starting (cold-start) rung on a network with history, and lets link receipts through so Fit Auto to display can upgrade.",enabled)}
+    ${devReq(readiness,"network_priors","priors_history","What turning it on stores","History is node-local and kept for 30 days. Nothing new is recorded while this is off.")}
+    ${devReq(readiness,"network_priors","priors_cold_start","What it changes for Auto's starting rung","With history, Auto starts below a rung that starved on that network or at the highest peak-safe rung; with none, it keeps today's start.")}
+    <p class="hint">Requirements are advisory and never prevent saving.</p>
+    ${devGraduation("Fit Auto to display graduates and D6 is fixed or accepted, with a fleet run showing priors improving cold starts without upgrading into stalls.","Paul chooses: the switch moves to Settings → Playback beside Auto quality, or priors become how Auto works and the switch is removed.")}
+    <div class="err" id="network-priors-error" role="alert"></div>${setCardFoot("saveNetworkPriors")}`,{id:"network-priors-card"});
+}
+async function saveNetworkPriors(btn){
+  const err=document.getElementById("network-priors-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_network_priors:!!(/** @type {HTMLInputElement} */(document.getElementById("network-priors"))).checked}}));
+    const card=document.getElementById("network-priors-card");if(card)card.outerHTML=networkPriorsCard(saved,DEVELOPER_READINESS);
+    toast("Network priors saved");
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
 
 function autoQualityCard(settings){
@@ -427,6 +456,70 @@ async function saveCinemaSharing(btn){
     const card=document.getElementById("cinema-sharing-settings");if(card)card.outerHTML=cinemaSharingCard(saved,DEVELOPER_READINESS);
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
+function clusterClockCard(settings,readiness){
+  const enabled=!!settings.cluster_clock_guard_enforced;
+  return setCard(`${cardHead("Cluster clock guard","Refuse clock-dependent cluster decisions when peer clock offsets cannot be bounded.",enabled?`<span class="pill warn">enforced</span>`:`<span class="pill">advisory</span>`)}
+    ${togRow("cluster-clock-enforced","Enforce the cluster clock guard","When on, session takeover, the expired-session scan, membership changes and /readyz are refused while clock evidence is unknown or above 2,000 ms. When off, offsets are still measured and what would have been refused is counted. Startup is never refused.",enabled)}
+    ${devReq(readiness,"cluster_clock","coverage","Every voter reachable and observed","Every committed remote voter must answer a fresh authenticated probe. A learner that does not answer is reported but not required; a measured learner still counts, and promoting one needs its own bound.")}
+    ${devReq(readiness,"cluster_clock","upper_bound","Worst observed offset within 2 s","Absolute offset plus uncertainty; an unknown member has no numeric offset.")}
+    ${devReq(readiness,"cluster_clock","ntp","NTP running on every node","Check chronyd or systemd-timesyncd on each node; this server cannot see them.")}
+    ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down voter blocks takeover, the expiry scan and membership changes on every node until it returns or is removed. A down learner blocks only the takeover of its own sessions, until it returns or is removed.")}
+    <p class="hint">Requirements are advisory and never prevent saving, in either direction.</p>
+    ${devGraduation("the identified measurement and enforcement releases have their fleet acceptance receipts.","the switch moves to Settings → Cluster.")}<div class="err" id="cluster-clock-error" role="alert"></div>${setCardFoot("saveClusterClockGuard")}`,{id:"cluster-clock-settings"});
+}
+async function saveClusterClockGuard(btn){
+  const err=document.getElementById("cluster-clock-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{cluster_clock_guard_enforced:/** @type {HTMLInputElement} */(document.getElementById("cluster-clock-enforced")).checked}}));
+    const card=document.getElementById("cluster-clock-settings");if(card)card.outerHTML=clusterClockCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+// Complete-output preparation queued by VOD starts. Three-valued, so it has
+// its own selector rather than a readiness `setting` (the switch walk PUTs
+// booleans). Off by default: one play must not start a whole-title encode.
+function outputPreparationCard(settings,readiness){
+  const mode=["off","copy","copy_and_encoded"].includes(settings.vod_output_preparation)?settings.vod_output_preparation:"off";
+  const opt=(v,label)=>`<option value="${v}"${mode===v?" selected":""}>${label}</option>`;
+  return setCard(`${cardHead("Complete-output preparation","Prepare a reusable copy or encode of a title after a VOD play.",mode==="off"?`<span class="pill">off</span>`:`<span class="pill warn">${esc(mode)}</span>`)}
+    <label class="tog" for="vod-output-preparation"><span>What a VOD start may queue<small>Off queues nothing. Copy queues remux preparation. Copy and encoded also queues a whole-title background encode. Turning a kind off cancels its queued jobs within a minute.</small></span><select id="vod-output-preparation">${opt("off","Off")}${opt("copy","Copy")}${opt("copy_and_encoded","Copy and encoded")}</select></label>
+    ${devReq(readiness,"output_preparation","output_budget","A retained-output budget","Preparations publish into the retained registry, bounded by the cache budget (unset is 50 GB).")}
+    ${devReq(readiness,"output_preparation","output_jobs","Queued and running preparation","Every job is in Settings → Jobs, filtered by kind, with a Cancel.")}
+    ${devReq(readiness,"output_preparation","output_node_idle","This node's background encoder is idle","A claimed preparation yields to foreground and offline work.")}
+    ${devReq(readiness,"output_preparation","output_stop","What Stop in Activity does","Stop cancels the preparation running on the node that answers; the next play of the title may queue it again.")}
+    <p class="hint">Requirements are advisory and never prevent saving.</p>
+    ${devGraduation("copy and encoded preparation each have a qualified fleet run: jobs drain on every node, Stop cancels, and the retained registry stays inside its budget.","Paul chooses: the selector moves to Settings → Playback beside the cache budget, or preparation becomes how plurx works and the selector is removed.")}
+    <div class="err" id="vod-output-preparation-error" role="alert"></div>${setCardFoot("saveOutputPreparation")}`,{id:"vod-output-preparation-card"});
+}
+async function saveOutputPreparation(btn){
+  const err=document.getElementById("vod-output-preparation-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_output_preparation:/** @type {HTMLSelectElement} */(document.getElementById("vod-output-preparation")).value}}));
+    const card=document.getElementById("vod-output-preparation-card");if(card)card.outerHTML=outputPreparationCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+// Retaining a rolling session's complete output as a reusable artifact. The
+// links pin disk the scratch ledger stops counting, so the rows below are the
+// free-space headroom and what this node holds.
+function rollingRetentionCard(settings,readiness){
+  const enabled=!!settings.vod_rolling_retention;
+  return setCard(`${cardHead("Rolling output retention","Keep a fully watched rolling session's segments as a reusable artifact.",enabled?`<span class="pill warn">on</span>`:`<span class="pill">off</span>`)}
+    ${togRow("vod-rolling-retention","Retain rolling output","Hard-links each segment into the retained namespace while the session plays. Only a title played from the start to its verified end publishes. Activity lists each retained output on this node with a Stop.",enabled)}
+    ${devReq(readiness,"rolling_retention","retention_same_filesystem","Session scratch and the retained namespace share a filesystem","Hard links need one filesystem; on another device a collection is refused before it reserves anything. Windows keeps retention off.")}
+    ${devReq(readiness,"rolling_retention","retention_budget","A retained-output budget","Bounded by the cache budget (unset is 50 GB).")}
+    ${devReq(readiness,"rolling_retention","retention_headroom","Free space beyond everything scratch may write","Sampled every 30 seconds. Below a 1 GiB reserve, every unpublished collection is abandoned.")}
+    ${devReq(readiness,"rolling_retention","retention_live_bytes","What retention holds on this node","Collecting, retained and releasing artifacts.")}
+    ${devReq(readiness,"rolling_retention","retention_cleanup_pending","Nothing waiting on the collector","Orphans from a crash and released artifacts are deleted in bounded slices each tick.")}
+    <p class="hint">Requirements are advisory and never prevent saving.</p>
+    ${devGraduation("a qualified fleet run shows retention staying inside its headroom on every node and released artifacts deleted within a tick.","Paul chooses: the switch moves to Settings → Playback beside the cache budget, or it is removed if retention becomes how plurx works.")}
+    <div class="err" id="vod-rolling-retention-error" role="alert"></div>${setCardFoot("saveRollingRetention")}`,{id:"vod-rolling-retention-card"});
+}
+async function saveRollingRetention(btn){
+  const err=document.getElementById("vod-rolling-retention-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_rolling_retention:/** @type {HTMLInputElement} */(document.getElementById("vod-rolling-retention")).checked}}));
+    const card=document.getElementById("vod-rolling-retention-card");if(card)card.outerHTML=rollingRetentionCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
@@ -439,14 +532,19 @@ function developerPanel(settings,readiness){
       ${directedChangeDeveloperRows()}`,{local:true});
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
+      <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
-      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${cinemaSharingCard(settings,readiness)}
+      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}${cinemaSharingCard(settings,readiness)}
+      <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
+      <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
+      <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
+      <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
-      <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence.</p></div>${displayAwareAutoCard(settings)}
+      <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
       <div class="setsection" id="enable-pgs-overlay"><h2>PGS subtitle overlay</h2><p>Serve bitmap subtitles separately from the video on capable clients.</p></div>${pgsOverlayCard(settings,readiness)}
@@ -580,5 +678,90 @@ async function saveHevcCopy(btn){
     cacheSettings(saved);
     const card=document.getElementById("hevc-copy-card"); if(card)card.outerHTML=hevcCopyCard(saved);
     toast("HEVC copy preference saved");
+  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+
+function jellyfinCompatibilityCard(settings,readiness){
+  const on=!!settings.jellyfin_compatibility_enabled;
+  const connection=new URL("/jellyfin",window.location.href).href;
+  const host=window.location.hostname;
+  return setCard(`${cardHead("Jellyfin client compatibility","Connect the tested Infuse and Jellyfin Android TV clients to this server.",`<span class="pill${on?" ok":""}">${on?"enabled":"off"}</span>`)}
+    <label class="checkrow"><input type="checkbox" id="jellyfin-compatibility-enabled" ${on?"checked":""}><span>Allow Jellyfin clients</span></label>
+    <p class="hint">In the client, enter just this server's address: <code>${esc(host)}</code>. Jellyfin clients add their standard port (8096) themselves. If the readiness row below says that port is not reachable, use <code>${esc(connection)}</code>, which always works. Sign in with a Plurx account.</p>
+    <p class="hint">Library posters and backdrops are served without sign-in while this is on: anyone who has an artwork link can read that image. A direct-play link for one title chosen after sign-in also works without a login header; it expires within 24 hours and stops working when playback stops or the login is revoked. Everything else requires sign-in.</p>
+    <details class="setdetails" open><summary>Readiness</summary><div class="setdetails-body">
+    ${devReq(readiness,"jellyfin_compatibility","client_qualification","Pinned clients qualified","The complete browsing, playback, track and recovery matrix must pass on the frozen candidate.")}
+    ${devReq(readiness,"jellyfin_compatibility","standard_port","Reachable by host alone","Jellyfin clients given only a host connect to port 8096 at the server root.")}
+    <p class="devcheck-note">Readiness is advisory. Your saved choice controls the connection surface.</p></div></details>
+    ${devGraduation("J6 records the pinned Infuse and Android TV flows, source/profile refusals, identity and watch fences, cluster behavior and native regressions on the frozen candidate.","the permanent compatibility switch moves to Settings → Integrations beside connection settings.")}
+    <div class="err" id="jellyfin-compatibility-error" role="alert"></div>${setCardFoot("saveJellyfinCompatibility")}`,{id:"jellyfin-compatibility-settings"});
+}
+async function saveJellyfinCompatibility(btn){
+  const err=document.getElementById("jellyfin-compatibility-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{jellyfin_compatibility_enabled:(/** @type {HTMLInputElement} */ (document.getElementById("jellyfin-compatibility-enabled"))).checked}}));
+    toast("Jellyfin compatibility saved");if(btn)setCardSaved(btn);
+  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+function contentEncodingCard(settings){
+  const ready=settings.content_encoding_scorer_ready;
+  const applicability=settings.content_encoding_applicability||{};
+  const selected=String(applicability.selected_encoder||"not reported");
+  const override=applicability.explicit_rate_control;
+  return setCard(`${cardHead("Measured per-title encoding","Idle producers compare three short SDR samples before choosing a quality recipe.","")}
+    ${togRow("content-encoding","Enable content-aware encoding","Applies measured choices to cached outputs and subsequent offline requests. Explicit rate-control overrides are preserved.",!!settings.content_aware_encoding)}
+    ${devStaticReq("VMAF scorer on this node",ready===true?"met":ready===false?"not available":"not checked yet","The container includes a separate static libvmaf scorer with the vmaf_v0.6.1 model. Native installs use their configured FFmpeg. The first background analysis checks automatically; missing scoring retains the normal recipe.",ready===false?"warn":"")}
+    ${devStaticReq("Current encoder",esc(selected),"Only software x264 jobs use these measured choices. Hardware jobs retain their existing recipe.",selected==="software"?"":"warn")}
+    ${devStaticReq("Operator rate control",override===true?"explicit override retained":override===false?"automatic policy":"not reported","An explicit bitrate or quality setting takes precedence. Content-aware encoding never changes your saved rate-control choice.",override===true?"warn":"")}
+    ${devStaticReq("Software quality mode",applicability.software_quality_supported===true?"available":applicability.software_quality_supported===false?"not available":"not reported","Uses the node’s already-published encoder capability result. Saving this preference never runs a new probe.",applicability.software_quality_supported===false?"warn":"")}
+    ${devStaticReq("Current scope","SDR software x264","Tagged BT.709, progressive square-pixel video without burned subtitles. Three two-second samples, the producer’s admitted thread count (at most six), and a three-minute budget. Every sample must preserve mean and lower-tail VMAF, with at least 10% byte savings.","")}
+    <div class="hint">The first offline package keeps its accepted recipe and prepares evidence for later requests. Sampling is not a whole-title quality guarantee. These observations never prevent saving the switch.</div>
+    ${devGraduation("representative real-title quality and cost evidence is recorded across supported sources and deployment FFmpeg builds.","the preference moves to Settings → Playback if a permanent switch remains useful.")}
+    <div class="err" id="content-encoding-error" role="alert"></div>${setCardFoot("saveContentEncoding")}`,{id:"content-encoding-card"});
+}
+async function saveContentEncoding(btn){
+  const err=document.getElementById("content-encoding-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{content_aware_encoding:(/** @type {HTMLInputElement} */ (document.getElementById("content-encoding"))).checked}}));
+    const card=document.getElementById("content-encoding-card");if(card)card.outerHTML=contentEncodingCard(saved);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function vodReorderCard(settings){
+  return setCard(`${cardHead("Reordered VOD frames","Allow two B-frames in software x264 VOD encodes.","")}
+    ${togRow("vod-reorder","Enable reordered VOD frames","Saves the requested recipe directly. Other encoders retain their existing frame order.",Number(settings.vod_reorder_frames)===2)}
+    ${devStaticReq("Supported encoder","software x264","Hardware encoder qualification is separate. Reordered frames require both decode and presentation timestamps in the VOD fragments.","")}
+    ${devStaticReq("Physical-client qualification","pending","Browser and native-client presentation continuity and measured compression receipts remain to be recorded.","warn")}
+    ${devGraduation("the software x264 compression and client presentation matrix is recorded.","the switch is removed if reordered frames become the normal VOD recipe, otherwise it moves to Playback.")}
+    <div class="err" id="vod-reorder-error" role="alert"></div>${setCardFoot("saveVodReorder")}`,{id:"vod-reorder-card"});
+}
+async function saveVodReorder(btn){
+  const err=document.getElementById("vod-reorder-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_reorder_frames:(/** @type {HTMLInputElement} */ (document.getElementById("vod-reorder"))).checked?2:0}}));
+    const card=document.getElementById("vod-reorder-card");if(card)card.outerHTML=vodReorderCard(saved);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+// S-10: CODECS on SDR HLS master variants. AVPlayer filters variants on
+// CODECS before it fetches a byte, so a string it dislikes silently removes a
+// rung, and no device has re-qualified the SDR string. Off is the pre-S-10
+// master every client already plays. The readiness row is advice: it never
+// disables the checkbox or refuses the save.
+function sdrMasterCodecsCard(settings,readiness){
+  const on=!!settings.playback_sdr_master_codecs;
+  return setCard(`${cardHead("CODECS on SDR master playlists","Name the exact H.264 and audio codecs on SDR HLS masters, as HDR masters already do.",`<span class="pill${on?" warn":""}">${on?"Enabled":"Off"}</span>`)}
+    ${togRow("sdr-master-codecs","Print CODECS on SDR variants","Fixed when a playback session is created: a running session keeps the master it started with, and only a session rebuilt after an owner takeover or VOD resurrection reads the current value. Only complete codec facts are printed, and HDR and Dolby Vision masters are unchanged either way.",on)}
+    <details class="setdetails" open><summary>Readiness — advisory only</summary><div class="setdetails-body">
+    ${devReq(readiness,"sdr_master_codecs","sdr_codecs_device_requalification","Apple TV and iPhone device check","With CODECS printed, every SDR variant must still be offered and play on tvOS and iOS. A player that rejects the string drops the variant before requesting it, so this server cannot observe the failure.")}
+    <p class="devcheck-note">Advisory only. The switch remains available and its save is never refused.</p>
+    </div></details>${devGraduation("the Apple TV and iPhone device check confirms every SDR variant is still offered.","the default becomes on and this switch is removed.")}<div class="err" id="sdr-codecs-error" role="alert"></div>${setCardFoot("saveSdrMasterCodecs")}`,{id:"sdr-codecs-card"});
+}
+async function saveSdrMasterCodecs(btn){
+  const err=document.getElementById("sdr-codecs-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_sdr_master_codecs:(/** @type {HTMLInputElement} */ (document.getElementById("sdr-master-codecs"))).checked}}));
+    const card=document.getElementById("sdr-codecs-card");if(card)card.outerHTML=sdrMasterCodecsCard(saved,DEVELOPER_READINESS);
+    toast("SDR master CODECS preference saved");
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }

@@ -269,6 +269,22 @@ class DirectedChangeTest {
     private val quality = PlaybackQuality.Auto
 
     @Test
+    fun healthyFailureRetainsOnceAndCannotBecomeAReopenOnReplay() {
+        val change = DirectedChange(epoch = 4, quality = quality)
+        var retained = 0
+        var reopened = 0
+        assertTrue(change.settleFailureOnce(4, true, { retained++ }, { reopened++ }))
+        assertFalse(change.settleFailureOnce(4, false, { retained++ }, { reopened++ }))
+        assertEquals(1, retained)
+        assertEquals(0, reopened)
+        assertEquals("retained current", PreparedReplacementAdvisory.outcomeLabel("retained_current", 12_000))
+        val stale = DirectedChange(epoch = 4, quality = quality)
+        assertFalse(stale.settleFailureOnce(5, true, { retained++ }, { reopened++ }))
+        assertEquals(1, retained)
+        assertEquals(0, reopened)
+    }
+
+    @Test
     fun aCommittedChangeNeverFallsBack() {
         val change = DirectedChange(epoch = 4, quality = quality)
         change.committed()

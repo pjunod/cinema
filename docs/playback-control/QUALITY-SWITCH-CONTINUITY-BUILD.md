@@ -17,6 +17,12 @@ states, the 330 s deadline, the reporter's pinned `renew_after_ms`, the
 `hold` semantics — stop and flag it instead of improvising.** Every line
 number below is from `c9e4edf4`; re-verify against the file before editing.
 
+**2026-09-30 follow-up:** [Continuous quality](CONTINUOUS-QUALITY-BUILD.md)
+now defines the next build and its acceptance. It replaces mandatory
+reopen-on-failure for healthy playback and adds compatible HLS rendition
+switching. This document retains the earlier contract and its historical
+evidence; it does not establish completion of the new work.
+
 ## 1. Objective and the bar
 
 A viewer-directed quality change (the quality menu, on any client) reaches the
@@ -75,10 +81,10 @@ reported, not judged.
   PR · implement the findings · full suite once · fix to green · un-WIP
   (`PATCH /pulls/<n>` title) · merge it yourself.
 - **Compile before you push.** Rust: [docs/ci/AGENT-COMPILE-LOOP.md](../ci/AGENT-COMPILE-LOOP.md);
-  the lab build host is nuc3 (`ssh pjunod@192.168.4.7`, rustup 1.97.1 at
+  the lab build host is lab3 (`ssh operator@10.42.4.7`, rustup 1.97.1 at
   `~/.cargo/bin`, clone under `~/work/<name>`, `CARGO_TARGET_DIR` may point at
   an existing warm target). Apple: `make apple-test` on the macOS runner
-  `pjunod@192.168.5.115` (`export PATH=/usr/local/bin:/opt/homebrew/bin:$PATH
+  `operator@10.42.5.115` (`export PATH=/usr/local/bin:/opt/homebrew/bin:$PATH
   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`; ~150 s warm).
   Android: `./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
   :app:lintDebug` with `platforms;android-37.0` from `--channel=3`.
@@ -874,7 +880,7 @@ unaffected.
   `p.autoRequestedHeight` is set before `notifyPlaybackControl` runs, that
   the outgoing selection carries `height: 1080`, and (Rust side) that the
   digest changes and the staged recipe carries 1080.
-- Browser acceptance against nynuc: `plurx_playback_control_actions_total{action="prepare",platform="web"}`
+- Browser acceptance against media1: `plurx_playback_control_actions_total{action="prepare",platform="web"}`
   increments once per menu change, one `committed` per change; the client log
   `quality_switch` carries `via=prepared`.
 

@@ -2135,7 +2135,7 @@ mod tests {
         std::net::SocketAddr,
         tokio::sync::oneshot::Receiver<crate::SharingConnectionCancellation>,
         tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<anyhow::Result<()>>,
+        tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
     ) {
         let app = sharing::peer_router(fixture.state.clone()).route(
             "/ordinary/pending",
@@ -2184,7 +2184,7 @@ mod tests {
         std::net::SocketAddr,
         tokio::sync::oneshot::Receiver<crate::SharingConnectionCancellation>,
         tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<anyhow::Result<()>>,
+        tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
     ) {
         let socket = tokio::net::TcpSocket::new_v4().expect("fixture socket");
         socket
@@ -2455,7 +2455,10 @@ mod tests {
         drop(sender);
         let _ = driver.await;
         stop.send(()).expect("fixture stop");
-        served.await.expect("server task").expect("server result");
+        assert_eq!(
+            served.await.expect("server task").expect("server result"),
+            crate::HttpDrain::Complete
+        );
     }
     #[tokio::test]
     async fn sharing_monitored_body_drop_ends_its_monitor_and_releases_its_permit() {
@@ -2563,7 +2566,10 @@ mod tests {
         drop(client);
         await_flag(&data_dropped, true).await;
         stop.send(()).expect("fixture stop");
-        served.await.expect("server task").expect("server result");
+        assert_eq!(
+            served.await.expect("server task").expect("server result"),
+            crate::HttpDrain::Complete
+        );
     }
     #[tokio::test]
     async fn sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor() {
@@ -2907,7 +2913,10 @@ mod tests {
                 let _ = driver.await;
             }
             stop.send(()).expect("stop");
-            served.await.expect("server task").expect("server");
+            assert_eq!(
+                served.await.expect("server task").expect("server"),
+                crate::HttpDrain::Complete
+            );
         }
     }
     #[tokio::test]
@@ -3282,7 +3291,10 @@ mod tests {
             release_receiver_client(client).await;
             await_flag(&data_dropped, true).await;
             stop.send(()).expect("stop");
-            served.await.expect("server task").expect("server result");
+            assert_eq!(
+                served.await.expect("server task").expect("server result"),
+                crate::HttpDrain::Complete
+            );
         }
     }
 
@@ -4396,7 +4408,10 @@ mod tests {
                     .expect("B art bytes return their lease once released");
                 }
                 stop.send(()).expect("stop B");
-                served.await.expect("B task").expect("B result");
+                assert_eq!(
+                    served.await.expect("B task").expect("B result"),
+                    crate::HttpDrain::Complete
+                );
                 source_stop.send(()).expect("stop Source");
                 source_task
                     .await
@@ -4636,7 +4651,10 @@ mod tests {
                 assert!(!connection.0.is_cancelled());
                 release_receiver_client(client).await;
                 stop.send(()).expect("stop B");
-                served.await.expect("B task").expect("B server");
+                assert_eq!(
+                    served.await.expect("B task").expect("B server"),
+                    crate::HttpDrain::Complete
+                );
                 source_stop.send(()).expect("stop Source");
                 source_task
                     .await
@@ -5258,6 +5276,8 @@ mod tests {
         let session = uuid::Uuid::new_v4().to_string();
         let incarnation = uuid::Uuid::new_v4().to_string();
         let info = crate::transcode::StartInfo {
+            audio_delivery: prepared.request().audio_delivery.clone(),
+            retained_output: None,
             session_id: session.clone(),
             playlist_url: format!("/api/v1/hls/{session}/index.m3u8"),
             duration_ms: Some(60_000),

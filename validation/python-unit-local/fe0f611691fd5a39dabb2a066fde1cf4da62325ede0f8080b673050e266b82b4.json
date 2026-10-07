@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-hdr-reference-scoring",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_codec_hdr_score.py",
+  "test_file_sha256": "0c09a7ea8679b2bc5eca7d9d6e7683eefd337aee8e99ae0237caa0f49cd28942",
+  "test_ids": ["test_codec_hdr_score.CodecHdrScoreTests.test_sdr_vmaf_requires_pinned_parent_grade_and_decoded_bt709"],
+  "command": "RECONSTRUCTED method scope, not verbatim shell command: python3 -m unittest tests.operations.test_codec_hdr_score.CodecHdrScoreTests.test_sdr_vmaf_requires_pinned_parent_grade_and_decoded_bt709 -v",
+  "output": "RECONSTRUCTED individual result from retained task context: tool39e6cd test_sdr_vmaf_requires_pinned_parent_grade_and_decoded_bt709 PASS once. Original verbatim output is unavailable after context compaction.",
+  "provenance_note": "Original uncommitted source includes the new SDR method; two earlier successful methods were not repeated. Original file hash and tool ID retained. Requires independent authenticated admissibility review.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}

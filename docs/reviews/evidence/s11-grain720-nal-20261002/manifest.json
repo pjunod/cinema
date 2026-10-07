@@ -1,0 +1,87 @@
+{
+  "archive": {
+    "bytes": 38574624,
+    "name": "grain720-retained-audit-bytes.zip",
+    "sha256": "8da906445a712a2416c485a3775dac69e96852a12a2ddd0da2602b7966a9c964"
+  },
+  "archive_upload": "not yet uploaded; authenticated Forgejo PR attachment separately pending",
+  "claims": {
+    "access_units": 1680,
+    "extra_keys": 2,
+    "first_idr": 35,
+    "idr_total": 37,
+    "internal_nal_contexts_measured": 1,
+    "original_qualified": 0,
+    "segments": 35
+  },
+  "files": [
+    {
+      "bytes": 29038,
+      "name": "parser.py",
+      "sha256": "56825d98839fa31757112bbc7ebeba731e8266cf3bc8ea93ec15cb45af689c80"
+    },
+    {
+      "bytes": 12983,
+      "name": "controls.py",
+      "sha256": "132a1e910f645715af611871100e1c9dd87db9783c885239c9055c0df0f322c9"
+    },
+    {
+      "bytes": 7122,
+      "name": "controls-watchdog.py",
+      "sha256": "918ce1b064bcce7f08026118df8b53b97b1aea20fc714f81f41762e938ed5485"
+    },
+    {
+      "bytes": 42454,
+      "name": "corpus-wrapper.py",
+      "sha256": "170546a4e77b318a5d7d7edfa93611bd6280ee2b9c057b26c883258a086a91df"
+    },
+    {
+      "bytes": 707244,
+      "name": "nal-result.json",
+      "sha256": "0d6feca4f581571695ac512ffed16eded449094c58ade980099a13d5f2a14aa5"
+    },
+    {
+      "bytes": 789,
+      "name": "worker-terminal.json",
+      "sha256": "56fb59b1fb79edf0ca9e061ed6c7ac0d72addbeedbe6604a7b83f364794bdbc7"
+    },
+    {
+      "bytes": 3291,
+      "name": "cleanup-final.json",
+      "sha256": "c14f3a045b0165f4957cb34751f2c536fcb8c77d4d2545643512b1ed65da020e"
+    },
+    {
+      "bytes": 112,
+      "name": "parser.stdout",
+      "sha256": "58c551e28eb2c9306632468ae1800ce8cf86a1b2e84961e79446b06d5b2344fe"
+    },
+    {
+      "bytes": 2702,
+      "name": "control-terminal.json",
+      "sha256": "0e118c1556d67fcae920d002b9ce58fb7db4f1dec96ea8c188450e534f7401ae"
+    },
+    {
+      "bytes": 1264,
+      "name": "control-journal.json",
+      "sha256": "16886bbc41f92e38b4dd632c4600a6788faece48d0de321970468f51c9d92d53"
+    },
+    {
+      "bytes": 1548,
+      "name": "control.stderr",
+      "sha256": "b6d8c28ff35cd8054382c3999786716e4794dfa892aafd58a18fd930154efdf8"
+    },
+    {
+      "bytes": 10321,
+      "name": "input-order.json",
+      "sha256": "c30f02a53acd94221366e39f1945efe9f0a5b5b6895b248d90b435ed02df36dc"
+    }
+  ],
+  "input_bytes": 38566323,
+  "input_files": 72,
+  "kind": "historical-evidence-snapshots-not-shipped-tooling",
+  "no_parser_controls_media_execution": true,
+  "original_receipt_sha256": "6039c85c357b7a6d2129b69677e8f5881a8489d214cef71b455f17bb2c88a18f",
+  "original_result_sha256": "9a286a6cbd781fa3bcf4f5a1180522f23f9321eb44afdb9c46f06b4db0ec995a",
+  "retention_owner": "root architecture effort; durable audit evidence, original input/runtime expiries unchanged",
+  "sanitization": "omit provenance.session_id from result and original receipt; no other value mutation"
+}

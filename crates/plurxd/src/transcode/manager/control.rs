@@ -1,6 +1,40 @@
 use super::*;
 
+/// The one grace every owner of running media work gets on a loss of serving
+/// authority; defined beside the fence so the rolling registry and the
+/// progressive remux owner cannot drift apart.
+pub(crate) use crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+
 impl TranscodeManager {
+    /// Exact passive-grant presence on this node's VOD registry.
+    pub(crate) async fn passive_presence(
+        &self,
+        session_id: &str,
+        user: &str,
+        player: &str,
+        request: &str,
+    ) -> bool {
+        self.vod
+            .passive_presence(session_id, user, player, request)
+            .await
+    }
+    #[cfg(test)]
+    pub(crate) async fn passive_grant_remaining_for_test(
+        &self,
+        session_id: &str,
+    ) -> Option<std::time::Duration> {
+        self.vod.passive_grant_remaining_for_test(session_id).await
+    }
+    #[cfg(test)]
+    pub(crate) async fn shorten_passive_grant_for_test(
+        &self,
+        session_id: &str,
+        remaining: std::time::Duration,
+    ) {
+        self.vod
+            .shorten_passive_grant_for_test(session_id, remaining)
+            .await
+    }
     pub(crate) async fn cluster_index_available(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -1463,27 +1497,88 @@ impl TranscodeManager {
         .await;
     }
 
-    /// Kill every mutable HLS producer on the first loss transition. The
-    /// watch is process-local and changes synchronously with readiness, so
-    /// teardown never waits for another Store request to time out.
+    /// Close the registration gate on every loss transition, and kill every
+    /// mutable HLS producer once serving authority has been lost for longer
+    /// than [`SERVING_FENCE_SESSION_GRACE`] in one outage.
+    ///
+    /// A loss that recovers inside the grace leaves existing sessions alone.
+    /// A Raft election after the leader restarts, or a leader stalled for a
+    /// second on one slow apply, loses the one-second quorum watermark on
+    /// every voter at once; retiring every session on that ended healthy
+    /// playback on nodes that had nothing to do with the restart (2026-10-04,
+    /// two cluster-wide interruptions in two minutes, each retired 48 ms after
+    /// authority had already returned).
+    ///
+    /// Keeping them is safe because nothing they hold is served while the
+    /// node is fenced: the router answers `serving_fenced` for media paths,
+    /// and every response admits against the *current* generation, so a
+    /// response can only be published under the authority that came back.
+    /// Ownership is not this loop's to prove. Another node can claim a session
+    /// only after its twelve-second replicated lease has expired, and renewals
+    /// run every three seconds, so in normal operation more than the grace is
+    /// left when authority is lost, even when only this node lost it and the
+    /// rest of the cluster keeps quorum. If a claim did commit, the kept
+    /// session still could not serve it: after recovery a request is served
+    /// locally only while the replicated route names this node (read through
+    /// a one-second cache), and the lease loop reaps a session whose lease is
+    /// gone. New registrations stay refused for the old generation exactly as
+    /// before.
+    ///
+    /// The grace is a budget for one outage, not per loss
+    /// ([`crate::serving_fence::SessionGrace`], the same policy each
+    /// progressive remux owner applies to its own child): losses that follow
+    /// each other within a grace of the last recovery spend the same budget,
+    /// so a quorum that keeps flapping cannot keep sessions forever.
     pub(crate) async fn serving_fence_loop(
         self: Arc<Self>,
         mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
     ) {
+        let mut grace = crate::serving_fence::SessionGrace::default();
         loop {
             let state = *serving.borrow_and_update();
             let previous_generation = self.serving_loss_generation.load(Acquire);
             if !state.ready || state.loss_generation != previous_generation {
-                // Keep the gate closed until the old generation is fully
-                // retired. A racing registration either observes false in its
-                // final pre-insert check or publishes before this loop obtains
-                // the registry lock, in which case the snapshot includes it.
+                // Keep the gate closed until this transition is resolved. A
+                // racing registration either observes false in its final
+                // pre-insert check or publishes before this loop obtains the
+                // registry lock, in which case a retirement snapshot includes
+                // it; registrations admitted under the old generation refuse
+                // themselves either way.
                 self.serving_ready.store(false, Release);
                 self.serving_loss_generation
                     .store(state.loss_generation, Release);
-                self.stop_all_sessions_for_serving_fence().await;
+                match grace.resolve_loss(&mut serving).await {
+                    crate::serving_fence::LossOutcome::Recovered {
+                        outage,
+                        budget_spent,
+                    } => {
+                        let kept = self.sessions.lock().await.len();
+                        tracing::warn!(
+                            target: "plurxd::transcode",
+                            outage_ms = u64::try_from(outage.as_millis()).unwrap_or(u64::MAX),
+                            outage_budget_spent_ms = u64::try_from(budget_spent.as_millis()).unwrap_or(u64::MAX),
+                            kept_sessions = kept,
+                            grace_ms = u64::try_from(SERVING_FENCE_SESSION_GRACE.as_millis()).unwrap_or(u64::MAX),
+                            "serving authority returned within the session grace; existing sessions kept"
+                        );
+                    }
+                    crate::serving_fence::LossOutcome::Expired => {
+                        self.stop_all_sessions_for_serving_fence().await;
+                    }
+                    crate::serving_fence::LossOutcome::Closed => {
+                        self.stop_all_sessions_for_serving_fence().await;
+                        break;
+                    }
+                }
             }
+            let state = *serving.borrow_and_update();
+            self.serving_loss_generation
+                .store(state.loss_generation, Release);
             self.serving_ready.store(state.ready, Release);
+            if !state.ready {
+                // Lost again, or never recovered: resolve it on the next turn.
+                continue;
+            }
             if serving.changed().await.is_err() {
                 break;
             }

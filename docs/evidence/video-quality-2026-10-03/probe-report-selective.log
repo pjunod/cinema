@@ -1,0 +1,93 @@
+   Compiling rusqlite v0.40.1
+   Compiling plurx-pgs v0.3.0 (/private/tmp/plurx-video-quality-build-20261003/crates/plurx-pgs)
+   Compiling plurxd v0.3.0 (/private/tmp/plurx-video-quality-build-20261003/crates/plurxd)
+   Compiling serde_rusqlite v0.43.0
+   Compiling hiqlite v0.14.0 (/private/tmp/plurx-video-quality-build-20261003/vendor/hiqlite)
+   Compiling plurx-core v0.3.0 (/private/tmp/plurx-video-quality-build-20261003/crates/plurx-core)
+   Compiling plurx-compat-plex v0.3.0 (/private/tmp/plurx-video-quality-build-20261003/crates/plurx-compat-plex)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `plurx-core` (lib test) generated 1 warning
+warning: `plurxd` (bin "plurxd" test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized] target(s) in 2m 51s
+     Running unittests src/lib.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/plurx_compat_plex-8117b95be79b7469)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/cluster_discovery.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/cluster_discovery-f3fe5f1a3ef6f90e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/plurx_core-01addd170982543f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1399 filtered out; finished in 0.00s
+
+     Running tests/audiobook_artwork.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/audiobook_artwork-9c341c3d099b2675)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/decoder_selection.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/decoder_selection-7f09d49955f5f7f6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.00s
+
+     Running tests/hiqlite_tls_provider.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/hiqlite_tls_provider-41fa8c00ad77e481)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/rustls_single_provider.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/rustls_single_provider-1681f08ba3ba10c4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/store_contract.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/store_contract-4a89377b34bb6438)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 192 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/plurx_pgs-4d90f0001a0fcc0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s
+
+     Running unittests src/bin/pgs-feasibility.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/pgs_feasibility-e7e24f6c1f114011)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/parser_prerequisites.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/parser_prerequisites-fd1692a5c5bdfbc9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/stable_input_identity.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/stable_input_identity-b15a85d181a39621)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/plurxd-7a293617723cd51f)
+
+running 1 test
+test ffmpeg::tests::a_content_encoding_report_is_not_a_source_change_for_the_same_reporter ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3162 filtered out; finished in 0.01s
+

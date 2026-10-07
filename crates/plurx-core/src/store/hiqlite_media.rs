@@ -2884,7 +2884,7 @@ impl MediaStore for HiqliteAuthStore {
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
                     probe.video_codec_tag.as_deref(),
-                    probe.field_order.as_deref(),
+                    probe.stored_field_order(),
                     probe.max_cll,
                     probe.max_fall,
                     probe.mastering_max_luminance,
@@ -3388,6 +3388,84 @@ impl MediaStore for HiqliteAuthStore {
         Ok(changed == 1)
     }
 
+    async fn files_without_luminance_facts(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError> {
+        #[derive(Debug)]
+        struct UnobservedRow {
+            id: i64,
+            path: String,
+            size: i64,
+            mtime: i64,
+            probe_json: String,
+        }
+        impl From<&mut Row<'_>> for UnobservedRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    id: row.get("id"),
+                    path: row.get("path"),
+                    size: row.get("size"),
+                    mtime: row.get("mtime"),
+                    probe_json: row.get("probe_json"),
+                }
+            }
+        }
+        // The frame walk's cursor passes ids for good, so a page read from a
+        // lagging replica could skip a committed `none` row forever.
+        Ok(self
+            .client()
+            // authority: the cursor never revisits an id it has passed.
+            .query_consistent_map::<UnobservedRow, _>(
+                "SELECT id, path, size, mtime, probe_json FROM files \
+                  WHERE hdr IS NOT NULL AND luminance_source = 'none' \
+                    AND probe_json IS NOT NULL AND id > $1 ORDER BY id LIMIT $2",
+                params!(after_id, limit.max(0)),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| MissingVideoCodecTag {
+                id: row.id,
+                path: row.path,
+                size: row.size,
+                mtime: row.mtime,
+                probe_json: row.probe_json,
+            })
+            .collect())
+    }
+
+    async fn set_file_frame_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "UPDATE files SET max_cll = $1, max_fall = $2, \
+                  mastering_max_luminance = $3, luminance_source = 'frame' \
+                  WHERE id = $4 AND path = $5 AND size = $6 AND mtime = $7 \
+                    AND probe_json = $8 AND luminance_source = 'none'",
+                params!(
+                    max_cll,
+                    max_fall,
+                    mastering_max_luminance,
+                    candidate.id,
+                    candidate.path.as_str(),
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json.as_str()
+                ),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
     async fn set_file_dolby_vision(
         &self,
         file_id: i64,
@@ -3481,6 +3559,26 @@ impl MediaStore for HiqliteAuthStore {
                     SET probe_json = json_set(probe_json, '$.plurx_hevc_parameter_sets', json($1)) \
                   WHERE id = $2 AND size = $3 AND mtime = $4 AND probe_json IS NOT NULL",
                 params!(census_json, file_id, size, mtime),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
+    async fn merge_file_probe_content_encoding(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        report_json: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "UPDATE files \
+                    SET probe_json = json_set(probe_json, '$.plurx_content_encoding', json($1)) \
+                  WHERE id = $2 AND size = $3 AND mtime = $4 AND probe_json IS NOT NULL",
+                params!(report_json, file_id, size, mtime),
             )
             .await
             .map_err(database_error)?;
@@ -3842,6 +3940,73 @@ impl MediaStore for HiqliteAuthStore {
 
 const PLAYABLE_KINDS: &str = "'movie','episode','video','audiobook'";
 
+/// The replicated watch-rollup statements, with the plan pins (`NOT INDEXED`
+/// seed and leaf join, `INDEXED BY idx_items_parent` recursion, `CROSS JOIN`
+/// tree-first order) that `sqlite/watch.rs`'s `watch_rollups_sql` explains:
+/// the vendored state machine runs `PRAGMA optimize`, so every voter has
+/// `sqlite_stat1`, and with it the unpinned statement skip-scanned every item
+/// through `idx_items_library_kind` (K-05: 2.6 → 7.9 ms on the fixture).
+/// `watch_rollup_plans_do_not_depend_on_statistics` pins these too.
+pub(super) fn watch_rollups_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(root, id) AS ( \
+             SELECT id, id FROM items NOT INDEXED \
+             WHERE id IN (SELECT value FROM json_each($1)) \
+             UNION SELECT t.root, i.id FROM items i INDEXED BY idx_items_parent \
+             JOIN tree t ON i.parent_id = t.id \
+         ) \
+         SELECT t.root AS root, COUNT(*) AS leaves, \
+                COALESCE(SUM(w.watched), 0) AS watched \
+         FROM tree t CROSS JOIN items i NOT INDEXED ON i.id = t.id \
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
+         WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
+    )
+}
+
+/// [`watch_rollups_sql`] for one container.
+pub(super) fn watch_rollup_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(id) AS ( \
+             SELECT id FROM items NOT INDEXED WHERE id = $1 \
+             UNION SELECT i.id FROM items i INDEXED BY idx_items_parent \
+             JOIN tree t ON i.parent_id = t.id \
+         ) \
+         SELECT $1 AS root, COUNT(*) AS leaves, \
+                COALESCE(SUM(w.watched), 0) AS watched \
+         FROM tree t CROSS JOIN items i NOT INDEXED ON i.id = t.id \
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
+         WHERE i.kind IN ({PLAYABLE_KINDS})"
+    )
+}
+
+/// Both halves of `watch_summary` in one statement; its rollup half is
+/// [`watch_rollups_sql`]'s, pins included, and its watch-map half is
+/// `read_watch_map`'s id-driven `CROSS JOIN` (one `(user_id, item_id)` key
+/// lookup per requested id). Before K-05 pinned it, that half was still the
+/// `watch_state`-first join K-05 M4 replaced in `watch_map`: without
+/// statistics it walked every watch row the user has through
+/// `idx_watch_updated`, so it also changed plan with `sqlite_stat1`.
+pub(super) fn watch_summary_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(root, id) AS ( \
+             SELECT id, id FROM items NOT INDEXED \
+             WHERE id IN (SELECT value FROM json_each($1)) \
+             UNION SELECT t.root, i.id FROM items i INDEXED BY idx_items_parent \
+             JOIN tree t ON i.parent_id = t.id \
+         ) \
+         SELECT 0 AS part, w.item_id AS item_id, w.position_ms AS position_ms, \
+                w.duration_ms AS duration_ms, w.watched AS watched, \
+                w.updated_at AS updated_at, NULL AS leaves \
+         FROM json_each($2) j \
+         CROSS JOIN watch_state w ON w.user_id = $3 AND w.item_id = j.value \
+         UNION ALL \
+         SELECT 1, t.root, NULL, NULL, COALESCE(SUM(w.watched), 0), NULL, COUNT(*) \
+         FROM tree t CROSS JOIN items i NOT INDEXED ON i.id = t.id \
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $3 \
+         WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
+    )
+}
+
 #[async_trait]
 impl WatchStore for HiqliteAuthStore {
     async fn watch_state(
@@ -3984,6 +4149,61 @@ impl WatchStore for HiqliteAuthStore {
         Ok(rows.into_iter().next().map(Into::into))
     }
 
+    async fn jellyfin_progress_is_current(
+        &self,
+        write: &super::JellyfinProgressWrite,
+    ) -> Result<bool, StoreError> {
+        let p = &write.provenance;
+        super::jellyfin_play::validate_key(&p.play_id, &p.scope)?;
+        let rows = self
+            .client()
+            // authority: queued compatibility admission observes the exact live play and manual-edit revision.
+            .query_consistent_map::<super::jellyfin_watch::CurrentRow, _>(
+                super::jellyfin_watch::CURRENT,
+                params!(
+                    p.play_id.clone(),
+                    p.scope.user_id,
+                    p.scope.token_digest.clone(),
+                    p.scope.device_digest.clone(),
+                    p.scope.client_family.as_str(),
+                    p.manual_revision,
+                    write.item_id,
+                    self.now()?
+                ),
+            )
+            .await?;
+        Ok(rows.into_iter().next().is_some_and(|row| row.current))
+    }
+    async fn put_jellyfin_progress(
+        &self,
+        write: super::JellyfinProgressWrite,
+        expected: Option<&WatchState>,
+    ) -> Result<Option<WatchState>, StoreError> {
+        let now = self.now()?;
+        let (expected, context) = super::jellyfin_watch::progress_context(&write, now, expected)?;
+        let p = &write.provenance;
+        let rows = self
+            .watch_write_returning::<WatchRow>(
+                p.scope.user_id,
+                super::jellyfin_watch::PROGRESS,
+                params!(
+                    write.item_id,
+                    write.duration_ms,
+                    write.position_ms,
+                    p.scope.user_id,
+                    now,
+                    p.play_id.clone(),
+                    p.scope.token_digest.clone(),
+                    p.scope.device_digest.clone(),
+                    p.scope.client_family.as_str(),
+                    p.manual_revision,
+                    expected,
+                    context
+                ),
+            )
+            .await?;
+        Ok(rows.into_iter().next().map(Into::into))
+    }
     async fn set_watched(
         &self,
         user_id: i64,
@@ -3991,69 +4211,45 @@ impl WatchStore for HiqliteAuthStore {
         watched: bool,
     ) -> Result<(), StoreError> {
         let now = self.now()?;
-        if watched {
-            self.watch_write(
-                user_id,
-                "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 VALUES ($1, $2, 0, 1, $3) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET watched = 1, updated_at = $3",
-                params!(user_id, item_id, now),
-            )
-            .await?;
-        } else {
-            self.watch_write(
-                user_id,
-                "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 VALUES ($1, $2, 0, 0, $3) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET \
-                     watched = 0, position_ms = 0, updated_at = $3",
-                params!(user_id, item_id, now),
-            )
-            .await?;
-        }
+        let sql = super::jellyfin_watch::manual_sql(false, watched);
+        validate_sql(&sql)?;
+        self.watch_write_returning::<super::jellyfin_watch::EditRow>(
+            user_id,
+            sql,
+            params!(item_id, user_id, now, Option::<String>::None),
+        )
+        .await?;
         Ok(())
     }
-
     async fn set_watched_tree(
         &self,
         user_id: i64,
         item_id: i64,
         watched: bool,
     ) -> Result<Vec<i64>, StoreError> {
+        self.set_watched_tree_with_origin(user_id, item_id, watched, None)
+            .await
+    }
+    async fn set_watched_tree_with_origin(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        watched: bool,
+        origin: Option<&super::JellyfinPlayScope>,
+    ) -> Result<Vec<i64>, StoreError> {
         let now = self.now()?;
-        let sql = if watched {
-            format!(
-                "WITH RECURSIVE tree(id) AS ( \
-                     SELECT id FROM items WHERE id = $1 \
-                     UNION SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                 ) \
-                 INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 SELECT $2, i.id, 0, 1, $3 FROM tree t JOIN items i ON i.id = t.id \
-                 WHERE i.kind IN ({PLAYABLE_KINDS}) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET watched = 1, updated_at = $3 \
-                 WHERE watch_state.watched = 0 RETURNING item_id AS id"
-            )
-        } else {
-            format!(
-                "WITH RECURSIVE tree(id) AS ( \
-                     SELECT id FROM items WHERE id = $1 \
-                     UNION SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                 ) \
-                 INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 SELECT $2, i.id, 0, 0, $3 FROM tree t JOIN items i ON i.id = t.id \
-                 WHERE i.kind IN ({PLAYABLE_KINDS}) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET \
-                     watched = 0, position_ms = 0, updated_at = $3 \
-                 WHERE watch_state.watched = 1 OR watch_state.position_ms <> 0 \
-                 RETURNING item_id AS id"
-            )
-        };
+        let origin = super::jellyfin_watch::origin_json(user_id, origin, now)?;
+        let sql = super::jellyfin_watch::manual_sql(true, watched);
         validate_sql(&sql)?;
         let mut changed = self
-            .watch_write_returning::<IdRow>(user_id, sql, params!(item_id, user_id, now))
+            .watch_write_returning::<super::jellyfin_watch::EditRow>(
+                user_id,
+                sql,
+                params!(item_id, user_id, now, origin),
+            )
             .await?
             .into_iter()
-            .map(|row| row.id)
+            .filter_map(|row| row.changed.then_some(row.id))
             .collect::<Vec<_>>();
         changed.sort_unstable();
         Ok(changed)
@@ -4293,23 +4489,7 @@ impl HiqliteAuthStore {
         let rows = self
             .watch_query::<WatchSummaryRow>(
                 read,
-                format!(
-                    "WITH RECURSIVE tree(root, id) AS ( \
-                         SELECT id, id FROM items \
-                         WHERE id IN (SELECT value FROM json_each($1)) \
-                         UNION SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                     ) \
-                     SELECT 0 AS part, w.item_id AS item_id, w.position_ms AS position_ms, \
-                            w.duration_ms AS duration_ms, w.watched AS watched, \
-                            w.updated_at AS updated_at, NULL AS leaves \
-                     FROM watch_state w JOIN json_each($2) j ON j.value = w.item_id \
-                     WHERE w.user_id = $3 \
-                     UNION ALL \
-                     SELECT 1, t.root, NULL, NULL, COALESCE(SUM(w.watched), 0), NULL, COUNT(*) \
-                     FROM tree t JOIN items i ON i.id = t.id \
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $3 \
-                     WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
-                ),
+                watch_summary_sql(),
                 params!(ids_json(container_ids)?, ids_json(item_ids)?, user_id),
             )
             .await?;
@@ -4359,21 +4539,7 @@ impl HiqliteAuthStore {
         item_id: i64,
     ) -> Result<WatchRollup, StoreError> {
         let rows = self
-            .watch_query::<RollupRow>(
-                read,
-                format!(
-                    "WITH RECURSIVE tree(id) AS ( \
-                         SELECT id FROM items WHERE id = $1 \
-                         UNION SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                     ) \
-                     SELECT $1 AS root, COUNT(*) AS leaves, \
-                            COALESCE(SUM(w.watched), 0) AS watched \
-                     FROM tree t JOIN items i ON i.id = t.id \
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
-                     WHERE i.kind IN ({PLAYABLE_KINDS})"
-                ),
-                params!(item_id, user_id),
-            )
+            .watch_query::<RollupRow>(read, watch_rollup_sql(), params!(item_id, user_id))
             .await?;
         let row = rows
             .into_iter()
@@ -4395,18 +4561,7 @@ impl HiqliteAuthStore {
             return Ok(HashMap::new());
         }
         let ids_json = ids_json(ids)?;
-        let sql = format!(
-            "WITH RECURSIVE tree(root, id) AS ( \
-                         SELECT id, id FROM items \
-                         WHERE id IN (SELECT value FROM json_each($1)) \
-                         UNION SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                     ) \
-                     SELECT t.root AS root, COUNT(*) AS leaves, \
-                            COALESCE(SUM(w.watched), 0) AS watched \
-                     FROM tree t JOIN items i ON i.id = t.id \
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
-                     WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
-        );
+        let sql = watch_rollups_sql();
         trace_statement("watch_rollups", &sql);
         let rows = self
             .watch_query::<RollupRow>(read, sql, params!(ids_json, user_id))

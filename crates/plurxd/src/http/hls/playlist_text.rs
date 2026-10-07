@@ -112,12 +112,10 @@ pub(super) fn master_playlist_with(
     master_playlist_with_shape(file, selected, context, rungs, MasterShape::default(), None)
 }
 
-fn master_playlist_with_shape(
+fn native_subtitle_media(
     file: &MediaFile,
     selected: Option<i64>,
-    context: &crate::transcode::HlsContext,
     rungs: MasterRungs,
-    shape: MasterShape,
     admitted: Option<&std::collections::BTreeSet<u16>>,
 ) -> String {
     let native: Vec<(usize, &SubtitleStream)> = file
@@ -131,26 +129,8 @@ fn master_playlist_with_shape(
         })
         .collect();
     let names = unique_subtitle_names(&native);
-    // Copy/remux sessions can contain open GOPs, so the video rendition does
-    // not promise independently decodable segments. The master must not make
-    // that stronger claim on its behalf: AVPlayer acts on it at a resume
-    // boundary and can reject an otherwise playable copied HEVC/DV stream.
-    // SUPPLEMENTAL-CODECS was introduced at HLS compatibility version 10.
-    // Advertising it from a version-7 master makes AVPlayer reject the
-    // otherwise valid Profile 8.1/8.4 rendition during item preparation, and
-    // the Apple client then takes its final H.264/SDR compatibility fallback.
-    // Keep ordinary masters at version 7; only the enhanced-codec declaration
-    // needs the newer contract.
-    let compatibility_version = if shape.codecs && context.supplemental_codecs.is_some() {
-        10
-    } else {
-        7
-    };
-    let mut out = format!("#EXTM3U\n#EXT-X-VERSION:{compatibility_version}\n");
+    let mut out = String::new();
     for (ordinal, (index, track)) in native.iter().enumerate() {
-        if !shape.subtitles {
-            break;
-        }
         // The query describes this player's selection. No selected index is
         // an explicit Off, not permission to resurrect a foreign-language
         // container default behind the client's back.
@@ -198,6 +178,80 @@ fn master_playlist_with_shape(
             if forced { "YES" } else { "NO" },
             characteristics,
         ));
+    }
+    out
+}
+
+/// Preserve every verified video/audio declaration and attach only the common
+/// native text group. Source bitrate/raster never replace family media facts.
+pub(super) fn continuous_master_with_subtitles(
+    bytes: Vec<u8>,
+    file: &MediaFile,
+    selected: Option<i64>,
+) -> Result<Vec<u8>, String> {
+    let subtitles = native_subtitle_media(file, selected, MasterRungs::active(), None);
+    if subtitles.is_empty() {
+        return Ok(bytes);
+    }
+    let master =
+        String::from_utf8(bytes).map_err(|_| "continuous master is not UTF-8".to_owned())?;
+    let mut out = String::new();
+    let mut inserted = false;
+    for line in master.lines() {
+        if line.starts_with("#EXT-X-STREAM-INF:") {
+            if !inserted {
+                out.push_str(&subtitles);
+                inserted = true;
+            }
+            out.push_str(line);
+            out.push_str(",SUBTITLES=\"subs\"\n");
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !inserted {
+        return Err("continuous master has no video variants".into());
+    }
+    Ok(out.into_bytes())
+}
+
+fn master_playlist_with_shape(
+    file: &MediaFile,
+    selected: Option<i64>,
+    context: &crate::transcode::HlsContext,
+    rungs: MasterRungs,
+    shape: MasterShape,
+    admitted: Option<&std::collections::BTreeSet<u16>>,
+) -> String {
+    let native: Vec<(usize, &SubtitleStream)> = file
+        .subtitle_streams
+        .iter()
+        .enumerate()
+        .filter(|(index, track)| {
+            is_native_text_subtitle(&track.codec)
+                && admitted
+                    .is_none_or(|set| u16::try_from(*index).is_ok_and(|index| set.contains(&index)))
+        })
+        .collect();
+    // Copy/remux sessions can contain open GOPs, so the video rendition does
+    // not promise independently decodable segments. The master must not make
+    // that stronger claim on its behalf: AVPlayer acts on it at a resume
+    // boundary and can reject an otherwise playable copied HEVC/DV stream.
+    // SUPPLEMENTAL-CODECS was introduced at HLS compatibility version 10.
+    // Advertising it from a version-7 master makes AVPlayer reject the
+    // otherwise valid Profile 8.1/8.4 rendition during item preparation, and
+    // the Apple client then takes its final H.264/SDR compatibility fallback.
+    // Keep ordinary masters at version 7; only the enhanced-codec declaration
+    // needs the newer contract.
+    let compatibility_version = if shape.codecs && context.supplemental_codecs.is_some() {
+        10
+    } else {
+        7
+    };
+    let mut out = format!("#EXTM3U\n#EXT-X-VERSION:{compatibility_version}\n");
+    if shape.subtitles {
+        out.push_str(&native_subtitle_media(file, selected, rungs, admitted));
     }
     let bandwidth = file.bitrate.unwrap_or(25_000_000).max(128_000);
     let (peak, average) = context
@@ -251,6 +305,22 @@ fn master_playlist_with_shape(
                     quoted(supplemental)
                 ));
             }
+        }
+    } else if shape.codecs {
+        // SDR (S-10). Before S-10 this branch did not exist and SDR variants
+        // carried no CODECS at all — the shape AVPlayer, Media3 and hls.js
+        // were qualified against. AVPlayer filters variants on CODECS before
+        // it fetches a byte, so a wrong string silently removes the rung.
+        // Printing therefore needs both complete frozen component facts and
+        // the session's frozen `playback.sdr_master_codecs` choice (Settings
+        // → Developer, default off), read once when the session was created.
+        // The HDR branch above is untouched by that switch.
+        if let Some(codecs) = context
+            .codec_facts
+            .as_ref()
+            .and_then(crate::transcode::FrozenHlsCodecFacts::sdr_master_codecs)
+        {
+            out.push_str(&format!(",CODECS=\"{}\"", quoted(&codecs)));
         }
     }
     // Unconditional. None of these variants carries a caption track, and

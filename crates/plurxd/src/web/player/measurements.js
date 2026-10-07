@@ -68,8 +68,8 @@ const PLAY_OPEN_GATE=createPlaybackOpenGate();
 // Network preparation has one absolute lifetime, separate from presentation.
 // A moving predecessor cannot extend it. Cancellation/timeout settles even a
 // transport that ignores abort, and its eventual session result is released.
-function beginPlaybackPreparation(isCurrent){
-  beginPlaybackPreparation.active?.cancel();
+function beginPlaybackPreparation(isCurrent,{background=false}={}){
+  if(!background) beginPlaybackPreparation.active?.cancel();
   const controller=new AbortController(), began=performance.now();
   let abandoned=false, rejectPending=null;
   const cancelled=()=>Object.assign(new Error("Playback preparation superseded."),{name:"AbortError"});
@@ -120,7 +120,7 @@ function beginPlaybackPreparation(isCurrent){
       }finally{clearTimeout(timer);rejectPending=null;}
     }
   };
-  beginPlaybackPreparation.active=owner;
+  if(!background) beginPlaybackPreparation.active=owner;
   return owner;
 }
 // Set by a caller that is about to re-enter play() for a reason play()
@@ -313,6 +313,7 @@ function endWait(resumed){
   const reportedMs=Number(p.waitReportedMs)||0;
   const reportedDetail=p.waitReportedDetail||"persistent";
   p.waitAt=null; p.waitStartedRunway=null; p.waitNudgedAt=null; p.waitReported=false;
+  if(p.abr) p.abr.controlStallVerdict=null;
   p.waitReportedMs=null; p.waitReportedDetail=null;
   if(reported){
     // persistentWait already reported this stall, while it was still frozen,
@@ -485,6 +486,7 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       control_trigger:controlTrigger,wait_started_runway:startedRunway,
       current_runway:currentRunway});
   }
+  if(p.abr) p.abr.controlStallVerdict=null;
   if(verdict&&verdict.type==="terminal"){
     // Ruling D1: the verdict is armed, not executed. Everything this player
     // had buffered is already spent — that is what a persistent wait means —
@@ -504,6 +506,11 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       title:verdictText,detail:"Your place is saved.",
       actions:playbackStallActions(p,"stall-terminal")});
     return;
+  }
+  if(kind==="presentation"&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS
+    &&verdict&&["hold","retry_resource"].includes(verdict.type)&&p.abr){
+    p.abr.controlStallVerdict={waitAt:began,atMs:performance.now(),
+      untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
   }
   if(kind==="presentation"&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
     const remaining=CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs;
@@ -534,8 +541,9 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       // viewer's information. A client that only waited would leave a viewer
       // eight seconds into a frozen picture with no UI and no bound, forever.
       // The reopen is what a hold suppresses; the explanation is what it earns.
-      if(p.abr) p.abr.stallVerdictUntilMs=began+CONTROL_STALL_DEFER_DEADLINE_MS;
       p.stallDeferrals=(p.stallDeferrals||0)+1;
+      if(p.abr) p.abr.controlStallVerdict={waitAt:began,
+        atMs:performance.now(),untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
       clientLog({level:"info",event:"stall_recovery",detail:"deferred:hold",
         message:`server holds this stall (${verdict.reason}) — reopen deferred`,
         control_trigger:controlTrigger});
@@ -555,13 +563,14 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   }
   if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT
      &&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
-    if(p.abr) p.abr.stallVerdictUntilMs=began+CONTROL_STALL_DEFER_DEADLINE_MS;
     // Production stopped for something that may not recur, and named when to
     // look again. Pace to it rather than reopening — but bounded, because a
     // server that keeps saying "soon" is not distinguishable, from here, from
     // one that is never going to be ready, and today's path is better than an
     // unbounded wait.
     p.stallDeferrals=(p.stallDeferrals||0)+1;
+    if(p.abr) p.abr.controlStallVerdict={waitAt:began,
+      atMs:performance.now(),untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
     const again=Math.min(Math.max(verdict.after_ms,CONTROL_MIN_EXCHANGE_MS),PERSISTENT_STALL_MS);
     clientLog({level:"info",event:"stall_recovery",detail:"deferred:retry_resource",
       message:`server paces this stall (${verdict.reason}) — waiting ${(again/1000).toFixed(1)}s`+
@@ -743,10 +752,25 @@ function fmtAgo(unix){ if(!unix) return ""; const s=Math.max(0,Math.floor(Date.n
 function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 // Artwork with a graceful fallback: initials on a tinted card when there's
 // no poster (so a seasons grid never shows blank rectangles).
-function artHtml(it, cls){
+function gridPosterSource(it){
+  const src=it.poster;
+  if(it.kind==='photo'||typeof src!=='string'||!Array.isArray(it.poster_sizes)
+      ||!it.poster_sizes.includes('w300')
+      ||!it.poster_sizes.every(size=>['w300','w500','w780'].includes(size))) return src;
+  // Only the advertised poster endpoint opts in. Keep explicit size choices,
+  // revision/query identity and non-poster artwork unchanged.
+  if(!/^\/api\/v1\/images\/[^/?#]+(?:\?[^#]*)?(?:#.*)?$/.test(src)) return src;
+  const hashAt=src.indexOf('#');
+  const address=hashAt<0?src:src.slice(0,hashAt);
+  const fragment=hashAt<0?'':src.slice(hashAt);
+  const queryAt=address.indexOf('?');
+  if(queryAt>=0&&new URLSearchParams(address.slice(queryAt+1)).has('size')) return src;
+  return address+(queryAt<0?'?':'&')+'size=w300'+fragment;
+}
+function artHtml(it, cls, gridPoster=false){
   // A photo whose thumbnail hasn't been generated yet still has itself to
   // show — the endpoint falls back to the original.
-  const src=it.poster||it.backdrop||(it.kind==='photo'?`/api/v1/items/${it.id}/photo?size=thumb`:null);
+  const src=(gridPoster?gridPosterSource(it):it.poster)||it.backdrop||(it.kind==='photo'?`/api/v1/items/${it.id}/photo?size=thumb`:null);
   // `decoding="async"` keeps a grid of posters off the main thread's critical
   // path: the browser may decode each image whenever it likes instead of
   // blocking the paint that reveals the card. It is advisory and understood

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 struct ServerOwner {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    task: tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
 }
 impl ServerOwner {
     fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> Self {
@@ -44,11 +44,12 @@ impl ServerOwner {
     }
     async fn finish(mut self) {
         let _ = self.stop.take().expect("owned stop").send(());
-        tokio::time::timeout(Duration::from_secs(15), &mut self.task)
+        let drained = tokio::time::timeout(Duration::from_secs(15), &mut self.task)
             .await
             .expect("finite actual driver drain")
             .expect("server join")
             .expect("server result");
+        assert_eq!(drained, crate::HttpDrain::Complete);
     }
 }
 impl Drop for ServerOwner {

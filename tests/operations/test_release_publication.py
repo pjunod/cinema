@@ -13,6 +13,7 @@ from unittest import mock
 
 from validation.release_artifact import BINARIES, create, verify
 from validation.release_aliases import alias_action
+from tests.operations.test_release_debug import packed_pair
 from validation.release_dockerfile import (
     render,
     render_binary_export,
@@ -208,12 +209,14 @@ class ReleasePublicationContractCase(unittest.TestCase):
             generated,
         )
         self.assertNotIn("FROM rust:", generated)
+        self.assertNotIn("FROM node:", generated)
+        self.assertNotIn("FROM runtime-assets AS ci", generated)
         self.assertNotIn("cargo build", generated)
         self.assertNotIn("COPY --from=build", generated)
 
     def test_digest_bound_release_omits_mutable_runtime_install(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        runtime = "192.168.4.7:3000/noirr/plurx-media-runtime@sha256:" + "a" * 64
+        runtime = "forge.lan:3000/noirr/plurx-media-runtime@sha256:" + "a" * 64
         generated = render(source, runtime)
 
         self.assertIn(f"FROM {runtime} AS runtime-assets", generated)
@@ -225,7 +228,7 @@ class ReleasePublicationContractCase(unittest.TestCase):
             generated,
         )
         with self.assertRaisesRegex(ValueError, "immutable sha256 digest"):
-            render(source, "192.168.4.7:3000/noirr/plurx-media-runtime:latest")
+            render(source, "forge.lan:3000/noirr/plurx-media-runtime:latest")
 
     def test_release_binds_daemon_identity_to_published_runtime(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -468,11 +471,13 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         export.mkdir()
         environment = own_repository_environment()
         shutil.copy2(ROOT / "Dockerfile", source / "Dockerfile")
+        shutil.copy2(ROOT / "Cargo.toml", source / "Cargo.toml")
+        shutil.copy2(ROOT / "rust-toolchain.toml", source / "rust-toolchain.toml")
         subprocess.run(
             ["git", "init", "-q"], cwd=source, check=True, env=environment
         )
         subprocess.run(
-            ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.test", "add", "Dockerfile"],
+            ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.test", "add", "Dockerfile", "Cargo.toml", "rust-toolchain.toml"],
             cwd=source,
             check=True,
             env=environment,
@@ -501,7 +506,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
             env=environment,
         ).stdout.strip()
         for name in BINARIES:
-            write_elf(export / name, "x86_64-unknown-linux-gnu", name.encode())
+            packed_pair(export, name)
         (export / "rustc-version").write_text(
             "rustc 1.97.1 (fixture)\nbinary: rustc\n", encoding="utf-8"
         )
@@ -548,8 +553,12 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                     "build-manifest.json",
                     "plurxd",
                     "plurxd.sha256",
+                    "plurxd.dwp",
+                    "plurxd.dwp.sha256",
                     "plurx-cluster-check",
                     "plurx-cluster-check.sha256",
+                    "plurx-cluster-check.dwp",
+                    "plurx-cluster-check.dwp.sha256",
                 },
             )
             self.assertIn(
@@ -573,6 +582,15 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
             )
             self.assertNotEqual(wrong_tree.returncode, 0)
             self.assertIn("does not match", wrong_tree.stderr)
+            (source / "Cargo.toml").write_text("# tracked source changed\n", encoding="utf-8")
+            dirty_tree = subprocess.run(
+                [str(ROOT / "scripts/release-package-candidate"), str(source),
+                 str(ROOT), str(export), str(fixture / "dirty"),
+                 "x86_64-unknown-linux-gnu", commit, commit],
+                capture_output=True, text=True, env=own_repository_environment(),
+            )
+            self.assertNotEqual(dirty_tree.returncode, 0)
+            self.assertIn("tracked changes", dirty_tree.stderr)
 
 
 if __name__ == "__main__":

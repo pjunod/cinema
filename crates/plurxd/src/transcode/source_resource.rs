@@ -80,6 +80,12 @@ impl SourceResourceReadCustody {
         .await
         .map_err(|_| std::io::Error::other("Source resource observation job failed"))??;
         Ok(crate::vodserve::SegmentReady {
+            // The materialized rendition caller fills this from its immutable
+            // plan/index after opening; init resources have no media duration.
+            observed_media_duration_ms: None,
+            // Source's actual response/producer custody owns this file. Local
+            // retained-cache admission cannot confer authority in this namespace.
+            retained_lease: None,
             file: tokio::fs::File::from_std(file),
             len,
             etag: format!("{etag_stem}-{len}"),

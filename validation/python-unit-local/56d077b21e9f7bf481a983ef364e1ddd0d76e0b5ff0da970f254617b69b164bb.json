@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-hdr-reference-scoring",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_codec_hdr_score.py",
+  "test_file_sha256": "88d450a8944b7a144aa5f7939028d58386c4ceb8e42a7d1bc412d89182ca707a",
+  "test_ids": ["test_codec_hdr_score.CodecHdrScoreTests.test_score_attributes_all_frames_and_refuses_missing_metric_output"],
+  "command": "RECONSTRUCTED failed-only method scope, not verbatim shell command: python3 -m unittest tests.operations.test_codec_hdr_score.CodecHdrScoreTests.test_score_attributes_all_frames_and_refuses_missing_metric_output -v",
+  "output": "RECONSTRUCTED individual result from retained task context: tool597637 test_score_attributes_all_frames_and_refuses_missing_metric_output PASS after failed-only temporary-path correction. Original verbatim output is unavailable after context compaction. Digest88d450 identifies the retained post-fixture-fix snapshot before the SDR method addition; it is not a hash of the earlier504e08 pre-fix file.",
+  "provenance_note": "Original failure504e08 refused macOS symlinked /var temporary parent; fixture resolved its owned path. This is the first valid pass after that correction. Digest88d450 is the earliest retained post-.resolve uncommitted snapshot before SDR method addition; the exact hash-capture instant is not retained. No claim that pre-fix504e08 and post-fix597637 used the same whole-file bytes. Tool597637 and the individual pass are reconstructed from retained task context; null commit is honest unknown source identity. Requires independent authenticated admissibility review, no rerun.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}

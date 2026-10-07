@@ -40,6 +40,17 @@ type SchemaMigrationTransaction<'a> = std::pin::Pin<
     Box<dyn Future<Output = Result<Vec<Result<usize, hiqlite::Error>>, StoreError>> + Send + 'a>,
 >;
 
+/// Synchronous admission immediately before a NEW migration submission.
+/// Settlement of an accepted transaction never consults this callback.
+type SchemaMigrationAdmission<'a> = Option<&'a (dyn Fn() -> Result<(), StoreError> + Send + Sync)>;
+
+fn admit_schema_migration(admission: SchemaMigrationAdmission<'_>) -> Result<(), StoreError> {
+    if let Some(admission) = admission {
+        admission()?;
+    }
+    Ok(())
+}
+
 // v6 adds revision-bound ebook reading state; v7 adds first-class book facts;
 // v8 adds monotone cluster-work leases; v9 adds the distributed whole-title
 // speculative-transcode queue; v10 adds live media-session routing; v11 adds
@@ -160,14 +171,56 @@ const DV_REQUEST_PROVENANCE_SCHEMA_VERSION: i64 = 68;
 const DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE: i64 = PREPARATION_INDEX_SCHEMA_VERSION;
 const PLAYBACK_INPUT_SCHEMA_VERSION: i64 = 69;
 const PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE: i64 = DV_REQUEST_PROVENANCE_SCHEMA_VERSION;
-const SHARING_SCHEMA_VERSION: i64 = 70;
-const SHARING_SCHEMA_MIGRATION_SOURCE: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
-/// Ordinary custody bootstrap is72; Source startup preserves layout71 and
-/// activates committed schema73.71 is solely the frozen installed predecessor.
-const SHARING_INGRESS_SCHEMA_VERSION: i64 = 72;
-const LEGACY_SOURCE_SCHEMA_VERSION: i64 = 71;
+const OFFLINE_AUDIO_SCHEMA_VERSION: i64 = 70;
+const OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
+const COPY_OUTPUT_SCHEMA_VERSION: i64 = 71;
+const COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE: i64 = OFFLINE_AUDIO_SCHEMA_VERSION;
+const CANDIDATE_RECOVERY_SCHEMA_VERSION: i64 = 72;
+const CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = COPY_OUTPUT_SCHEMA_VERSION;
+const ENCODED_OUTPUT_SCHEMA_VERSION: i64 = 73;
+const ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE: i64 = CANDIDATE_RECOVERY_SCHEMA_VERSION;
+const JELLYFIN_IDENTITY_SCHEMA_VERSION: i64 = 74;
+const JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;
+const JELLYFIN_LOGIN_SCHEMA_VERSION: i64 = 75;
+const JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_IDENTITY_SCHEMA_VERSION;
+const JELLYFIN_PLAY_SCHEMA_VERSION: i64 = 76;
+const JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_LOGIN_SCHEMA_VERSION;
+const JELLYFIN_WATCH_SCHEMA_VERSION: i64 = 77;
+const JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_PLAY_SCHEMA_VERSION;
+const QUALITY_CANCELLATION_SCHEMA_VERSION: i64 = 78;
+const QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_WATCH_SCHEMA_VERSION;
+const QUALITY_LEDGER_SCHEMA_VERSION: i64 = 79;
+const QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE: i64 = QUALITY_CANCELLATION_SCHEMA_VERSION;
+const SHARING_SCHEMA_VERSION: i64 = 80;
+const SHARING_SCHEMA_MIGRATION_SOURCE: i64 = QUALITY_LEDGER_SCHEMA_VERSION;
+const SHARING_INGRESS_SCHEMA_VERSION: i64 = 81;
+// Frozen private Source layout71 is not a composed migration ordinal. Its
+// installation identity remains71; current main's ordinal71 means copy output.
+
 pub const AUTH_SCHEMA_BASELINE_VERSION: i64 = SHARING_INGRESS_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = 73;
+pub const AUTH_SCHEMA_VERSION: i64 = 82;
+// `store_contract.rs` rewinds a real cluster to marker 65 and replays the
+// offline-audio step from there; these are the composed ordinals it depends on.
+// A renumbering that moves either fails here, not in a contract lane no pull
+// request runs.
+const _: () = assert!(
+    ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION == 66 && OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE == 69
+);
+/// The marker the private-lineage bridge stamps: the end of the canonical
+/// union it builds (`schema_lineage::bridge_plan`'s `canonical_end`), not the
+/// binary's current schema. Steps after it are ordinary dispatcher steps.
+const BRIDGED_LINEAGE_SCHEMA_VERSION: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;
+/// Leading compare-and-swap for a replicated schema step, bound to the step's
+/// source version. Two voters can read the same marker and both submit the
+/// step; the trailing marker `UPDATE ... WHERE schema_version = $src` only
+/// stops the stale one from moving the marker, not from running its DDL first.
+/// A step that drops and recreates objects (the source-guard triggers) would
+/// then reinstall a superseded definition under a newer marker. Executed as
+/// the transaction's first statement, this guard aborts the stale step before
+/// any DDL (`json()` of a non-JSON literal raises), the same mechanism the
+/// lineage bridge's CAS uses; `settle_migration_attempt` then sees the marker
+/// already past the source and treats the step as completed elsewhere.
+const SCHEMA_STEP_SOURCE_GUARD: &str = "SELECT CASE WHEN (SELECT COUNT(*) FROM cluster_meta WHERE singleton=1 AND schema_version=$1)=1 THEN 1 ELSE json('schema migration source is stale') END";
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -812,6 +865,102 @@ impl StoreOperationMetrics {
 
 static STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
     LazyLock::new(StoreOperationMetrics::default);
+
+/// Only this exact unordered pair is the production takeover switch poll.
+/// No SQL text or caller-supplied label participates in attribution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorityReadScope {
+    Unattributed,
+    TakeoverSettings,
+}
+
+impl AuthorityReadScope {
+    fn settings_pair(first: &str, second: &str) -> Self {
+        if (first == keys::CLUSTER_MEDIA_POOL_ENABLED
+            && second == keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+            || (second == keys::CLUSTER_MEDIA_POOL_ENABLED
+                && first == keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+        {
+            Self::TakeoverSettings
+        } else {
+            Self::Unattributed
+        }
+    }
+
+    fn metrics(
+        self,
+        metrics: &TakeoverAuthorityReadMetrics,
+    ) -> Option<&TakeoverAuthorityReadMetrics> {
+        match self {
+            Self::Unattributed => None,
+            Self::TakeoverSettings => Some(metrics),
+        }
+    }
+}
+
+#[derive(Default)]
+struct TakeoverAuthorityReadMetrics {
+    started: AtomicU64,
+    outcomes: [AtomicU64; 3],
+}
+
+impl TakeoverAuthorityReadMetrics {
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = format!(
+            "# HELP plurx_takeover_settings_authority_reads_started_total Replicated takeover settings read attempts started, including retries and in-flight attempts.\n\
+             # TYPE plurx_takeover_settings_authority_reads_started_total counter\n\
+             plurx_takeover_settings_authority_reads_started_total {}\n\
+             # HELP plurx_takeover_settings_authority_reads_total Replicated takeover settings read attempts by terminal outcome.\n\
+             # TYPE plurx_takeover_settings_authority_reads_total counter\n",
+            self.started.load(Ordering::Relaxed),
+        );
+        for outcome in StoreOperationOutcome::ALL {
+            let _ = writeln!(
+                out,
+                "plurx_takeover_settings_authority_reads_total{{outcome=\"{}\"}} {}",
+                outcome.label(),
+                self.outcomes[outcome.index()].load(Ordering::Relaxed),
+            );
+        }
+        out
+    }
+}
+
+struct TakeoverAuthorityReadAttempt<'a> {
+    metrics: &'a TakeoverAuthorityReadMetrics,
+    completed: bool,
+}
+
+impl<'a> TakeoverAuthorityReadAttempt<'a> {
+    fn start(metrics: &'a TakeoverAuthorityReadMetrics) -> Self {
+        StoreOperationMetrics::saturating_add(&metrics.started, 1);
+        Self {
+            metrics,
+            completed: false,
+        }
+    }
+
+    fn complete(mut self, outcome: StoreOperationOutcome) {
+        StoreOperationMetrics::saturating_add(&self.metrics.outcomes[outcome.index()], 1);
+        self.completed = true;
+    }
+}
+
+impl Drop for TakeoverAuthorityReadAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            StoreOperationMetrics::saturating_add(
+                &self.metrics.outcomes[StoreOperationOutcome::Cancelled.index()],
+                1,
+            );
+        }
+    }
+}
+
+static TAKEOVER_AUTHORITY_READ_METRICS: LazyLock<TakeoverAuthorityReadMetrics> =
+    LazyLock::new(TakeoverAuthorityReadMetrics::default);
 static STORE_VALIDATION_REFUSALS: AtomicU64 = AtomicU64::new(0);
 
 // The named P2f runner needs a production-equivalent control arm without
@@ -999,8 +1148,9 @@ fn is_replicated_store_timeout<T>(result: &Result<T, StoreError>) -> bool {
     )
 }
 
-async fn time_authority_read_with_retry<T, F, Fut>(
+async fn time_scoped_authority_read_with_retry<T, F, Fut>(
     metrics: &'static StoreOperationMetrics,
+    scope: Option<&TakeoverAuthorityReadMetrics>,
     mut operation: F,
 ) -> Result<T, StoreError>
 where
@@ -1012,12 +1162,27 @@ where
     let mut quorum_recovery_deadline = None;
     let mut last_quorum_message = None;
     loop {
-        let attempt = time_store_operation(
-            metrics,
-            StoreOperationClass::AuthorityRead,
-            operation(),
-            |_| true,
-        );
+        let attempt = async {
+            // Start at first poll, not logical invocation or completion. Every
+            // retry is another attempt; dropping an in-flight attempt keeps
+            // its start and records cancellation without awaiting store I/O.
+            let scoped_attempt = scope.map(TakeoverAuthorityReadAttempt::start);
+            let result = time_store_operation(
+                metrics,
+                StoreOperationClass::AuthorityRead,
+                operation(),
+                |_| true,
+            )
+            .await;
+            if let Some(scoped_attempt) = scoped_attempt {
+                scoped_attempt.complete(if result.is_ok() {
+                    StoreOperationOutcome::Ok
+                } else {
+                    StoreOperationOutcome::Error
+                });
+            }
+            result
+        };
         let result = if let Some(deadline) = quorum_recovery_deadline {
             match tokio::time::timeout_at(deadline, attempt).await {
                 Ok(result) => result,
@@ -1111,6 +1276,7 @@ pub fn prometheus_store_operations() -> String {
     use std::fmt::Write;
 
     let mut out = STORE_OPERATION_METRICS.render();
+    out.push_str(&TAKEOVER_AUTHORITY_READ_METRICS.render());
     out.push_str(
         "# HELP plurx_store_validation_refusals_total Replicated statements refused before store I/O.\n\
          # TYPE plurx_store_validation_refusals_total counter\n",
@@ -1138,6 +1304,24 @@ enum TimedClientInner {
     Connected(Client),
     #[cfg(test)]
     Disconnected,
+    #[cfg(test)]
+    InjectedConsistentRead(Arc<InjectedConsistentRead>),
+}
+
+/// Replace only consistent-query I/O in the production settings-pair path.
+/// The isolated sink receives real attempt increments, never seeded counts.
+#[cfg(test)]
+struct InjectedConsistentRead {
+    outcomes: Mutex<std::collections::VecDeque<InjectedConsistentReadOutcome>>,
+    calls: Mutex<Vec<(String, Params)>>,
+    metrics: TakeoverAuthorityReadMetrics,
+}
+
+#[cfg(test)]
+enum InjectedConsistentReadOutcome {
+    Timeout,
+    Error(&'static str),
+    Empty,
 }
 
 impl TimedClient {
@@ -1156,7 +1340,19 @@ impl TimedClient {
             TimedClientInner::Disconnected => {
                 panic!("validation test attempted hiqlite I/O")
             }
+            #[cfg(test)]
+            TimedClientInner::InjectedConsistentRead(_) => {
+                panic!("injected consistent-read client attempted unrelated hiqlite I/O")
+            }
         }
+    }
+
+    fn takeover_authority_read_metrics(&self) -> &TakeoverAuthorityReadMetrics {
+        #[cfg(test)]
+        if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
+            return &io.metrics;
+        }
+        &TAKEOVER_AUTHORITY_READ_METRICS
     }
 
     pub(super) async fn query_consistent_map<T, S>(
@@ -1168,18 +1364,61 @@ impl TimedClient {
         T: for<'a, 'r> From<&'a mut hiqlite::Row<'r>> + Send + 'static,
         S: Into<Cow<'static, str>>,
     {
+        self.query_consistent_map_scoped(sql, params, AuthorityReadScope::Unattributed)
+            .await
+    }
+
+    async fn query_consistent_map_scoped<T, S>(
+        &self,
+        sql: S,
+        params: hiqlite::Params,
+        scope: AuthorityReadScope,
+    ) -> Result<Vec<T>, StoreError>
+    where
+        T: for<'a, 'r> From<&'a mut hiqlite::Row<'r>> + Send + 'static,
+        S: Into<Cow<'static, str>>,
+    {
         let sql = sql.into();
         validate_sql(&sql)?;
-        time_authority_read_with_retry(&STORE_OPERATION_METRICS, || {
-            #[cfg(feature = "cluster-read-cost-validation")]
-            self.operations
-                .consistent_query_calls
-                .fetch_add(1, Ordering::Relaxed);
-            timeout_store(
-                self.inner()
-                    .query_consistent_map(sql.clone(), params.clone()),
-            )
-        })
+        time_scoped_authority_read_with_retry(
+            &STORE_OPERATION_METRICS,
+            scope.metrics(self.takeover_authority_read_metrics()),
+            || async {
+                #[cfg(feature = "cluster-read-cost-validation")]
+                self.operations
+                    .consistent_query_calls
+                    .fetch_add(1, Ordering::Relaxed);
+                #[cfg(test)]
+                if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
+                    io.calls
+                        .lock()
+                        .expect("injected I/O calls lock")
+                        .push((sql.to_string(), params.clone()));
+                    let outcome = io
+                        .outcomes
+                        .lock()
+                        .expect("injected I/O outcomes lock")
+                        .pop_front()
+                        .expect("unexpected additional physical attempt");
+                    return timeout_store(async {
+                        match outcome {
+                            InjectedConsistentReadOutcome::Timeout => {
+                                tokio::time::sleep(STORE_TIMEOUT + Duration::from_secs(1)).await;
+                                Ok(Vec::<T>::new())
+                            }
+                            InjectedConsistentReadOutcome::Error(error) => Err(error),
+                            InjectedConsistentReadOutcome::Empty => Ok(Vec::new()),
+                        }
+                    })
+                    .await;
+                }
+                timeout_store(
+                    self.inner()
+                        .query_consistent_map(sql.clone(), params.clone()),
+                )
+                .await
+            },
+        )
         .await
     }
 
@@ -1449,7 +1688,7 @@ impl HiqliteAuthStore {
     /// triggers start enforcing this after a guarded full-roster activation,
     /// so a rolled-back binary cannot race another node's readiness refresh
     /// and mutate authority with legacy SQL.
-    async fn credential_mutation(
+    pub(super) async fn credential_mutation(
         &self,
         statements: Vec<(&'static str, Params)>,
     ) -> Result<Vec<usize>, StoreError> {
@@ -1625,6 +1864,34 @@ impl HiqliteAuthStore {
             result.map_err(database_error)?;
         }
         super::hiqlite_catalog::install_schema(&client).await?;
+        for result in
+            timeout_store(client.batch(super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA)).await?
+        {
+            result.map_err(database_error)?;
+        }
+
+        for result in
+            timeout_store(client.batch(super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA)).await?
+        {
+            result.map_err(database_error)?;
+        }
+        for result in timeout_store(client.batch(super::jellyfin_play::SCHEMA)).await? {
+            result.map_err(database_error)?;
+        }
+        let columns = timeout_store(
+            client
+                // authority: restartable watch migration must inspect committed columns before its atomic schema transaction.
+                .query_consistent_map::<super::jellyfin_watch::ColumnRow, _>(
+                    "SELECT name FROM pragma_table_info('watch_state')",
+                    params!(),
+                ),
+        )
+        .await?;
+        for result in
+            timeout_store(client.txn(super::jellyfin_watch::migration_statements(&columns))).await?
+        {
+            result.map_err(database_error)?;
+        }
         super::hiqlite_durable::install_schema(&client).await?;
         super::hiqlite_dv_conversion::install_schema(&client).await?;
         super::hiqlite_pretranscode::install_schema(&client).await?;
@@ -1635,6 +1902,16 @@ impl HiqliteAuthStore {
         super::hiqlite_background_jobs::install_schema(&client).await?;
         super::hiqlite_library_channels::install_schema(&client).await?;
         super::hiqlite_dvr::install_schema(&client).await?;
+        // Fresh bootstrap stamps the current marker without traversing the
+        // migration chain. Install its candidate memory table before that
+        // marker, just as the corresponding migration does.
+        client
+            .txn([(super::candidate_recovery::SCHEMA, params!())])
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
         client
             .txn(super::hiqlite_live_tv_resource::schema_statements())
             .await
@@ -1720,12 +1997,28 @@ impl HiqliteAuthStore {
         client: Client,
         telemetry_path: &Path,
     ) -> Result<Self, StoreError> {
+        Self::open_or_migrate_with_admission(client, telemetry_path, None).await
+    }
+
+    pub(crate) async fn open_or_migrate_admitted(
+        client: Client,
+        telemetry_path: &Path,
+        admission: &(dyn Fn() -> Result<(), StoreError> + Send + Sync),
+    ) -> Result<Self, StoreError> {
+        Self::open_or_migrate_with_admission(client, telemetry_path, Some(admission)).await
+    }
+
+    async fn open_or_migrate_with_admission(
+        client: Client,
+        telemetry_path: &Path,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<Self, StoreError> {
         let store = Self::with_clock(
             client,
             Arc::new(SystemClock),
             NodeLocalTelemetry::open(telemetry_path)?,
         );
-        store.migrate_schema().await?;
+        store.migrate_schema(admission).await?;
         store
             .verify_compatibility(ClusterCompatibility::CURRENT)
             .await?;
@@ -1742,6 +2035,23 @@ impl HiqliteAuthStore {
         Ok(rows.len() == 1
             && rows[0].count
                 == super::hiqlite_fragment_index_cluster::ANALYSIS_COMPONENT_SCHEMA_OBJECTS)
+    }
+
+    // A private sharing effort used70..73 before main assigned those
+    // ordinals to different families. Never let either lineage bridge or
+    // ordinary dispatch reinterpret its Source/custody objects as main DDL.
+    async fn refuse_ambiguous_sharing_lineage(&self) -> Result<(), StoreError> {
+        let version = self.committed_schema_version_unchecked().await?;
+        if version < SHARING_SCHEMA_VERSION {
+            // authority: shape recognition must precede any migration write.
+            let rows = self.client().query_consistent_map::<CountRow,_>(
+                "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('sharing_identity','sharing_source_schema_installation','sharing_source_session_bindings','sharing_ingress_custody')",params!()).await?;
+            if sharing_lineage_is_ambiguous(version, rows.first().map_or(0, |row| row.count)) {
+                return Err(StoreError::Migration(
+                    "private sharing lineage collides with published main schema; coordinated migration requires explicit lineage qualification".into()));
+            }
+        }
+        Ok(())
     }
 
     // Migration branches use distinct transaction array types. Keeping their
@@ -1761,7 +2071,12 @@ impl HiqliteAuthStore {
         Box::pin(self.client().txn(statements))
     }
 
-    async fn migrate_schema(&self) -> Result<(), StoreError> {
+    async fn migrate_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        self.refuse_ambiguous_sharing_lineage().await?;
+        self.bridge_private_lineage(admission).await?;
         loop {
             let sql = "SELECT schema_version, protocol_min, protocol_max \
                        FROM cluster_meta WHERE singleton = 1";
@@ -1769,10 +2084,12 @@ impl HiqliteAuthStore {
                 .client()
                 .query_consistent_map::<CompatibilityRow, _>(sql, params!())
                 .await?;
+            admit_schema_migration(admission)?;
             match schema_migration_action(&rows, ClusterCompatibility::CURRENT)? {
                 SchemaMigrationAction::Current => return Ok(()),
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -1795,6 +2112,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(BOOK_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (super::hiqlite_catalog::BOOK_AUTHOR_SCHEMA, params!()),
@@ -1818,6 +2136,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(LEASE_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (super::hiqlite_coordination::JOB_LEASES_SCHEMA, params!()),
@@ -1837,6 +2156,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(PRETRANSCODE_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -1887,6 +2207,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -1948,6 +2269,7 @@ impl HiqliteAuthStore {
                             SHARED_CACHE_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(SHARED_CACHE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -1966,6 +2288,7 @@ impl HiqliteAuthStore {
                             FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -1984,6 +2307,7 @@ impl HiqliteAuthStore {
                             ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE,
@@ -1993,6 +2317,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -2033,6 +2358,7 @@ impl HiqliteAuthStore {
                             ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE,
@@ -2042,6 +2368,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -2064,6 +2391,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -2093,6 +2421,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -2137,6 +2466,7 @@ impl HiqliteAuthStore {
                             DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE,
@@ -2148,6 +2478,7 @@ impl HiqliteAuthStore {
                     TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE,
                 ) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (super::hiqlite_timeline_annotations::SCHEMA, params!()),
@@ -2172,6 +2503,7 @@ impl HiqliteAuthStore {
                     TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE,
                 ) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -2213,6 +2545,7 @@ impl HiqliteAuthStore {
                             ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE,
@@ -2222,6 +2555,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (super::MEDIA_SESSION_PREPARATIONS_SCHEMA, params!()),
@@ -2244,6 +2578,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -2270,6 +2605,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -2328,6 +2664,7 @@ impl HiqliteAuthStore {
                     // commits. `settle_migration_attempt` is what turns the
                     // loser's duplicate-column failure into an observation
                     // that the step is already done.
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2351,6 +2688,7 @@ impl HiqliteAuthStore {
                     // commits. `settle_migration_attempt` is what turns the
                     // loser's duplicate-column failure into an observation
                     // that the step is already done.
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE,
@@ -2378,6 +2716,7 @@ impl HiqliteAuthStore {
                             ),
                         ),
                     ];
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE,
@@ -2435,6 +2774,7 @@ impl HiqliteAuthStore {
                     if self.pointer_desired_revision_column_present().await? {
                         statements.remove(0);
                     }
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE,
@@ -2458,6 +2798,7 @@ impl HiqliteAuthStore {
                             ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE,
@@ -2494,6 +2835,7 @@ impl HiqliteAuthStore {
                     if self.drain_deadline_column_present().await? {
                         statements.remove(0);
                     }
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2509,6 +2851,7 @@ impl HiqliteAuthStore {
                     // when the transaction *failed* — so the safety here is the
                     // statement's own idempotence, and it is worth saying so
                     // rather than borrowing a guarantee from the wrong place.
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA, params!()),
@@ -2537,6 +2880,7 @@ impl HiqliteAuthStore {
                     // `settle_migration_attempt` is what turns the loser's
                     // duplicate-column failure into an observation that the
                     // step is already done.
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (
@@ -2562,6 +2906,7 @@ impl HiqliteAuthStore {
                     OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE,
                 ) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (super::OFFLINE_CLAIM_GENERATION_SCHEMA.to_owned(), params!()),
@@ -2611,6 +2956,7 @@ impl HiqliteAuthStore {
                             LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE,
@@ -2634,6 +2980,7 @@ impl HiqliteAuthStore {
                             LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE,
@@ -2650,6 +2997,7 @@ impl HiqliteAuthStore {
                             .to_owned(),
                         params!(DVR_SCHEMA_VERSION, now, DVR_SCHEMA_MIGRATION_SOURCE),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(DVR_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2664,6 +3012,7 @@ impl HiqliteAuthStore {
                             .to_owned(),
                         params!(SUBJECT_SCHEMA_VERSION, now, DVR_SCHEMA_VERSION),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(DVR_SCHEMA_VERSION, attempt)
                         .await?;
@@ -2681,12 +3030,14 @@ impl HiqliteAuthStore {
                             DVR_EVENT_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(DVR_EVENT_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (super::FILES_VIDEO_CODEC_TAG_COLUMN, params!()),
@@ -2717,6 +3068,7 @@ impl HiqliteAuthStore {
                             VIDEO_CODEC_TAG_SCHEMA_VERSION
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(VIDEO_CODEC_TAG_SCHEMA_VERSION, attempt)
                         .await?;
@@ -2737,6 +3089,7 @@ impl HiqliteAuthStore {
                             CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE,
@@ -2746,6 +3099,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(FIELD_ORDER_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self
                         .schema_migration_transaction([
                             (super::FILES_FIELD_ORDER_COLUMN, params!()),
@@ -2779,6 +3133,7 @@ impl HiqliteAuthStore {
                             LUMINANCE_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(LUMINANCE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2787,6 +3142,7 @@ impl HiqliteAuthStore {
                     DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE,
                 ) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(vec![
                         (super::downloaded_subtitles::SCHEMA.to_owned(), params!()),
                         ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
@@ -2811,6 +3167,7 @@ impl HiqliteAuthStore {
                             FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(FILE_GRANTS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2822,6 +3179,7 @@ impl HiqliteAuthStore {
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(SUBTITLE_SOURCE_SCHEMA_VERSION, now, SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2850,6 +3208,7 @@ impl HiqliteAuthStore {
                             ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE,
@@ -2868,6 +3227,7 @@ impl HiqliteAuthStore {
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(BACKGROUND_JOBS_SCHEMA_VERSION, now, BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2883,6 +3243,7 @@ impl HiqliteAuthStore {
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(LIBRARY_JOBS_SCHEMA_VERSION, now, LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2898,6 +3259,7 @@ impl HiqliteAuthStore {
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(LIBRARY_REQUESTS_SCHEMA_VERSION, now, LIBRARY_REQUESTS_SCHEMA_MIGRATION_SOURCE),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         LIBRARY_REQUESTS_SCHEMA_MIGRATION_SOURCE,
@@ -2916,6 +3278,7 @@ impl HiqliteAuthStore {
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(JOB_RESOURCES_SCHEMA_VERSION, now, JOB_RESOURCES_SCHEMA_MIGRATION_SOURCE),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(JOB_RESOURCES_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2931,6 +3294,7 @@ impl HiqliteAuthStore {
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(PROVIDER_BUDGET_SCHEMA_VERSION, now, PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2948,6 +3312,7 @@ impl HiqliteAuthStore {
                     ));
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(SUBTITLE_JOBS_SCHEMA_VERSION, now, SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2961,6 +3326,7 @@ impl HiqliteAuthStore {
                             .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(ARTWORK_JOBS_SCHEMA_VERSION, now, ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -2974,6 +3340,7 @@ impl HiqliteAuthStore {
                             .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(TRANSCODE_COPIES_SCHEMA_VERSION, now, TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE,
@@ -2990,6 +3357,7 @@ impl HiqliteAuthStore {
                             .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(PREDICTIONS_SCHEMA_VERSION, now, PREDICTIONS_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(PREDICTIONS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -3003,6 +3371,7 @@ impl HiqliteAuthStore {
                             .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(EMBEDDINGS_SCHEMA_VERSION, now, EMBEDDINGS_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(EMBEDDINGS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -3016,6 +3385,7 @@ impl HiqliteAuthStore {
                             .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(PROBE_JOBS_SCHEMA_VERSION, now, PROBE_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(PROBE_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -3029,6 +3399,7 @@ impl HiqliteAuthStore {
                             .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(INTEGRITY_JOBS_SCHEMA_VERSION, now, INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -3040,6 +3411,7 @@ impl HiqliteAuthStore {
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(LIVE_TV_RESOURCE_SCHEMA_VERSION,now,LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE),
                     ));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE,
@@ -3056,6 +3428,7 @@ impl HiqliteAuthStore {
                             .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(SUBTITLE_RECONCILE_SCHEMA_VERSION, now, SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE,
@@ -3072,6 +3445,7 @@ impl HiqliteAuthStore {
                             .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(JOB_RETENTION_SCHEMA_VERSION, now, JOB_RETENTION_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(JOB_RETENTION_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -3085,6 +3459,7 @@ impl HiqliteAuthStore {
                             .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(RECEIPT_PRESSURE_SCHEMA_VERSION, now, RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(
                         RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE,
@@ -3105,6 +3480,7 @@ impl HiqliteAuthStore {
                     {
                         result.map_err(database_error)?;
                     }
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(VIEWER_ANALYSIS_SCHEMA_VERSION, now, VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE))]).await;
                     self.settle_migration_attempt(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE, attempt)
@@ -3114,6 +3490,7 @@ impl HiqliteAuthStore {
                     ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE,
                 ) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(vec![
                         (super::fragment_index_cluster::ANALYSIS_RESULT_TARGET_FORCE_SCHEMA.to_owned(), params!()),
                         ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
@@ -3127,6 +3504,7 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(vec![
                         (super::background_jobs::PREPARATION_INDEX_SCHEMA.to_owned(), params!()),
                         ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
@@ -3142,6 +3520,7 @@ impl HiqliteAuthStore {
                     DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
                 ) => {
                     let now = self.now()?;
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(vec![
                         (super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN.to_owned(), params!()),
                         ("DROP TRIGGER dv_queue_admission_settings_ai".to_owned(), params!()),
@@ -3156,7 +3535,163 @@ impl HiqliteAuthStore {
                     .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE) => {
-                    Box::pin(self.migrate_playback_inputs()).await?;
+                    Box::pin(self.migrate_playback_inputs(admission)).await?;
+                }
+                SchemaMigrationAction::MigrateFrom(OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // Like the desired-selection/drain migrations, tolerate
+                    // an already-present additive column during upgrade replay.
+                    // An incompatible type/nullability is not an audio snapshot.
+                    // authority: a stale replica could miss a committed audio_recipe column and replay its ADD COLUMN.
+                    let columns = self.client().query_consistent_map::<CountRow, _>(
+                        "SELECT COUNT(*) AS count FROM pragma_table_info('offline_packages') WHERE name = 'audio_recipe' AND upper(type) = 'TEXT' AND \"notnull\" = 0", params!()).await?;
+                    let mut statements = vec![(
+                        SCHEMA_STEP_SOURCE_GUARD.to_owned(),
+                        params!(OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE),
+                    )];
+                    if !columns.first().is_some_and(|row| row.count == 1) {
+                        statements.push((
+                            "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT".to_owned(),
+                            params!(),
+                        ));
+                    }
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(OFFLINE_AUDIO_SCHEMA_VERSION, now, OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> = vec![(
+                        SCHEMA_STEP_SOURCE_GUARD.to_owned(),
+                        params!(COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE),
+                    )];
+                    statements.extend(
+                        super::background_jobs::COPY_OUTPUT_SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!())),
+                    );
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(COPY_OUTPUT_SCHEMA_VERSION, now, COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    admit_schema_migration(admission)?;
+                    let attempt = self.client().txn([
+                        (SCHEMA_STEP_SOURCE_GUARD, params!(CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE)),
+                        (super::candidate_recovery::SCHEMA, params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3", params!(CANDIDATE_RECOVERY_SCHEMA_VERSION, now, CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> = vec![(
+                        SCHEMA_STEP_SOURCE_GUARD.to_owned(),
+                        params!(ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE),
+                    )];
+                    statements.extend(
+                        super::background_jobs::ENCODED_OUTPUT_SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!())),
+                    );
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(ENCODED_OUTPUT_SCHEMA_VERSION, now, ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE) => {
+                    admit_schema_migration(admission)?;
+                    for result in self
+                        .client()
+                        .batch(super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA)
+                        .await?
+                    {
+                        result.map_err(database_error)?;
+                    }
+                    admit_schema_migration(admission)?;
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(JELLYFIN_IDENTITY_SCHEMA_VERSION,now,JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE))]).await;
+                    self.settle_migration_attempt(
+                        JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE) => {
+                    admit_schema_migration(admission)?;
+                    for result in self
+                        .client()
+                        .batch(super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA)
+                        .await?
+                    {
+                        result.map_err(database_error)?;
+                    }
+                    admit_schema_migration(admission)?;
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_LOGIN_SCHEMA_VERSION,now,JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE))]).await;
+                    self.settle_migration_attempt(JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE) => {
+                    admit_schema_migration(admission)?;
+                    for result in self.client().batch(super::jellyfin_play::SCHEMA).await? {
+                        result.map_err(database_error)?;
+                    }
+                    admit_schema_migration(admission)?;
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_PLAY_SCHEMA_VERSION,now,JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE))]).await;
+                    self.settle_migration_attempt(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE) => {
+                    let columns = self
+                        .client()
+                        // authority: the manual-edit schema and marker migrate atomically even after partial setup or another coordinator.
+                        .query_consistent_map::<super::jellyfin_watch::ColumnRow, _>(
+                            "SELECT name FROM pragma_table_info('watch_state')",
+                            params!(),
+                        )
+                        .await?;
+                    let mut statements = super::jellyfin_watch::migration_statements(&columns);
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_WATCH_SCHEMA_VERSION,self.now()?,JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                // Each new step runs in its own boxed future. This chain is one
+                // async fn with an arm per version, and in debug builds every
+                // inline arm's temporaries widen the frame that polls it; the
+                // daemon join test thread had no headroom left for two more.
+                SchemaMigrationAction::MigrateFrom(
+                    QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    Box::pin(self.migrate_additive_schema_step(
+                        admission,
+                        super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
+                        QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+                        QUALITY_CANCELLATION_SCHEMA_VERSION,
+                    ))
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE) => {
+                    Box::pin(self.migrate_additive_schema_step(
+                        admission,
+                        super::quality_ledger::SCHEMA,
+                        QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE,
+                        QUALITY_LEDGER_SCHEMA_VERSION,
+                    ))
+                    .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(SHARING_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -3169,14 +3704,13 @@ impl HiqliteAuthStore {
                         .collect();
                     statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".into(),
                         params!(SHARING_SCHEMA_VERSION,now,SHARING_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
                     self.settle_migration_attempt(SHARING_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
-                SchemaMigrationAction::MigrateFrom(
-                    SHARING_SCHEMA_VERSION | LEGACY_SOURCE_SCHEMA_VERSION,
-                ) => {
-                    Box::pin(self.migrate_sharing_ingress_custody()).await?;
+                SchemaMigrationAction::MigrateFrom(SHARING_SCHEMA_VERSION) => {
+                    Box::pin(self.migrate_sharing_ingress_custody(admission)).await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
@@ -3188,22 +3722,18 @@ impl HiqliteAuthStore {
     }
 
     /// Additive custody migration is separate from the frozen Source rebuild.
-    /// A71 marker must prove its complete exact installation before any write.
-    async fn migrate_sharing_ingress_custody(&self) -> Result<(), StoreError> {
+    /// Frozen Source layout71 is independently checked at activation82.
+    /// Historical private ordinal71 is refused before this migration runs.
+    async fn migrate_sharing_ingress_custody(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
         let previous = self.committed_schema_version_unchecked().await?;
         let (next, guard) = match previous {
             SHARING_SCHEMA_VERSION => (
                 SHARING_INGRESS_SCHEMA_VERSION,
                 "NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sharing_ingress_custody')"
                     .to_owned(),
-            ),
-            LEGACY_SOURCE_SCHEMA_VERSION => (
-                AUTH_SCHEMA_VERSION,
-                format!(
-                    "({}) AND ({})",
-                    super::sharing_source_schema::legacy_installed_guard(),
-                    super::sharing_source_schema::legacy_source_work_drained_guard()
-                ),
             ),
             _ => {
                 return Err(StoreError::Migration(
@@ -3227,6 +3757,7 @@ impl HiqliteAuthStore {
         // Guard failure must abort, rather than silently mark a partial shape.
         let assertion = format!("INSERT INTO cluster_meta(singleton) SELECT NULL WHERE NOT (({guard}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version=$1))");
         let shape = super::sharing_ingress_custody::schema_guard();
+        admit_schema_migration(admission)?;
         let attempt = self.schema_migration_transaction(vec![
             (assertion, params!(previous)),
             (super::sharing_ingress_custody::declaration().to_owned(), params!()),
@@ -3255,11 +3786,268 @@ impl HiqliteAuthStore {
     }
 
     // Isolate each new migration state machine from the large version dispatcher.
-    async fn migrate_playback_inputs(&self) -> Result<(), StoreError> {
+    async fn bridge_private_lineage(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        self.bridge_private_lineage_inner(admission, false).await
+    }
+
+    async fn read_lineage_snapshot(&self) -> Result<LineageSnapshot, StoreError> {
+        use super::schema_lineage::{self, SchemaObject};
+        // Metadata and schema must come from one SQLite statement snapshot.
+        let sql = format!(
+            "SELECT schema_version,protocol_min,protocol_max,({}) AS fingerprint FROM cluster_meta WHERE singleton=1",
+            schema_lineage::FINGERPRINT_QUERY,
+        );
+        let mut rows = self
+            .client()
+            // authority: the bridge decides from the committed marker and schema, never a lagging replica's.
+            .query_consistent_map::<LineageReadRow, _>(sql, params!())
+            .await?;
+        if rows.len() != 1 {
+            return Err(StoreError::Migration(format!(
+                "expected one cluster lineage marker, found {}",
+                rows.len()
+            )));
+        }
+        let row = rows.remove(0);
+        let objects = serde_json::from_str::<Vec<[String; 3]>>(&row.fingerprint)
+            .map_err(|error| {
+                StoreError::Migration(format!("invalid lineage fingerprint: {error}"))
+            })?
+            .into_iter()
+            .map(|[kind, name, sql]| SchemaObject { kind, name, sql })
+            .collect();
+        Ok(LineageSnapshot {
+            compatibility: row.compatibility,
+            objects,
+            fingerprint: row.fingerprint,
+        })
+    }
+
+    async fn bridge_private_lineage_inner(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+        fail_before_stamp: bool,
+    ) -> Result<(), StoreError> {
+        use super::schema_lineage::{self, Backend};
+        let snapshot = self.read_lineage_snapshot().await?;
+        let rows = [snapshot.compatibility];
+        // Keep the existing protocol/range refusal before any bridge write.
+        schema_migration_action(&rows, ClusterCompatibility::CURRENT)?;
+        let marker = rows
+            .first()
+            .ok_or_else(|| StoreError::Migration("missing cluster lineage marker".to_owned()))?
+            .schema_version;
+        if marker < ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION {
+            return Ok(());
+        }
+        let objects = snapshot.objects;
+        let Some(plan) = schema_lineage::bridge_plan(Backend::Hiqlite, marker, &objects)? else {
+            return Ok(());
+        };
+        let before = snapshot.fingerprint;
+        let expected = schema_lineage::expected_fingerprint(Backend::Hiqlite, &objects, &plan)?;
+        let guard = format!("SELECT CASE WHEN (SELECT COUNT(*) FROM cluster_meta WHERE singleton=1 AND schema_version=$1 AND protocol_min=$2 AND protocol_max=$3)=1 AND ({})=$4 THEN 1 ELSE json('lineage marker/schema CAS mismatch') END", schema_lineage::FINGERPRINT_QUERY);
+        let post = format!("SELECT CASE WHEN ({})=$1 AND (SELECT COUNT(*) FROM pragma_foreign_key_check)=0 THEN 1 ELSE json('lineage post-schema/integrity mismatch') END", schema_lineage::FINGERPRINT_QUERY);
+        let mut statements = vec![(
+            guard,
+            params!(marker, rows[0].protocol_min, rows[0].protocol_max, before),
+        )];
+        statements.extend(plan.into_iter().map(|sql| (sql, params!())));
+        statements.push((post, params!(expected.clone())));
+        if fail_before_stamp {
+            statements.push((
+                "SELECT json('validation-only lineage rollback')".to_owned(),
+                params!(),
+            ));
+        }
+        // The bridge builds the canonical union, which ends at main's v73
+        // (`schema_lineage::bridge_plan`'s `canonical_end`); ordinary steps
+        // after it (the Jellyfin v74–v77, then quality cancellation v78 and
+        // the continuous ledger v79) then run from that marker through the
+        // dispatcher. Stamping the binary's current version here would skip
+        // them.
+        statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(BRIDGED_LINEAGE_SCHEMA_VERSION, self.now()?, marker)));
+        // Every query is a single prepared statement. The vendored writer
+        // executes sequentially within ONE transaction and rolls back on any
+        // preparation/execution failure, including either read-only CAS guard.
+        // There is no partially committed bridge or private-marker rewind.
+        admit_schema_migration(admission)?;
+        let attempt = self.client().txn(statements).await;
+        let failure = match attempt {
+            Ok(results) => results
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .err()
+                .map(database_error),
+            Err(error) => Some(error),
+        };
+        let Some(failure) = failure else {
+            return Ok(());
+        };
+        // A concurrently accepted identical bridge is success only when BOTH
+        // its final marker and exact schema are durable. Preserve the original
+        // transaction error for all other outcomes, including failed rereads.
+        if let Ok(current) = self.read_lineage_snapshot().await {
+            if current.compatibility.schema_version == BRIDGED_LINEAGE_SCHEMA_VERSION
+                && current.compatibility.protocol_min == rows[0].protocol_min
+                && current.compatibility.protocol_max == rows[0].protocol_max
+                && current.fingerprint == expected
+            {
+                return Ok(());
+            }
+        }
+        Err(failure)
+    }
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub async fn validation_coherent_lineage_snapshot(&self) -> Result<(i64, String), StoreError> {
+        use super::schema_lineage::{self, Backend};
+        let snapshot = self.read_lineage_snapshot().await?;
+        schema_migration_action(
+            std::slice::from_ref(&snapshot.compatibility),
+            ClusterCompatibility::CURRENT,
+        )?;
+        schema_lineage::bridge_plan(
+            Backend::Hiqlite,
+            snapshot.compatibility.schema_version,
+            &snapshot.objects,
+        )?;
+        Ok((snapshot.compatibility.schema_version, snapshot.fingerprint))
+    }
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub async fn validation_lineage_bridge_rollback(&self) -> Result<(), StoreError> {
+        self.bridge_private_lineage_inner(None, true).await
+    }
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub async fn validation_lineage_union_fingerprint(&self) -> Result<String, StoreError> {
+        let objects = self
+            .client()
+            // authority: contract validation fingerprints the committed schema, not replica lag.
+            .query_consistent_map::<super::schema_lineage::SchemaObject, _>(
+                super::schema_lineage::OBJECT_QUERY,
+                params!(),
+            )
+            .await?;
+        super::schema_lineage::verify_union(super::schema_lineage::Backend::Hiqlite, &objects)?;
+        super::schema_lineage::fingerprint(&objects)
+    }
+
+    /// Source-derived synthetic shape; never represents a captured database.
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub async fn validation_set_schema_lineage(
+        &self,
+        marker: i64,
+        private: bool,
+        fresh_encoded_omission: bool,
+    ) -> Result<(), StoreError> {
+        if !(66..=69).contains(&marker) || (fresh_encoded_omission && (!private || marker != 69)) {
+            return Err(StoreError::Migration(
+                "invalid synthetic Hiqlite lineage".to_owned(),
+            ));
+        }
+        let main = if private { 0 } else { marker - 65 };
+        let effort = if private { marker - 65 } else { 0 };
+        let mut sql = Vec::new();
+        if main < 1 {
+            sql.push("DROP INDEX analysis_requests_result_target_force".to_owned());
+        }
+        if main < 2 {
+            sql.push("DROP INDEX background_jobs_file_source".to_owned());
+        }
+        if main < 4 {
+            for trigger in [
+                "playback_settings_insert",
+                "playback_settings_update",
+                "playback_settings_delete",
+            ] {
+                sql.push(format!("DROP TRIGGER {trigger}"));
+            }
+            sql.push("DROP TABLE playback_input_generation".to_owned());
+        }
+        if main < 3 {
+            sql.push("DROP TRIGGER dv_queue_admission_settings_ai".to_owned());
+            sql.push("ALTER TABLE dv_conversions DROP COLUMN requested_manually".to_owned());
+            sql.push(super::dv_conversion::DV_QUEUE_ADMISSION_MIGRATION_TRIGGER.to_owned());
+        }
+        if effort < 1 {
+            sql.push("ALTER TABLE offline_packages DROP COLUMN audio_recipe".to_owned());
+        }
+        if effort < 3 {
+            sql.push("DROP TABLE candidate_recovery".to_owned());
+        }
+        if effort < 2 {
+            sql.push("DROP TRIGGER background_job_copy_output_target".to_owned());
+            sql.push("DROP TRIGGER background_job_publish_copy_output_command".to_owned());
+        }
+        if effort < 4 || fresh_encoded_omission {
+            sql.push("DROP TRIGGER background_job_encoded_output_target".to_owned());
+        }
+        sql.push("DROP TRIGGER background_job_source_changed".to_owned());
+        sql.push("DROP TRIGGER background_job_source_deleted".to_owned());
+        let guards = if effort >= 4 && !fresh_encoded_omission {
+            super::background_jobs::ENCODED_OUTPUT_SCHEMA
+        } else if effort >= 2 {
+            super::background_jobs::COPY_OUTPUT_SCHEMA
+        } else {
+            super::background_jobs::SCHEMA
+        };
+        for name in [
+            "background_job_source_changed",
+            "background_job_source_deleted",
+        ] {
+            let statement = guards
+                .split("-- next statement\n")
+                .find(|statement| {
+                    statement.contains(&format!(
+                        "CREATE TRIGGER {}{name}",
+                        if guards == super::background_jobs::SCHEMA {
+                            "IF NOT EXISTS "
+                        } else {
+                            ""
+                        }
+                    ))
+                })
+                .ok_or_else(|| {
+                    StoreError::Migration("missing synthetic guard source".to_owned())
+                })?;
+            sql.push(statement.to_owned());
+        }
+        let mut statements: Vec<_> = sql.into_iter().map(|sql| (sql, params!())).collect();
+        // The same marker write as the migration chain, so the store layer
+        // keeps exactly one shape of `cluster_meta` write.
+        statements.push((
+            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1"
+                .to_owned(),
+            params!(marker, self.now()?),
+        ));
+        self.client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    async fn migrate_playback_inputs(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
         let now = self.now()?;
+        admit_schema_migration(admission)?;
         for result in self.client().batch(super::PLAYBACK_INPUT_SCHEMA).await? {
             result.map_err(database_error)?;
         }
+        admit_schema_migration(admission)?;
         let attempt = self.client().txn(vec![(
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(PLAYBACK_INPUT_SCHEMA_VERSION, now, PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE),
@@ -3308,6 +4096,38 @@ impl HiqliteAuthStore {
             )
             .await?;
         Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
+    /// One additive schema step, in main's step shape: the source guard, the
+    /// step's DDL and the marker advance from exactly `source` to `target`
+    /// commit in a single Raft transaction, or none of them does. `schema`
+    /// holds `;`-terminated statements, one per line ending.
+    async fn migrate_additive_schema_step(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+        schema: &'static str,
+        source: i64,
+        target: i64,
+    ) -> Result<(), StoreError> {
+        let now = self.now()?;
+        let mut statements: Vec<(String, hiqlite::Params)> =
+            vec![(SCHEMA_STEP_SOURCE_GUARD.to_owned(), params!(source))];
+        statements.extend(
+            schema
+                .split_inclusive(";\n")
+                .map(str::trim)
+                .filter(|sql| !sql.is_empty())
+                .map(|sql| (sql.to_owned(), params!())),
+        );
+        statements.push((
+            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+             WHERE singleton = 1 AND schema_version = $3"
+                .to_owned(),
+            params!(target, now, source),
+        ));
+        admit_schema_migration(admission)?;
+        let attempt = self.client().txn(statements).await;
+        self.settle_migration_attempt(source, attempt).await
     }
 
     async fn settle_migration_attempt(
@@ -3440,13 +4260,9 @@ impl HiqliteAuthStore {
     async fn verify_source_schema_version(client: &Client) -> Result<(), StoreError> {
         let rows=client.query_consistent_map::<CompatibilityRow,_>(
             "SELECT schema_version,protocol_min,protocol_max FROM cluster_meta WHERE singleton=1",params!()).await.map_err(database_error)?;
-        if matches!(rows.as_slice(),[row] if matches!(row.schema_version, super::sharing_source_schema::SOURCE_SCHEMA_VERSION | LEGACY_SOURCE_SCHEMA_VERSION))
+        if matches!(rows.as_slice(),[row] if row.schema_version == super::sharing_source_schema::SOURCE_SCHEMA_VERSION)
         {
-            let guard = if rows[0].schema_version == LEGACY_SOURCE_SCHEMA_VERSION {
-                super::sharing_source_schema::legacy_installed_guard()
-            } else {
-                super::sharing_source_schema::installed_guard()
-            };
+            let guard = super::sharing_source_schema::installed_guard();
             let shape = client
                 .query_consistent_map::<CountRow, _>(
                     format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
@@ -3583,6 +4399,18 @@ impl HiqliteAuthStore {
                 "DELETE FROM media_session_terminal_acks".to_owned(),
                 params!(),
             ),
+            (
+                "DELETE FROM quality_cancellation_receipts".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM quality_preparation_owners".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM continuous_quality_ledgers".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM media_sessions".to_owned(), params!()),
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
@@ -3674,6 +4502,9 @@ impl HiqliteAuthStore {
             "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms FROM media_playback_pointers ORDER BY user_id, playback_id",
             "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms FROM media_sessions ORDER BY incarnation_id",
             "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, client_instance_id, sequence, request_fingerprint, response_json, expires_at_ms, updated_at_ms FROM media_session_terminal_acks ORDER BY session_id",
+            "SELECT receipt_key, generation, session_id, owner_node_id, owner_epoch, client_instance_id, lifetime_id, recipe_revision, accepted_sequence, state, created_at_ms, updated_at_ms FROM quality_cancellation_receipts ORDER BY receipt_key",
+            "SELECT staged_incarnation_id, cancellation_key FROM quality_preparation_owners ORDER BY staged_incarnation_id",
+            "SELECT generation, owner_node_id, owner_epoch, revision, attachment_id, ledger_json, updated_at_ms FROM continuous_quality_ledgers ORDER BY generation",
             "SELECT user_id, playback_id, staged_incarnation_id, expected_predecessor_incarnation_id, deadline_ms, created_at_ms, updated_at_ms FROM media_session_preparations ORDER BY user_id, playback_id",
         ] {
             validate_sql(sql)?;
@@ -3684,98 +4515,145 @@ impl HiqliteAuthStore {
                 super::hiqlite_catalog::local_catalog_digest(self.client()),
             )
             .await
-            .map_err(|_| {
-                StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())
-            })??,
+            .map_err(|_| StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))??,
             durable_digest: tokio::time::timeout(
                 STORE_TIMEOUT,
                 super::hiqlite_durable::local_durable_digest(self.client()),
             )
             .await
-            .map_err(|_| {
-                StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())
-            })??,
-            cluster_meta: self.client().query_map(
-                "SELECT singleton, schema_version, protocol_min, protocol_max, migrated_at \
+            .map_err(|_| StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))??,
+            cluster_meta: self
+                .client()
+                .query_map(
+                    "SELECT singleton, schema_version, protocol_min, protocol_max, migrated_at \
                      FROM cluster_meta ORDER BY singleton",
-                params!(),
-            )
-            .await?,
-            settings: self.client().query_map(
-                "SELECT key, value, updated_at FROM settings ORDER BY key",
-                params!(),
-            )
-            .await?,
-            users: self.client().query_map(
-                "SELECT id, username, password_hash, is_admin, created_at \
+                    params!(),
+                )
+                .await?,
+            settings: self
+                .client()
+                .query_map(
+                    "SELECT key, value, updated_at FROM settings ORDER BY key",
+                    params!(),
+                )
+                .await?,
+            users: self
+                .client()
+                .query_map(
+                    "SELECT id, username, password_hash, is_admin, created_at \
                      FROM users ORDER BY id",
-                params!(),
-            )
-            .await?,
-            tokens: self.client().query_map(
-                "SELECT token_hash, user_id, device, created_at, last_seen_at \
+                    params!(),
+                )
+                .await?,
+            tokens: self
+                .client()
+                .query_map(
+                    "SELECT token_hash, user_id, device, created_at, last_seen_at \
                      FROM tokens ORDER BY token_hash",
-                params!(),
-            )
-            .await?,
-            api_keys: self.client().query_map(
-                "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled \
+                    params!(),
+                )
+                .await?,
+            api_keys: self
+                .client()
+                .query_map(
+                    "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled \
                      FROM api_keys ORDER BY id",
-                params!(),
-            )
-            .await?,
-            job_leases: self.client().query_map(
-                "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms \
+                    params!(),
+                )
+                .await?,
+            job_leases: self
+                .client()
+                .query_map(
+                    "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms \
                      FROM job_leases ORDER BY resource",
-                params!(),
-            )
-            .await?,
-            media_session_requests: self.client().query_map(
-                "SELECT user_id, request_id, request_fingerprint, playback_id, state, \
+                    params!(),
+                )
+                .await?,
+            media_session_requests: self
+                .client()
+                .query_map(
+                    "SELECT user_id, request_id, request_fingerprint, playback_id, state, \
                         claim_expires_at_ms, incarnation_id, owner_node_id, response_json, \
                         updated_at_ms \
                    FROM media_session_requests ORDER BY user_id, request_id",
-                params!(),
-            )
-            .await?,
-            library_channel_session_recipes: self.client().query_map(
-                "SELECT user_id, request_id, incarnation_id, recipe_json, created_at_ms \
+                    params!(),
+                )
+                .await?,
+            library_channel_session_recipes: self
+                .client()
+                .query_map(
+                    "SELECT user_id, request_id, incarnation_id, recipe_json, created_at_ms \
                    FROM library_channel_session_recipes ORDER BY user_id, request_id",
-                params!(),
-            )
-            .await?,
-            media_playback_pointers: self.client().query_map(
-                "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms \
+                    params!(),
+                )
+                .await?,
+            media_playback_pointers: self
+                .client()
+                .query_map(
+                    "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms \
                    FROM media_playback_pointers ORDER BY user_id, playback_id",
-                params!(),
-            )
-            .await?,
-            media_sessions: self.client().query_map(
-                "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, \
+                    params!(),
+                )
+                .await?,
+            media_sessions: self
+                .client()
+                .query_map(
+                    "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, \
                         owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, \
                         publication_ready_at_ms, recipe_json, response_json, \
                         produced_playable_through_ms, fetched_through_ms, \
                         media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms \
                    FROM media_sessions ORDER BY incarnation_id",
-                params!(),
-            )
-            .await?,
-            media_session_terminal_acks: self.client().query_map(
-                "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, \
+                    params!(),
+                )
+                .await?,
+            continuous_quality_ledgers: self
+                .client()
+                .query_map(
+                    "SELECT generation, owner_node_id, owner_epoch, revision, attachment_id, \
+                        ledger_json, updated_at_ms \
+                   FROM continuous_quality_ledgers ORDER BY generation",
+                    params!(),
+                )
+                .await?,
+            quality_preparation_owners: self
+                .client()
+                .query_map(
+                    "SELECT staged_incarnation_id, cancellation_key \
+                   FROM quality_preparation_owners ORDER BY staged_incarnation_id",
+                    params!(),
+                )
+                .await?,
+            quality_cancellation_receipts: self
+                .client()
+                .query_map(
+                    "SELECT receipt_key, generation, session_id, owner_node_id, owner_epoch, \
+                        client_instance_id, lifetime_id, recipe_revision, accepted_sequence, \
+                        state, created_at_ms, updated_at_ms \
+                   FROM quality_cancellation_receipts ORDER BY receipt_key",
+                    params!(),
+                )
+                .await?,
+            media_session_terminal_acks: self
+                .client()
+                .query_map(
+                    "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, \
                         client_instance_id, sequence, request_fingerprint, response_json, \
                         expires_at_ms, updated_at_ms \
                    FROM media_session_terminal_acks ORDER BY session_id",
-                params!(),
-            )
-            .await?,
-            media_session_preparations: self.client().query_map(
-                "SELECT user_id, playback_id, staged_incarnation_id, \
+                    params!(),
+                )
+                .await?,
+            media_session_preparations: self
+                .client()
+                .query_map(
+                    "SELECT user_id, playback_id, staged_incarnation_id, \
                         expected_predecessor_incarnation_id, deadline_ms, \
                         created_at_ms, updated_at_ms \
                    FROM media_session_preparations ORDER BY user_id, playback_id",
-                params!(),
-            )
-            .await?,
+                    params!(),
+                )
+                .await?,
         })
     }
 
@@ -3945,6 +4823,15 @@ impl HiqliteAuthStore {
 
 #[async_trait]
 impl crate::store::FragmentIndexStore for HiqliteAuthStore {
+    async fn fragment_index_status(
+        &self,
+        wanted: &[(i64, crate::segplan::SourceIdentity)],
+    ) -> Result<Vec<crate::store::FragmentIndexStatus>, StoreError> {
+        crate::store::fragindex::check_status_batch(wanted)?;
+        crate::store::record_http_index_status_call();
+        self.telemetry.fragment_index_status(wanted.to_vec()).await
+    }
+
     async fn put_fragment_index(
         &self,
         file_id: i64,
@@ -4155,6 +5042,21 @@ impl PlaybackTelemetryStore for HiqliteAuthStore {
 
 #[async_trait]
 impl NetworkPriorStore for HiqliteAuthStore {
+    async fn observe_candidate_link(
+        &self,
+        value: &crate::domain::CandidateLinkObservation,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.telemetry
+            .observe_candidate_link(value.clone(), now_ms)
+            .await
+    }
+    async fn candidate_link_prior(
+        &self,
+        binding: &crate::domain::CandidateLinkBinding,
+    ) -> Result<Option<crate::domain::CandidateLinkPrior>, StoreError> {
+        self.telemetry.candidate_link_prior(binding.clone()).await
+    }
     async fn observe_network_prior(
         &self,
         observation: &NetworkPriorObservation,
@@ -4385,7 +5287,11 @@ impl SettingsStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let rows = self
             .client()
-            .query_consistent_map::<SettingEntryRow, _>(sql, params!(first, second))
+            .query_consistent_map_scoped::<SettingEntryRow, _>(
+                sql,
+                params!(first, second),
+                AuthorityReadScope::settings_pair(first, second),
+            )
             .await?;
         let mut pair = (None, None);
         for row in rows {
@@ -4897,9 +5803,10 @@ impl UserStore for HiqliteAuthStore {
             > 0)
     }
 
-    async fn authenticate_token(
+    async fn authenticate_token_for(
         &self,
         token_hash: &str,
+        audience: super::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
@@ -4913,7 +5820,9 @@ impl UserStore for HiqliteAuthStore {
                           (SELECT value FROM settings WHERE key = $2) AS expiry_idle_days, \
                           (SELECT value FROM settings WHERE key = $3) AS expiry_since \
                  FROM users u JOIN tokens t ON t.user_id = u.id \
-                 WHERE t.token_hash = $4";
+                 WHERE t.token_hash = $4 \
+                   AND ($5 = 'native') = NOT EXISTS ( \
+                     SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)";
         validate_sql(sql)?;
         trace_statement("authenticate_token", sql);
         let mut rows = self
@@ -4924,7 +5833,8 @@ impl UserStore for HiqliteAuthStore {
                     keys::AUTH_TOKEN_EXPIRY_ENABLED,
                     keys::AUTH_TOKEN_IDLE_DAYS,
                     keys::AUTH_TOKEN_EXPIRY_SINCE,
-                    token_hash
+                    token_hash,
+                    audience.as_str()
                 ),
             )
             .await?;
@@ -5390,11 +6300,18 @@ fn schema_migration_action(
         | PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE
         | DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE
         | PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE
+        | OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE
+        | COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE
+        | CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE
+        | ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE
+        | QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE
+        | QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE
         | SHARING_SCHEMA_MIGRATION_SOURCE
-        | SHARING_SCHEMA_VERSION
-        | LEGACY_SOURCE_SCHEMA_VERSION => {
-            Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
-        }
+        | SHARING_SCHEMA_VERSION => Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version)),
         version => Err(StoreError::Migration(format!(
             "cluster schema {version} cannot migrate to voter schema {}",
             supported.schema_version
@@ -5416,9 +6333,7 @@ fn verify_compatibility_rows(
         && !(supported.schema_version == AUTH_SCHEMA_VERSION
             && matches!(
                 meta.schema_version,
-                AUTH_SCHEMA_BASELINE_VERSION
-                    | SHARING_SCHEMA_VERSION
-                    | LEGACY_SOURCE_SCHEMA_VERSION
+                AUTH_SCHEMA_BASELINE_VERSION | SHARING_SCHEMA_VERSION
             ))
     {
         return Err(StoreError::Migration(format!(
@@ -5448,6 +6363,9 @@ struct AuthStoreDump {
     library_channel_session_recipes: Vec<LibraryChannelSessionRecipeDumpRow>,
     media_playback_pointers: Vec<MediaPlaybackPointerDumpRow>,
     media_sessions: Vec<MediaSessionDumpRow>,
+    continuous_quality_ledgers: Vec<QualityLedgerDumpRow>,
+    quality_preparation_owners: Vec<QualityPreparationOwnerDumpRow>,
+    quality_cancellation_receipts: Vec<QualityCancellationDumpRow>,
     media_session_terminal_acks: Vec<MediaSessionTerminalAckDumpRow>,
     media_session_preparations: Vec<MediaSessionPreparationDumpRow>,
 }
@@ -5457,6 +6375,40 @@ struct CompatibilityRow {
     schema_version: i64,
     protocol_min: i64,
     protocol_max: i64,
+}
+
+struct LineageReadRow {
+    compatibility: CompatibilityRow,
+    fingerprint: String,
+}
+
+struct LineageSnapshot {
+    compatibility: CompatibilityRow,
+    objects: Vec<super::schema_lineage::SchemaObject>,
+    fingerprint: String,
+}
+
+impl From<&mut Row<'_>> for LineageReadRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            compatibility: CompatibilityRow {
+                schema_version: row.get("schema_version"),
+                protocol_min: row.get("protocol_min"),
+                protocol_max: row.get("protocol_max"),
+            },
+            fingerprint: row.get("fingerprint"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for super::schema_lineage::SchemaObject {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            kind: row.get("kind"),
+            name: row.get("name"),
+            sql: row.get("sql"),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for CompatibilityRow {
@@ -5878,6 +6830,34 @@ dump_row!(MediaSessionPreparationDumpRow {
     created_at_ms: i64,
     updated_at_ms: i64,
 });
+dump_row!(QualityLedgerDumpRow {
+    generation: String,
+    owner_node_id: String,
+    owner_epoch: i64,
+    revision: i64,
+    attachment_id: String,
+    ledger_json: String,
+    updated_at_ms: i64,
+});
+
+dump_row!(QualityPreparationOwnerDumpRow {
+    staged_incarnation_id: String,
+    cancellation_key: String
+});
+dump_row!(QualityCancellationDumpRow {
+    receipt_key: String,
+    generation: String,
+    session_id: String,
+    owner_node_id: String,
+    owner_epoch: i64,
+    client_instance_id: String,
+    lifetime_id: String,
+    recipe_revision: i64,
+    accepted_sequence: i64,
+    state: String,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+});
 dump_row!(MediaSessionTerminalAckDumpRow {
     incarnation_id: String,
     session_id: String,
@@ -5891,6 +6871,10 @@ dump_row!(MediaSessionTerminalAckDumpRow {
     updated_at_ms: i64,
 });
 
+fn sharing_lineage_is_ambiguous(version: i64, sharing_objects: i64) -> bool {
+    version < SHARING_SCHEMA_VERSION && sharing_objects > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5902,7 +6886,7 @@ mod tests {
             protocol_min: AUTH_PROTOCOL_VERSION,
             protocol_max: AUTH_PROTOCOL_VERSION,
         };
-        for previous in [SHARING_SCHEMA_VERSION, LEGACY_SOURCE_SCHEMA_VERSION] {
+        for previous in [QUALITY_LEDGER_SCHEMA_VERSION, SHARING_SCHEMA_VERSION] {
             assert_eq!(
                 schema_migration_action(&[row(previous)], ClusterCompatibility::CURRENT)
                     .expect("explicit legacy upgrade input"),
@@ -5927,6 +6911,21 @@ mod tests {
         );
         assert!(super::super::sharing_source_schema::INSTALLATION_SCHEMA
             .contains("CHECK(schema_version=71)"));
+    }
+
+    #[test]
+    fn sharing_private_replicated70_to73_objects_refuse_main_ordinal_reinterpretation() {
+        for marker in 70..=73 {
+            assert!(sharing_lineage_is_ambiguous(marker, 1));
+            assert!(!sharing_lineage_is_ambiguous(marker, 0));
+        }
+        assert!(sharing_lineage_is_ambiguous(79, 1));
+        assert!(!sharing_lineage_is_ambiguous(80, 1));
+        assert_eq!(SHARING_SCHEMA_MIGRATION_SOURCE, 79);
+        assert_eq!(
+            (AUTH_SCHEMA_BASELINE_VERSION, AUTH_SCHEMA_VERSION),
+            (81, 82)
+        );
     }
 
     #[test]
@@ -5976,6 +6975,30 @@ mod tests {
 
     static TEST_STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
         LazyLock::new(StoreOperationMetrics::default);
+
+    #[test]
+    fn k06_schema_migration_admits_each_new_boundary_without_replenishment() {
+        let expired = std::sync::atomic::AtomicBool::new(false);
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let admit = || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            if expired.load(Ordering::SeqCst) {
+                Err(StoreError::Database(
+                    "original startup deadline expired".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        admit_schema_migration(Some(&admit)).expect("first boundary in budget");
+        expired.store(true, Ordering::SeqCst);
+        assert!(admit_schema_migration(Some(&admit)).is_err());
+        assert!(admit_schema_migration(Some(&admit)).is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        // Ordinary maintenance/open migration has no startup phase callback.
+        admit_schema_migration(None).expect("unchanged ordinary path");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
 
     #[test]
     fn replicated_generation_guard_matches_only_canonical_integer_state() {
@@ -6473,10 +7496,377 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn takeover_authority_attribution_settings_pair_reaches_timed_client_retries() {
+        for (first, second) in [
+            (
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ),
+            (
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+            ),
+        ] {
+            let io = Arc::new(InjectedConsistentRead {
+                outcomes: Mutex::new(
+                    [
+                        InjectedConsistentReadOutcome::Timeout,
+                        InjectedConsistentReadOutcome::Error(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}",
+                        ),
+                        InjectedConsistentReadOutcome::Empty,
+                        InjectedConsistentReadOutcome::Timeout,
+                        InjectedConsistentReadOutcome::Error(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}",
+                        ),
+                        InjectedConsistentReadOutcome::Empty,
+                    ]
+                    .into(),
+                ),
+                calls: Mutex::new(Vec::new()),
+                metrics: TakeoverAuthorityReadMetrics::default(),
+            });
+            let store = HiqliteAuthStore {
+                media_session_projection: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                client: TimedClient {
+                    inner: TimedClientInner::InjectedConsistentRead(Arc::clone(&io)),
+                    #[cfg(feature = "cluster-read-cost-validation")]
+                    operations: Arc::new(OperationCounters::default()),
+                },
+                clock: Arc::new(FixedClock(0)),
+                telemetry: NodeLocalTelemetry::open(Path::new(":memory:"))
+                    .expect("in-memory sidecar"),
+                activity_refreshes: Arc::new(ActivityRefreshGate::default()),
+                cache_touches: Arc::new(ReplaceableWriteGate::default()),
+                watch_fences: Arc::new(super::super::watch_fence::WatchWriteFences::default()),
+            };
+            let started = tokio::time::Instant::now();
+            assert_eq!(
+                store
+                    .get_setting_pair(first, second)
+                    .await
+                    .expect("the real settings-pair path recovers"),
+                (None, None)
+            );
+            assert!(
+                started.elapsed() >= STORE_TIMEOUT,
+                "the real TimedClient deadline must fire before retry"
+            );
+            assert_eq!(
+                io.metrics.started.load(Ordering::Relaxed),
+                3,
+                "settings-pair scope must reach the actual retry attempt sink in either key order"
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Ok.index()].load(Ordering::Relaxed),
+                1
+            );
+
+            assert_eq!(
+                store
+                    .get_setting_pair(keys::MONARR_URL, keys::MONARR_API_KEY)
+                    .await
+                    .expect("unrelated settings pair also recovers"),
+                (None, None)
+            );
+            assert_eq!(
+                io.metrics.started.load(Ordering::Relaxed),
+                3,
+                "unrelated retried settings pairs must not enter the takeover numerator"
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Ok.index()].load(Ordering::Relaxed),
+                1
+            );
+            let calls = io.calls.lock().expect("calls lock");
+            assert_eq!(
+                calls.len(),
+                6,
+                "both pairs must execute all three physical attempts"
+            );
+            for (index, (sql, bound)) in calls.iter().enumerate() {
+                assert_eq!(
+                    sql,
+                    "SELECT key, value FROM settings WHERE key = $1 OR key = $2 ORDER BY key"
+                );
+                let expected = if index < 3 {
+                    params!(first, second)
+                } else {
+                    params!(keys::MONARR_URL, keys::MONARR_API_KEY)
+                };
+                assert_eq!(
+                    *bound, expected,
+                    "the production query retains the original bound key order on every retry"
+                );
+            }
+            assert!(io.outcomes.lock().expect("outcomes lock").is_empty());
+        }
+    }
+
+    #[test]
+    fn takeover_authority_attribution_selects_only_the_exact_pair_and_fixed_series() {
+        let metrics = TakeoverAuthorityReadMetrics::default();
+        for (first, second) in [
+            (
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ),
+            (
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+            ),
+        ] {
+            assert_eq!(
+                AuthorityReadScope::settings_pair(first, second),
+                AuthorityReadScope::TakeoverSettings
+            );
+            assert!(AuthorityReadScope::settings_pair(first, second)
+                .metrics(&metrics)
+                .is_some());
+        }
+        for (first, second) in [
+            (keys::MONARR_URL, keys::MONARR_API_KEY),
+            (keys::TRANSCODE_RATE_MODE, keys::TRANSCODE_QUALITY),
+            (keys::BACKUP_SCHEDULE_UTC, keys::BACKUP_DESTINATION),
+            (keys::TELEMETRY_RETAIN_DAYS, keys::PLAYBACK_NETWORK_PRIORS),
+            (keys::MAX_HW_SESSIONS, keys::SW_POOL_THREADS),
+            (
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+            ),
+            (
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ),
+            (
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+                "cluster.session_takeover_enabled.extra",
+            ),
+            (
+                "cluster.media_pool_enabled.extra",
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ),
+        ] {
+            assert_eq!(
+                AuthorityReadScope::settings_pair(first, second),
+                AuthorityReadScope::Unattributed
+            );
+            assert!(AuthorityReadScope::settings_pair(first, second)
+                .metrics(&metrics)
+                .is_none());
+        }
+        let exposition = metrics.render();
+        let samples: Vec<_> = exposition
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(
+            samples,
+            [
+                "plurx_takeover_settings_authority_reads_started_total 0",
+                "plurx_takeover_settings_authority_reads_total{outcome=\"ok\"} 0",
+                "plurx_takeover_settings_authority_reads_total{outcome=\"error\"} 0",
+                "plurx_takeover_settings_authority_reads_total{outcome=\"cancelled\"} 0",
+            ]
+        );
+        assert!(!exposition.contains(keys::CLUSTER_MEDIA_POOL_ENABLED));
+        assert!(!exposition.contains(keys::CLUSTER_SESSION_TAKEOVER_ENABLED));
+        let production_exposition = prometheus_store_operations();
+        assert!(production_exposition
+            .contains("# TYPE plurx_takeover_settings_authority_reads_started_total counter\n"));
+        assert!(production_exposition
+            .contains("# TYPE plurx_takeover_settings_authority_reads_total counter\n"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_authority_attribution_counts_retries_errors_and_excludes_other_pairs() {
+        let store_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+        let metrics = TakeoverAuthorityReadMetrics::default();
+        let scope = AuthorityReadScope::settings_pair(
+            keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            keys::CLUSTER_MEDIA_POOL_ENABLED,
+        );
+        let mut calls = 0;
+        let value =
+            time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || {
+                calls += 1;
+                let call = calls;
+                async move {
+                    match call {
+                        1 => Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())),
+                        2 | 3 => Err(StoreError::Database(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+                        )),
+                        _ => Ok(42),
+                    }
+                }
+            })
+            .await
+            .expect("existing retry policy recovers");
+        assert_eq!((value, calls), (42, 4));
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 4);
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Ok.index()].load(Ordering::Relaxed),
+            1
+        );
+
+        let error = time_scoped_authority_read_with_retry(
+            store_metrics,
+            scope.metrics(&metrics),
+            || async { Err::<(), _>(StoreError::Database("bad row".to_owned())) },
+        )
+        .await
+        .expect_err("permanent error is not retried");
+        assert_eq!(error.to_string(), "database error: bad row");
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+            4
+        );
+
+        let other = AuthorityReadScope::settings_pair(keys::MONARR_URL, keys::MONARR_API_KEY);
+        time_scoped_authority_read_with_retry(store_metrics, other.metrics(&metrics), || async {
+            Ok(())
+        })
+        .await
+        .expect("unrelated authority read succeeds");
+        assert_eq!(
+            metrics.started.load(Ordering::Relaxed),
+            5,
+            "unrelated authority work must never enter this numerator"
+        );
+        assert_eq!(
+            store_metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Ok
+                )
+                .count
+                .load(Ordering::Relaxed),
+            2,
+            "the unrelated read still enters the existing aggregate metric"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_authority_attribution_starts_on_poll_and_retains_cancelled_attempts() {
+        let store_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+        let metrics = TakeoverAuthorityReadMetrics::default();
+        let scope = AuthorityReadScope::settings_pair(
+            keys::CLUSTER_MEDIA_POOL_ENABLED,
+            keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+        );
+        let unpolled =
+            time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || {
+                std::future::pending::<Result<(), StoreError>>()
+            });
+        drop(unpolled);
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 0);
+        let mut pending = Box::pin(time_scoped_authority_read_with_retry(
+            store_metrics,
+            scope.metrics(&metrics),
+            std::future::pending::<Result<(), StoreError>>,
+        ));
+        assert!(matches!(
+            futures_util::poll!(&mut pending),
+            std::task::Poll::Pending
+        ));
+        assert_eq!(
+            metrics.started.load(Ordering::Relaxed),
+            1,
+            "in-flight work is already in the daily numerator"
+        );
+        assert_eq!(
+            metrics
+                .outcomes
+                .iter()
+                .map(|counter| counter.load(Ordering::Relaxed))
+                .sum::<u64>(),
+            0
+        );
+        drop(pending);
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Cancelled.index()].load(Ordering::Relaxed),
+            1
+        );
+
+        let mut backoff = Box::pin(time_scoped_authority_read_with_retry(
+            store_metrics,
+            scope.metrics(&metrics),
+            || async { Err::<(), _>(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())) },
+        ));
+        assert!(matches!(
+            futures_util::poll!(&mut backoff),
+            std::task::Poll::Pending
+        ));
+        drop(backoff);
+        assert_eq!(
+            metrics.started.load(Ordering::Relaxed),
+            2,
+            "cancellation during backoff cannot manufacture an unstarted retry"
+        );
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Cancelled.index()].load(Ordering::Relaxed),
+            1
+        );
+
+        let slow_attempt = STORE_TIMEOUT - Duration::from_millis(100);
+        let started = tokio::time::Instant::now();
+        time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || async {
+            tokio::time::sleep(slow_attempt).await;
+            Err::<(), _>(StoreError::Database(
+                "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+            ))
+        })
+        .await
+        .expect_err("absolute quorum deadline cancels the final attempt");
+        assert_eq!(
+            started.elapsed(),
+            slow_attempt + AUTHORITY_QUORUM_RECOVERY_BUDGET
+        );
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Cancelled.index()].load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            store_metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Cancelled
+                )
+                .count
+                .load(Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn authority_reads_retry_timeouts_once_and_quorum_failures_through_election() {
         let timeout_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let retried = time_authority_read_with_retry(timeout_metrics, {
+        let retried = time_scoped_authority_read_with_retry(timeout_metrics, None, {
             let attempts = Arc::clone(&attempts);
             move || {
                 let attempt = attempts.fetch_add(1, Ordering::Relaxed);
@@ -6517,7 +7907,7 @@ mod tests {
 
         let quorum_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let quorum_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let recovered = time_authority_read_with_retry(quorum_metrics, {
+        let recovered = time_scoped_authority_read_with_retry(quorum_metrics, None, {
             let attempts = Arc::clone(&quorum_attempts);
             move || {
                 let attempt = attempts.fetch_add(1, Ordering::Relaxed);
@@ -6561,7 +7951,7 @@ mod tests {
         let exhausted_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let exhausted_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let started = tokio::time::Instant::now();
-        let error = time_authority_read_with_retry(exhausted_metrics, {
+        let error = time_scoped_authority_read_with_retry(exhausted_metrics, None, {
             let attempts = Arc::clone(&exhausted_attempts);
             move || {
                 attempts.fetch_add(1, Ordering::Relaxed);
@@ -6600,7 +7990,7 @@ mod tests {
         let slow_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let slow_attempt = STORE_TIMEOUT - Duration::from_millis(100);
         let started = tokio::time::Instant::now();
-        let error = time_authority_read_with_retry(slow_metrics, {
+        let error = time_scoped_authority_read_with_retry(slow_metrics, None, {
             let attempts = Arc::clone(&slow_attempts);
             move || {
                 attempts.fetch_add(1, Ordering::Relaxed);
@@ -6647,7 +8037,7 @@ mod tests {
 
         let permanent_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let permanent_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let error = time_authority_read_with_retry(permanent_metrics, {
+        let error = time_scoped_authority_read_with_retry(permanent_metrics, None, {
             let attempts = Arc::clone(&permanent_attempts);
             move || {
                 attempts.fetch_add(1, Ordering::Relaxed);
@@ -7530,9 +8920,56 @@ mod tests {
             "v67 advances exactly one step to request provenance"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 67,
+            ENCODED_OUTPUT_SCHEMA_VERSION + 1,
+            JELLYFIN_IDENTITY_SCHEMA_VERSION,
+            "v74 advances to Jellyfin wire identities"
+        );
+        assert_eq!(
+            JELLYFIN_IDENTITY_SCHEMA_VERSION + 1,
+            JELLYFIN_LOGIN_SCHEMA_VERSION,
+            "v75 advances to compatibility logins"
+        );
+        assert_eq!(
+            JELLYFIN_LOGIN_SCHEMA_VERSION + 1,
+            JELLYFIN_PLAY_SCHEMA_VERSION,
+            "v76 advances to compatibility negotiations"
+        );
+        assert_eq!(
+            JELLYFIN_PLAY_SCHEMA_VERSION + 1,
+            JELLYFIN_WATCH_SCHEMA_VERSION,
+            "v77 advances to manual-edit watch revisions"
+        );
+        assert_eq!(
+            JELLYFIN_WATCH_SCHEMA_VERSION, QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+            "quality cancellation follows the Jellyfin watch schema"
+        );
+        assert_eq!(
+            QUALITY_CANCELLATION_SCHEMA_VERSION, QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE,
+            "continuous dependencies follow quality cancellation"
+        );
+        assert_eq!(
+            QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE + 1,
+            QUALITY_LEDGER_SCHEMA_VERSION,
+            "the continuous ledger follows quality cancellation"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 74,
+            QUALITY_LEDGER_SCHEMA_VERSION,
+            "this implementation retains every additive v5→v79 main step"
+        );
+        assert_eq!(
+            SHARING_SCHEMA_MIGRATION_SOURCE, QUALITY_LEDGER_SCHEMA_VERSION,
+            "sharing follows all current main migrations"
+        );
+        assert_eq!(
+            SHARING_SCHEMA_VERSION + 1,
             AUTH_SCHEMA_BASELINE_VERSION,
-            "ordinary v70 advances to custody72, skipping frozen Source installation71"
+            "ordinary sharing80 advances to custody81"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_BASELINE_VERSION + 1,
+            AUTH_SCHEMA_VERSION,
+            "Source activation82 preserves frozen family layout71"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

@@ -1448,7 +1448,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
                     probe.video_codec_tag.as_deref(),
-                    probe.field_order.as_deref(),
+                    probe.stored_field_order(),
                     probe.max_cll,
                     probe.max_fall,
                     probe.mastering_max_luminance,

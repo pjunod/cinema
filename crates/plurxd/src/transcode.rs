@@ -114,7 +114,9 @@ const MIXED_RECOVERY_CAPACITY_WAIT: Duration = Duration::from_secs(5);
 // split: begin planning
 #[path = "transcode/planning.rs"]
 mod planning;
-pub(crate) use planning::*;
+#[cfg(test)]
+pub(crate) use planning::unverified_hevc_copy_enabled;
+use planning::*;
 // split: end planning
 
 pub(crate) const ADMISSION_POLL: Duration = Duration::from_millis(250);
@@ -672,9 +674,9 @@ pub struct TranscodeManager {
     /// starts before they reach the manager; this second edge closes the
     /// transition race between that check and publishing a spawned child.
     serving_ready: AtomicBool,
-    /// Monotonic counterpart to `serving_ready`. Recovery may reopen the
-    /// process, but it cannot erase a loss observed by a session admitted
-    /// under an older generation.
+    /// Monotonic counterpart to `serving_ready`: the generation the fence
+    /// loop last resolved. Recovery may reopen the process, but registrations
+    /// admitted under an older generation still refuse themselves.
     serving_loss_generation: AtomicU64,
     /// Lock-free projection for Prometheus. The session map remains the
     /// authority; every production insert/removal publishes its resulting
@@ -735,6 +737,7 @@ pub struct TranscodeManager {
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
     hdr10_passthrough_qsv: bool,
+    hdr10_passthrough_vaapi: bool,
     dovi_proofs: std::sync::Mutex<HashMap<String, bool>>,
     /// The ahead-window limits, snapshotted ([`AHEAD_LIMITS_TTL`]).
     ///
@@ -749,6 +752,40 @@ pub struct TranscodeManager {
     /// actually elapse. Zero (always, in production) means the real budget —
     /// see [`TranscodeManager::playlist_wait`].
     playlist_wait_override_ms: std::sync::atomic::AtomicU64,
+    /// Complete-output queue publications handed off by VOD starts. Create
+    /// never waits on the catalog rebuild, source fences or replicated
+    /// enqueue; [`TranscodeManager::output_enqueue_loop`] owns them.
+    output_enqueue: OutputEnqueueQueue,
+}
+
+/// Starts that may hand off before the owned worker drains. Beyond this a
+/// start does not queue its preparation; the title's next start offers it.
+const OUTPUT_ENQUEUE_CAPACITY: usize = 64;
+
+/// One complete-output queue publication handed off by a VOD start.
+pub(crate) struct OutputEnqueue {
+    request: SessionRequest,
+    file: plurx_core::domain::MediaFile,
+    settings: crate::vodserve::VodSettings,
+    encoding: Option<Arc<crate::vodencode::Encoding>>,
+    session_id: String,
+    queued_at: Instant,
+}
+
+/// Bounded hand-off from session create to the single owned enqueue worker.
+pub(crate) struct OutputEnqueueQueue {
+    sender: tokio::sync::mpsc::Sender<OutputEnqueue>,
+    receiver: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<OutputEnqueue>>>,
+}
+
+impl OutputEnqueueQueue {
+    fn new() -> Self {
+        let (sender, receiver) = tokio::sync::mpsc::channel(OUTPUT_ENQUEUE_CAPACITY);
+        Self {
+            sender,
+            receiver: std::sync::Mutex::new(Some(receiver)),
+        }
+    }
 }
 
 // split: begin manager-hooks
@@ -771,7 +808,7 @@ const QUALIFICATION_ENCODERS: [Encoder; 5] = [
     Encoder::VideoToolbox,
 ];
 const QUALIFICATION_GRADES: [OutputGrade; 2] = [OutputGrade::Sdr, OutputGrade::Hdr10];
-const QUALIFICATION_PIPELINES: [Pipeline; 8] = [
+const QUALIFICATION_PIPELINES: [Pipeline; 9] = [
     Pipeline::VppQsv,
     Pipeline::TonemapVaapi,
     Pipeline::Libplacebo,
@@ -780,6 +817,7 @@ const QUALIFICATION_PIPELINES: [Pipeline; 8] = [
     Pipeline::DoviPassthrough,
     Pipeline::Hdr10Passthrough,
     Pipeline::Cpu,
+    Pipeline::LibplaceboVaapi,
 ];
 
 // split: begin terminal-admission
@@ -788,12 +826,23 @@ mod terminal_admission;
 use terminal_admission::*;
 // split: end terminal-admission
 
+/// Rolling retention as this node sees it, for the Developer card.
+pub(crate) struct RollingRetentionFacts {
+    pub(crate) same_filesystem: Option<bool>,
+    pub(crate) slack: Option<i64>,
+    pub(crate) admits: Result<(), &'static str>,
+    pub(crate) rows: Vec<crate::vodserve::retained::RetainedOutputRow>,
+    pub(crate) cleanup_pending: usize,
+}
+
 // split: begin manager
 #[path = "transcode/manager/cache.rs"]
 mod manager_cache;
 #[path = "transcode/manager/candidates.rs"]
 mod manager_candidates;
 pub(crate) use manager_candidates::QUALITY_PLANNING_KEYS;
+#[path = "transcode/content_encoding.rs"]
+mod content_encoding;
 #[path = "transcode/manager/construct.rs"]
 mod manager_construct;
 #[path = "transcode/manager/control.rs"]
@@ -810,6 +859,8 @@ mod manager_plan;
 mod manager_produce;
 #[path = "transcode/manager/publication.rs"]
 mod manager_publication;
+#[path = "transcode/manager/rolling_retained.rs"]
+mod manager_rolling_retained;
 #[path = "transcode/manager/start.rs"]
 mod manager_start;
 // split: end manager

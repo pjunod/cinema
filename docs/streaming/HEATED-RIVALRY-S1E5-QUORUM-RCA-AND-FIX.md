@@ -55,14 +55,14 @@ attributed by this investigation.
 
 ## 2. Incident — the different errors followed the same stream teardown
 
-The viewer used Safari at `http://m6:32400`, playing file **6736**, Heated
+The viewer used Safari at `http://lab6:32400`, playing file **6736**, Heated
 Rivalry S1E5, “I'll Believe in Anything.” The file is 6,504,792,644 bytes,
 3,339.36 seconds, HEVC Main 3840×1600 SDR video and six-channel E-AC-3 audio.
 FFprobe read it successfully; FFmpeg decoded its opening 15 seconds without
 error. This does not validate the entire file or prove Safari compatibility.
 
 The first log capture contained **19 serving-authority losses on each of
-m6, nuc4 and nynuc** in approximately 45 minutes. The first captured loss
+lab6, lab4 and media1** in approximately 45 minutes. The first captured loss
 was around 19:41 EDT, well before this episode's first recorded decision at
 20:21:37. The media file did not initiate the cluster-wide problem.
 
@@ -72,20 +72,20 @@ than assuming clocks are perfectly synchronized.
 
 | Time | Evidence | Consequence |
 |---|---|---|
-| 20:21:40.069 | m6 logs serving authority expired | The initial HLS creation receives HTTP 503 at 20:21:41.035 |
+| 20:21:40.069 | lab6 logs serving authority expired | The initial HLS creation receives HTTP 503 at 20:21:41.035 |
 | 20:22:08.757 | VOD refuses with `vod_index_pending`; temporary copy-HLS starts | The player depends on an active mutable producer |
-| 20:22:41.073 | m6 fences; the episode's session logs self-fencing at 20:22:41.342 | The server terminates that producer |
+| 20:22:41.073 | lab6 fences; the episode's session logs self-fencing at 20:22:41.342 | The server terminates that producer |
 | 20:22:44.105 | Safari reports native media error 3 and requests a transcode fallback | A decoder-labelled error follows the server teardown by about 2.8 seconds |
 | 20:22:46.644 | The fallback receives `409 candidate_recipe_changed_or_decoder_unavailable` | The replacement does not open |
 | 20:23:20.549 | A fresh attempt again selects temporary copy-HLS because the index is pending | Refresh has created another stream vulnerable to the same periodic operation |
-| 20:23:40.558 | m6 fences again; the new session is retired | Another attempt loses its producer |
+| 20:23:40.558 | lab6 fences again; the new session is retired | Another attempt loses its producer |
 | 20:24:03.784 | Web diagnosis says “The stream request looks blocked,” with ad-blocker advice | The UI does not preserve an accurate explanation of the server interruption |
 | 20:24:25.001 | Another attempt again falls back from VOD | The sequence repeats |
 | 20:24:40.073 | Serving authority expires again | The replacement is terminated |
 | 20:25:08.418 | The ad-blocker diagnosis appears again | A second misleading diagnosis follows a known server failure |
 | 20:25:30.181 | Retry reports `503: the local media worker has no serving authority` | The actual cluster failure surfaces again |
 
-The leader was nuc4, Raft node **6**, in term **18070**. Its container had no
+The leader was lab4, Raft node **6**, in term **18070**. Its container had no
 restart or OOM event in the inspected status. CPU quota and cpuset were
 unset, and the sampled host pressure did not show saturation. Those are
 point observations, not a claim that resources can never contribute.
@@ -98,7 +98,7 @@ read without modifying it. At `last_applied + 1`, its SQL payload begins
 `DELETE FROM cluster_fragment_index_jobs` and contains the terminal-job
 retention predicate reproduced in section 4.
 
-| m6 expiry time, EDT | Last applied | Next WAL entry: slow prune |
+| lab6 expiry time, EDT | Last applied | Next WAL entry: slow prune |
 |---|---:|---:|
 | 20:20:40.070 | 26358371 | 26358372 |
 | 20:21:40.069 | 26358665 | 26358666 |
@@ -283,7 +283,7 @@ indexing overdue → prune → worker busy → no file examined → no stamp
         └──────────── next 60-second scheduler tick ─────────┘
 ```
 
-The code establishes this repeat mechanism. Live settings also showed m6's
+The code establishes this repeat mechanism. Live settings also showed lab6's
 last-index stamp at Unix seconds `1790899243`, which is
 **2026-10-02 00:00:43 UTC = 2026-10-01 20:00:43 EDT**, while these later
 attempts ran. This corrects the earlier accidental EST conversion. The
@@ -305,7 +305,7 @@ counts and trial results.
 The [standalone reproduction](../evidence/quorum-prune-repro-2026-10-01.py)
 contains the exact deployed SQL.
 
-The final experiment ran on nuc4 using SQLite **3.53.2**, compiled from the
+The final experiment ran on lab4 using SQLite **3.53.2**, compiled from the
 amalgamation in pinned `libsqlite3-sys 0.38.1`. A private Python process loaded
 that library. No daemon binary, database schema or service configuration was
 changed. The retained library reports `ENABLE_STAT4`; its complete
@@ -446,8 +446,8 @@ limitation. Reproduce the exact candidate case before changing selection.
 The episode had no cluster source attestation, index artifact or fragment
 build job in the inspected tables. A later inspection of **analysis
 requests**, a separate pre-build layer, found a queued `fragment_index`
-request for m6 with `last_error_code=foreground_preempted`. Subtitle
-extraction had completed successfully on nynuc.
+request for lab6 with `last_error_code=foreground_preempted`. Subtitle
+extraction had completed successfully on media1.
 
 This corrects a possible misreading of “no index job”: a prerequisite
 analysis request existed, but it had not produced a fragment-index job or

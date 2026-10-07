@@ -1108,10 +1108,19 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 
 .PHONY: cluster-store-check
+# 8 MiB test threads: in a debug build, one poll of the hundred-step replicated
+# migration loop needs more than libtest's default 2 MiB, so every test that
+# opens a store from an old marker (v47, v65) aborted the whole binary with a
+# stack overflow. Release builds are unaffected; this is a debug-frame bound.
 cluster-store-check: ## Run the Store contracts against SQLite and three voters
-	$(CARGO) test --locked -p plurx-core \
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract -- --test-threads=1
+	# The only end-to-end test of the schema-lineage bridge: a real three-voter
+	# cluster carried from each private and canonical marker to the head.
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
+	  --features cluster-read-cost-validation,hiqlite-contract-tests \
+	  --test schema_lineage_upgrade -- --test-threads=1
 
 .PHONY: cluster-harness-check
 cluster-harness-check: ## Run replicated growth and topology harness contracts
@@ -1454,6 +1463,12 @@ ui-check: ## Sweep every layout and fail if the structural golden moved
 control-browser-check: ## Run the shipped playback-control reporter in a real browser
 	@scripts/control-reporter-browser-check
 
+.PHONY: library-rows-browser-check
+library-rows-browser-check: ## Test grouped library rows with the provisioned Playwright browser
+	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
+		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
+		--test tests/web/library-rows.browser.cjs
+
 # Regenerating the golden is a deliberate act that shows up in a git diff, never
 # a side effect of a normal run — a golden that rewrites itself asserts nothing.
 # Run this when you MEANT to change the UI, then read the diff before committing.
@@ -1465,18 +1480,46 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 # so a JS syntax error in it compiles, links, passes every Rust test, and then
 # serves a blank page; and the theme tables are data, so a token pair that
 # fails contrast is not a type error anywhere. Run this on any web change.
+.PHONY: effort-web-static-check
+effort-web-static-check: ## Lint current web source without behavior or browser fixtures
+	@scripts/js-check
+	@node scripts/web-jsconfig --check
+	@scripts/web-types
+	@node scripts/web-shape-check
+	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
+		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
+		--allow scripts/contrast-allow.txt
+
 .PHONY: media-preparation-browser-check
 media-preparation-browser-check: ## Focused media-info browser regression (PLAYWRIGHT_MODULE may name an installed Playwright)
 	@node --test tests/web/media-preparation.browser.cjs
 
 .PHONY: web-check
-web-check: ## Test playback policy, embedded JS, and every shipped theme
+web-check: web-unit-check ## Test playback policy, embedded JS, and every shipped theme
+	@scripts/web-hls-startup-browser-check
+	@scripts/subtitle-readiness-browser-check
+	@scripts/js-check
+	# Shape, not order: TypeScript's checker (tsc, checkJs) over the same rows,
+	# against a per-file baseline that only shrinks. The file list is generated
+	# from the shell, so a new row is read the day it is served.
+	# docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md §3.
+	@node tests/web/jsconfig-generated.test.js
+	@scripts/web-types
+	@node tests/web/player-typedef.test.js
+	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
+		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
+		--allow scripts/contrast-allow.txt
+
+.PHONY: web-unit-check
+# Every Node test of the web client and its playback policy, with no browser
+# and no TypeScript: about two minutes on two cores. The fast lane's web job
+# runs exactly this, so a web pull request executes the same tests web-check
+# does apart from the two real-browser scripts.
+web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/playback/web-policy.test.js
 	@node --test tests/playback/web-media-recovery.test.js
 	@node tests/playback/web-control.test.js
 	@node --test tests/playback/seek-control.test.js
-	@scripts/web-hls-startup-browser-check
-	@scripts/subtitle-readiness-browser-check
 	@node tests/playback/player-input-contract.test.js
 	@node tests/playback/playback-surface-contract.test.js
 	@node tests/web/player-dom.test.js
@@ -1484,9 +1527,12 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# resume point. One failed session used to erase it for good.
 	@node --test tests/web/progress-never-presented.test.js
 	@node --test tests/web/seek-telemetry.test.js
+	# Continuous quality: protocol refusals, adapter reservations, fMP4 inspection.
+	@node --test tests/web/continuous-quality.test.js tests/web/continuous-adapter.test.js tests/web/continuous-media.test.js
 	@node tests/web/nav-keyboard.test.js
 	@node tests/web/reader.test.js
 	@node tests/web/library-channels.test.js
+	@node tests/web/library-rows.test.js
 	@node tests/web/live-tv.test.js
 	@node tests/web/layout-containment.test.js
 	@node tests/web/calm-library.test.js
@@ -1510,6 +1556,21 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# surface like any other here. Two seconds.
 	@node tests/web/cluster-membership.test.js
 	@node --test tests/web/error-reporter.test.js
+	@node --test tests/playback/current-main-effort-quality.test.js
+	@node --test tests/playback/frame-diagnostics.test.js
+	@node tests/playback/network-shaping.test.js
+	@node --test tests/playback/preparation-measurement.test.js
+	@node --test tests/playback/frame-clock.test.js
+	@node --test tests/playback/quality-cancellation.test.js
+	# Every tests/{web,playback}/*.test.js is run here or is required by a test
+	# that is; tests/operations/test_web_test_inventory.py fails a pull request
+	# that adds one this recipe would not run.
+	@node --test tests/web/content-analysis-failures.test.js
+	@node --test tests/web/dvr-visibility.test.js
+	@node --test tests/web/grid-poster-derivatives.test.js
+	@node --test tests/web/hls-seek.test.js
+	@node --test tests/web/local-search.test.js
+	@node --test tests/web/ui-baseline-capture-clamp.test.js
 	# The split shell is sixty-five plain scripts in one scope: the order they
 	# are served in is a load order. One reads them, one runs them.
 	@node --test tests/web/file-context.test.js
@@ -1521,17 +1582,6 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/asset-order.test.js
 	@node tests/web/asset-load.test.js
 	@node tests/web/asset-layout.test.js
-	@scripts/js-check
-	# Shape, not order: TypeScript's checker (tsc, checkJs) over the same rows,
-	# against a per-file baseline that only shrinks. The file list is generated
-	# from the shell, so a new row is read the day it is served.
-	# docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md §3.
-	@node tests/web/jsconfig-generated.test.js
-	@scripts/web-types
-	@node tests/web/player-typedef.test.js
-	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
-		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
-		--allow scripts/contrast-allow.txt
 
 ## ---- packaging & setup -------------------------------------------------
 
@@ -1540,6 +1590,18 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 VERSION := $(shell sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
 BUILD_REF := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
 BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)
+# The commit's committer time. Image builds pass it as SOURCE_DATE_EPOCH so the
+# binary's built_at stamp and BuildKit's image timestamps are the same on every
+# build of one commit (crates/plurxd/build_support/source_date.rs). `.git` is
+# outside the build context, so the build script cannot read it there itself.
+#
+# Empty for a `-dirty` tree: HEAD's time would date a binary that is not HEAD,
+# so the build script falls back to the clock. And `:=`, not `?=`: the image is
+# stamped with this checkout's BUILD_REF and BUILD_SHA, so its date comes from
+# the same checkout, never from a SOURCE_DATE_EPOCH some other tool left
+# exported in the shell. A deliberate override is still
+# `make docker SOURCE_DATE_EPOCH=<seconds>`, which Make lets win.
+SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))
 HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
 
 .PHONY: version
@@ -1548,7 +1610,7 @@ version: ## Print the version and git build stamp a build would report
 
 .PHONY: docker
 docker: ## Build the container image
-	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" -t plurx/plurxd:latest .
+	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .
 
 .PHONY: container-smoke
 container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
@@ -1616,7 +1678,7 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 docker-up: ## Build + (re)start Compose after its startup budget passes
 	cd deploy && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe

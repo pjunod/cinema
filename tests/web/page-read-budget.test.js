@@ -1063,8 +1063,12 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   const poll = shippedSource("pollDvFileActions");
   assert.match(poll, /results\.some\(Boolean\)[\s\S]*armDvFilePoll[\s\S]*clearInterval\(PAGE_TIMER\)/,
     "the item timer stops after the first all-terminal snapshot");
+  // f632af81d moved the model out of loadItem so a successor episode can be
+  // prepared without side effects; the binding lives where the model is built.
   const loadItem = shippedSource("loadItem");
-  assert.match(loadItem, /f\.library_id=it\.library_id/,
+  assert.match(loadItem, /page=itemPageModel\(id,d,libs\)/,
+    "item detail builds its page through the shared model");
+  assert.match(shippedSource("itemPageModel"), /f\.library_id=it\.library_id/,
     "item detail binds its already-loaded library id to every file action");
   const queueLibrary = shippedSource("convertDvLibrary");
   assert.match(queueLibrary, /result\.saturated/,

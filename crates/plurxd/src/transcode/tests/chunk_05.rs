@@ -1183,6 +1183,672 @@
         );
     }
 
+    #[tokio::test]
+    async fn rolling_real_copy_complete_retention_attaches_new_owner_and_verified_body() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("retained.mp4");
+        write_real_video(&source, 12);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(
+            &store,
+            &source.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(12_000),
+                container: Some("mp4".into()),
+                video_codec: Some("h264".into()),
+                width: Some(160),
+                height: Some(120),
+                ..Default::default()
+            },
+        ).await;
+        store.put_setting(keys::HLS_READRATE, "0").await.expect("readrate");
+        store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("retained allowance");
+        // Rolling retention is a Developer switch, off by default (D3).
+        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
+        let work = crate::test_tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(
+            Arc::clone(&store), work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu,
+        ));
+        // No sampler runs in a test: publish the headroom it would have.
+        manager.record_retained_headroom(1 << 50);
+        let options = CopySessionOptions {
+            convert_dolby_vision: false,
+            transcode_audio: false,
+            preserve_dolby_vision: false,
+        };
+        let initial = manager.start_copy(file_id, 0.0, None, options, "owner", "first")
+            .await.expect("ordinary initial copy");
+        let first = manager.sessions.lock().await.get(&initial.session_id).cloned().expect("first owner");
+        assert!(first.rolling_artifact.is_none(), "cold facts remain uncaptured");
+        let production = first.rolling_provenance.as_ref().expect("actual inherited input");
+        assert!(first.rolling_collection.is_some(), "allowance reserved before publication");
+        let artifact = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(artifact) = manager.vod.acquire_rolling_output(production) {
+                    break artifact;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("normal child and reader completion publish retained inventory");
+        let rates = artifact.bandwidth().expect("complete mux rates");
+        assert!(rates.average_bps > 0 && rates.peak_bps >= rates.average_bps);
+        let next = manager.start_copy(file_id, 0.0, None, options, "owner", "second")
+            .await.expect("compatible new attachment");
+        let second = manager.sessions.lock().await.get(&next.session_id).cloned().expect("second owner");
+        assert!(second.rolling_artifact.is_some());
+        assert!(second.child.lock().await.is_none(), "no new producer owns the retained body");
+        let playlist = manager.playlist(&next.session_id).await.expect("actual playlist owner");
+        assert!(std::str::from_utf8(&playlist).expect("playlist").contains("#EXT-X-ENDLIST"));
+        let manifest = artifact.manifest().expect("verified inventory");
+        let media_name = manifest.objects.iter().find(|object| object.name.starts_with("seg"))
+            .expect("actual media object").name.clone();
+        let body = manager.segment(&next.session_id, &media_name).await.expect("verified GET")
+            .expect("retained media ready");
+        drop(body);
+        assert!(first.rolling_artifact.is_none(), "already-issued cold owner is never rebound");
+        manager.stop_session(&next.session_id, "test_done").await;
+        manager.stop_session(&initial.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn rolling_refused_proof_keeps_real_copy_playable_and_source_identity_closed() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("ordinary.mp4");
+        write_real_video(&source, 12);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(&store, &source.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(12_000), container: Some("mp4".into()),
+                video_codec: Some("h264".into()), width: Some(160), height: Some(120),
+                ..Default::default()
+            }).await;
+        store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
+        // Rolling retention is a Developer switch, off by default (D3).
+        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced producer");
+        let work = crate::test_tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
+            work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu));
+        // No sampler runs in a test: publish the headroom it would have.
+        manager.record_retained_headroom(1 << 50);
+        let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
+            convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+        }, "owner", "refused-proof").await.expect("ordinary copy");
+        let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("owner");
+        let production = session.rolling_provenance.as_ref().expect("actual source binding");
+        let collection = session.rolling_collection.as_ref().expect("bounded optional collection");
+        // A received/foreign name is never a hardlink target or proof authority.
+        collection.capture(source.clone(), "../foreign.ts",
+            crate::rolling_output::CommittedObject { bytes: 1, digest: [0; 32] });
+        assert!(manager.vod.acquire_rolling_output(production).is_none());
+        let playlist = manager.playlist(&info.session_id).await.expect("refusal preserves playback");
+        let text = std::str::from_utf8(&playlist).expect("playlist");
+        let name = text.lines().find(|line| line.starts_with("seg") && !line.starts_with('#'))
+            .expect("ordinary materialized media");
+        let body = manager.segment(&info.session_id, name).await.expect("ordinary GET")
+            .expect("ordinary body survives proof refusal");
+        drop(body);
+        manager.stop_session(&info.session_id, "test_done").await;
+        // Replacement of the pathname cannot turn the held old input into a
+        // fresh source fact, even though its old open descriptor still exists.
+        let replacement = media.path().join("replacement.mp4");
+        write_real_video(&replacement, 1);
+        std::fs::rename(&replacement, &source).expect("replace source object");
+        assert!(!production.input_current().await);
+        assert!(manager.vod.acquire_rolling_output(production).is_none());
+        assert!(session.rolling_artifact.is_none());
+    }
+
+    #[tokio::test]
+    async fn rolling_real_put_complete_ts_attaches_exact_new_owner() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("put-input.mp4");
+        write_real_video(&source, 12);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(&store, &source.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(12_000), container: Some("mp4".into()),
+                video_codec: Some("h264".into()), width: Some(160), height: Some(120),
+                ..Default::default()
+            }).await;
+        store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
+        // Rolling retention is a Developer switch, off by default (D3).
+        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
+        store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
+        let work = crate::test_tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
+            work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu));
+        // No sampler runs in a test: publish the headroom it would have.
+        manager.record_retained_headroom(1 << 50);
+        let first = manager.start(file_id, 120, 0.0, None, None, "owner", "first-put")
+            .await.expect("real PUT transcode");
+        let session = manager.sessions.lock().await.get(&first.session_id).cloned().expect("first");
+        let production = session.rolling_provenance.as_ref().expect("held actual input");
+        let artifact = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(artifact) = manager.vod.acquire_rolling_output(production) { break artifact; }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("normal complete PUT inventory");
+        let manifest = artifact.manifest().expect("complete inventory");
+        assert!(!manifest.contains_object("init.mp4"), "TS must not invent initialization");
+        let name = manifest.objects.iter().find(|object| object.name.ends_with(".ts"))
+            .expect("actual muxed TS").name.clone();
+        let next = manager.start(file_id, 120, 0.0, None, None, "owner", "second-put")
+            .await.expect("new exact transcode attachment");
+        let next_session = manager.sessions.lock().await.get(&next.session_id).cloned().expect("next");
+        assert!(next_session.rolling_artifact.is_some());
+        assert!(next_session.child.lock().await.is_none());
+        let playlist = manager.playlist(&next.session_id).await.expect("retained TS playlist");
+        assert!(std::str::from_utf8(&playlist).expect("playlist").contains("#EXT-X-ENDLIST"));
+        let body = manager.segment(&next.session_id, &name).await.expect("verified TS GET")
+            .expect("complete TS body");
+        drop(body);
+        assert!(session.rolling_artifact.is_none());
+        manager.stop_session(&next.session_id, "test_done").await;
+        manager.stop_session(&first.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn rolling_integrity_refusal_is_one_way_and_retained_copy_bypasses_full_scratch() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("integrity.mp4");
+        write_real_video(&source, 12);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(&store, &source.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(12_000), container: Some("mp4".into()),
+                video_codec: Some("h264".into()), width: Some(160), height: Some(120),
+                ..Default::default()
+            }).await;
+        store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
+        // Rolling retention is a Developer switch, off by default (D3).
+        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
+        store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
+        let work = crate::test_tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
+            work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu));
+        // No sampler runs in a test: publish the headroom it would have.
+        manager.record_retained_headroom(1 << 50);
+        let options = CopySessionOptions { convert_dolby_vision: false,
+            transcode_audio: false, preserve_dolby_vision: false };
+        let first = manager.start_copy(file_id, 0.0, None, options, "owner", "integrity-first")
+            .await.expect("real producer");
+        let incumbent = manager.sessions.lock().await.get(&first.session_id).cloned().expect("first");
+        let production = incumbent.rolling_provenance.as_ref().expect("held source");
+        let artifact = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(artifact) = manager.vod.acquire_rolling_output(production) { break artifact; }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("real complete body");
+        let name = artifact.manifest().expect("manifest").objects.iter()
+            .find(|object| object.name.starts_with("seg")).expect("media").name.clone();
+        // Admission is intentionally impossible for any new producer. Exact
+        // retained attachment must resolve before the scratch reservation.
+        store.put_setting(keys::HLS_SCRATCH_MAX_BYTES, "1").await.expect("full scratch");
+        assert!(manager.scratch_ledger.reserve(1, 1).is_err(), "incumbent keeps its real charge");
+        let next = manager.start_copy(file_id, 0.0, None, options, "owner", "integrity-next")
+            .await.expect("retained answer bypasses producer admission");
+        let session = manager.sessions.lock().await.get(&next.session_id).cloned().expect("retained");
+        assert!(session.scratch.is_none());
+        assert!(session.child.lock().await.is_none());
+        let held_body = manager.segment(&next.session_id, &name).await.expect("verified GET")
+            .expect("issued immutable body");
+        std::fs::write(artifact.directory.join(&name), b"corrupt").expect("owned fixture corruption");
+        assert!(matches!(manager.segment_for_publication(&next.session_id, &name).await,
+            Ok(SegmentPublication::Failed(_))), "real HTTP integrity classification");
+        assert!(!artifact.acquirable());
+        assert!(manager.vod.acquire_rolling_output(production).is_none());
+        assert!(manager.vod.acquire_rolling_output(production).is_none(), "no TTL renewal/reacquisition");
+        if let Ok(ordinary) = manager.start_copy(file_id, 0.0, None, options, "owner", "integrity-third").await {
+            let ordinary_session = manager.sessions.lock().await.get(&ordinary.session_id)
+                .cloned().expect("ordinary recovery");
+            assert!(ordinary_session.rolling_artifact.is_none(), "bad artifact is not reacquired");
+            manager.stop_session(&ordinary.session_id, "test_done").await;
+        }
+        assert!(incumbent.rolling_artifact.is_none(), "issued cold facts remain unchanged");
+        drop(held_body);
+        manager.stop_session(&next.session_id, "test_done").await;
+        manager.stop_session(&first.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn rolling_busy_optional_capture_never_waits_on_ordinary_publication() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("busy-proof.mp4");
+        write_real_video(&source, 12);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(&store, &source.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(12_000), container: Some("mp4".into()),
+                video_codec: Some("h264".into()), width: Some(160), height: Some(120),
+                ..Default::default()
+            }).await;
+        store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
+        // Rolling retention is a Developer switch, off by default (D3).
+        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced writer");
+        let work = crate::test_tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
+            EncoderCaps::default(), Pipeline::Cpu));
+        // No sampler runs in a test: publish the headroom it would have.
+        manager.record_retained_headroom(1 << 50);
+        let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
+            convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+        }, "owner", "busy-proof").await.expect("ordinary start");
+        let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
+        let collection = session.rolling_collection.as_ref().expect("optional reservation");
+        let held = collection.hold_optional_capture_for_test().await;
+        // This is the actual synchronous capture boundary used by both writers.
+        // A stalled owner cannot be joined by the ordinary commit path.
+        collection.capture(source, "seg00099.m4s",
+            crate::rolling_output::CommittedObject { bytes: 1, digest: [0; 32] });
+        let playlist = tokio::time::timeout(Duration::from_secs(20), manager.playlist(&info.session_id))
+            .await.expect("ordinary publication independent of optional owner").expect("playlist");
+        assert!(!playlist.is_empty());
+        assert!(manager.vod.acquire_rolling_output(session.rolling_provenance.as_ref().expect("source")).is_none());
+        drop(held);
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    // ---- D3 (main-merge defects 2026-10-04): retention containment --------
+
+    /// A real 12 s copy session with retention on. `readrate` 1 keeps the
+    /// producer alive through the test; 0 lets it finish and publish.
+    async fn d3_copy_session(
+        readrate: &str,
+        retention: bool,
+    ) -> (
+        Arc<TranscodeManager>,
+        Arc<Session>,
+        StartInfo,
+        i64,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("d3.mp4");
+        write_real_video(&source, 12);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(&store, &source.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(12_000), container: Some("mp4".into()),
+                video_codec: Some("h264".into()), width: Some(160), height: Some(120),
+                ..Default::default()
+            }).await;
+        store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
+        if retention {
+            store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
+        }
+        store.put_setting(keys::HLS_READRATE, readrate).await.expect("pacing");
+        // The default 90 s burst consumes this entire 12 s fixture before
+        // retention can be abandoned; pacing needs a zero burst as well.
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
+        let work = crate::test_tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
+            EncoderCaps::default(), Pipeline::Cpu));
+        manager.record_retained_headroom(1 << 50);
+        let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
+            convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+        }, "owner", "d3").await.expect("ordinary start");
+        let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
+        (manager, session, info, file_id, media, work)
+    }
+
+    async fn d3_wait_for_links(directory: &std::path::Path) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if std::fs::read_dir(directory).is_ok_and(|mut entries| entries.next().is_some()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("the collection linked a segment");
+    }
+
+    #[tokio::test]
+    async fn rolling_retention_off_by_default_with_budget_set() {
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", false).await;
+        assert!(session.rolling_collection.is_none(),
+            "cache.max_gb alone no longer turns rolling retention on");
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn abandon_releases_links_while_session_alive() {
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", true).await;
+        let collection = session.rolling_collection.as_ref().expect("collection");
+        let directory = collection.directory_for_test();
+        d3_wait_for_links(&directory).await;
+        collection.abandon();
+        // A published link can still hold the capture gate. Collection is
+        // deferred until that owned capture settles, even with a live session.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while directory.exists() {
+                manager.vod.maintain().await;
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("abandoned links collected after capture settles");
+        assert!(manager.sessions.lock().await.contains_key(&info.session_id),
+            "the session is still playing");
+        assert!(!directory.exists(),
+            "an abandoned collection's links are released while its session lives");
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn abandon_is_a_no_op_once_published() {
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("0", true).await;
+        let production = session.rolling_provenance.as_ref().expect("production");
+        let artifact = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(artifact) = manager.vod.acquire_rolling_output(production) {
+                    break artifact;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("published");
+        drop(artifact);
+        session.rolling_collection.as_ref().expect("collection").abandon();
+        manager.vod.maintain().await;
+        assert!(manager.vod.acquire_rolling_output(production).is_some(),
+            "attached sessions serve from a published artifact: abandon cannot touch it");
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn capture_racing_abandon_leaves_no_link() {
+        let (manager, session, info, file_id, _media, work) = d3_copy_session("1", true).await;
+        let production = session.rolling_provenance.as_ref().expect("production");
+        // A collection of its own on the session's filesystem, so the live
+        // session's captures can take neither the pause nor the gate.
+        let collection = manager.vod.begin_rolling_collection(
+            Arc::clone(production), 1 << 30, 1 << 20,
+            Instant::now() + Duration::from_secs(60),
+            Arc::clone(manager.scratch_ledger.headroom()),
+            work.path(), file_id, "d3-race",
+        ).await.expect("collection");
+        let directory = collection.directory_for_test();
+        let source = work.path().join("late.m4s");
+        std::fs::write(&source, [7_u8; 64]).expect("late object");
+        let (reached, resume) = collection.pause_next_link_for_test();
+        collection.capture(source, "seg09999.m4s",
+            crate::rolling_output::CommittedObject { bytes: 64, digest: [0; 32] });
+        // The capture holds the gate and has passed every check, including
+        // `refused`; the abandonment lands in the window before its link.
+        tokio::task::spawn_blocking(move || reached.recv())
+            .await.expect("join").expect("the capture reached its link");
+        collection.abandon();
+        assert!(collection.abandoned());
+        manager.vod.maintain().await;
+        assert!(directory.exists(), "the collector waits while a capture holds the gate");
+        resume.send(()).expect("resume the capture");
+        // The capture links, sees the abandonment, takes its link back and
+        // only then releases the gate.
+        drop(collection.hold_optional_capture_for_test().await);
+        assert!(!directory.join("seg09999.m4s").exists(),
+            "a capture that raced an abandonment takes back its own link");
+        manager.vod.maintain().await;
+        assert!(!directory.exists(), "and the collector then frees the directory");
+        drop(collection);
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    /// Stop on a published output: refused while a session reads it, and not
+    /// refused merely because its own producing session is still alive.
+    #[tokio::test]
+    async fn release_is_refused_for_a_reader_but_not_for_the_producer() {
+        use crate::vodserve::retained::RetainedRelease;
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("0", true).await;
+        let production = session.rolling_provenance.as_ref().expect("production");
+        let nonce = session.rolling_collection.as_ref().expect("collection").nonce_for_test();
+        let reader = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(artifact) = manager.vod.acquire_rolling_output(production) {
+                    break artifact;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("published");
+        let row = || manager.retained_output_snapshot().into_iter()
+            .find(|row| row.nonce == nonce.to_string()).expect("the output's row");
+        assert!(row().attached, "a reader is attached");
+        assert_eq!(manager.release_retained_output(nonce), RetainedRelease::Attached,
+            "Stop is refused (409) while a session reads the output");
+        drop(reader);
+        // The producing session and its collection are still alive here.
+        assert!(session.rolling_collection.is_some());
+        let retained = row();
+        assert_eq!(retained.state, "retained");
+        assert!(!retained.attached, "the producer's own reference is not a reader");
+        assert_eq!(manager.release_retained_output(nonce), RetainedRelease::Released);
+        assert!(manager.vod.acquire_rolling_output(production).is_none(),
+            "a released output is no longer served");
+        assert_eq!(row().state, "releasing");
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_artifact_does_not_block_the_queue_behind_it() {
+        // In front: a published artifact a reader still holds, retired by
+        // integrity refusal, so the collector cannot delete it yet.
+        let (manager, first, first_info, file_id, _media, _work) = d3_copy_session("0", true).await;
+        let production = first.rolling_provenance.as_ref().expect("production");
+        let held = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(artifact) = manager.vod.acquire_rolling_output(production) {
+                    break artifact;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("published");
+        manager.vod.refuse_rolling_output(&held);
+        // Behind it: a live session's collection, abandoned.
+        manager.stop_session(&first_info.session_id, "test_done").await;
+        manager.store.put_setting(keys::HLS_READRATE, "1").await.expect("paced");
+        let second_info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
+            convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+        }, "owner", "d3-second").await.expect("second start");
+        let second = manager.sessions.lock().await.get(&second_info.session_id).cloned()
+            .expect("second");
+        let collection = second.rolling_collection.as_ref().expect("second collection");
+        let directory = collection.directory_for_test();
+        d3_wait_for_links(&directory).await;
+        collection.abandon();
+        manager.vod.maintain().await;
+        assert!(!directory.exists(), "the abandoned artifact behind a held one is collected");
+        drop(held);
+        manager.stop_session(&second_info.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn collection_refused_across_filesystems_reserves_nothing() {
+        let (manager, session, info, file_id, _media, work) = d3_copy_session("1", true).await;
+        let production = session.rolling_provenance.as_ref().expect("production");
+        // `/proc` is never the filesystem the retained namespace is on.
+        let refused = manager.vod.begin_rolling_collection(
+            Arc::clone(production), 1 << 30, 1 << 20,
+            Instant::now() + Duration::from_secs(60),
+            Arc::clone(manager.scratch_ledger.headroom()),
+            std::path::Path::new("/proc"), file_id, "d3",
+        ).await;
+        assert!(refused.is_none(), "a hard link across filesystems fails; reserve nothing");
+        let rows = manager.retained_output_snapshot();
+        assert_eq!(rows.len(), 1, "only the session's own collection: {rows:?}");
+        let accepted = manager.vod.begin_rolling_collection(
+            Arc::clone(production), 1 << 30, 1 << 20,
+            Instant::now() + Duration::from_secs(60),
+            Arc::clone(manager.scratch_ledger.headroom()),
+            work.path(), file_id, "d3",
+        ).await;
+        assert!(accepted.is_some(), "the same filesystem admits");
+        drop(accepted);
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn capture_refuses_below_free_space_headroom() {
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", true).await;
+        let collection = session.rolling_collection.as_ref().expect("collection");
+        // The sample says the disk cannot hold what scratch may still write.
+        manager.scratch_ledger.headroom().record(
+            0, &manager.scratch_ledger.snapshot(), 1 << 30);
+        let source = std::env::temp_dir().join(format!("d3-{}.m4s", uuid::Uuid::new_v4()));
+        std::fs::write(&source, [1_u8; 32]).expect("object");
+        collection.capture(source.clone(), "seg08888.m4s",
+            crate::rolling_output::CommittedObject { bytes: 32, digest: [0; 32] });
+        assert!(collection.abandoned(), "a capture below the reserve abandons the collection");
+        let _ = std::fs::remove_file(source);
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn headroom_failure_sheds_unpublished_collections() {
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", true).await;
+        let collection = session.rolling_collection.as_ref().expect("collection");
+        assert!(!collection.abandoned());
+        manager.record_retained_headroom(0);
+        assert!(collection.abandoned(),
+            "the sampler sheds every unpublished collection when headroom fails");
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn session_stop_mid_title_abandons_collection() {
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", true).await;
+        let collection = Arc::clone(session.rolling_collection.as_ref().expect("collection"));
+        d3_wait_for_links(&collection.directory_for_test()).await;
+        drop(session);
+        manager.stop_session(&info.session_id, "test_done").await;
+        assert!(collection.abandoned(), "a session stopped before its title ends never publishes");
+        manager.vod.maintain().await;
+        assert!(!collection.directory_for_test().exists());
+    }
+
+    #[tokio::test]
+    async fn activity_reports_and_stops_retained_output() {
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", true).await;
+        let collection = session.rolling_collection.as_ref().expect("collection");
+        let rows = manager.retained_output_snapshot();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, "collecting");
+        assert_eq!(rows[0].title, "Heat");
+        assert_eq!(manager.release_retained_output(collection.nonce_for_test()),
+            crate::vodserve::retained::RetainedRelease::Released);
+        assert!(collection.abandoned());
+        assert_eq!(manager.release_retained_output(uuid::Uuid::new_v4()),
+            crate::vodserve::retained::RetainedRelease::Unknown);
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rolling_attested_initial_spawn_does_not_reresolve_changed_executable_symlink() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("executable-input.mp4");
+        write_real_video(&source, 12);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(&store, &source.to_string_lossy(),
+            plurx_core::domain::ProbeResult { duration_ms: Some(12_000),
+                container: Some("mp4".into()), video_codec: Some("h264".into()),
+                width: Some(160), height: Some(120), ..Default::default() }).await;
+        let file = store.get_file(file_id).await.expect("file read").expect("file");
+        let executable = crate::ffmpeg::encoder_executable_path().expect("actual ffmpeg");
+        let alias = media.path().join("configured-ffmpeg");
+        std::os::unix::fs::symlink(&executable, &alias).expect("alias A");
+        let proof = crate::rolling_provenance::RollingProduction::capture(&file, b"exact-test-graph",
+            false, &alias.to_string_lossy()).await.expect("actual executable A captured");
+        std::fs::remove_file(&alias).expect("replace alias only");
+        std::os::unix::fs::symlink("/usr/bin/false", &alias).expect("alias B");
+        assert_eq!(proof.executable_path(), executable.as_path());
+        // Exercise the same producer wrapper used by proof-enabled initial
+        // launches, not a second command constructor or the mutable alias.
+        let work = crate::test_tempdir().expect("runtime cache");
+        let spawned = spawn_ffmpeg_at(proof.executable_path(), &["-version".to_owned()],
+            crate::process_control::ChildWork::realtime("executable provenance regression"),
+            "copy", "executable-provenance-test",
+            FfmpegProgressObserver::offline(Arc::new(Progress::new()), 0), work.path(),
+            FfmpegDescriptors::default(), DiagnosticObservation::copy("executable-provenance-test"))
+            .expect("captured executable launch");
+        let (mut child, job, diagnostics) = spawned.into_parts();
+        let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(status) => status.expect("wait"),
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                panic!("bounded version producer timed out");
+            }
+        };
+        assert!(status.success(), "mutable alias B was not executed");
+        let _ = diagnostics.settle(Duration::from_secs(2),
+            crate::decoder_health::ExitDisposition::CleanEnd).await;
+        drop(job);
+    }
+
+    #[tokio::test]
+    async fn rolling_retained_transcode_resolves_before_full_software_and_scratch_admission() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("pre-admission.mp4");
+        write_real_video(&source, 12);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(&store, &source.to_string_lossy(),
+            plurx_core::domain::ProbeResult { duration_ms: Some(12_000),
+                container: Some("mp4".into()), video_codec: Some("h264".into()),
+                width: Some(160), height: Some(120), ..Default::default() }).await;
+        store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
+        // Rolling retention is a Developer switch, off by default (D3).
+        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
+        store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
+        let work = crate::test_tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
+            EncoderCaps::default(), Pipeline::Cpu));
+        // No sampler runs in a test: publish the headroom it would have.
+        manager.record_retained_headroom(1 << 50);
+        let first = manager.start(file_id, 120, 0.0, None, None, "owner", "admission-first")
+            .await.expect("real PUT producer");
+        let incumbent = manager.sessions.lock().await.get(&first.session_id).cloned().expect("first");
+        let production = incumbent.rolling_provenance.as_ref().expect("held source");
+        let _artifact = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(artifact) = manager.vod.acquire_rolling_output(production) { break artifact; }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("complete real PUT body");
+        let cpu = manager.admissions.try_admit_software(1, 100, Priority::Background)
+            .expect("real background software ownership");
+        store.put_setting(keys::HLS_SCRATCH_MAX_BYTES, "1").await.expect("full scratch");
+        assert!(manager.scratch_ledger.reserve(1, 1).is_err(), "incumbent keeps its real charge");
+        let next = tokio::time::timeout(Duration::from_secs(2),
+            manager.start(file_id, 120, 0.0, None, None, "owner", "admission-next"))
+            .await.expect("no encoder wait").expect("exact retained answer");
+        let session = manager.sessions.lock().await.get(&next.session_id).cloned().expect("next");
+        assert!(session.rolling_artifact.is_some());
+        assert!(session.scratch.is_none());
+        assert!(session.sw_permit.lock().expect("permit lock").is_none());
+        assert!(session.child.lock().await.is_none());
+        drop(cpu);
+        manager.stop_session(&next.session_id, "test_done").await;
+        manager.stop_session(&first.session_id, "test_done").await;
+    }
+
     /// M8's shipped-shape test for the rolling session: `start_copy`, the
     /// production start path, leaves the session's hook slot on
     /// [`NoopSessionHooks`], every awaited point is ready at its first poll,

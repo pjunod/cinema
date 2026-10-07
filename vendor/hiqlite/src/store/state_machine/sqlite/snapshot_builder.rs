@@ -45,6 +45,8 @@ pub struct SQLiteSnapshotBuilder {
     #[cfg(feature = "backup")]
     pub path_backups: String,
     pub path_snapshots: String,
+    pub(crate) database_path: std::path::PathBuf,
+    pub(crate) storage_deferral: std::time::Duration,
     pub write_tx: flume::Sender<WriterRequest>,
     pub(crate) snapshot_files: Arc<Mutex<SnapshotFileState>>,
     pub(crate) snapshot_recovery_pending: Arc<AtomicBool>,
@@ -67,6 +69,10 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
     #[tracing::instrument(level = "trace", skip(self))]
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfigSqlite>, StorageError<NodeId>> {
         let timer = SnapshotTimer::start(SnapshotOperation::Build);
+        // Storage-only admission owns no publication state. Incoming receive
+        // and install must remain live throughout a bounded deferral.
+        crate::snapshot_admission::wait_for_storage(&self.database_path, self.storage_deferral)
+            .await;
         // Snapshot construction and installation both replace the current
         // state-machine image. Serialize their file publication so cleanup
         // always reads the operation that actually completed last.

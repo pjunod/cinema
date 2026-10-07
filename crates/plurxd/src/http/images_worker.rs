@@ -586,12 +586,14 @@ pub(crate) async fn run(state: AppState) {
                 Err(error) => tracing::warn!(%error,"artwork verification discovery failed"),
             }
         }
+        let mapped_progress = super::jellyfin_artwork_pass(&state).await;
         let progressed = pass(&state, &boot, &mut cursor)
             .await
             .unwrap_or_else(|error| {
                 tracing::warn!(%error, "durable artwork pass failed");
                 false
             });
+        let progressed = progressed || mapped_progress;
         tokio::select! {
             () = state.artwork_fetch.wake.notified() => {},
             () = tokio::time::sleep(pacing.after_completion(progressed)) => {},

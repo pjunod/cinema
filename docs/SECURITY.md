@@ -406,6 +406,57 @@ Kept honest by
 which asserts a scan key gets 401/403 from `/settings`, `/users` and `/me` —
 and by `only_an_admin_manages_keys`, which asserts a key cannot mint another.
 
+## Jellyfin compatibility — mapped artwork and one-title media links
+
+Two parts of the `/jellyfin` surface answer without a login, both approved by
+the operator on 2026-10-03 and both off whenever the Developer switch is off:
+
+- **Mapped artwork.** Posters and backdrops of mapped movie/TV items are served
+  to anyone who has the artwork URL. The item's random wire ID limits
+  enumeration but is not access control. There is no listing route, no user
+  avatar, no arbitrary path or size: widths quantize to the existing
+  derivative set, a miss enqueues bounded deduplicated work for the existing
+  artwork owner, and each client (an IPv4 address or an IPv6 /64) admits at
+  most 20 misses a minute from a fixed 4,096-entry table that refuses rather
+  than evicts. Warm images do no work and are not counted.
+- **One-title media links.** A direct-play negotiation, made with a login,
+  returns one 256-bit secret as the source `ETag`. It is the token of a native
+  one-file grant (only its SHA-256 is stored) for that title and that play.
+  It expires within 24 hours of the negotiation, and new requests stop
+  working on `Stop`, on replacement by a newer play, when the switch is saved
+  off, or when its login is revoked or idle-expires (each request
+  re-authenticates that login's digest, which also counts as activity). A
+  response already streaming finishes. The native open-in grant route
+  refuses it. It opens only that item's direct bytes. Treat a URL carrying it as
+  a credential for one title for at most a day; it grants nothing else.
+
+Streams for HLS and every subtitle still require the compatibility login on
+each request. Since 2026-10-04 the URLs the facade returns (`TranscodingUrl`,
+`DirectStreamUrl`, subtitle `DeliveryUrl`, and every child URI in a facade
+manifest) carry that login as `ApiKey`, exactly as Jellyfin's own URLs do:
+Jellyfin for Android TV sends no header on media, HLS or subtitle requests
+(J0 trace), so without it those requests could not authenticate at all. The
+value is only ever the compatibility login the same request presented, never
+a native token, and it is returned only to that authenticated caller. Request
+logs omit the query. Treat such a URL as that login: it reaches `/jellyfin`
+until sign-out, revocation or idle expiry, and nothing else. A per-play
+capability in place of the login would be tighter; it needs new storage and
+remains open as hardening.
+
+A compatibility login is not a native bearer. The token Infuse or Jellyfin
+Android TV receives authenticates only `/jellyfin`; the native API, the Plex
+facade and the cached admin proof all refuse it, so a token copied off a shared
+TV cannot reach settings or mint keys. It still appears in the account's device
+list, where it can be revoked. Signing out of the facade revokes the token
+before any media cleanup, so a busy release cannot leave it valid.
+
+The facade also answers on Jellyfin's standard port (`server.jellyfin_port`,
+default 8096) on the main listener's address, so a client given only a host
+connects. Every request there is mapped under `/jellyfin` before routing:
+nothing native, no web app and no Plex route is reachable on it, and while the
+switch is off it answers a JSON 404 to everything. Set `jellyfin_port = 0` to
+close that listener.
+
 ## Live TV capabilities — one tuner, one URL, no account bearer
 
 A live session is not a library read, and its URLs end up in places library

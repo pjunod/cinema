@@ -7,7 +7,7 @@ version = 1
 entries = []
 
 
-# Passing opt-in fixtures are a separate inventory from temporarily broken
+# Explicit opt-in fixtures are a separate inventory from temporarily broken
 # tests. Their exact commands supply a disposable namespace; they are never
 # counted as known-red, and never qualify a production Tailscale topology.
 [[fixtures]]
@@ -86,3 +86,10 @@ owner = "sharing"
 reason = "Authenticated Source and B authority requires a real pinned peer in a disposable CGNAT namespace."
 requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
 command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_forwarding_fixture.rs::http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure"
+owner = "sharing"
+reason = "Actual selected receiver members and accepted H2 drivers forward protected media to a retained owner and settle End only after physical driver closure; pinned Source transport requires an isolated CGNAT namespace. This fixture does not qualify remote-only mounts or production Tailscale topology."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure -- --ignored --exact --nocapture"

@@ -466,7 +466,6 @@ function catalogLibsChanged(){
 // ready.
 const CATALOG_WHY_COLLECTIONS="Collections don’t exist on the server yet — there is nothing behind this tab to list. It arrives when the server learns what a collection is.";
 const CATALOG_WHY_CATEGORIES="Categories needs genre data — coming with the metadata milestone.";
-const CATALOG_WHY_LIST="List view needs the codec, HDR, audio and size columns, and the library response doesn’t carry them yet — coming with the browse-data milestone. Asking for them per row would be one request per item, so it stays off until the list itself carries them.";
 
 // A control that is visibly, announcedly and structurally not ready.
 //  - a <span>, so it is not focusable and not an action: there is nothing to
@@ -490,12 +489,7 @@ function catalogLibraryShell(m){
       ${catalogSoon("px-ltab","Collections",CATALOG_WHY_COLLECTIONS)}
       ${catalogSoon("px-ltab","Categories",CATALOG_WHY_CATEGORIES)}
     </nav>`;
-  // Grid is not a button either: it is the only view, so it is a state, not a
-  // choice. Making it pressable would promise a toggle that has one position.
-  const view=`<span class="px-view" role="group" aria-label="View">
-      <span class="px-vt on" aria-current="true"><span aria-hidden="true">▦</span> Grid</span>
-      ${catalogSoon("px-vt","☰ List",CATALOG_WHY_LIST)}
-    </span>`;
+  const view=libraryViewToggle();
   // The selects are classic's, verbatim, including the onchange strings: they
   // are behaviour, and a layout that retypes them is a layout that can get
   // them subtly wrong. The wrapper keeps the shipped `libbar` class because
@@ -509,9 +503,7 @@ function catalogLibraryShell(m){
       <span class="lbl" style="margin-left:8px">Show</span>
       <select data-library-watch-filter aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
         ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select>
-      <span class="lbl" style="margin-left:8px">Per page</span>
-      <select aria-label="Per page" onchange="setPerPage(this.value);libGoPage(0)">
-        ${LIB_SIZES.map(n=>libOpt(String(n),String(n),String(LIB_PER))).join("")}${libOpt("all","All",String(LIB_PER))}</select>
+      ${libraryPageSize()}
     </div>
     <span class="muted" id="libcount"></span></div>`;
   const head=pageHead([{href:"#/",label:"Home"},{label:m.title}],m.title);

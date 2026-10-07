@@ -2,6 +2,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderName, Response, StatusCode};
 use futures_util::{future::BoxFuture, stream, StreamExt};
+use plurx_core::cluster::clock::{
+    ClockDecision, ClockRefusal, ClusterClockGuard, OwnedClockAcquisitionTicket,
+};
 use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::{
     MediaSessionActivation, MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
@@ -140,6 +144,7 @@ const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
 const MAX_CONTROL_RATE_ENTRIES: usize = 4_096;
 const CONTROL_RATE_WINDOW: Duration = Duration::from_secs(1);
 const CONTROL_RATE_PER_SESSION: u32 = 8;
+const QUALITY_RATE_PER_SESSION: u32 = 32;
 const CONTROL_RATE_GLOBAL: u32 = 512;
 /// Maximum authenticated clock disagreement accepted on a relayed resource
 /// deadline. This is deliberately small: it is only tolerance for wall-clock
@@ -308,6 +313,48 @@ struct PendingTakeoverSettlement<W = TakeoverWorkerGuard, A = SessionAdoptionTok
     monotonic_expiry: tokio::time::Instant,
     claim_cache_generation: u64,
     metric: TakeoverMetricGuard,
+}
+
+struct TakeoverClockAdmission {
+    ticket: OwnedClockAcquisitionTicket,
+    monotonic_expiry: tokio::time::Instant,
+}
+
+impl TakeoverClockAdmission {
+    fn claim(
+        &self,
+        original: &MediaSessionRoute,
+        next_owner_node_id: &str,
+    ) -> MediaSessionTakeover {
+        let now_ms = self.ticket.now_ms();
+        MediaSessionTakeover {
+            incarnation_id: original.incarnation_id.clone(),
+            expected_owner_node_id: original.owner_node_id.clone(),
+            expected_owner_epoch: original.owner_epoch,
+            next_owner_node_id: next_owner_node_id.to_owned(),
+            now_ms,
+            lease_expires_at_ms: now_ms.saturating_add(TAKEOVER_CLAIM_LEASE_TTL_MS),
+        }
+    }
+}
+
+/// `owner_node_id` is the route's current owner. Its lease expiry was written
+/// by its own clock, so the owner itself must be bounded: an unobserved
+/// learner that coverage excuses is never contested, and every revalidation of
+/// the ticket re-checks that owner.
+fn acquire_takeover_clock(
+    clock: &Arc<ClusterClockGuard>,
+    owner_node_id: &str,
+) -> Result<TakeoverClockAdmission, ClockRefusal> {
+    // Capture before the serialized wall reading so this conservative local
+    // lifetime cannot outlive the original fixed caller-bound claim.
+    let origin = tokio::time::Instant::now();
+    let ticket = clock.acquire_owned_for_owner(ClockDecision::Takeover, owner_node_id)?;
+    Ok(TakeoverClockAdmission {
+        ticket,
+        monotonic_expiry: origin
+            + Duration::from_millis(u64::try_from(TAKEOVER_CLAIM_LEASE_TTL_MS).unwrap_or_default()),
+    })
 }
 
 trait TakeoverWorkerLifecycle: Send + Sized + 'static {
@@ -1188,6 +1235,10 @@ pub(crate) struct CandidateCatalogContext {
 #[serde(try_from = "RemoteStartRequestWire", into = "RemoteStartRequestWire")]
 pub(crate) struct RemoteStartRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output_receiver: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_catalog: Option<CandidateCatalogContext>,
     /// Retained route context. Tolerated by the parser floor, never minted by
     /// it and never sufficient to authorize a worker route.
@@ -1223,6 +1274,10 @@ pub(crate) struct RemoteStartRequest {
 #[serde(deny_unknown_fields)]
 struct RemoteStartRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output_receiver: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_catalog: Option<CandidateCatalogContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
@@ -1250,6 +1305,8 @@ impl TryFrom<RemoteStartRequestWire> for RemoteStartRequest {
         let principal = remote_wire_principal(wire.principal, wire.user_id)?;
         Ok(Self {
             principal,
+            retained_output_receiver: wire.retained_output_receiver,
+            retained_output: wire.retained_output,
             candidate_catalog: wire.candidate_catalog,
             candidate_id: wire.candidate_id,
             presentation_target: wire.presentation_target,
@@ -1275,6 +1332,8 @@ impl From<RemoteStartRequest> for RemoteStartRequestWire {
         Self {
             principal,
             user_id,
+            retained_output_receiver: request.retained_output_receiver,
+            retained_output: request.retained_output,
             candidate_catalog: request.candidate_catalog,
             candidate_id: request.candidate_id,
             presentation_target: request.presentation_target,
@@ -1312,7 +1371,17 @@ impl RemoteStartRequest {
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
-    (request.candidate_id.is_none() || request.decoder_caps.is_some() && request.candidate_catalog.is_some())
+    request.request.continuous_media.as_ref().is_none_or(|media| {
+        media.autonomous_companion.is_none_or(|companion| request.candidate_id.is_some_and(|primary| primary != companion))
+            && media.family_descriptor.as_ref().is_none_or(|description| {
+                request.candidate_id.is_some_and(|primary| description.video.iter().any(|row| row.candidate_id == primary))
+            })
+    })
+        && (request.request.continuous_media.is_none() || request.library_channel.is_none())
+        && request.retained_output_receiver.is_none_or(|version| version == 1)
+        && (request.retained_output.is_none() || request.retained_output_receiver == Some(1))
+        && request.retained_output.as_ref().is_none_or(crate::transcode::RetainedOutputFacts::valid)
+        && (request.candidate_id.is_none() || request.decoder_caps.is_some() && request.candidate_catalog.is_some())
         && request.candidate_catalog.as_ref().is_none_or(|context| {
             request.candidate_id == Some(context.candidate.id) && context.candidate.identity_matches()
                 && context.caps.v == 2 && context.caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
@@ -1377,7 +1446,16 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
 }
 
 fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) -> bool {
-    (request.file_id > 0 || (source_ids && request.file_id == 0))
+    request
+        .continuous_media
+        .as_ref()
+        .is_none_or(|media| media.valid_for(request))
+        && (!request.passive_vod
+            || (request.vod_only && request.request_id.as_deref().is_some_and(|id| !id.trim().is_empty())))
+        && (!request.vod_only || request.presentation == crate::transcode::Presentation::Vod)
+        && request.finite_bitrate_limit_bps.is_none_or(|limit|
+            request.passive_vod && request.vod_only && (64_000..=1_000_000_000).contains(&limit))
+        && (request.file_id > 0 || (source_ids && request.file_id == 0))
         && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
         && !request
@@ -1390,6 +1468,8 @@ fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) 
         && request
             .audio_index
             .is_none_or(|index| (0..=1_024).contains(&index))
+        && request.audio_delivery.as_ref().is_none_or(|audio| audio.valid_snapshot())
+        && request.audio_claim.as_ref().is_none_or(|claim| claim.valid_snapshot())
         && request
             .subtitle_burn
             .is_none_or(|index| (0..=1_024).contains(&index))
@@ -1420,6 +1500,10 @@ fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
     pub playlist_url: String,
     pub duration_ms: Option<i64>,
@@ -1578,6 +1662,8 @@ fn decode_remote_start_response(
 impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
+            retained_output: info.retained_output,
+            audio_delivery: info.audio_delivery,
             session_id: info.session_id,
             playlist_url: info.playlist_url,
             duration_ms: info.duration_ms,
@@ -1597,6 +1683,14 @@ impl From<StartInfo> for RemoteStartResponse {
 impl RemoteStartResponse {
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && self
+                .retained_output
+                .as_ref()
+                .is_none_or(|facts| self.vod && facts.valid())
+            && self
+                .audio_delivery
+                .as_ref()
+                .is_none_or(|audio| audio.valid_snapshot())
             && self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
             && self
                 .duration_ms
@@ -1689,6 +1783,7 @@ pub(crate) enum RelayResource {
         diagnostic: Option<String>,
     },
     VideoPlaylist,
+    ContinuousFamily,
     SubtitlePlaylist {
         index: i64,
     },
@@ -1699,7 +1794,20 @@ pub(crate) enum RelayResource {
     Segment {
         segment: String,
     },
+    ChildPlaylist {
+        role: String,
+        rendition: String,
+    },
+    ChildSegment {
+        child: crate::vodserve::ChildMediaRequest,
+    },
     Delete,
+    /// Authenticated compatibility presence for one exact passive play.
+    PassivePresence {
+        user: String,
+        player: String,
+        request: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1776,7 +1884,7 @@ impl RelayHeaders {
 impl RelayResource {
     pub(crate) fn is_valid(&self) -> bool {
         match self {
-            Self::Status | Self::VideoPlaylist | Self::Delete => true,
+            Self::Status | Self::VideoPlaylist | Self::ContinuousFamily | Self::Delete => true,
             Self::Playlist { native, subtitle } => {
                 native.is_none_or(|value| value <= 1)
                     && subtitle.is_none_or(|value| (0..=1_024).contains(&value))
@@ -1795,6 +1903,19 @@ impl RelayResource {
                 (0..=1_024).contains(index) && valid_resource_name(segment)
             }
             Self::Segment { segment } => valid_resource_name(segment),
+            Self::ChildSegment { child } => child.is_valid(),
+            Self::ChildPlaylist { role, rendition } => {
+                crate::vodserve::ChildMediaRequest::valid_identity(role, rendition)
+            }
+            Self::PassivePresence {
+                user,
+                player,
+                request,
+            } => [user, player, request].iter().all(|value| {
+                !value.trim().is_empty()
+                    && value.len() <= 256
+                    && !value.chars().any(char::is_control)
+            }),
         }
     }
 
@@ -1803,9 +1924,14 @@ impl RelayResource {
             Self::Playlist { .. }
             | Self::Master { .. }
             | Self::VideoPlaylist
-            | Self::SubtitlePlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
-            Self::Segment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
-            Self::Status | Self::SubtitleSegment { .. } | Self::Delete => RELAY_SHORT_MAX_LIFETIME,
+            | Self::ContinuousFamily
+            | Self::SubtitlePlaylist { .. }
+            | Self::ChildPlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
+            Self::Segment { .. } | Self::ChildSegment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
+            Self::Status
+            | Self::SubtitleSegment { .. }
+            | Self::Delete
+            | Self::PassivePresence { .. } => RELAY_SHORT_MAX_LIFETIME,
         }
     }
 
@@ -1904,6 +2030,7 @@ pub(crate) struct MediaSessionCoordinator {
     route_generations: Arc<Vec<std::sync::atomic::AtomicU64>>,
     lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, LeaseSeed>>>,
     control_admission: Arc<StdMutex<ControlAdmission>>,
+    quality_admission: Arc<StdMutex<ControlAdmission>>,
     route_cache_metrics: Arc<RouteCacheMetrics>,
     /// Test-only: while set, a lookup that reaches the Store read waits here
     /// until the semaphore is closed, so a test can hold one read open and
@@ -1957,6 +2084,15 @@ impl Default for ControlAdmission {
 
 impl ControlAdmission {
     fn admit(&mut self, now: Instant, session_id: &str) -> Result<(), u32> {
+        self.admit_with_limit(now, session_id, CONTROL_RATE_PER_SESSION)
+    }
+
+    fn admit_with_limit(
+        &mut self,
+        now: Instant,
+        session_id: &str,
+        per_session: u32,
+    ) -> Result<(), u32> {
         if now.duration_since(self.window_started) >= CONTROL_RATE_WINDOW {
             self.window_started = now;
             self.admitted = 0;
@@ -1993,7 +2129,7 @@ impl ControlAdmission {
             entry.window_started = now;
             entry.admitted = 0;
         }
-        if entry.admitted >= CONTROL_RATE_PER_SESSION {
+        if entry.admitted >= per_session {
             let remaining =
                 CONTROL_RATE_WINDOW.saturating_sub(now.duration_since(entry.window_started));
             return Err(u32::try_from(remaining.as_millis())
@@ -2031,6 +2167,7 @@ impl MediaSessionCoordinator {
             ),
             lease_seeds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             control_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
+            quality_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
             route_cache_metrics: Arc::new(RouteCacheMetrics::default()),
             #[cfg(test)]
             route_store_gate: Arc::new(StdMutex::new(None)),
@@ -2080,6 +2217,24 @@ impl MediaSessionCoordinator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         admission.admit(now, session_id)
+    }
+
+    /// Fragment reservations and completed facts have a separate bounded
+    /// budget: prebuffering must not consume the manual intent/lease budget.
+    pub(crate) fn admit_quality_schedule(&self, session_id: &str) -> Result<(), u32> {
+        self.quality_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit_with_limit(Instant::now(), session_id, QUALITY_RATE_PER_SESSION)
+    }
+
+    /// Schedule admissions charged in the current node-wide window.
+    #[cfg(test)]
+    pub(crate) fn quality_schedule_admissions_in_window(&self) -> u32 {
+        self.quality_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admitted
     }
 
     /// Cache active routes and short negative answers. Deterministic query
@@ -2932,7 +3087,11 @@ impl MediaSessionCoordinator {
                 (REMOTE_START_OWNERSHIP_HEADER, REMOTE_START_OWNERSHIP_V1),
             )
             .await?;
-        decode_remote_start_response(response)
+        let started = decode_remote_start_response(response)?;
+        if request.retained_output_receiver != Some(1) && started.info.retained_output.is_some() {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        Ok(started)
     }
 
     pub(crate) async fn activate_remote(
@@ -3084,7 +3243,6 @@ impl MediaSessionCoordinator {
 
     /// Exact authenticated closure of an outer accepted driver. No request
     /// timeout or missing registry entry is interpreted as physical closure.
-    #[allow(dead_code)] // Complete authenticated close RPC; Source/B principal retirement adapters integrate next.
     pub(crate) async fn close_sharing_ingress(
         &self,
         ingress_node: &str,
@@ -3117,7 +3275,7 @@ impl MediaSessionCoordinator {
                 body,
                 deadline,
                 2048,
-                PeerAuthMode::ExactRequest,
+                PeerAuthMode::ExactRequestAndMemberResponse,
             )
             .await?;
         if !response.status.is_success() {
@@ -3129,6 +3287,76 @@ impl MediaSessionCoordinator {
             return Err(PeerTransportError::InvalidResponse);
         }
         Ok(receipt)
+    }
+
+    pub(crate) async fn quality_schedule(
+        &self,
+        owner_node_id: &str,
+        request: &crate::http::hls::QualityScheduleRelayRequest,
+    ) -> Result<Response<Body>, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > crate::http::hls::QUALITY_SCHEDULE_MAX_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let remaining = request
+            .deadline_unix_ms
+            .saturating_sub(unix_ms())
+            .min(12_000);
+        if remaining <= 0 {
+            return Err(PeerTransportError::TimedOut);
+        }
+        let deadline = deadline_after(Duration::from_millis(remaining as u64));
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let (response, retry_after) = self
+            .transport
+            .request_with_retry_after(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                crate::http::hls::QUALITY_SCHEDULE_PATH,
+                body,
+                deadline,
+                crate::http::hls::QUALITY_SCHEDULE_MAX_RESPONSE_BYTES,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        if response.status.is_success() {
+            serde_json::from_slice::<crate::vodserve::QualityScheduleResponse>(&response.body)
+                .ok()
+                .filter(|reply| reply.valid_for(&request.request))
+                .ok_or(PeerTransportError::InvalidResponse)?;
+        }
+        relayed_owner_response(response.status.as_u16(), retry_after, response.body)
+    }
+
+    pub(crate) async fn quality_control(
+        &self,
+        owner_node_id: &str,
+        request: &crate::http::hls::QualityControlRelayRequest,
+    ) -> Result<QualityControlRelayOutcome, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > crate::http::hls::QUALITY_CONTROL_MAX_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let budget =
+            crate::playback_control::inherited_exchange_budget(request.deadline_unix_ms, unix_ms())
+                .ok_or(PeerTransportError::TimedOut)?;
+        let deadline = deadline_after(budget);
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let (response, retry_after) = self
+            .transport
+            .request_with_retry_after(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                crate::http::hls::QUALITY_CONTROL_PATH,
+                body,
+                deadline,
+                crate::http::hls::QUALITY_CONTROL_MAX_BYTES,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        classify_quality_control_relay(response, retry_after, &request.request)
     }
 
     /// Mutating playback control uses its own exact-auth endpoint. It must not
@@ -3238,6 +3466,91 @@ fn remote_abort_legacy_retry_body(
     }
     serde_json::to_vec(&request.without_reason())
         .map(Some)
+        .map_err(|_| PeerTransportError::InvalidResponse)
+}
+
+/// What an owner answered a relayed quality-control exchange.
+pub(crate) enum QualityControlRelayOutcome {
+    Reply(crate::http::hls::QualityControlResponse),
+    /// The owner has no quality-control endpoint (an older build).
+    Unsupported,
+    /// The owner refused or deferred this exchange; its status, body and
+    /// retry hint reach the client unchanged.
+    Refused(Response<Body>),
+}
+
+/// An owner's quality-control answer, keeping its meaning across the relay.
+///
+/// A 404 carrying the owner's own `session_gone` body is a route miss on a
+/// node that does implement the endpoint; any other 404, or a 405, is an
+/// owner without the endpoint, which is what "unsupported" means. Owner
+/// refusals (409/410/425) and deferrals (429/503) pass through rather than
+/// collapsing into a 503 that loses the difference between "stop" and
+/// "retry".
+fn classify_quality_control_relay(
+    response: PeerResponse,
+    retry_after: Option<u32>,
+    request: &crate::http::hls::QualityControlRequest,
+) -> Result<QualityControlRelayOutcome, PeerTransportError> {
+    let status = response.status.as_u16();
+    if response.status.is_success() {
+        return serde_json::from_slice::<crate::http::hls::QualityControlResponse>(&response.body)
+            .ok()
+            .filter(|reply| reply.valid_for(request))
+            .map(QualityControlRelayOutcome::Reply)
+            .ok_or(PeerTransportError::InvalidResponse);
+    }
+    let error_body =
+        serde_json::from_slice::<crate::playback_control::ControlErrorBody>(&response.body)
+            .ok()
+            .filter(|body| body.is_valid_for_status(status));
+    match (status, error_body) {
+        (404, Some(body)) => quality_control_refusal(status, retry_after, Some(body)),
+        (404 | 405, None) => Ok(QualityControlRelayOutcome::Unsupported),
+        (409 | 410 | 425 | 429 | 503, body) => {
+            // The owner answers some refusals with a bare status; an
+            // unparseable body is dropped rather than relayed.
+            quality_control_refusal(status, retry_after, body)
+        }
+        _ => Err(PeerTransportError::InvalidResponse),
+    }
+}
+
+fn quality_control_refusal(
+    status: u16,
+    retry_after: Option<u32>,
+    body: Option<crate::playback_control::ControlErrorBody>,
+) -> Result<QualityControlRelayOutcome, PeerTransportError> {
+    let retry_after = retry_after.or_else(|| {
+        body.as_ref()
+            .and_then(|body| body.retry_after_ms)
+            .map(|delay_ms| delay_ms.div_ceil(1000).max(1))
+    });
+    let bytes = match body {
+        Some(body) => serde_json::to_vec(&body).map_err(|_| PeerTransportError::InvalidResponse)?,
+        None => Vec::new(),
+    };
+    relayed_owner_response(status, retry_after, bytes).map(QualityControlRelayOutcome::Refused)
+}
+
+/// One owner answer relayed to the client: its status and body, plus its
+/// retry hint. A deferral (429/503) always carries one, so a client that
+/// waits on the header never spins on an owner that omitted it.
+fn relayed_owner_response(
+    status: u16,
+    retry_after: Option<u32>,
+    body: Vec<u8>,
+) -> Result<Response<Body>, PeerTransportError> {
+    let retry_after = retry_after.or(matches!(status, 429 | 503).then_some(1));
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(seconds) = retry_after {
+        builder = builder.header(header::RETRY_AFTER, seconds.to_string());
+    }
+    builder
+        .body(Body::from(body))
         .map_err(|_| PeerTransportError::InvalidResponse)
 }
 
@@ -3790,6 +4103,13 @@ async fn fence_and_reap_sessions(
     }
     futures_util::future::join_all(sessions.into_iter().map(
         |(incarnation_id, session_id, owner_epoch, known_vod, reason)| async move {
+            tracing::warn!(
+                session = %crate::transcode::session_log_id(&session_id),
+                %incarnation_id,
+                owner_epoch,
+                reason,
+                "media-session lease lifecycle fencing worker"
+            );
             if known_vod || state.transcode.vod_owns_or_preparing(&session_id).await {
                 // A lease-loss observation closes publication immediately,
                 // but it cannot choose a typed VOD tombstone ahead of the
@@ -5113,9 +5433,68 @@ impl TakeoverGate {
     }
 }
 
+/// One clock-admitted inventory page. `cursor` follows the WHOLE page, so a
+/// route skipped for its owner's clock cannot pin the keyset scan; `None`
+/// means the page was empty and the next tick starts a fresh pass.
+#[derive(Debug)]
+struct ExpiryScanPage {
+    contestable: Vec<MediaSessionRoute>,
+    cursor: Option<MediaSessionTakeoverCursor>,
+}
+
 /// Contest expired session routes only after the separate replicated rollout
 /// switch is enabled. Every candidate independently proves source/pipeline
 /// eligibility; the Store CAS still admits exactly one successor epoch.
+///
+/// A route is contestable only when its OWNER's clock is bounded too: the
+/// lease expiry was written by the owner's clock, and coverage excuses an
+/// unobserved learner, which may own delegated sessions. Enforced, such a
+/// route is skipped (not expired, not taken over) until its owner is measured
+/// within the bound or leaves the roster; advisory, it is contested as before
+/// and the refusal is counted.
+async fn clock_guarded_expiry_scan<Q, F>(
+    clock: &ClusterClockGuard,
+    query: Q,
+) -> Result<ExpiryScanPage, String>
+where
+    Q: FnOnce(i64) -> F,
+    F: Future<Output = Result<Vec<MediaSessionRoute>, StoreError>>,
+{
+    let ticket = clock
+        .acquire_for(ClockDecision::ExpiryScan)
+        .map_err(|cause| format!("media-session expiry clock refused: {cause:?}"))?;
+    // One original caller timestamp, not a fresh wall read after the Store
+    // await. Discard the entire page on invalidation, leaving its keyset
+    // cursor unchanged so a later healthy tick can reconsider it.
+    let routes = tokio::time::timeout(Duration::from_secs(3), query(ticket.now_ms()))
+        .await
+        .map_err(|_| "media-session expiry inventory timed out".to_owned())?
+        .map_err(|error| error.to_string())?;
+    clock
+        .revalidate_for(ClockDecision::ExpiryScan, &ticket)
+        .map_err(|cause| format!("media-session expiry clock refused: {cause:?}"))?;
+    let cursor = routes.last().map(MediaSessionTakeoverCursor::from);
+    let contestable = routes
+        .into_iter()
+        .filter(|route| {
+            clock
+                .admit_owner_for(ClockDecision::ExpiryScan, &ticket, &route.owner_node_id)
+                .inspect_err(|cause| {
+                    tracing::debug!(
+                        owner = %route.owner_node_id,
+                        ?cause,
+                        "media-session expiry skipped: the owner's clock is not bounded"
+                    );
+                })
+                .is_ok()
+        })
+        .collect();
+    Ok(ExpiryScanPage {
+        contestable,
+        cursor,
+    })
+}
+
 pub(crate) async fn takeover_loop(state: AppState) {
     let mut interval = tokio::time::interval(TAKEOVER_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -5132,30 +5511,31 @@ pub(crate) async fn takeover_loop(state: AppState) {
             scan_cursor = None;
             continue;
         }
-        let now_ms = unix_ms();
-        let routes = match tokio::time::timeout(
-            Duration::from_secs(3),
+        let clock = state.membership.clock_guard();
+        let page = match clock_guarded_expiry_scan(&clock, |now_ms| {
             state
                 .store
-                .expired_media_sessions(now_ms, scan_cursor.clone(), TAKEOVER_BATCH),
-        )
+                .expired_media_sessions(now_ms, scan_cursor.clone(), TAKEOVER_BATCH)
+        })
         .await
         {
-            Ok(Ok(routes)) => routes,
-            Ok(Err(error)) => {
+            Ok(page) => page,
+            Err(error) => {
                 tracing::debug!(%error, "media-session takeover inventory unavailable");
                 continue;
             }
-            Err(_) => continue,
         };
-        if routes.is_empty() {
+        let Some(cursor) = page.cursor else {
             // Reaching the end starts a fresh oldest-first pass on the next
             // tick. This also revisits transient refusals without sacrificing
             // bounded progress through the current inventory.
             scan_cursor = None;
             continue;
-        }
-        scan_cursor = routes.last().map(MediaSessionTakeoverCursor::from);
+        };
+        // Past the whole page, including routes skipped for their owner's
+        // clock, so they cannot pin the scanner to one page.
+        scan_cursor = Some(cursor);
+        let routes = page.contestable;
         // A route stays expired-and-claimable until somebody's CAS lands, so
         // it reappears on every tick until then. Contesting it again while
         // this node's own attempt is still in flight buys nothing and costs an
@@ -5283,6 +5663,7 @@ async fn stop_pending_takeover<W, A>(
 async fn settle_initial_takeover_claim<I, W, A>(
     io: &I,
     pending: PendingTakeoverSettlement<W, A>,
+    before_submission: impl FnOnce() -> Result<(), ClockRefusal>,
 ) -> Result<(), String>
 where
     I: TakeoverSettlementIo<A, W>,
@@ -5301,6 +5682,18 @@ where
         .await;
         return Err("media-session takeover claim expired before submission".to_owned());
     };
+    // The fixed proposal is still unsubmitted here. A clock refusal is not a
+    // Store ambiguity: stop the exact worker, never enter replay/read. After
+    // io.claim is submitted its original reconciliation remains ungated.
+    if let Err(cause) = before_submission() {
+        stop_pending_takeover(
+            pending,
+            "media-session takeover clock refused before submission",
+            TAKEOVER_SKIPPED,
+        )
+        .await;
+        return Err(format!("media-session takeover clock refused: {cause:?}"));
+    }
     match tokio::time::timeout_at(claim_deadline, io.claim(&pending.claim)).await {
         Ok(Ok(Some(claimed))) => reconcile_pending_takeover(io, pending, Some(claimed)).await,
         Ok(Ok(None)) => {
@@ -5675,6 +6068,7 @@ async fn supervise_takeover_settlement(
     settlement: SessionSettlementGuard,
     slot: tokio::sync::OwnedSemaphorePermit,
     metric: TakeoverMetricGuard,
+    clock: TakeoverClockAdmission,
 ) -> Result<(), String> {
     let provisional_id = start.provisional_session_id.clone();
     let replacement = state
@@ -5728,18 +6122,13 @@ async fn supervise_takeover_settlement(
         return Err("media-session takeover creation changed its provisional id".to_owned());
     }
 
-    let claim_now_ms = unix_ms();
-    let claim_monotonic_expiry = tokio::time::Instant::now()
-        + Duration::from_millis(u64::try_from(TAKEOVER_CLAIM_LEASE_TTL_MS).unwrap_or_default());
+    // Preparation spends this original 24-second lease, rather than replacing
+    // the ticket's wall time or silently extending its monotonic lifetime.
+    // Existing minimum-runway checks refuse a late publication; bootstrap
+    // renewal remains unchanged once the exact fixed proposal has won.
+    let claim_monotonic_expiry = clock.monotonic_expiry;
     let claim_cache_generation = state.media_sessions.route_generation(&original.session_id);
-    let takeover = MediaSessionTakeover {
-        incarnation_id: original.incarnation_id.clone(),
-        expected_owner_node_id: original.owner_node_id.clone(),
-        expected_owner_epoch: original.owner_epoch,
-        next_owner_node_id: state.node_id.clone(),
-        now_ms: claim_now_ms,
-        lease_expires_at_ms: claim_now_ms.saturating_add(TAKEOVER_CLAIM_LEASE_TTL_MS),
-    };
+    let takeover = clock.claim(&original, &state.node_id);
     worker.retain_settlement_until(takeover.lease_expires_at_ms, claim_monotonic_expiry);
     let pending = PendingTakeoverSettlement {
         original,
@@ -5751,7 +6140,7 @@ async fn supervise_takeover_settlement(
         claim_cache_generation,
         metric,
     };
-    settle_initial_takeover_claim(&state, pending).await
+    settle_initial_takeover_claim(&state, pending, || clock.ticket.revalidate()).await
 }
 
 /// A route whose durable recipe the takeover path accepts, for the tests in
@@ -5772,8 +6161,13 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         },
         typeless_playlist: true,
         request: SessionRequest {
+            sdr_master_codecs: None,
+            continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             request_id: Some(incarnation_id.to_owned()),
             presentation: crate::transcode::Presentation::Live,
             ..base.request
@@ -5810,6 +6204,11 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
+    let clock = acquire_takeover_clock(&state.membership.clock_guard(), &route.owner_node_id)
+        .map_err(|cause| {
+            metric.outcome = TAKEOVER_SKIPPED;
+            format!("media-session takeover clock refused: {cause:?}")
+        })?;
     let Some(takeover_slot) = try_admit_takeover_settlement() else {
         metric.outcome = TAKEOVER_SKIPPED;
         return Err("media-session takeover settlement capacity is full".to_owned());
@@ -5938,10 +6337,13 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     // an ordinary height plan after takeover.
     tokio::time::timeout_at(
         deadline,
-        state.transcode.restore_candidate_context(&mut envelope),
+        state
+            .transcode
+            .restore_candidate_context_with_deadline(&mut envelope, deadline),
     )
     .await
-    .map_err(|_| "candidate takeover validation timed out".to_owned())??;
+    .map_err(|_| "candidate takeover validation timed out".to_owned())?
+    .map_err(|error| error.to_string())?;
     let user = tokio::time::timeout_at(
         deadline,
         state.store.get_user(
@@ -5978,6 +6380,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
             settlement,
             takeover_slot,
             metric,
+            clock,
         )
         .await
         {
@@ -6206,9 +6609,279 @@ mod tests {
 
     use crate::transcode::ReopenReason;
 
+    fn clock_fixture(offset: Option<(i64, i64)>) -> Arc<ClusterClockGuard> {
+        let guard = Arc::new(ClusterClockGuard::new(true));
+        // These fixtures exercise the operator-enabled guard; the default
+        // (advisory) mode is covered by the advisory test below.
+        guard.set_enforced(true);
+        if let Some((offset_us, uncertainty_us)) = offset {
+            let ticket = guard.roster(&["peer".into()]);
+            assert!(guard.publish(
+                ticket,
+                std::collections::BTreeMap::from([(
+                    "peer".into(),
+                    plurx_core::cluster::clock::PeerClockOffset::Bounded {
+                        offset_us,
+                        uncertainty_us,
+                        observed_at: Instant::now(),
+                    },
+                )]),
+            ));
+        }
+        guard
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_expiry_requires_bound_and_discards_changed_page() {
+        for (offset, allowed) in [
+            (Some((0, 1_000)), true),
+            (Some((1_999_000, 1_000)), true),
+            (Some((1_500_000, 601_000)), false),
+            (Some((2_500_000, 1_000)), false),
+            (None, false),
+        ] {
+            let clock = clock_fixture(offset);
+            let called = AtomicU64::new(0);
+            let called_ref = &called;
+            let result = clock_guarded_expiry_scan(&clock, |now_ms| async move {
+                called_ref.fetch_add(1, Ordering::Relaxed);
+                assert!(now_ms > 0);
+                Ok(vec![media_route("expired-clock-fixture")])
+            })
+            .await;
+            assert_eq!(result.is_ok(), allowed, "{offset:?}");
+            assert_eq!(called.load(Ordering::Relaxed), u64::from(allowed));
+        }
+        for clock in [Arc::new(ClusterClockGuard::new(false)), clock_fixture(None)] {
+            clock.roster(&[]);
+            assert!(
+                clock_guarded_expiry_scan(&clock, |_| async { Ok(Vec::new()) })
+                    .await
+                    .is_ok()
+            );
+        }
+        let clock = clock_fixture(Some((0, 1_000)));
+        let error = clock_guarded_expiry_scan(&clock, |_| async {
+            tokio::task::yield_now().await;
+            clock.roster_failed();
+            Ok(vec![media_route("must-not-advance-cursor")])
+        })
+        .await
+        .expect_err("discard a page invalidated during the Store await");
+        assert!(error.contains("GenerationChanged"));
+        assert!(clock.prometheus().contains(
+            "plurx_cluster_clock_refusals_total{decision=\"expiry_scan\",cause=\"generation_changed\"} 1\n"
+        ));
+        let clock = clock_fixture(Some((0, 1_000)));
+        assert!(clock_guarded_expiry_scan(&clock, |_| {
+            std::future::pending::<Result<Vec<MediaSessionRoute>, StoreError>>()
+        })
+        .await
+        .expect_err("existing inventory timeout remains finite")
+        .contains("timed out"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_is_advisory_while_enforcement_is_off() {
+        for offset in [None, Some((2_500_000, 1_000))] {
+            let clock = clock_fixture(offset);
+            clock.set_enforced(false);
+            assert!(
+                acquire_takeover_clock(&clock, "node-old").is_ok(),
+                "an unbounded or unknown clock never blocks takeover while off: {offset:?}"
+            );
+            let called = AtomicU64::new(0);
+            let called_ref = &called;
+            assert!(clock_guarded_expiry_scan(&clock, |_| async move {
+                called_ref.fetch_add(1, Ordering::Relaxed);
+                Ok(Vec::new())
+            })
+            .await
+            .is_ok());
+            assert_eq!(called.load(Ordering::Relaxed), 1);
+            let metrics = clock.prometheus();
+            assert!(
+                metrics.contains("plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"unknown\"} 0\n")
+                    && metrics.contains("plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"offset\"} 0\n"),
+                "nothing is actually refused"
+            );
+            let cause = if offset.is_none() {
+                "unknown"
+            } else {
+                "offset"
+            };
+            for decision in ["takeover", "expiry_scan"] {
+                assert!(
+                    metrics.contains(&format!(
+                        "plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} "
+                    )) && !metrics.contains(&format!(
+                        "plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} 0\n"
+                    )),
+                    "{decision} records what enforcement would have refused"
+                );
+            }
+        }
+    }
+
+    struct FixedClockMembership(plurx_core::cluster::clock::ClockMembershipIdentity);
+
+    impl plurx_core::cluster::clock::ClockMembershipSource for FixedClockMembership {
+        fn current(&self) -> Option<plurx_core::cluster::clock::ClockMembershipIdentity> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn clock_node(raft_id: u64) -> String {
+        format!("00000000-0000-0000-0000-{raft_id:012}")
+    }
+
+    /// Local node 1; voters 1-3; node 4 a committed learner. The listed raft
+    /// ids are measured within the bound, every other peer is Unknown.
+    fn learner_clock_fixture(bounded: &[u64], enforced: bool) -> Arc<ClusterClockGuard> {
+        use plurx_core::cluster::clock::{ClockMembershipIdentity, PeerClockOffset};
+        use plurx_core::cluster::membership::{ActivityPeer, ClockPeerRoster};
+        let identity = ClockMembershipIdentity {
+            local_node: 1,
+            log: (2, 1, 7),
+            members: [1, 2, 3, 4].into(),
+            voters: [1, 2, 3].into(),
+        };
+        let guard = Arc::new(ClusterClockGuard::with_membership_source(Arc::new(
+            FixedClockMembership(identity.clone()),
+        )));
+        guard.set_enforced(enforced);
+        let roster = ClockPeerRoster {
+            membership: Some(identity),
+            peers: [2, 3, 4]
+                .into_iter()
+                .map(|raft_id| ActivityPeer {
+                    node_id: clock_node(raft_id),
+                    raft_id,
+                    http_base: Some(format!("https://node{raft_id}:443")),
+                    reachable: true,
+                })
+                .collect(),
+        };
+        let round = guard
+            .roster_for_peer_directory(&roster)
+            .expect("exact directory");
+        assert!(guard.publish(
+            round,
+            roster
+                .peers
+                .iter()
+                .map(|peer| {
+                    let observation = if bounded.contains(&peer.raft_id) {
+                        PeerClockOffset::Bounded {
+                            offset_us: 0,
+                            uncertainty_us: 1_000,
+                            observed_at: Instant::now(),
+                        }
+                    } else {
+                        PeerClockOffset::Unknown
+                    };
+                    (peer.node_id.clone(), observation)
+                })
+                .collect(),
+        ));
+        guard
+    }
+
+    /// K-06 review P1. Every voter bounded, learner 4 unobserved: coverage
+    /// excuses the learner, but R1 is ITS lease, written by its clock. The
+    /// expiry scan contests only the voter's R2 and takeover of R1 is
+    /// refused; the cursor still passes R1 so it cannot pin the scanner.
+    /// Advisory mode contests both and counts what it would have refused.
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_skips_routes_owned_by_an_unobserved_learner() {
+        let learner_route = MediaSessionRoute {
+            owner_node_id: clock_node(4),
+            incarnation_id: "00000000-0000-4000-8000-0000000000b2".to_owned(),
+            ..media_route("owned-by-learner")
+        };
+        let voter_route = MediaSessionRoute {
+            owner_node_id: clock_node(2),
+            incarnation_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
+            ..media_route("owned-by-voter")
+        };
+        let page = || {
+            let routes = vec![voter_route.clone(), learner_route.clone()];
+            async move { Ok(routes) }
+        };
+
+        let clock = learner_clock_fixture(&[2, 3], true);
+        let scanned = clock_guarded_expiry_scan(&clock, |_| page())
+            .await
+            .expect("every voter is bounded");
+        assert_eq!(
+            scanned
+                .contestable
+                .iter()
+                .map(|route| route.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["owned-by-voter"],
+            "the unobserved learner's lease is not expired"
+        );
+        assert_eq!(
+            scanned.cursor,
+            Some(MediaSessionTakeoverCursor::from(&learner_route)),
+            "the cursor passes the skipped route"
+        );
+        assert_eq!(
+            acquire_takeover_clock(&clock, &learner_route.owner_node_id).err(),
+            Some(ClockRefusal::Unknown)
+        );
+        assert!(acquire_takeover_clock(&clock, &voter_route.owner_node_id).is_ok());
+        let metrics = clock.prometheus();
+        for decision in ["expiry_scan", "takeover"] {
+            assert!(
+                metrics.contains(&format!(
+                    "plurx_cluster_clock_refusals_total{{decision=\"{decision}\",cause=\"unknown\"}} 1\n"
+                )),
+                "{decision}: {metrics}"
+            );
+        }
+
+        // Measured within the bound, the learner's route is contested too.
+        let clock = learner_clock_fixture(&[2, 3, 4], true);
+        let scanned = clock_guarded_expiry_scan(&clock, |_| page())
+            .await
+            .expect("bounded");
+        assert_eq!(scanned.contestable.len(), 2);
+        assert!(acquire_takeover_clock(&clock, &learner_route.owner_node_id).is_ok());
+
+        // Advisory: contested as before, each would-be refusal counted.
+        let clock = learner_clock_fixture(&[2, 3], false);
+        let scanned = clock_guarded_expiry_scan(&clock, |_| page())
+            .await
+            .expect("advisory");
+        assert_eq!(scanned.contestable.len(), 2);
+        assert!(acquire_takeover_clock(&clock, &learner_route.owner_node_id).is_ok());
+        let metrics = clock.prometheus();
+        for decision in ["expiry_scan", "takeover"] {
+            assert!(
+                metrics.contains(&format!(
+                    "plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"unknown\"}} 1\n"
+                )) && metrics.contains(&format!(
+                    "plurx_cluster_clock_refusals_total{{decision=\"{decision}\",cause=\"unknown\"}} 0\n"
+                )),
+                "{decision}: {metrics}"
+            );
+        }
+
+        // An empty page ends the pass.
+        let clock = learner_clock_fixture(&[2, 3], true);
+        let scanned = clock_guarded_expiry_scan(&clock, |_| async { Ok(Vec::new()) })
+            .await
+            .expect("bounded");
+        assert!(scanned.contestable.is_empty() && scanned.cursor.is_none());
+    }
+
     pub(super) fn valid_start_request() -> RemoteStartRequest {
         let incarnation_id = "00000000-0000-4000-8000-0000000000a1".to_owned();
         RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
@@ -6221,8 +6894,13 @@ mod tests {
             typeless_playlist: true,
             library_channel: None,
             request: SessionRequest {
+                sdr_master_codecs: None,
+                continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 control_sequence: None,
                 file_id: 11,
                 playback_id: "player-a".to_owned(),
@@ -6233,6 +6911,8 @@ mod tests {
                 kind: SessionKind::Transcode { height: 720 },
                 start_seconds: 12.5,
                 audio_index: Some(1),
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
@@ -6324,6 +7004,71 @@ mod tests {
         assert_eq!(recovered.principal, shared);
     }
 
+    #[test]
+    fn retained_receipt_extensions_are_omitted_for_legacy_and_require_negotiation() {
+        // The pre-extension strict worker key set, not a permissive JSON map.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct LegacyStart {
+            candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+            presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>,
+            decoder_caps: Option<crate::playback_control::DecoderCapsSnapshot>,
+            protocol_version: i64,
+            incarnation_id: String,
+            user_id: i64,
+            source_size: i64,
+            source_mtime: i64,
+            typeless_playlist: bool,
+            library_channel: Option<serde_json::Value>,
+            request: SessionRequest,
+        }
+        let mut request = valid_start_request();
+        let legacy_wire = serde_json::to_value(&request).expect("legacy serialization");
+        assert!(legacy_wire.get("retained_output_receiver").is_none());
+        assert!(legacy_wire.get("retained_output").is_none());
+        assert!(serde_json::from_value::<LegacyStart>(legacy_wire.clone()).is_ok());
+        let decoded: RemoteStartRequest =
+            serde_json::from_value(legacy_wire).expect("new parser accepts legacy");
+        assert_eq!(decoded.retained_output_receiver, None);
+        assert!(decoded.retained_output.is_none());
+        request.retained_output_receiver = Some(1);
+        let negotiated = serde_json::to_value(&request).expect("negotiated serialization");
+        assert!(
+            serde_json::from_value::<LegacyStart>(negotiated).is_err(),
+            "never send extension to a strict old worker"
+        );
+        assert!(request.is_valid());
+        request.retained_output_receiver = Some(2);
+        assert!(!request.is_valid());
+        request.retained_output_receiver = None;
+        request.retained_output = Some(crate::transcode::RetainedOutputFacts {
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            output_identity: "ab".repeat(32),
+            average_bps: 8000,
+            peak_bps: 12000,
+        });
+        assert!(
+            !request.is_valid(),
+            "unnegotiated retained descriptor is not accepted"
+        );
+        request.retained_output_receiver = Some(1);
+        assert!(request.is_valid());
+        let mut response = valid_start_response();
+        let legacy_response = serde_json::to_value(&response).expect("legacy response");
+        assert!(
+            legacy_response.get("retained_output").is_none(),
+            "new worker with legacy capture emits no extension"
+        );
+        response.retained_output = request.retained_output;
+        assert!(response.is_valid());
+        response.vod = false;
+        assert!(
+            !response.is_valid(),
+            "retained VOD proof cannot be replayed onto rolling output"
+        );
+    }
+
     fn valid_prepare_request() -> RemotePrepareRequest {
         RemotePrepareRequest {
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
@@ -6360,6 +7105,8 @@ mod tests {
     fn valid_start_response() -> RemoteStartResponse {
         let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
         RemoteStartResponse {
+            retained_output: None,
+            audio_delivery: None,
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
             duration_ms: Some(7_200_000),
@@ -6379,6 +7126,7 @@ mod tests {
     fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
         let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
         let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::CREATED,
             body: body.clone(),
         })
@@ -6390,6 +7138,7 @@ mod tests {
         );
 
         let recovered = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::ALREADY_REPORTED,
             body: body.clone(),
         })
@@ -6404,6 +7153,7 @@ mod tests {
         let mut legacy_info = valid_start_response();
         legacy_info.activation_generation = None;
         let legacy = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: serde_json::to_vec(&legacy_info).expect("legacy start response JSON"),
         })
@@ -6453,6 +7203,74 @@ mod tests {
             deadline_unix_ms,
             headers: RelayHeaders::default(),
         }
+    }
+
+    #[test]
+    fn private_media_relay_refuses_path_and_identity_aliases() {
+        let mut child = crate::vodserve::ChildMediaRequest {
+            role: "video".into(),
+            rendition: "a".repeat(64),
+            kind: "segment".into(),
+            object: "12.m4s".into(),
+        };
+        assert!(RelayResource::ChildSegment {
+            child: child.clone()
+        }
+        .is_valid());
+        assert!(RelayResource::ChildPlaylist {
+            role: "audio".into(),
+            rendition: child.rendition.clone()
+        }
+        .is_valid());
+        assert!(!RelayResource::ChildPlaylist {
+            role: "subtitle".into(),
+            rendition: child.rendition.clone()
+        }
+        .is_valid());
+        assert!(!RelayResource::ChildPlaylist {
+            role: "video".into(),
+            rendition: "../cached".into()
+        }
+        .is_valid());
+        assert_eq!(child.media_name().as_deref(), Some("seg00012.m4s"));
+        for object in [
+            "../12.m4s",
+            "012.m4s",
+            "-1.m4s",
+            "12.m4s/extra",
+            "9999999999.m4s",
+        ] {
+            child.object = object.into();
+            assert!(!RelayResource::ChildSegment {
+                child: child.clone()
+            }
+            .is_valid());
+            assert!(child.media_name().is_none());
+        }
+        child.kind = "init".into();
+        child.object = format!("{}.mp4", "b".repeat(64));
+        assert!(child.is_valid());
+        assert_eq!(child.media_name().as_deref(), Some("init.mp4"));
+        child.object = format!("{}.mp4", "B".repeat(64));
+        assert!(!child.is_valid());
+        child.object = format!("{}.mp4", "b".repeat(64));
+        child.role = "subtitles".into();
+        assert!(!child.is_valid());
+        child.role = "audio".into();
+        child.rendition = "../cached".into();
+        assert!(!child.is_valid());
+        assert!(!RelayResource::Segment {
+            segment: "video/child/12.m4s".into()
+        }
+        .is_valid());
+        let now = 1_700_000_000_000_i64;
+        child.rendition = "a".repeat(64);
+        let request = relay_request(RelayResource::ChildSegment { child }, now + 90_000);
+        assert_eq!(
+            request.owner_budget_at(now),
+            Some(RELAY_SEGMENT_MAX_LIFETIME)
+        );
+        assert!(!request.deadline_is_plausible_at(now));
     }
 
     #[test]
@@ -6517,6 +7335,29 @@ mod tests {
             request.owner_budget_at(origin_deadline).is_none(),
             "publication cannot start after ingress abandonment"
         );
+    }
+
+    #[test]
+    fn passive_presence_relay_resource_round_trips_and_bounds_its_identity() {
+        let resource = RelayResource::PassivePresence {
+            user: "[\"user_id\",1]".into(),
+            player: "jellyfin:player".into(),
+            request: "11111111-1111-4111-8111-111111111111".into(),
+        };
+        let wire = serde_json::to_value(&resource).expect("relay resource");
+        assert_eq!(wire["resource"], "passive_presence");
+        let decoded: RelayResource = serde_json::from_value(wire).expect("round trip");
+        assert!(decoded.is_valid());
+        assert_eq!(decoded.max_lifetime(), RELAY_SHORT_MAX_LIFETIME);
+        let long = "x".repeat(257);
+        for bad in ["", "  ", "line\nbreak", long.as_str()] {
+            let invalid = RelayResource::PassivePresence {
+                user: "[\"user_id\",1]".into(),
+                player: bad.into(),
+                request: "request".into(),
+            };
+            assert!(!invalid.is_valid(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -6714,6 +7555,7 @@ mod tests {
         renewals: StdMutex<std::collections::VecDeque<ScriptedOutcome<bool>>>,
         cache_results: StdMutex<std::collections::VecDeque<bool>>,
         next_generation: AtomicU64,
+        fail_clock_on_initial_claim: Option<Arc<ClusterClockGuard>>,
     }
 
     impl ScriptedTakeoverIo {
@@ -6728,6 +7570,7 @@ mod tests {
                 renewals: StdMutex::new(std::collections::VecDeque::new()),
                 cache_results: StdMutex::new(std::collections::VecDeque::new()),
                 next_generation: AtomicU64::new(10),
+                fail_clock_on_initial_claim: None,
             }
         }
 
@@ -6781,6 +7624,9 @@ mod tests {
         ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>> {
             Box::pin(async move {
                 self.record("claim");
+                if let Some(clock) = self.fail_clock_on_initial_claim.as_ref() {
+                    clock.roster_failed();
+                }
                 let outcome = self
                     .claims
                     .lock()
@@ -7328,8 +8174,13 @@ mod tests {
         let mut vod = base.clone();
         vod.recipe_json = serde_json::to_string(&RemoteStartRequest {
             request: SessionRequest {
+                sdr_master_codecs: None,
+                continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -7480,8 +8331,13 @@ mod tests {
 
         let vod = RemoteStartRequest {
             request: SessionRequest {
+                sdr_master_codecs: None,
+                continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -7777,6 +8633,155 @@ mod tests {
         );
     }
 
+    fn scripted_clock_takeover(
+        events: Arc<StdMutex<Vec<String>>>,
+        clock: &TakeoverClockAdmission,
+    ) -> (
+        PendingTakeoverSettlement<ProbeTakeoverWorker, ProbeTakeoverAdoption>,
+        MediaSessionRoute,
+    ) {
+        let (mut pending, mut winner) = scripted_takeover(events);
+        pending.claim = clock.claim(&pending.original, "node-new");
+        pending.monotonic_expiry = clock.monotonic_expiry;
+        winner.lease_expires_at_ms = pending.claim.lease_expires_at_ms;
+        winner.updated_at_ms = pending.claim.now_ms;
+        (pending, winner)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_refuses_only_unsubmitted_claim_and_stops_exact_worker() {
+        for (offset, expected) in [
+            (None, ClockRefusal::Unknown),
+            (Some((1_500_000, 601_000)), ClockRefusal::Offset),
+            (Some((2_500_000, 1_000)), ClockRefusal::Offset),
+        ] {
+            assert_eq!(
+                acquire_takeover_clock(&clock_fixture(offset), "node-old").err(),
+                Some(expected)
+            );
+        }
+        for clock in [
+            Arc::new(ClusterClockGuard::new(false)),
+            clock_fixture(Some((1_999_000, 1_000))),
+        ] {
+            assert!(acquire_takeover_clock(&clock, "node-old").is_ok());
+        }
+        for recovered in [false, true] {
+            let guard = clock_fixture(Some((0, 1_000)));
+            let clock = acquire_takeover_clock(&guard, "node-old").expect("original admission");
+            let original_now = clock.ticket.now_ms();
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            let (pending, _) = scripted_clock_takeover(Arc::clone(&events), &clock);
+            tokio::task::yield_now().await;
+            guard.roster_failed();
+            if recovered {
+                let round = guard.roster(&[]);
+                assert!(guard.publish(round, std::collections::BTreeMap::new()));
+            }
+            let error = settle_initial_takeover_claim(&io, pending, || clock.ticket.revalidate())
+                .await
+                .expect_err("an old proof cannot be renewed by recovered evidence");
+            assert!(error.contains("GenerationChanged"));
+            assert_eq!(clock.ticket.now_ms(), original_now);
+            assert_eq!(
+                io.events(),
+                vec!["worker:worker-a:stop:media-session takeover clock refused before submission"],
+                "no claim, replay, pin, publication or unrelated worker teardown"
+            );
+            assert!(guard.prometheus().contains(
+                "plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"generation_changed\"} 1\n"
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_preserves_original_24s_lease_and_publication_runway() {
+        for preparation in [Duration::from_secs(8), Duration::from_secs(12)] {
+            let guard = Arc::new(ClusterClockGuard::new(false));
+            let clock = acquire_takeover_clock(&guard, "node-old").expect("standalone admission");
+            let original_now = clock.ticket.now_ms();
+            let original_monotonic_expiry = clock.monotonic_expiry;
+            tokio::time::advance(preparation).await;
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            let (pending, winner) = scripted_clock_takeover(Arc::clone(&events), &clock);
+            assert_eq!(pending.claim.now_ms, original_now);
+            assert_eq!(pending.claim.lease_expires_at_ms - original_now, 24_000);
+            assert_eq!(pending.monotonic_expiry, original_monotonic_expiry);
+            assert_eq!(
+                pending.monotonic_expiry - tokio::time::Instant::now(),
+                Duration::from_secs(24) - preparation
+            );
+            io.claims
+                .lock()
+                .expect("scripted claim")
+                .push_back(ScriptedOutcome::Ready(Some(winner)));
+            io.allow_publication();
+            let result =
+                settle_initial_takeover_claim(&io, pending, || clock.ticket.revalidate()).await;
+            let published = io.events().iter().any(|event| event.ends_with(":publish"));
+            if preparation == Duration::from_secs(8) {
+                result.expect("eight-second preparation still has sufficient original runway");
+                assert!(published);
+                assert!(io
+                    .events()
+                    .iter()
+                    .any(|event| event == "renew:provisional-scripted"));
+            } else {
+                assert!(
+                    result.is_err(),
+                    "insufficient runway never extends the original lease"
+                );
+                assert!(!published);
+                assert!(io
+                    .events()
+                    .iter()
+                    .any(|event| event.contains("stop-retain:")));
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_keeps_submitted_ambiguous_reconciliation_ungated() {
+        for mode in ["error", "timeout"] {
+            let guard = clock_fixture(Some((0, 1_000)));
+            let clock = acquire_takeover_clock(&guard, "node-old").expect("original admission");
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let mut io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            io.fail_clock_on_initial_claim = Some(Arc::clone(&guard));
+            let (pending, winner) = scripted_clock_takeover(Arc::clone(&events), &clock);
+            io.claims
+                .lock()
+                .expect("scripted claim")
+                .push_back(if mode == "error" {
+                    ScriptedOutcome::Error("reply lost after submission and clock failure")
+                } else {
+                    ScriptedOutcome::Never
+                });
+            io.replays
+                .lock()
+                .expect("scripted replay")
+                .push_back(ScriptedOutcome::Ready(Some(winner)));
+            io.allow_publication();
+            settle_initial_takeover_claim(&io, pending, || clock.ticket.revalidate())
+                .await
+                .expect("submitted fixed claim reconciles despite later clock failure");
+            assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+            let events = io.events();
+            assert_eq!(events.first().map(String::as_str), Some("claim"));
+            assert!(events.iter().any(|event| event == "replay"), "{mode}");
+            assert!(events
+                .iter()
+                .any(|event| event == "renew:provisional-scripted"));
+            assert!(events.iter().any(|event| event.ends_with(":publish")));
+            assert!(!events.iter().any(|event| event.contains("drop-teardown")));
+            assert!(guard.prometheus().contains(
+                "plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"generation_changed\"} 0\n"
+            ));
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn ambiguous_initial_claim_error_and_timeout_reconcile_to_one_worker() {
         for mode in ["error", "timeout"] {
@@ -7797,7 +8802,7 @@ mod tests {
                 .push_back(ScriptedOutcome::Ready(Some(winner)));
             io.allow_publication();
 
-            settle_initial_takeover_claim(&io, pending)
+            settle_initial_takeover_claim(&io, pending, || Ok(()))
                 .await
                 .expect("ambiguous initial claim must reconcile");
             let events = io.events();
@@ -8380,6 +9385,46 @@ mod tests {
     }
 
     #[test]
+    fn service_vod_only_policy_survives_worker_and_durable_recipe_without_native_identity_change() {
+        let native = valid_start_request();
+        let native_value = serde_json::to_value(&native).expect("native envelope");
+        assert!(native_value["request"].get("vod_only").is_none());
+        assert!(native_value["request"].get("passive_vod").is_none());
+        let legacy: RemoteStartRequest =
+            serde_json::from_value(native_value).expect("legacy recipe");
+        assert!(!legacy.request.vod_only);
+
+        assert_eq!(
+            native.request.durable_intent_fingerprint(&native.principal),
+            legacy.request.durable_intent_fingerprint(&legacy.principal)
+        );
+        let mut service = native.clone();
+        service.request.vod_only = true;
+        service.request.passive_vod = true;
+        assert_ne!(
+            native.request.durable_intent_fingerprint(&native.principal),
+            service
+                .request
+                .durable_intent_fingerprint(&service.principal)
+        );
+        let encoded = serde_json::to_vec(&service).expect("worker and durable envelope");
+        let mut recovered: RemoteStartRequest =
+            serde_json::from_slice(&encoded).expect("policy round trip");
+        assert!(recovered.request.vod_only);
+        assert!(recovered.request.passive_vod);
+        let mut invalid = recovered.clone();
+        invalid.request.vod_only = false;
+        assert!(!invalid.is_valid());
+        assert!(recovered.is_valid());
+        recovered.request.presentation = crate::transcode::Presentation::Live;
+        assert!(!recovered.is_valid());
+        assert!(
+            !takeover_recipe_is_valid(&recovered),
+            "takeover cannot turn VOD-only into rolling"
+        );
+    }
+
+    #[test]
     fn remote_start_contract_rejects_unfenced_or_noncanonical_inputs() {
         let request = valid_start_request();
         assert!(request.is_valid());
@@ -8529,6 +9574,182 @@ mod tests {
             spray.sessions.len() <= MAX_CONTROL_RATE_ENTRIES,
             "the admission map itself must stay bounded"
         );
+    }
+
+    #[test]
+    fn quality_reservation_burst_keeps_manual_control_budget_independent() {
+        let started = Instant::now();
+        let mut quality = ControlAdmission {
+            window_started: started,
+            ..Default::default()
+        };
+        let mut manual = ControlAdmission {
+            window_started: started,
+            ..Default::default()
+        };
+        for _ in 0..QUALITY_RATE_PER_SESSION {
+            assert_eq!(
+                quality.admit_with_limit(started, "film", QUALITY_RATE_PER_SESSION),
+                Ok(())
+            );
+        }
+        assert!(quality
+            .admit_with_limit(started, "film", QUALITY_RATE_PER_SESSION)
+            .is_err());
+        for _ in 0..CONTROL_RATE_PER_SESSION {
+            assert_eq!(manual.admit(started, "film"), Ok(()));
+        }
+        assert!(manual.admit(started, "film").is_err());
+        assert_eq!(
+            quality.admit_with_limit(
+                started + CONTROL_RATE_WINDOW,
+                "film",
+                QUALITY_RATE_PER_SESSION
+            ),
+            Ok(())
+        );
+        let mut spray = ControlAdmission {
+            window_started: started,
+            ..Default::default()
+        };
+        for index in 0..CONTROL_RATE_GLOBAL {
+            assert_eq!(
+                spray.admit_with_limit(started, &index.to_string(), QUALITY_RATE_PER_SESSION),
+                Ok(())
+            );
+        }
+        assert!(spray
+            .admit_with_limit(started, "extra", QUALITY_RATE_PER_SESSION)
+            .is_err());
+        assert!(spray.sessions.len() <= MAX_CONTROL_RATE_ENTRIES);
+    }
+
+    fn owner_answer(status: u16, body: &[u8]) -> PeerResponse {
+        PeerResponse {
+            clock_timing: None,
+            status: reqwest::StatusCode::from_u16(status).expect("status"),
+            body: body.to_vec(),
+        }
+    }
+
+    fn quality_discovery() -> crate::http::hls::QualityControlRequest {
+        crate::http::hls::QualityControlRequest {
+            version: 1,
+            generation: uuid::Uuid::new_v4().to_string(),
+            control_epoch: 1,
+            operation: crate::http::hls::QualityControlOperation::Discover,
+            identity: None,
+        }
+    }
+
+    /// An owner's refusal or deferral must keep its meaning across the relay:
+    /// collapsing 409/410/429 into 503 turns "stop" into "retry", and calling
+    /// an owner's route miss "unsupported" disables cancellation for a
+    /// session that merely raced its own end.
+    #[test]
+    fn quality_control_relay_keeps_owner_refusals_and_route_misses_distinct() {
+        let request = quality_discovery();
+        let gone = serde_json::to_vec(&crate::playback_control::ControlErrorBody {
+            terminal_reason: None,
+            code: "session_gone".into(),
+            message: "no media session holds this capability".into(),
+            generation: None,
+            control_epoch: None,
+            retry_after_ms: None,
+            invalid_field: None,
+        })
+        .expect("error body");
+        let Ok(QualityControlRelayOutcome::Refused(miss)) =
+            classify_quality_control_relay(owner_answer(404, &gone), None, &request)
+        else {
+            panic!("an owner's own route miss is not 'unsupported'");
+        };
+        assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+        for status in [404, 405] {
+            assert!(
+                matches!(
+                    classify_quality_control_relay(owner_answer(status, b""), None, &request),
+                    Ok(QualityControlRelayOutcome::Unsupported)
+                ),
+                "an owner without the endpoint ({status}) is unsupported"
+            );
+        }
+        for status in [409, 410] {
+            let Ok(QualityControlRelayOutcome::Refused(refusal)) =
+                classify_quality_control_relay(owner_answer(status, b""), None, &request)
+            else {
+                panic!("owner {status} must pass through");
+            };
+            assert_eq!(refusal.status().as_u16(), status);
+            assert!(refusal.headers().get(header::RETRY_AFTER).is_none());
+        }
+        let limited = serde_json::to_vec(&crate::playback_control::ControlErrorBody {
+            terminal_reason: None,
+            code: "control_rate_limited".into(),
+            message: "the quality control budget is exhausted".into(),
+            generation: None,
+            control_epoch: None,
+            retry_after_ms: Some(2_500),
+            invalid_field: None,
+        })
+        .expect("error body");
+        let Ok(QualityControlRelayOutcome::Refused(deferred)) =
+            classify_quality_control_relay(owner_answer(429, &limited), None, &request)
+        else {
+            panic!("owner 429 must pass through");
+        };
+        assert_eq!(deferred.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            deferred
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("3"),
+            "the owner's own delay reaches the client"
+        );
+        let Ok(QualityControlRelayOutcome::Refused(unavailable)) =
+            classify_quality_control_relay(owner_answer(503, b""), Some(7), &request)
+        else {
+            panic!("owner 503 must pass through");
+        };
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            unavailable
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("7")
+        );
+        assert!(matches!(
+            classify_quality_control_relay(owner_answer(500, b""), None, &request),
+            Err(PeerTransportError::InvalidResponse)
+        ));
+    }
+
+    /// The schedule relay keeps the owner's status and its retry hint, and a
+    /// deferral without one still tells the client when to come back.
+    #[test]
+    fn quality_schedule_relay_passes_owner_status_and_retry_after() {
+        let deferred = relayed_owner_response(429, Some(4), Vec::new()).expect("relay");
+        assert_eq!(deferred.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            deferred
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("4")
+        );
+        let unavailable = relayed_owner_response(503, None, Vec::new()).expect("relay");
+        assert_eq!(
+            unavailable
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        let refused = relayed_owner_response(409, None, Vec::new()).expect("relay");
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert!(refused.headers().get(header::RETRY_AFTER).is_none());
     }
 
     #[test]
@@ -9552,6 +10773,7 @@ mod tests {
         for disposition in ["accepted", "replayed"] {
             let response = validated_control_relay_response(
                 PeerResponse {
+                    clock_timing: None,
                     status: reqwest::StatusCode::OK,
                     body: body.clone(),
                 },

@@ -1355,9 +1355,9 @@ struct PinnedPair {
     base: String,
     session: Value,
     b_stop: tokio::sync::oneshot::Sender<()>,
-    b_task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    b_task: tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
     source_stop: tokio::sync::oneshot::Sender<()>,
-    source_task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    source_task: tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
 }
 
 impl PinnedPair {
@@ -1446,15 +1446,19 @@ impl PinnedPair {
 
     async fn finish(self) {
         let _ = self.b_stop.send(());
-        self.b_task
+        let b_drained = self
+            .b_task
             .await
             .expect("actual B server joined")
             .expect("B server result");
         let _ = self.source_stop.send(());
-        self.source_task
+        let source_drained = self
+            .source_task
             .await
             .expect("actual Source server joined")
             .expect("Source server result");
+        assert_eq!(b_drained, crate::HttpDrain::Complete);
+        assert_eq!(source_drained, crate::HttpDrain::Complete);
         self.fixture.shutdown().await;
     }
 }

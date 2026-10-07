@@ -62,6 +62,28 @@ pub(super) async fn spawn_generation(
         recipe.encoding.is_some() || rendition.key.starts_with("source-"),
         permit.is_some(),
     );
+    // A family may retain this reservation through several generations, but
+    // only the exact unreaped process may use it. Refuse a duplicate launch
+    // before opening inputs or spawning a second producer under one credit.
+    let permit = match permit {
+        Some(reservation) => match rendition
+            .retained_admission
+            .bind(reservation)
+            .try_claim_worker()
+        {
+            Some(worker) => Some(worker),
+            None => {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    "the producer reservation still belongs to an unreaped worker".to_owned(),
+                );
+                return;
+            }
+        },
+        None => None,
+    };
     let attested = attested_source_setup(rendition);
     let source_current = if rendition.key.starts_with("source-") {
         let Some(held) = rendition
@@ -299,8 +321,12 @@ pub(super) async fn spawn_generation(
                 tracing::warn!(target:"plurxd::vodserve",%error,"generation retirement was superseded")
             }
         }
-        if !diagnostic.trim().is_empty() {
-            tracing::warn!(target:"plurxd::vodserve",rendition=%key,generation=epoch,%diagnostic,"VOD producer diagnostic");
+        let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
+        if !diagnostic.informational.is_empty() {
+            tracing::debug!(target: "plurxd::vodserve", rendition = %key, generation = epoch, informational = %diagnostic.informational, "VOD producer informational output");
+        }
+        if !diagnostic.actionable.is_empty() {
+            tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, diagnostic = %diagnostic.actionable, "VOD producer diagnostic");
         }
         if let Some(outcome) = outcome {
             on_generation_end(&shared, &rendition, outcome, epoch).await;
@@ -377,12 +403,18 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
         // Plan duration is rounded to a complete output frame, just like the
         // terminal -t. Neither audio padding nor the source's final VFR gap
         // may turn a short final entry into an unplanned audio-only tail.
-        let plan = encoding.grid.plan(file.duration_ms.unwrap_or(0), 0);
+        let plan = encoding.media_plan(file.duration_ms.unwrap_or(0));
         let end = plan
             .entries
             .last()
             .map_or(0, |entry| entry.start_ticks + entry.duration_ticks);
-        let mut args = encoding.args(&file, start_seconds, end as f64 / f64::from(plan.timescale));
+        let duration_seconds = if encoding.shared_audio.is_some() {
+            // Encoding maps the source duration onto the shared film end once.
+            file.duration_ms.unwrap_or(0) as f64 / 1_000.0
+        } else {
+            end as f64 / f64::from(plan.timescale)
+        };
+        let mut args = encoding.args(&file, start_seconds, duration_seconds);
         if attested && !file.audio_streams.is_empty() {
             let mut inputs = 0;
             for index in 0..args.len().saturating_sub(1) {
@@ -397,13 +429,14 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
         }
         args
     } else {
-        let mut args = copy_pipe_args_with_dolby_vision(
+        let mut args = plurx_core::transcode::copy_pipe_args_with_audio_delivery(
             &recipe.file,
             start_seconds,
             recipe.audio_index,
             recipe.aac,
             Pacing::unpaced(),
             recipe.video,
+            recipe.audio_delivery.as_ref(),
         );
         if attested {
             replace_inputs_with_attested_descriptor(&mut args);
@@ -441,7 +474,10 @@ pub(super) async fn reopen_encoded_audio(
     source: Option<&crate::fragment_index_cluster::SourceFence>,
     recipe: &Recipe,
 ) -> Result<Option<crate::fragment_index_cluster::SourceFence>, String> {
-    if recipe.encoding.is_some() && !recipe.file.audio_streams.is_empty() {
+    if recipe.encoding.as_ref().is_some_and(|encoding| {
+        encoding.shared_audio.is_none() && encoding.plan.options().input_has_audio
+    }) && !recipe.file.audio_streams.is_empty()
+    {
         if let Some(source) = source {
             return source.reopen(&recipe.file).await.map(Some);
         }
@@ -546,6 +582,11 @@ async fn run_generation(
     let generation = Generation {
         plan: rendition.plan.clone(),
         index: rendition.index.clone(),
+        encoded_frame_ticks: rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .map(|encoding| encoding.grid.denominator),
         encoded_audio_anchor: rendition.recipe.encoding.as_ref().map(|_| {
             let start = rendition.plan.entry(at).expect("spawn entry").start_ticks as f64
                 / f64::from(rendition.timescale);
@@ -576,6 +617,18 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
         return Err(Outcome::Failed(Failure::EngineChanged(
             "the immutable media engine changed before init publication".to_owned(),
         )));
+    }
+    if let Some(audio) = rendition
+        .recipe
+        .encoding
+        .as_ref()
+        .and_then(|encoding| encoding.shared_audio.as_ref())
+    {
+        if let Err(error) = audio.verify_init(muxer) {
+            return Err(Outcome::Failed(Failure::Stream(format!(
+                "shared soundtrack init: {error}"
+            ))));
+        }
     }
     let served = {
         let mut state = rendition.identity.lock().await;
@@ -614,12 +667,26 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
                 let served = identity
                     .served_init_for(muxer)
                     .expect("an identity just established from this muxer init serves it");
-                if let Err(error) = store_identity(&rendition.identity_path(), &identity).await {
+                let preparation = rendition.preparation();
+                if let Err(error) = store_identity_observed(
+                    &rendition.identity_path(),
+                    &identity,
+                    preparation
+                        .as_ref()
+                        .map(|preparation| &preparation.allowance),
+                )
+                .await
+                {
                     tracing::warn!(
                         target: "plurxd::vodserve",
                         rendition = %rendition.key,
                         "persisting identity.json: {error}"
                     );
+                    if preparation.is_some() {
+                        rendition.revoke_preparation();
+                        drop(state);
+                        return Err(Outcome::Failed(Failure::Sink(error)));
+                    }
                 }
                 *state = IdentityState {
                     identity: Some(identity),
@@ -629,8 +696,25 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
             }
         }
     };
+    let preparation = rendition.preparation();
+    let pending = if let Some(preparation) = preparation.as_ref() {
+        match preparation.allowance.begin(served.bytes.len() as u64) {
+            Some(pending) => Some(pending),
+            None => {
+                rendition.revoke_preparation();
+                return Err(Outcome::Failed(Failure::Sink(
+                    io::ErrorKind::OutOfMemory.into(),
+                )));
+            }
+        }
+    } else {
+        None
+    };
     if let Err(error) = rendition.dir.write_init(&served.bytes).await {
         return Err(Outcome::Failed(Failure::Sink(error)));
+    }
+    if let Some(pending) = pending {
+        pending.commit(false);
     }
     rendition.clear_demand(INIT_DEMAND_INDEX);
     rendition.init_notify.notify_waiters();
@@ -644,6 +728,14 @@ async fn on_generation_end(
     outcome: Outcome,
     epoch: u64,
 ) {
+    if rendition.cancelled_preparation_epoch.load(Acquire) == epoch.saturating_add(1) {
+        // Background cancellation is not a foreground producer verdict. The
+        // key/readers fence refuses to terminate an epoch acquired by a live
+        // reader; its existing driver owns subsequent reconciliation.
+        super::copy_preparation::fence_cancelled_epoch(shared, rendition, epoch).await;
+        rendition.kick();
+        return;
+    }
     if rendition.closed.load(Relaxed) {
         return;
     }
@@ -661,6 +753,16 @@ async fn on_generation_end(
     match outcome {
         Outcome::Failed(Failure::InitDrift(cause)) => {
             on_init_drift(shared, rendition, cause).await;
+        }
+        Outcome::Failed(Failure::Sink(error)) if quality_reservations_unknown(&error) => {
+            // Unknown is not a verdict on the rendition. Nothing was
+            // published, the producer is reaped, and the next demand respawns
+            // and asks the Store again.
+            tracing::warn!(
+                target: "plurxd::vodserve",
+                rendition = %rendition.key,
+                "holding publication because continuous dependencies are unknown: {error}"
+            );
         }
         Outcome::Failed(failure) => {
             record_failure(
@@ -704,6 +806,23 @@ pub(super) async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Renditio
     let from_disk = rendition.identity.lock().await.from_disk;
     let admitted = rendition.manifest.lock().await.is_admitted();
     if from_disk && !admitted {
+        let _dependency_guard = shared
+            .rendition_build_gate(&rendition.key)
+            .lock_owned()
+            .await;
+        let dependencies = shared
+            .store
+            .quality_reserved_intervals(&rendition.key)
+            .await;
+        if !matches!(dependencies, Ok(ref intervals) if intervals.is_empty()) {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::RenditionInitChanged,
+                format!("retaining reserved or unverified media after init drift: {cause}"),
+            );
+            return;
+        }
         {
             let mut manifest = rendition.manifest.lock().await;
             let freed = rendition.dir.purge(&mut manifest).await;
@@ -901,7 +1020,202 @@ pub(super) async fn credit_marker_prewarm_publication(
     publication
 }
 
+/// Whether any continuous-quality ledger can name this rendition. The
+/// reservation publisher verifies every reserved video interval against a
+/// continuous AVC High recipe without input audio and every AAC interval
+/// against a shared-soundtrack recipe before committing it, and a rendition
+/// key hashes its recipe, so a copy remux or an ordinary transcode can never
+/// carry a pin. Those publish without a Store round trip.
+pub(super) fn quality_reservations_possible(recipe: &Recipe) -> bool {
+    recipe.encoding.as_ref().is_some_and(|encoding| {
+        encoding.shared_audio.is_some()
+            || (!encoding.plan.options().input_has_audio
+                && encoding.plan.options().video_sample_envelope
+                    == plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50)
+    })
+}
+
+const QUALITY_RESERVATION_LOOKUP_ATTEMPTS: u32 = 3;
+
+/// The sink could not learn a continuous rendition's reserved intervals.
+/// Carried inside the sink's `io::Error` so the generation's end can tell it
+/// from a real write fault.
+#[derive(Debug)]
+struct QualityReservationsUnknown(String);
+
+impl std::fmt::Display for QualityReservationsUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "reserved media verification unavailable: {}", self.0)
+    }
+}
+
+impl std::error::Error for QualityReservationsUnknown {}
+
+pub(super) fn quality_reservations_unknown_error(cause: String) -> io::Error {
+    io::Error::other(QualityReservationsUnknown(cause))
+}
+
+pub(super) fn quality_reservations_unknown(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<QualityReservationsUnknown>())
+}
+
+/// A cached publication is traversed, never replaced: its bytes must still be
+/// exactly the manifest's, and any reservation must match them.
+pub(super) async fn verify_retained_publication(
+    path: &Path,
+    plan: &plurx_core::segplan::SegmentPlan,
+    entry: u32,
+    expected: u64,
+    dependencies: &[plurx_core::playback::continuous_quality::QualityInterval],
+) -> io::Result<()> {
+    let cached = super::vod_serve_serve::read_quality_artifact(
+        path,
+        expected.min(plurx_core::playback::continuous_quality::MAX_QUALITY_PINNED_BYTES),
+    )
+    .await
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if cached.len() as u64 != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reserved artifact differs from its manifest",
+        ));
+    }
+    verify_reserved_publication(plan, entry, &cached, dependencies)
+}
+
+/// An already reserved URI cannot acquire different bytes on regeneration.
+/// The caller holds the same exact-key gate as reservation and eviction.
+pub(super) fn verify_reserved_publication(
+    plan: &plurx_core::segplan::SegmentPlan,
+    entry: u32,
+    bytes: &[u8],
+    dependencies: &[plurx_core::playback::continuous_quality::QualityInterval],
+) -> io::Result<()> {
+    let planned = plan.entry(entry).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "publication is outside the media plan",
+        )
+    })?;
+    for dependency in dependencies {
+        if !dependency.valid() || dependency.timescale != plan.timescale {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "reserved media clock is unverifiable",
+            ));
+        }
+        if dependency.from_tick < planned.end_ticks()
+            && planned.start_ticks < dependency.through_tick
+            && (dependency.from_tick != planned.start_ticks
+                || dependency.through_tick != planned.end_ticks()
+                || !dependency.matches_bytes(bytes))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "regenerated media differs from its reserved immutable artifact",
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl RenditionSink {
+    /// The exact-key gate plus every reserved interval of this rendition.
+    ///
+    /// Only continuous renditions ask the Store. An unanswered lookup is
+    /// retried with the gate released, so reservation and eviction are never
+    /// queued behind an unavailable Store; if it stays unanswered the
+    /// publication is refused as unknown. That is the safe direction: an
+    /// unverified regeneration could replace bytes a client already
+    /// scheduled, while holding only delays a fragment the next generation
+    /// retries. It never retires the rendition.
+    async fn reserved_dependencies(
+        &self,
+    ) -> io::Result<(
+        tokio::sync::OwnedMutexGuard<()>,
+        Vec<plurx_core::playback::continuous_quality::QualityInterval>,
+    )> {
+        if !quality_reservations_possible(&self.rendition.recipe) {
+            let guard = self
+                .shared
+                .rendition_build_gate(&self.rendition.key)
+                .lock_owned()
+                .await;
+            return Ok((guard, Vec::new()));
+        }
+        let mut cause = String::new();
+        for attempt in 0..QUALITY_RESERVATION_LOOKUP_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(250 << (attempt - 1))).await;
+            }
+            if self.rendition.closed.load(Relaxed)
+                || self.rendition.gen_epoch.load(Relaxed) != self.epoch
+            {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            let guard = self
+                .shared
+                .rendition_build_gate(&self.rendition.key)
+                .lock_owned()
+                .await;
+            match tokio::time::timeout(
+                Duration::from_secs(1),
+                self.shared
+                    .store
+                    .quality_reserved_intervals(&self.rendition.key),
+            )
+            .await
+            {
+                Ok(Ok(dependencies)) => return Ok((guard, dependencies)),
+                Ok(Err(error)) => cause = error.to_string(),
+                Err(_) => cause = "the Store did not answer within one second".to_owned(),
+            }
+        }
+        Err(quality_reservations_unknown_error(cause))
+    }
+}
+
 impl vodgen::Sink for RenditionSink {
+    async fn completed_output(&self) {
+        if !recipe_engine_is_current(&self.rendition.recipe).await {
+            return;
+        }
+        let manifest = self.rendition.manifest.lock().await;
+        // Only vodgen's verified normal trailer reaches this callback. The
+        // driver may already have retired an all-done child, but that cannot
+        // invalidate its successfully published bytes. The observer still
+        // checks the original Sink epoch; mixed/repeated writes lose proof.
+        if !self.rendition.closed.load(Relaxed)
+            && self
+                .rendition
+                .source
+                .as_ref()
+                .is_some_and(|source| source.unchanged())
+        {
+            let mut measurement = self
+                .rendition
+                .output_measurement
+                .lock()
+                .expect("output measurement lock");
+            measurement.complete(
+                self.epoch,
+                !manifest.is_empty() && manifest.next_gap(0).is_none(),
+            );
+            if let Some(rates) = measurement.complete_rates() {
+                tracing::debug!(target: "plurxd::vodserve",
+                    output_identity = %hex::encode(rates.identity),
+                    wire_bytes = rates.wire_bytes, duration_micros = rates.duration_micros,
+                    average_bps = rates.average_bps, rfc_peak_bps = rates.rfc_peak_bps,
+                    segment_burst_bps = rates.segment_burst_bps,
+                    "complete full-mux VOD measurement; retained wire consumer not issued");
+            }
+            drop(measurement);
+            drop(manifest);
+            super::retained::RetainedArtifactRegistry::offer(&self.shared, &self.rendition);
+        }
+    }
     async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> io::Result<()> {
         if self.rendition.closed.load(Relaxed) {
             // The quiet teardown: `NotFound` is how vodgen learns the session
@@ -945,7 +1259,89 @@ impl vodgen::Sink for RenditionSink {
             );
             return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
+        if self
+            .rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .is_some_and(|encoding| {
+                encoding.continuous_object_fits(&self.rendition.plan, entry, bytes.len() as u64)
+                    == Some(false)
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "continuous object exceeds its advertised container-inclusive delivery budget",
+            ));
+        }
+        let (dependency_guard, dependencies) = self.reserved_dependencies().await?;
+        let retained = {
+            let manifest = self.rendition.manifest.lock().await;
+            if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            manifest
+                .state(entry)
+                .filter(|state| state.is_materialized())
+                .map(|state| state.bytes())
+        };
+        // A completed URI may already be in an HTTP client's hands before its
+        // Scheduled acknowledgement pins the bytes. Publication, not that
+        // later acknowledgement, makes the cached artifact immutable.
+        let retain_published = retained.is_some();
+        if retain_published {
+            // A restarted encoder can use different rate-control history.
+            // Traverse the original publication instead of replacing it.
+            let expected = retained.expect("materialized published interval");
+            verify_retained_publication(
+                &self
+                    .rendition
+                    .dir
+                    .path()
+                    .join(segment_name(u64::from(entry))),
+                &self.rendition.plan,
+                entry,
+                expected,
+                &dependencies,
+            )
+            .await?;
+        } else {
+            verify_reserved_publication(&self.rendition.plan, entry, &bytes, &dependencies)?;
+        }
+        if self
+            .rendition
+            .source
+            .as_ref()
+            .is_some_and(|source| !source.unchanged())
+        {
+            let cause = "source changed while verifying reserved media".to_owned();
+            record_failure(
+                &self.shared,
+                &self.rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause.clone(),
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
+        }
+        if retain_published {
+            {
+                let _manifest = self.rendition.manifest.lock().await;
+                if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
+                    return Err(io::Error::from(io::ErrorKind::NotFound));
+                }
+                self.rendition.clear_demand(entry);
+            }
+            drop(dependency_guard);
+            // This is process progress through existing bytes, not a fresh
+            // publication, working-set charge or marker-prewarm credit.
+            self.rendition.slot.produced(entry).await;
+            self.shared.pool.satisfy(&self.rendition.key, entry);
+            self.rendition.kick();
+            return Ok(());
+        }
         let len = bytes.len() as u64;
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let init = self.rendition.identity.lock().await.identity.clone();
         {
             let mut manifest = self.rendition.manifest.lock().await;
             // Checked under the manifest lock, so a driver bumping the epoch
@@ -954,23 +1350,64 @@ impl vodgen::Sink for RenditionSink {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             let before = manifest.state(entry).map(|s| s.bytes()).unwrap_or(0);
+            let preparation = self.rendition.preparation();
+            let pending = if let Some(preparation) = preparation.as_ref() {
+                if before != 0 || manifest.is_admitted() {
+                    self.rendition.revoke_preparation();
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                match preparation.allowance.begin(len) {
+                    Some(pending) => Some(pending),
+                    None => {
+                        self.rendition.revoke_preparation();
+                        return Err(io::ErrorKind::OutOfMemory.into());
+                    }
+                }
+            } else {
+                None
+            };
             self.rendition
                 .dir
                 .materialize(&mut manifest, entry, &bytes, now_ms())
                 .await?;
+            let publication =
+                credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
+            if let Some(init) = init.as_ref() {
+                self.rendition
+                    .output_measurement
+                    .lock()
+                    .expect("output measurement lock")
+                    .observe(
+                        &self.rendition,
+                        init,
+                        self.epoch,
+                        entry,
+                        output_measurement::ObservedOutputMember {
+                            bytes: len,
+                            digest,
+                            publication,
+                        },
+                    );
+            }
             // Publication and provenance linearize under the same manifest
             // lock. A skip can therefore observe neither fact or both, never
             // real prewarm bytes with a missing credit.
-            credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
             if !manifest.is_admitted() {
                 sub_saturating(&self.shared.working_set, before);
                 self.shared.working_set.fetch_add(len, Relaxed);
             }
-            if manifest.next_gap(0).is_none() {
+            if let Some(pending) = pending {
+                pending.commit(true);
+            }
+            if manifest.next_gap(0).is_none() && preparation.is_none() {
                 self.shared.try_admit(&self.rendition, &mut manifest).await;
+            }
+            if let Some(preparation) = preparation {
+                preparation.progress.notify_waiters();
             }
             self.rendition.clear_demand(entry);
         }
+        drop(dependency_guard);
         self.rendition.slot.produced(entry).await;
         if let (Some(encoding), Some(planned)) = (
             &self.rendition.recipe.encoding,

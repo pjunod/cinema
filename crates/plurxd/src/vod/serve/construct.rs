@@ -25,18 +25,31 @@ impl VodServe {
     /// admission after its durable pointer commit. A copy rendition has no
     /// encoder and therefore needs no transition.
     pub(crate) async fn promote_prepared_session(&self, session_id: &str) -> bool {
-        let rendition = self
-            .shared
-            .sessions
-            .lock()
-            .await
-            .get(session_id)
-            .and_then(|session| session.rendition.clone());
-        let Some(rendition) = rendition else {
-            return false;
+        let renditions = {
+            let sessions = self.shared.sessions.lock().await;
+            let Some(session) = sessions
+                .get(session_id)
+                .filter(|session| session.tombstone.is_none())
+            else {
+                return false;
+            };
+            let Some(root) = session.rendition.as_ref() else {
+                return false;
+            };
+            std::iter::once(Arc::clone(root))
+                .chain(
+                    session
+                        .children
+                        .iter()
+                        .map(|child| Arc::clone(&child.rendition)),
+                )
+                .collect::<Vec<_>>()
         };
-        if let Some(encoding) = rendition.recipe.encoding.as_ref() {
-            encoding.promote();
+        for rendition in renditions {
+            if let Some(encoding) = rendition.recipe.encoding.as_ref() {
+                encoding.promote();
+            }
+            rendition.kick();
         }
         true
     }
@@ -134,9 +147,12 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                retained_logical: None,
+                measured_candidate: None,
                 file: file.clone(),
                 audio_index: None,
                 aac: true,
+                audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
                 source_object_version: None,
                 cluster_cache_key: None,
@@ -154,10 +170,16 @@ impl VodServe {
             completed_cache_budget: 50 << 30,
             materialize_budget: Duration::from_secs(30),
             manifest: Mutex::new(Manifest::new(plan.clone())),
+            output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
+            copy_preparation: StdMutex::new(None),
+            preparation_epoch: AtomicU64::new(0),
+            retained_offer: StdMutex::new(None),
+            cancelled_preparation_epoch: AtomicU64::new(0),
             plan,
             identity: Mutex::new(IdentityState::default()),
             slot: ProducerSlot::new(),
             source_owners: SourceRenditionOwners::default(),
+            retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),
             publication_versions: StdMutex::new(vec![None; plan_len]),
@@ -183,13 +205,22 @@ impl VodServe {
 
         let lifecycle = self.shared.session_lifecycle(session_id);
         let _lifecycle = lifecycle.lock().await;
-        let previous = self
+        let (previous, children) = self
             .shared
             .sessions
             .lock()
             .await
-            .get(session_id)
-            .and_then(|session| session.rendition.as_ref().map(Arc::clone));
+            .get_mut(session_id)
+            .map(|session| {
+                (
+                    session.rendition.as_ref().map(Arc::clone),
+                    std::mem::take(&mut session.children),
+                )
+            })
+            .unwrap_or_default();
+        for child in children {
+            child.detach(&self.shared.pool).await;
+        }
         if let Some(previous) = previous {
             previous.detach_reader(&self.shared.pool, session_id).await;
         }
@@ -197,6 +228,9 @@ impl VodServe {
         self.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                children: Vec::new(),
+                passive_grant: None,
+                retained_output: None,
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(file.clone()),
@@ -212,6 +246,7 @@ impl VodServe {
                 },
                 supersession_user: "[\"user_id\",1]".to_owned(),
                 block_budget: Duration::from_secs(1),
+                sdr_master_codecs: false,
                 lifecycle: Arc::clone(&lifecycle),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
@@ -330,6 +365,7 @@ impl VodServe {
                 cluster_index_root,
                 cluster_membership,
                 sessions: Mutex::new(HashMap::new()),
+                passive_grants: passive_grant::Registry::default(),
                 preparing_sessions: StdMutex::new(HashMap::new()),
                 session_lifecycles: StdMutex::new(HashMap::new()),
                 rendition_builds: StdMutex::new(HashMap::new()),
@@ -337,7 +373,10 @@ impl VodServe {
                 head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
                 pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
+                preparation_media: AtomicU64::new(0),
+                preparation_attachment: StdMutex::new(0),
                 completed_cache: AtomicU64::new(0),
+                retained_artifacts: retained::RetainedArtifactRegistry::default(),
                 terminal_eviction_cursor: AtomicU64::new(0),
                 hooks: crate::seam_hooks::HookSlot::new(&NoopVodSharedHooks),
             }),

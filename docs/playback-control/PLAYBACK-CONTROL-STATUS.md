@@ -645,7 +645,7 @@ is the safe direction. Apple 108, Android 64.
 
 **2026-09-16, effort `effort/quality-switch-continuity`.** The prepared handoff
 described in the section below was complete on the server and on all three
-clients, deployed, default-on — and **no viewer had ever received one.** nynuc's
+clients, deployed, default-on — and **no viewer had ever received one.** media1's
 counters 28 minutes after the 2026-09-16 deploy read
 `preparation_observations_total{seam="in_session"} 2`,
 `preparation_staged_total{outcome="refused"} 1`, `staged 0`,

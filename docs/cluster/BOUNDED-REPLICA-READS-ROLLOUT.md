@@ -1,6 +1,6 @@
 # Bounded replica reads rollout — a consistency-policy change, one route at a time
 
-**Status:** M0–M3 server implementation merged; web echo and normal default in E1 construction (`codex/cluster-cache-preparation`), final review/validation pending · **Executes:** S1, F-sc-1, F-core-4 from
+**Status:** open — M0–M4, the web echo, and the on-by-default setting (the `config.rs` seed is `true`) on `main` since 2026-10-04 (#793), switched on before the lab readout; Apple and Android send no `X-Plurx-Read-After`; the named lab readout and rolling-upgrade acceptance remain open; recommendation: remove the switch after the lab readout (see the 2026-10-04 relevance pass §2.9) · **Executes:** S1, F-sc-1, F-core-4 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -8,24 +8,36 @@
 
 Read [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §3.2–§3.4
 (the four consistency classes and the `BoundedReplica` proof) and §6.4 (what
-P3 built) before this. Then §2 here for what the tree does today, and §3 for
-the order: measure, widen coverage, fence write-followed-by-read, and only
-then flip the default. If a step seems to require caching an ordinary
+P3 built) before this. Then §2 here for the starting snapshot, and §3 for
+the original order: measure, widen coverage, fence write-followed-by-read,
+and then flip the default. If a step seems to require caching an ordinary
 authentication result, serving a watch-state read locally without a fence,
-or turning `bounded_replica_reads` on before a route's fallback has a test,
-stop and flag it.
+or claiming M4 acceptance without the route's failure proof and named lab
+readout, stop and flag it.
 
-**2026-09-26 continuation:** the durable-cluster-work E1 build now owns the web
-echo and normal bounded-read default. It adds a replicated Developer preference
-with advisory observations; absent/stale replica proof and unknown watch-write
-positions still use Authority. The browser uses decimal u64 indexes, a monotonic
-60-second window, auth-generation isolation and invalidation of in-flight
-receipts after an unknown write. Existing fallback/parity contracts are extended
-for live preference changes. No authentication cache is introduced. Tests run
-only after E1's completed-PR adversarial review, per the user's delivery order;
-no production rollout or fleet benchmark is claimed by construction checks.
-Earlier “not built” and default-false entries below are the historical M2–M3
-record. Current build evidence lives in [DURABLE-WORK-QUEUE-STATUS.md](DURABLE-WORK-QUEUE-STATUS.md).
+**2026-09-29 source correction:** [PR #572](http://forge.lan:3000/noirr/plurx/pulls/572)
+merged E1's web echo and on-by-default bounded-read preference (`5ba02212f`)
+to `main` as `82df7f59e`. The Developer switch saves the replicated preference
+with advisory readiness; absent or stale replica proof and unknown watch-write
+positions still use Authority. The browser keeps decimal u64 indexes intact,
+echoes for a monotonic 60-second window, and discards receipts across an auth
+change or an unknown write. Its focused contracts are
+`tests/web/read-after.test.js`; the config default assertion is in
+`crates/plurx-core/src/config.rs`. Separately, `9aeafe86` consolidated the
+item page's three playback-language setting reads into one `get_settings`
+call. These are merged source facts, not the §5.1 lab readout, watch-method
+paused/partitioned-follower proof, rolling-upgrade observation, or fleet
+acceptance. Earlier “not built” and default-false entries below record the
+M2–M3 state at their dated snapshots. The E1 build record is
+[DURABLE-WORK-QUEUE-STATUS.md](DURABLE-WORK-QUEUE-STATUS.md).
+
+**2026-10-04 correction — the key's doc comment.** On `main` at
+`1c8ee9acb` the doc comment above `keys::BOUNDED_REPLICA_READS` in
+`crates/plurx-core/src/store/mod.rs` is a misplaced VOD-index comment: it
+says missing or zero is off, while the effective default is on
+(`bounded_replica_reads: true` in `crates/plurx-core/src/config.rs`). The
+2026-10-04 close-out PR replaces the comment; the behaviour described in this
+plan is the `config.rs` default.
 
 **Correction to the review:** none on the facts. Two clarifications the
 plan depends on. First, `search_items` is already a local read on hiqlite
@@ -47,9 +59,10 @@ Authority whenever that proof cannot be shown; and `bounded_replica_reads`
 defaults to `true` only after each eligible route has that coverage proven
 by a test and the per-route measurement shows the saving.
 
-## 2. Contract today
+## 2. Contract at the 2026-09-20 baseline
 
-Re-verify at build time.
+This section records the starting source snapshot. Use the dated corrections
+in §2.6 and the 2026-09-29 source correction above for the merged state.
 
 ### 2.1 The switch and the reader
 
@@ -177,15 +190,14 @@ What the M2-M4 continuation found when it re-read the tree:
   text count could no longer see. The census now counts each call that
   passes `WatchRead::Authority` to that helper as a site (§3.4 *As built*),
   and stands at 241 after merging `main` at `448e803da`.
-- **The item page pays three consistent settings reads before any watch
-  read.** `item_detail` calls `TranscodeManager::lang_prefs`
-  ([browse.rs:389](../../crates/plurxd/src/http/browse.rs)), which reads
+- **At this 2026-09-24 snapshot, the item page paid three consistent settings
+  reads before any watch read.** `item_detail` called `TranscodeManager::lang_prefs`
+  ([browse.rs:389](../../crates/plurxd/src/http/browse.rs)), which read
   `AUDIO_LANG`, `SUB_LANG` and `SUB_MODE` one `get_setting` at a time
-  ([transcode.rs:21070-21080](../../crates/plurxd/src/transcode.rs)). §3.4's
-  settings bullet names exactly this class; it is not changed yet (see the
-  Execution log).
-- **Everything else in §2 still holds**: `bounded_replica_reads` defaults to
-  `false` and the lag budget to 64 (`config.rs`), `run_bounded_replica`
+  (then in `transcode.rs`). `9aeafe86` later replaced those three calls with
+  one `get_settings` snapshot; see §3.4.
+- **Everything else in §2 held at that snapshot**: `bounded_replica_reads`
+  defaulted to `false` and the lag budget to 64 (`config.rs`), `run_bounded_replica`
   issues and revalidates one permit per local read
   ([migration.rs:8068-8085](../../crates/plurx-core/src/cluster/migration.rs)),
   and authentication is one consistent read per request.
@@ -314,12 +326,12 @@ Authority: it precedes a mutation.
     left the client echoing its previous, older index past a write it had
     just been told succeeded.)* A client that echoes `unknown` verbatim
     sends a malformed fence, which is also Authority.
-- *Not built here*: the web client's echo (`node tests/web/read-after.test.js`
-  in §5.3). It is client code and is left to the session that owns web
-  client work; until it lands no client sends the header, so **no node
-  serves watch state locally**, even with `bounded_replica_reads=true`: M2's
-  local path is exercised by the contracts and is dormant in production
-  until a client echoes. Apple and Android are §7 question 1.
+- *Not built in #504*: the web client's echo (`node tests/web/read-after.test.js`
+  in §5.3). It was client code left to the web owner; until #572 landed,
+  no client sent the header, so **no node served watch state locally**, even
+  with `bounded_replica_reads=true`. The local path was exercised by the
+  contracts but dormant without a client echo. Apple and Android are §7
+  question 1.
 - *Not fenced*: `publish_identity_repair`'s watch-row copies
   (`hiqlite_publication.rs`) are a catalogue repair under a job lease, not
   a user's write; the rows move with the items they describe and are
@@ -349,9 +361,11 @@ one connection and `progress_rails` runs the same shared statement
 `list_items`, `item_detail` and `home_previews` read watch state once each;
 `hubs` reads its two progress rails once and keeps a separate lookup for the
 recently-added rail's cards, which depend on the catalogue rows it
-annotates. The settings bullet is **not** done: the only handler-path case
-found is `lang_prefs`' three reads (§2.6), and `get_setting_pair` would take
-it to two, not one; which shape to use is left to the M0 readout.
+annotates. The settings bullet subsequently landed in `9aeafe86`:
+`try_lang_prefs` now calls `get_settings(&[AUDIO_LANG, SUB_LANG, SUB_MODE])`
+once on both backends, so the item page no longer pays three separate
+settings reads. This is a source-level read count, not a measured page-latency
+saving.
 
 Census: `crates/plurx-core/src/store/consistent_read_census.rs` counts
 `query_consistent` per `hiqlite*.rs` against a checked-in table, fails when
@@ -393,12 +407,36 @@ request on a voter and the expected count after; (d) readiness already drops
 a node that lost its serving proof (`serving_fence.rs`); the lag budget
 `bounded_replica_max_lag_entries = 64` is kept.
 
-Then `bounded_replica_reads` default becomes `true` in `config.rs:170`, with
-the env/TOML key retained as the kill switch and OPERATIONS.md's rollout
-note ("identical on every voter during rollout and rollback") kept. The
-setting is node-local config by necessity (it is read before the store
-exists); the Developer readiness page lists, advisory only, whether every
-committed voter reports the same value in its heartbeat capability set.
+**Merged source state (2026-09-29).** #572 changed the config default to
+`true` and added a replicated Developer preference whose readiness is
+advisory. The env/TOML value seeds the initial preference; after a Developer
+choice is saved, that replicated value overrides the seed. The source and
+focused web/config contracts are present. On merged `main`, precondition (b)
+has not been extended to the watch methods; the K-04 branch proof below covers
+that extension. Precondition (c) has no
+named §5.1 lab readout in this record. The changed default is therefore a
+merged behavior, not evidence that every M4 acceptance step passed.
+
+**2026-09-29 focused source proof.** The separate K-04 branch extends
+`plurx-cluster-check`'s existing three-process apply-pause and follower-
+partition case through `watch_map`, `watch_rollup`, `watch_summary`, and
+`progress_rails`. It seeds a real watch write, carries the acknowledged Raft
+index into each read, checks Authority fallback and the returned watch state
+while apply is paused, then checks that a partitioned follower cannot return
+its stale local state after the one-second watermark lease expires. The
+focused harness mode is `cargo run --locked -p plurx-cluster-check --
+bounded-watch-failure`. On the `9c094da0` source checkpoint plus the harness
+count correction, Rust 1.97.1 (`8bab26f4f`) compiled the crate and this focused
+mode passed. Healthy reads issue two local statements: the replicated
+preference lookup and the catalogue/watch query. Paused or expired proof
+still issues no local SQL and attempts one Authority statement. This is a
+source-level failure proof, not the named lab or rolling-upgrade acceptance.
+The K-04 candidate targets `effort/architecture-review-2026-09-20`, whose
+2026-09-30 base is `38c91722`. Repeat the pinned checks against that exact
+candidate before pushing. Independent seek PR #623 still targets `main`;
+its eventual merge must be synchronized into the effort and the resulting
+tree qualified before final promotion. Earlier snapshot evidence cannot
+qualify a moved base.
 
 ## 4. Guardrails (non-goals)
 
@@ -415,8 +453,9 @@ committed voter reports the same value in its heartbeat capability set.
   but never replace.
 - **No wall-clock freshness.** The bounded permit's lease is monotonic; M2's
   fence is an index comparison. Neither reads `SystemTime`.
-- **The default does not flip before M0–M3.** Flipping it is the
-  consistency-policy change the assessment names; it is the last PR.
+- **The normal default flipped after M0–M3 server work merged.** #572 made
+  that consistency-policy change; the missing watch failure and lab proofs
+  stay open in §3.5 rather than being inferred from the default.
 - **The census is not evidence of latency**, and the plan never presents it
   as such.
 - **No change to `bounded_replica_max_lag_entries`** without a lab
@@ -466,35 +505,48 @@ extra `query_consistent` in a fixture copy of `hiqlite_reading.rs`.
 
 ### 5.5 M4 — default flip
 
-Acceptance: `config.rs` test asserts the new default; `make cluster-check`
-green; the M0 readout repeated on the lab shows `home`'s authority reads per
-request ≤ 2 and `library`/`item` ≤ 1 with the switch at its new default;
-OPERATIONS.md and CLUSTER-PERFORMANCE-PLAN.md §6.4 updated in the same PR.
+Acceptance: the `config.rs` test asserts the merged default; the
+watch-method paused/partitioned-follower `cluster-check` case must pass;
+the M0 readout repeated on the lab must show `home`'s authority reads per
+request ≤ 2 and `library`/`item` ≤ 1 with the switch at its normal default.
+The first is merged source evidence. The K-04 branch's cluster-check
+extension passed the focused pinned-toolchain mode recorded in §3.5; that
+branch proof does not yet describe merged `main`. The named lab readout
+remains open. Rollout and
+rolling-upgrade observations are
+separate from source acceptance.
 
 ## 6. Verification and rollout
 
-Fast lane per PR: `make unit`; M2/M3/M4 also `make cluster-store-check`
+The 2026-09-30 effort integration override on the work board governs remaining
+plan PRs: use the focused `bounded-watch-failure` regression and the blocking
+Effort development gate, without task-to-main unit sweeps. The final effort
+promotion requires qualification of the synchronized tree and its receipt.
+
+Historical main fast lane per PR: `make unit`; M2/M3/M4 also `make cluster-store-check`
 (the P3 contracts live there). Node gate for M2's client change:
-`node tests/web/read-after.test.js`. Rollout: M0–M3 are behaviour-neutral
-with the switch off. M4 rolls voter by voter with the env kill switch set
-`false` on each node first, then removed; rollback is setting it back, and
-the mixed state is safe because the reader falls back per request.
+`node tests/web/read-after.test.js`. The normal default and Developer
+preference are merged; the saved preference can turn bounded reads off or on
+without a restart and overrides the env/TOML seed. Every read still checks
+its own consistency proof and falls back per request. Record the §5.1 lab
+readout and rolling-upgrade observation separately before claiming rollout
+acceptance.
 
 ## 7. Open questions
 
 1. Whether Apple and Android should adopt the `X-Plurx-Read-After` echo in
    the same quarter; until then their Home rails are Authority on
    non-writing nodes, which is today's behaviour.
-2. The 60 s TTL on the per-user write index and the header window — a
-   proposal; a longer window only costs Authority reads.
+2. Whether to lengthen the implemented 60 s per-user write index and header
+   window; a longer window only costs Authority reads.
 3. Should `route_group` include `reader` (ebooks) as its own value? Nine
    groups are proposed; the table is the place to add one.
 4. *(Raised by the M2 build, for Paul; narrowed by the review of #504.)* A
    watch read is local only for a client that echoes an
    `X-Plurx-Read-After` from the last 60 s. A node's own write record no
-   longer counts on its own (§3.3 *As built*), so until the web echo lands
-   **no watch read is local anywhere**, and afterwards Apple and Android
-   (question 1) and an idle web session stay on Authority for watch state.
+   longer counts on its own (§3.3 *As built*). The web echo landed in #572;
+   Apple and Android (question 1) and an idle web session stay on Authority
+   for watch state.
    That is what makes the fence sound without a replicated per-user
    revision, and M3 already takes that Authority cost from two reads to one.
    The header also gives per-client, not per-user, consistency: a second
@@ -518,20 +570,20 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · `3976b8c51` | Implemented fixed-cardinality request-local Store attribution and route latency. `cargo test -p plurxd metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts` passed; the required lab1–lab3 readout remains pending. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · `06c87ff92` | Named search explicitly as `NodeLocal` through `CatalogueReader` and expanded the handler inventory across photos, images, reading, DVR, and library channels while retaining Authority pre-mutation/ownership reads. `cargo test -p plurxd bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate` passed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · pending | Blocked: M0 fleet evidence is required before widening the rollout. The vendored `Client::execute` also exposes rows affected, not the acknowledged Raft log index; deriving a fence from a later quorum sample would add a second round trip and would not be the write response contract this milestone specifies. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · pending | Blocked behind M2: watch-state reads stay Authority until the revision fence is real. No combined-query claim or authority-read reduction is recorded. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · pending | Blocked on M0–M3 and three-voter paused/partition evidence. `bounded_replica_reads` remains false; the lag budget remains 64; no enablement gate or auth cache was added. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Review disposition | [#428 comment #3344](http://192.168.4.7:3000/noirr/plurx/pulls/428#issuecomment-3344) | Replaced substring attribution with an exact registered-`MatchedPath` table, exercised every non-`other` family through the production middleware and the `TimedClient` operation-timer path, added explicit `fenced`/`unknown` roles, and made the M1 five-surface inventory an exact per-function call multiset. Focused tests named in the PR disposition passed. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | claim | [#504](http://192.168.4.7:3000/noirr/plurx/pulls/504) · `b497c86ba` | Claimed the server-side remainder (M2-M4) on `plan/K-04-2` from `0e2c3fd47`; re-verified §2 (§2.6). |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 (server) | [#504](http://192.168.4.7:3000/noirr/plurx/pulls/504) · `7fcf4853b`, `afc92eafe` | Unblocked in-repo: Hiqlite patch 20 reports the committed Raft log index (§3.3 *As built*). Per-process fence, fenced reader methods, `ReadAfter`, `X-Plurx-Commit-Index`. Evidence: `watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_write` (three voters, streamed writes) passed; `store::watch_fence::tests` (5), `bounded_replica_after_refuses_before_reading_until_the_fence_is_applied`, vendor `write_ack_*` (2), plurxd `read_after_accepts_exactly_one_positive_decimal_index` and `commit_index_header_offers_only_a_fully_acknowledged_watch_write_position` passed. Reverting each production hunk fails its test: the permit's applied-index check (the core unit test and the contract), the leader's negotiation (the contract gets no index), the no-record-no-header rule (three fence unit tests and the contract), the response header (the plurxd test). **Not built:** the web echo and its `tests/web/read-after.test.js` (client code). |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | [#504](http://192.168.4.7:3000/noirr/plurx/pulls/504) · `afc92eafe` | `watch_summary` and `progress_rails` on both backends; browse pages read watch state once per dependency; source census at 226 sites *(restated as 241 by the review disposition below: 226 was the refactor hiding five reads)*. Evidence: `watch_summary_and_progress_rails_match_the_separate_reads_on_every_backend` (SQLite and three voters), `watch_summary_and_progress_rails_are_one_read_matching_the_separate_reads` (one consistent read each, local path parity), `consistent_read_census_*` (3), plurxd `home_previews_reads_watch_state_exactly_once` passed *(then a source-text check; a Store counter since the review disposition below)*. **Not done:** the settings bullet (§3.4 *As built*). |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#428](http://forge.lan:3000/noirr/plurx/pulls/428) · `3976b8c51` | Implemented fixed-cardinality request-local Store attribution and route latency. `cargo test -p plurxd metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts` passed; the required lab1–lab3 readout remains pending. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#428](http://forge.lan:3000/noirr/plurx/pulls/428) · `06c87ff92` | Named search explicitly as `NodeLocal` through `CatalogueReader` and expanded the handler inventory across photos, images, reading, DVR, and library channels while retaining Authority pre-mutation/ownership reads. `cargo test -p plurxd bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate` passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#428](http://forge.lan:3000/noirr/plurx/pulls/428) · pending | Blocked: M0 fleet evidence is required before widening the rollout. The vendored `Client::execute` also exposes rows affected, not the acknowledged Raft log index; deriving a fence from a later quorum sample would add a second round trip and would not be the write response contract this milestone specifies. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#428](http://forge.lan:3000/noirr/plurx/pulls/428) · pending | Blocked behind M2: watch-state reads stay Authority until the revision fence is real. No combined-query claim or authority-read reduction is recorded. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#428](http://forge.lan:3000/noirr/plurx/pulls/428) · pending | Blocked on M0–M3 and three-voter paused/partition evidence. `bounded_replica_reads` remains false; the lag budget remains 64; no enablement gate or auth cache was added. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Review disposition | [#428 comment #3344](http://forge.lan:3000/noirr/plurx/pulls/428#issuecomment-3344) | Replaced substring attribution with an exact registered-`MatchedPath` table, exercised every non-`other` family through the production middleware and the `TimedClient` operation-timer path, added explicit `fenced`/`unknown` roles, and made the M1 five-surface inventory an exact per-function call multiset. Focused tests named in the PR disposition passed. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | claim | [#504](http://forge.lan:3000/noirr/plurx/pulls/504) · `b497c86ba` | Claimed the server-side remainder (M2-M4) on `plan/K-04-2` from `0e2c3fd47`; re-verified §2 (§2.6). |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 (server) | [#504](http://forge.lan:3000/noirr/plurx/pulls/504) · `7fcf4853b`, `afc92eafe` | Unblocked in-repo: Hiqlite patch 20 reports the committed Raft log index (§3.3 *As built*). Per-process fence, fenced reader methods, `ReadAfter`, `X-Plurx-Commit-Index`. Evidence: `watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_write` (three voters, streamed writes) passed; `store::watch_fence::tests` (5), `bounded_replica_after_refuses_before_reading_until_the_fence_is_applied`, vendor `write_ack_*` (2), plurxd `read_after_accepts_exactly_one_positive_decimal_index` and `commit_index_header_offers_only_a_fully_acknowledged_watch_write_position` passed. Reverting each production hunk fails its test: the permit's applied-index check (the core unit test and the contract), the leader's negotiation (the contract gets no index), the no-record-no-header rule (three fence unit tests and the contract), the response header (the plurxd test). **Not built:** the web echo and its `tests/web/read-after.test.js` (client code). |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | [#504](http://forge.lan:3000/noirr/plurx/pulls/504) · `afc92eafe` | `watch_summary` and `progress_rails` on both backends; browse pages read watch state once per dependency; source census at 226 sites *(restated as 241 by the review disposition below: 226 was the refactor hiding five reads)*. Evidence: `watch_summary_and_progress_rails_match_the_separate_reads_on_every_backend` (SQLite and three voters), `watch_summary_and_progress_rails_are_one_read_matching_the_separate_reads` (one consistent read each, local path parity), `consistent_read_census_*` (3), plurxd `home_previews_reads_watch_state_exactly_once` passed *(then a source-text check; a Store counter since the review disposition below)*. **Not done:** the settings bullet (§3.4 *As built*). |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | not started | Not buildable in this PR by the plan's own guardrail: the default flip is the last PR, after M0-M3 are merged (§4). Its precondition (c) also needs the §5.1 readout on lab voters with M2-M3 deployed; (b) needs `plurx-cluster-check`'s apply-pause/partition case extended to the watch methods, which is buildable and belongs to that PR. `bounded_replica_reads` stays `false`, the lag budget stays 64, no auth cache was added. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | needs: fleet | post-merge | After #504 deploys to lab1-lab3, run the §5.1 GPT prompt with one addition: *"Also, with a browser session on a follower, mark an episode watched and give me the response's `X-Plurx-Commit-Index` header (present, a positive integer), then load Home on that same follower within 60 s and on another voter, and report `plurx_http_store_reads_total{route_group="home"}` deltas for each load with `PLURX_CLUSTER_BOUNDED_REPLICA_READS=true`. Then deploy it to one voter only (rolling upgrade) and confirm a watch write through that voter still succeeds while the leader runs the previous build."* |
-| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review disposition | [#504 comment 4631](http://192.168.4.7:3000/noirr/plurx/pulls/504#issuecomment-4631) · `d17cf2381`, `b11dc6b69`, `d5fd2ff81`, `ac43956c1` | Merged `main` at `448e803da` first (`2b75ce66c`; two conflicts, both additive: the store contract's tail and this plan's work-board row). (1) **P1, fixed:** a node's own older write record no longer proves freshness; without `X-Plurx-Read-After` every watch read is Authority, on every node (§3.3 *As built*, §7 question 4). Pinned by `watch_fence_a_peers_older_record_does_not_prove_a_write_through_another_node` (three voters: write via B, write via A, read on B) and `store::watch_fence::tests::a_local_write_record_never_stands_in_for_the_clients_floor`. (2) **P2, fixed:** `X-Plurx-Commit-Index: unknown` on a request with an unindexed watch write, and the client drops its echo; pinned by `http::tests::commit_index_header_offers_the_acknowledged_position_or_unknown`. (3) **P2, fixed:** a Store counter of watch reads per request (`HttpStoreOperationCounts::watch_reads`) replaces the source-text check; `http::browse::tests::home_previews_reads_watch_state_exactly_once` and `home_hubs_grid_and_item_pages_read_watch_state_once_per_dependency` drive the handlers. (4) **P2, fixed:** the census counts `WatchRead::Authority` call sites of `watch_query` and is restated at 241 (§2.6, §3.4); `consistent_read_census_refuses_a_new_authority_read_through_a_dispatch_helper`. Each test was run with its production hunk reverted on nuc3 and failed (exit 101); the counter test also fails (2 reads) when an extra `state.store.watch_state` call is added to `home_previews`. Consequence recorded for Paul: until the web echo lands, no watch read is served locally (§7 question 4). |
-| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Promotion | [#504](http://192.168.4.7:3000/noirr/plurx/pulls/504) | On merging `origin/main` (`37baf6e0b`, P-03 phase B in force past `448e803da`) the branch's two `validation/regressions.d` rows (`b11dc6b6`, `d17cf238`) were refused by the freeze, since both commits are past the boundary. They are removed; the pull request body's five `Regression-Test:` lines name the review-fix tests and are carried into the landing commit's message. |
-| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Promotion | [#504](http://192.168.4.7:3000/noirr/plurx/pulls/504) | K-08 (#503) landed first and took Hiqlite ledger row 20 (`ring` as the only rustls provider), so on merging `origin/main` `196d2a43e` the `WriteAck` patch this plan adds is **patch 21**: `vendor/hiqlite/PLURX-PATCH.md` now carries twenty-one patches, thirteen of them Plurx policies (rows 20 and 21 in the removal paragraph), and `tests/operations/test_hiqlite_patch_ledger.py` expects 21 rows. The 2026-09-24 rows above that say patch 20 predate the renumbering. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review disposition | [#504 comment 4631](http://forge.lan:3000/noirr/plurx/pulls/504#issuecomment-4631) · `d17cf2381`, `b11dc6b69`, `d5fd2ff81`, `ac43956c1` | Merged `main` at `448e803da` first (`2b75ce66c`; two conflicts, both additive: the store contract's tail and this plan's work-board row). (1) **P1, fixed:** a node's own older write record no longer proves freshness; without `X-Plurx-Read-After` every watch read is Authority, on every node (§3.3 *As built*, §7 question 4). Pinned by `watch_fence_a_peers_older_record_does_not_prove_a_write_through_another_node` (three voters: write via B, write via A, read on B) and `store::watch_fence::tests::a_local_write_record_never_stands_in_for_the_clients_floor`. (2) **P2, fixed:** `X-Plurx-Commit-Index: unknown` on a request with an unindexed watch write, and the client drops its echo; pinned by `http::tests::commit_index_header_offers_the_acknowledged_position_or_unknown`. (3) **P2, fixed:** a Store counter of watch reads per request (`HttpStoreOperationCounts::watch_reads`) replaces the source-text check; `http::browse::tests::home_previews_reads_watch_state_exactly_once` and `home_hubs_grid_and_item_pages_read_watch_state_once_per_dependency` drive the handlers. (4) **P2, fixed:** the census counts `WatchRead::Authority` call sites of `watch_query` and is restated at 241 (§2.6, §3.4); `consistent_read_census_refuses_a_new_authority_read_through_a_dispatch_helper`. Each test was run with its production hunk reverted on lab3 and failed (exit 101); the counter test also fails (2 reads) when an extra `state.store.watch_state` call is added to `home_previews`. Consequence recorded for Paul: until the web echo lands, no watch read is served locally (§7 question 4). |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Promotion | [#504](http://forge.lan:3000/noirr/plurx/pulls/504) | On merging `origin/main` (`37baf6e0b`, P-03 phase B in force past `448e803da`) the branch's two `validation/regressions.d` rows (`b11dc6b6`, `d17cf238`) were refused by the freeze, since both commits are past the boundary. They are removed; the pull request body's five `Regression-Test:` lines name the review-fix tests and are carried into the landing commit's message. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Promotion | [#504](http://forge.lan:3000/noirr/plurx/pulls/504) | K-08 (#503) landed first and took Hiqlite ledger row 20 (`ring` as the only rustls provider), so on merging `origin/main` `196d2a43e` the `WriteAck` patch this plan adds is **patch 21**: `vendor/hiqlite/PLURX-PATCH.md` now carries twenty-one patches, thirteen of them Plurx policies (rows 20 and 21 in the removal paragraph), and `tests/operations/test_hiqlite_patch_ledger.py` expects 21 rows. The 2026-09-24 rows above that say patch 20 predate the renumbering. |
 
 Implementation decisions recorded for this run: retain the proposed nine route
 groups and classify every registered route pattern explicitly (`other` is only

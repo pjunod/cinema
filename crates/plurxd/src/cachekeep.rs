@@ -848,6 +848,26 @@ pub async fn budget_bytes_fallible(
     Ok((gb > 0).then(|| gb.saturating_mul(GB)))
 }
 
+/// The budget a stored `cache.max_gb` value means, as a pure parse of a value
+/// the caller already read: unset is the 50 GB default the settings page
+/// shows, `0` is off, and anything unparseable is off.
+///
+/// Used by the settings API, complete-output preparation, rolling retention
+/// and the preparation queue's ceiling. The sweep itself still reads through
+/// [`budget_bytes_fallible`], which agrees on unset and `0` but treats an
+/// unparseable value as an error rather than as off (the settings API refuses
+/// to store one, so the two only differ for a value written by another route).
+/// VOD rendition admission deliberately keeps its own rule (unset = closed):
+/// opening it on nodes that never set the key would admit and retain
+/// renditions no switch gates.
+pub fn cache_budget(value: Option<&str>) -> Option<u64> {
+    let gb = match value {
+        None => u64::try_from(DEFAULT_MAX_GB).unwrap_or(0),
+        Some(value) => value.trim().parse::<u64>().ok()?,
+    };
+    (gb > 0).then(|| gb.saturating_mul(u64::try_from(GB).unwrap_or(0)))
+}
+
 /// Run the whole sweep. Safe to call at any time; does nothing surprising when
 /// the cache is empty, unconfigured, or its root does not exist.
 ///
@@ -1715,6 +1735,7 @@ mod tests {
             .await
             .expect("user");
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: format!("package-{recipe}"),
             request_id: format!("request-{recipe}"),
             user_id: user.id,
@@ -3155,6 +3176,7 @@ mod tests {
                 .expect("complete cache");
 
             let package = |id: &str, request: &str| NewOfflinePackage {
+                audio_recipe: None,
                 id: id.into(),
                 request_id: request.into(),
                 user_id: user.id,

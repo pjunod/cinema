@@ -14,6 +14,39 @@ import XCTest
 /// `AppleClientTests`); a mutation that exposes before aligning fails it.
 @MainActor
 final class PreparedCommitRendezvousTests: XCTestCase {
+    func testFirstFrameBudgetSuspendsExplicitPauseAndResumesRemainingTime() {
+        var budget = PreparedActiveWallBudget(boundMs: 6_000, nowMs: 100, playbackRequested: true)
+        XCTAssertFalse(budget.update(nowMs: 2_100, playbackRequested: false))
+        XCTAssertEqual(budget.remainingMs, 4_000)
+        XCTAssertFalse(budget.update(nowMs: 62_100, playbackRequested: true))
+        XCTAssertEqual(budget.remainingMs, 4_000)
+        XCTAssertFalse(budget.update(nowMs: 66_099, playbackRequested: true))
+        XCTAssertTrue(budget.update(nowMs: 66_100, playbackRequested: true))
+        XCTAssertEqual(budget.remainingMs, 0)
+    }
+
+    func testPreparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline() {
+        var budget = PreparedActiveWallBudget(boundMs: 6_000, nowMs: 11_100,
+            playbackRequested: false, overlapBoundMs: 12_000, overlapStartedAtMs: 100)
+        XCTAssertEqual(budget.remainingOverlapMs, 1_000)
+        XCTAssertFalse(budget.update(nowMs: 12_099, playbackRequested: false))
+        XCTAssertTrue(budget.update(nowMs: 12_100, playbackRequested: false))
+        XCTAssertEqual(budget.remainingMs, 6_000)
+        let spent = PreparedActiveWallBudget(boundMs: 6_000, nowMs: 20_100,
+            playbackRequested: true, overlapBoundMs: 12_000, overlapStartedAtMs: 100)
+        XCTAssertEqual(spent.remainingOverlapMs, 0)
+    }
+
+    func testFirstFrameBudgetBoundsStallsAndIgnoresBackwardClockSamples() {
+        var budget = PreparedActiveWallBudget(boundMs: 6_000, nowMs: 100, playbackRequested: true)
+        XCTAssertFalse(budget.update(nowMs: 3_100, playbackRequested: true))
+        XCTAssertFalse(budget.update(nowMs: 2_100, playbackRequested: true))
+        XCTAssertEqual(budget.remainingMs, 3_000)
+        XCTAssertTrue(budget.update(nowMs: 6_100, playbackRequested: true))
+        XCTAssertEqual(budget.remainingMs, 0)
+        XCTAssertTrue(budget.update(nowMs: 90_000, playbackRequested: false))
+    }
+
     private func playerControllerSource() throws -> String {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -34,6 +67,21 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         return source[start.upperBound...]
     }
 
+    func testDecodedAlignmentRejectsStaleInvalidAndEmptySamples() {
+        let rendezvous = PreparedCommitRendezvous.plan(
+            stagedFilmPositionMs: 1_000, incumbentFilmPositionMs: 10_000, mediaOriginMs: 2_000
+        )
+        XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8 + 1 / 24, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 7.95, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8.05, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8.2, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 1280, height: 720, frameDurationSeconds: 0))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: .nan, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: .infinity, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 0, height: 720, frameDurationSeconds: 1 / 24))
+    }
+
     // MARK: The rendezvous itself
 
     func testTheSwitchHappensWhereTheIncumbentGotToNotWhereTheOfferStagedIt() {
@@ -47,6 +95,19 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             plan.itemPositionMs, 12_000,
             "the successor's own zero is its media_origin_ms, not the film's"
         )
+    }
+
+    func testFutureRendezvousParksAheadWithoutChangingTheSuccessorOrigin() {
+        let plan = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 30_000,
+            incumbentFilmPositionMs: 42_000, mediaOriginMs: 30_000, leadMs: 2_000)
+        XCTAssertEqual(plan.filmPositionMs, 44_000)
+        XCTAssertEqual(plan.itemPositionMs, 14_000)
+        let negative = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 30_000,
+            incumbentFilmPositionMs: 42_000, mediaOriginMs: 30_000, leadMs: -2_000)
+        XCTAssertEqual(negative.filmPositionMs, 42_000)
+        let overflow = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 0,
+            incumbentFilmPositionMs: Int.max, mediaOriginMs: 0, leadMs: 1_000)
+        XCTAssertEqual(overflow.filmPositionMs, Int.max)
     }
 
     func testTheSuccessorIsNeverAskedToSeekBehindWhereItWasPrimed() {
@@ -74,7 +135,10 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         let body = try commitBody()
         let align = try XCTUnwrap(body.range(of: "awaitPreparedAlignment(of: item"))
         let boundary = try XCTUnwrap(body.range(of: "let boundaryMs = rendezvous.filmPositionMs"))
-        let expose = try XCTUnwrap(body.range(of: "player.replaceCurrentItem(with: item)"))
+        // The successor is exposed by promoting its warm player onto the
+        // surface (continuous quality, #774), not by swapping an item into
+        // the incumbent player.
+        let expose = try XCTUnwrap(body.range(of: "playbackSurface?.promote(successor)"))
         XCTAssertTrue(
             align.lowerBound < expose.lowerBound,
             "exposing first shows the viewer the staged position, which is behind the picture"
@@ -92,7 +156,7 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         let refusal = try XCTUnwrap(
             tail.range(of: "PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand")
         )
-        let expose = try XCTUnwrap(tail.range(of: "player.replaceCurrentItem(with: item)"))
+        let expose = try XCTUnwrap(tail.range(of: "playbackSurface?.promote(successor)"))
         XCTAssertTrue(refusal.lowerBound < expose.lowerBound)
         XCTAssertEqual(
             PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand,
@@ -167,4 +231,12 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             "a seek that comes back in the last poll answered; it did not time out"
         )
     }
+    func testFirstFrameBoundaryUsesActualCadenceForLocalAndShared() {
+        XCTAssertTrue(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: 7_980, boundaryMs: 8_000, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: 7_950, boundaryMs: 8_000, frameDurationSeconds: 1 / 24))
+        XCTAssertTrue(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: 8_050, boundaryMs: 8_000, frameDurationSeconds: 1 / 60))
+        XCTAssertFalse(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: 8_000, boundaryMs: 8_000, frameDurationSeconds: 0))
+        XCTAssertFalse(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: .nan, boundaryMs: 8_000, frameDurationSeconds: 1 / 24))
+    }
+
 }

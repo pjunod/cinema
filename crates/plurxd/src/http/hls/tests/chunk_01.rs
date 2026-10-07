@@ -159,7 +159,7 @@
     /// added to `http/hls/` without being listed here fails each scan instead
     /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
     /// production code as literals and are not product sources.
-    const HLS_PRODUCT_SOURCES: [(&str, &str); 16] = [
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 21] = [
         ("../hls.rs", include_str!("../../hls.rs")),
         ("hooks.rs", include_str!("../hooks.rs")),
         ("session_guard.rs", include_str!("../session_guard.rs")),
@@ -179,6 +179,14 @@
         ("subtitle_names.rs", include_str!("../subtitle_names.rs")),
         ("playlist_text.rs", include_str!("../playlist_text.rs")),
         ("segment.rs", include_str!("../segment.rs")),
+        ("quality_control.rs", include_str!("../quality_control.rs")),
+        ("quality_schedule.rs", include_str!("../quality_schedule.rs")),
+        (
+            "candidate_recovery.rs",
+            include_str!("../candidate_recovery.rs"),
+        ),
+        ("link_receipts.rs", include_str!("../link_receipts.rs")),
+        ("prepared_link.rs", include_str!("../prepared_link.rs")),
     ];
 
     fn hls_product_source() -> String {
@@ -737,14 +745,8 @@
     #[tokio::test]
     async fn driven_local_body_rejects_queued_data_after_terminal_failure() {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let (accepted, rejected) = tokio::sync::oneshot::channel();
-        sender
-            .send(DrivenLocalChunk {
-                bytes: Bytes::from_static(b"stale-chunk"),
-                accepted,
-            })
-            .await
-            .expect("body receiver");
+        let (chunk, accepted_bytes) = test_resident_chunk(Bytes::from_static(b"stale-chunk"));
+        sender.send(chunk).await.expect("body receiver");
         let terminal = StreamedBodyTerminal::new();
         terminal.fail(
             std::io::ErrorKind::TimedOut,
@@ -752,7 +754,7 @@
         );
         drop(sender);
 
-        let mut body = driven_local_body(
+        let mut body = resident_local_body(
             receiver,
             terminal,
             tokio::time::Instant::now() + Duration::from_secs(60),
@@ -764,10 +766,7 @@
             .expect_err("the driven body must expose the producer failure");
         assert!(error.to_string().contains("body deadline expired"));
         assert!(body.frame().await.is_none());
-        assert!(
-            rejected.await.is_err(),
-            "stale bytes must not be acknowledged"
-        );
+        assert_eq!(accepted_bytes(), 0, "stale bytes must not be acknowledged");
     }
 
     #[test]
@@ -912,6 +911,8 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         let recipe = RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
@@ -924,8 +925,13 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                sdr_master_codecs: None,
+                continuous_media: None,
                 quality_catalog: None,
-            candidate_context: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 control_sequence: None,
                 file_id: 1,
                 playback_id: "control-transition".to_owned(),
@@ -936,6 +942,8 @@
                 kind: crate::transcode::SessionKind::Transcode { height: 720 },
                 start_seconds: 0.0,
                 audio_index: None,
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
@@ -945,10 +953,12 @@
             },
         };
         let start = StartResponse {
+            delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -1802,10 +1812,12 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+            delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -1859,6 +1871,7 @@
         fixture
             .store
             .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                quality_cancellation_key: None,
                 expected_desired_revision: None,
                 incarnation_id: successor_incarnation.clone(),
                 session_id: successor_session.clone(),
@@ -2080,6 +2093,8 @@
             .await
             .expect("terminal cancellation user");
         let recipe = RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
@@ -2092,8 +2107,13 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                sdr_master_codecs: None,
+                continuous_media: None,
                 quality_catalog: None,
-            candidate_context: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 control_sequence: None,
                 file_id: fixture.file_id(),
                 playback_id: "terminal-cancellation".to_owned(),
@@ -2104,6 +2124,8 @@
                 kind: crate::transcode::SessionKind::Transcode { height: 720 },
                 start_seconds: 0.0,
                 audio_index: None,
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
@@ -2113,10 +2135,12 @@
             },
         };
         let start = StartResponse {
+            delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -2347,6 +2371,8 @@
             let generation = uuid::Uuid::new_v4().to_string();
             let client_instance_id = uuid::Uuid::new_v4().to_string();
             let recipe = RemoteStartRequest {
+                retained_output: None,
+                retained_output_receiver: None,
                 candidate_catalog: None,
                 candidate_id: None,
                 presentation_target: None,
@@ -2359,8 +2385,13 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    sdr_master_codecs: None,
+                    continuous_media: None,
                     quality_catalog: None,
-            candidate_context: None,
+                    candidate_context: None,
+                    vod_only: false,
+                    passive_vod: false,
+                    finite_bitrate_limit_bps: None,
                     control_sequence: None,
                     file_id: fixture.file_id(),
                     playback_id: format!("terminal-{label}"),
@@ -2371,6 +2402,8 @@
                     kind: crate::transcode::SessionKind::Transcode { height: 720 },
                     start_seconds: 0.0,
                     audio_index: None,
+                    audio_delivery: None,
+                    audio_claim: None,
                     subtitle_burn: None,
                     audio_offset_ms: 0,
                     hdr10: false,
@@ -2380,10 +2413,12 @@
                 },
             };
             let start = StartResponse {
+                delivered_audio: None,
         quality_catalog_status: None,
                 display_aware_auto_protocol: Some("route-v1".to_owned()),
                 quality_candidate_id: None,
                 quality_candidates: None,
+                measured_candidate_outputs: None,
                 session_id: session_id.clone(),
                 playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                 duration_ms: Some(60_000),
@@ -2657,3 +2692,46 @@
             );
         }
     }
+
+#[test]
+fn native_http_cannot_select_service_vod_only_policy() {
+    let public: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"native", "vod_only":true, "passive_vod":true})).expect("native body");
+    let request = public.into_request(1, 360);
+    assert!(!request.vod_only);
+    assert!(!request.passive_vod);
+}
+
+#[tokio::test]
+async fn passive_vod_owner_loop_retains_dormant_route_and_http_terminal_fences_expiry() {
+    let dir = crate::test_tempdir().expect("owner integration base");
+    let fixture = HlsDeliveryFixture::publish(dir.path(), "unused-rolling-fixture").await;
+    let id = uuid::Uuid::new_v4().to_string();
+    let _owner = install_vod_http_session(&fixture, dir.path(), &id).await;
+    activate_fixture_route(&fixture, &id, "passive-owner-player").await;
+    let vod = fixture.state.transcode.vod_for_test();
+    vod.install_passive_grant_for_test(&id, "user", "passive-owner-player", "passive-owner-request").await;
+    vod.force_reader_idle_for_test(&id).await;
+    vod.maintain().await;
+    assert_eq!(vod.active_sessions().await, 0);
+    assert!(vod.delivery_infos().await.is_empty());
+    assert_eq!(vod.frontier_ms(&id).await, Some(0));
+    let loop_task = tokio::spawn(crate::media_sessions::lease_loop(fixture.state.clone()));
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let route = fixture.store.media_session_route(&id).await.expect("route read").expect("route");
+    assert_eq!(route.state, "active", "missing reader must not trigger stale settlement");
+    assert_eq!(route.owner_epoch, 1);
+    assert!(vod.passive_presence(&id, "user", "passive-owner-player", "passive-owner-request").await);
+    assert_eq!(vod.active_sessions().await, 0);
+    vod.expire_passive_grant_for_test(&id).await;
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let route = fixture.store.media_session_route(&id).await.expect("passive test fixture").expect("passive test fixture");
+            if route.state == "ended" { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.expect("expired grant settles through real owner loop");
+    assert!(!vod.passive_presence(&id, "user", "passive-owner-player", "passive-owner-request").await);
+    assert!(matches!(vod_resurrected_before(&fixture.state, &id, Instant::now() + Duration::from_secs(2)).await, VodResurrection::Ended));
+    loop_task.abort();
+    let _ = loop_task.await;
+}

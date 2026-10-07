@@ -58,7 +58,7 @@ key into a 3-second refusal for the lifetime of the process.
 
 ## 2. What actually happened, from the nodes
 
-Owner was **m6** (`192.168.4.14`), build `v0.3.0-3135-g9deb58a2e`.
+Owner was **lab6** (`10.42.4.14`), build `v0.3.0-3135-g9deb58a2e`.
 `docker logs plurxd`, times UTC:
 
 ```

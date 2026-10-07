@@ -1,0 +1,271 @@
+# Grouped library rows — implementation and acceptance status
+
+**Status:** open — native parity merged; post-merge CI monitoring continues · **Updated:** 2026-10-05 · **Branch:**
+`codex/grouped-library-rows` · **Pull request:** [#821](http://192.168.4.7:3000/noirr/plurx/pulls/821)
+
+Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md), which maps the web
+application. This page records the approved grouped-row library design,
+implementation progress, decisions, review, and merge evidence.
+
+## The browsing contract
+
+Movies, shows, and other libraries offer Rows and Grid as normal view choices.
+Rows group the filtered library by its selected sort: title initial, year,
+recently-added period, recording year, or resolution. Each group scrolls
+horizontally; the page scrolls vertically. A jump index reaches each group,
+and View all opens one group as a paginated grid. The choice is remembered.
+Existing cards, watch filters, library scope, title search, artwork, and item
+navigation remain shared with the existing library view.
+
+Rows must cover the entire loaded library, not the first display page. Loading
+and failures must identify incomplete results. Arriving pages must preserve
+row scroll and keyboard focus. Pointer, touch, and keyboard users must all be
+able to reach the last item in a group. Empty and unknown metadata groups are
+handled explicitly, without invented dates or years.
+
+## Progress
+
+| Step | State | Evidence / next action |
+|---|---|---|
+| Isolated checkout | done | Own clone under `/private/tmp`; user checkouts untouched. |
+| Compiler and hooks | ready | Local Rust 1.97.1 verified; tracked commit hook installed. |
+| Shared grouping and row presentation | implemented | Shared loader/card renderer; all five sorts; no server changes. |
+| Responsive controls and navigation | implemented | All three web layouts, touch rows, keyboard navigation, jump index and group grids. |
+| Regression coverage | passed | Seven unit/keyboard checks and eight browser cases have passed on the final source. Only failed browser cases were rerun. |
+| Adversarial agent review | addressed | Three P2 findings on `1affd2904`: Theater controls, group viewport navigation, index focus. All corrected with regression coverage. |
+| Fast lane | tracked on PR | [PR #821](http://192.168.4.7:3000/noirr/plurx/pulls/821) carries the current candidate verdict and final evidence. |
+| Merge and cleanup | tracked on PR | The PR records its landing commit and cleanup receipt under the user’s explicit merge-first instruction. |
+
+## Decisions
+
+1. **One PR with normal commits.** This is one library-browsing change, built
+   in an independent clone. Implementation, coverage, and documentation land
+   together, without task PRs or unrelated edits.
+2. **The existing sort drives groups.** No separate grouping setting that can
+   contradict sorting, and no Developer gate for an ordinary view option.
+3. **Tests follow the final review.** Paul explicitly confirmed on 2026-10-04
+   that this overrides the earlier before-push regression timing. Formatting,
+   syntax checks, and compiler/lint checks continue during development.
+4. **No playback changes.** This work changes catalog presentation only and
+   reuses item navigation and the existing metadata API.
+
+## Review and validation evidence
+
+Formatting, pinned workspace Clippy, JavaScript syntax, the TypeScript
+baseline, source-shape lint, and theme contrast lint passed during development.
+After review corrections, these focused commands passed:
+
+```bash
+node --test tests/web/library-rows.test.js tests/web/calm-library.test.js tests/web/nav-keyboard.test.js
+# Seven reported checks, plus the existing incremental-grid assertions.
+
+node --test tests/web/library-rows.browser.cjs tests/web/library-layout.browser.cjs
+# Five browser cases passed initially; three fixture assumptions needed correction.
+
+node --test --test-name-pattern='rows preserve cards|View all opens|row filters, sorts' tests/web/library-rows.browser.cjs
+# Incremental scroll/focus passed; two remaining cases required fixture corrections.
+
+node --test --test-name-pattern='View all opens|row filters, sorts' tests/web/library-rows.browser.cjs
+# Both remaining browser cases passed. All eight now have passing evidence.
+```
+
+Browser commands used the bundled Playwright module via `PLAYWRIGHT_MODULE`.
+The fixture corrections account for CSS scroll snapping, give the expanded
+group enough content to exercise vertical navigation, and measure library
+containment independently of the existing Classic header overflow at 768 px.
+No production code changed between these browser runs. Full unit suites were
+not run locally. Fast-lane results are recorded on the PR; the user subsequently requested merge first and monitoring afterward.
+
+## Scope and interaction choices
+
+This PR implements the responsive web app shown in the approved renders,
+including mobile browsers. Native Apple and Android screens are outside this
+PR; no response to the optional scope question had arrived when work began.
+
+Rows is the default; `plurx_library_view` remembers Rows/Grid per browser.
+The existing page size controls Grid and group expansion, not row contents.
+Title groups follow the server's article-stripped `sort_title`; non-A–Z keys
+share `#`. Year and recording date use years; resolution uses existing tiers.
+Recently added uses Today, Previous 6 days, Earlier this month, then calendar
+months. Missing metadata goes into named Unknown groups; future added dates
+are identified separately. TV years are series years, not episode air dates.
+
+Each row initially mounts at most 40 cards. Approaching its horizontal end
+mounts another 40. Arrow keys move between posters; Home/End reach a row's
+first/last poster. View all opens the complete group in the existing grid,
+and All rows restores its horizontal position. Counts identify partial loads
+and request failures offer Retry. Grouping never caps membership to Grid's
+page size. Merged category ordering follows the server's shared sort fixture.
+
+
+## Adversarial review — 2026-10-05
+
+One independent agent reviewed `1affd2904` without running tests. Its verdict
+was request changes for three P2 findings:
+
+| Finding | Correction | Regression |
+|---|---|---|
+| Theater toolbar omitted Rows/Grid and retained an inert page size. | All three layout shells use the same view and page-size controls. | Cross-layout desktop/mobile browser case. |
+| View all retained a late row's vertical offset in the new grid. | Expansion scrolls to its heading; returning jumps to the originating row. | Late-letter expansion and return browser case. |
+| A new group replaced every jump-index button and lost focus. | Index buttons reconcile by group identity, preserving focus and scroll. | Delayed page with a focused index button. |
+
+No second review is requested. Validation follows these corrections.
+
+## Candidate handoff — 2026-10-05
+
+Review corrections and focused passing evidence are committed in `b45b81409`.
+The PR is ready for merge validation; `main` remained at `bf0bb6acf` through
+this local acceptance pass. Forgejo's API title change cleared draft status
+without emitting a ready-for-review run, so this documentation update supplies
+the normal ready-PR synchronization event. It changes no tested source.
+The [PR check list](http://192.168.4.7:3000/noirr/plurx/pulls/821) is the
+source of truth for the resulting candidate's gate and landing status.
+
+## Fast-lane baseline correction — 2026-10-05
+
+Run 4171 stopped at `make history-check`: the pre-existing fragment
+`10cd4ba6-ffmpeg8-repeated-hevc-descriptions.toml` named a commit after the
+frozen boundary. Landing `96443d519` (#811) already carries the two correct
+`Regression-Test` lines. Removing the forbidden duplicate fragment preserves
+that immutable evidence and fixes the audit at its cause. No history rule,
+erratum, test selection, or playback source changes. The remaining jobs from
+the failed candidate are cancelled before the corrected push.
+
+
+## Merge-first instruction — 2026-10-05
+
+Run 4172 passed the history audit and 289 validation tests, then failed two
+of 691 operations tests. The row keyboard handler violated the existing
+input-adapter fence; it now lives inside the shared keyboard adapter, with
+its behavior unchanged and no fence exemption. The unrelated known-red
+inventory assertion expects 21 ignored tests but finds 24. That baseline
+failure remains assigned to the separate batch repair process.
+
+Paul explicitly requested “Merge it and watch the tests after merge,”
+overriding the earlier green-before-merge timing. The final handler relocation
+will be checked after landing, and the PR will record post-merge results.
+
+
+## Post-merge input wiring correction — 2026-10-05
+
+PR #821 landed as `4ab8ad84c`. The merged tree matched the final branch.
+The targeted fence rerun caught the listener registration still outside the
+keyboard adapter; the row now calls an adapter-owned wiring function too.
+The merged-source keyboard navigation check and row-boundary browser case
+passed. The follow-up corrects only the adapter boundary, without relaxing
+its enforcement or changing keyboard behavior.
+
+
+## Native Android and Apple parity — 2026-10-05
+
+The approved mobile renders also cover native Android and iOS. The initial
+web-only interpretation was incorrect; this follow-up completes that scope
+in one native-client PR, including shared Android TV and tvOS screens.
+Work uses a fresh agent-owned clone, never the user's checkout.
+
+| Surface | State | Acceptance / evidence |
+|---|---|---|
+| Native grouping | implemented | Same five sort dimensions, unknown groups, stable row keys and full filtered membership. |
+| Android | validated | Existing LibraryPager and MediaRow; saved Rows/Grid, title search, visible group index, View all, partial error Retry. Twelve JVM and six phone/TV UI cases passed. |
+| Apple | validated | Existing LibraryGridCoordinator and cards; saved Rows/Grid, visible group index, View all destination, partial error Retry. Ten iPhone-simulator cases passed; iOS/tvOS builds passed. |
+| Paging ownership | implemented | Rows request all pages through the existing pager; Grid keeps viewport prefetch. No second loader. |
+| Review and tests | complete | One adversarial review, all five findings addressed, then focused tests; only failed cases rerun. |
+| Merge | merged | Native PR #823 landed as `b924ec11b`; all seven regression references are retained. Post-merge checks remain monitored. |
+
+Rows are the default on both native platforms. Native lazy row containers
+keep cards bounded to the viewport without limiting group membership.
+Grouping and filtering run off the UI thread. Release counters are Apple
+build 209 and Android versionCode 146; this work does not deploy a build or
+change playback.
+
+
+Native build evidence before review: Android debug APK, JVM test sources,
+and instrumentation APK compile; iOS and tvOS application builds pass;
+iOS XCTest sources compile with build-for-testing. No tests have been run
+for this native follow-up before its adversarial review.
+
+
+### Native adversarial review — 2026-10-05
+
+The one read-only review of `2b284bea9` requested five corrections, all
+implemented before executing tests:
+
+- Restore authoritative watch/rollup refresh after Apple detail navigation;
+  keep the prior complete row snapshot mounted while replacement pages load.
+- Show the shared incomplete-result message and Retry inside Android's
+  expanded group, not only underneath its full-screen sheet.
+- Match the approved visible horizontal letter/year index, with keyed buttons
+  and an accessible selected state.
+- Use landscape home-media artwork and recording metadata; Apple home
+  collections initially select recording-date groups.
+- Reuse month labels and one date formatter per grouping pass; skip Apple
+  grouping in Grid and cancel superseded grouping snapshots.
+
+Native PR: [#823](http://192.168.4.7:3000/noirr/plurx/pulls/823). Tests follow
+these corrections; their final commands and outcomes are recorded on the PR.
+
+
+### Native focused evidence after review
+
+Android: all 12 targeted JVM tests pass (`LibraryGroupsTest`,
+`LibraryPagerWatchFilterTest`, `LibrarySortTest`). Three Android TV UI tests
+pass: group jump/expansion/return, retry while expanded, and D-pad focus
+retention across a late page. All three phone acceptance cases also pass, including 16:9 home-video artwork and recording-year defaults.
+
+Apple: all nine grouping/coordinator cases have passed on an owned iPhone
+simulator. Only the failed partial-page retry case was rerun: the cause was
+the coordinator's reuse of Home's cached-content error suppression, which
+turned a partial-library failure into an immediate retry loop. The coordinator
+now retains the error for explicit Retry. The separate affected shelf-metadata
+regression also passes. iOS and tvOS compile after the corrections.
+
+The merge base remains `1dfcca2dd`; no user checkout or physical device was
+used. Apple build 209 and Android versionCode 146 remain the claimed counters.
+
+
+The phone navigation fixture initially selected both visible “View all”
+actions. Each action now has an accessible group-specific name; only that
+failed phone case was rerun. Final local evidence is 12 Android JVM cases,
+three Android TV UI/focus cases, three phone acceptance cases, and ten Apple
+cases (nine grouping/coordinator plus the existing card-metadata contract).
+The final PR body carries configured CI outcomes and the landing receipt.
+
+
+Native fast lane 4177 passed scope and mobile version validation, then stopped
+at history-check. This PR records its native regression anchors, updates the
+superseded watch-filter wiring anchor to the combined Rows/filter/search
+paging demand, and records the malformed immutable Python trailer in #822 as
+an erratum. The audit rules remain unchanged; the new PR trailers resolve
+against the current tree before landing.
+
+
+### Post-merge documentation correction — 2026-10-05
+
+Native fast lane 4178 passed its history audit, regression references, and
+289 validation tests. Operations reported four failures from two documentation
+omissions: Android's README still claimed build 145 after versionCode became
+146, and the Apple release note lacked the status header required by its
+existing `built` index row. This follow-up corrects those source documents;
+validation rules and application code stay unchanged. The separate known-red
+inventory failure (24 versus 21) remains for batch repair.
+
+The correction receives one adversarial review, then only the four failed
+documentation checks are rerun. The native PR body records the follow-up
+landing and test results. The mobile-counter job's comparison against main
+after the native merge is recorded separately as a post-merge race.
+
+
+### iOS index tap correction — 2026-10-05
+
+The user reported that tapping a letter in the native index does not scroll
+to its row. The shared scroll reader contains two `ForEach` trees with the
+same group IDs: index entries precede the vertical row destinations. The
+repair gives row destinations their own typed identity. Its
+[Apple change note](../apple-builds/823-ios-library-index-scroll.md) records
+the cause and the simulator UI regression. iOS and tvOS compilation passed. The
+one adversarial review found no issues. After review, the letter regression
+reproduced the no-scroll failure with the original IDs; the typed row-target
+fix passed both UI cases (M, repeat M after manual scroll, return A, and 2012).
+Four focused build-claim/documentation contracts also passed. Only a failed
+fixture-navigation attempt was retried; no passing suite was rerun. Apple
+build 213 carries the repair; the PR records its merge and remaining CI.

@@ -32,7 +32,7 @@ These are local handoff locations, recorded on 2026-09-25:
 | Preferred working tree | `/private/tmp/plurx-agent-android-double-back-20260925` |
 | Branch | `codex/android-double-back-20260925` |
 | Current main base | `60f3803d1d5dc431a919235fab328ae6ea86d394` |
-| Original checkout | `/Users/pjunod/code/plurx` |
+| Original checkout | `~/code/plurx` |
 | Original base | `bafeb08766ce057634f3fab0850cdd9e03507a98`; do not deliver from this base |
 | Commit/push/PR state | See the delivery status; no APK publication is in scope. |
 | Writable code already prepared | Navigation helper, all 16 call sites, six new instrumented tests |
@@ -276,7 +276,7 @@ predicates.
 ### 6.1 Compile, JVM tests, and lint
 
 Use the repository-pinned Gradle wrapper and dependencies. The recorded
-local SDK is `/Users/pjunod/Library/Android/sdk`; local SDK settings remain
+local SDK is `~/Library/Android/sdk`; local SDK settings remain
 untracked. From the candidate's Android directory:
 
 ```bash
@@ -452,7 +452,7 @@ so the next reader does not inherit the temporary uncommitted-candidate state.
 ### 9.1 Execution update — 2026-09-25
 
 The selected navigation patch and Media3 opt-in were committed to the
-separate agent branch, rebased to main `196d2a43e`. Ready [PR #523](http://192.168.4.7:3000/noirr/plurx/pulls/523)
+separate agent branch, rebased to main `196d2a43e`. Ready [PR #523](http://forge.lan:3000/noirr/plurx/pulls/523)
 received one adversarial agent review with no actionable findings. The
 reviewed Android source at `855e46cf8` built app and test APKs, passed
 `lintDebug`, and passed seven selected API 36 emulator tests with zero
@@ -473,5 +473,5 @@ commit plus errata for immutable missing trailers in earlier merged PRs
 was rebased to retain those upstream rows. The Media3-only lint commit was
 relabeled `chore` because it does not change user behavior. The Android
 version and navigation anchor repairs are in PR #523;
-the [PR](http://192.168.4.7:3000/noirr/plurx/pulls/523) remains the live
+the [PR](http://forge.lan:3000/noirr/plurx/pulls/523) remains the live
 record for the final run and merge outcome.

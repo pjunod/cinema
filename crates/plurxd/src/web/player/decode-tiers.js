@@ -176,6 +176,45 @@ async function hevcTiersMediaCapabilities(){
   }
   return answered?{passed, pqPassed}:null;
 }
+// Channels this browser's audio output reaches. The destination of an
+// AudioContext is the only public answer; the context is closed again at once
+// so a page that never plays sound keeps no audio device open. Unknown is
+// stereo, never a guessed surround claim.
+function browserOutputChannels(){
+  try{
+    // Safari before 14.1 named it webkitAudioContext; TypeScript knows only the standard name.
+    const Ctx=window.AudioContext||/** @type {any} */ (window).webkitAudioContext;
+    if(!Ctx) return 2;
+    const context=new Ctx();
+    const channels=Number(context.destination&&context.destination.maxChannelCount);
+    try{ const closing=context.close(); if(closing&&closing.catch) closing.catch(()=>{}); }catch(e){}
+    return Number.isFinite(channels)&&channels>0?channels:2;
+  }catch(e){ return 2; }
+}
+// Read when a caps document is first built for a request (after the viewer
+// has interacted, so no autoplay warning at page load) and again after an
+// output device change, never on every document.
+let BROWSER_OUTPUT_CHANNELS=null;
+function browserOutputChannelsCached(){
+  if(BROWSER_OUTPUT_CHANNELS===null) BROWSER_OUTPUT_CHANNELS=browserOutputChannels();
+  return BROWSER_OUTPUT_CHANNELS;
+}
+try{
+  if(navigator.mediaDevices&&navigator.mediaDevices.addEventListener){
+    navigator.mediaDevices.addEventListener("devicechange",()=>{ BROWSER_OUTPUT_CHANNELS=null; });
+  }
+}catch(e){}
+// The route claim the server negotiates audio from (AUDIO-RESOLVED-
+// INDEPENDENTLY.md §3.1). A browser decodes every codec it lists itself and
+// never passes a bitstream through, so each decoded codec reaches exactly the
+// output's channel count, and the browser resamples anything it decodes. Only
+// codecs the server's negotiation understands are claimed.
+function browserAudioSinks(acodec, outputChannels){
+  const raw=Math.floor(Number(outputChannels));
+  const channels=Number.isFinite(raw)?Math.min(8,Math.max(2,raw)):2;
+  return String(acodec||"").split(",").filter(codec=>["aac","mp3","flac","ac3","eac3"].includes(codec))
+    .map(codec=>({codec, max_channels:channels, passthrough:false, sample_rates_hz:[44100,48000]}));
+}
 function buildPlayCaps(hevc){
   let v=null; try{ v=document.createElement("video"); }catch(e){}
   const can=t=>{ try{ return !!v && v.canPlayType(t)!==""; }catch(e){ return false; } };
@@ -345,6 +384,8 @@ function capsDocument(c, limits){
     // Only when this browser has one; absent is not a claim.
     ...(c.dv?{dv_transport:"progressive"}:{}),
     display:{hdr:!!c.hdrDisplay, dolby_vision:dvProfiles.length>0},
+    // Absent is the legacy audio contract, so an empty claim is not sent.
+    ...(Array.isArray(c.audioSinks)&&c.audioSinks.length?{audio_sinks:c.audioSinks.slice(0,16)}:{}),
     ...(c.maxheight?{max_height:c.maxheight}:{}),
     // The identity is the MAP KEY in localStorage, so the entries have to be
     // rebuilt with it inlined — the obvious `Object.values()` would send a
@@ -402,7 +443,9 @@ function measuredPresentationTarget(){
   return {...PRESENTATION_TARGET_RECT};
 }
 function currentCapsDocument(){
-  const caps=capsDocument(PLAY_CAPS, decodeLimits());
+  const sinks=browserAudioSinks(PLAY_CAPS.acodec, browserOutputChannelsCached());
+  const caps=capsDocument(sinks.length?Object.assign({}, PLAY_CAPS, {audioSinks:sinks}):PLAY_CAPS,
+    decodeLimits());
   const target=measuredPresentationTarget();
   if(SERVER&&SERVER.playback_display_aware_auto&&target){
     Object.assign(caps.display,{presentation_target:target});
@@ -681,6 +724,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
 }
 function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent){
   WATCH_CLOSE_PROMISE=null;
+  cancelNextEpisodePreparation(PLAYER);
   // Live TV holds a physical tuner and, since the dock, keeps holding it on
   // every other route. Starting a film used to be the moment it was released
   // (the route change stopped it); now the dock survives, so two pictures
@@ -981,6 +1025,7 @@ function buildPlayer(attempt,decided,prepared){
     attemptId:null, attemptReason:null, bufferLimits:null,
     ladder, priorKbps, autoHeight:autoStartHeight,
     qualityCandidates:Array.isArray(decision.quality_candidates)?decision.quality_candidates:null,
+    measuredCandidateOutputs:Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null,
     qualityCandidateId:decision.quality_candidate_id||null,
     bandwidthSeedBps:replacementBandwidthSeed,
     abr:{requestedCandidateId:decision.quality_candidate_id||null,
@@ -992,6 +1037,7 @@ function buildPlayer(attempt,decided,prepared){
       recentEstimateSource:null,recentEstimateUrl:null,
       completedTransfers:[],lastCliffAtMs:null,
       switches:[],switching:false,stableSinceMs:clickedAt,supplyRescued:false,
+      decodeStepConsumed:false,
       // Rungs this playback has already failed to open. Per playback, not
       // persisted: a transient server failure must not cap quality forever.
       failedHeights:new Set()},
@@ -1336,7 +1382,8 @@ async function executePlaybackMediaChange(p,change){
       // point: which context a create is in is decided in ONE place, not by
       // which branch of this function happened to call which function.
       const info=await preparation.run(
-        signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(p),opts,signal,{preparation}),
+        signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(p),opts,signal,{preparation,
+          continuousRestartSessionId:change.forceReopen&&p.continuousQualityBootstrap?p.sessionId:null}),
         late=>releaseSession(late&&late.session_id));
       if(!live()){ releaseSession(info&&info.session_id); return false; }
       retirePlaybackPredecessor(p);
@@ -1593,7 +1640,9 @@ function mseCodecKey(srcCodec, bitDepth){
 // nothing here is ever told to the server. A no sends the remux down the
 // progressive path, which is where the `<video>` error handler's rescue lives.
 function mseCanTake(srcCodec, audioCodec, bitDepth){
-  const mediaSource=window.ManagedMediaSource||window.MediaSource;
+  // Match every Hls instance's explicit preferManagedMediaSource:false.
+  // The static Hls.getMediaSource() helper still defaults to MMS-first.
+  const mediaSource=window.MediaSource||window.ManagedMediaSource||window.WebKitMediaSource;
   if(!(mediaSource && mediaSource.isTypeSupported)) return false;
   const v=MSE_VIDEO[mseCodecKey(srcCodec, bitDepth)];
   if(!v) return false;                       // unknown codec: do not gamble
@@ -1720,8 +1769,9 @@ async function refreshSegTimes(){
 }
 // A frame callback registered before a new media execution belongs to the
 // predecessor, even if the browser delivers it after the source was replaced.
-function queuePlaybackFrame(v,p,callback){
+function queuePlaybackFrame(v,p,callback,renewingSeek=false){
   const epoch=p.controlPresentationEpoch||0;
+  const attachment=p.mediaAttachment, intent=p.controlSeek?.sequence;
   // One subscription belongs to this player and element. Retire it when an
   // element is adopted or reused, including callbacks already queued by the
   // browser before cancellation.
@@ -1739,7 +1789,7 @@ function queuePlaybackFrame(v,p,callback){
     v.removeEventListener("loadeddata",ready);
     v.removeEventListener("canplay",ready);
     v.removeEventListener("seeked",ready);
-    if(p.controlFrameCancel===clear) p.controlFrameCancel=null;
+    if(p.controlFrameCancel===clear){p.controlFrameCancel=null;p.controlFrameRearm=null;}
     if(v._plurxFrameCancel===clear) v._plurxFrameCancel=null;
   };
   const suspend=()=>{if(PLAYER!==p) clear();else cancel();};
@@ -1753,15 +1803,17 @@ function queuePlaybackFrame(v,p,callback){
     // frame, including when playback stays paused.
     // Readiness only permits registration; actual callbacks remain the proof
     // of presentation used by the existing progress detector.
-    if(id!=null||v.readyState<2||v.seeking) return;
+    if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;
     const registration=++generation;
     id=v.requestVideoFrameCallback((now,meta)=>{
       if(registration!==generation) return;
       id=null;clear();
-      if(PLAYER===p) callback(now,meta,epoch);
+      if(PLAYER===p&&p.mediaAttachment===attachment) callback(now,meta,epoch,{attachment,intent,epoch});
     });
   };
   p.controlFrameCancel=clear;v._plurxFrameCancel=clear;
+  // Execution renews this same observer before assigning the target clock.
+  p.controlFrameRearm=()=>queuePlaybackFrame(v,p,callback,true);
   v.addEventListener("emptied",suspend);
   v.addEventListener("loadeddata",ready);
   // loadeddata is once per resource; canplay also covers buffer replenishment.
@@ -1775,7 +1827,7 @@ function armHitchDetector(v){
   if(!p.controlHasFrameCallbacks) return;
   p.hitches={back:0, held:0, late:0, gap:0, drop:0, slow:0, worst:0, last:null, at:[], fps:null,
              n:0, near:{}, flushEdge:null, skewMax:0, skewAt:null, decodeMs:null, frames:0,
-             rate:null, renderedFps:null, faults:[]};
+             rate:null, renderedFps:null, faults:[], metadataAnomalies:0, metadataFaults:[]};
   // When the detector armed, so "zero faults" can be told apart from "zero
   // callbacks". Safari has shipped rVFC for years and still declines to fire
   // it on some pipelines — a session that stutters visibly while this
@@ -1839,7 +1891,7 @@ function armHitchDetector(v){
         : null;
     }
   };
-  const step=(now, meta, epoch)=>{
+  const step=(now, meta, epoch, observation)=>{
     // Bail the moment this playback is replaced, or the callback outlives its
     // PLAYER and starts recording another stream's frames as this one's. A
     // prepared switch keeps the same PLAYER while changing the video element;
@@ -1849,9 +1901,22 @@ function armHitchDetector(v){
       prev=null;rateWin.length=0;
       queuePlaybackFrame(v,p,step);return;
     }
+    if(!v.paused&&!v.seeking&&PlaybackPolicy.frameMetadataAheadOfClock(meta,{
+      nowMs:now,currentTime:v.currentTime,playbackRate:v.playbackRate||1,nominalSeconds:nominal()||0
+    })){
+      const h=p.hitches;
+      h.metadataAnomalies++;
+      h.metadataFaults.push({kind:'future_media_timestamp',at_ms:now,media_time:meta.mediaTime,
+        current_time:v.currentTime,expected_display_time_ms:meta.expectedDisplayTime??null,
+        presented_frames:meta.presentedFrames??null,session_id:p.sessionId||null});
+      if(h.metadataFaults.length>16) h.metadataFaults.shift();
+      // Preserve the last trustworthy frame: the next callback still spans
+      // this interval and can reveal a real hold, backward step or late frame.
+      queuePlaybackFrame(v,p,step);return;
+    }
     p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
     if(epoch===(p.controlPresentationEpoch||0))
-      settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames);
+      settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames,observation);
     p.hitches.frames++;
     if(v.paused || v.seeking){
       // Clear the MEASUREMENT with the window: a rate left standing after a

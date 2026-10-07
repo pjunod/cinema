@@ -3712,6 +3712,21 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                             .duration_ms,
                         Some(123456)
                     );
+                    // These facts have a probe document and no field order,
+                    // which is what a worker that predates the parsed-probe
+                    // `unknown` rule publishes. The coordinator's apply must
+                    // not strand the probed row as `NULL`.
+                    assert_eq!(
+                        store
+                            .get_file(file_id)
+                            .await
+                            .expect("file")
+                            .expect("file")
+                            .field_order
+                            .as_deref(),
+                        Some("unknown"),
+                        "{backend}: probed facts without a field order store `unknown`"
+                    );
                     store
                         .upsert_file(
                             file.item_id,

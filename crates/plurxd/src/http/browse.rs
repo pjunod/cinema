@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::Path as FsPath;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -20,6 +21,108 @@ use crate::state::AppState;
 
 const DEFAULT_LIMIT: i64 = 60;
 const MAX_LIMIT: i64 = 200;
+
+static INDEX_PRESENCES: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+const PAIR_BUCKETS: [u64; 8] = [1, 2, 4, 8, 32, 128, 512, u64::MAX];
+const PROBE_BYTE_BUCKETS: [u64; 8] = [
+    1024,
+    16_384,
+    65_536,
+    262_144,
+    1_048_576,
+    4_194_304,
+    16_777_216,
+    u64::MAX,
+];
+static PAIRS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static PROBE_BYTES: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static PAIR_SUM: AtomicU64 = AtomicU64::new(0);
+static PROBE_BYTE_SUM: AtomicU64 = AtomicU64::new(0);
+
+fn record_detail_projection(
+    statuses: &[plurx_core::store::FragmentIndexStatus],
+    probe_bytes: usize,
+) {
+    use plurx_core::store::IndexPresence;
+    for status in statuses {
+        let index = match status.presence {
+            IndexPresence::Ready => 0,
+            IndexPresence::Unverified => 1,
+            IndexPresence::Absent => 2,
+        };
+        INDEX_PRESENCES[index].fetch_add(1, AtomicOrdering::Relaxed);
+    }
+    for (value, buckets, counts, sum) in [
+        (
+            statuses.len() as u64,
+            PAIR_BUCKETS.as_slice(),
+            PAIRS.as_slice(),
+            &PAIR_SUM,
+        ),
+        (
+            probe_bytes as u64,
+            PROBE_BYTE_BUCKETS.as_slice(),
+            PROBE_BYTES.as_slice(),
+            &PROBE_BYTE_SUM,
+        ),
+    ] {
+        sum.fetch_add(value, AtomicOrdering::Relaxed);
+        for (bucket, count) in buckets.iter().zip(counts) {
+            if value <= *bucket {
+                count.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Atomics only, with no paths, identities, payloads or Store reads on scrape.
+pub(super) fn detail_projection_prometheus() -> String {
+    let mut out = String::from("# HELP plurx_index_status_projections_total Metadata-only index badge answers.\n# TYPE plurx_index_status_projections_total counter\n");
+    for (label, count) in ["ready", "unverified", "absent"]
+        .iter()
+        .zip(&INDEX_PRESENCES)
+    {
+        out.push_str(&format!(
+            "plurx_index_status_projections_total{{presence=\"{label}\"}} {}\n",
+            count.load(AtomicOrdering::Relaxed)
+        ));
+    }
+    for (name, help, buckets, counts, sum) in [
+        (
+            "plurx_index_status_pairs",
+            "Pairs per detail render.",
+            PAIR_BUCKETS.as_slice(),
+            PAIRS.as_slice(),
+            &PAIR_SUM,
+        ),
+        (
+            "plurx_detail_probe_json_bytes",
+            "Catalogue probe JSON bytes per detail render.",
+            PROBE_BYTE_BUCKETS.as_slice(),
+            PROBE_BYTES.as_slice(),
+            &PROBE_BYTE_SUM,
+        ),
+    ] {
+        out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} histogram\n"));
+        for (bucket, count) in buckets.iter().zip(counts) {
+            let label = if *bucket == u64::MAX {
+                "+Inf".to_owned()
+            } else {
+                bucket.to_string()
+            };
+            out.push_str(&format!(
+                "{name}_bucket{{le=\"{label}\"}} {}\n",
+                count.load(AtomicOrdering::Relaxed)
+            ));
+        }
+        out.push_str(&format!(
+            "{name}_sum {}\n{name}_count {}\n",
+            sum.load(AtomicOrdering::Relaxed),
+            counts[counts.len() - 1].load(AtomicOrdering::Relaxed)
+        ));
+    }
+    out
+}
 
 /// One sentence for why a file has no fragment index, and whether waiting will
 /// change it.
@@ -395,23 +498,68 @@ pub async fn item_detail(
         files.sort_by(|left, right| natural_path_cmp(&left.path, &right.path));
     }
 
-    // Check each file actually resolves on disk right now, so the client can
-    // refuse to "play" a file that's missing (unmounted share, moved file,
-    // wrong container mount) instead of opening a dead player. One stat per
-    // file — cheap for the handful a movie/episode has. Admins also get the
-    // full path back so they can see what to fix.
+    // Start every file's node-local observation together and give the whole
+    // detail page one deadline, including a many-part audiobook. This is an
+    // advisory answer; playback's source open remains authoritative.
     //
     // Track defaults are independent of that availability check: they use the
     // stored stream rows plus one settings snapshot, never a playback decision
     // or a media probe. Missing/unmounted files can therefore still explain
     // which tracks they contain and which policy choice would apply.
     let playback_prefs = state.transcode.lang_prefs().await;
+    let availability = state
+        .detail_availability
+        .observe_many(
+            &files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await;
     let mut file_dtos: Vec<FileDto> = Vec::with_capacity(files.len());
     let mut part_offset_ms = 0_i64;
-    for f in files {
+    let has_video = files
+        .iter()
+        .any(|file| crate::copyseg::supports(file.video_codec.as_deref()));
+    let have_dovi = has_video && crate::ffmpeg::has_dovi_rpu().await;
+    let convert = has_video && state.transcode.dv_convert_enabled().await;
+    let mut wanted = Vec::new();
+    let mut prepared = Vec::with_capacity(files.len());
+    let mut probe_bytes = 0_usize;
+    for file in &files {
+        let raw_probe = state.catalogue.get_file_probe_json(file.id).await?;
+        probe_bytes = probe_bytes.saturating_add(raw_probe.as_ref().map_or(0, String::len));
+        let start = wanted.len();
+        let videos = if crate::copyseg::supports(file.video_codec.as_deref()) {
+            crate::fragindex::video_identities(file, raw_probe.as_deref(), have_dovi, convert)
+        } else {
+            Vec::new()
+        };
+        for video in &videos {
+            wanted.push((file.id, crate::fragindex::identity_for(file, *video)));
+        }
+        prepared.push((raw_probe, start..wanted.len(), videos));
+    }
+    let mut statuses = Vec::with_capacity(wanted.len());
+    for chunk in wanted.chunks(plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK) {
+        let batch = state.store.fragment_index_status(chunk).await?;
+        if batch.len() != chunk.len()
+            || batch.iter().zip(chunk).any(|(status, (id, identity))| {
+                status.file_id != *id || status.argv_fingerprint != identity.argv_fingerprint
+            })
+        {
+            return Err(plurx_core::error::StoreError::Task(
+                "fragment status batch lost input identity/order".into(),
+            )
+            .into());
+        }
+        statuses.extend(batch);
+    }
+    record_detail_projection(&statuses, probe_bytes);
+    for ((f, observation), (raw_probe, range, videos)) in
+        files.into_iter().zip(availability).zip(prepared)
+    {
         let path = f.path.clone();
-        let available = tokio::fs::metadata(&path).await.is_ok();
-        let raw_probe = state.catalogue.get_file_probe_json(f.id).await?;
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
         let mut vod_index_refusal = None;
         let vod_index_status = if f.video_codec.is_none() {
@@ -425,12 +573,6 @@ pub async fn item_detail(
             // which read green for a title a DV-capable client could not serve
             // from (PLAYBACK-CAPS-V2-PLAN §4.7). `partial` is the state that
             // was previously invisible.
-            let videos = crate::fragindex::video_identities(
-                &f,
-                raw_probe.as_deref(),
-                crate::ffmpeg::has_dovi_rpu().await,
-                state.transcode.dv_convert_enabled().await,
-            );
             let mut present = 0_usize;
             // Why the rest are missing, when the indexer has already found
             // out. `pending` used to cover three states an operator acts on
@@ -438,28 +580,28 @@ pub async fn item_detail(
             // tried and refused for good. The first is a wait; the last never
             // ends, and nothing on this page said so.
             //
-            // Asked per identity, in the loop that was already reading them,
-            // and through the same match rule the index itself uses — so a
+            // The batched projection keeps every identity and uses the same
+            // match rule as the index itself — so a
             // file the operator has since replaced stops answering with its
             // predecessor's refusal. A per-file read would have kept showing
             // "cannot be indexed" for a title that now plays, which is the
             // false-permanent-state failure this whole milestone exists to
             // remove, inverted.
             let mut refusals = Vec::new();
-            for video in &videos {
-                let identity = crate::fragindex::identity_for(&f, *video);
-                if state.store.fragment_index(f.id, &identity).await?.is_some()
+            // Preserve metadata-only batched local answers and the newer
+            // cluster-artifact fallback for the exact same captured pipeline.
+            // Never reintroduce packed per-file local index reads here.
+            for (status, video) in statuses[range.clone()].iter().zip(&videos) {
+                if status.presence == plurx_core::store::IndexPresence::Ready
                     || state.transcode.cluster_index_available(&f, *video).await
                 {
                     present += 1;
-                } else if let Some(outcome) =
-                    state.store.fragment_index_outcome(f.id, &identity).await?
-                {
-                    refusals.push(outcome);
+                } else if let Some(outcome) = &status.outcome {
+                    refusals.push(outcome.clone());
                 }
             }
             vod_index_refusal = index_refusal_summary(&refusals);
-            Some(if present == videos.len() {
+            Some(if present == range.len() {
                 "indexed"
             } else if present > 0 {
                 "partial"
@@ -473,7 +615,9 @@ pub async fn item_detail(
             })
         };
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
-        dto.available = available;
+        dto.available = observation.available();
+        dto.availability = observation.state.as_str();
+        dto.availability_observed_at_ms = observation.observed_at_ms;
         dto.vod_index_status = vod_index_status;
         dto.vod_index_refusal = vod_index_refusal.map(|(_, detail)| detail);
         dto.part_offset_ms = part_offset_ms;
@@ -481,9 +625,7 @@ pub async fn item_detail(
         if item.kind == ItemKind::Audiobook {
             part_offset_ms = part_offset_ms.saturating_add(duration_ms);
         }
-        if !available && user.is_admin {
-            dto.missing_path = Some(path.to_string_lossy().into_owned());
-        }
+        dto.missing_path = observation.missing_path(user.is_admin, &path);
         file_dtos.push(dto);
     }
 
@@ -773,6 +915,501 @@ mod tests {
 
     use crate::http::extract::{AuthUser, ReadAfter};
     use crate::state::AppState;
+
+    struct IndexPage {
+        state: AppState,
+        user: User,
+        item: i64,
+        files: Vec<plurx_core::domain::MediaFile>,
+        root: tempfile::TempDir,
+    }
+
+    async fn index_page(parts: usize, dv: bool) -> IndexPage {
+        use plurx_core::domain::{DolbyVisionFacts, ProbeResult};
+        let root = tempfile::tempdir().expect("owned detail fixture");
+        let store = std::sync::Arc::new(
+            plurx_core::store::SqliteStore::open(&root.path().join("catalogue.db")).expect("store"),
+        );
+        let state = AppState::new(
+            "test".into(),
+            store,
+            crate::state::Dirs {
+                artwork: root.path().join("artwork"),
+                transcode: root.path().join("transcode"),
+                cache: root.path().join("cache"),
+                subs: root.path().join("subs"),
+                runtime_cache: root.path().join("runtime"),
+                renditions: root.path().join("renditions"),
+            },
+            "detail-node".into(),
+            Default::default(),
+            Default::default(),
+            std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        let user = state
+            .store
+            .create_user("detail", "hash", false)
+            .await
+            .expect("user");
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "detail".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: if parts > 1 {
+                    ItemKind::Audiobook
+                } else {
+                    ItemKind::Movie
+                },
+                parent_id: None,
+                title: "detail fixture".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = ProbeResult {
+            video_codec: Some(if dv { "hevc" } else { "h264" }.into()),
+            duration_ms: Some(1000),
+            hdr: dv.then(|| "dolby_vision".into()),
+            dolby_vision: if dv {
+                DolbyVisionFacts {
+                    profile: Some(7),
+                    level: Some(6),
+                    bl_compat_id: Some(6),
+                    el_present: Some(true),
+                    rpu_present: Some(true),
+                }
+            } else {
+                Default::default()
+            },
+            ..Default::default()
+        };
+        let mut files = Vec::new();
+        for part in 0..parts {
+            let id = state
+                .store
+                .upsert_file(
+                    item,
+                    &root
+                        .path()
+                        .join(format!("Part {part}.mkv"))
+                        .to_string_lossy(),
+                    4096,
+                    100,
+                    &probe,
+                )
+                .await
+                .expect("file");
+            files.push(
+                state
+                    .store
+                    .get_file(id)
+                    .await
+                    .expect("lookup")
+                    .expect("file"),
+            );
+        }
+        IndexPage {
+            state,
+            user,
+            item,
+            files,
+            root,
+        }
+    }
+
+    async fn publish(page: &IndexPage, file: usize, identities: usize, rows: usize) {
+        use plurx_core::segplan::{FragmentIndex, IndexRow};
+        let file = &page.files[file];
+        let raw = page
+            .state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe");
+        let videos = crate::fragindex::video_identities(
+            file,
+            raw.as_deref(),
+            crate::ffmpeg::has_dovi_rpu().await,
+            true,
+        );
+        for video in videos.into_iter().take(identities) {
+            let index = FragmentIndex::new(
+                1000,
+                (0..rows)
+                    .map(|n| IndexRow {
+                        dts: n as u64 * 1000,
+                        duration: 1000,
+                        bytes: 100,
+                        video_bytes: 90,
+                        class: plurx_core::fmp4::CutClass::CleanIdr,
+                    })
+                    .collect(),
+                "fixture-init",
+                crate::fragindex::identity_for(file, video),
+            );
+            page.state
+                .store
+                .put_fragment_index(file.id, &index)
+                .await
+                .expect("publish");
+        }
+    }
+
+    async fn detail(page: &IndexPage) -> serde_json::Value {
+        let Json(body) = super::item_detail(
+            AuthUser(page.user.clone()),
+            State(page.state.clone()),
+            ReadAfter(None),
+            Path(page.item),
+        )
+        .await
+        .expect("detail");
+        serde_json::to_value(body).expect("body")
+    }
+
+    #[tokio::test]
+    async fn a_detail_render_unpacks_no_index() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let page = index_page(1, false).await;
+        publish(&page, 0, 1, 4100).await;
+        let token = "synthetic-detail-token";
+        page.state
+            .store
+            .create_token(&plurx_core::auth::hash_token(token), page.user.id, None)
+            .await
+            .expect("test token");
+        // Positive control: this is a live counter on the actual decoder,
+        // not a zero-valued test helper disconnected from production get.
+        let raw = page
+            .state
+            .store
+            .get_file_probe_json(page.files[0].id)
+            .await
+            .expect("probe");
+        let video = crate::fragindex::video_identities(
+            &page.files[0],
+            raw.as_deref(),
+            crate::ffmpeg::has_dovi_rpu().await,
+            true,
+        )[0];
+        let counter = plurx_core::store::fragment_index_unpack_counter(
+            &page.root.path().join("catalogue.db"),
+        );
+        let control = counter.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(page
+            .state
+            .store
+            .fragment_index(
+                page.files[0].id,
+                &crate::fragindex::identity_for(&page.files[0], video)
+            )
+            .await
+            .expect("full control read")
+            .is_some());
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            control + 1
+        );
+        let before = counter.load(std::sync::atomic::Ordering::Relaxed);
+        let response = crate::http::router(page.state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/items/{}", page.item))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("JSON");
+        assert_eq!(body["files"][0]["vod_index_status"], "indexed");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), before);
+    }
+
+    #[tokio::test]
+    async fn merged_detail_preserves_batched_local_and_exact_cluster_index_metadata() {
+        use crate::queue_fixture::QueueFixture;
+        use plurx_core::store::{
+            ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation,
+            FragmentIndexSourceObservation, NewClusterFragmentIndexJob,
+        };
+
+        plurx_core::testfixtures::require_ffmpeg();
+        let page = index_page(2, false).await;
+        publish(&page, 0, 1, 4100).await;
+        let file = &page.files[1];
+        // Owned metadata fixture, not a claim that these bytes are playable
+        // media. Match the scanner's exact size/mtime before attesting it.
+        std::fs::write(&file.path, vec![0_u8; file.size as usize]).expect("owned source");
+        std::fs::File::open(&file.path)
+            .expect("source handle")
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(file.mtime as u64),
+            ))
+            .expect("fixture scanner mtime");
+        let raw = page
+            .state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe");
+        let video = crate::fragindex::video_identities(
+            file,
+            raw.as_deref(),
+            crate::ffmpeg::has_dovi_rpu().await,
+            true,
+        )[0];
+        let source_sha256 = "b".repeat(64);
+        let object_version = crate::fragment_index_cluster::inspect_copy_source(file)
+            .await
+            .expect("exact source identity");
+        page.state
+            .store
+            .record_fragment_index_source(&FragmentIndexSourceObservation {
+                node_id: "detail-node".to_owned(),
+                file_id: file.id,
+                object_version,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_sha256: source_sha256.clone(),
+                observed_at_ms: 1,
+            })
+            .await
+            .expect("source observation fixture");
+        let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+        let pipeline_sha256 = crate::fragment_index_cluster::pipeline_digest(file, &engine, video);
+        let cache_key = plurx_core::store::cluster_fragment_index_key(
+            file.id,
+            file.size,
+            file.mtime,
+            &source_sha256,
+            &pipeline_sha256,
+        )
+        .expect("exact pipeline key");
+        let now = crate::fragment_index_cluster::unix_ms();
+        assert!(page
+            .state
+            .store
+            .enqueue_cluster_fragment_index(&NewClusterFragmentIndexJob {
+                cache_key: cache_key.clone(),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_sha256: source_sha256.clone(),
+                pipeline_sha256: pipeline_sha256.clone(),
+                priority: "foreground".to_owned(),
+                trigger: "foreground".to_owned(),
+                target_node_id: "detail-node".to_owned(),
+                not_before_ms: now,
+                created_at_ms: now,
+            })
+            .await
+            .expect("enqueue fixture"));
+        let claimed = page
+            .state
+            .store
+            .fixture_claim_cluster_fragment_index("detail-node", &[], now, now + 60_000)
+            .await
+            .expect("claim fixture")
+            .expect("one fixture job");
+        let index = plurx_core::segplan::FragmentIndex::new(
+            1000,
+            vec![plurx_core::segplan::IndexRow {
+                dts: 0,
+                duration: 1000,
+                bytes: 100,
+                video_bytes: 90,
+                class: plurx_core::fmp4::CutClass::CleanIdr,
+            }],
+            "fixture-init",
+            crate::fragindex::identity_for(file, video),
+        );
+        let blob = plurx_core::store::encode_cluster_fragment_index_blob(
+            &index,
+            &source_sha256,
+            &pipeline_sha256,
+        )
+        .expect("fixture blob");
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_sha256,
+            pipeline_sha256,
+            blob_sha256: plurx_core::store::cluster_fragment_index_blob_sha256(&blob),
+            bytes: blob.len() as i64,
+            built_by_node_id: "detail-node".to_owned(),
+            built_at_ms: now + 1,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key,
+            node_id: "detail-node".to_owned(),
+            bytes: artifact.bytes,
+            verified_at_ms: now + 1,
+            last_seen_at_ms: now + 1,
+        };
+        assert!(page
+            .state
+            .store
+            .fixture_complete_cluster_fragment_index(&claimed, &artifact, &location, now + 1,)
+            .await
+            .expect("publish metadata fixture"));
+        let counter = plurx_core::store::fragment_index_unpack_counter(
+            &page.root.path().join("catalogue.db"),
+        );
+        let before = counter.load(std::sync::atomic::Ordering::Relaxed);
+        let body = detail(&page).await;
+        assert!(
+            body["files"]
+                .as_array()
+                .expect("files")
+                .iter()
+                .all(|file| file["vod_index_status"] == "indexed"),
+            "local and cluster metadata must both survive the merge: {body}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "detail must not unpack either a local index or a cluster blob"
+        );
+        // The metadata badge is advisory, not blob availability authority.
+        // Changing the physical source invalidates only its cluster fallback.
+        std::fs::write(&file.path, b"changed source").expect("replace owned source");
+        let body = detail(&page).await;
+        assert_eq!(body["files"][0]["vod_index_status"], "indexed");
+        assert_eq!(body["files"][1]["vod_index_status"], "pending");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), before);
+    }
+
+    #[tokio::test]
+    async fn an_unverified_legacy_row_renders_pending_not_indexed() {
+        let page = index_page(1, false).await;
+        publish(&page, 0, 1, 4100).await;
+        let conn = rusqlite::Connection::open(page.root.path().join("catalogue.db"))
+            .expect("fixture connection");
+        conn.execute("UPDATE fragment_indexes SET validated_revision = 0, promotion = 'malformed legacy JSON'", []).expect("legacy");
+        let body = detail(&page).await;
+        assert_eq!(body["files"][0]["vod_index_status"], "pending");
+        assert!(body["files"][0]["vod_index_refusal"].is_null());
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM fragment_indexes", [], |r| r
+                .get::<_, i64>(0))
+                .expect("retained"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partially_indexed_dv_file_still_renders_partial() {
+        let page = index_page(1, true).await;
+        let file = &page.files[0];
+        let raw = page
+            .state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe");
+        assert_eq!(
+            crate::fragindex::video_identities(
+                file,
+                raw.as_deref(),
+                crate::ffmpeg::has_dovi_rpu().await,
+                true
+            )
+            .len(),
+            3
+        );
+        publish(&page, 0, 2, 10).await;
+        assert_eq!(
+            detail(&page).await["files"][0]["vod_index_status"],
+            "partial"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_identity_still_renders_its_summary() {
+        let page = index_page(1, false).await;
+        let raw = page
+            .state
+            .store
+            .get_file_probe_json(page.files[0].id)
+            .await
+            .expect("probe");
+        let source = crate::fragindex::identity_for(
+            &page.files[0],
+            plurx_core::transcode::CopyVideoOptions::from_probe(
+                &page.files[0],
+                raw.as_deref(),
+                crate::ffmpeg::has_dovi_rpu().await,
+                false,
+            ),
+        );
+        let outcome = page
+            .state
+            .store
+            .record_fragment_index_outcome(
+                page.files[0].id,
+                &source,
+                plurx_core::segplan::IndexRefusal::Unsupported,
+                "synthetic unsupported codec",
+            )
+            .await
+            .expect("refusal");
+        let body = detail(&page).await;
+        assert_eq!(body["files"][0]["vod_index_status"], "refused");
+        assert_eq!(
+            body["files"][0]["vod_index_refusal"],
+            super::index_refusal_summary(&[outcome]).expect("summary").1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_three_hundred_part_audiobook_makes_two_status_calls() {
+        let page = index_page(300, false).await;
+        let counts = HttpStoreOperationCounts::default();
+        let body = scope_http_store_operations(counts.clone(), detail(&page)).await;
+        assert_eq!(counts.index_status_calls(), 2);
+        assert_eq!(body["files"].as_array().expect("parts").len(), 300);
+        assert_eq!(body["files"][299]["part_offset_ms"], 299_000);
+    }
+
+    #[test]
+    fn detail_projection_metrics_are_fixed_and_store_free() {
+        let text = super::detail_projection_prometheus();
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.starts_with("plurx_index_status_projections_total{"))
+                .count(),
+            3
+        );
+        assert!(text.contains("plurx_index_status_pairs_bucket{le=\"+Inf\"}"));
+        assert!(text.contains("plurx_detail_probe_json_bytes_count"));
+    }
 
     /// A movie library and a show library, one user with progress on a
     /// movie and one watched episode, so every browse page below has cards,

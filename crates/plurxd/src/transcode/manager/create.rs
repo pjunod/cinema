@@ -1,6 +1,75 @@
 use super::*;
 
+fn recovered_retained_output_matches(
+    capture: &crate::vodserve::RetainedOutputCapture,
+    candidate_expected: Option<&RetainedOutputFacts>,
+    actual: Option<&RetainedOutputFacts>,
+) -> bool {
+    match capture {
+        crate::vodserve::RetainedOutputCapture::Restore(expected) => expected.as_ref() == actual,
+        crate::vodserve::RetainedOutputCapture::ReceiverUnavailable => actual.is_none(),
+        crate::vodserve::RetainedOutputCapture::New => {
+            candidate_expected.is_none_or(|expected| actual == Some(expected))
+        }
+    }
+}
+
 impl TranscodeManager {
+    /// Retained output is authoritative; an initial claim is negotiated only
+    /// after this producer has selected the encoded route and its AAC lattice.
+    pub(super) fn encoded_start_audio_options(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        options: TranscodeOptions,
+    ) -> Result<TranscodeOptions, String> {
+        Self::encoded_audio_options(
+            file,
+            req.audio_index,
+            req.audio_claim.as_ref(),
+            req.audio_delivery.as_ref(),
+            options,
+        )
+    }
+
+    pub(super) fn encoded_audio_options(
+        file: &plurx_core::domain::MediaFile,
+        audio_index: Option<i64>,
+        claim: Option<&plurx_core::playback::audio::AudioClaim>,
+        retained: Option<&plurx_core::playback::audio::AudioDelivery>,
+        mut options: TranscodeOptions,
+    ) -> Result<TranscodeOptions, String> {
+        if let Some(audio) = retained {
+            options.set_audio_delivery(audio.clone());
+        } else if let Some(claim) = claim {
+            let selected = audio_index.map_or_else(
+                || file.audio_streams.first(),
+                |index| {
+                    file.audio_streams
+                        .iter()
+                        .find(|stream| stream.index == index)
+                },
+            );
+            options.set_audio_delivery(plurx_core::playback::audio::resolve_audio(
+                selected,
+                &claim.profile(),
+                plurx_core::playback::audio::AudioRoute::EncodedVod,
+                file.audio_offset_ms,
+            ));
+        }
+        if options
+            .audio
+            .as_ref()
+            .is_some_and(|audio| !audio.is_encoded_vod_compatible())
+        {
+            return Err(vod_refusal_error(
+                "vod_audio_recipe_invalid",
+                "encoded VOD requires its fixed AAC sample lattice",
+            ));
+        }
+        Ok(options)
+    }
+
     /// Create a session, or hand back the one an identical request already
     /// created.
     ///
@@ -36,7 +105,7 @@ impl TranscodeManager {
             None,
             None,
             None,
-            Priority::Live,
+            (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
         )
         .await
         .map(|creation| creation.info)
@@ -58,7 +127,37 @@ impl TranscodeManager {
             user_name,
             deadline,
             admitted_serving_generation,
-            Priority::Live,
+            (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
+        )
+        .await
+    }
+
+    /// Start a provisional make-before-break worker only from spare capacity.
+    pub(crate) async fn create_cluster_session_for_receiver(
+        &self,
+        request: (&SessionRequest, Option<u8>, Option<&RetainedOutputFacts>),
+        recovery: &SessionRecoveryIdentity,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        admitted_serving_generation: u64,
+    ) -> Result<ClusterSessionStart, String> {
+        let capture = if request.1 == Some(1) {
+            request
+                .2
+                .cloned()
+                .map_or(crate::vodserve::RetainedOutputCapture::New, |facts| {
+                    crate::vodserve::RetainedOutputCapture::Restore(Some(facts))
+                })
+        } else {
+            crate::vodserve::RetainedOutputCapture::ReceiverUnavailable
+        };
+        self.create_cluster_session_with_priority(
+            request.0,
+            recovery,
+            user_name,
+            deadline,
+            admitted_serving_generation,
+            (Priority::Live, capture),
         )
         .await
     }
@@ -81,7 +180,10 @@ impl TranscodeManager {
             user_name,
             deadline,
             admitted_serving_generation,
-            Priority::Speculative,
+            (
+                Priority::Speculative,
+                crate::vodserve::RetainedOutputCapture::New,
+            ),
         )
         .await
     }
@@ -93,7 +195,7 @@ impl TranscodeManager {
         user_name: &str,
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
-        priority: Priority,
+        priority: (Priority, crate::vodserve::RetainedOutputCapture),
     ) -> Result<ClusterSessionStart, String> {
         let serving_admission = ClusterServingAdmission {
             generation: admitted_serving_generation,
@@ -202,7 +304,10 @@ impl TranscodeManager {
             Some(deadline),
             Some(takeover),
             None,
-            Priority::Live,
+            (
+                Priority::Live,
+                crate::vodserve::RetainedOutputCapture::ReceiverUnavailable,
+            ),
         )
         .await
         .map(|creation| creation.info)
@@ -421,8 +526,9 @@ impl TranscodeManager {
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
-        priority: Priority,
+        priority: (Priority, crate::vodserve::RetainedOutputCapture),
     ) -> Result<SessionCreation, String> {
+        let (priority, retained_capture) = priority;
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
         }
@@ -442,15 +548,24 @@ impl TranscodeManager {
         let claim = match req.request_id.as_deref() {
             Some(key) => match self.claim_request(key, req, supersession_user).await? {
                 Claimed::Recovered(info) => {
+                    if !recovered_retained_output_matches(
+                        &retained_capture,
+                        req.candidate_context
+                            .as_ref()
+                            .and_then(|context| context.retained_output.as_ref()),
+                        info.retained_output.as_ref(),
+                    ) {
+                        return Err(vod_refusal_error("retained_artifact_unavailable", "the recovered presentation does not own the exact issued retained artifact"));
+                    }
                     if let Some(admission) = serving_admission {
                         self.require_cluster_serving_authority(admission)?;
                     }
                     return Ok(SessionCreation {
-                        info,
+                        info: *info,
                         created: false,
                     });
                 }
-                Claimed::Mine(claim, normalized) => Some((claim, normalized)),
+                Claimed::Mine(claim, normalized) => Some((claim, *normalized)),
             },
             None => None,
         };
@@ -469,6 +584,25 @@ impl TranscodeManager {
         self.validate_candidate_planning_binding(req, replacement_deadline)
             .await?;
 
+        if req.passive_vod
+            && (!req.vod_only
+                || req.presentation != Presentation::Vod
+                || req
+                    .request_id
+                    .as_deref()
+                    .is_none_or(|id| id.trim().is_empty()))
+        {
+            return Err(vod_refusal_error(
+                "vod_passive_policy_invalid",
+                "passive retention requires VOD-only policy and request identity",
+            ));
+        }
+        if req.vod_only && req.presentation != Presentation::Vod {
+            return Err(vod_refusal_error(
+                "vod_source_unsupported",
+                "VOD-only service policy forbids rolling presentation",
+            ));
+        }
         let startup_create_at = Instant::now();
         // Immutable VOD remains first. During the index backfill, a typed
         // prerequisite refusal may use the retained live engine rather than
@@ -492,8 +626,15 @@ impl TranscodeManager {
             started
         } else {
             let vod_lookup_at = Instant::now();
+            // Read once here and handed down, so the fallback below decides
+            // from the same snapshot the VOD attempt was admitted under.
+            let vod_settings = self.vod_settings(req).await?;
+            let live_recovery_enabled = vod_settings
+                .as_ref()
+                .is_some_and(|settings| settings.live_recovery);
             let vod = self
                 .try_vod_session(
+                    vod_settings,
                     req,
                     recovery
                         .map(|identity| {
@@ -507,6 +648,7 @@ impl TranscodeManager {
                     replacement_deadline,
                     takeover.is_some(),
                     serving_admission,
+                    retained_capture,
                 )
                 .await;
             tracing::info!(
@@ -527,7 +669,7 @@ impl TranscodeManager {
                     let live_recovery_reason = vod_refusal(&error)
                         .and_then(|(code, _)| LiveRecoveryReason::from_refusal(code));
                     if let Some(reason) = live_recovery_reason {
-                        if self.live_hls_recovery_enabled().await? {
+                        if !req.vod_only && live_recovery_enabled {
                             tracing::warn!(
                                 target: "plurxd::transcode",
                                 file_id = req.file_id,
@@ -646,6 +788,9 @@ impl TranscodeManager {
                     req.hdr10,
                     req.candidate_context.as_deref(),
                     priority,
+                    req.audio_claim.as_ref(),
+                    req.audio_delivery.as_ref(),
+                    req.sdr_master_codecs,
                 )
                 .await
             }
@@ -671,6 +816,8 @@ impl TranscodeManager {
                     takeover,
                     &req.playback_id,
                     req.automatic,
+                    req.audio_delivery.as_ref(),
+                    req.sdr_master_codecs,
                 )
                 .await
             }
@@ -701,6 +848,84 @@ impl TranscodeManager {
             crate::subtitle_source::Live::Path(&file.path),
         )
         .await
+    }
+
+    /// Retain the accepted inputs or acquire one real bounded atomic snapshot.
+    /// Revalidation can reject it, but cannot silently replace its choice.
+    pub(super) async fn vod_preparation_snapshot(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<Arc<plurx_core::store::PlaybackPlanningSnapshot>, String> {
+        let context = req.candidate_context.as_ref();
+        if context.is_some_and(|context| context.planning_binding.is_none()) {
+            return Err(catalog_input_error(
+                "selected candidate planning binding missing",
+            ));
+        }
+        let snapshot = if let Some(snapshot) =
+            context.and_then(|context| context.planning_snapshot.as_ref())
+        {
+            if context.and_then(|context| context.planning_binding.as_ref())
+                != Some(&crate::media_pool::PlanningBinding::from_snapshot(snapshot))
+            {
+                return Err(catalog_input_error("accepted planning snapshot is unbound"));
+            }
+            Arc::clone(snapshot)
+        } else {
+            Arc::new(
+                tokio::time::timeout_at(
+                    crate::media_pool::create_stage_deadline(Duration::from_secs(2)),
+                    self.store
+                        .playback_planning_snapshot(req.file_id, &super::QUALITY_PLANNING_KEYS),
+                )
+                .await
+                .map_err(|_| catalog_input_error("VOD planning snapshot deadline"))?
+                .map_err(|error| catalog_input_error(error.to_string()))?
+                .ok_or_else(|| catalog_input_error("VOD planning source missing"))?,
+            )
+        };
+        if req.file_id != file.id
+            || snapshot.file.id != file.id
+            || snapshot.file.size != file.size
+            || snapshot.file.mtime != file.mtime
+            || !matches!((Self::plan_source_identity(file), Self::plan_source_identity(&snapshot.file)),
+                (Ok(expected), Ok(actual)) if expected == actual)
+        {
+            return Err(catalog_input_error("VOD planning source changed"));
+        }
+        if context
+            .and_then(|context| context.planning_binding.as_ref())
+            .is_some_and(|binding| {
+                *binding != crate::media_pool::PlanningBinding::from_snapshot(&snapshot)
+            })
+        {
+            return Err(catalog_input_error("VOD planning binding changed"));
+        }
+        Ok(snapshot)
+    }
+
+    /// The same equality seam checked before the frozen Encoding is built.
+    pub(super) fn validate_prepared_candidate_recipe(
+        &self,
+        plan: &ResolvedTranscode,
+        presentation: super::Presentation,
+        reorder_frames: bool,
+        context: &CandidateExecutionContext,
+    ) -> Result<[u8; 32], String> {
+        let actual = self
+            .candidate_recipe_digest(plan, presentation, reorder_frames)
+            .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
+        if actual != context.recipe_digest
+            || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
+                != context.candidate_id
+        {
+            return Err(vod_refusal_error(
+                "candidate_recipe_changed",
+                "the resolved source/route no longer matches the selected candidate",
+            ));
+        }
+        Ok(actual)
     }
 
     /// Freeze an executable encoded recipe before any rendition is named.
@@ -751,9 +976,30 @@ impl TranscodeManager {
             &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
         )>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        if req
+            .continuous_media
+            .as_ref()
+            .is_some_and(|media| !media.valid_for(req))
+        {
+            return Err(vod_refusal_error(
+                "vod_continuous_recipe_invalid",
+                "the continuous media role is incompatible with this request",
+            ));
+        }
+        if req.finite_bitrate_limit_bps.is_some_and(|limit| {
+            !req.vod_only || !req.passive_vod || !(64_000..=1_000_000_000).contains(&limit)
+        }) {
+            return Err(vod_refusal_error(
+                "vod_output_budget_refused",
+                "invalid finite bitrate policy",
+            ));
+        }
         if matches!(req.kind, SessionKind::Copy { .. }) {
             match req.subtitle_burn {
-                None => return Ok(None),
+                None => {
+                    validate_finite_copy_rate(req, file)?;
+                    return Ok(None);
+                }
                 // A copy whose burn track the store holds as having no cues
                 // has nothing to burn: it stays the copy it would have been,
                 // rather than a full re-encode to overlay nothing.
@@ -769,11 +1015,22 @@ impl TranscodeManager {
                         subtitle_index = index,
                         "the burn track has no cues; serving the copy without an overlay"
                     );
+                    validate_finite_copy_rate(req, file)?;
                     return Ok(None);
                 }
                 Some(_) => {}
             }
         }
+        let note_phase = |phase: &'static str, started: std::time::Instant| {
+            tracing::debug!(
+                target: "plurxd::transcode",
+                file_id = file.id,
+                phase,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "encoded recipe preparation phase completed"
+            );
+        };
+        let phase_started = std::time::Instant::now();
         let source = if source_evidence.is_some() {
             crate::fragment_index_cluster::open_source_playback_fence(file, None).await
         } else {
@@ -792,6 +1049,7 @@ impl TranscodeManager {
                 );
             }
         }
+        note_phase("source_fence", phase_started);
         // Bind preparation, burn extraction, key construction, and the final
         // producer open to the same inspected object, not scanner seconds.
         let source_object_version = source.object_version().to_owned();
@@ -885,18 +1143,39 @@ impl TranscodeManager {
         .map_err(|error| {
             start_infrastructure_error(format!("reading the stored source probe: {error}"))
         })?;
-        let held_probe = if let Some((evidence, _)) = source_evidence {
-            evidence.document().to_owned()
+        let phase_started = std::time::Instant::now();
+        let (held_probe, held_decode_facts) = if let Some((evidence, _)) = source_evidence {
+            // Source's actual operation supplied this evidence; no Local cache
+            // or stored-account probe can authorize the foreign descriptor.
+            (evidence.document().to_owned(), None)
         } else {
-            crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
-                .await
-                .map_err(|error| {
-                    vod_refusal_error(
-                        "vod_source_rescan_required",
-                        format!("the held source could not be verified against its scan: {error}"),
-                    )
-                })?
+            let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
+                vod_refusal_error(
+                    "vod_source_rescan_required",
+                    format!("the held source could not be retained for verification: {error}"),
+                )
+            })?;
+            let collected = self.probe_vod_source_once(file, held_plan_handle).await?;
+            match collected {
+                Some(mut collected) => (std::mem::take(&mut collected.document), Some(collected)),
+                // Platforms without a sealed probe keep their existing source
+                // verification and stored-facts planning behavior.
+                None => (
+                    crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
+                        .await
+                        .map_err(|error| {
+                            vod_refusal_error(
+                                "vod_source_rescan_required",
+                                format!(
+                                "the held source could not be verified against its scan: {error}"
+                            ),
+                            )
+                        })?,
+                    None,
+                ),
+            }
         };
+        note_phase("held_source_probe", phase_started);
         let comparison = probe
             .as_deref()
             .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
@@ -960,9 +1239,18 @@ impl TranscodeManager {
                 "the source probe has no usable video cadence; rescan the file",
             )
         })?;
-        let (mut encoder, mut grade) = self
-            .encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
-            .await?;
+        let shared_audio_role = req
+            .continuous_media
+            .as_ref()
+            .is_some_and(|media| media.role == ContinuousMediaRole::SharedAudio);
+        let (mut encoder, mut grade) = if shared_audio_role {
+            // This process maps no video. It needs neither a GPU permit nor a
+            // video tone-map proof merely because its source contains HDR.
+            (Encoder::Software, OutputGrade::Sdr)
+        } else {
+            self.encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
+                .await?
+        };
         // After the encoder and grade, deliberately. `encoder_and_grade_for`
         // can refuse this source outright (an unknown Dolby Vision profile, an
         // unproven Profile 5 renderer), and a refusal must not first start a
@@ -1030,10 +1318,10 @@ impl TranscodeManager {
             }
             None => (None, None),
         };
-        let software_threads = Workload::of(file, target_height)
-            .software_threads()
-            .min(self.software_budget().await)
-            .max(1) as u32;
+        let software_threads = crate::vodencode::frozen_software_threads(
+            &Workload::of(file, target_height),
+            self.software_budget().await,
+        );
         let mut options = self.live_lookup_options(
             self.rate_control_snapshot(),
             encoder,
@@ -1045,6 +1333,7 @@ impl TranscodeManager {
             Some(software_threads),
             grade,
         );
+        options = self.encoded_start_audio_options(req, file, options)?;
         if let Some(context) = req.candidate_context.as_ref() {
             options.normalized_geometry = context.normalized_geometry;
             if let Some(profile) = context.profile {
@@ -1053,6 +1342,73 @@ impl TranscodeManager {
                 options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
             }
         }
+        // Catalog identity describes the muxed candidate. Verify that exact
+        // plan before deriving the video-only or shared-AAC execution recipe.
+        let phase_started = std::time::Instant::now();
+        let catalog_plan = if let Some(context) = req
+            .candidate_context
+            .as_ref()
+            .filter(|_| req.continuous_media.is_some())
+        {
+            let catalog_encoder = if shared_audio_role {
+                self.encoder_and_grade_for(file, false, target_height, false)
+                    .await?
+                    .0
+            } else {
+                encoder
+            };
+            let mut catalog_options = self.live_lookup_options(
+                self.rate_control_snapshot(),
+                catalog_encoder,
+                file,
+                target_height,
+                0.0,
+                req.audio_index,
+                None,
+                Some(software_threads),
+                OutputGrade::Sdr,
+            );
+            // The catalog row was resolved with the request's audio claim,
+            // so its muxed recipe carries the same audio delivery.
+            catalog_options = self.encoded_start_audio_options(req, file, catalog_options)?;
+            catalog_options.normalized_geometry = context.normalized_geometry;
+            if let Some(profile) = context.profile {
+                catalog_options.auto_quality_rate_profile = Some(profile);
+                catalog_options.video_bitrate_kbps = profile.video_bitrate_kbps();
+                catalog_options.effective_rate_control =
+                    plurx_core::transcode::EffectiveRateControl::Vbr;
+            }
+            Some(
+                self.resolve_vod_movie_plan(
+                    file,
+                    &catalog_options,
+                    catalog_encoder,
+                    Arc::new(
+                        source
+                            .handle
+                            .try_clone()
+                            .map_err(|error| start_infrastructure_error(error.to_string()))?,
+                    ),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        note_phase("catalog_decoder_plan", phase_started);
+        if let Some(media) = req.continuous_media.as_ref() {
+            options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+            if media.role == ContinuousMediaRole::SharedAudio {
+                options.pipeline = Pipeline::Cpu;
+                options.tone_map = ToneMap::None;
+            }
+            if media.role == ContinuousMediaRole::Video {
+                options.video_sample_envelope =
+                    plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50;
+                options.normalized_geometry = true;
+            }
+        }
+        constrain_finite_vod_rate(req, file, &mut options)?;
         let subtitle = if let Some(subtitle) = burn_file {
             #[cfg(unix)]
             {
@@ -1079,9 +1435,15 @@ impl TranscodeManager {
                 format!("the held source could not be retained for decoder planning: {error}"),
             )
         })?;
-        let plan = self
-            .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
-            .await?;
+        let phase_started = std::time::Instant::now();
+        let plan = if let Some(prepared) = held_decode_facts {
+            self.resolve_vod_prepared_source(file, &options, encoder, held_plan_handle, prepared)
+                .await?
+        } else {
+            self.resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
+                .await?
+        };
+        note_phase("execution_decoder_plan", phase_started);
         if let Some(frame_rate) = plan
             .output_contract()
             .normalized_geometry()
@@ -1098,20 +1460,46 @@ impl TranscodeManager {
                 )
             })?;
         }
+        // The VOD builder still derives its raster from the retained file.
+        // Do not attach a held-facts experiment if these two rasters differ.
+        let output = plan.output_contract();
+        let same_raster = transcode::output_size(file, options.target_height)
+            == output
+                .effective_width()
+                .zip(output.effective_height())
+                .map(|(width, height)| (i64::from(width), i64::from(height)));
+        let cadence = same_raster
+            .then(|| transcode::Rational::new(grid.numerator, grid.denominator))
+            .flatten();
+        let plan = plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr);
+        let planning = self.vod_preparation_snapshot(req, file).await?;
+        let reorder_frames = Self::vod_reorder_from_snapshot(&planning);
         if let Some(context) = req.candidate_context.as_ref() {
-            let actual = self
-                .candidate_recipe_digest(&plan, req.presentation)
-                .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
-            if actual != context.recipe_digest
-                || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
-                    != context.candidate_id
-            {
-                return Err(vod_refusal_error(
-                    "candidate_recipe_changed",
-                    "the resolved source/route no longer matches the selected candidate",
-                ));
-            }
+            // Continuous roles verify the muxed catalog plan; every other
+            // candidate verifies the qualified execution plan itself.
+            self.validate_prepared_candidate_recipe(
+                catalog_plan.as_ref().unwrap_or(&plan),
+                req.presentation,
+                reorder_frames,
+                context,
+            )?;
         }
+        let shared_audio = if req
+            .continuous_media
+            .as_ref()
+            .is_some_and(|media| media.role == ContinuousMediaRole::SharedAudio)
+        {
+            Some(
+                plurx_core::transcode::VodSharedAudioRecipe::from_plan(&plan).ok_or_else(|| {
+                    vod_refusal_error(
+                        "vod_continuous_audio_invalid",
+                        "the resolved source has no bounded shared AAC recipe",
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(
@@ -1128,6 +1516,7 @@ impl TranscodeManager {
         } else {
             None
         };
+        let phase_started = std::time::Instant::now();
         let engine = if let Some((evidence, _)) = source_evidence {
             evidence.engine()
         } else {
@@ -1141,6 +1530,7 @@ impl TranscodeManager {
             .await
             .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?
         };
+        note_phase("encoded_engine_capture", phase_started);
         if !source.unchanged() {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
@@ -1148,11 +1538,13 @@ impl TranscodeManager {
             ));
         }
         Ok(Some(Arc::new(crate::vodencode::Encoding {
+            shared_audio,
             source_object_version,
             plan,
             resources,
             options,
             grid,
+            reorder_frames,
             subtitle,
             subtitle_digest,
             ffmpeg_build: if let Some((evidence, _)) = source_evidence {
@@ -1167,9 +1559,12 @@ impl TranscodeManager {
             admissions: self.admissions.clone(),
             store: Arc::clone(&self.store),
             nonpreemptive_trial: req.automatic && req.candidate_context.is_some(),
+            // A video-only worker or shared soundtrack is not the muxed
+            // catalog recipe whose production speed this proof measures.
             candidate_recipe: req
                 .candidate_context
                 .as_ref()
+                .filter(|_| req.continuous_media.is_none())
                 .map(|context| context.recipe_digest),
             production_proofs: Arc::clone(&self.candidate_production_proofs),
             active_production: std::sync::Mutex::new(
@@ -1185,11 +1580,143 @@ impl TranscodeManager {
         })))
     }
 
-    /// The only public HLS presentation. A request either receives immutable
-    /// VOD or fails with a stable refusal; it never enters the live arms.
+    async fn prepare_vod_companion(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<Option<(SessionRequest, Arc<crate::vodencode::Encoding>)>, String> {
+        let Some(media) = request
+            .continuous_media
+            .as_ref()
+            .filter(|media| media.autonomous_companion.is_some())
+        else {
+            return Ok(None);
+        };
+        let context = media.companion_context.as_ref().ok_or_else(|| {
+            vod_refusal_error(
+                "vod_family_catalog_missing",
+                "the autonomous companion has no restored worker catalog context",
+            )
+        })?;
+        if media.autonomous_companion != Some(context.candidate.candidate_id) {
+            return Err(vod_refusal_error(
+                "vod_family_invalid",
+                "the companion context does not match its requested catalog identity",
+            ));
+        }
+        let mut companion = request.clone();
+        let role = companion
+            .continuous_media
+            .as_mut()
+            .expect("continuous video");
+        role.autonomous_companion = None;
+        role.companion_catalog = None;
+        role.companion_context = None;
+        role.family_descriptor = None;
+        companion.kind = SessionKind::Transcode {
+            height: context.height,
+        };
+        companion.candidate_context = Some(Box::new(context.candidate.clone()));
+        let encoding = self
+            .prepare_vod_encoding(&companion, file)
+            .await?
+            .ok_or_else(|| {
+                vod_refusal_error("vod_family_invalid", "the companion has no video recipe")
+            })?;
+        Ok(Some((companion, encoding)))
+    }
+
+    async fn prepare_vod_soundtrack(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        video: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        if file.audio_streams.is_empty()
+            || !request
+                .continuous_media
+                .as_ref()
+                .is_some_and(|media| media.role == ContinuousMediaRole::Video)
+        {
+            return Ok(None);
+        }
+        let mut audio = request.clone();
+        audio
+            .continuous_media
+            .as_mut()
+            .expect("continuous video")
+            .role = ContinuousMediaRole::SharedAudio;
+        // Video has already validated its catalog context. AAC uses its own
+        // CPU-only recipe and borrows only the selected video's end grid.
+        audio.candidate_context = None;
+        let role = audio
+            .continuous_media
+            .as_mut()
+            .expect("shared soundtrack role");
+        role.autonomous_companion = None;
+        role.companion_catalog = None;
+        role.companion_context = None;
+        role.family_descriptor = None;
+        let mut soundtrack = self.prepare_vod_encoding(&audio, file).await?;
+        if let (Some(soundtrack), Some(video)) = (soundtrack.as_mut(), video) {
+            Arc::get_mut(soundtrack)
+                .expect("new soundtrack recipe")
+                .grid = video.grid;
+        }
+        Ok(soundtrack)
+    }
+
+    /// Negotiation shares native encoded preparation and the exact copy
+    /// prerequisite resolver, without allocating a media session or producer.
+    pub(crate) async fn preview_compatibility_vod(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        if !req.vod_only
+            || !req.passive_vod
+            || req.presentation != Presentation::Vod
+            || req
+                .request_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+        {
+            return Err(vod_refusal_error(
+                "vod_passive_policy_invalid",
+                "compatibility preview requires the server-owned passive VOD policy",
+            ));
+        }
+        let Some(settings) = self.vod_settings(req).await? else {
+            return Err(vod_refusal_error(
+                "vod_disabled",
+                "VOD session creation is disabled on this server",
+            ));
+        };
+        let encoding = self.prepare_vod_encoding(req, file).await?;
+        self.vod
+            .preview_recipe(
+                crate::vodserve::VodRecipeRequest {
+                    measured_candidate: None,
+                    retained_capture: crate::vodserve::RetainedOutputCapture::New,
+                    request: req,
+                    encoding,
+                    // A passive compatibility preview is never a continuous
+                    // family: it names no shared soundtrack or companion.
+                    soundtrack: None,
+                    companion: None,
+                },
+                file,
+                &settings,
+                None,
+            )
+            .await
+    }
+
+    /// The only public HLS presentation: immutable VOD or a typed refusal.
     #[allow(clippy::too_many_arguments)]
     async fn try_vod_session(
         &self,
+        vod_settings: Option<crate::vodserve::VodSettings>,
         req: &SessionRequest,
         user_id: Option<i64>,
         user_name: &str,
@@ -1197,6 +1724,7 @@ impl TranscodeManager {
         replacement_deadline: Option<tokio::time::Instant>,
         is_takeover: bool,
         serving_admission: Option<ClusterServingAdmission>,
+        retained_capture: crate::vodserve::RetainedOutputCapture,
     ) -> Result<StartInfo, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
@@ -1213,7 +1741,7 @@ impl TranscodeManager {
                 "this session must be reopened as a new VOD handle after owner takeover",
             ));
         }
-        let Some(settings) = self.vod_settings(req).await? else {
+        let Some(settings) = vod_settings else {
             return Err(vod_refusal_error(
                 "vod_disabled",
                 "VOD session creation is disabled on this server",
@@ -1256,16 +1784,152 @@ impl TranscodeManager {
                 encoding.options.pipeline,
             )
         });
+        let soundtrack = self
+            .prepare_vod_soundtrack(req, &file, encoding.as_ref())
+            .await?;
+        let companion = self.prepare_vod_companion(req, &file).await?;
+        // A continuous family role executes a video-only or shared-AAC split of
+        // its muxed catalog candidate, already verified against that catalog
+        // plan in `prepare_vod_encoding`. It is never one complete retained
+        // candidate output: it binds no measured candidate and offers nothing
+        // to the complete-output queue.
+        let complete_candidate_output = req.continuous_media.is_none();
+        let measured_candidate = if let Some(context) = req
+            .candidate_context
+            .as_ref()
+            .filter(|_| complete_candidate_output)
+        {
+            use plurx_core::playback::candidate::{CandidateId, CandidateRoute};
+            let actual_grade = encoding.as_ref().map_or_else(
+                || super::manager_candidates::copy_candidate_grade(&file),
+                |encoding| encoding.options.pipeline.output_grade(),
+            );
+            let (actual, route) = if let Some(encoding) = &encoding {
+                (
+                    self.candidate_recipe_digest(
+                        &encoding.plan,
+                        req.presentation,
+                        encoding.reorder_frames,
+                    )?,
+                    CandidateRoute::Encode,
+                )
+            } else if let SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } = req.kind
+            {
+                let source = crate::fragment_index_cluster::open_source_fence(&file, None).await?;
+                let executable = crate::ffmpeg::EncodedExecutable::capture()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let engine = crate::ffmpeg::EncodedEngine::capture(None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let raster = file
+                    .width
+                    .and_then(|value| u32::try_from(value).ok())
+                    .zip(file.height.and_then(|value| u32::try_from(value).ok()))
+                    .ok_or_else(|| {
+                        vod_refusal_error("candidate_recipe_changed", "copy geometry is unknown")
+                    })?;
+                let actual = super::manager_candidates::copy_candidate_recipe_digest(
+                    &file,
+                    req.audio_index,
+                    file.audio_offset_ms,
+                    req.subtitle_burn,
+                    (aac, preserve_dolby_vision, convert_dolby_vision),
+                    Some(source.object_version()),
+                    Some(&executable.digest),
+                    Some(&engine.digest),
+                    raster,
+                );
+                if !source.unchanged() {
+                    return Err(vod_refusal_error(
+                        "candidate_recipe_changed",
+                        "copy source changed during equality validation",
+                    ));
+                }
+                (actual, CandidateRoute::Remux)
+            } else {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "no actual candidate route",
+                ));
+            };
+            if actual != context.recipe_digest
+                || CandidateId::for_recipe_digest(actual) != context.candidate_id
+                || actual_grade != context.grade
+            {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "actual execution differs from the accepted candidate",
+                ));
+            }
+            Some(crate::vodserve::RetainedCandidateBinding {
+                kind,
+                normalized_geometry: context.normalized_geometry,
+                profile: context.profile,
+                candidate_id: context.candidate_id,
+                recipe_digest: actual,
+                file_id: file.id,
+                audio_index: req.audio_index,
+                audio_offset_ms: file.audio_offset_ms,
+                subtitle_burn: req.subtitle_burn,
+                grade: context.grade,
+                route,
+            })
+        } else {
+            None
+        };
+        // Complete-output queue publication is handed to the owned enqueue
+        // worker once the session exists; it never runs on the start path.
+        // Only when the Developer switch admits this kind: a play must not
+        // queue a whole-title background job the operator never turned on.
+        let output_enqueue = (complete_candidate_output
+            && settings.output_preparation.admits(encoding.is_some())
+            && matches!(
+                &retained_capture,
+                crate::vodserve::RetainedOutputCapture::New
+            )
+            && req
+                .candidate_context
+                .as_ref()
+                .is_none_or(|context| context.retained_output.is_none()))
+        .then(|| {
+            (
+                req.clone(),
+                file.clone(),
+                settings.clone(),
+                encoding.clone(),
+            )
+        });
         let prepared = crate::vodserve::VodRecipeRequest {
+            companion,
+            measured_candidate,
+            retained_capture: match retained_capture {
+                crate::vodserve::RetainedOutputCapture::New => req
+                    .candidate_context
+                    .as_ref()
+                    .and_then(|context| context.retained_output.clone())
+                    .map_or(crate::vodserve::RetainedOutputCapture::New, |facts| {
+                        crate::vodserve::RetainedOutputCapture::Restore(Some(facts))
+                    }),
+                existing => existing,
+            },
             request: req,
             encoding,
+            soundtrack,
         };
         // Cluster activation is make-before-break: the Store pointer CAS and
         // exact post-CAS terminal projection are the only operations allowed
         // to retire the authoritative predecessor. If provisional capacity is
         // unavailable, fail this replacement and leave the current player
         // intact. Legacy process-local callers retain their historical sweep.
-        if replacement_deadline.is_none() {
+        // A continuous parent is also make-before-break: group admission
+        // can refuse after preparation, and must not end a healthy incumbent.
+        // Its prepared/CAS owner or explicit client release retires that parent.
+        if replacement_deadline.is_none() && req.continuous_media.is_none() {
             self.reap_superseded_before(None, supersession_user, &req.playback_id)
                 .await?;
         }
@@ -1283,6 +1947,14 @@ impl TranscodeManager {
             item_title: &item_title,
             supersession_user,
         };
+        let local_viewer = crate::state::PlaybackViewerDemand {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user_id.ok_or_else(|| {
+                    "Local VOD start requires its explicit viewer principal".to_owned()
+                })?,
+            },
+            playback_id: req.playback_id.clone(),
+        };
         let start = if let Some(admission) = serving_admission {
             self.vod
                 .try_create_cluster_for_viewer(
@@ -1296,12 +1968,7 @@ impl TranscodeManager {
                         admission.generation,
                         admission.deadline.into_std(),
                     ),
-                    user_id.map(|user_id| crate::state::PlaybackViewerDemand {
-                        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                            user_id,
-                        },
-                        playback_id: req.playback_id.clone(),
-                    }),
+                    local_viewer.clone(),
                 )
                 .await
                 .map_err(|error| {
@@ -1323,19 +1990,34 @@ impl TranscodeManager {
                     &settings,
                     attribution,
                     session_id,
-                    user_id.map(|user_id| crate::state::PlaybackViewerDemand {
-                        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                            user_id,
-                        },
-                        playback_id: req.playback_id.clone(),
-                    }),
+                    local_viewer,
                 )
                 .await?
         };
         if let Some((encoder, grade, pipeline)) = codec_qualification {
             self.record_codec_qualification_session(encoder, grade, Some(pipeline));
         }
+        if let Some((request, file, settings, encoding)) = output_enqueue {
+            self.hand_off_output_enqueue(OutputEnqueue {
+                request,
+                file,
+                settings,
+                encoding,
+                session_id: start.session_id.clone(),
+                queued_at: Instant::now(),
+            });
+        }
         Ok(StartInfo {
+            retained_output: self
+                .vod
+                .hls_facts(&start.session_id)
+                .await
+                .and_then(|facts| facts.response_owner.retained_output_facts()),
+            audio_delivery: self
+                .vod
+                .hls_facts(&start.session_id)
+                .await
+                .and_then(|facts| facts.audio_delivery),
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
             session_id: start.session_id,
             duration_ms: Some(start.duration_ms),
@@ -1373,6 +2055,17 @@ impl TranscodeManager {
                 plurx_core::store::keys::VOD_MATERIALIZE_BUDGET_SECS,
                 plurx_core::store::keys::CACHE_MAX_GB,
                 plurx_core::store::keys::VOD_BLOCKED_GET_CAP,
+                // Not admission policy, but read on this same create path:
+                // folding it in costs no extra Store read, and the session
+                // freezes it beside its block budget (S-10 Developer switch).
+                plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS,
+                // Read on every VOD create too, and once one statement at a
+                // time (D4): the cluster index gate, the HEVC copy proof
+                // switch, and the live-recovery fallback switch.
+                plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE,
+                plurx_core::store::keys::HEVC_UNVERIFIED_COPY,
+                plurx_core::store::keys::VOD_LIVE_RECOVERY,
+                plurx_core::store::keys::VOD_OUTPUT_PREPARATION,
             ])
             .await
             .map_err(|error| {
@@ -1462,12 +2155,34 @@ impl TranscodeManager {
                 .unwrap_or(DEFAULT_BLOCKED_GET_CAP),
             None => DEFAULT_BLOCKED_GET_CAP,
         };
+        let switch = |key: &str, absent: bool| {
+            plurx_core::store::stored_switch(read(key).map(String::as_str), absent)
+        };
         Ok(Some(crate::vodserve::VodSettings {
             working_set_bytes,
             completed_cache_bytes,
             block_budget: Duration::from_secs_f64(block_secs),
             materialize_budget: Duration::from_secs_f64(materialize_secs),
             blocked_get_cap,
+            // The create's own snapshot read when it carried one, so VOD and
+            // rolling freeze the same value; else this batch's. Missing is
+            // off: the pre-S-10 master with no SDR CODECS.
+            sdr_master_codecs: req.sdr_master_codecs.unwrap_or_else(|| {
+                plurx_core::store::stored_switch(
+                    read(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS).map(String::as_str),
+                    false,
+                )
+            }),
+            index_cluster_cache: switch(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, false),
+            hevc_unverified_copy: switch(plurx_core::store::keys::HEVC_UNVERIFIED_COPY, false),
+            live_recovery: switch(plurx_core::store::keys::VOD_LIVE_RECOVERY, true),
+            output_preparation: crate::vodserve::OutputPreparation::parse(
+                read(plurx_core::store::keys::VOD_OUTPUT_PREPARATION).map(String::as_str),
+            ),
+            output_budget_bytes: crate::cachekeep::cache_budget(
+                read(plurx_core::store::keys::CACHE_MAX_GB).map(String::as_str),
+            )
+            .unwrap_or(0),
         }))
     }
 
@@ -1510,6 +2225,77 @@ impl TranscodeManager {
     ) -> Option<VodResponsePublication<Option<crate::vodserve::SegmentReady>>> {
         self.vod
             .segment_before(session_id, name, Some(deadline))
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
+    }
+
+    pub(crate) async fn vod_quality_schedule_before(
+        &self,
+        session_id: &str,
+        owner_node_id: &str,
+        request: &crate::vodserve::QualityScheduleRequest,
+        deadline: Instant,
+    ) -> Result<crate::vodserve::QualityScheduleResponse, String> {
+        self.vod
+            .quality_schedule_before(session_id, owner_node_id, request, deadline)
+            .await
+    }
+
+    pub(crate) async fn vod_continuous_family_description_before(
+        &self,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Option<VodResponsePublication<Option<Vec<u8>>>> {
+        self.vod
+            .continuous_family_description_before(session_id, deadline)
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
+    }
+
+    pub(crate) async fn vod_continuous_master_before(
+        &self,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Option<VodResponsePublication<Option<Vec<u8>>>> {
+        self.vod
+            .continuous_master_before(session_id, deadline)
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
+    }
+
+    pub(crate) async fn vod_child_playlist_before(
+        &self,
+        session_id: &str,
+        role: &str,
+        rendition_id: &str,
+        deadline: Instant,
+    ) -> Option<VodResponsePublication<Option<Vec<u8>>>> {
+        self.vod
+            .child_playlist_before(session_id, role, rendition_id, deadline)
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
+    }
+
+    pub(crate) async fn vod_child_segment_before(
+        &self,
+        session_id: &str,
+        request: &crate::vodserve::ChildMediaRequest,
+        deadline: Instant,
+    ) -> Option<VodResponsePublication<Option<crate::vodserve::SegmentReady>>> {
+        self.vod
+            .child_segment_before(session_id, request, deadline)
             .await
             .map(|publication| VodResponsePublication {
                 result: publication.result,
@@ -1564,7 +2350,31 @@ impl TranscodeManager {
     /// may be cancelled before attachment, while VodServe's final reader-graph
     /// and registry swap is synchronous after it owns every affected lock, so
     /// timeout cannot expose a half-attached incarnation.
-    pub(crate) async fn vod_resurrect_before(
+    /// Resurrect a VOD session from its durable recipe. The future holds a
+    /// complete VOD create, so it is constructed outside the caller's polling
+    /// frame; built inline, unoptimized builds lay it out in every caller's
+    /// stack frame beneath the HTTP segment path.
+    #[inline(never)]
+    pub(crate) fn vod_resurrect_before<'a>(
+        &'a self,
+        recipe_json: &'a str,
+        session_id: &'a str,
+        user_id: i64,
+        adoption: SessionAdoptionToken,
+        deadline: Instant,
+        speculative: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(self.resurrect_vod_from_recipe_before(
+            recipe_json,
+            session_id,
+            user_id,
+            adoption,
+            deadline,
+            speculative,
+        ))
+    }
+
+    async fn resurrect_vod_from_recipe_before(
         &self,
         recipe_json: &str,
         session_id: &str,
@@ -1585,11 +2395,21 @@ impl TranscodeManager {
             return false;
         }
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-            let Ok(remote) =
+            let Ok(mut remote) =
                 serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(recipe_json)
             else {
                 return false;
             };
+            if self
+                .restore_candidate_context_with_deadline(
+                    &mut remote,
+                    tokio::time::Instant::from_std(deadline),
+                )
+                .await
+                .is_err()
+            {
+                return false;
+            }
             let req = remote.request;
             if req.presentation != Presentation::Vod {
                 return false;
@@ -1608,7 +2428,22 @@ impl TranscodeManager {
             let Ok(encoding) = self.prepare_vod_encoding(&req, &file).await else {
                 return false;
             };
+            let Ok(soundtrack) = self
+                .prepare_vod_soundtrack(&req, &file, encoding.as_ref())
+                .await
+            else {
+                return false;
+            };
+            let Ok(companion) = self.prepare_vod_companion(&req, &file).await else {
+                return false;
+            };
             if speculative {
+                if let Some((_, encoding)) = companion.as_ref() {
+                    encoding.mark_speculative();
+                }
+                if let Some(soundtrack) = soundtrack.as_ref() {
+                    soundtrack.mark_speculative();
+                }
                 if let Some(encoding) = encoding.as_ref() {
                     encoding.mark_speculative();
                 }
@@ -1634,8 +2469,14 @@ impl TranscodeManager {
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
+                        companion,
+                        measured_candidate: None,
+                        retained_capture: crate::vodserve::RetainedOutputCapture::Restore(
+                            remote.retained_output.clone(),
+                        ),
                         request: &req,
                         encoding,
+                        soundtrack,
                     },
                     &file,
                     &settings,
@@ -1670,6 +2511,115 @@ impl TranscodeManager {
         })
         .await
         .unwrap_or(false)
+    }
+
+    /// Hand a started session's complete-output queue publication to the
+    /// owned worker. Never waits: a full hand-off is reported and skipped,
+    /// and the title's next start offers the same deduplicated job again.
+    fn hand_off_output_enqueue(&self, work: OutputEnqueue) {
+        let file_id = work.file.id;
+        if let Err(error) = self.output_enqueue.sender.try_send(work) {
+            let reason = match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => "queue_full",
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => "worker_stopped",
+            };
+            crate::telemetry::record_output_enqueue_drop(reason);
+            tracing::info!(
+                target: "plurxd::transcode",
+                file_id,
+                reason,
+                "complete output preparation not handed off; the next start offers it again"
+            );
+        }
+    }
+
+    /// The single owner of post-start complete-output queue publication,
+    /// spawned beside [`Self::vod_maintain_loop`]. Each publication keeps its
+    /// own stage budget (the catalog restore's create-stage deadline and the
+    /// store's own write bound) instead of borrowing the viewer's start
+    /// budget, and every outcome is logged against its file and session.
+    ///
+    /// It stops on the daemon's `shutdown` token, both while idle and while a
+    /// publication is in flight: an interrupted publication is the same
+    /// deduplicated job the title's next start offers again, so dropping it
+    /// at shutdown loses nothing durable.
+    pub async fn output_enqueue_loop(
+        self: Arc<Self>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) {
+        let Some(mut receiver) = self
+            .output_enqueue
+            .receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        loop {
+            let work = tokio::select! {
+                () = shutdown.cancelled() => break,
+                work = receiver.recv() => match work {
+                    Some(work) => work,
+                    None => break,
+                },
+            };
+            let started = Instant::now();
+            let publication = async {
+                match &work.encoding {
+                    Some(encoding) => (
+                        "encoded_output",
+                        self.enqueue_encoded_output(
+                            &work.request,
+                            &work.file,
+                            &work.settings,
+                            encoding,
+                        )
+                        .await,
+                    ),
+                    None => (
+                        "copy_output",
+                        self.enqueue_copy_output(&work.request, &work.file, &work.settings)
+                            .await,
+                    ),
+                }
+            };
+            let (kind, result) = tokio::select! {
+                () = shutdown.cancelled() => {
+                    tracing::info!(
+                        target: "plurxd::transcode",
+                        file_id = work.file.id,
+                        session_id = %work.session_id,
+                        "complete output preparation interrupted by shutdown"
+                    );
+                    break;
+                }
+                outcome = publication => outcome,
+            };
+            let waited_ms = started.duration_since(work.queued_at).as_millis() as u64;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            match result {
+                Ok(()) => tracing::debug!(
+                    target: "plurxd::transcode",
+                    file_id = work.file.id,
+                    session_id = %work.session_id,
+                    kind,
+                    waited_ms,
+                    elapsed_ms,
+                    "complete output preparation queued"
+                ),
+                Err(error) => tracing::info!(
+                    target: "plurxd::transcode",
+                    file_id = work.file.id,
+                    session_id = %work.session_id,
+                    kind,
+                    waited_ms,
+                    elapsed_ms,
+                    %error,
+                    "complete output preparation not queued"
+                ),
+            }
+        }
     }
 
     /// The VOD serving maintenance loop, spawned beside [`Self::reap_loop`].
@@ -1757,7 +2707,7 @@ impl TranscodeManager {
                         };
                         entry.target_height = target_height;
                     }
-                    return Ok(Claimed::Mine(claim, normalized));
+                    return Ok(Claimed::Mine(claim, Box::new(normalized)));
                 }
                 Step::Recover(session_id, persisted_target) => {
                     if let Some(info) = self.recover(&session_id).await {
@@ -1767,7 +2717,7 @@ impl TranscodeManager {
                             ));
                         }
                         tracing::debug!(target: "plurxd::transcode", session = %session_log_id(&session_id), request_id = key, "idempotent create: same session");
-                        return Ok(Claimed::Recovered(info));
+                        return Ok(Claimed::Recovered(Box::new(info)));
                     }
                     // Its session is gone; the entry is stale, not
                     // authoritative. Remove exactly the entry that was seen —
@@ -1809,8 +2759,18 @@ impl TranscodeManager {
             };
             return Ok((request.clone(), target_height));
         };
-        let Some(ReopenReason::Stall) = request.reopen_reason else {
+        let Some(reason) = request.reopen_reason else {
             return Err(invalid_reopen_error("unsupported reopen reason"));
+        };
+        // A typed cause (link/encode/decode/hold/authority) is advisory
+        // evidence recorded at HTTP ingress, never a precondition for media.
+        // Its reopen keeps the exact target the client asked for; a missing
+        // full candidate or an incumbent this node no longer runs leaves the
+        // cause unrecorded rather than refusing a stalled viewer.
+        let typed = reason != ReopenReason::Stall;
+        let requested_height = match request.kind {
+            SessionKind::Transcode { height } => Some(height),
+            SessionKind::Copy { .. } => None,
         };
         // A stall reopen bound to a VOD predecessor: validate the binding
         // against the VOD registry and pass the request through untouched. A
@@ -1842,9 +2802,16 @@ impl TranscodeManager {
             kind,
         ) = {
             let sessions = self.sessions.lock().await;
-            let previous = sessions
-                .get(previous_session_id)
-                .ok_or_else(|| invalid_reopen_error("the previous session is no longer running"))?;
+            let Some(previous) = sessions.get(previous_session_id) else {
+                if typed {
+                    // Remote, retired or already-replaced incumbent: the
+                    // typed reopen proceeds as an ordinary start.
+                    return Ok((request.clone(), requested_height));
+                }
+                return Err(invalid_reopen_error(
+                    "the previous session is no longer running",
+                ));
+            };
             (
                 Arc::clone(previous),
                 previous.supersession_user.clone(),
@@ -1864,12 +2831,8 @@ impl TranscodeManager {
             ));
         }
 
-        if request.candidate_context.is_some() {
-            let height = match request.kind {
-                SessionKind::Transcode { height } => Some(height),
-                SessionKind::Copy { .. } => None,
-            };
-            return Ok((request.clone(), height));
+        if typed || request.candidate_context.is_some() {
+            return Ok((request.clone(), requested_height));
         }
 
         // The rung step exists for a link that could not keep up. A predecessor
@@ -1908,5 +2871,138 @@ impl TranscodeManager {
             }
         };
         Ok((normalized, Some(target_height)))
+    }
+}
+
+/// Both plain copies and copies with a known empty burn track share the same
+/// source-rate proof. The empty-track optimization cannot bypass the ceiling.
+pub(super) fn validate_finite_copy_rate(
+    request: &SessionRequest,
+    file: &plurx_core::domain::MediaFile,
+) -> Result<(), String> {
+    if request.finite_bitrate_limit_bps.is_some_and(|limit| {
+        let extra_audio = if matches!(request.kind, SessionKind::Copy { aac: true, .. }) {
+            320_000
+        } else {
+            0
+        };
+        file.bitrate.is_none_or(|bitrate| {
+            bitrate <= 0
+                || bitrate
+                    .checked_add(extra_audio)
+                    .is_none_or(|total| total > i64::from(limit))
+        })
+    }) {
+        return Err(vod_refusal_error(
+            "vod_output_budget_refused",
+            "copy delivery cannot meet the finite bitrate ceiling",
+        ));
+    }
+    Ok(())
+}
+
+/// Apply a service-owned ceiling before the native semantic recipe is frozen.
+/// VBR's existing 1.5x video peak and the native audio rate share this budget.
+pub(super) fn constrain_finite_vod_rate(
+    request: &SessionRequest,
+    file: &plurx_core::domain::MediaFile,
+    options: &mut plurx_core::transcode::TranscodeOptions,
+) -> Result<(), String> {
+    let Some(limit) = request.finite_bitrate_limit_bps else {
+        return Ok(());
+    };
+    if !request.vod_only
+        || !request.passive_vod
+        || !(64_000..=1_000_000_000).contains(&limit)
+        || request.candidate_context.is_some()
+    {
+        return Err(vod_refusal_error(
+            "vod_output_budget_refused",
+            "invalid finite bitrate policy",
+        ));
+    }
+    let audio_bps = if file.audio_streams.is_empty() {
+        0
+    } else {
+        u64::from(options.audio_bitrate_kbps) * 1000
+    };
+    let video_kbps = u64::from(limit)
+        .checked_sub(audio_bps)
+        .map(|remaining| remaining / 1500)
+        .filter(|rate| *rate >= 32)
+        .ok_or_else(|| {
+            vod_refusal_error(
+                "vod_output_budget_refused",
+                "the ceiling cannot contain the native audio and a valid video rate",
+            )
+        })?;
+    options.video_bitrate_kbps = options.video_bitrate_kbps.min(video_kbps as u32);
+    options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+    Ok(())
+}
+
+#[cfg(test)]
+mod retained_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn idempotent_recovery_preserves_captured_absence_and_exact_artifact_identity() {
+        use crate::vodserve::RetainedOutputCapture;
+        let original = RetainedOutputFacts {
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            output_identity: "ab".repeat(32),
+            average_bps: 8000,
+            peak_bps: 12000,
+        };
+        let mut other = original.clone();
+        other.artifact_id = uuid::Uuid::new_v4().to_string();
+        assert!(recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(None),
+            None,
+            None
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(None),
+            None,
+            Some(&original)
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(Some(original.clone())),
+            None,
+            None
+        ));
+        assert!(recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(Some(original.clone())),
+            None,
+            Some(&original)
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(Some(original.clone())),
+            None,
+            Some(&other)
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::ReceiverUnavailable,
+            None,
+            Some(&original)
+        ));
+        assert!(
+            recovered_retained_output_matches(&RetainedOutputCapture::New, None, Some(&original)),
+            "new capable replay reads the incumbent without changing it"
+        );
+        assert!(
+            !recovered_retained_output_matches(&RetainedOutputCapture::New, Some(&original), None),
+            "a measured selection cannot silently downgrade to old captured None"
+        );
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::New,
+            Some(&original),
+            Some(&other)
+        ));
+        assert!(recovered_retained_output_matches(
+            &RetainedOutputCapture::New,
+            Some(&original),
+            Some(&original)
+        ));
     }
 }

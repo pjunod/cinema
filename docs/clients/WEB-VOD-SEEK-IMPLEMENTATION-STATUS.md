@@ -2,7 +2,7 @@
 
 **Status:** open — implementation merged; physical Safari acceptance pending ·
 **Updated:** 2026-09-24 · **Merged commit:** `c327b2a60110c8353907465287b0f6226d0bf032` ·
-**PR:** [#478](http://192.168.4.7:3000/noirr/plurx/pulls/478) ·
+**PR:** [#478](http://forge.lan:3000/noirr/plurx/pulls/478) ·
 **State:** reviewed and fast lane green on the merged candidate.
 
 Companion to [the RCA and fix proposal](WEB-VOD-SEEK-MISSING-MEDIA-RCA-AND-FIX.md).

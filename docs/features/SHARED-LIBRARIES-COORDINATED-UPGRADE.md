@@ -194,11 +194,11 @@ does not supply that missing receipt. Other open cases include interruption
 during installation, a production backup tool,
 physical hardware, Tailscale, CGNAT, or rolling upgrade. Sharing stays behind its
 saved advisory Developer switch; readiness never overrides the saved choice.
-The installed legacy Source 71 → 73 migration requires coordinated drain of
+The installed legacy Source 71 → 82 migration requires coordinated drain of
 all held Source bindings, starting sharing requests, active or non-ended
 sharing media routes, and sharing preparations before atomic additive custody
 migration. Its exact Source layout marker remains 71 while the committed
-version advances to 73. Live or held old obligations refuse migration; this
+version advances to 82. Live or held old obligations refuse migration; this
 transition is not rolling safe and the Local drill above does not qualify it.
 Restore retains custody rows under the old principal, incarnation and owner
 identity for diagnosis, disables sharing and requires re-pairing. Interrupted

@@ -246,13 +246,15 @@ function recordAutoSwitch(p,from,to,reason,position,targetSessionId){
 }
 function autoCauseEvidence(p,nowMs){
   const maxAge=PlaybackPolicy.AUTO_DEFAULTS.causeMaxAgeMs;
-  if(p&&p.abr&&nowMs<Number(p.abr.stallVerdictUntilMs||0))
-    return {kind:"control-stall-verdict",ageMs:0};
   const episode=p&&p.hlsStartup;
   if(episode&&episode.establishedSuspension
     &&episode.establishedSuspension.attachment===p.mediaAttachment){
     return {kind:"loader-suspended",ageMs:0};
   }
+  const stallVerdict=p&&p.abr&&p.abr.controlStallVerdict;
+  if(stallVerdict&&p.waitAt===stallVerdict.waitAt
+    &&nowMs<stallVerdict.untilMs)
+    return {kind:"control-stall-verdict",ageMs:Math.max(0,nowMs-stallVerdict.atMs)};
   const failure=STREAM_FAILURE;
   if(failure&&(!failure.attachment||failure.attachment===p.mediaAttachment)){
     const age=Math.max(0,Date.now()-Number(failure.at||Date.now()));
@@ -267,6 +269,12 @@ function autoCauseEvidence(p,nowMs){
         return {kind:"delivery-refused",ageMs:age,code};
     }
   }
+  const abr=p&&p.abr;
+  const decodeEvents=abr&&abr.stallEvents&&abr.stallEvents.decode;
+  const decodeAt=decodeEvents&&decodeEvents.length
+    ?decodeEvents[decodeEvents.length-1]:null;
+  if(decodeAt!=null&&nowMs>=decodeAt&&nowMs-decodeAt<=maxAge)
+    return {kind:"decode-failed",ageMs:nowMs-decodeAt};
   const healthAge=p&&p.healthObservedAt!=null?Math.max(0,nowMs-p.healthObservedAt):null;
   const health=p&&p.health;
   if(health&&healthAge<=maxAge){
@@ -275,7 +283,6 @@ function autoCauseEvidence(p,nowMs){
       &&["running","held"].includes(String(health.producer_state||"")))
       return {kind:"capacity-shortfall",ageMs:healthAge};
   }
-  const abr=p&&p.abr;
   const sampleAge=abr&&abr.recentEstimateAtMs!=null
     ?Math.max(0,nowMs-abr.recentEstimateAtMs):null;
   const sourceKbps=Number(p&&p.source&&p.source.bitrate)/1000;
@@ -284,6 +291,29 @@ function autoCauseEvidence(p,nowMs){
     &&abr.recentEstimateKbps<sourceKbps*PlaybackPolicy.AUTO_DEFAULTS.severeEstimateRatio)
     return {kind:"bandwidth-limited",ageMs:sampleAge};
   return {kind:healthAge==null?"unknown":"stale",ageMs:healthAge};
+}
+// The element's typed decoder error reaches `wirePlayerMedia` before the
+// periodic stall reporter can run. Give Auto its one policy move there, before
+// the terminal compatibility owner decides whether anything else can recover.
+function autoDecodeMediaError(p,v){
+  if(!p||!p.abr||p.method!=="transcode"||qualityForce()!=="auto"
+    ||p.abr.switching||p.autoFallbackInFlight||p.pendingMediaChange
+    ||hasPendingPlaybackOpen(p)) return false;
+  const currentHeight=Number(p.health?.target_height||p.autoHeight||v.videoHeight);
+  if(!(currentHeight>0)) return false;
+  const now=performance.now();
+  const result=PlaybackPolicy.decideRung({ladder:p.ladder,currentHeight,
+    decodeStalls:1,decodeStepConsumed:!!p.abr.decodeStepConsumed,
+    blockedHeights:p.abr.failedHeights,
+    switchesThisPlaybackHour:(p.abr.switchBudgetTimes||[])
+      .filter(at=>now-at<3600000).length,
+    causeEvidence:{kind:"decode-failed",ageMs:0},nowMs:now});
+  if(!result.blockedHeights||result.height===currentHeight) return false;
+  p.abr.decodeStepConsumed=true;
+  p.abr.failedHeights=p.abr.failedHeights||new Set();
+  for(const height of result.blockedHeights) p.abr.failedHeights.add(height);
+  switchAutoRung(currentHeight,result).catch(()=>{});
+  return true;
 }
 function recordAutoDecision(p,currentHeight,result,runway,throughputKbps){
   if(!p||!p.abr) return;
@@ -396,6 +426,10 @@ async function switchAutoRung(currentHeight,decision){
     }
     const outcome=await requestQualityChange(p,"auto-quality",reopen,
       {from:currentHeight,to:decision.height,switchReason:decision.reason});
+    if(outcome==="continuous"&&p.directedChange&&!p.directedChange.settled){
+      retainClaim=true;
+      return;
+    }
     if(outcome==="prepared"&&p.directedChange&&!p.directedChange.settled){
       const change=p.directedChange;
       change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,"commit_timeout"),
@@ -526,6 +560,8 @@ async function autoControllerTick(){
     previousRunwaySeconds:p.abr.previousRunway,
     recentSpeed:health.recent_speed,
     activeSupplyStall,supplyStalls:p.abr.stallEvents.supply.length,
+    decodeStalls:p.abr.stallEvents.decode.length,
+    decodeStepConsumed:!!p.abr.decodeStepConsumed,
     lastStallAtMs:p.abr.lastStallAtMs,nowMs:now,
     lastSwitchAtMs:p.abr.lastSwitchAtMs,mildSamples:p.abr.mildSamples,
     lastCliffAtMs:p.abr.lastCliffAtMs,
@@ -535,6 +571,10 @@ async function autoControllerTick(){
     blockedHeights:p.abr.failedHeights,causeEvidence
   });
   p.abr.previousRunway=runway;
+  if(result.blockedHeights){
+    p.abr.decodeStepConsumed=true;
+    for(const height of result.blockedHeights) p.abr.failedHeights.add(height);
+  }
   p.abr.mildSamples=result.mildSamples;
   p.abr.upgradeSinceMs=result.upgradeSinceMs;
   recordAutoDecision(p,currentHeight,result,runway,p.abr.recentEstimateKbps);
@@ -566,10 +606,12 @@ async function refreshQualityCandidates(p){
   const attachment=p.mediaAttachment, intent=p.controlIntentGeneration;
   try{
     const decision=await askDecision(playbackFileContextForPlayer(p),qualityForce(),
-      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0});
+      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},null,p);
     if(PLAYER!==p||p.mediaAttachment!==attachment||p.controlIntentGeneration!==intent
       ||candidateQualityContext(p)!==key) return false;
-    p.qualityCandidates=Array.isArray(decision.quality_candidates)?decision.quality_candidates:null;
+    p.qualityCandidates=Array.isArray(decision.quality_candidates)
+      ?continuousQualityBoundCatalog(decision.quality_candidates,p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null):null;
+    p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
     p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
     p.abr.candidateContext=key;
     p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
@@ -582,7 +624,91 @@ async function refreshQualityCandidates(p){
 function candidateTransferEvidence(p,now){
   const transfer=p.abr&&p.abr.qualityTransfer;
   return transfer&&transfer.attachment===p.mediaAttachment
+    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
     ? {...transfer,age_ms:now-transfer.atMs}:null;
+}
+function candidateLinkReceipt(p,fileId,now=performance.now()){
+  const localId=fileId&&typeof fileId==="object"&&fileId.source_ref?.kind==="local"?fileId.source_ref.file_id:fileId;
+  if(!p||PLAYER!==p||p.fileId!==localId||qualityForce()!=='auto'
+    ||!playbackOwnsAttachedMedia(p)) return null;
+  const sample=candidateTransferEvidence(p,now);
+  return sample&&candidateTransferOriginCurrent(sample)&&sample.linkPositiveReported&&sample.etag
+    &&typeof sample.receipt==='string'
+    &&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(sample.receipt)
+    &&sample.age_ms>=0&&sample.age_ms<=15000&&PlaybackPolicy.qualityTransferBps(sample)>0
+    ? sample.receipt:null;
+}
+function candidateTransferOriginCurrent(sample){
+  try{
+    return typeof sample?.origin==='string'&&sample.origin===new URL(location.href).origin;
+  }catch(e){ return false; }
+}
+function measuredCandidateOutput(p,candidate){
+  const outputs=p.measuredCandidateOutputs;
+  if(!candidate||!Array.isArray(outputs)||outputs.length>64
+    ||!/^[0-9a-f]{32}$/.test(candidate.id)||!['original','remux','encode'].includes(candidate.route)
+    ||!Array.isArray(candidate.recipe_digest)||candidate.recipe_digest.length!==32
+    ||!candidate.recipe_digest.every(byte=>Number.isInteger(byte)&&byte>=0&&byte<=255)) return null;
+  const matches=outputs.filter(row=>row&&row.candidate_id===candidate.id&&row.route===candidate.route
+    &&Array.isArray(row.recipe_digest)&&row.recipe_digest.length===32
+    &&row.recipe_digest.every((byte,index)=>byte===candidate.recipe_digest[index])
+    &&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(row.artifact_id)
+    &&/^[0-9a-f]{64}$/.test(row.output_identity)&&row.qualification==='complete_full_mux_rfc8216_v1'
+    &&Number.isSafeInteger(row.average_bps)&&row.average_bps>0
+    &&Number.isSafeInteger(row.peak_bps)&&row.peak_bps>=row.average_bps);
+  return matches.length===1?matches[0]:null;
+}
+function measuredCandidateCatalog(p,candidates){
+  // A member of the open continuous family is costed by the family's own
+  // declared delivery budget, which continuousQualityBoundCatalog already
+  // bound onto the row; every other unmeasured advertised peak is discarded.
+  const family=p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null;
+  const members=new Set(family&&Array.isArray(family.video)?family.video.map(row=>row.candidate_id):[]);
+  return (candidates||[]).map(candidate=>{
+    const output=measuredCandidateOutput(p,candidate);
+    if(!output&&members.has(candidate.id)) return {...candidate,average_bps:null};
+    return {...candidate,average_bps:output?.average_bps??null,peak_bps:output?.peak_bps??null};
+  });
+}
+function continuousFamilyPeak(p,candidateId){
+  // The open family's declared, server-enforced container-inclusive budget
+  // (video plus shared audio): an object over it is refused, never served.
+  const family=p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null;
+  const row=family&&Array.isArray(family.video)?family.video.find(member=>member.candidate_id===candidateId):null;
+  const peak=row?row.peak_bps+(family.audio?.peak_bps||0):null;
+  return Number.isSafeInteger(peak)&&peak>0?peak:null;
+}
+function candidatePositiveMargin(p,candidate,transfer){
+  const link=PlaybackPolicy.qualityTransferBps(transfer);
+  const own=!!(candidateTransferOriginCurrent(transfer)&&transfer.etag&&transfer.attachment===p.mediaAttachment
+    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId&&link>0);
+  // Between members of the open continuous family, cost is the family's
+  // enforced budget and the evidence is a completed family object of this
+  // session. Those role-split objects are not a muxed candidate's output, so
+  // they carry no candidate link receipt and are never reported as one.
+  const family=continuousFamilyPeak(p,candidate?.id);
+  if(family!=null&&continuousFamilyPeak(p,p.qualityCandidateId)!=null) return own&&link>=family*1.8;
+  const output=measuredCandidateOutput(p,candidate);
+  return !!(output&&own&&transfer.receipt&&link>=output.peak_bps*1.8);
+}
+function unknownStageableOriginal(p,candidate){
+  if(!candidate||candidate.route!=='remux'||candidate.decoder_compatible!==true
+    ||!(candidate.width>0&&candidate.height>0)||candidate.peak_bps!=null
+    ||!/^[0-9a-f]{32}$/.test(candidate.id)||!Array.isArray(candidate.recipe_digest)
+    ||candidate.recipe_digest.length!==32
+    ||!candidate.recipe_digest.every(byte=>Number.isInteger(byte)&&byte>=0&&byte<=255)) return false;
+  const outputs=p.measuredCandidateOutputs;
+  return outputs==null||Array.isArray(outputs)&&outputs.length<=64&&!outputs.some(row=>row
+    &&row.candidate_id===candidate.id&&row.route===candidate.route
+    &&Array.isArray(row.recipe_digest)&&row.recipe_digest.length===32
+    &&row.recipe_digest.every((byte,index)=>byte===candidate.recipe_digest[index]));
+}
+function candidateAdmissionCatalog(p,candidates,current,transfer){
+  const trials=new Set((candidates||[]).filter(candidate=>unknownStageableOriginal(p,candidate)).map(row=>row.id));
+  return measuredCandidateCatalog(p,candidates).filter(candidate=>candidate.id===current.id
+    ||candidate.width*candidate.height<=current.width*current.height
+      &&!(current.route==='encode'&&candidate.route!=='encode')
+    ||candidatePositiveMargin(p,candidate,transfer)||trials.has(candidate.id));
 }
 async function naturalBoundaryQualityCandidate(p,seekIntent){
   if(!p.abr||qualityForce()!=='auto'||!SERVER||!SERVER.playback_display_aware_auto
@@ -591,15 +717,19 @@ async function naturalBoundaryQualityCandidate(p,seekIntent){
   const generation=p.controlIntentGeneration;
   try{
     const decision=await askDecision(playbackFileContextForPlayer(p),'auto',
-      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal);
+      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal,p);
     if(PLAYER!==p||p.controlSeek!==seekIntent||p.controlIntentGeneration!==generation
       ||qualityForce()!=='auto'||!Array.isArray(decision.quality_candidates)) return null;
-    const candidates=decision.quality_candidates;
+    const candidates=continuousQualityBoundCatalog(decision.quality_candidates,
+      p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null);
+    p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
     const current=(p.qualityCandidates||[]).find(candidate=>candidate.id===p.qualityCandidateId);
     const progress=p.abr.qualityPressureTransfer, now=performance.now();
     const limit=progress&&progress.attachment===p.mediaAttachment&&now-progress.atMs<=15000?progress.bps:null;
     const blocked=p.abr.candidateState?.blockedCandidates||[];
-    const picked=PlaybackPolicy.selectQualityCandidate({candidates:candidates.filter(row=>!blocked.includes(row.id)),target:measuredPresentationTarget(),
+    const picked=PlaybackPolicy.selectQualityCandidate({candidates:current
+      ?candidateAdmissionCatalog(p,candidates,current,candidateTransferEvidence(p,now)).filter(row=>!blocked.includes(row.id))
+      :measuredCandidateCatalog(p,candidates).filter(row=>!blocked.includes(row.id)),target:measuredPresentationTarget(),
       aspect:current?current.width/current.height:null,
       transfer:candidateTransferEvidence(p,now),linkLimitBps:limit});
     p.qualityCandidates=candidates;
@@ -615,7 +745,7 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
   if(!await refreshQualityCandidates(p)||PLAYER!==p||!playbackOwnsAttachedMedia(p)) return;
   now=performance.now();
   const transfer=candidateTransferEvidence(p,now);
-  const current=p.qualityCandidates.find(candidate=>candidate.id===p.qualityCandidateId);
+  const current=measuredCandidateCatalog(p,p.qualityCandidates).find(candidate=>candidate.id===p.qualityCandidateId);
   if(!current) return;
   let cause='unknown';
   if(['authority-refused','producer-failed','delivery-refused'].includes(causeEvidence.kind)) cause='authority';
@@ -633,8 +763,9 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
     &&p.healthObservedAt!=null
     &&PlaybackPolicy.qualityEncodeProof(p.health,current.id,now-p.healthObservedAt)
     &&speed<1000) cause='encode';
+  reportCandidateLinkSample(p,v,cause,now);
   const result=PlaybackPolicy.decideCandidateTransition({
-    state:p.abr.candidateState||{},candidates:p.qualityCandidates,currentId:current.id,
+    state:p.abr.candidateState||{},candidates:candidateAdmissionCatalog(p,p.qualityCandidates,current,transfer),currentId:current.id,
     aspect:current.width/current.height,target:measuredPresentationTarget(),
     sample:{now_ms:now,automatic:qualityForce()==='auto',presenting:p.started,
       paused:v.paused,seeking:v.seeking||!!p.controlSeek,move_in_flight:!!p.pendingMediaChange||p.abr.switching,
@@ -649,8 +780,32 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
       evidence:{age_ms:transfer?transfer.age_ms:null}},bufferRunway(v),link>0?link/1000:null);
   if(result.candidate) await switchAutoCandidate(p,v,current,result);
 }
+function reportCandidateLinkSample(p,v,cause,now){
+  const sample=p.abr&&p.abr.qualityTransfer;
+  if(!sample||!sample.receipt||!sample.etag||sample.attachment!==p.mediaAttachment
+    ||sample.session_id!==p.sessionId||sample.candidate_id!==p.qualityCandidateId
+    ||PLAYER!==p||!playbackOwnsAttachedMedia(p)||qualityForce()!=='auto'
+    ||!sample.completed||sample.from_cache!==false||sample.producer_paced!==false
+    ||now-sample.atMs<0||now-sample.atMs>15000
+    ||['encode','decode','hold','authority'].includes(cause)) return;
+  // A completed acquisition reports raw Link evidence once. A later actual
+  // low-runway Link stall may claim this same body, without refreshing it.
+  const negative=!!sample.linkPositiveReported;
+  if(negative&&(sample.linkNegativeReported||cause!=='link'||!p.started||v.paused
+    ||v.seeking||p.controlSeek||p.pendingMediaChange||!p.waitAt||bufferRunway(v)>1.5
+    ||!(sample.server_media_duration_ms>0&&sample.elapsed_ms>sample.server_media_duration_ms))) return;
+  clientLog({event:'candidate_link_sample',message:'Completed candidate body',session_id:p.sessionId,
+    link_sample:{receipt:sample.receipt,object_name:sample.object_name,etag:sample.etag,
+      body_bytes:sample.bytes,body_duration_ms:Math.round(sample.elapsed_ms),age_ms:Math.round(now-sample.atMs),
+      network_load:true,from_cache:false,producer_paced:false,cause:'link',negative,
+      media_duration_ms:sample.server_media_duration_ms??null,presenting:!!p.started,
+      stalled:!!p.waitAt,runway_ms:Math.max(0,Math.round(bufferRunway(v)*1000))}});
+  if(negative) sample.linkNegativeReported=true;
+  else sample.linkPositiveReported=true;
+}
 async function switchAutoCandidate(p,v,current,decision){
   if(PLAYER!==p||!decision.candidate||!claimAutoFallback(p)) return false;
+  const standingSelection=playbackControlSelection(p);
   const chosen=decision.candidate, previousCandidateId=p.abr.requestedCandidateId||current.id;
   const copy=chosen.route!=='encode';
   const recovery=decision.emergency||decision.transition==='recover';
@@ -675,14 +830,18 @@ async function switchAutoCandidate(p,v,current,decision){
     p.abr.requestedCandidateId=chosen.id;
     p.autoRequestedHeight=null;
     p.abr.switching=true;
-    const outcome=await requestQualityChange(p,'auto-quality',reopen,move);
+    const outcome=await requestQualityChange(p,'auto-quality',reopen,move,standingSelection);
+    if(outcome==='continuous'&&p.directedChange&&!p.directedChange.settled){
+      retained=true;
+      return true;
+    }
     if(outcome==='prepared'&&p.directedChange&&!p.directedChange.settled){
       const change=p.directedChange;
       change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,'commit_timeout'),
         Math.max(0,10000-(performance.now()-change.tappedAt)));
       retained=true;
     }
-    return outcome==='prepared';
+    return outcome==='prepared'||outcome==='continuous';
   }finally{
     if(!retained){p.abr.switching=false;releaseAutoFallback(p);}
   }
