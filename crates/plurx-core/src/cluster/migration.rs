@@ -29,6 +29,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(feature = "hiqlite-store")]
 use futures_util::StreamExt;
 use rusqlite::backup::Backup;
+#[cfg(feature = "hiqlite-store")]
+use rusqlite::OptionalExtension;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
@@ -2204,6 +2206,12 @@ pub async fn restore_cluster_backup_archive(
             super::SINGLE_VOTER_RAFT_ID,
         )?;
         let local = configured_local_peer(config, identity.raft_id)?;
+        project_restored_observation_identity(&database, &identity, &local)?;
+        File::open(&database)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| {
+                migration_io("syncing restored observation identity", &database, error)
+            })?;
         let membership = LocalMembership {
             version: local_membership_version(ClusterRole::Voter),
             cluster_id: manifest.cluster_id.clone(),
@@ -2251,6 +2259,106 @@ pub async fn restore_cluster_backup_archive(
         let _ = remove_directory_if_present(&incoming);
     }
     result
+}
+
+/// Offline restore alone owns this verified, locked fresh image. Project only
+/// its newly minted observation identity; timestamp zero and no capabilities
+/// confer neither serving permission nor purpose-key readiness. Runtime joins
+/// retain their original token-bound guards byte for byte.
+#[cfg(feature = "hiqlite-store")]
+fn project_restored_observation_identity(
+    database: &Path,
+    identity: &super::ClusterIdentity,
+    local: &ClusterPeer,
+) -> Result<(), StoreError> {
+    let mut connection = Connection::open(database)?;
+    let present: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='cluster_nodes'",
+        [],
+        |row| row.get(0),
+    )?;
+    if present == 0 {
+        return Ok(());
+    }
+    let tx = connection.transaction()?;
+    let expected: Vec<_> = super::membership::sharing_member_admission_guard_schema()
+        .into_iter()
+        .filter(|sql| sql.contains("_node_insert_guard "))
+        .collect();
+    let mut originals = Vec::new();
+    for (sql, capability) in expected.iter().zip([
+        super::membership::SHARING_SESSION_PRINCIPAL_CAPABILITY,
+        super::membership::SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
+        super::membership::SHARING_PURPOSE_KEYS_CAPABILITY,
+    ]) {
+        let name = sql
+            .split_whitespace()
+            .nth(5)
+            .expect("canonical trigger name");
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let installed: bool = tx.query_row(
+            &format!(
+                "SELECT ({})",
+                super::membership::sharing_installed_marker_predicate(capability)
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        match stored {
+            Some(stored) if stored == sql.replace(" IF NOT EXISTS", "") => {
+                originals.push((name.to_owned(), stored))
+            }
+            None if !installed => {}
+            _ => {
+                return Err(StoreError::Migration(
+                    "restored image has a missing or noncanonical sharing node admission guard"
+                        .into(),
+                ))
+            }
+        }
+    }
+    let extra: i64 = tx.query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name GLOB 'cluster_sharing_*_node_insert_guard'", [], |row| row.get(0))?;
+    if extra != originals.len() as i64 {
+        return Err(StoreError::Migration(
+            "restored image has an unknown sharing node admission guard".into(),
+        ));
+    }
+    let empty: i64 = tx.query_row("SELECT count(*) FROM cluster_nodes", [], |row| row.get(0))?;
+    let capabilities: i64 = tx.query_row(
+        "SELECT count(*) FROM cluster_node_capabilities",
+        [],
+        |row| row.get(0),
+    )?;
+    if empty != 0 || capabilities != 0 || identity.raft_id != super::SINGLE_VOTER_RAFT_ID {
+        return Err(StoreError::Migration(
+            "restored observation identity requires a cleared sole-voter image".into(),
+        ));
+    }
+    let quote = |value: &str| value.replace('\'', "''");
+    for (name, _) in &originals {
+        tx.execute_batch(&format!("DROP TRIGGER {name}; CREATE TRIGGER {name} BEFORE INSERT ON cluster_nodes WHEN (NEW.node_id='{}' AND NEW.raft_id={} AND NEW.api_address='{}' AND NEW.raft_address='{}' AND NEW.last_seen_at=0 AND NEW.removed_at IS NULL AND NEW.role='voter' AND NOT EXISTS(SELECT 1 FROM cluster_nodes) AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities)) IS NOT 1 BEGIN SELECT RAISE(ABORT,'restore bootstrap identity mismatch'); END;", quote(&identity.node_id), identity.raft_id, quote(&local.api_address), quote(&local.raft_address)))?;
+    }
+    #[cfg(test)]
+    if !originals.is_empty() {
+        for (raft_id, role) in [(identity.raft_id as i64, None), (99, Some("voter"))] {
+            let refused = tx.execute("INSERT INTO cluster_nodes(node_id,raft_id,raft_address,api_address,last_seen_at,removed_at,role) VALUES(?1,?2,?3,?4,0,NULL,?5)", rusqlite::params![identity.node_id,raft_id,local.raft_address,local.api_address,role]).expect_err("temporary restore guard must reject NULL and a foreign tuple");
+            assert!(refused
+                .to_string()
+                .contains("restore bootstrap identity mismatch"));
+        }
+    }
+    tx.execute("INSERT INTO cluster_nodes(node_id,raft_id,raft_address,api_address,last_seen_at,removed_at,role) VALUES(?1,?2,?3,?4,0,NULL,'voter')", rusqlite::params![identity.node_id,identity.raft_id as i64,local.raft_address,local.api_address])?;
+    for (name, original) in &originals {
+        tx.execute_batch(&format!("DROP TRIGGER {name}; {original};"))?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -5761,6 +5869,52 @@ mod tests {
         let report = restore_cluster_backup_archive(&artifact, &target_config, &[], None)
             .await
             .expect("restore real snapshot");
+        if sharing {
+            let connection = Connection::open(
+                target
+                    .join(HIQLITE_ACTIVE_DIRNAME)
+                    .join("state_machine/db")
+                    .join(HIQLITE_DATABASE_FILENAME),
+            )
+            .expect("offline restored projection");
+            let observation: (String, i64, i64) = connection
+                .query_row(
+                    "SELECT node_id,raft_id,last_seen_at FROM cluster_nodes",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("only restored observation identity");
+            assert_eq!(Some(observation.0.as_str()), report.node_id.as_deref());
+            assert_eq!(
+                (observation.1, observation.2),
+                (super::super::SINGLE_VOTER_RAFT_ID as i64, 0)
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM cluster_node_capabilities",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("no fabricated capabilities"),
+                0
+            );
+            assert!(connection.execute("INSERT INTO cluster_nodes(node_id,raft_id,raft_address,api_address,last_seen_at,removed_at,role) VALUES('unproved-node',99,'raft','api',0,NULL,'voter')", []).is_err(), "canonical join admission must still refuse arbitrary nodes");
+            for expected in super::super::membership::sharing_member_admission_guard_schema()
+                .into_iter()
+                .filter(|sql| sql.contains("_node_insert_guard "))
+            {
+                let name = expected.split_whitespace().nth(5).expect("canonical name");
+                let actual: String = connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE name=?1",
+                        [name],
+                        |row| row.get(0),
+                    )
+                    .expect("restored canonical guard");
+                assert_eq!(actual, expected.replace(" IF NOT EXISTS", ""));
+            }
+        }
         let restored = startup_observer::select_applied_singleton(&target_config)
             .await
             .expect("restored target starts");

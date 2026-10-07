@@ -1519,7 +1519,7 @@ impl SharingJoinCapabilities {
     }
 }
 
-fn sharing_installed_marker_predicate(capability: &str) -> String {
+pub(crate) fn sharing_installed_marker_predicate(capability: &str) -> String {
     match capability {
         SHARING_INGRESS_CUSTODY_CAPABILITY => crate::store::sharing_ingress_custody::schema_guard(),
         // The census table is boot ownership that every startup creates
