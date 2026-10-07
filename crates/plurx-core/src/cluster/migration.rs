@@ -2850,17 +2850,10 @@ async fn open_active_store_with_key(
         // Written here rather than beside the rename so a crash in between still
         // converges: any boot that successfully opens an active target re-asserts
         // it, and this is the only place that can be reached without one.
-        let first_activation_master = credential_key.is_some();
-        let mut credential_key = match credential_key {
-            Some(key) => key,
-            None => match open_active_credential_key(config, &store, &identity).await {
-                Ok(key) => key,
-                Err(error) => {
-                    drop(store);
-                    return Err(error);
-                }
-            },
-        };
+        // A restored first voter has a key file but no admitted SQL node yet.
+        // Keep the supplied activation master for comparison; authoritative
+        // census must wait for this exact startup's committed admission.
+        let activation_master = credential_key;
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
         let replication = status::ReplicationMonitor::replicated(
@@ -2984,17 +2977,15 @@ async fn open_active_store_with_key(
             .revalidate()
             .map_err(|error| StoreError::Database(error.to_string()))?;
         ensure_activated_source_record(&config.storage.data_dir, &marker)?;
-        if first_activation_master {
-            // The first admitted SQL node is established by the actual
-            // membership constructor. Census the replicated rows under that
-            // real identity before any purpose capability can be published.
-            let current = open_active_credential_key(config, &concrete_store, &identity).await?;
-            if current.sharing_purpose_master_fingerprint()
+        // The real membership constructor and clock observation establish
+        // the exact admitted SQL identity without publishing a purpose master.
+        // Both initial activation and reopen census only after that barrier.
+        let credential_key = open_active_credential_key(config, &concrete_store, &identity).await?;
+        if activation_master.is_some_and(|expected| {
+            expected.sharing_purpose_master_fingerprint()
                 != credential_key.sharing_purpose_master_fingerprint()
-            {
-                return Err(crate::sharing::invalid());
-            }
-            credential_key = current;
+        }) {
+            return Err(crate::sharing::invalid());
         }
         Ok(SelectedStore {
             store,
@@ -5679,6 +5670,25 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     async fn restore_archive_observation_fixture() {
+        restore_archive_observation_fixture_with_sharing(false).await;
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn restore_archive_with_retired_purpose_keys_admits_new_node_before_key_census() {
+        startup_observer::run_full_hiqlite_fixture(
+            "restore-sharing-census",
+            restore_archive_sharing_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn restore_archive_sharing_observation_fixture() {
+        restore_archive_observation_fixture_with_sharing(true).await;
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn restore_archive_observation_fixture_with_sharing(sharing: bool) {
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");
@@ -5687,9 +5697,20 @@ mod tests {
             SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME))
                 .expect("legacy source store"),
         );
-        let source = startup_observer::select_applied_singleton(&source_config)
+        let mut source = startup_observer::select_applied_singleton(&source_config)
             .await
             .expect("source voter");
+        if sharing {
+            source
+                .store
+                .put_setting("sharing_enabled", "1")
+                .await
+                .expect("actual enabled setting");
+            assert!(source
+                .prepare_source_schema_before_serving()
+                .await
+                .expect("actual Source and purpose activation"));
+        }
         let client = source.local_client().expect("source local client");
         let applied = client
             .trigger_db_snapshot()
@@ -5755,6 +5776,60 @@ mod tests {
         );
         assert!(status.nodes[0].is_voter);
         assert!(status.nodes[0].is_leader);
+        if sharing {
+            assert_eq!(
+                restored
+                    .store
+                    .get_setting("sharing_enabled")
+                    .await
+                    .expect("fenced setting")
+                    .as_deref(),
+                Some("false")
+            );
+            assert_eq!(
+                restored
+                    .store
+                    .verify_sharing_purpose_material(&restored.credential_key)
+                    .await
+                    .expect("strict retired-key census"),
+                crate::store::sharing_purpose_keys::PurposeKeyInstallation::NotReady
+            );
+            let connection = Connection::open(
+                target
+                    .join(HIQLITE_ACTIVE_DIRNAME)
+                    .join("state_machine/db")
+                    .join(HIQLITE_DATABASE_FILENAME),
+            )
+            .expect("actual reopened image");
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM sharing_identity", [], |row| row
+                        .get::<_, i64>(0))
+                    .expect("removed sharing identity"),
+                0
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM sharing_purpose_key_archive",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("retained purpose pair"),
+                2
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM sharing_purpose_census_intents",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("completed exact census"),
+                0
+            );
+            assert_eq!(connection.query_row("SELECT count(*) FROM cluster_nodes WHERE node_id=?1 AND removed_at IS NULL", [&restored.identity.node_id], |row| row.get::<_, i64>(0)).expect("actual newly admitted node"), 1);
+        }
         restored.shutdown().await.expect("restored voter shutdown");
     }
 
