@@ -1,6 +1,6 @@
 # Raspberry Pi implementation — extend the existing server and web player
 
-**Status:** implemented and reviewed; final validation and physical acceptance pending · **Written:**
+**Status:** implemented and reviewed; named regressions pass; promotion and physical acceptance pending · **Written:**
 2026-10-06 · **Executes:** Paul's request for server and HDMI playback on one
 Pi 5, using existing Plurx and as much real hardware acceleration as possible.
 

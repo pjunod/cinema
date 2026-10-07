@@ -1,12 +1,12 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** implementation and review complete; static-contract repairs pass; remaining validation pending · **Updated:** 2026-10-06
+**Status:** software implemented; named regressions pass; promotion policy and physical acceptance pending · **Updated:** 2026-10-06
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
 The existing daemon and web player remain the product.
 
-[PR #832](http://192.168.4.7:3000/noirr/plurx/pulls/832) batches all
+[PR #832](http://forge.lan:3000/noirr/plurx/pulls/832) batches all
 implementation commits. Its checks and PR description carry the live final
 validation receipt and merge result. Physical acceptance remains separate.
 
@@ -18,10 +18,10 @@ validation receipt and merge result. Physical acceptance remains separate.
 | Compiler | baseline passed | Rust 1.97.1; `cargo check --locked -p plurxd --all-targets`, exit 0 in 1m46s before Rust edits |
 | Implementation contract | implemented | Source audits of server decoder inventory and browser media predictions |
 | Server decoder integration | implemented; compiler passed | Sol 6.1; separate 8/10-bit graph proof, operational capabilities, shared HLS/VOD transfer |
-| Existing browser player | implemented; validation pending | Sol 6.1; delivered tuple and fenced nullable predictions; syntax/type checks passed |
-| Deployment | implemented; validation pending | Sol 6.1; `deploy/pi-player`, safe launcher ownership, bounded report, six regression cases written |
+| Existing browser player | implemented; tests passed | Sol 6.1; delivered tuple and fenced nullable predictions; web unit inventory, syntax and types pass |
+| Deployment | implemented; tests passed | Sol 6.1; `deploy/pi-player`, safe launcher ownership, bounded report; all six regressions pass |
 | Adversarial review | complete; both findings addressed | Reviewed `dfa775112`; Sol repaired P1 fallback and P2 transforms, coordinator inspected the changes |
-| Fast lane | targeted repairs passed | Run 4222 retained 289 passes; all three failed static-contract methods now pass; later stages not run |
+| Validation | targeted checks passed; CI promotion incomplete | 292 validation methods, 729 operations methods, web inventory and all 10 named Rust regressions have passing evidence; one optional operations test skipped |
 | Physical Pi 5 | unavailable | Host/user requested; no hardware, HDR or concurrent-playback claim |
 
 ## Standing decisions
@@ -42,18 +42,43 @@ validation receipt and merge result. Physical acceptance remains separate.
 
 ## Evidence ledger
 
-[Run 4222](http://192.168.4.7:3000/noirr/plurx/actions/runs/4222) tested
+[Run 4222](http://forge.lan:3000/noirr/plurx/actions/runs/4222) tested
 `35d90bc4db1feb061250ae918987446660271d7f`. History and regression-field checks
-passed. Validation unittest ran 292 methods: 289 passed, three failed. One
-assertion still expected FFmpeg arguments in the inventory instead of their
-shared mapping; two ownership ledger counts need to include the new fallback
-regression. Later test stages have not run. Preserve the passing evidence and
-repair only those failures. All three now pass in targeted invocations; playback
-code is unchanged by these assertion/ledger repairs. The main workflow bundles
-Python tests without the effort workflow's per-test receipts; its retry granularity
-needs reconciliation before another CI run. The PR carries the live validation
-and merge receipt.
-No physical-device acceptance has been recorded.
+passed. Validation unittest ran 292 methods: 289 passed, three failed. Commit
+`19764e7a5` repaired an assertion's old FFmpeg argument location and two ownership
+counts; targeted invocations passed all three failed methods. Playback code did
+not change. Successful siblings were retained.
+
+Subsequent checks used that production source, with documentation-only link
+scrubbing required by the operations contract:
+
+| Command / coverage | Result |
+|---|---|
+| `make operations-check` plus failed-method continuation | 729/730 methods passed across retained runs; one optional upstream Hiqlite comparison skipped without its external source fixture |
+| `make web-unit-check` plus unpassed-command continuation | Entire recipe passed; after a sandbox socket refusal, the existing `PLAYBACK_LAB_TEST_FILTER` retained 23 shaping passes and ran the remaining 95, followed by the unrun recipe suffix |
+| `cargo test --locked -p plurx-core --features hiqlite-store --lib transcode::decoder_inventory::tests::request_` | 3 passed |
+| `cargo test --locked -p plurx-core --features hiqlite-store --test decoder_selection request_` | 5 passed |
+| `cargo test --locked -p plurxd --bin plurxd -- browser_predictions_do_not_claim_decoder_identity request_decode_software_encode_has_one_frozen_software_startup_successor` | 2 passed |
+
+The operations continuation reran only 11 unsuccessful methods. Socket/process
+fixtures passed with the needed permissions. The Linux janitor timeout case
+needs GNU `timeout`, absent on the Mac; a source-only archive executed that one
+method on Linux in 2.054 seconds, passed, and its temporary extraction was
+removed. No repository credential was transferred. The infrastructure-name
+scrubber corrected two new status links and eight pre-existing links in three
+other documents. It changed no runtime configuration.
+
+**Promotion remains incomplete.** Main's fast lane bundles Python tests and
+repeats overlapping web tests; it lacks the effort lane's per-test pass receipts.
+The failed run was cancelled after its result to release an unused queued job.
+The PR is draft to avoid replaying successful tests. Paul's reconciliation of
+that gate with the requested once-only policy is pending. No full Rust unit
+suite or Windows/Apple/Android CI compilation is claimed by the targeted local
+evidence, and no green CI status has been manufactured. The PR description
+holds the live receipt and final merge disposition.
+
+All 20 named PR regressions have passed. No physical-device acceptance has been
+recorded; server/browser/HDMI behavior still needs the exact Pi runtime.
 
 The Pi FFmpeg source confirms its DRM SAND transfer uses planar `yuv420p`
 or `yuv420p10le`; treating every 10-bit DRM frame as P010 would be wrong.
@@ -67,13 +92,11 @@ The three implementation tasks were built by `gpt-6.1-sol` agents. The
 coordinator integrated their changes without changing the user's checkout.
 
 - Rust 1.97.1 daemon all-target compilation passed on the integrated source.
-- Core `decoder_selection` integration target compilation passed; no tests
-  executed. The bare-core compile emits existing feature-dependent dead-code
-  warnings; the full workspace Clippy hook with denied warnings passes.
+- Core decoder-selection compilation and the five request-selection regressions
+  passed. The full workspace Clippy hook with denied warnings passes.
 - JavaScript syntax and TypeScript ratchet checks pass; the existing type
   diagnostic count decreased from 515 to 513.
-- Python deployment syntax passes. Its six operation regressions are written
-  and deferred to the final validation window.
+- Python deployment syntax and all six operation regressions pass.
 - The static regression-field resolver exposed its missing support for the
   repository's existing `asyncTest` harness. The authoritative marker parser
   now recognizes that exact declaration; a negative-case regression is added.
@@ -99,7 +122,6 @@ not a hardware-support claim. No second review or early unit run is planned.
 Repair regressions are
 `request_decode_requires_proven_identity_transform_even_for_continuations`
 and `request_decode_software_encode_has_one_frozen_software_startup_successor`.
-They are written, compiled with the candidate and scheduled with the final
-fast lane; no unit execution preceded review. The existing actor still owns
+Both now pass; no unit execution preceded review. The existing actor still owns
 one in-process retry; its separately budgeted classified-health wrapper does
 not introduce another attempt or a new watchdog.
