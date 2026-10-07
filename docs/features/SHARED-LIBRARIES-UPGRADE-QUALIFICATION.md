@@ -42,7 +42,7 @@ Cargo command.
 Use a new disposable source directory and a dedicated warm target directory:
 
 ```bash
-export PATH=/Users/pjunod/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH
+export PATH=~/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH
 python3 scripts/qualify-sharing-old-store.py \
   --source-dir /private/tmp/plurx-sharing-old-store-qualification \
   --target-dir /private/tmp/plurx-sharing-upgrade-target

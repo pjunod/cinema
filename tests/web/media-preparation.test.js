@@ -88,15 +88,16 @@ test("a navigation discards the old preparation response",async()=>{
 // warming must remain independent of the open player and its track choices.
 function nextEpisodeHarness(){
   const {ctx}=harness();
+  vm.runInContext(fs.readFileSync("crates/plurxd/src/web/core/file-context.js","utf8"),ctx);
   const reads=[],settings=new Map();
   const season={id:"10",kind:"season"},show={id:"20",kind:"show"};
   const episode=id=>({item:{id,kind:"episode",title:`Episode ${id}`,library_id:"1"},
-    files:[{id:`f${id}`,available:true,duration_ms:100000}],ancestors:[show,season]});
+    files:[{id:String(100+Number(id)),available:true,duration_ms:100000}],ancestors:[show,season]});
   const data={"/items/1":episode("1"),"/items/2":episode("2"),
     "/items/10":{children:[{id:"1",kind:"episode"},{id:"2",kind:"episode"}]}};
   Object.assign(ctx,{AbortController,setTimeout,clearTimeout,now:0,position:75,
     performance:{now:()=>ctx.now},localStorage:{getItem:k=>settings.get(k),setItem:(k,v)=>settings.set(k,v)},
-    PLAYER:{fileId:"f1",meta:{kind:"episode"}},ITEM_FOR_FILE:{f1:"1"},WATCH:null,
+    PLAYER:{fileId:"101",meta:{kind:"episode"}},ITEM_FOR_FILE:{"101":"1"},WATCH:null,
     playerMeta:it=>({kind:it.kind}),pbTotalSec:()=>100,pbPosSec:()=>ctx.position,
     playbackOwnsAttachedMedia:()=>true,libsCached:async()=>[],
     syncPlayerNextTrack:()=>{},toast:()=>{},api:async(path)=>{reads.push(path);assert.ok(data[path],path);return data[path];},
@@ -109,14 +110,14 @@ function nextEpisodeHarness(){
 }
 test("next episode prewarm is single flight and publishes no playback state",async()=>{
   const {ctx,reads,warm}=nextEpisodeHarness();
-  vm.runInContext('PREPLAY={f1:{audio:3}}',ctx);
+  vm.runInContext('PREPLAY={101:{audio:3}}',ctx);
   warm();const state=ctx.PLAYER.nextEpisodePreparation;
   for(let i=0;i<10;i++)warm();
   await state.promise;
   assert.deepEqual(reads,["/items/1","/items/10","/items/2"]);
-  assert.equal(vm.runInContext("PREPLAY.f1.audio",ctx),3);
-  assert.equal(ctx.ITEM_FOR_FILE.f2,undefined);
-  assert.equal(ctx.PLAYER.fileId,"f1");
+  assert.equal(vm.runInContext("PREPLAY['101'].audio",ctx),3);
+  assert.equal(ctx.ITEM_FOR_FILE["102"],undefined);
+  assert.equal(ctx.PLAYER.fileId,"101");
   assert.equal(await ctx.playNextEpisode(),true);
   assert.equal(ctx.location.hash,"#/item/2");
   assert.equal(reads.length,3,"transition repeated successor metadata reads");
@@ -124,7 +125,7 @@ test("next episode prewarm is single flight and publishes no playback state",asy
   assert.equal(prepared.page.id,"2");
   await ctx.loadItem("2",()=>true,prepared.page);
   assert.equal(reads.length,3,"loadItem repeated a prepared item read");
-  assert.equal(ctx.ITEM_FOR_FILE.f2,"2");
+  assert.equal(ctx.ITEM_FOR_FILE["102"],"2");
   assert.equal(vm.runInContext("Object.keys(PREPLAY).length",ctx),0);
   assert.equal(ctx.takeAutoplayNextPreparation("2"),null);
 });

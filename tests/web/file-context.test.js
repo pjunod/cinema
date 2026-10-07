@@ -76,7 +76,7 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     ["player/audio-sync.js",["subUrl"]],
     ["detail/watch-browser.js",["watchChapterThumbUrl"]],
     ["player/stats.js",["reportProgress"]],
-    ["player/autoplay-next.js",["playNextEpisode","playNextSharedEpisode","playNextAudiobookPart","playbackContinuation"]],
+    ["player/autoplay-next.js",["autoNextOn","playNextEpisode","playNextSharedEpisode","playNextAudiobookPart","playbackContinuation"]],
   ].flatMap(([file,names])=>names.map(name=>shippedFunction(file,name))).join("\n");
   vm.runInContext(source+`\nlet PREPLAY={},PLAYER=null,STREAM_SEQ=0;
     const PLAYBACK_ID="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",SERVER=null;
@@ -140,12 +140,14 @@ test("shared progress and continuation cannot reach local item routes before adm
   const next=h.playContext("8",{fileContext:h.local("7")});
   assert.equal(next.file_base,"/api/v1/files/8");
 });
-test("file route census allows only explicit local administration and reader exceptions",()=>{
+test("file route census allows only explicit local administration and reader exceptions",async()=>{
   const exceptions={
     "pages/reader.js":["`/files/${routeFileId}/publication`"],
     "pages/analysis.js":["`/files/${row.file_id}/analysis`"],
     "detail/track-facts.js":["`/files/${fileId}/analysis`","`/files/${id}/preparation`"],
     "detail/preplay-selection.js":["`/files/${fileId}/subtitles/search?language=${encodeURIComponent(language)}`","`/files/${fileId}/subtitles/download`","`/api/v1/files/${exactWireId(file)}/content`","`/files/${id}/dv-conversion`"],
+    // Continuous enrollment is Local-only; the real Start guard is exercised below.
+    "player/continuous-quality.js":["`/files/${fileId}/hls/continuous-candidates`","`/files/${fileId}/hls/continuous-sessions`"],
   };
   const seen=new Set(),unexpected=[];
   for(const file of shellSource().rows.body){
@@ -169,6 +171,11 @@ test("file route census allows only explicit local administration and reader exc
   assert.deepEqual(unexpected,[],"playback file paths must use the typed context helper");
   for(const [file,entries]of Object.entries(exceptions))for(const entry of entries)
     assert.ok(seen.has(file+"::"+entry),"stale exception: "+file+"::"+entry);
+  const h=callerHarness(),shared=h.shared(reference,detail());
+  h.stub("openContinuousQualitySession",()=>{throw new Error("Shared cannot enroll a Local continuous family");});
+  await h.start(shared,{start:0,transport:"hlsjs"});
+  assert.equal(h.requests.length,1);
+  assert.equal(h.requests[0].url,detail().file_base.slice(7)+"/hls/sessions");
 });
 
 test("logout retires shared contexts and account-scoped selection keys",()=>{

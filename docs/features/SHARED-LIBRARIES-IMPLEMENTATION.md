@@ -1292,7 +1292,7 @@ milestones serially against the effort's current head.
 | Step | Scope and boundary | Required acceptance |
 |---|---|---|
 | S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
-| S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
+| S1 | merged into effort | [PR #746](http://forge.lan:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
 | S2 | Serve/loopback deployment, TLS provisioning/renewal, pinned egress, peer/admin routes, Developer switch | Two NATed servers over Tailscale; no public/LAN listener; TLS mismatch, VPN loss, wrong port/route, redirect/proxy and broad-grant cases |
 | S3 | Playback principal migration in existing family and cluster schema floor | Owner-key PK/upsert/count parity; local/shared replay races; user/grant deletion; old-writer migration receipt; prepared successor, cluster ownership and ordinary-router refusal |
 | S4 | Shared catalogue, live keyset paging, batch metadata, scoped art, assignments and local history | Huge IDs, same IDs on two sources, paging completes during continuous metadata writes, moved sort keys, expiry/deletion, denied cache reads, progress ordering |
@@ -1550,8 +1550,8 @@ implied by the build handoff.
 | Milestone | State | PR / commit | Evidence / outstanding work |
 |---|---|---|---|
 | S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
-| S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
-| S2 | implementation in progress; topology qualification open | [draft PR #759](http://192.168.4.7:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
+| S1 | merged into effort | [PR #746](http://forge.lan:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
+| S2 | implementation in progress; topology qualification open | [draft PR #759](http://forge.lan:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
 | S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Canonical Local writers, complete principal reads and seven-table candidate rebuild implemented; ownership and actual-voter lifecycle regressions passed. Caller refusal and retained-read census are qualified; Shared grant/scope admission, migration installation and coordinated upgrade qualification remain open; §16.4 records the boundaries. |
 | S4 | source catalogue and private history candidates implemented; qualification pending | `codex/sharing-s4-catalogue` | Consistent live keysets and batch metadata, candidate order maintenance and durable item identities, peer metadata routes and receiver-only ordered history. Viewer/cache/artwork/details, activation floor and qualification remain open. |
 | S5 | bounded resource grammar candidate built; relay and admission open | `codex/sharing-s3-principals` (unpublished) | Current-engine relative HLS grammar and generator/escape regressions passed; no Shared producer, relay or signed file locator is enabled. |
@@ -1652,7 +1652,7 @@ No production process, firewall or Tailscale setting was used. Regression tests
 also prove a consumed-invitation replay cannot widen narrowed scope, and an
 unchanged scope does not advance the catalogue generation.
 
-**Task:** [S1 PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746) targets
+**Task:** [S1 PR #746](http://forge.lan:3000/noirr/plurx/pulls/746) targets
 `effort/shared-libraries`. Manual effort run 3884 refused its first catalog
 mapping: the two new store adapters must also select `cluster.auth` in the
 CI scope resolver. That mapping was corrected, and all 253 validation tests
@@ -1662,7 +1662,7 @@ Run 3887 passed policy, web, Apple and Android checks, but its Rust job
 rejected the isolated Hiqlite spike lockfile before compilation. Commit
 `aaafc1a0f5af031c3adbfe6760ad4edcff7cb082` synchronizes that lockfile;
 `make spike-lock-check` and the normal hook passed locally. Exact-candidate
-[run 3890](http://192.168.4.7:3000/noirr/plurx/actions/runs/3890) has passed
+[run 3890](http://forge.lan:3000/noirr/plurx/actions/runs/3890) has passed
 scope, policy, Rust, web, Apple and Android. Windows attempt 1 reached its
 30-minute runner deadline without a compiler error. The individual retry on
 the same commit passed in 20 minutes 17 seconds; the final Effort development
@@ -5066,7 +5066,7 @@ component tests.
 3. **The fixture's own expectations.** The public router carries the Plex
    colon routes, and segments use the Local `video/iso.segment` MIME.
 
-Evidence on nuc4 (Ubuntu 26.04, rustc 1.97.1) at `49eb0352c`:
+Evidence on lab4 (Ubuntu 26.04, rustc 1.97.1) at `49eb0352c`:
 
 - `sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end`
   passed with one executed test, in a disposable Docker CGNAT namespace
@@ -5210,7 +5210,7 @@ The Sharing settings "This node" card renders it. The new metric is
 stranded route is logged once as a warning, with no credential material. The
 design's pause setting is deliberately absent.
 
-Evidence on nuc4 (rustc 1.97.1):
+Evidence on lab4 (rustc 1.97.1):
 
 - Core `--lib sharing_receiver_orphan`/`sharing_receiver_dispatch`: six tests
   over memory/pooled SQLite × retained/rebuilt principal layouts (grace and
@@ -5303,7 +5303,7 @@ parallel chapter thumbnails.
 to replace) with `422 sharing_resource_unsupported`. It does so for every
 method, HEAD included, before any import, locator, account or Local lookup.
 
-Evidence on nuc4: see the commit message for the exact test run. The ignored
+Evidence on lab4: see the commit message for the exact test run. The ignored
 CGNAT fixture (`actual_pinned_playback`) now also fetches a WebVTT through
 B in the native modes, a missing chapter thumbnail, and the `stream.mp4`
 closure; it was not run here.
@@ -5399,7 +5399,7 @@ absence; End still waits for the actor's body ledger. A parked read job keeps
 its guard after the response is dropped. A cancelled B waiter loses only the
 answer; the open task keeps the sent request. Status never moves activity.
 
-Evidence on nuc4 (rustc 1.97.1):
+Evidence on lab4 (rustc 1.97.1):
 
 - New focused tests, 15 passed, 0 failed:
   - Source: actual decision required, grant/Source slots,
@@ -5473,11 +5473,11 @@ same rule progress follows. Other route changes on a direct play (audio,
 quality, decode rescue) go to Copy or encoded HLS. An HLS-bound context still
 has no generic replacement. (Superseded by the P0 reopen below.)
 
-Evidence on nuc4 (node 22.22.1): `tests/web/file-context.test.js` passes 17
+Evidence on lab4 (node 22.22.1): `tests/web/file-context.test.js` passes 17
 of 17 and `tests/web/shared-decision.test.js` passes 16 of 16, including the
 new direct cases. `make web-check` passes, and `scripts/web-types` is
 unchanged at 518 diagnostics. Two browser checks in that lane skip because
-Playwright is not installed on nuc4. None of this has been checked in a
+Playwright is not installed on lab4. None of this has been checked in a
 physical browser against a real pinned Source/B pair.
 
 ### Shared directed change reopen — P0 (2026-10-04)
@@ -5555,7 +5555,7 @@ retirement is the existing owner and still needs the confirmed Source End.
 The `preparation: none` answer is a statement about the Source owner, not
 evidence of any physical state.
 
-Evidence on nuc4 (rustc 1.97.1, node 22.22.1):
+Evidence on lab4 (rustc 1.97.1, node 22.22.1):
 
 - New focused tests:
   - Source: `source_control_changed_selection_declines_preparation`,
@@ -5709,7 +5709,7 @@ type ExoPlayer cannot read as a file (WMA, octet-stream) is released and the
 same decision is played as Copy HLS. A directed change from direct play goes
 to Copy or encoded HLS.
 
-Evidence on nuc3 (pinned `plurx-android-build` image, JDK 25):
+Evidence on lab3 (pinned `plurx-android-build` image, JDK 25):
 
 - New suites: `SharedPlaybackSessionTest` (4) and `SharedPlaybackOwnerTest`
   (4). Together with the existing Shared, context and decision suites: 51
@@ -5832,7 +5832,7 @@ between commits recovers the same incarnation" does not apply. Supersession
 and withdrawal are decided from B's registry, never from row absence or lease
 expiry. Retirement still needs the confirmed Source End.
 
-Evidence on nuc4 (rustc 1.97.1):
+Evidence on lab4 (rustc 1.97.1):
 
 - New B tests, all passing: fourteen in `shared_receiver_successor_tests.rs`
   and `sharing_receiver_control_never_forwards_an_acknowledgement`.
@@ -5977,7 +5977,7 @@ or the ask a successor was staged for. An ask equal to it never stages.
 redispatched. It is cleared when the successor is withdrawn for a left ask or
 aborted, so a renewed change stages again.
 
-Evidence on nuc4 (rustc 1.97.1), integrated tree:
+Evidence on lab4 (rustc 1.97.1), integrated tree:
 
 - New regressions, each failing on the old code and passing now:
   - `sharing_receiver_commit_answer_writer_is_released_before_the_predecessor_retires`;
@@ -6145,7 +6145,7 @@ fixed: the Shared file-suffix grammar accepted indexes above 4095 and leading
 zeros (`PlaybackFileContext.sharedFileSuffix`), and a Shared Start accepted a
 duration above 2^53-1 ms.
 
-Evidence on nuc3 (pinned `plurx-android-build` image):
+Evidence on lab3 (pinned `plurx-android-build` image):
 
 - New suites: `SharedProtocolCasesTest` (8), `SharedCatalogueActionsTest` (3)
   and `SharedPreparedHandoffTest` (5). The handoff suite covers a commit
@@ -6224,7 +6224,7 @@ staged successor is `409 stale_control`, not `422 shared_control_unsupported`
 (P0's answer). The row now says so; every client's outcome for it is still
 `stop`.
 
-Evidence on nuc4 (rustc 1.97.1, node 22.22.1):
+Evidence on lab4 (rustc 1.97.1, node 22.22.1):
 
 - New Rust tests, all passing: `sharing_protocol_fixture_receiver_status_envelope`,
   `sharing_protocol_fixture_receiver_refusals`,

@@ -7,7 +7,7 @@ first.
 ## Live TV station logos on Apple TV, iOS and Android
 
 **Branch `fix/live-tv-station-logos-native`, issue
-[#815](http://192.168.4.7:3000/noirr/plurx/issues/815).** Paul reported
+[#815](http://forge.lan:3000/noirr/plurx/issues/815).** Paul reported
 2026-10-04 that the Apple TV Live TV guide has no station logos while the web
 guide does. Cause: #755 put the rule that picks a channel's logo in the web
 page (`pages/live-tv.js`) instead of the shared guide reducer and
@@ -29,7 +29,7 @@ wiring pinned by source tests). Not yet on hardware.
 
 ## A leader restart no longer ends progressive or Live TV playback
 
-**[PR #807](http://192.168.4.7:3000/noirr/plurx/pulls/807), branch `fix/progressive-fence-grace`; not deployed.**
+**[PR #807](http://forge.lan:3000/noirr/plurx/pulls/807), branch `fix/progressive-fence-grace`; not deployed.**
 Paul's standing rule is that a quorum leader restart must not interrupt
 playback. #798 gave the rolling registry a 5 s serving-fence grace; two more
 owners of running playback still treated any fence generation bump as final,
@@ -72,7 +72,7 @@ commits are not deployed.**
   accepted on 2026-10-04.
 ## Main-merge defects D1–D7 and the red gates: one batched PR
 
-**[PR #810](http://192.168.4.7:3000/noirr/plurx/pulls/810), branch `claude/main-merge-defects`; Android 146 source; not yet deployed or merged.**
+**[PR #810](http://forge.lan:3000/noirr/plurx/pulls/810), branch `claude/main-merge-defects`; Android 146 source; not yet deployed or merged.**
 Builds `claude/main-merge-defects-rca-and-fix-2026-10-04.md` (rev 3). D1: the
 speculative and content-aware producers resolve audio with the canonical
 stereo-AAC claim, so stereo-route clients hit pre-transcodes again (policy
