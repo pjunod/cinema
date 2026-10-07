@@ -7807,3 +7807,67 @@ player library. Its checksum-verified fragments are prebuffered and loading
 stopped before playback; it removes the live encoder and application controls
 while retaining HLS parsing and fragment timestamps. Neither the MP4 nor MSE
 reference discharges the actual streaming or physical-output acceptance rows.
+
+The saved-segment HLS reference passes both browsers with complete sampling:
+Firefox 4,802 samples / 91.90ms upper hold; Chrome 4,803 / 95.92ms. Both have
+zero unknown, backward or skipped counters. Preserve
+`minimal-hls-198b37330-half-speed-{firefox,chrome}1*`. This narrows the
+remaining failure to the actual application runtime, live producer load, or
+their interaction; it does not identify a production fix.
+
+A diagnostic of the actual Plurx player waits for 16 seconds of buffer and
+stops continued HLS loading before the unchanged half-speed optical window.
+Its first attempt omits the lab's existing `PLURX_BOUND_FFPROBE` binding and
+is refused before creating any session. The corrected launcher explicitly
+uses the verified self-contained parser, with unchanged backend source.
+Preserve `firefox-198b37330-half-speed-optical-buffered-plurx{1,2}*`. The first
+daemon retired; the repeat's exact-daemon guard attached before playback.
+
+The corrected actual-player prebuffer diagnostic still fails: 137.51ms lower
+/ 146.36ms upper hold, two capture gaps, zero backward/skipped counters.
+The recorded runway was 16.83 seconds before stopping further HLS loads.
+Its browser trace advances exactly 0.5x without reported hitches/stalls;
+independent pixels retain the failure. The exact daemon retired.
+
+A bounded Chrome renderer sampling diagnostic also fails with complete
+optical sampling: 104.17ms lower / 112.53ms upper hold, no unknown, backward
+or skipped counters. Its longest uninterrupted non-idle sampled span is
+99.32ms and includes verification digests, append handling and garbage
+collection. Sampling includes scheduling effects and does not establish
+causation. Preserve `chrome-198b37330-half-speed-optical-cpu-profile1*`; its
+exact daemon retired. A lab-only worker experiment keeps identical SHA-256
+verification while moving digest work off the page thread. No production
+code or acceptance threshold changes before evaluating that experiment.
+
+Digest-only offload fails (150.19ms lower / 158.50ms upper, one capture gap).
+Moving both sample-fingerprint assembly and digest work off the page thread
+passes the Chrome experiment: complete 4,557-sample window, 95.92ms upper
+hold, accurate 0.498x clock, zero hitches/stalls/backward/skipped counters.
+Firefox improves to complete sampling and 91.68ms lower / 100.036ms upper
+hold, but remains a strict failure; do not round it into a pass. Preserve
+`{chrome,firefox}-198b37330-half-speed-optical-facts-worker1*`. All experiment
+daemons retired. The producer-suspension attempt finds no encoder matching
+its full identity/path filter and stops before measurement, suspending none.
+No producer-free playback claim is made.
+
+### 10.258 Attachment-owned verification candidate (2026-10-07)
+
+The production candidate gives each continuous MediaSource attachment one
+lazy verification worker. Artifact and elementary-sample fingerprints share
+one loader snapshot; SourceBuffer verification transfers its already-owned
+snapshot, preserving actual appended bytes and retained init configuration.
+Parsing and all exact ledger comparisons remain in place. Eight outstanding
+jobs / 64 MiB and a 14-second deadline bound work; detach rejects pending
+work, terminates the worker and revokes its object URL. A platform without
+blob workers retains the same verification with cooperative assembly/hash
+work and attachment cancellation. No feature switch or readiness gate is
+added.
+
+Worker provenance/container-rewrite, ownership transfer, bounded cancellation
+and fallback regressions are authored but deliberately unrun. The existing
+adapter test loads the media dependency it now initializes. Syntax checks
+pass. Normal hook, committed-source build and actual browser qualification
+are next; experimental injected-page results are not evidence for the new
+production candidate. Phone build-216 UI-runner compilation/signing passed,
+without executing units or a device case; the phone currently reports a
+connected local-network tunnel, which does not prove it is unlocked.

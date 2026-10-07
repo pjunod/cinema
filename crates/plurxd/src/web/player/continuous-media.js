@@ -153,11 +153,13 @@ function continuousMediaInspector(){
   }
   return inspect;
 }
-async function continuousMediaDigest(bytes){
-  const hash=typeof crypto!=='undefined'&&crypto.subtle?await crypto.subtle.digest('SHA-256',bytes):await continuousSoftwareSHA256(bytes);
+async function continuousMediaDigest(bytes,signal=null){
+  if(signal?.aborted)throw new Error('Continuous media verification ended');
+  const hash=typeof crypto!=='undefined'&&crypto.subtle?await crypto.subtle.digest('SHA-256',bytes):await continuousSoftwareSHA256(bytes,signal);
+  if(signal?.aborted)throw new Error('Continuous media verification ended');
   return Array.from(new Uint8Array(hash),byte=>byte.toString(16).padStart(2,'0')).join('');
 }
-async function continuousSampleDigest(inspection,fragment){
+async function continuousSampleDigest(inspection,fragment,signal=null){
   // Hash lengths as well as payloads, so a different sample partition cannot
   // inherit a match even if its concatenated elementary bytes are identical.
   const length=fragment.samples.reduce((sum,row)=>sum+16+row.size,0);
@@ -166,11 +168,20 @@ async function continuousSampleDigest(inspection,fragment){
   for(const sample of fragment.samples){
     view.setUint32(cursor,sample.size);view.setUint32(cursor+4,sample.duration);
     view.setBigUint64(cursor+8,BigInt(sample.pts));cursor+=16;
-    payload.set(inspection.bytes.subarray(sample.offset,sample.offset+sample.size),cursor);cursor+=sample.size;
+    if(signal){
+      for(let offset=0;offset<sample.size;offset+=131072){
+        if(signal.aborted)throw new Error('Continuous media verification ended');
+        const length=Math.min(131072,sample.size-offset);
+        payload.set(inspection.bytes.subarray(sample.offset+offset,sample.offset+offset+length),cursor+offset);
+        await new Promise(resolve=>setTimeout(resolve,0));
+      }
+    }else payload.set(inspection.bytes.subarray(sample.offset,sample.offset+sample.size),cursor);
+    cursor+=sample.size;
   }
-  return continuousMediaDigest(payload);
+  return continuousMediaDigest(payload,signal);
 }
-async function continuousSampleFacts(inspection){
+async function continuousSampleFacts(inspection,signal=null){
+  if(signal?.aborted)throw new Error('Continuous media verification ended');
   if(!inspection.fragments.length)throw new Error('Continuous media has no samples');
   const track=inspection.fragments[0].track,samples=[];
   for(const fragment of inspection.fragments){
@@ -183,7 +194,7 @@ async function continuousSampleFacts(inspection){
     if(sample.pts!==through)throw new Error('Continuous media sample timeline gap or overlap');
     through+=sample.duration;
   }
-  const [fingerprint,configuration_digest]=await Promise.all([continuousSampleDigest(inspection,{samples}),continuousMediaDigest(track.configuration)]);
+  const [fingerprint,configuration_digest]=await Promise.all([continuousSampleDigest(inspection,{samples},signal),continuousMediaDigest(track.configuration,signal)]);
   return {type:track.type,timescale:track.timescale,from_tick:presentation[0].pts,
     through_tick:through,width:track.width,height:track.height,channels:track.channels,
     sample_count:samples.length,fingerprint,configuration_digest};
@@ -191,7 +202,7 @@ async function continuousSampleFacts(inspection){
 
 // LAN HTTP playback has getRandomValues but may lack secure-context SubtleCrypto.
 // Keep payload verification available there without weakening its digest.
-async function continuousSoftwareSHA256(input){
+async function continuousSoftwareSHA256(input,signal=null){
   const bytes=input instanceof Uint8Array?input:new Uint8Array(input);
   if(bytes.length>17*1024*1024)throw new Error('Continuous SHA payload bound');
   const constants=new Uint32Array([
@@ -221,8 +232,111 @@ async function continuousSoftwareSHA256(input){
       h=g;g=f;f=e;e=(d+first)>>>0;d=c;c=b;b=a;a=(first+second)>>>0;
     }
     for(const [i,value] of [a,b,c,d,e,f,g,h].entries())state[i]=(state[i]+value)>>>0;
-    if(offset>0&&offset%(1024*1024)===0)await new Promise(resolve=>setTimeout(resolve,0));
+    if(signal?.aborted)throw new Error('Continuous media verification ended');
+    if(offset>0&&offset%(signal?131072:1024*1024)===0)await new Promise(resolve=>setTimeout(resolve,0));
   }
   const digest=new Uint8Array(32),output=new DataView(digest.buffer);for(let i=0;i<8;i++)output.setUint32(i*4,state[i]);
   return digest.buffer;
+}
+
+// One verifier belongs to one MediaSource attachment. Raw payloads stay on
+// that attachment; only bounded copies cross its worker port.
+function continuousMediaVerifier(){
+  const pending=new Map(),cancellation=new AbortController();
+  let worker=null,workerUrl=null,workerAttempted=false,closed=false,nextId=0,charged=0;
+  const release=id=>{
+    const job=pending.get(id);if(!job)return null;
+    pending.delete(id);charged-=job.bytes;clearTimeout(job.timer);return job;
+  };
+  function close(error=new Error('Continuous media verification ended')){
+    if(closed)return;closed=true;cancellation.abort();
+    if(worker){worker.terminate();worker=null;}
+    if(workerUrl){URL.revokeObjectURL(workerUrl);workerUrl=null;}
+    for(const id of Array.from(pending.keys()))release(id).reject(error);
+  }
+  const digestValid=value=>typeof value==='string'&&/^[0-9a-f]{64}$/.test(value);
+  function factsValid(value){
+    return value&&['vide','soun'].includes(value.type)&&digestValid(value.fingerprint)
+      &&digestValid(value.configuration_digest)&&Number.isSafeInteger(value.sample_count)
+      &&value.sample_count>0&&value.sample_count<=65536&&Number.isSafeInteger(value.timescale)
+      &&value.timescale>0&&Number.isSafeInteger(value.from_tick)&&value.from_tick>=0
+      &&Number.isSafeInteger(value.through_tick)&&value.through_tick>value.from_tick;
+  }
+  function settle(id,result,error){
+    const job=release(id);if(!job)return;
+    if(error){job.reject(error);return;}
+    const valid=job.kind==='digest'?digestValid(result):job.kind==='facts'?factsValid(result):
+      result&&factsValid(result.facts)&&digestValid(result.artifact);
+    if(!valid)job.reject(new Error('Continuous verification result shape'));else job.resolve(result);
+  }
+  function startWorker(){
+    if(workerAttempted)return;workerAttempted=true;
+    if(typeof Worker!=='function'||typeof Blob!=='function'||typeof URL.createObjectURL!=='function')return;
+    try{
+      const source=[continuousSoftwareSHA256,continuousMediaDigest,continuousSampleDigest,continuousSampleFacts]
+        .map(fn=>'const '+fn.name+'='+fn.toString()+';').join('\n')+`
+        onmessage=async event=>{
+          const {id,kind,bytes,inspection}=event.data;
+          try{
+            let result;
+            if(kind==='digest'){
+              if(bytes.byteLength>17*1024*1024)throw Error('Continuous digest payload bound');
+              result=await continuousMediaDigest(bytes);
+            }else{
+              if(inspection.bytes.byteLength>16*1024*1024)throw Error('Continuous inspection payload bound');
+              result=kind==='facts'?await continuousSampleFacts(inspection):
+                await Promise.all([continuousSampleFacts(inspection),continuousMediaDigest(inspection.bytes)])
+                  .then(([facts,artifact])=>({facts,artifact}));
+            }
+            postMessage({id,result});
+          }catch(error){postMessage({id,error:String(error.message||'Continuous verification refused').slice(0,256)});}
+        };`;
+      workerUrl=URL.createObjectURL(new Blob([source],{type:'application/javascript'}));
+      worker=new Worker(workerUrl);
+      worker.onmessage=event=>{
+        const data=event.data;if(!data||!Number.isSafeInteger(data.id))return;
+        settle(data.id,data.result,data.error?new Error(data.error):null);
+      };
+      worker.onerror=()=>close(new Error('Continuous verification worker failed'));
+      worker.onmessageerror=()=>close(new Error('Continuous verification worker message failed'));
+    }catch(error){
+      if(worker){worker.terminate();worker=null;}
+      if(workerUrl){URL.revokeObjectURL(workerUrl);workerUrl=null;}
+      // Platforms without blob workers retain identical verification, with
+      // cooperative assembly/hash work and attachment cancellation below.
+    }
+  }
+  function dispatch(kind,input,owned=false){
+    if(closed)return Promise.reject(new Error('Continuous media verification ended'));
+    const bytes=kind==='digest'?(input instanceof Uint8Array?input:new Uint8Array(input)):input.bytes;
+    const limit=(kind==='digest'?17:16)*1024*1024;
+    if(bytes.byteLength>limit)return Promise.reject(new Error('Continuous verification payload bound'));
+    if(pending.size>=8||charged+bytes.byteLength>64*1024*1024)
+      return Promise.reject(new Error('Continuous verification capacity'));
+    startWorker();
+    if(nextId===Number.MAX_SAFE_INTEGER){if(pending.size)return Promise.reject(new Error('Continuous verification identity bound'));nextId=0;}
+    const id=++nextId;
+    return new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>close(new Error('Continuous verification deadline')),14000);
+      pending.set(id,{kind,bytes:bytes.byteLength,timer,resolve,reject});charged+=bytes.byteLength;
+      if(!worker){
+        const signal=cancellation.signal;
+        const result=kind==='digest'?continuousMediaDigest(input,signal):kind==='facts'?
+          continuousSampleFacts(input,signal):Promise.all([
+            continuousSampleFacts(input,signal),continuousMediaDigest(input.bytes,signal)
+          ]).then(([facts,artifact])=>({facts,artifact}));
+        Promise.resolve(result).then(value=>settle(id,value),error=>settle(id,null,error));return;
+      }
+      try{
+        // appendBuffer's inspector owns its snapshot, so that snapshot can
+        // transfer directly. Loader response bytes must stay intact for HLS.
+        const copy=owned&&bytes.byteOffset===0&&bytes.byteLength===bytes.buffer.byteLength
+          &&bytes.buffer instanceof ArrayBuffer?bytes:bytes.slice();
+        const message=kind==='digest'?{id,kind,bytes:copy}:{id,kind,inspection:{...input,bytes:copy}};
+        worker.postMessage(message,[copy.buffer]);
+      }catch(error){settle(id,null,error);}
+    });
+  }
+  return {digest:bytes=>dispatch('digest',bytes),facts:(inspection,owned=false)=>dispatch('facts',inspection,owned),
+    verify:inspection=>dispatch('verify',inspection),close};
 }
