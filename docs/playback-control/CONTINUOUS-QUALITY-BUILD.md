@@ -7384,3 +7384,54 @@ out of root space. Exact cache identifiers reclaimed 837 MB without pruning
 other workloads. Further optical tooling uses extracted packages in the
 owned temporary lab instead of growing the host's image cache. Physical-device
 availability remains unresolved; no native pass or merge readiness is claimed.
+
+### 10.244 Optical completeness and early-pause failure (2026-10-07)
+
+Portable Firefox 153.4.0esr and Xvfb now run from extracted packages in the
+owned temporary lab. A private read-only mount supplies the keyboard compiler;
+no host packages or physical display are changed. The short two-switch run
+on `9023815cb` passed browser timing (85.52ms maximum callback gap, no
+hitches/stalls), but its independent optical window **failed**: 13,280 valid
+samples, zero capture holes or unknown counters, one skipped counter and a
+104.21–113.94ms held picture at film 14.583s. Presented switches were at film
+4s and 46s; this hold was away from both boundaries. One browser dropped frame
+also remains recorded. Receipt: `firefox-9023815cb-portable-optical-focus1*`.
+
+A single steady baseline on the same source/display **passed**: 10,564 samples,
+zero unknown/backward/skipped counters and capture holes, maximum hold bound
+70.83ms. Its window begins after the fixed 1000ms capture warmup; it does not
+cover an entire campaign or physical output. Receipt:
+`firefox-9023815cb-portable-optical-baseline1*`. Neither result erases the
+other, and no threshold is relaxed.
+
+A subsequent lifecycle probe found an actual failure: an eight-second pause
+immediately after the first presented frame reloads the initial manifest,
+then supply-stalls and reopens its session. Seek and five distributed seeks
+landed with no stalls/hitches and the latter retained its session/player,
+but the temporary helper assumed a nonexistent snapshot generation field
+and marked their enrollment checks failed. Those original receipts remain
+failed; family identity is present in their full snapshots. Only the failed
+pause is being instrumented, using the corrected schema.
+
+Main advanced to `e512d131b` with shared Source activation. Integrated branch
+`aa20ab0df` passed pinned Rust all-target check in 2m16s; the source-only Linux
+build is running before repeating the pause against this tree. No unit tests,
+final adversarial review or external-review pause have begun for this batch.
+
+### 10.245 Parsed master readiness survives ordinary level requests (2026-10-07)
+
+The instrumented repeat on integrated `aa20ab0df` reproduced the pause failure.
+The manifest trace disproved a suspected ownership gap: both events belonged
+to the current attachment. hls.js dispatches Parsed synchronously inside its
+Loaded processing, so this app's later Loaded listener downgraded Parsed;
+ordinary level-playlist sends then set Loading. Pause before the presentation
+sampling tick retired startup therefore reloaded an already-decoded master,
+reset the clock, stalled and reopened. Receipt:
+`firefox-aa20ab0df-pause-diagnostic1*`.
+
+Loaded and ordinary playlist dispatches now preserve Parsed. A genuine master
+Loading event still resets it, and the existing attachment/intent/failure
+fences remain. The authored `parsed master survives level loads and early
+Pause/Play` regression follows nested event order, a level send, the immediate
+pause/resume retry, and a retired attachment. No units execute yet. The focused
+runtime repeat will use the committed corrective tree after its pinned build.

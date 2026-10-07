@@ -7757,3 +7757,41 @@ test("abandoned continuous handoff retries release only their unpublished family
     const h=harness([error]);await assert.rejects(h.open());assert.deepEqual(h.released,[],"unbound refusal fields cannot release an attachment");
   }
 });
+
+
+test("parsed master survives level loads and early Pause/Play", () => {
+  const h = new PlaybackContextFunction("PlaybackPolicy", [
+    "let now=0,current=true;const timers=[],loads=[],starts=[],events=new Map();",
+    "const performance={now:()=>now};function setTimeout(fn){timers.push(fn);return timers.length;}function clearTimeout(){}",
+    "function clientLog(){}function playbackContext(){return {};}function resetPlaybackTransportEvents(){}function applyPlaybackTransportIntent(){}",
+    "function exhaustHlsStartup(){throw Error('unexpected exhaustion');}function cancelHlsStartup(){throw Error('unexpected cancellation');}",
+    "const Hls={Events:{MANIFEST_LOADING:'loading',MANIFEST_LOADED:'loaded',MANIFEST_PARSED:'parsed'}};",
+    "const hls={on(event,fn){events.set(event,fn);},loadSource(url){loads.push(url);},startLoad(at){starts.push(at);},stopLoad(){}};",
+    "const attachment={current:()=>current},video={currentTime:0.2};",
+    "let PLAYER={hls,mediaAttachment:attachment,wantsPlayback:true,controlIntentGeneration:1};",
+    "const episode={player:PLAYER,attachment,mediaAttachment:attachment,hls,state:'active',manifestState:'unknown',playlistUrl:'/master.m3u8',startedAt:0,deadlineMs:40000,dispatches:0,loaders:new Set(),retry:{state:'unused',timer:null}};PLAYER.hlsStartup=episode;",
+    "class StockLoader{openAndSendXhr(){}abort(){}destroy(){}}",
+    shippedSource("playbackAttemptTerminallyStopped"), shippedSource("hlsStartupCurrent"),
+    shippedSource("hlsStartupManifestRequest"), shippedSource("abortHlsStartupLoaders"),
+    shippedSource("createHlsStartupLoader"), shippedSource("wireHlsObservers"),
+    shippedSource("pauseHlsStartup"), shippedSource("resumeHlsStartup"), shippedSource("armHlsStartupRetry"),
+    "wireHlsObservers(hls,episode,video,()=>current);const Loader=createHlsStartupLoader(StockLoader,episode);",
+    "return {episode,loads,starts,emit(event){events.get(event)();},",
+    "level(){const loader=new Loader();loader.plurxIntentGeneration=PLAYER.controlIntentGeneration;loader.openAndSendXhr({},{type:'level',url:'/720/index.m3u8'},{});},",
+    "pause(){PLAYER.wantsPlayback=false;PLAYER.controlIntentGeneration++;return pauseHlsStartup(PLAYER);},",
+    "resume(){PLAYER.wantsPlayback=true;PLAYER.controlIntentGeneration++;const result=resumeHlsStartup(video,PLAYER);timers.splice(0).forEach(fn=>fn());return result;},",
+    "retire(){current=false;}};",
+  ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
+  h.emit("loading");
+  h.emit("parsed");
+  h.emit("loaded");
+  assert.equal(h.episode.manifestState, "parsed", "nested parsing precedes our loaded listener");
+  h.level();
+  assert.equal(h.episode.manifestState, "parsed", "ordinary level requests retain master readiness");
+  assert.equal(h.pause(), true);
+  assert.equal(h.resume(), true);
+  assert.deepEqual(h.loads, [], "early Play does not reset a decoded attachment with loadSource");
+  assert.deepEqual(h.starts, [0.2], "Play resumes network loading at the retained clock");
+  h.retire();h.emit("loading");
+  assert.equal(h.episode.manifestState, "parsed", "a retired attachment cannot change readiness");
+});
