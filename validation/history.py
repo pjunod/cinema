@@ -143,6 +143,18 @@ class MergeErratum:
 
 
 @dataclasses.dataclass(frozen=True)
+class VerifiedLanding:
+    """Immutable API merge identity; recognition only, never a trailer waiver."""
+
+    commit: str
+    tree: str
+    parents: tuple[str, str]
+    title: str
+    pull: str
+    reason: str
+
+
+@dataclasses.dataclass(frozen=True)
 class MergeLedger:
     """The boundary the freeze is measured from, and the permanent errata.
 
@@ -155,6 +167,7 @@ class MergeLedger:
 
     enforce_after: str | None
     errata: tuple[MergeErratum, ...]
+    landings: tuple[VerifiedLanding, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -425,7 +438,7 @@ def load_merge_ledger(path: Path = DEFAULT_MERGE_LEDGER) -> MergeLedger:
         raise HistoryError(f"cannot read {path}: {exc}") from exc
     if raw.get("version") != 1:
         raise HistoryError(f"{path.name} version must be 1")
-    stray = set(raw) - {"version", "enforce_after", "errata"}
+    stray = set(raw) - {"version", "enforce_after", "errata", "landings"}
     if stray:
         raise HistoryError(f"{path.name} has unknown keys {', '.join(sorted(stray))}")
     enforce_after = raw.get("enforce_after")
@@ -449,7 +462,30 @@ def load_merge_ledger(path: Path = DEFAULT_MERGE_LEDGER) -> MergeLedger:
         if not reason:
             raise HistoryError(f"{where} has no reason")
         errata.append(MergeErratum(commit=commit, reason=reason))
-    return MergeLedger(enforce_after=enforce_after, errata=tuple(errata))
+    landings: list[VerifiedLanding] = []
+    for index, item in enumerate(raw.get("landings", [])):
+        where = f"{path.name} landings[{index}]"
+        required = {"commit", "tree", "parents", "title", "pull", "reason"}
+        if not isinstance(item, dict) or set(item) != required:
+            raise HistoryError(f"{where} must contain exactly {', '.join(sorted(required))}")
+        for field in ("commit", "tree"):
+            if not isinstance(item[field], str) or not re.fullmatch(r"[0-9a-f]{40}", item[field]):
+                raise HistoryError(f"{where}.{field} must be a full Git SHA")
+        parents = item["parents"]
+        if (not isinstance(parents, list) or len(parents) != 2
+                or any(not isinstance(parent, str) or not re.fullmatch(r"[0-9a-f]{40}", parent) for parent in parents)
+                or parents[0] == parents[1]):
+            raise HistoryError(f"{where}.parents must be two distinct full ordered Git SHAs")
+        if not isinstance(item["pull"], str) or not re.fullmatch(r"[1-9][0-9]*", item["pull"]):
+            raise HistoryError(f"{where}.pull must be a positive PR number string")
+        for field in ("title", "reason"):
+            if not isinstance(item[field], str) or not item[field].strip() or "\n" in item[field]:
+                raise HistoryError(f"{where}.{field} must be a nonempty single line")
+        if any(row.commit == item["commit"] for row in landings):
+            raise HistoryError(f"{where} duplicates landing {item['commit']}")
+        landings.append(VerifiedLanding(item["commit"], item["tree"], tuple(parents),
+                                        item["title"], item["pull"], item["reason"]))
+    return MergeLedger(enforce_after=enforce_after, errata=tuple(errata), landings=tuple(landings))
 
 
 def landing_commit_title(subject: str) -> tuple[str, str] | None:
@@ -725,6 +761,10 @@ def audit_merge_regressions(
                 f"boundary {ledger.enforce_after}"
             )
 
+    for landing in ledger.landings:
+        if landing.commit not in post_boundary:
+            errors.append(f"verified landing {landing.commit} names no commit past the boundary {ledger.enforce_after}")
+
     log = _git(
         root, "log", "--format=%H%x1f%P%x1f%s%x1e", *history_heads, "--not", boundary, "--"
     )
@@ -734,6 +774,16 @@ def audit_merge_regressions(
             continue
         sha, parents, subject = record.split("\x1f", 2)
         landed = landing_commit_title(subject)
+        verified = next((row for row in ledger.landings if row.commit == sha), None)
+        if verified is not None:
+            if (tuple(parents.split()) != verified.parents or subject != verified.title
+                    or _git(root, "show", "-s", "--format=%T", sha).strip() != verified.tree):
+                errors.append(f"verified landing {sha[:8]} (#{verified.pull}) immutable merge identity mismatch")
+                continue
+            if landed is not None:
+                errors.append(f"verified landing {sha[:8]} already has a canonical landing subject")
+                continue
+            landed = (verified.title, verified.pull)
         if landed is None:
             continue
         title, pull = landed

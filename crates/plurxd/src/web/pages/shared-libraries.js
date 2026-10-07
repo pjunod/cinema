@@ -113,7 +113,7 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
           sharedCatalogueId(file.file_id);
           const fileRef=sharedCatalogueReference(file.reference?.item);
           if(JSON.stringify(fileRef)!==JSON.stringify(current)||file.reference.file_id!==file.file_id) throw new Error("Shared file changed");
-          return `<p>${esc(file.video_codec||file.container||"Media file")}${file.duration_ms?` · ${esc(fmtDur(file.duration_ms/1000))}`:""} <button data-shared-play="${index}"${launch?"":" disabled"}>Play</button></p>`;
+          return `<p>${esc(file.video_codec||file.container||"Media file")}${file.duration_ms?` · ${esc(fmtDur(file.duration_ms))}`:""} <button data-shared-play="${index}"${launch?"":" disabled"}>Play</button></p>`;
         }).join("")}</div><div id="shared-children"></div>`);
         const mount=document.getElementById("shared-catalogue");
         const watchButton=mount?.querySelector("button[data-shared-watched]");
@@ -133,7 +133,8 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
         }
         // Children are other items of the same library: bind the page to the
         // library reference, not to this parent's item identity.
-        await sharedCatalogueLoadPage(`${base}/items/${ref.item_id}/children`,sharedCatalogueLibraryReference(ref),capture,"shared-children");
+        if(["show","season"].includes(item.kind))
+          await sharedCatalogueLoadPage(`${base}/items/${ref.item_id}/children`,sharedCatalogueLibraryReference(ref),capture,"shared-children");
       }else{
         const ref=parsed.reference;
         paint(`<form id="shared-search"><label>Search this library <input name="q" maxlength="512" value="${esc(parsed.q)}"></label><button class="ghost" type="submit">Search</button></form><div id="shared-items"></div>`);

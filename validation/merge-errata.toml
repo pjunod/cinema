@@ -246,3 +246,14 @@ reason = "PR #699 reached the architecture effort through immutable merge 6f0bac
 [[errata]]
 commit = "6cb19bb489edf0a8cb005503cd914b586fbc628c"
 reason = "PR #822 landed with a class-qualified Python Regression-Test field, tests/operations/test_player_input_fence.py::PlayerInputFenceTest.test_the_fence_passes_the_repository_as_it_stands. The resolver requires the bare method name: tests/operations/test_player_input_fence.py::test_the_fence_passes_the_repository_as_it_stands. That test passed on the corrected bb90441e1 source before landing; the merge tree was verified identical, and the row-boundary browser regression also passed. Native PR #823 exposed the malformed immutable trailer in history-check. This erratum records only that reference typo; it preserves the boundary, audit policy, runtime and original history. PR #823 validates its own bare-method trailers before merging."
+
+# The API supplied the PR title verbatim rather than Forgejo's canonical merge
+# subject. This pins its real immutable two-parent landing, without excusing any
+# trailer: history still resolves every Regression-Test against this exact tree.
+[[landings]]
+commit = "5630baf52634fc7610254238f0ca35d77425577d"
+tree = "83af8af5c2d07f2a3eb59b9fe8da245338166877"
+parents = ["cca4a09b997171ba91136b396f7d484097305fd0", "397dfa991fcd185d9c8199f78c0ff57ca51b718e"]
+title = "fix(sharing): promote shared libraries with Source-owned playback and custody"
+pull = "828"
+reason = "Verified PR828 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All100 original trailers remain mandatory own-tree evidence; this row recognizes identity only and waives no checks."

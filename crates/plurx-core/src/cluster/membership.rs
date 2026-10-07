@@ -1519,7 +1519,7 @@ impl SharingJoinCapabilities {
     }
 }
 
-fn sharing_installed_marker_predicate(capability: &str) -> String {
+pub(crate) fn sharing_installed_marker_predicate(capability: &str) -> String {
     match capability {
         SHARING_INGRESS_CUSTODY_CAPABILITY => crate::store::sharing_ingress_custody::schema_guard(),
         // The census table is boot ownership that every startup creates
@@ -11062,14 +11062,12 @@ impl MembershipManager {
         let Some(inner) = &self.inner else {
             return Ok(());
         };
-        if inner
+        let saved = inner
             .store
             .get_setting("sharing_enabled")
             .await
-            .map_err(|_| MembershipError::Incompatible)?
-            .as_deref()
-            != Some("true")
-        {
+            .map_err(|_| MembershipError::Incompatible)?;
+        if !crate::store::stored_switch(saved.as_deref(), false) {
             return Ok(());
         }
         let master = inner

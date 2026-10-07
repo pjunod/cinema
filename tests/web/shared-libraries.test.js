@@ -184,3 +184,12 @@ test("manual Shared watched state posts only to the B-private Shared route",asyn
  assert.deepEqual(bodies.map(o=>[o.method,o.body.watched]),[["POST",false],["POST",true]]);
  await assert.rejects(fixture.context.watched(ref,"false"));assert.equal(fixture.requests.length,2);
 });
+
+
+test("Shared movie detail formats milliseconds and does not request unsupported children",async()=>{
+ const f=harness(path=>{assert.ok(!path.includes("/children"));return reply({item:{source:"shared",reference:ref,title:"Twelve minutes",kind:"movie"},delivery_status:"available",files:[{file_id:"1",reference:{item:ref,file_id:"1"},duration_ms:720000,video_codec:"h264"}]});});
+ const durations=[];f.context.fmtDur=ms=>{durations.push(ms);return "12:00";};
+ f.context.location.hash=f.h.href(ref);await f.h.view(1);
+ assert.deepEqual(durations,[720000]);assert.match(f.elements.get("shared-catalogue").innerHTML,/12:00/);
+ assert.equal(f.requests.filter(path=>path.includes("/children")).length,0);
+});

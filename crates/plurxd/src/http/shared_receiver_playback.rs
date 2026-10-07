@@ -57,6 +57,20 @@ pub(crate) enum ReceiverStartError {
     Unsupported,
     DolbyVisionUnsupported,
 }
+fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_client::PeerError) {
+    use crate::sharing_client::PeerError;
+    let (error_class, http_status) = match error {
+        PeerError::Unavailable => ("unavailable", None),
+        PeerError::IdentityMismatch => ("identity_mismatch", None),
+        PeerError::ProtocolUnsupported => ("protocol_unsupported", None),
+        PeerError::Authentication => ("authentication", None),
+        PeerError::InvalidResponse => ("invalid_response", None),
+        PeerError::Rejected(status) => ("rejected", Some(status.as_u16())),
+        PeerError::DolbyVisionUnsupported => ("dolby_vision_unsupported", None),
+    };
+    tracing::warn!(target: "plurx::sharing", stage, error_class, http_status, "receiver Source status refused");
+}
+
 #[derive(Default)]
 pub(crate) struct ReceiverStartRegistry {
     ingress: ingress_custody::ReceiverIngressCache,
@@ -1033,28 +1047,32 @@ impl ReceiverStartActor {
         use futures_util::StreamExt;
         self.current_delivery_attachment(&state)
             .await
-            .inspect_err(|_error| {
+            .inspect_err(|error| {
+                tracing::warn!(target: "plurx::sharing", stage = "initial_attachment", error_class = ?error, "protected receiver Start refused");
                 #[cfg(test)]
-                eprintln!("B protected Start stage=initial_attachment error={_error:?}");
+                eprintln!("B protected Start stage=initial_attachment error={error:?}");
             })?;
         self.current_source_status(&state)
             .await
-            .inspect_err(|_error| {
+            .inspect_err(|error| {
+                tracing::warn!(target: "plurx::sharing", stage = "source_status", error_class = ?error, "protected receiver Start refused");
                 #[cfg(test)]
-                eprintln!("B protected Start stage=source_status error={_error:?}");
+                eprintln!("B protected Start stage=source_status error={error:?}");
             })?;
         self.current_delivery_attachment(&state)
             .await
-            .inspect_err(|_error| {
+            .inspect_err(|error| {
+                tracing::warn!(target: "plurx::sharing", stage = "attachment_recheck", error_class = ?error, "protected receiver Start refused");
                 #[cfg(test)]
-                eprintln!("B protected Start stage=attachment_recheck error={_error:?}");
+                eprintln!("B protected Start stage=attachment_recheck error={error:?}");
             })?;
         let guard = self
             .retain_delivery_connection(state, connection)
             .await
-            .inspect_err(|_error| {
+            .inspect_err(|error| {
+                tracing::warn!(target: "plurx::sharing", stage = "accepted_ingress", error_class = ?error, "protected receiver Start refused");
                 #[cfg(test)]
-                eprintln!("B protected Start stage=accepted_ingress error={_error:?}");
+                eprintln!("B protected Start stage=accepted_ingress error={error:?}");
             })?;
         let (parts, body) = response.into_parts();
         let stream = body.into_data_stream().map(move |frame| {
@@ -1234,6 +1252,7 @@ impl ReceiverStartActor {
         lifetime: Arc<dyn Send + Sync>,
     ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
         if self.0.stop.is_cancelled() {
+            tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", "receiver Source status refused");
             return Err(ReceiverStartError::Unresolved);
         }
         // Current B policy precedes the network operation; every following
@@ -1242,8 +1261,14 @@ impl ReceiverStartActor {
             .store
             .prepare_receiver_session_authority(self.0.intent.clone())
             .await
-            .map_err(|_| ReceiverStartError::Unresolved)?
-            .ok_or(ReceiverStartError::Unresolved)?;
+            .map_err(|_| {
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", "receiver Source status refused");
+                ReceiverStartError::Unresolved
+            })?
+            .ok_or(ReceiverStartError::Unresolved)
+            .inspect_err(|_| {
+                tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", "receiver Source status refused");
+            })?;
         let received = self
             .0
             .state
@@ -1251,7 +1276,10 @@ impl ReceiverStartActor {
             .expect("receiver owner")
             .received
             .clone()
-            .ok_or(ReceiverStartError::Unresolved)?;
+            .ok_or(ReceiverStartError::Unresolved)
+            .inspect_err(|_| {
+                tracing::warn!(target: "plurx::sharing", stage = "retained_received", error_class = "absent", "receiver Source status refused");
+            })?;
         let expected = plurx_core::sharing::SharingIdentity {
             server_id: self.0.intent.scope.source_server_id,
             catalogue_epoch: self.0.intent.scope.catalogue_epoch,
@@ -1264,10 +1292,16 @@ impl ReceiverStartActor {
             lifetime,
         )
         .await
-        .map_err(|_| ReceiverStartError::Unresolved)?;
+        .map_err(|error| {
+            log_source_status_peer_failure("verified_peer", error);
+            ReceiverStartError::Unresolved
+        })?;
         let known = received
             .lineage()
-            .map_err(|_| ReceiverStartError::Unresolved)?;
+            .map_err(|_| {
+                tracing::warn!(target: "plurx::sharing", stage = "lineage", error_class = "invalid", "receiver Source status refused");
+                ReceiverStartError::Unresolved
+            })?;
         peer.file_status(
             &received.credential,
             &received.viewer_hash,
@@ -1276,10 +1310,9 @@ impl ReceiverStartActor {
         )
         .await
         .map_err(|error| {
+            log_source_status_peer_failure("status_exchange", error);
             #[cfg(test)]
             eprintln!("B real Source status exchange error={error:?}");
-            #[cfg(not(test))]
-            let _ = error;
             ReceiverStartError::Unresolved
         })
     }

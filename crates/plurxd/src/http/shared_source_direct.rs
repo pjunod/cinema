@@ -390,12 +390,13 @@ pub(super) async fn published_reply(
         .actor
         .open_direct_start(deadline)
         .await
-        .map_err(|e| SourceStartFailure::from(e).response())?;
-    let (_, current_grant) = current_reference(state, headers, target).await?;
+        .map_err(|e| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_actor", error_class = ?e, "Source direct status refused"); SourceStartFailure::from(e).response() })?;
+    let (_, current_grant) = current_reference(state, headers, target).await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_reference", error_class = "refused", "Source admission refused"); })?;
     if current_grant != grant || entry.grant != grant {
+        tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_grant", error_class = "mismatch", "Source admission refused");
         return Err(unavailable());
     }
-    observe_direct_published(entry, owned, &start).map_err(SourceStartFailure::response)?;
+    observe_direct_published(entry, owned, &start).inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_observed", error_class = "refused", "Source admission refused"); }).map_err(SourceStartFailure::response)?;
     let response = super::super::shared_library::source_file_json(
         grant,
         target,
@@ -472,6 +473,7 @@ pub(super) async fn direct_bytes(
         &connection.as_ref().ok_or_else(unavailable)?.0,
         &entry,
         &owned.assignment,
+        deadline,
     )
     .await?;
     if !owned.actor.is_direct() {

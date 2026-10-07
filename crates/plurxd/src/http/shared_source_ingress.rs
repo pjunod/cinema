@@ -15,6 +15,22 @@ pub(super) struct LocalCustody {
     registration: IngressRegistration,
     obligation: crate::sharing_connection_custody::CapturedIngressObligation,
 }
+/// Coordinates only this retained principal's known registration operation.
+/// Dropping its waiter releases scheduling custody, never a common ambiguous
+/// reservation. Every wait inherits the caller's absolute request deadline.
+#[derive(Default)]
+pub(super) struct RegistrationGate(tokio::sync::Mutex<()>);
+impl RegistrationGate {
+    pub(super) async fn acquire(
+        &self,
+        deadline: Instant,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, ApiError> {
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), self.0.lock())
+            .await
+            .map_err(|_| unavailable())
+    }
+}
+
 async fn repair_local(
     state: &crate::state::AppState,
     entry: &SourceStartEntry,
@@ -39,7 +55,7 @@ async fn repair_local(
             .store
             .acknowledge_source_ingress_custody(value, &held.registration, receipt.confirmation())
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.repair.ack_store", error_class = "store", "Source admission refused"); unavailable() })?;
         if matches!(
             result,
             SourceCustodyWrite::Applied
@@ -48,7 +64,7 @@ async fn repair_local(
         ) {
             held.obligation
                 .release_after_ack(&receipt)
-                .map_err(|_| unavailable())?;
+                .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.repair.local_release", error_class = "refused", "Source admission refused"); unavailable() })?;
             if let Ok(permit) = permit {
                 permit.complete();
             }
@@ -494,6 +510,7 @@ pub(super) async fn apply_forward_custody(
 ) -> Result<CustodyReply, ApiError> {
     let (entry, value) = retained(state, wire)?;
     let reg = registration(&custody.ingress)?;
+    let _registration = entry.registration_gate.acquire(deadline).await?;
     let result = match &custody.action {
         CustodyAction::Register => {
             let headers = SourceHeaders::verified_fresh(
@@ -588,6 +605,22 @@ pub(super) async fn register_local(
     connection: &crate::SharingConnectionCancellation,
     entry: &Arc<SourceStartEntry>,
     value: &SourceDispatchAssignment,
+    deadline: Instant,
+) -> Result<(), ApiError> {
+    let _registration = entry.registration_gate.acquire(deadline).await?;
+    tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        register_local_locked(state, connection, entry, value),
+    )
+    .await
+    .map_err(|_| unavailable())?
+}
+
+async fn register_local_locked(
+    state: &crate::state::AppState,
+    connection: &crate::SharingConnectionCancellation,
+    entry: &Arc<SourceStartEntry>,
+    value: &SourceDispatchAssignment,
 ) -> Result<(), ApiError> {
     repair_local(state, entry, value).await?;
     // Definite never-sent refusals occur before reserving an ordinal.
@@ -595,29 +628,30 @@ pub(super) async fn register_local(
         .store
         .source_ingress_custody(value)
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.ledger_store", error_class = "store", "Source admission refused"); unavailable() })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.snapshot_0", error_class = "absent", "Source admission refused"); unavailable() })?;
     if existing.state.is_sealed() {
+        tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.ledger", error_class = "sealed", "Source admission refused");
         return Err(unavailable());
     }
     let members = state
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.members_store", error_class = "store", "Source admission refused"); unavailable() })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.snapshot_1", error_class = "absent", "Source admission refused"); unavailable() })?;
     let captured = state
         .sharing
         .accepted_drivers
         .capture(connection, &state.node_id)
-        .map_err(|_| unavailable())?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.capture", error_class = "refused", "Source admission refused"); unavailable() })?;
     let driver = captured.id().clone();
     let mut permit = state
         .sharing
         .accepted_drivers
         .registration_guard()
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.registration_permit", error_class = "refused", "Source admission refused"); unavailable() })?;
     let obligation = captured
         .prepare_obligation(
             &mut permit,
@@ -625,7 +659,7 @@ pub(super) async fn register_local(
             value.binding().incarnation_id(),
             &value.custody_identity(),
         )
-        .map_err(|_| unavailable())?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.prepare_obligation", error_class = "refused", "Source admission refused"); unavailable() })?;
     let reg = IngressRegistration {
         node_id: state.node_id.clone(),
         boot_id: driver.boot_id,
@@ -654,6 +688,9 @@ pub(super) async fn register_local(
     let ack_assignment = value.clone();
     let ack_reg = reg.clone();
     let ack_obligation = obligation.clone();
+    // Capture only the coordinator, never the entry: the accepted driver must
+    // not retain a strong entry/monitor ownership cycle.
+    let ack_gate = Arc::clone(&entry.registration_gate);
     let monitor = connection.monitor(async move {
         // Even physical closure cannot race a later Register send by this owner.
         // Cancellation drops the sender; ambiguity then requires guarded ACK fencing.
@@ -664,25 +701,35 @@ pub(super) async fn register_local(
             .accepted_drivers
             .reconcile_guard(&ack_obligation)
             .await;
-        let future = ack_state.store.acknowledge_source_ingress_custody(
-            &ack_assignment,
-            &ack_reg,
-            receipt.confirmation(),
-        );
-        if let Ok(Ok(
-            SourceCustodyWrite::Applied
-            | SourceCustodyWrite::ExactReplay
-            | SourceCustodyWrite::ReconciledClosed,
-        )) = tokio::time::timeout(std::time::Duration::from_secs(60), future).await
-        {
-            if ack_obligation.release_after_ack(&receipt).is_ok() {
+        let ack_deadline = Instant::now() + std::time::Duration::from_secs(60);
+        let future = async {
+            let _registration = ack_gate.acquire(ack_deadline).await?;
+            let result = ack_state
+                .store
+                .acknowledge_source_ingress_custody(
+                    &ack_assignment,
+                    &ack_reg,
+                    receipt.confirmation(),
+                )
+                .await
+                .map_err(|_| unavailable())?;
+            if matches!(
+                result,
+                SourceCustodyWrite::Applied
+                    | SourceCustodyWrite::ExactReplay
+                    | SourceCustodyWrite::ReconciledClosed
+            ) && ack_obligation.release_after_ack(&receipt).is_ok()
+            {
                 if let Ok(permit) = reconciliation {
                     permit.complete();
                 }
             }
-        }
+            Ok::<_, ApiError>(())
+        };
+        let _ = tokio::time::timeout_at(tokio::time::Instant::from_std(ack_deadline), future).await;
     });
     if monitor.is_err() {
+        tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.monitor", error_class = "refused", "Source admission refused");
         permit.complete();
         let _ = obligation.release_refused_registration();
         return Err(unavailable());
@@ -700,13 +747,13 @@ pub(super) async fn register_local(
         .register_source_ingress_custody(value, &reg, &members)
         .await;
     let _ = completed.send(());
-    match result.map_err(|_| unavailable())? {
+    match result.map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.register_store", error_class = "store", "Source admission refused"); unavailable() })? {
         SourceCustodyWrite::Applied | SourceCustodyWrite::ExactReplay => {
             permit.complete();
             entry.changed.notify_waiters();
             Ok(())
         }
-        SourceCustodyWrite::Refused | SourceCustodyWrite::ReconciledClosed => Err(unavailable()),
+        SourceCustodyWrite::Refused | SourceCustodyWrite::ReconciledClosed => { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.register_result", error_class = "refused_or_closed", "Source admission refused"); Err(unavailable()) },
     }
 }
 
@@ -906,14 +953,14 @@ pub(super) async fn publication_allowed(
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.members_store", error_class = "store", "Source admission refused"); unavailable() })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_0", error_class = "absent", "Source admission refused"); unavailable() })?;
     state
         .store
         .prepare_source_ingress_admission(value, state.sharing.accepted_drivers.boot_id(), &members)
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.admission_store", error_class = "store", "Source admission refused"); unavailable() })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_1", error_class = "absent", "Source admission refused"); unavailable() })?;
     Ok(())
 }
 
@@ -1003,4 +1050,91 @@ pub(super) async fn source_forward_locality(
     }
     current_reference(state, &headers, &wire.reference).await?;
     Ok(Some((size, mtime)))
+}
+
+#[cfg(test)]
+mod registration_coordination_tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    /// This pins registration scheduling and the existing ambiguity fence;
+    /// constructed driver identities do not claim a physical closure receipt.
+    #[tokio::test]
+    async fn sharing_source_known_registration_overlap_waits_but_unknown_reservation_stays_fenced()
+    {
+        let registry = crate::sharing_connection_custody::AcceptedDriverRegistry::default();
+        let first_connection = crate::SharingConnectionCancellation::new();
+        let second_connection = crate::SharingConnectionCancellation::new();
+        let third_connection = crate::SharingConnectionCancellation::new();
+        let first = registry
+            .capture(&first_connection, "owner")
+            .expect("first driver");
+        let second = registry
+            .capture(&second_connection, "owner")
+            .expect("second driver");
+        let third = registry
+            .capture(&third_connection, "owner")
+            .expect("third driver");
+        let incarnation = Uuid::new_v4();
+        let identity = "a".repeat(64);
+        let gate = RegistrationGate::default();
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let first_guard = gate.acquire(deadline).await.expect("first operation");
+        let mut first_permit = registry.registration_guard().await.expect("first permit");
+        first
+            .prepare_obligation(&mut first_permit, "source", incarnation, &identity)
+            .expect("known registration in flight");
+        let next = async {
+            let _guard = gate.acquire(deadline).await.expect("queued operation");
+            let mut permit = registry.registration_guard().await.expect("second permit");
+            let obligation = second
+                .prepare_obligation(&mut permit, "source", incarnation, &identity)
+                .expect("definite predecessor registration completed");
+            // Dropping this unresolved permit intentionally models a cancelled
+            // or uncertain Register, not a successful durable registration.
+            (obligation, permit)
+        };
+        tokio::pin!(next);
+        assert!(
+            next.as_mut().now_or_never().is_none(),
+            "overlap waits instead of touching the common pending fence"
+        );
+        assert!(
+            gate.acquire(Instant::now()).await.is_err(),
+            "an expired caller cannot wait indefinitely"
+        );
+        first_permit.complete();
+        drop(first_guard);
+        let (unknown, unknown_permit) = next.await;
+        drop(unknown_permit);
+        let _next_guard = gate
+            .acquire(deadline)
+            .await
+            .expect("scheduler custody released");
+        let mut third_permit = registry.registration_guard().await.expect("third permit");
+        assert!(
+            third
+                .prepare_obligation(&mut third_permit, "source", incarnation, &identity)
+                .is_err(),
+            "owner scheduling cannot clear an unknown registration"
+        );
+        // A separate principal remains independent despite the exact pending
+        // reservation. No global lock is held through registration work.
+        let unrelated_gate = RegistrationGate::default();
+        let _unrelated = unrelated_gate
+            .acquire(deadline)
+            .await
+            .expect("independent principal");
+        let mut unrelated_permit = registry
+            .registration_guard()
+            .await
+            .expect("independent permit");
+        third
+            .prepare_obligation(&mut unrelated_permit, "source", Uuid::new_v4(), &identity)
+            .expect("unrelated registration proceeds");
+        unrelated_permit.complete();
+        // Only explicit reconciliation of the exact pending reservation can
+        // release it. No physical-close ACK is manufactured by this test.
+        assert!(registry.reconcile_guard(&unknown).await.is_ok());
+    }
 }

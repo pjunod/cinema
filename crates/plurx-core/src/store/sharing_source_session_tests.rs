@@ -201,14 +201,278 @@ fn proof() -> SourceAdmissionMembers {
     .expect("Source candidate fixture operation")
 }
 
+#[derive(Clone, Copy, Debug)]
+enum AdmissionInterleave {
+    Register,
+    Ack,
+    Seal,
+    AckAll,
+    WrongOwner,
+    WrongRoutingOwner,
+    WrongBoot,
+    WrongInitialHash,
+    MalformedRouting,
+    RemoveFloor,
+}
+
+/// This wrapper captures a real Store read, commits a real metadata operation,
+/// then returns that captured read before admission's atomic assertion. No
+/// sleeps or synthetic physical receipt are involved: this qualifies accounting
+/// interleavings; the daemon separately authenticates actual driver closures.
+struct AdmissionInterleavedStore<'a> {
+    store: &'a SqliteStore,
+    assignment: &'a SourceDispatchAssignment,
+    action: std::sync::Mutex<Option<AdmissionInterleave>>,
+    second: crate::sharing_ingress_custody::IngressRegistration,
+}
+
+#[async_trait::async_trait]
+impl super::super::sharing::Backend for AdmissionInterleavedStore<'_> {
+    fn sharing_is_replicated(&self) -> bool {
+        self.store.sharing_is_replicated()
+    }
+    async fn sharing_read(
+        &self,
+        sql: &str,
+        values: Vec<super::super::sharing::Value>,
+    ) -> Result<Vec<String>, StoreError> {
+        let rows = self.store.sharing_read(sql, values).await?;
+        let action =
+            if sql.starts_with("SELECT json_object('revision',revision,'custody',custody_json)") {
+                self.action.lock().expect("one interleaving").take()
+            } else {
+                None
+            };
+        if let Some(action) = action {
+            use crate::store::sharing_source_ingress_custody::SourceCustodyWrite;
+            match action {
+                AdmissionInterleave::Register => {
+                    assert_eq!(
+                        self.store
+                            .register_source_ingress_custody(
+                                self.assignment,
+                                &self.second,
+                                &proof()
+                            )
+                            .await?,
+                        SourceCustodyWrite::Applied
+                    );
+                }
+                AdmissionInterleave::Ack | AdmissionInterleave::AckAll => {
+                    let current = self
+                        .store
+                        .source_ingress_custody(self.assignment)
+                        .await?
+                        .expect("current exact ledger");
+                    let open = current.state.open().cloned().collect::<Vec<_>>();
+                    let count = if matches!(action, AdmissionInterleave::Ack) {
+                        1
+                    } else {
+                        open.len()
+                    };
+                    for slot in open.into_iter().take(count) {
+                        assert_eq!(
+                            self.store
+                                .acknowledge_source_ingress_custody(
+                                    self.assignment,
+                                    &slot,
+                                    &"e".repeat(64)
+                                )
+                                .await?,
+                            SourceCustodyWrite::Applied
+                        );
+                    }
+                }
+                AdmissionInterleave::Seal => {
+                    assert_eq!(
+                        self.store
+                            .seal_source_ingress_custody(self.assignment)
+                            .await?,
+                        SourceCustodyWrite::Applied
+                    );
+                }
+                AdmissionInterleave::RemoveFloor => {
+                    self.store
+                        .sharing_txn(vec![(
+                            "DELETE FROM cluster_node_capabilities WHERE capability=$1".into(),
+                            vec![
+                                crate::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY
+                                    .to_owned()
+                                    .into(),
+                            ],
+                        )])
+                        .await?;
+                }
+                AdmissionInterleave::WrongOwner => {
+                    self.store.sharing_txn(vec![("UPDATE sharing_ingress_custody SET owner_identity=$1,revision=revision+1 WHERE incarnation_id=$2".into(), vec!["f".repeat(64).into(), self.assignment.binding().incarnation_id().into()])]).await?;
+                }
+                other => {
+                    let (path, value) = match other {
+                        AdmissionInterleave::WrongRoutingOwner => {
+                            ("$.source_routing.owner_node_id", "other".to_owned())
+                        }
+                        AdmissionInterleave::WrongBoot => (
+                            "$.source_routing.registry_boot_id",
+                            Uuid::new_v4().to_string(),
+                        ),
+                        AdmissionInterleave::WrongInitialHash => {
+                            ("$.source_routing.initial_credential_hash", "f".repeat(64))
+                        }
+                        AdmissionInterleave::MalformedRouting => {
+                            ("$.source_routing.unexpected", "extra".to_owned())
+                        }
+                        _ => unreachable!("handled metadata mutation"),
+                    };
+                    self.store.sharing_txn(vec![("UPDATE sharing_ingress_custody SET custody_json=json_set(custody_json,$1,$2),revision=revision+1 WHERE incarnation_id=$3".into(), vec![path.to_owned().into(), value.into(), self.assignment.binding().incarnation_id().into()])]).await?;
+                }
+            }
+        }
+        Ok(rows)
+    }
+    async fn sharing_txn(
+        &self,
+        statements: Vec<super::super::sharing::Statement>,
+    ) -> Result<Vec<usize>, StoreError> {
+        self.store.sharing_txn(statements).await
+    }
+    async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_revision_key_rows().await
+    }
+    async fn sharing_file_locator_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_file_locator_key_rows().await
+    }
+    async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_purpose_archive_rows().await
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses_changed_authority()
+{
+    use crate::sharing_ingress_custody::IngressRegistration;
+    use crate::store::sharing_source_ingress_custody::SourceCustodyWrite;
+    for action in [
+        AdmissionInterleave::Register,
+        AdmissionInterleave::Ack,
+        AdmissionInterleave::Seal,
+        AdmissionInterleave::AckAll,
+        AdmissionInterleave::WrongOwner,
+        AdmissionInterleave::WrongRoutingOwner,
+        AdmissionInterleave::WrongBoot,
+        AdmissionInterleave::WrongInitialHash,
+        AdmissionInterleave::MalformedRouting,
+        AdmissionInterleave::RemoveFloor,
+    ] {
+        let store = SqliteStore::open_in_memory().expect("actual Store");
+        let (grant, credential) = setup(&store).await;
+        install_fixture_ingress_context(&store).await;
+        let planned = intent(&store, grant, &credential, "admission-interleave").await;
+        let binding = match store
+            .claim_source_media_session(&planned, &proof())
+            .await
+            .expect("actual claim")
+        {
+            SourceClaimOutcome::Acquired(value) => value,
+            _ => panic!("fresh claim"),
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &credential, &proof())
+            .await
+            .expect("actual assignment")
+            .expect("exact assignment");
+        let boot = planned.request.ingress_registry_boot_id;
+        let first = IngressRegistration {
+            node_id: "voter".into(),
+            boot_id: boot,
+            connection_id: Uuid::new_v4(),
+            driver_sequence: 1,
+            registration_sequence: 1,
+            closed_confirmation: None,
+        };
+        let second = IngressRegistration {
+            connection_id: Uuid::new_v4(),
+            driver_sequence: 2,
+            registration_sequence: 2,
+            ..first.clone()
+        };
+        assert_eq!(
+            store
+                .register_source_ingress_custody(&assignment, &first, &proof())
+                .await
+                .expect("first metadata registration"),
+            SourceCustodyWrite::Applied
+        );
+        if !matches!(action, AdmissionInterleave::Register) {
+            assert_eq!(
+                store
+                    .register_source_ingress_custody(&assignment, &second, &proof())
+                    .await
+                    .expect("second metadata registration"),
+                SourceCustodyWrite::Applied
+            );
+        }
+        let retained = store
+            .prepare_source_ingress_admission(&assignment, boot, &proof())
+            .await
+            .expect("initial admission")
+            .expect("current open registration");
+        let original_revision = store
+            .source_ingress_custody(&assignment)
+            .await
+            .expect("read")
+            .expect("exact ledger")
+            .revision;
+        let interleaved = AdmissionInterleavedStore {
+            store: &store,
+            assignment: &assignment,
+            action: std::sync::Mutex::new(Some(action)),
+            second,
+        };
+        let result = interleaved
+            .prepare_source_ingress_admission(&assignment, boot, &proof())
+            .await;
+        if matches!(
+            action,
+            AdmissionInterleave::Register | AdmissionInterleave::Ack
+        ) {
+            let permission = result
+                .expect("benign accounting cannot become a Store error")
+                .expect("current authority still admits");
+            assert!(permission.assignment().same_identity(&assignment));
+            assert!(
+                store
+                    .source_ingress_custody(&assignment)
+                    .await
+                    .expect("read")
+                    .expect("ledger")
+                    .revision
+                    > original_revision,
+                "the actual accounting mutation committed between read and assertion"
+            );
+        } else {
+            assert!(
+                result.is_err() || result.expect("ordinary refusal").is_none(),
+                "changed current authority must refuse: {action:?}"
+            );
+        }
+        if matches!(action, AdmissionInterleave::AckAll) {
+            assert!(
+                store
+                    .refresh_source_ingress_admission(&retained, &proof())
+                    .await
+                    .expect("retained refresh")
+                    .is_some(),
+                "an already admitted producer permits ordinary zero-open gaps while unsealed"
+            );
+        }
+    }
+}
+
 /// These Store fixtures never admit an accepted HTTP driver or producer. They
 /// qualify SQL accounting, not physical closure. Advance their exact retained
 /// empty ledger through the production CAS; do not bypass the sealed predicate
 /// or manufacture a joined-driver receipt from metadata.
-async fn seal_fixture_owned_empty_ingress(
-    store: &SqliteStore,
-    assignment: &SourceDispatchAssignment,
-) {
+async fn install_fixture_ingress_context(store: &SqliteStore) {
     // This SQL-only fixture installs the canonical private cleanup context.
     // It admitted no transport or producer; these rows are not physical proof.
     use crate::store::sharing_source_schema as layout;
@@ -221,6 +485,13 @@ async fn seal_fixture_owned_empty_ingress(
         ("INSERT INTO sharing_source_schema_installation VALUES(1,$1,$2,1)".into(), vec![layout::SOURCE_LAYOUT_VERSION.into(), "a".repeat(64).into()]),
         ("INSERT INTO sharing_source_schema_transaction_guard VALUES(1,1)".into(), vec![]),
     ]).await.expect("actual private schema cleanup context");
+}
+
+async fn seal_fixture_owned_empty_ingress(
+    store: &SqliteStore,
+    assignment: &SourceDispatchAssignment,
+) {
+    install_fixture_ingress_context(store).await;
     let snapshot = store
         .source_ingress_custody(assignment)
         .await

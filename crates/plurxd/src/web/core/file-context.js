@@ -173,6 +173,9 @@ function playbackFileContextForFile(file){
   return localPlaybackFileContext(file.id_text!=null?file.id_text:file.id);
 }
 function samePlaybackFile(player,fileId,meta){
+  // The initial player is a transport placeholder with no attached identity.
+  // Present contexts still go through the strict brand and auth checks below.
+  if(player&&player.fileId==null&&player.fileContext==null&&!Object.hasOwn(player,"source_ref")&&!Object.hasOwn(player,"file_base")) return false;
   return !!player&&playbackFileKey(playbackFileContextForPlayer(player))
     ===playbackFileKey(meta&&meta.fileContext||fileId);
 }

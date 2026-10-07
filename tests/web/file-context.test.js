@@ -407,3 +407,22 @@ test("Shared next episode dispatches to the Source-order resolver and a fresh au
   calls.length=0;h.stub("sharedCatalogueNextEpisode",async()=>{throw new Error("Shared source changed");});
   assert.equal(await h.next(),false);assert.deepEqual(calls,["finish"]);
 });
+
+
+test("cold Shared beginPlayAttempt accepts unbound player while rejecting forged and stale contexts",()=>{
+ const ctx=vm.createContext({AUTH_GENERATION:0,API:"/api/v1"});
+ const tiers=fs.readFileSync("crates/plurxd/src/web/player/decode-tiers.js","utf8");
+ const begin=tiers.slice(tiers.indexOf("function beginPlayAttempt("),tiers.indexOf("function capturePlayInputs("));
+ vm.runInContext(source+`
+let PLAYER={fileId:null,started:false};let WATCH_CLOSE_PROMISE=null,PENDING_LIBRARY_CHANNEL_PLAYBACK=null;
+ const play={};const cancelNextEpisodePreparation=()=>{};const beginPlaybackPreparation=()=>({finish(){}});
+ const PLAY_OPEN_GATE={begin:()=>({}),current:()=>true};const document={getElementById:()=>({classList:{contains:()=>false}})};
+ `+begin+`
+this.setup=(r,f)=>sharedPlaybackFileContextFromDetail(r,f);this.begin=(c)=>beginPlayAttempt(c.source_file_id,"Shared",0,720000,{fileContext:c});this.compare=(p,c)=>samePlaybackFile(p,c.source_file_id,{fileContext:c});this.logout=()=>AUTH_GENERATION++;`,ctx);
+ const c=ctx.setup(reference,detail());assert.doesNotThrow(()=>ctx.begin(c));
+ assert.equal(ctx.compare({fileId:null},c),false);
+ assert.throws(()=>ctx.compare({fileId:null,fileContext:{...c}},c));
+ assert.throws(()=>ctx.compare({fileId:null,source_ref:{kind:"shared"}},c));
+ assert.throws(()=>ctx.compare({fileId:null,file_base:""},c));
+ ctx.logout();assert.throws(()=>ctx.compare({fileId:"7",fileContext:c},c));
+});

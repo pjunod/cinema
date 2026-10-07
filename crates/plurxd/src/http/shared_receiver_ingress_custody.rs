@@ -43,6 +43,7 @@ pub(super) async fn validate_owner_locked(
     if tuple.owner_node_id != state.node_id {
         return Err(ReceiverStartError::Unavailable);
     }
+    tracing::debug!(target: "plurx::sharing", stage = "exact_route", "receiver ingress registration progress");
     let route = exact_route(state, tuple).await?;
     let actor = state
         .sharing
@@ -99,6 +100,7 @@ pub(super) async fn validate_forward_ingress(
     let _lease_observation = actor.0.lease_observation.lock().await;
     validate_owner_locked(state, tuple).await?;
     let route = exact_route(state, tuple).await?;
+    tracing::debug!(target: "plurx::sharing", stage = "proof_read", "receiver ingress registration progress");
     let proof = state
         .store
         .receiver_relay_read_authority(&route)
@@ -142,20 +144,25 @@ pub(super) async fn register_owner(
         .receiver_starts
         .by_session(tuple.session_id)
         .ok_or(ReceiverStartError::Unavailable)?;
+    tracing::debug!(target: "plurx::sharing", stage = "lease_gate waiting", "receiver ingress registration progress");
     #[cfg(test)]
     eprintln!("B Register stage=lease_gate waiting");
     let _lease_observation = actor.0.lease_observation.lock().await;
+    tracing::debug!(target: "plurx::sharing", stage = "lease_gate acquired", "receiver ingress registration progress");
     #[cfg(test)]
     eprintln!("B Register stage=lease_gate acquired");
     validate_owner_locked(state, tuple)
         .await
         .inspect_err(|_error| {
+            tracing::warn!(target: "plurx::sharing", stage = "actual_owner", error_class = "operation_refused", "receiver ingress registration refused");
             #[cfg(test)]
             eprintln!("B Register stage=actual_owner error={_error:?}");
         })?;
+    tracing::debug!(target: "plurx::sharing", stage = "actual_owner validated", "receiver ingress registration progress");
     #[cfg(test)]
     eprintln!("B Register stage=actual_owner validated");
     let route = exact_route(state, tuple).await.inspect_err(|_error| {
+        tracing::warn!(target: "plurx::sharing", stage = "exact_route", error_class = "operation_refused", "receiver ingress registration refused");
         #[cfg(test)]
         eprintln!("B Register stage=exact_route error={_error:?}");
     })?;
@@ -164,12 +171,14 @@ pub(super) async fn register_owner(
         .receiver_relay_read_authority(&route)
         .await
         .map_err(|_error| {
+            tracing::warn!(target: "plurx::sharing", stage = "proof_read", error_class = "operation_refused", "receiver ingress registration refused");
             #[cfg(test)]
             eprintln!("B Register stage=proof_read StoreError={_error:?}");
             ReceiverStartError::Unresolved
         })?
         .ok_or(ReceiverStartError::Unavailable)
         .inspect_err(|_error| {
+            tracing::warn!(target: "plurx::sharing", stage = "proof_read", error_class = "authority_absent", "receiver ingress registration refused");
             #[cfg(test)]
             eprintln!("B Register stage=proof_read absent");
         })?;
@@ -204,6 +213,7 @@ pub(super) async fn register_owner(
         "B Register stage=members begin replicated={}",
         state.membership.is_replicated()
     );
+    tracing::debug!(target: "plurx::sharing", stage = "members", "receiver ingress registration progress");
     let members = if state.membership.is_replicated() {
         Some(
             state
@@ -211,12 +221,14 @@ pub(super) async fn register_owner(
                 .observe_ingress_custody_members()
                 .await
                 .map_err(|_error| {
+                    tracing::warn!(target: "plurx::sharing", stage = "members", error_class = "operation_refused", "receiver ingress registration refused");
                     #[cfg(test)]
                     eprintln!("B Register stage=members error={_error:?}");
                     ReceiverStartError::Unresolved
                 })?
                 .ok_or(ReceiverStartError::Unavailable)
                 .inspect_err(|_error| {
+                    tracing::warn!(target: "plurx::sharing", stage = "members", error_class = "authority_absent", "receiver ingress registration refused");
                     #[cfg(test)]
                     eprintln!("B Register stage=members absent");
                 })?,
@@ -230,6 +242,7 @@ pub(super) async fn register_owner(
         .ok_or(ReceiverStartError::Unavailable)?;
     #[cfg(test)]
     eprintln!("B Register stage=CoreCAS begin members={} registration_valid={} registered_closed={} local_boot_equal={} registration_node_equal_owner={}", members.is_some(), registration.valid(), registration.closed_confirmation.is_some(), registration.boot_id==state.sharing.accepted_drivers.boot_id(), registration.node_id==tuple.owner_node_id);
+    tracing::debug!(target: "plurx::sharing", stage = "core_cas", "receiver ingress registration progress");
     let result = state
         .store
         .register_receiver_ingress(
@@ -240,10 +253,12 @@ pub(super) async fn register_owner(
         )
         .await
         .map_err(|_error| {
+            tracing::warn!(target: "plurx::sharing", stage = "CoreCAS", error_class = "operation_refused", "receiver ingress registration refused");
             #[cfg(test)]
             eprintln!("B Register stage=CoreCAS StoreError={_error:?}");
             ReceiverStartError::Unresolved
         })?;
+    tracing::debug!(target: "plurx::sharing", stage = "core_cas", outcome = ?result, "receiver ingress registration outcome");
     // A refused CAS may race another accepted write. It cannot discharge an
     // ingress reservation merely because this exchange did not observe it.
     #[cfg(test)]
@@ -266,6 +281,13 @@ pub(super) async fn ack_owner(
     if !receipt.matches(driver) {
         return Err(ReceiverStartError::Unavailable);
     }
+    // Serialize known ledger writes with live Register without requiring a
+    // surviving actor for authenticated terminal/orphan cleanup.
+    let actor = state.sharing.receiver_starts.by_session(tuple.session_id);
+    let _lease_observation = match actor.as_ref() {
+        Some(actor) => Some(actor.0.lease_observation.lock().await),
+        None => None,
+    };
     let route = exact_route(state, tuple).await?;
     let snapshot = state
         .store
@@ -344,7 +366,44 @@ async fn exchange_at_owner(
 /// This cache owns metadata reservations, never sockets. The accepted-driver
 /// monitor owns registration through cancellation and its finite closure ACK.
 #[derive(Default)]
-pub(super) struct ReceiverIngressCache(Mutex<Vec<Arc<ReceiverIngressEntry>>>);
+pub(super) struct ReceiverIngressCache(
+    Mutex<Vec<Arc<ReceiverIngressEntry>>>,
+    Mutex<Vec<ReceiverRegistrationCoordinator>>,
+);
+struct ReceiverRegistrationCoordinator {
+    incarnation: Uuid,
+    owner_identity: String,
+    gate: std::sync::Weak<tokio::sync::Mutex<()>>,
+}
+impl ReceiverIngressCache {
+    fn registration_gate(
+        &self,
+        tuple: &ReceiverForwardTuple,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, ReceiverStartError> {
+        let mut slots = self.1.lock().expect("receiver registration coordinators");
+        slots.retain(|slot| slot.gate.strong_count() > 0);
+        if let Some(gate) = slots
+            .iter()
+            .find(|slot| {
+                slot.incarnation == tuple.incarnation_id
+                    && slot.owner_identity == tuple.owner_identity
+            })
+            .and_then(|slot| slot.gate.upgrade())
+        {
+            return Ok(gate);
+        }
+        if slots.len() >= 512 {
+            return Err(ReceiverStartError::Capacity);
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        slots.push(ReceiverRegistrationCoordinator {
+            incarnation: tuple.incarnation_id,
+            owner_identity: tuple.owner_identity.clone(),
+            gate: Arc::downgrade(&gate),
+        });
+        Ok(gate)
+    }
+}
 struct ReceiverIngressEntry {
     tuple: ReceiverForwardTuple,
     ingress: ReceiverForwardIngress,
@@ -368,7 +427,10 @@ async fn wait_admission(
         }
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), changed)
             .await
-            .map_err(|_| ReceiverStartError::Deadline)?;
+            .map_err(|_| {
+                tracing::warn!(target: "plurx::sharing", stage = "admission_wait", error_class = "deadline", "receiver ingress admission unresolved");
+                ReceiverStartError::Deadline
+            })?;
     }
 }
 pub(super) async fn receiver_forward_admit(
@@ -414,6 +476,18 @@ pub(super) async fn receiver_forward_admit(
     for principal in pressure {
         let _ = reconcile_principal(state.clone(), connection, &principal, pressure_deadline).await;
     }
+    // The scheduling guard moves into the accepted monitor: cancellation of
+    // this caller must not expose another driver while Register is in flight.
+    // An uncertain outcome releases scheduling only, retaining the common fence.
+    let gate = state
+        .sharing
+        .receiver_starts
+        .ingress
+        .registration_gate(&tuple)?;
+    let registration_guard =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), gate.lock_owned())
+            .await
+            .map_err(|_| ReceiverStartError::Deadline)?;
     let driver = state
         .sharing
         .accepted_drivers
@@ -560,6 +634,7 @@ pub(super) async fn receiver_forward_admit(
                     ReceiverCustodyReply::Unresolved => "unresolved",
                 })
             );
+            tracing::debug!(target: "plurx::sharing", stage = "owner_exchange", outcome = ?outcome.as_ref().map(|reply| match reply { ReceiverCustodyReply::Applied => "applied", ReceiverCustodyReply::Replay => "replay", ReceiverCustodyReply::Refused => "refused", ReceiverCustodyReply::ReconciledClosed => "reconciled_closed", ReceiverCustodyReply::Unresolved => "unresolved" }), "receiver ingress registration exchange completed");
             let admitted = match outcome {
                 Ok(ReceiverCustodyReply::Applied | ReceiverCustodyReply::Replay) => {
                     permit.complete();
@@ -567,6 +642,7 @@ pub(super) async fn receiver_forward_admit(
                 }
                 _ => Err(ReceiverStartError::Unresolved),
             };
+            drop(registration_guard);
             *monitored
                 .admitted
                 .lock()
@@ -977,4 +1053,140 @@ pub(super) async fn confirmed_terminal_end(state: &AppState, tuple: &ReceiverFor
     matches!(state.store.receiver_ingress_snapshot(&route).await,
         Ok(Some(snapshot)) if snapshot.owner_identity == tuple.owner_identity
             && snapshot.state.is_sealed() && snapshot.state.settled())
+}
+
+#[cfg(test)]
+mod registration_coordination_tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    /// This pins registration scheduling and the existing ambiguity fence;
+    /// constructed driver identities do not claim a physical closure receipt.
+    #[tokio::test]
+    async fn sharing_receiver_known_registration_overlap_waits_but_unknown_reservation_stays_fenced(
+    ) {
+        let registry = crate::sharing_connection_custody::AcceptedDriverRegistry::default();
+        let first_connection = crate::SharingConnectionCancellation::new();
+        let second_connection = crate::SharingConnectionCancellation::new();
+        let third_connection = crate::SharingConnectionCancellation::new();
+        let first = registry
+            .capture(&first_connection, "owner")
+            .expect("first driver");
+        let second = registry
+            .capture(&second_connection, "owner")
+            .expect("second driver");
+        let third = registry
+            .capture(&third_connection, "owner")
+            .expect("third driver");
+        let incarnation = Uuid::new_v4();
+        let identity = "a".repeat(64);
+        let cache = ReceiverIngressCache::default();
+        let tuple = ReceiverForwardTuple {
+            incarnation_id: incarnation,
+            session_id: Uuid::new_v4(),
+            owner_node_id: "owner".into(),
+            owner_epoch: 1,
+            owner_identity: identity.clone(),
+        };
+        let gate = cache.registration_gate(&tuple).expect("principal gate");
+        assert!(Arc::ptr_eq(
+            &gate,
+            &cache
+                .registration_gate(&tuple)
+                .expect("same principal gate")
+        ));
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let first_guard = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            gate.clone().lock_owned(),
+        )
+        .await
+        .expect("first operation");
+        let mut first_permit = registry.registration_guard().await.expect("first permit");
+        first
+            .prepare_obligation(&mut first_permit, "receiver", incarnation, &identity)
+            .expect("known registration in flight");
+        let next = async {
+            let _guard =
+                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), gate.lock())
+                    .await
+                    .expect("queued operation");
+            let mut permit = registry.registration_guard().await.expect("second permit");
+            let obligation = second
+                .prepare_obligation(&mut permit, "receiver", incarnation, &identity)
+                .expect("definite predecessor registration completed");
+            // Dropping this unresolved permit intentionally models a cancelled
+            // or uncertain Register, not a successful durable registration.
+            (obligation, permit)
+        };
+        tokio::pin!(next);
+        assert!(
+            next.as_mut().now_or_never().is_none(),
+            "overlap waits instead of touching the common pending fence"
+        );
+        assert!(
+            tokio::time::timeout_at(tokio::time::Instant::now(), gate.lock())
+                .await
+                .is_err(),
+            "an expired caller cannot wait indefinitely"
+        );
+        // The real accepted connection owns this operation after its caller's
+        // scheduling handle disappears. This claims no socket-close receipt.
+        let caller_gate = gate.clone();
+        let (complete, completion) = tokio::sync::oneshot::channel();
+        let (finished, finish) = tokio::sync::oneshot::channel();
+        first_connection
+            .monitor(async move {
+                completion.await.expect("definite registration result");
+                first_permit.complete();
+                drop(first_guard);
+                let _ = finished.send(());
+            })
+            .expect("accepted monitor owns scheduling guard");
+        drop(caller_gate);
+        assert!(
+            next.as_mut().now_or_never().is_none(),
+            "caller cancellation cannot release the monitor's guard"
+        );
+        complete.send(()).expect("monitor result receiver");
+        finish.await.expect("monitor completion");
+        let (unknown, unknown_permit) = next.await;
+        drop(unknown_permit);
+        let _next_guard =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), gate.lock())
+                .await
+                .expect("scheduler custody released");
+        let mut third_permit = registry.registration_guard().await.expect("third permit");
+        assert!(
+            third
+                .prepare_obligation(&mut third_permit, "receiver", incarnation, &identity)
+                .is_err(),
+            "owner scheduling cannot clear an unknown registration"
+        );
+        // A separate principal remains independent despite the exact pending
+        // reservation. No global lock is held through registration work.
+        let mut unrelated_tuple = tuple.clone();
+        unrelated_tuple.incarnation_id = Uuid::new_v4();
+        let unrelated_gate = cache
+            .registration_gate(&unrelated_tuple)
+            .expect("unrelated principal gate");
+        assert!(!Arc::ptr_eq(&gate, &unrelated_gate));
+        let _unrelated = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            unrelated_gate.lock(),
+        )
+        .await
+        .expect("independent principal");
+        let mut unrelated_permit = registry
+            .registration_guard()
+            .await
+            .expect("independent permit");
+        third
+            .prepare_obligation(&mut unrelated_permit, "receiver", Uuid::new_v4(), &identity)
+            .expect("unrelated registration proceeds");
+        unrelated_permit.complete();
+        // Only explicit reconciliation of the exact pending reservation can
+        // release it. No physical-close ACK is manufactured by this test.
+        assert!(registry.reconcile_guard(&unknown).await.is_ok());
+    }
 }

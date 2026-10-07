@@ -43,6 +43,7 @@ struct SourceStartEntry {
     ending: std::sync::Mutex<Option<std::sync::Arc<SourceEndOwner>>>,
     end_deadline: std::sync::OnceLock<std::time::Instant>,
     local_custody: std::sync::Mutex<Vec<ingress::LocalCustody>>,
+    registration_gate: std::sync::Arc<ingress::RegistrationGate>,
     changed: tokio::sync::Notify,
     result: std::sync::Mutex<Option<Result<SourceStartOwned, SourceStartFailure>>>,
     task: SourceStartTask,
@@ -194,6 +195,21 @@ impl SourceStartEntry {
                     SourceStartTaskJoined::PanickedOrCancelled,
                 ),
             };
+            if let Err(error) = &result {
+                let stage = match &*entry.task.stage.lock().expect("Source start stage") {
+                    SourceStartTaskStage::Registered => "registered",
+                    SourceStartTaskStage::ReadingIntent { .. } => "reading_intent",
+                    SourceStartTaskStage::IntentReady { .. } => "intent_ready",
+                    SourceStartTaskStage::Claiming { .. } => "claiming",
+                    SourceStartTaskStage::Acquired(_) => "preparing",
+                    SourceStartTaskStage::Assigning(_) => "assigning",
+                    SourceStartTaskStage::Assigned(_) => "ingress_admission",
+                    SourceStartTaskStage::Activating(_) => "activation_authority",
+                    SourceStartTaskStage::InvokingFactory(_) => "factory_invocation",
+                    SourceStartTaskStage::FactoryRefused(_) => "factory_refused",
+                };
+                tracing::warn!(target: "plurx::sharing", stage, error_class = ?error, "Source initial Start failed");
+            }
             if let Ok(owned) = &result {
                 debug_assert_eq!(
                     entry
@@ -332,6 +348,7 @@ impl SourceStartRegistry {
             ending: std::sync::Mutex::new(None),
             end_deadline: std::sync::OnceLock::new(),
             local_custody: Default::default(),
+            registration_gate: Default::default(),
             changed: tokio::sync::Notify::new(),
             result: std::sync::Mutex::new(None),
             task: SourceStartTask::default(),
@@ -808,6 +825,7 @@ async fn live_operation_owner(
         connection.ok_or_else(unavailable)?,
         &entry,
         &owned.assignment,
+        deadline,
     )
     .await?;
     Ok((entry, owned))
@@ -962,11 +980,12 @@ async fn status(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(9);
     let bytes = axum::body::to_bytes(body, 128 * 1024)
         .await
-        .map_err(|_| invalid())?;
-    let input = parse_operation_request(&bytes, &item, &file, &request)?;
-    let viewer = viewer_hash(&headers)?;
-    let hash = source_credential_hash(&headers)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.body", error_class = "invalid", "Source status refused"); invalid() })?;
+    let input = parse_operation_request(&bytes, &item, &file, &request).inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.input", error_class = "invalid", "Source status refused"); })?;
+    let viewer = viewer_hash(&headers).inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.viewer", error_class = "invalid", "Source status refused"); })?;
+    let hash = source_credential_hash(&headers).inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.credential", error_class = "invalid", "Source status refused"); })?;
     let current = current_reference(&state, &headers, &input.start.reference).await;
+    tracing::debug!(target: "plurx::sharing", stage = "source_status.current_reference", current_authority = current.is_ok(), "Source status authority observation");
     let entry = match current.as_ref() {
         Ok((current_hash, current_grant)) => state.transcode.source_http_starts.current_entry(
             *current_grant,
@@ -979,20 +998,22 @@ async fn status(
             .source_http_starts
             .cleanup_entry(&hash, &viewer, &input.start),
     }
-    .map_err(SourceStartFailure::response)?;
+    .inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.entry", error_class = "operation_refused", "Source status refused"); }).map_err(SourceStartFailure::response)?;
     entry
         .validate_known(input.known.as_ref())
+        .inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.known_lineage", error_class = "operation_refused", "Source status refused"); })
         .map_err(SourceStartFailure::response)?;
     let owned = entry
         .wait(deadline)
         .await
+        .inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.entry_wait", error_class = "operation_refused", "Source status refused"); })
         .map_err(SourceStartFailure::response)?;
     let ledger = state
         .store
         .source_ingress_custody(&owned.assignment)
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", "Source status refused"); unavailable() })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "absent", "Source status refused"); unavailable() })?;
     let cleanup_only = headers.cleanup_only()
         || current.is_err()
         || ledger.state.is_sealed()
@@ -1000,11 +1021,12 @@ async fn status(
     if !cleanup_only {
         ingress::register_local(
             &state,
-            &connection.as_ref().ok_or_else(unavailable)?.0,
+            &connection.as_ref().ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.connection", error_class = "absent", "Source status refused"); unavailable() })?.0,
             &entry,
             &owned.assignment,
+            deadline,
         )
-        .await?;
+        .await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.register_local", error_class = "operation_refused", "Source status refused"); })?;
     }
     if let (Ok((_, current_grant)), true) =
         (current.as_ref(), owned.actor.is_direct() && !cleanup_only)
@@ -1018,7 +1040,7 @@ async fn status(
             *current_grant,
             deadline,
         )
-        .await
+        .await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_published", error_class = "operation_refused", "Source status refused"); })
         {
             return Ok(super::shared_library::guard_source_response(
                 state,
@@ -1029,16 +1051,18 @@ async fn status(
         }
     }
     if current.is_ok() && !cleanup_only {
-        if let Ok((response, guard)) = owned.actor.open_start_response(deadline).await {
-            ingress::publication_allowed(&state, &owned.assignment).await?;
+        if let Ok((response, guard)) = owned.actor.open_start_response(deadline).await.inspect_err(|error| { tracing::warn!(target: "plurx::sharing", stage = "source_status.vod_published", error_class = ?error, "Source status refused"); }) {
+            ingress::publication_allowed(&state, &owned.assignment).await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.publication_allowed", error_class = "operation_refused", "Source status refused"); })?;
             entry
                 .observe_published(&owned, &response)
+                .inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.observed_reply", error_class = "operation_refused", "Source status refused"); })
                 .map_err(SourceStartFailure::response)?;
             // The same actual full Start envelope/guard is used for live status;
             // neither stored JSON nor cleanup authority can establish readiness.
             let (_, current_grant) =
-                current_reference(&state, &headers, &input.start.reference).await?;
+                current_reference(&state, &headers, &input.start.reference).await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.current_recheck", error_class = "operation_refused", "Source status refused"); })?;
             if current_grant != entry.grant {
+                tracing::warn!(target: "plurx::sharing", stage = "source_status.grant_recheck", error_class = "mismatch", "Source status refused");
                 return Err(unavailable());
             }
             let response = super::shared_library::source_file_json(
@@ -1054,6 +1078,7 @@ async fn status(
             .await);
         }
     }
+    tracing::debug!(target: "plurx::sharing", stage = "source_status.cleanup_projection", cleanup_only, current_authority = current.is_ok(), "Source status returns terminal-only projection");
     // Revoked grants get no live metadata, resources or readiness. The exact
     // retained cleanup identity may observe only genuine terminal settlement.
     let published = entry
@@ -1477,6 +1502,7 @@ async fn resources(
         &connection.as_ref().ok_or_else(unavailable)?.0,
         &entry,
         &owned.assignment,
+        deadline,
     )
     .await?;
     let opened = owned
@@ -1611,7 +1637,7 @@ async fn start(
     }
     let assignment = ingress::assigned(&state, &entry, deadline).await?;
     let connection = connection.ok_or_else(unavailable)?;
-    ingress::register_local(&state, &connection.0, &entry, &assignment).await?;
+    ingress::register_local(&state, &connection.0, &entry, &assignment, deadline).await?;
     let owned = entry
         .wait(deadline)
         .await
@@ -1821,16 +1847,17 @@ async fn own_start(
         .store
         .initialize_source_ingress_custody(&assignment)
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_initialize", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     loop {
         let changed = entry.changed.notified();
         let ledger = state
             .store
             .source_ingress_custody(&assignment)
             .await
-            .map_err(|_| SourceStartFailure::Unresolved)?
-            .ok_or(SourceStartFailure::Unresolved)?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_read", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
+            .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
         if ledger.state.is_sealed() {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_sealed", "Source initial admission refused");
             return Err(SourceStartFailure::Unresolved);
         }
         if ledger.state.open().next().is_some() {
@@ -1838,15 +1865,15 @@ async fn own_start(
         }
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), changed)
             .await
-            .map_err(|_| SourceStartFailure::Unresolved)?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_wait", error_class = "deadline", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     }
 
     let members = state
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
-        .ok_or(SourceStartFailure::Unresolved)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.members", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_members_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     let ingress_permission = state
         .store
         .prepare_source_ingress_admission(
@@ -1855,18 +1882,18 @@ async fn own_start(
             &members,
         )
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
-        .ok_or(SourceStartFailure::Unresolved)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_permission", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_permission_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     entry.retain_stage(SourceStartTaskStage::Activating(assignment.clone()));
     let activation = match state
         .store
         .prepare_source_activation_authority(&assignment, &state.sharing.key, &members)
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
     {
         SourceWriteAuthorityRead::Ready(value) => *value,
-        SourceWriteAuthorityRead::Unavailable => return Err(SourceStartFailure::Unresolved),
-        SourceWriteAuthorityRead::Capacity => return Err(SourceStartFailure::Capacity),
+        SourceWriteAuthorityRead::Unavailable => { tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "refused", "Source initial admission refused"); return Err(SourceStartFailure::Unresolved); },
+        SourceWriteAuthorityRead::Capacity => { tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "capacity", "Source initial admission refused"); return Err(SourceStartFailure::Capacity); },
     };
     entry.retain_stage(SourceStartTaskStage::InvokingFactory(assignment.clone()));
     let actor = match direct::start_prepared_worker(

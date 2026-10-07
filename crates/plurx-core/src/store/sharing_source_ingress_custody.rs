@@ -91,6 +91,29 @@ fn snapshot_guard(snapshot: &IngressCustodySnapshot) -> Result<String, StoreErro
         quote(&snapshot.state.encode()?)
     ))
 }
+/// Admission observes current semantic custody, not an accounting CAS revision.
+/// Register/ACK may legitimately change slots while retaining this exact owner.
+/// Mutating accounting operations continue to use `snapshot_guard` unchanged.
+fn current_admission_guard(
+    snapshot: &IngressCustodySnapshot,
+    fresh_factory: bool,
+) -> Result<String, StoreError> {
+    let routing = snapshot.state.source_routing().ok_or_else(invalid)?;
+    let routing_json = serde_json::to_string(routing).map_err(|_| invalid())?;
+    let open = if fresh_factory {
+        // Option<String> decodes both JSON null and an omitted optional field
+        // as None. Other JSON types never describe an open registration.
+        "AND EXISTS(SELECT 1 FROM json_each(c.custody_json,'$.slots') slot WHERE json_type(slot.value)='object' AND (json_type(slot.value,'$.closed_confirmation')='null' OR json_type(slot.value,'$.closed_confirmation') IS NULL))"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "EXISTS(SELECT 1 FROM sharing_ingress_custody c WHERE c.principal_kind='source' AND c.incarnation_id={} AND c.owner_identity={} AND json_valid(c.custody_json) AND (SELECT count(*) FROM json_each(c.custody_json))=5 AND json_type(c.custody_json,'$.version')='integer' AND json_extract(c.custody_json,'$.version')=1 AND json_type(c.custody_json,'$.sealed')='false' AND json_type(c.custody_json,'$.slots')='array' AND json_type(c.custody_json,'$.highwater')='array' AND json_type(c.custody_json,'$.source_routing')='object' AND json_extract(c.custody_json,'$.source_routing')={} {open})",
+        quote(&snapshot.incarnation_id.to_string()),
+        quote(&snapshot.owner_identity),
+        quote(&routing_json),
+    ))
+}
 async fn snapshot<T: Backend>(
     store: &T,
     assignment: &SourceDispatchAssignment,
@@ -239,7 +262,7 @@ async fn ingress_admission<T: Backend>(
     let mut check = assertion(&format!(
         "{} AND {} AND ({floor})",
         source_guard(assignment),
-        snapshot_guard(&snapshot)?
+        current_admission_guard(&snapshot, fresh_factory)?
     ));
     check.1 = values;
     let counts = store.sharing_txn(vec![check]).await?;

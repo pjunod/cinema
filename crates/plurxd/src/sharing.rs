@@ -30,6 +30,7 @@ pub(crate) struct ImportTransportStatus {
 }
 #[derive(Clone, Serialize)]
 pub(crate) struct SharingStatus {
+    pub source_activation_at_boot: Option<bool>,
     pub listener: &'static str,
     pub listener_address: String,
     pub certificate: Option<CertificateStatus>,
@@ -279,6 +280,7 @@ impl SharingManager {
             key,
             key_directory,
             status: RwLock::new(SharingStatus {
+                source_activation_at_boot: None,
                 listener: "not_started",
                 listener_address: network.bind.to_string(),
                 certificate: None,
@@ -306,6 +308,13 @@ impl SharingManager {
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn catalogue_cache_entries(&self) -> usize {
         self.catalogue_cache.lock().expect("cache").entries.len()
+    }
+    /// Advisory startup evidence only; never admission authority.
+    pub fn observe_source_activation_at_boot(&self, ready: Option<bool>) {
+        self.status
+            .write()
+            .expect("sharing status lock")
+            .source_activation_at_boot = ready;
     }
     pub fn status(&self) -> SharingStatus {
         let mut status = self.status.read().expect("sharing status lock").clone();
@@ -2226,6 +2235,22 @@ mod tests {
         secrets::{CredentialKey, SharingSecretPurpose},
         sharing::{ImportSummary, StoredImport},
     };
+    #[test]
+    fn sharing_boot_activation_observation_is_tri_state_and_survives_enable_wakes() {
+        let manager = SharingManager::new(
+            Arc::new(CredentialKey::from_bytes([41; 32])),
+            PathBuf::from("unused-advisory-fixture"),
+            SharingNetworkConfig::default(),
+        );
+        assert_eq!(manager.status().source_activation_at_boot, None);
+        manager.observe_source_activation_at_boot(Some(false));
+        manager.enablement_written(true);
+        assert_eq!(manager.status().source_activation_at_boot, Some(false));
+        manager.observe_source_activation_at_boot(Some(true));
+        manager.enablement_written(false);
+        assert_eq!(manager.status().source_activation_at_boot, Some(true));
+        assert_eq!(manager.status().listener, "not_started");
+    }
     #[test]
     fn sharing_source_dispatch_retains_complete_receiver_recipe_and_private_request() {
         use plurx_core::{

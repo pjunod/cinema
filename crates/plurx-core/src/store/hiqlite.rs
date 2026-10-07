@@ -309,7 +309,7 @@ const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
 const CREDENTIAL_MUTATION_INTENT_END_SQL: &str =
     "DELETE FROM cluster_credential_mutation_intents WHERE singleton = 1";
 
-const AUTH_SCHEMA: &str = r#"
+pub(super) const AUTH_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS cluster_meta (
     singleton        INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_version   INTEGER NOT NULL,
