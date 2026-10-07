@@ -10,6 +10,183 @@ from validation.python_unit_receipts import ReceiptError
 
 
 class MainUnitReceiptsCase(unittest.TestCase):
+    def test_exact_upload_failure_retains_only_original_incomplete_start(self):
+        import contextlib
+        import io
+        import json
+        proof = copy.deepcopy(main.PREUNIT_UPLOAD4324)
+        scope = {'repository': 1, 'pr': 845, 'branch': proof['branch'], 'base': 'main', 'workflow': main.WORKFLOW}
+        repo = {'id': 1, 'full_name': 'owner/repository'}
+        event = {'repository': repo, 'number': 845, 'action': 'synchronized', 'pull_request': {
+            'number': 845, 'draft': False, 'state': 'open',
+            'head': {'repo': repo, 'sha': proof['commit'], 'ref': proof['branch']},
+            'base': {'repo': repo, 'ref': 'main', 'sha': proof['base']}}}
+        prior = {'id': proof['run'], 'repository': repo, 'commit_sha': proof['commit'],
+                 'workflow_id': main.WORKFLOW, 'event': 'pull_request',
+                 'event_payload': json.dumps(event), 'status': 'failure'}
+        job = {'id': proof['job'], 'run_id': proof['run'], 'repo_id': 1, 'attempt': 1,
+               'task_id': proof['task'], 'name': main.JOB, 'status': 'failure'}
+        test = 'validation:test_fixture.Case.test_ok'
+        start = {'version': main.receipts.VERSION, 'scope': scope, 'run': proof['run'],
+                 'commit': proof['commit'], 'complete': False, 'fixture_errors': [],
+                 'passes': {test: {'run': 4315, 'commit': 'b' * 40}}}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            main.emit_snapshot(start, 'start')
+        lines = output.getvalue().splitlines()
+        for _ in range(3):
+            lines += ['Beginning upload of artifact content to blob storage',
+                      '::error::Error runner api getting task: task is not running%0A']
+        lines += [f"Job '{main.JOB}' failed"]
+        raw = ('\n'.join(lines) + '\n').encode()
+        proof.update(log_bytes=len(raw), log_sha256=main.hashlib.sha256(raw).hexdigest(),
+                     sources={'validation/main_unit_receipts.py': main.hashlib.sha256(b'reviewed source').hexdigest()})
+        class API:
+            log = raw
+            run = prior
+            producer = b'reviewed source'
+            markers = []
+            run_artifacts = []
+            def get(self, path):
+                return self.run_artifacts if path.endswith('/artifacts') else self.run
+            def pages(self, path, query=None):
+                return [job] if path.endswith('/jobs') else self.markers
+            def bytes(self, path, query=None):
+                return self.log if path.endswith('/logs') else self.producer
+        api = API()
+        with patch.object(main, 'PREUNIT_UPLOAD4324', proof), patch.object(main, 'source', return_value=b'reviewed source'), \
+             patch.object(main, 'validate_bridge_environment'):
+            recovered = main.recover_log(api, scope, prior, job, [])
+            self.assertEqual(recovered, start)
+            self.assertIs(recovered['complete'], False)
+            self.assertEqual(recovered['passes'][test]['run'], 4315)
+            self.assertIsNone(main.recover_preunit_upload4324(api, scope, dict(prior, id=4323), job))
+            for changed in (dict(job, status='running'), dict(job, attempt=2), dict(job, task_id=0),
+                            dict(job, id=44111), dict(job, repo_id=2)):
+                with self.subTest(job=changed), self.assertRaises(ReceiptError):
+                    main.recover_preunit_upload4324(api, scope, prior, changed)
+            api.log = raw + b'Ran 1 test in 0.01s\n'
+            with self.assertRaises(ReceiptError):
+                main.recover_preunit_upload4324(api, scope, prior, job)
+            api.log, api.producer = raw, b'changed remote source'
+            with self.assertRaises(ReceiptError):
+                main.recover_preunit_upload4324(api, scope, prior, job)
+            api.producer, api.markers = b'reviewed source', [{'run_id': proof['run']}]
+            with self.assertRaises(ReceiptError):
+                main.recover_preunit_upload4324(api, scope, prior, job)
+            api.markers, api.run_artifacts = [], [{'id': 1}]
+            with self.assertRaises(ReceiptError):
+                main.recover_preunit_upload4324(api, scope, prior, job)
+            api.run_artifacts, api.run = [], dict(prior, status='success')
+            with self.assertRaises(ReceiptError):
+                main.recover_preunit_upload4324(api, scope, prior, job)
+
+    def test_failed_upload_start_requires_authenticated_origin_then_current_applicability(self):
+        commit = 'a' * 40
+        scope = {'repository': 1, 'pr': 845, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        prior = {'id': 4324, 'commit_sha': commit}
+        test = 'validation:test_fixture.Case.test_ok'
+        value = {'run': 4315, 'commit': 'b' * 40}
+        start = {'version': main.receipts.VERSION, 'scope': scope, 'run': 4324, 'commit': commit,
+                 'complete': False, 'passes': {test: value}, 'fixture_errors': []}
+        class API:
+            def pages(self, path, query=None, field=None):
+                if path == '/actions/artifacts': return []
+                if path == '/actions/runs': return [prior]
+                return [{'id': 44110, 'name': main.JOB, 'repo_id': 1, 'run_id': 4324,
+                         'attempt': 1, 'status': 'failure', 'task_id': 16574}]
+            def bytes(self, path, query=None): return b'validation.main_unit_receipts'
+        class Applicability:
+            applicable = True
+            def __call__(self, identity, origin): return self.applicable
+            def finish(self, passes): pass
+        bridge = ({test: dict(value, job=44000, attempt=1, outcome='success')}, {4315, 4324})
+        checker = Applicability()
+        with patch.object(main, 'authenticate_run'), patch.object(main, 'validate_bridge_environment'), \
+             patch.object(main, 'unexecuted_preflight', return_value=False), \
+             patch.object(main, 'recover_preunit_upload4324', return_value=start):
+            self.assertEqual(main.restore(API(), scope, 4325, checker, bridge), {test: value})
+            checker.applicable = False
+            self.assertEqual(main.restore(API(), scope, 4325, checker, bridge), {})
+            with self.assertRaisesRegex(ReceiptError, 'authenticated provenance'):
+                main.restore(API(), scope, 4325, checker, ({}, {4324}))
+        self.assertIs(start['complete'], False)
+
+    def test_bridge_production_inputs_invalidate_only_the_changed_method(self):
+        from validation import main_preflight_adoption as adoption
+        current, original = 'a' * 40, 'b' * 40
+        checker = object.__new__(main.DeclaredApplicability)
+        checker.adoption, checker.commit = adoption, current
+        checker.paths = {'tests/validation/test_fixture.py'}
+        checker.families = [{'id_prefix': 'validation:test_fixture.', 'inputs': ['input'], 'reason': 'fixture'}]
+        checker.source = unittest.mock.Mock(return_value=True)
+        value = {'run': 3, 'commit': original}
+        with patch.object(adoption, 'input_digest', side_effect=lambda commit, row: commit):
+            self.assertFalse(checker('validation:test_fixture.Case.test_changed', value))
+        with patch.object(adoption, 'input_digest', return_value='same'):
+            self.assertTrue(checker('validation:test_fixture.Case.test_retained', value))
+            checker.source.return_value = False
+            self.assertFalse(checker('validation:test_fixture.Case.test_changed_fixture', value))
+        checker.families = []
+        with self.assertRaises(ReceiptError):
+            checker('validation:test_fixture.Case.test_unknown', value)
+        self.assertFalse(checker('validation:test_removed.Case.test_removed', value))
+
+    def test_bridge_environment_requires_original_producer_and_matching_runtime(self):
+        from validation import main_preflight_adoption as adoption
+        env = {'platform': 'linux', 'machine': 'x86_64', 'python': [3, 12], 'node': 'v22.23.2'}
+        journal = {'environment': env, 'producer_blob': 'a' * 40}
+        commands = ['python3 -m validation.main_unit_receipts prepare',
+                    'python3 -m validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations',
+                    'python3 -m validation.main_preflight_adoption node']
+        with patch.object(adoption, 'environment', return_value=env), \
+             patch.object(adoption, 'git', return_value='a' * 40), \
+             patch.object(adoption, 'run_commands', return_value=commands):
+            main.validate_bridge_environment(journal, journal, 'b' * 40)
+            for changed in (dict(journal, producer_blob='c' * 40),
+                            dict(journal, environment=dict(env, python=[3, 14]))):
+                with self.assertRaises(ReceiptError):
+                    main.validate_bridge_environment(journal, changed, 'b' * 40)
+            with patch.object(adoption, 'run_commands', return_value=commands[:1]), self.assertRaises(ReceiptError):
+                main.validate_bridge_environment(journal, journal, 'b' * 40)
+
+    def test_bridge_retains_authenticated_origin_before_current_input_filtering(self):
+        commit = 'a' * 40
+        test = 'validation:test_fixture.Case.test_ok'
+        scope = {'repository': 1, 'pr': 845, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        attribution = {'run': 5, 'commit': 'b' * 40}
+        start = {'version': main.receipts.VERSION, 'scope': scope, 'run': 10, 'commit': commit,
+                 'complete': False, 'passes': {test: attribution}, 'fixture_errors': []}
+        prior = {'id': 10, 'commit_sha': commit}
+        class Applicability:
+            def __call__(self, identity, value): return False
+            def finish(self, passes): pass
+        class API:
+            def pages(self, path, query=None, field=None):
+                if path == '/actions/runs': return [prior]
+                if path == '/actions/artifacts':
+                    marker = query['name'].endswith('-start-10')
+                    return [{'name': query['name'], 'expired': False, 'size_in_bytes': 1,
+                             'run_id': 10, 'id': 2 if marker else 1}]
+                return [{'id': 3, 'name': main.JOB, 'repo_id': 1, 'run_id': 10, 'attempt': 1, 'status': 'failure'}]
+            def bytes(self, path, query=None):
+                if path.endswith(main.WORKFLOW): return b'validation.main_unit_receipts'
+                return start
+        bridge = ({test: dict(attribution, job=4, attempt=1, outcome='success')}, {5})
+        with patch.object(main, 'authenticate_run'), patch.object(main, 'validate_bridge_environment'), \
+             patch.object(main.receipts, 'artifact_json', side_effect=lambda value: value):
+            self.assertEqual(main.restore(API(), scope, 11, Applicability(), bridge), {})
+            with self.assertRaises(ReceiptError):
+                main.restore(API(), scope, 11, Applicability(), ({}, {5}))
+
+    def test_bridge_does_not_replace_ordinary_main_python_applicability(self):
+        with patch.object(main.receipts, 'SourceApplicability', return_value='ordinary') as checker, \
+             patch.object(main, 'DeclaredApplicability', return_value='declared') as bridge:
+            self.assertEqual(main.applicability_for({'repository': 1, 'pr': 7}, 'a' * 40), 'ordinary')
+            self.assertEqual(main.applicability_for({'repository': 1, 'pr': 845}, 'a' * 40), 'declared')
+            self.assertEqual(checker.call_count, 1)
+            self.assertEqual(bridge.call_count, 1)
+
     def test_failed_pre_receipt_run_still_uses_legacy_bootstrap(self):
         scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
         commit = 'a' * 40

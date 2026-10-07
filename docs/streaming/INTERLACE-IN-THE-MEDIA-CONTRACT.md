@@ -506,6 +506,23 @@ ratified; by the two bars above until then.
   `heavy_source` keeps on the CPU chain anyway; only a mis-flagged heavy
   HEVC file pays.
 
+**2026-10-07 — source correction in the final architecture close-out.**
+The candidate request now preserves the existing eligible GPU graph until
+resolved facts decide its scan-dependent pipeline. Rolling lookup/start,
+retained/cache paths, finite preparation, speculative and offline producers
+carry that resolved pipeline into execution options, retry preparation and
+attribution; no other execution fields are rewritten. Offers report the
+resolved graph, or no concrete graph on resolution error while retaining the
+ordinary offer fallback. This does not adopt hardware deinterlace, restore an
+obsolete subtitle exclusion or change scheduling. Confirmed/unavailable
+interlace still selects CPU `bwdif`; a strict progressive overrule can retain
+the qualified GPU candidate. The two actual manager-path regressions and the
+source/physical-evidence boundary are recorded in the
+[close-out](../reviews/ARCHITECTURE-REVIEW-2026-09-20-CLOSEOUT.md#the-confirmed-routing-repair-is-in-progress).
+This forward correction supersedes the October 2 missing-code statement;
+existing motion/display acceptance and the historical measurements below keep
+their original scope.
+
 ## 9. M5 evidence and decision (2026-10-02)
 
 Measured on lab3 (Alder Lake-P iGPU, iHD VA-API driver with libva 1.24,
