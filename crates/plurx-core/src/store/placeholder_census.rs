@@ -658,9 +658,13 @@ fn principal_bindings(
         };
         let name = tail[..equals].trim();
         let expression_start = start + 4 + equals + 1;
-        let expression_end = prefix[expression_start..]
-            .find(';')
-            .map_or(prefix.len(), |at| expression_start + at);
+        // The current SQL literal may itself be inside a binding. Only
+        // completed preceding bindings can provide interpolation arguments.
+        let Some(expression_end) = (expression_start..prefix.len())
+            .find(|&at| is_code[at] && prefix.as_bytes()[at] == b';')
+        else {
+            continue;
+        };
         let expression = prefix[expression_start..expression_end].trim();
         // A closure definition supplies a helper, not a call with its bound
         // parameter. Its literal arguments are resolved at the actual calls.
@@ -749,6 +753,13 @@ fn principal_bindings(
                 None
             };
         if module == "hiqlite_sessions.rs" {
+            // These actual read-side bindings load the same finite Local SQL
+            // layout inline rather than naming a layout variable first.
+            if expression == "LocalSessionSql::load(self).await?.column()" {
+                resolved = super::hiqlite_sessions::census_local_principal_fragment(
+                    "column", 0, "", rebuilt,
+                );
+            }
             for receiver in ["layout.", "ownership."] {
                 if let Some(at) = expression.find(receiver) {
                     let call = &expression[at + receiver.len()..];

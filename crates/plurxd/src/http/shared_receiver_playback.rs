@@ -994,10 +994,31 @@ impl ReceiverStartActor {
         response: axum::response::Response,
     ) -> Result<axum::response::Response, ReceiverStartError> {
         use futures_util::StreamExt;
-        self.current_delivery_attachment(&state).await?;
-        self.current_source_status(&state).await?;
-        self.current_delivery_attachment(&state).await?;
-        let guard = self.retain_delivery_connection(state, connection).await?;
+        self.current_delivery_attachment(&state)
+            .await
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("B protected Start stage=initial_attachment error={_error:?}");
+            })?;
+        self.current_source_status(&state)
+            .await
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("B protected Start stage=source_status error={_error:?}");
+            })?;
+        self.current_delivery_attachment(&state)
+            .await
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("B protected Start stage=attachment_recheck error={_error:?}");
+            })?;
+        let guard = self
+            .retain_delivery_connection(state, connection)
+            .await
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("B protected Start stage=accepted_ingress error={_error:?}");
+            })?;
         let (parts, body) = response.into_parts();
         let stream = body.into_data_stream().map(move |frame| {
             let _accepted_writer = &guard;
@@ -1213,7 +1234,13 @@ impl ReceiverStartActor {
             &known,
         )
         .await
-        .map_err(|_| ReceiverStartError::Unresolved)
+        .map_err(|error| {
+            #[cfg(test)]
+            eprintln!("B real Source status exchange error={error:?}");
+            #[cfg(not(test))]
+            let _ = error;
+            ReceiverStartError::Unresolved
+        })
     }
     fn close_dispatch(&self) {
         self.0.state.lock().expect("receiver owner").dispatch_closed = true;

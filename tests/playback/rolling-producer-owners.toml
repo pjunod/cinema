@@ -4185,7 +4185,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # writer closure/receipt checks; no timer elects work and no task is added.
 # +1 shared qualification fixture: finite join bound for its existing membership
 # heartbeat owner; no new production timer or recovery loop.
-expected_occurrences = 1553
+# +2 failed-resource diagnostic bounds: status and member observations cannot
+# park the test before reporting its original HTTP refusal; no production timer.
+expected_occurrences = 1555
 
 
 [[module_structures]]

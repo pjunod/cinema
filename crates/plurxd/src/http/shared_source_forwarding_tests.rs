@@ -210,10 +210,16 @@ async fn actual_nonowner_forwarding() {
         .send_request(request)
         .await
         .expect("actual forwarded Start");
-    assert_eq!(response.status(), StatusCode::OK);
+    let start_status = response.status();
     let bytes = axum::body::to_bytes(axum::body::Body::new(response.into_body()), 4 * 1024 * 1024)
         .await
         .expect("Start envelope");
+    assert_eq!(
+        start_status,
+        StatusCode::OK,
+        "actual forwarded Source Start response: {}",
+        String::from_utf8_lossy(&bytes)
+    );
     let decoded = super::super::decode_source_start_response(&bytes, &worker.reference)
         .expect("strict Source envelope");
     let mut recipe: Value = serde_json::from_slice(&worker.request).expect("canonical recipe");

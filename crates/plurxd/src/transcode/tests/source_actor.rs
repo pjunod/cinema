@@ -2524,7 +2524,10 @@ impl SourceFactoryIngressFixture {
                 }
                 changed.await;
             }
-            self.close().await;
+            // The production actor owns seal/retirement. This fixture owns
+            // only its actual accepted transport and joined receipt/ACK; a
+            // second seal CAS would race that actor's retained cleanup owner.
+            self.close_transport(false).await;
         }))
     }
 }
