@@ -11748,6 +11748,9 @@ extension PlayerController: PreparedSuccessorHost {
         // The incumbent remains visible and audible while its seek lands and
         // its decoded output is checked, then advances to that same instant.
         // All waits consume the pipeline's original physical overlap budget.
+        // The coordinator records a failed outcome before disposing this
+        // staging. Early disposal here erases the item's typed error and
+        // original overlap budget before that failure journal can read them.
         let layerReady = await awaitBoundedValue(
             boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs),
             pollMs: PreparedReplacementBounds.pollMs,
@@ -11762,19 +11765,16 @@ extension PlayerController: PreparedSuccessorHost {
         )
         guard layerReady == true, preparedPlayer === successor,
               preparedCommitStillOwned(commitAttempt), wantsPlayback else {
-            discardPreparedSuccessor()
             return .failedWithoutReopen
         }
         guard let frameDurationSeconds = await awaitPreparedFrameDuration(of: item),
               preparedItem === item, preparedPlayer === successor,
               preparedCommitStillOwned(commitAttempt), wantsPlayback else {
-            discardPreparedSuccessor()
             return .failedWithoutReopen
         }
         let rendezvousRate = preferredRate
         guard rendezvousRate.isFinite, rendezvousRate > 0,
               preparedOverlapRemainingMs > 1_000 else {
-            discardPreparedSuccessor()
             return .failedWithoutReopen
         }
         let rendezvous = PreparedCommitRendezvous.plan(
@@ -11794,7 +11794,6 @@ extension PlayerController: PreparedSuccessorHost {
         // the viewer's tap produces nothing at all, because the prepared path
         // already claimed it and suppressed the in-place reopen.
         guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs) else {
-            discardPreparedSuccessor()
             return automaticTrial ? .failedWithoutReopen : PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
         guard let alignedOutput = preparedVideoOutput,
@@ -11802,7 +11801,6 @@ extension PlayerController: PreparedSuccessorHost {
                 item: item, successor: successor, output: alignedOutput,
                 rendezvous: rendezvous, frameDurationSeconds: frameDurationSeconds, commit: commitAttempt
               ) else {
-            discardPreparedSuccessor()
             return .failedWithoutReopen
         }
 
@@ -11811,7 +11809,6 @@ extension PlayerController: PreparedSuccessorHost {
             frameDurationSeconds: frameDurationSeconds, rate: rendezvousRate,
             commit: commitAttempt
         ) else {
-            discardPreparedSuccessor()
             return .failedWithoutReopen
         }
 
@@ -11824,11 +11821,9 @@ extension PlayerController: PreparedSuccessorHost {
               started, player.currentItem != nil,
               !automaticTrial || autoTrialAllowsExposure(action)
         else {
-            discardPreparedSuccessor()
             return automaticTrial ? .failedWithoutReopen : .refused
         }
         guard Double(abs(realPositionMs() - rendezvous.filmPositionMs)) <= frameDurationSeconds * 1_000 else {
-            discardPreparedSuccessor()
             return .failedWithoutReopen
         }
         let incumbentPlayer = player

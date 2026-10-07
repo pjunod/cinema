@@ -7646,3 +7646,76 @@ executables and all rebuildable owned incremental caches were removed. The
 next pinned build uses `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0`; its
 receipt is written to the independent checkout rather than the constrained
 lab. Source, compiled dependency libraries and historical receipts remain.
+
+The bounded no-incremental daemon build passed in 2m34s. The first build-215
+TV repeat failed before requesting quality: its initial 720p AVPlayer item
+reported `CoreMediaErrorDomain -66681`. Apple's installed tvOS SDK names that
+audio-start code `kAudioQueueErr_CannotStart`. The proxy recorded zero transport
+errors and the owned backend produced media fragments. The physical TV/audio
+readiness check is pending; no prepared-successor diagnosis is claimed.
+Preserve `tv-e4c367634-diagnostic1.xcresult` and its companion JSON.
+
+The independent phone build and strict signatures passed, but the physical
+runner timed out enabling iOS UI automation before any case ran. Preserve
+`ios-e4c367634-diagnostic1.xcresult`; its proxy records zero playback probes.
+Exact observed disposable app/runner processes, proxies and owned backend
+retired, including removal of the synthetic private control. No live producer
+drain census is claimed.
+
+Offline analysis of the preserved half-speed pixels places the 164ms lower
+hold bound at encoded frame 225, separate from both capture gaps. The prior
+report retained only its maximum callback gap and cannot correlate this
+later hold. A failed-only half-speed repeat now acquires bounded raw
+composition callbacks alongside the pixel counter, preserving the 100ms
+optical criterion and all hitch/counter checks. It is a diagnostic, not a
+physical-output qualification.
+
+### 10.253 Half-speed callbacks and pixels disagree (2026-10-07)
+
+The exact diagnostic-backend half-speed repeat fails: one backward callback,
+one late-frame hitch, five capture gaps, and a 129.16ms lower held-picture
+bound (137.52ms upper). All 4,621 optical samples are readable, with zero
+backward or skipped encoded counters. Preserve
+`firefox-e4c367634-half-speed-optical-d3diagnostic1*`; the exact owned daemon
+and isolated display retired.
+
+Offline correlation uses the snapshot wall/performance offsets, differing by
+2ms, with an explicit 12ms neighborhood. The callback claiming media time
+2.875s (counter 69) coincides with pixels containing counter 64. Its following
+callback claims 2.75s while pixels advance to counter 65. This supports a
+metadata inconsistency; it does not erase the independently held pixels or
+turn incomplete coverage into a pass. The existing future-clock guard records
+one earlier anomaly but lets this later outlier seed a backward fault.
+
+A focused follow-up adds the element's current time and actual callback
+execution time to bounded lab composition records. No production counter or
+threshold changes; no unit executes. It will establish whether the guard's
+coarse-clock allowance explains the missed outlier before changing behavior.
+
+The element-clock follow-up has complete optical sampling: 4,608 readable
+samples, zero gaps/backward/skipped counters. It still fails the unchanged
+100ms criterion with 100.02ms lower/109.22ms upper held-picture bounds, plus
+three late callbacks. No future-timestamp outlier recurred; this does not
+justify changing the production metadata guard. Callback execution lag stays
+below 15ms, while the late reported presentation intervals approach 119ms.
+Preserve `firefox-e4c367634-half-speed-optical-d3diagnostic2*`. Its daemon
+and display retired.
+
+### 10.254 Preserve failure context until settlement (2026-10-07)
+
+Inspection found eight failed pre-exposure commit branches that discarded the
+prepared item before returning to the coordinator. The coordinator already
+records the abandonment and then disposes it, so that early cleanup erased
+the typed error and original overlap budget before the new journal read them.
+Those redundant disposals are removed; the same coordinator owns immediate
+settlement cleanup. Incumbent retention, deadlines and post-exposure rollback
+remain unchanged. Apple build counter advances to 216. The existing
+`testFailedVoluntaryExposureRestoresIncumbentWithoutFallbackReopen` names the
+failed-outcome cleanup/retention contract; units remain deferred.
+
+iOS production compilation passed. The isolated tvOS compile harness initially
+referenced the production product name in its test-host path; correcting only
+that disposable path and retaining the production module name lets the
+production/test-source compile pass. No device or unit execution is
+implied. Physical failure diagnosis still needs the pending TV output and
+phone automation readiness windows.
