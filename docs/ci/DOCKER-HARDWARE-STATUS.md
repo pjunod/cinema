@@ -7,7 +7,7 @@ libraries, but Docker does not infer host device access or supplementary groups.
 A non-root container can therefore fall back to software even on a capable host.
 NVIDIA additionally needs its video driver libraries exposed by the toolkit.
 
-PR [#849](http://192.168.4.7:3000/noirr/plurx/pulls/849) implements deployment-time
+PR [#849](http://forge.lan:3000/noirr/plurx/pulls/849) implements deployment-time
 detection in both source and image startup
 paths, preserves explicit selections and host overrides, and documents native
 macOS VideoToolbox separately. No Rust encoder selection or feature gates change. Missing NVIDIA toolkit
@@ -23,7 +23,7 @@ blocking startup or other encoders.
 | Focused regression | passed | 14 hardware tests and three rollout contracts; only the failed temporary-path case was rerun |
 | Real Docker hardware smoke | passed | On rog, generated groups 44/992, preserved the override and group 1000, and completed CUDA decode plus NVENC encode as UID 1000 |
 | Catalog lint | fixed | Registered the helper in the existing operations point after preflight reported the missing path |
-| Fast lane | tracked in PR | The PR checks and description are the live qualification record |
+| Fast lane | qualifying refreshed candidate | Main now includes the reviewed four-call sharing inventory correction and passing Python evidence reuse; the PR checks and description carry the live qualification result. |
 | Merge and cleanup | tracked in PR | Merge only after required checks pass; carry regression lines into the landing message |
 
 The earlier diagnostic on rog confirmed its RTX 4080 Laptop GPU can perform a
