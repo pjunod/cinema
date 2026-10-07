@@ -5079,6 +5079,11 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn build_static_probe(path: &std::path::Path, mode: u8) {
+        build_static_probe_with_private_path(path, mode, Path::new("/unavailable-parent-marker"));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_static_probe_with_private_path(path: &Path, mode: u8, private_path: &Path) {
         use std::os::unix::fs::PermissionsExt;
 
         let source = path.with_extension("c");
@@ -5104,6 +5109,9 @@ mod tests {
 #define NR_EXIT 60
 #define NR_MEMFD_CREATE 319
 #define NR_EXECVEAT 322
+#define NR_OPENAT 257
+#define NR_PTRACE 101
+#define NR_PROCESS_VM_READV 310
 #if defined(__aarch64__)
 #undef NR_READ
 #undef NR_WRITE
@@ -5120,6 +5128,12 @@ mod tests {
 #undef NR_EXIT
 #undef NR_MEMFD_CREATE
 #undef NR_EXECVEAT
+#undef NR_OPENAT
+#undef NR_PTRACE
+#undef NR_PROCESS_VM_READV
+#define NR_OPENAT 56
+#define NR_PTRACE 117
+#define NR_PROCESS_VM_READV 270
 #define NR_READ 63
 #define NR_WRITE 64
 #define NR_CLOSE 57
@@ -5306,6 +5320,36 @@ void probe_main(unsigned long *stack) {
         unsigned long delay[2] = { 5, 0 };
         syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
     }
+#elif PROBE_MODE == 7
+    if (syscall6(NR_OPENAT, -100, (long)PROBE_PRIVATE_PATH, 0, 0, 0, 0) >= 0) finish(96);
+    if (syscall6(NR_OPENAT, -100, (long)PROBE_PARENT_ROOT_PATH, 0, 0, 0, 0) >= 0) finish(97);
+    if (syscall6(NR_PTRACE, 0, 0, 0, 0, 0, 0) != -1) finish(98);
+    if (syscall6(NR_PROCESS_VM_READV, PROBE_PARENT_PID, 0, 0, 0, 0, 0) != -1) finish(99);
+#elif PROBE_MODE == 8 || PROBE_MODE == 9
+    if (argc > 1 && same(argv[1], "-version")) {
+        write_text(1, facts);
+        finish(0);
+    }
+    long child;
+#if defined(__x86_64__)
+    child = syscall6(NR_FORK, 0, 0, 0, 0, 0, 0);
+#else
+    child = syscall6(NR_FORK, SIGCHLD, 0, 0, 0, 0, 0);
+#endif
+    if (child < 0) finish(89);
+    if (child == 0) {
+#if PROBE_MODE == 9
+        syscall6(NR_LSEEK, 3, 0, 0, 0, 0, 0);
+        write_text(3, "namespace-child-started");
+#endif
+        unsigned long delay[2] = { 60, 0 };
+        syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
+        finish(0);
+    }
+#if PROBE_MODE == 9
+    unsigned long delay[2] = { 60, 0 };
+    syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
+#endif
 #endif
     write_text(1, facts);
     finish(0);
@@ -5322,6 +5366,19 @@ void probe_main(unsigned long *stack) {
             .arg("-Wl,--build-id=none")
             .arg("-Wl,-e,_start")
             .arg(format!("-DPROBE_MODE={mode}"))
+            .arg(format!(
+                "-DPROBE_PRIVATE_PATH={:?}",
+                private_path.to_str().expect("private marker path")
+            ))
+            .arg(format!(
+                "-DPROBE_PARENT_ROOT_PATH={:?}",
+                format!(
+                    "/proc/{}/root{}",
+                    std::process::id(),
+                    private_path.display()
+                )
+            ))
+            .arg(format!("-DPROBE_PARENT_PID={}", std::process::id()))
             .arg(&source)
             .arg("-o")
             .arg(path)
@@ -5530,6 +5587,99 @@ void probe_main(unsigned long *stack) {
                 assert_eq!(facts.codec(), Some("h264"));
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
+    async fn namespace_probe_hides_parent_files_and_reaps_descendants() {
+        assert!(std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some());
+        let root = crate::test_tempdir().expect("tempdir");
+        let marker = root.path().join("parent-private-marker");
+        std::fs::write(&marker, b"must not enter probe namespace").expect("parent marker");
+        for mode in [7, 8] {
+            let probe = root.path().join(format!("isolated-probe-{mode}"));
+            build_static_probe_with_private_path(&probe, mode, &marker);
+            let identity = DecodeProbeIdentity::discover_with_mode(
+                probe.to_str().expect("probe path"),
+                ProbeLaunchMode::ProductionNamespace,
+            )
+            .await
+            .expect("isolated production bootstrap");
+            let media = root.path().join(format!("media-{mode}"));
+            std::fs::write(&media, b"production-bound source").expect("media");
+            let source = Arc::new(std::fs::File::open(media).expect("source"));
+            let facts = tokio::time::timeout(Duration::from_secs(7), DecodeFactCache::new().get_or_probe(&identity, DecodeFactSource::isolated(source), None, ProbeStreamSelection::Absolute(4), Duration::from_secs(5), None)).await.expect("namespace child retaining pipes for60s must be killed within unchanged probe deadline").expect("isolated parser facts");
+            assert_eq!(facts.codec(), Some("h264"));
+        }
+        assert_eq!(
+            std::fs::read(marker).expect("parent marker remains"),
+            b"must not enter probe namespace"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
+    async fn namespace_probe_cancellation_kills_started_descendants() {
+        assert!(std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some());
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("cancellable-namespace-probe");
+        build_static_probe(&probe, 9);
+        let identity = DecodeProbeIdentity::discover_with_mode(
+            probe.to_str().expect("probe path"),
+            ProbeLaunchMode::ProductionNamespace,
+        )
+        .await
+        .expect("isolated production bootstrap");
+        let media = root.path().join("owned-cancellation-marker-source");
+        std::fs::write(&media, b"production-bound source").expect("media");
+        // This owned test source is deliberately writable solely to signal that
+        // the hostile descendant has started, before cancellation is requested.
+        let source = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&media)
+                .expect("owned marker source"),
+        );
+        let cleanup_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let probe_gate = Arc::clone(&cleanup_gate);
+        let token = tokio_util::sync::CancellationToken::new();
+        let probe_token = token.clone();
+        let task = tokio::spawn(async move {
+            DecodeFactCache::new()
+                .get_or_probe(
+                    &identity,
+                    DecodeFactSource::new(source, probe_gate, TEST_FACT_WORK),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    Duration::from_secs(10),
+                    Some(&probe_token),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(&media)
+                .expect("owned source marker")
+                .starts_with(b"namespace-child-started")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("actual descendant must start before cancellation");
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancellation must not wait for the descendant60s sleep")
+            .expect("probe task joins");
+        assert!(matches!(result, Err(DecodeFactError::Cancelled)));
+        let _reaped_source =
+            tokio::time::timeout(Duration::from_secs(2), cleanup_gate.acquire_owned())
+                .await
+                .expect("descendant cleanup must reap before returning source ownership")
+                .expect("source ownership remains available");
     }
 
     #[cfg(target_os = "linux")]

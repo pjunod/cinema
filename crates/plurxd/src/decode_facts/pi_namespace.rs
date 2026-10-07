@@ -196,7 +196,7 @@ pub(super) fn configure(
                     return Err(error);
                 }
             };
-            let result = (|| {
+            let result: std::io::Result<()> = (|| {
                 match source_fd {
                     Some(source) => install_probe_child_fds(source, executable_fd)?,
                     None => {
