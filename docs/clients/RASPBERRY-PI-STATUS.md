@@ -334,11 +334,11 @@ access, and own upgrades/uninstall without deleting user data.
 | Work | State | Evidence / next action |
 |---|---|---|
 | Independent clone and compiler | ready | Main `7f0142d45`; pinned Rust 1.97.1 all-target workspace check passed in 2m14s |
-| Docker runtime | in progress | Stock Jellyfin lacks request decoding; combine maintained Pi 8.1 request/SAND support with the pinned Jellyfin patch series |
-| Setup lifecycle | in progress | Sol 6.1 owns Docker/default, native selection, prerequisites, ownership, upgrade recovery and removal |
-| Host browser | in progress | Pin and verify the previously exercised HEVC browser; preserve ordinary Chromium and sandboxing |
-| Final review and fast lane | pending | No unit or physical acceptance run before the final review |
-| Pi state | compilation only | ARM64 Trixie; 61 build prerequisite packages added with baseline/delta recorded, no package upgrades; isolated FFmpeg C build in progress, no media service/browser started |
+| Pi media runtime | native compilation passed; container acceptance pending | Jellyfin patch series plus Pi request/SAND source links on ARM64 Trixie; AC-4, DV filter, tonemap and request build assertions pass |
+| Setup lifecycle | repaired; regression pending | Sol 6.1 owns Docker/default, native selection, prerequisites, ownership, upgrade recovery and removal |
+| Host browser | repaired; regression pending | Pin and verify the previously exercised HEVC browser; preserve ordinary Chromium and sandboxing |
+| Final review and fast lane | review complete; repairs implemented | One review of `c55437408` found six issues below; repairs are implemented and the fast lane is next |
+| Pi state | compilation only | ARM64 Trixie; 61 build prerequisite packages added with baseline/delta recorded, no package upgrades; isolated FFmpeg C build complete, no media service/browser started |
 
 The installer will build from the chosen checkout initially. This automates
 prerequisites rather than assuming prebuilt native releases that the project
@@ -348,5 +348,20 @@ Implementation is tracked in [draft PR #851](http://forge.lan:3000/noirr/plurx/p
 The source assembly applies all 100 Jellyfin patches and the adapted Pi
 request/SAND delta; native ARM64 compilation found a missing link dependency: request decoding
 uses `v4l2_fmt.o`, which upstream listed only for the stateful backend. The
-adapted patch now gives the request decoder its direct dependency. Recompilation
-is pending; no test or playback success is claimed from compilation.
+adapted patch now gives the request decoder its direct dependency. The corrected ARM64 build completed and passed its runtime feature inventory
+assertions; no playback success is claimed from compilation.
+
+### Installation review disposition
+
+The single adversarial review of `c55437408` against `7f0142d45` requested
+changes. It performed no tests or device mutations. The implementation agents addressed every finding; no second review is planned.
+Focused regressions are written and unrun pending the fast lane.
+
+| Finding | Required correction | State |
+|---|---|---|
+| Native rollback can leave a failed replacement active | Stop the replacement before restoring files; restore and verify the prior running state | repaired; regression pending |
+| Upgrade adopts operator runtime additions/changes | Preserve prior identities, refuse modified managed outputs, and record only new or legitimate provider rewrites | repaired; regression pending |
+| Interruption leaves no recoverable installation ownership | Persist transaction journal and backups before mutation; reconcile interrupted work deterministically | repaired; regression pending |
+| Existing Docker without Compose fails provisioning | Detect and install missing Compose independently from Docker Engine | repaired; regression pending |
+| Native service cannot read some user-selected media mounts | Provision appropriate supplementary groups and validate access as the service identity | repaired; regression pending |
+| Native readiness ignores configured startup budget | Derive the deadline from the existing effective configuration contract | repaired; regression pending |

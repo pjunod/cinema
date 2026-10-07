@@ -87,6 +87,13 @@ download, service operation, configuration write or hardware probe.
   state. Stage upgrades before stopping the previous runtime; restore it when
   the replacement fails readiness. An unchanged reinstall should not restart
   a working server or browser.
+  Persist a transaction journal and recovery material before changing owned
+  installation state, so interruption can be reconciled on the next setup run.
+  Runtime ownership records retain the identities of explicitly provisioned
+  artifacts; upgrades cannot adopt operator additions or refresh hashes for
+  modified files. A process-held lock prevents concurrent setup from mistaking
+  an active transaction for interrupted work; status and dry-run report pending
+  recovery without changing the host.
 - Ordinary uninstall retains databases, media, browser login profiles and
   shared prerequisites. Remove only unchanged, verified installation-owned
   files and resources. Stop only processes/services owned by this installation.

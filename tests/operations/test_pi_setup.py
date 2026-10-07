@@ -6,6 +6,8 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import shutil
+import subprocess
 import types
 import unittest
 from unittest.mock import patch
@@ -80,34 +82,229 @@ class PiSetupTests(unittest.TestCase):
         provider.assert_not_called()
         self.assertEqual(run.call_count, 1)
 
-    def test_failed_upgrade_restores_native_binary_and_unit(self):
+    @contextlib.contextmanager
+    def native_host(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / 'deploy').mkdir()
             (root / 'deploy/pi-runtime').write_text('provider fixture')
             unit, binary = root / 'unit', root / 'binary'
             unit.write_text('old unit')
             binary.write_text('old binary')
+            state_path = root / 'state/ownership.json'
+            state_path.parent.mkdir()
+            previous = {'owner': setup.OWNER, 'uid': setup.os.getuid(), 'checkout': str(root),
+                        'role': 'server', 'runtime': 'native', 'data_dir': str(root / 'data'),
+                        'media': [], 'url': 'http://localhost:32400',
+                        'files': {str(unit): setup.sha(unit), str(binary): setup.sha(binary)}}
+            state_path.write_text(json.dumps(previous))
+            events = []
+            service = {'active': True, 'binary': 'old binary'}
+            def write(path, content, mode=0o644):
+                events.append(('write', str(path), content))
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content if isinstance(content, bytes) else content.encode())
+                path.chmod(mode)
+            def run(argv, **kwargs):
+                command = list(map(str, argv))
+                events.append(('run', command))
+                if command[0] == 'git':
+                    return 'abc\n'
+                if command[:2] == ['systemctl', 'show']:
+                    return ('active' if service['active'] else 'inactive') if 'ActiveState' in command[2] else 'enabled'
+                if command[:2] == ['systemctl', 'stop']:
+                    service['active'] = False
+                elif command[:2] == ['systemctl', 'start'] or command[:3] == ['systemctl', 'enable', '--now']:
+                    if not service['active']:
+                        service.update(active=True, binary=binary.read_text())
+                elif command[0] == 'rm':
+                    path = Path(command[-1])
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink(missing_ok=True)
+                return '{}'
+            with patch.multiple(setup, ROOT=root, UNIT=unit, BINARY=binary, STATE=state_path,
+                                JOURNAL=state_path.parent / 'transaction.json', BACKUPS=state_path.parent / 'backups',
+                                LOCK=state_path.parent / 'setup.lock'), \
+                 patch.object(setup, 'write', side_effect=write), patch.object(setup, 'run', side_effect=run), \
+                 patch.object(setup, 'root_protected', return_value=True):
+                yield root, previous, events, service
+
+    def test_failed_upgrade_stops_active_replacement_before_restoring_and_proves_old_ready(self):
+        with self.native_host() as (root, previous, events, service):
             candidate = root / 'candidate'
             candidate.write_text('new binary')
-            args = self.args(command='upgrade', server_runtime='native', binary=candidate, data_dir=root)
-            previous = {'files': {str(unit): 'ignored', str(binary): 'ignored'}}
-            runtime = {'ffmpeg': '/opt/plurx-runtime/ffmpeg', 'ffprobe': '/opt/plurx-runtime/ffprobe', 'bound_ffprobe': '/opt/plurx-runtime/static'}
-            def write(path, content, mode=0o644):
-                path.write_bytes(content if isinstance(content, bytes) else content.encode())
-            with patch.object(setup, 'ROOT', root), patch.object(setup, 'UNIT', unit), patch.object(setup, 'BINARY', binary), \
-                 patch.object(setup, 'conflict'), patch.object(setup, 'provision', return_value=runtime), \
-                 patch.object(setup, 'package_tools'), patch.object(setup, 'run', return_value='abc'), \
-                 patch.object(setup, 'write', side_effect=write), patch.object(setup.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)), \
-                 patch.object(setup, 'wait_ready', side_effect=ValueError('not ready')):
-                with self.assertRaises(ValueError):
+            args = self.args(command='upgrade', server_runtime='native', binary=candidate, data_dir=root, media=[])
+            runtime = {'ffmpeg': '/opt/plurx-runtime/ffmpeg', 'ffprobe': '/opt/plurx-runtime/ffprobe',
+                       'bound_ffprobe': '/opt/plurx-runtime/static', 'groups': ['44']}
+            waits = []
+            def readiness(url, seconds):
+                waits.append(seconds)
+                if len(waits) == 1:
+                    self.assertEqual(service['binary'], 'new binary')
+                    raise ValueError('replacement is active but unhealthy')
+                self.assertTrue(service['active'])
+                self.assertEqual(service['binary'], 'old binary')
+            with patch.object(setup, 'conflict'), patch.object(setup, 'provision', return_value=runtime), \
+                 patch.object(setup, 'package_tools'), patch.object(setup, 'native_startup_budget', return_value=18135), \
+                 patch.object(setup, 'native_media_groups', return_value=['777']), \
+                 patch.object(setup.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=1001, pw_gid=1001)), \
+                 patch.object(setup, 'wait_ready', side_effect=readiness):
+                with self.assertRaisesRegex(ValueError, 'active but unhealthy'):
                     setup.install(args, previous)
-            self.assertEqual(binary.read_text(), 'old binary')
-            self.assertEqual(unit.read_text(), 'old unit')
+            self.assertEqual(setup.BINARY.read_text(), 'old binary')
+            self.assertEqual(setup.UNIT.read_text(), 'old unit')
+            self.assertEqual(waits, [18135, 18135])
+            self.assertFalse(setup.JOURNAL.exists())
+            restore = next(i for i, event in enumerate(events) if event[:2] == ('write', str(setup.BINARY)) and event[2] == b'old binary')
+            stops = [i for i, event in enumerate(events) if event == ('run', ['systemctl', 'stop', 'plurxd'])]
+            self.assertGreaterEqual(len(stops), 2)
+            self.assertLess(stops[-1], restore)
+
+    def test_interrupted_first_install_reconciles_new_owned_files_and_preserves_data(self):
+        with self.native_host() as (root, previous, events, service):
+            setup.STATE.unlink()
+            setup.UNIT.unlink()
+            setup.BINARY.unlink()
+            data = root / 'data'
+            data.mkdir()
+            (data / 'watch-state').write_text('retained')
+            args = self.args(server_runtime='native', media=[], data_dir=data)
+            transaction = setup.begin_transaction(args, None)
+            transaction['phase'] = 'deployment'
+            setup.durable_journal(transaction)
+            setup.UNIT.write_text('partially installed unit')
+            setup.BINARY.write_text('partially installed binary')
+            # Simulate power loss: nothing catches an exception; next invocation reads the durable journal.
+            pending = setup.read_journal()
+            setup.recover_transaction(pending)
+            self.assertFalse(setup.UNIT.exists())
+            self.assertFalse(setup.BINARY.exists())
+            self.assertFalse(setup.STATE.exists())
+            self.assertFalse(setup.JOURNAL.exists())
+            self.assertEqual((data / 'watch-state').read_text(), 'retained')
+
+    def test_interrupted_upgrade_reconciles_baseline_before_ownership_validation(self):
+        with self.native_host() as (root, previous, events, service):
+            args = self.args(command='upgrade', server_runtime='native', media=[])
+            transaction = setup.begin_transaction(args, previous)
+            transaction['phase'] = 'deployment'
+            setup.durable_journal(transaction)
+            setup.BINARY.write_text('new binary after power loss')
+            setup.UNIT.write_text('new unit after power loss')
+            service.update(active=True, binary='new binary after power loss')
+            with patch.object(setup, 'native_startup_budget', return_value=18135), patch.object(setup, 'wait_ready') as ready:
+                setup.recover_transaction(setup.read_journal())
+            self.assertEqual(service['binary'], 'old binary')
+            self.assertEqual(setup.receipt()['files'], previous['files'])
+            ready.assert_called_once_with('http://127.0.0.1:32400', 18135)
+
+    def test_active_process_lock_prevents_concurrent_recovery(self):
+        with self.native_host() as (root, previous, events, service):
+            setup.LOCK.write_text('')
+            with setup.LOCK.open('rb') as held:
+                setup.fcntl.flock(held, setup.fcntl.LOCK_EX | setup.fcntl.LOCK_NB)
+                with patch.object(setup.sys, 'argv', ['pi-setup', 'install', '--yes']), \
+                     patch.object(setup.os, 'getuid', return_value=1000), \
+                     patch.object(setup, 'recover_transaction') as recover, \
+                     contextlib.redirect_stderr(io.StringIO()) as output:
+                    self.assertEqual(setup.main(), 1)
+                self.assertIn('another Pi setup invocation is active', output.getvalue())
+                recover.assert_not_called()
+
+    def test_keyboard_interrupt_has_journal_before_provider_and_restores_baseline(self):
+        with self.native_host() as (root, previous, events, service):
+            candidate = root / 'candidate'
+            candidate.write_text('candidate')
+            args = self.args(command='upgrade', server_runtime='native', binary=candidate, media=[])
+            def provider(args):
+                self.assertEqual(setup.read_journal()['phase'], 'prepared')
+                raise KeyboardInterrupt()
+            with patch.object(setup, 'conflict'), patch.object(setup, 'package_tools'), \
+                 patch.object(setup, 'native_startup_budget', return_value=18135), \
+                 patch.object(setup, 'native_media_groups', return_value=[]), \
+                 patch.object(setup.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=1001, pw_gid=1001)), \
+                 patch.object(setup, 'provision', side_effect=provider):
+                with self.assertRaises(KeyboardInterrupt):
+                    setup.install(args, previous)
+            self.assertEqual(setup.BINARY.read_text(), 'old binary')
+            self.assertTrue(service['active'])
+            self.assertNotIn(('run', ['systemctl', 'stop', 'plurxd']), events)
+            self.assertFalse(setup.JOURNAL.exists())
+
+    def test_native_media_0750_root_supplies_group_without_changing_media(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory).resolve()
+            media.chmod(0o750)
+            before = media.stat().st_mode
+            original = Path.stat
+            def info(path, *args, **kwargs):
+                value = original(path, *args, **kwargs)
+                if path == media:
+                    return types.SimpleNamespace(st_mode=value.st_mode, st_uid=10, st_gid=777)
+                if path in media.parents:
+                    # Isolate this root-group case from private host temp ancestors.
+                    return types.SimpleNamespace(st_mode=(value.st_mode & ~0o777) | 0o755, st_uid=0, st_gid=0)
+                return value
+            with patch.object(setup.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=99999, pw_gid=88888)), \
+                 patch.object(Path, 'stat', info), patch.object(setup, 'run') as run:
+                groups = setup.native_media_groups([media], ['44'])
+            self.assertIn('777', groups)
+            self.assertIn('44', groups)
+            self.assertEqual(media.stat().st_mode, before)
+            command = list(map(str, run.call_args.args[0]))
+            self.assertEqual(command[0], 'setpriv')
+            self.assertIn('--groups=44,777,88888', command)
+            checked = json.loads(run.call_args.kwargs['input_text'])
+            self.assertIn([str(media), setup.os.R_OK | setup.os.X_OK], checked)
+
+    def test_native_media_owner_only_root_refuses_before_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory).resolve()
+            media.chmod(0o700)
+            with patch.object(setup.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=99999, pw_gid=88888)), \
+                 patch.object(setup, 'run') as run:
+                with self.assertRaisesRegex(ValueError, 'cannot read/traverse'):
+                    setup.native_media_groups([media], [])
+            run.assert_not_called()
+            self.assertEqual(media.stat().st_mode & 0o777, 0o700)
+
+    def test_existing_docker_without_compose_installs_only_compose_plugin(self):
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv == ['docker', 'compose', 'version'] and calls.count(argv) == 1:
+                raise subprocess.CalledProcessError(1, argv)
+        with patch.object(setup.shutil, 'which', return_value='/usr/bin/tool'), patch.object(setup, 'run', side_effect=run):
+            setup.package_tools('docker')
+        self.assertIn(['apt-get', 'install', '-y', 'docker-compose-v2'], calls)
+        self.assertFalse(any('docker.io' in call for call in calls))
+        self.assertEqual(calls[-1], ['docker', 'compose', 'version'])
+
+    def test_native_readiness_budget_uses_retained_cluster_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'plurx.toml'
+            config.write_text('[cluster]\nsnapshot_transfer_timeout_secs = 14400\ninstall_snapshot_timeout_secs = 3600\n')
+            self.assertEqual(setup.native_startup_budget([config]), 18135)
+
+    def test_status_and_dry_run_report_pending_transaction_without_reconciliation(self):
+        pending = {'previous': None}
+        for arguments in (['pi-setup', 'status'], ['pi-setup', 'install', '--dry-run']):
+            with patch.object(setup.sys, 'argv', arguments), patch.object(setup.os, 'getuid', return_value=1000), \
+                 patch.object(setup, 'read_journal', return_value=pending), patch.object(setup, 'LOCK', Path('/nonexistent/pi-test-lock')), \
+                 patch.object(setup, 'recover_transaction') as recover, patch.object(setup, 'run') as run, \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(setup.main(), 0)
+            self.assertEqual(json.loads(output.getvalue())['transaction'], 'recovery-needed')
+            recover.assert_not_called()
+            run.assert_not_called()
 
     def test_uninstall_retains_data_profiles_and_shared_packages(self):
         previous = {'role': 'both', 'runtime': 'docker', 'files': {'/managed/.env': 'hash'}, 'data_dir': '/srv/plurx'}
-        with patch.object(setup, 'run', return_value='{}') as run, contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(setup, 'run', return_value='{}') as run, patch.object(setup, 'begin_transaction', return_value={'id': 'abc'}), \
+             patch.object(setup, 'durable_journal'), patch.object(setup, 'finish_transaction'), \
+             patch.object(Path, 'exists', return_value=True), contextlib.redirect_stdout(io.StringIO()):
             setup.uninstall(self.args(), previous)
         commands = [list(map(str, call.args[0])) for call in run.call_args_list]
         self.assertIn(['python3', str(ROOT / 'deploy/pi-player'), 'uninstall'], commands)
