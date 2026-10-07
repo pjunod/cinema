@@ -4204,7 +4204,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # supplies physical closure or authorizes a new driver. The existing60s monitor
 # ACK timeout becomes an absolute timeout_at including the same-entry gate
 # wait (net zero). No task, interval, sleep, retry or watchdog is added.
-expected_occurrences = 1564
+# +6 B known-registration coordination: one original-deadline owned mutex
+# wait in admission; five finite test waits exercise gate/monitor custody.
+# No deadline is extended and no timer or missing row supplies close proof.
+expected_occurrences = 1570
 
 
 [[module_structures]]
@@ -5152,7 +5155,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +6: integrated Jellyfin admission, catalog and refusal response reads.
 # Three fixture calls to start_replication own the existing sampler for
 # Source, B worker and B ingress; these are not process launchers.
-expected_occurrences = 708
+# +4 metadata-only B coordination regression: three existing accepted-driver
+# capture calls and one real connection monitor registration. These construct
+# no media producer and manufacture no physical closure receipt.
+expected_occurrences = 712
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

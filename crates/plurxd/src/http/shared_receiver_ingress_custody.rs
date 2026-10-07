@@ -281,6 +281,13 @@ pub(super) async fn ack_owner(
     if !receipt.matches(driver) {
         return Err(ReceiverStartError::Unavailable);
     }
+    // Serialize known ledger writes with live Register without requiring a
+    // surviving actor for authenticated terminal/orphan cleanup.
+    let actor = state.sharing.receiver_starts.by_session(tuple.session_id);
+    let _lease_observation = match actor.as_ref() {
+        Some(actor) => Some(actor.0.lease_observation.lock().await),
+        None => None,
+    };
     let route = exact_route(state, tuple).await?;
     let snapshot = state
         .store
@@ -359,7 +366,44 @@ async fn exchange_at_owner(
 /// This cache owns metadata reservations, never sockets. The accepted-driver
 /// monitor owns registration through cancellation and its finite closure ACK.
 #[derive(Default)]
-pub(super) struct ReceiverIngressCache(Mutex<Vec<Arc<ReceiverIngressEntry>>>);
+pub(super) struct ReceiverIngressCache(
+    Mutex<Vec<Arc<ReceiverIngressEntry>>>,
+    Mutex<Vec<ReceiverRegistrationCoordinator>>,
+);
+struct ReceiverRegistrationCoordinator {
+    incarnation: Uuid,
+    owner_identity: String,
+    gate: std::sync::Weak<tokio::sync::Mutex<()>>,
+}
+impl ReceiverIngressCache {
+    fn registration_gate(
+        &self,
+        tuple: &ReceiverForwardTuple,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, ReceiverStartError> {
+        let mut slots = self.1.lock().expect("receiver registration coordinators");
+        slots.retain(|slot| slot.gate.strong_count() > 0);
+        if let Some(gate) = slots
+            .iter()
+            .find(|slot| {
+                slot.incarnation == tuple.incarnation_id
+                    && slot.owner_identity == tuple.owner_identity
+            })
+            .and_then(|slot| slot.gate.upgrade())
+        {
+            return Ok(gate);
+        }
+        if slots.len() >= 512 {
+            return Err(ReceiverStartError::Capacity);
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        slots.push(ReceiverRegistrationCoordinator {
+            incarnation: tuple.incarnation_id,
+            owner_identity: tuple.owner_identity.clone(),
+            gate: Arc::downgrade(&gate),
+        });
+        Ok(gate)
+    }
+}
 struct ReceiverIngressEntry {
     tuple: ReceiverForwardTuple,
     ingress: ReceiverForwardIngress,
@@ -432,6 +476,18 @@ pub(super) async fn receiver_forward_admit(
     for principal in pressure {
         let _ = reconcile_principal(state.clone(), connection, &principal, pressure_deadline).await;
     }
+    // The scheduling guard moves into the accepted monitor: cancellation of
+    // this caller must not expose another driver while Register is in flight.
+    // An uncertain outcome releases scheduling only, retaining the common fence.
+    let gate = state
+        .sharing
+        .receiver_starts
+        .ingress
+        .registration_gate(&tuple)?;
+    let registration_guard =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), gate.lock_owned())
+            .await
+            .map_err(|_| ReceiverStartError::Deadline)?;
     let driver = state
         .sharing
         .accepted_drivers
@@ -586,6 +642,7 @@ pub(super) async fn receiver_forward_admit(
                 }
                 _ => Err(ReceiverStartError::Unresolved),
             };
+            drop(registration_guard);
             *monitored
                 .admitted
                 .lock()
@@ -996,4 +1053,140 @@ pub(super) async fn confirmed_terminal_end(state: &AppState, tuple: &ReceiverFor
     matches!(state.store.receiver_ingress_snapshot(&route).await,
         Ok(Some(snapshot)) if snapshot.owner_identity == tuple.owner_identity
             && snapshot.state.is_sealed() && snapshot.state.settled())
+}
+
+#[cfg(test)]
+mod registration_coordination_tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    /// This pins registration scheduling and the existing ambiguity fence;
+    /// constructed driver identities do not claim a physical closure receipt.
+    #[tokio::test]
+    async fn sharing_receiver_known_registration_overlap_waits_but_unknown_reservation_stays_fenced(
+    ) {
+        let registry = crate::sharing_connection_custody::AcceptedDriverRegistry::default();
+        let first_connection = crate::SharingConnectionCancellation::new();
+        let second_connection = crate::SharingConnectionCancellation::new();
+        let third_connection = crate::SharingConnectionCancellation::new();
+        let first = registry
+            .capture(&first_connection, "owner")
+            .expect("first driver");
+        let second = registry
+            .capture(&second_connection, "owner")
+            .expect("second driver");
+        let third = registry
+            .capture(&third_connection, "owner")
+            .expect("third driver");
+        let incarnation = Uuid::new_v4();
+        let identity = "a".repeat(64);
+        let cache = ReceiverIngressCache::default();
+        let tuple = ReceiverForwardTuple {
+            incarnation_id: incarnation,
+            session_id: Uuid::new_v4(),
+            owner_node_id: "owner".into(),
+            owner_epoch: 1,
+            owner_identity: identity.clone(),
+        };
+        let gate = cache.registration_gate(&tuple).expect("principal gate");
+        assert!(Arc::ptr_eq(
+            &gate,
+            &cache
+                .registration_gate(&tuple)
+                .expect("same principal gate")
+        ));
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let first_guard = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            gate.clone().lock_owned(),
+        )
+        .await
+        .expect("first operation");
+        let mut first_permit = registry.registration_guard().await.expect("first permit");
+        first
+            .prepare_obligation(&mut first_permit, "receiver", incarnation, &identity)
+            .expect("known registration in flight");
+        let next = async {
+            let _guard =
+                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), gate.lock())
+                    .await
+                    .expect("queued operation");
+            let mut permit = registry.registration_guard().await.expect("second permit");
+            let obligation = second
+                .prepare_obligation(&mut permit, "receiver", incarnation, &identity)
+                .expect("definite predecessor registration completed");
+            // Dropping this unresolved permit intentionally models a cancelled
+            // or uncertain Register, not a successful durable registration.
+            (obligation, permit)
+        };
+        tokio::pin!(next);
+        assert!(
+            next.as_mut().now_or_never().is_none(),
+            "overlap waits instead of touching the common pending fence"
+        );
+        assert!(
+            tokio::time::timeout_at(tokio::time::Instant::now(), gate.lock())
+                .await
+                .is_err(),
+            "an expired caller cannot wait indefinitely"
+        );
+        // The real accepted connection owns this operation after its caller's
+        // scheduling handle disappears. This claims no socket-close receipt.
+        let caller_gate = gate.clone();
+        let (complete, completion) = tokio::sync::oneshot::channel();
+        let (finished, finish) = tokio::sync::oneshot::channel();
+        first_connection
+            .monitor(async move {
+                completion.await.expect("definite registration result");
+                first_permit.complete();
+                drop(first_guard);
+                let _ = finished.send(());
+            })
+            .expect("accepted monitor owns scheduling guard");
+        drop(caller_gate);
+        assert!(
+            next.as_mut().now_or_never().is_none(),
+            "caller cancellation cannot release the monitor's guard"
+        );
+        complete.send(()).expect("monitor result receiver");
+        finish.await.expect("monitor completion");
+        let (unknown, unknown_permit) = next.await;
+        drop(unknown_permit);
+        let _next_guard =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), gate.lock())
+                .await
+                .expect("scheduler custody released");
+        let mut third_permit = registry.registration_guard().await.expect("third permit");
+        assert!(
+            third
+                .prepare_obligation(&mut third_permit, "receiver", incarnation, &identity)
+                .is_err(),
+            "owner scheduling cannot clear an unknown registration"
+        );
+        // A separate principal remains independent despite the exact pending
+        // reservation. No global lock is held through registration work.
+        let mut unrelated_tuple = tuple.clone();
+        unrelated_tuple.incarnation_id = Uuid::new_v4();
+        let unrelated_gate = cache
+            .registration_gate(&unrelated_tuple)
+            .expect("unrelated principal gate");
+        assert!(!Arc::ptr_eq(&gate, &unrelated_gate));
+        let _unrelated = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            unrelated_gate.lock(),
+        )
+        .await
+        .expect("independent principal");
+        let mut unrelated_permit = registry
+            .registration_guard()
+            .await
+            .expect("independent permit");
+        third
+            .prepare_obligation(&mut unrelated_permit, "receiver", Uuid::new_v4(), &identity)
+            .expect("unrelated registration proceeds");
+        unrelated_permit.complete();
+        // Only explicit reconciliation of the exact pending reservation can
+        // release it. No physical-close ACK is manufactured by this test.
+        assert!(registry.reconcile_guard(&unknown).await.is_ok());
+    }
 }
