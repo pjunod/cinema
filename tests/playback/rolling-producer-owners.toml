@@ -2991,6 +2991,8 @@ expected_occurrences = 13
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Resume repair: two graceful-drain test deadlines and a bounded polling
+# wait for the retained forwarding cleanup owner add four test-only timers.
 # Shared ingress custody adds one bounded actual-driver closure wait and two
 # finite regression bounds (independent admission and real HTTP driver closure).
 # The accepted driver owns monitors through their join; no polling owner is added.
@@ -4213,7 +4215,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +6 B known-registration coordination: one original-deadline owned mutex
 # wait in admission; five finite test waits exercise gate/monitor custody.
 # No deadline is extended and no timer or missing row supplies close proof.
-expected_occurrences = 1570
+expected_occurrences = 1574
 
 
 [[module_structures]]

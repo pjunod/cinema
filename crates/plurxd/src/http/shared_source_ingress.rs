@@ -269,7 +269,7 @@ pub(super) async fn resolve_forward_route(
         .map_err(|_| unavailable())?
     {
         if route.request_fingerprint != fingerprint(&input) {
-            return Err(invalid());
+            return Err(SourceStartFailure::Conflict.response());
         }
         if route.owner_node_id == state.node_id {
             return Ok(ForwardRoute::Local);
@@ -772,7 +772,7 @@ pub(super) async fn retire_custody_with_mode(
     {
         SourceCustodyWrite::Applied | SourceCustodyWrite::ExactReplay => {}
         SourceCustodyWrite::Refused | SourceCustodyWrite::ReconciledClosed => {
-            return Err(unavailable())
+            return Err(unavailable());
         }
     }
     let ledger = state

@@ -608,10 +608,14 @@ impl ReceiverStartActor {
             let Ok(Some(snapshot)) = state.store.receiver_ingress_snapshot(&route).await else {
                 return;
             };
-            let _ = state
-                .store
-                .reclaim_receiver_ingress(&route, &snapshot)
-                .await;
+            crate::store_result::observe(
+                crate::store_result::Operation::ReclaimReceiverIngress,
+                crate::store_result::Discard::BestEffort,
+                state
+                    .store
+                    .reclaim_receiver_ingress(&route, &snapshot)
+                    .await,
+            );
         };
         let _ = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work).await;
     }
