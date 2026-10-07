@@ -343,6 +343,17 @@ made-up URL and prevents the fork from being declared fully tracked.
   and `crates/plurx-core/src/cluster/membership.rs`; the `k06_*` tests in
   `src/startup_cleanup.rs` pin the drain boundary.
 
+- **Row 24 — Source layout rollback certificate:** `src/error.rs` exports the
+  exact guard SQL/DDL and reserved existing `Error::Transaction` certificate
+  predicate. `src/store/state_machine/sqlite/writer.rs` emits it only for the
+  exact first statement, a single integer layout 81 or 82, the actual named
+  SQLite CHECK failure, and successful explicit rollback. Later statements,
+  other SQL/parameters/constraints and failed rollback keep ordinary errors.
+  The existing transaction/Raft payload is unchanged. The focused
+  `source_layout_certificate_requires_exact_first_guard_and_completed_rollback`
+  regression covers matching zero-row guards, mismatch rollback, and refusal
+  boundaries; no unknown commit is certified.
+
 **Partial upstream receipt, 2026-10-03:** row 1's local-node selection by
 durable id is accepted in [upstream PR 368](https://github.com/sebadob/hiqlite/pull/368),
 merged September 24 as
@@ -403,14 +414,3 @@ it to pin OpenRaft 0.9.25 and its resolver-selected transitive dependencies, so
 the focused vendor lane exercises the snapshot reset semantics actually
 shipped by the application. The workspace excludes this directory
 deliberately.
-
-- **Row 24 — Source layout rollback certificate:** `src/error.rs` exports the
-  exact guard SQL/DDL and reserved existing `Error::Transaction` certificate
-  predicate. `src/store/state_machine/sqlite/writer.rs` emits it only for the
-  exact first statement, a single integer layout 81 or 82, the actual named
-  SQLite CHECK failure, and successful explicit rollback. Later statements,
-  other SQL/parameters/constraints and failed rollback keep ordinary errors.
-  The existing transaction/Raft payload is unchanged. The focused
-  `source_layout_certificate_requires_exact_first_guard_and_completed_rollback`
-  regression covers matching zero-row guards, mismatch rollback, and refusal
-  boundaries; no unknown commit is certified.
