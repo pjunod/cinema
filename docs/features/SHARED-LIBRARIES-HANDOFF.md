@@ -22,7 +22,7 @@ Use `/private/tmp/plurx-shared-libraries-s3`, branch
 `codex/sharing-s3-principals`. It was clean at the baseline above, before this
 handoff document and its index row. It is unpublished integration work.
 
-The primary checkout `/Users/pjunod/code/plurx` is on
+The primary checkout `~/code/plurx` is on
 `codex/playback-seek-30s` with unrelated user changes. Do not switch, reset,
 clean, commit or overwrite that checkout or unrelated worktrees. Preserve
 agents' uncommitted changes and retained stashes. Integrate complete branch
@@ -330,7 +330,7 @@ Use separate target directories for concurrent agents. Root's loop is:
 
 ```bash
 cd /private/tmp/plurx-shared-libraries-s3
-export PATH=/Users/pjunod/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH
+export PATH=~/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH
 rustc --version # Must report 1.97.1, not Homebrew 1.98.
 export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
 export CARGO_TARGET_DIR=/private/tmp/plurx-shared-libraries/target
@@ -416,7 +416,7 @@ pop or drop it as cleanup.
 
 S1 landed into the effort through PR #746; its landing receipt names
 `971265536a`. S2 draft PR #759 is
-`http://192.168.4.7:3000/noirr/plurx/pulls/759`; its previously observed gate
+`http://forge.lan:3000/noirr/plurx/pulls/759`; its previously observed gate
 passed, but live Tailscale/hardware qualification remained open. Do not infer
 merge permission or current gate success from that old observation.
 

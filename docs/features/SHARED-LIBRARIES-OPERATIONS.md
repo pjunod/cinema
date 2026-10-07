@@ -151,12 +151,12 @@ device and topology work:
 > implementation contract. Use your own clone and the exact promotion candidate.
 > First obtain the one adversarial review, address its findings, and run the
 > required fast-lane checks once, rerunning only failures. Preserve receipts
-> against the code they cover. Qualify isolated instances on nuc4
-> (192.168.4.8) and m6 (192.168.4.14), with separate ports and data directories;
+> against the code they cover. Qualify isolated instances on lab4
+> (10.42.4.8) and lab6 (10.42.4.14), with separate ports and data directories;
 > do not replace their fleet services. Establish approved Tailscale access and
 > a real second-NAT/relay topology before claiming those cells. Use permitted
 > Apple devices, excluding Paul's iPhone 18 Pro and Apple TV, and the Android
-> Google TV Streamer available through nuc3. Exercise native direct play,
+> Google TV Streamer available through lab3. Exercise native direct play,
 > prepared handoff and refusal recovery, subtitle burn/HDR, revocation, cluster
 > loss, remote-only file placement and active Shared upgrade/restore. A Local
 > HLS harness or same-host two-node fixture cannot stand in for those receipts.

@@ -3,9 +3,9 @@
 **Status:** implementation integrated; promotion qualification tracked below ·
 **Updated:** 2026-10-06 · **Owner:** Root coordinating GPT-6.1 Sol builders.
 
-**Batch:** [completion PR #827](http://192.168.4.7:3000/noirr/plurx/pulls/827).
-**Live promotion status and final receipts:** [PR #828](http://192.168.4.7:3000/noirr/plurx/pulls/828).
-**Current integration batch:** [PR #829](http://192.168.4.7:3000/noirr/plurx/pulls/829).
+**Batch:** [completion PR #827](http://forge.lan:3000/noirr/plurx/pulls/827).
+**Live promotion status and final receipts:** [PR #828](http://forge.lan:3000/noirr/plurx/pulls/828).
+**Current integration batch:** [PR #829](http://forge.lan:3000/noirr/plurx/pulls/829).
 
 Companion to [the implementation contract](SHARED-LIBRARIES-IMPLEMENTATION.md)
 (the authority, ownership and acceptance rules). This page records what is
@@ -36,7 +36,7 @@ receipt updates there do not change the source tree being qualified. The
 compiler evidence below remains attributed to its actual input revision.
 
 The isolated checkout is `/private/tmp/plurx-shared-sol/repo`, on
-`codex/shared-libraries-completion`. Source-only archives compile on nuc4 in
+`codex/shared-libraries-completion`. Source-only archives compile on lab4 in
 `~/work/codex-shared-sol/compiler-source` using the verified Rust 1.97.1 compiler and the
 existing warm target. Paul's checkout is not used for changes.
 
@@ -63,7 +63,7 @@ existing warm target. Paul's checkout is not used for changes.
 | Active upgrade harness | Integrated through `cdf18d7f5`; unexecuted | Historical/candidate/restored Local HLS, actual video decode and live encoder drain; does not qualify Shared relay or active principal rebuild |
 | Main integration compilation | Passed at `4d0aa44b3` / tree `993422d0` | Rust workspace/all-target Clippy 1m59s; Core contract-feature compile 1m02s; Windows all-target check 5m26s; iOS/tvOS and Android app/test-source compilation; static web/catalog/history/mobile policy. Normal hook passed. No test execution |
 | Independent adversarial review | One P1 found at `4d0aa44b3` | Initial Apple Shared seek needs the existing bounded owner; correction and verification receipts tracked in PR #828 before test execution |
-| Compiler and lint | Earlier effort batch compilation passed | Final combined hook passed at `0ba500735` (2m24s); Core contract-feature targets compiled in 45.89s without execution; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Final Windows MSVC workspace/all-target check passed on `0ba500735` in 2m09s on m6, Rust 1.97.1, 4 CPUs / 8 GiB; compiler warnings remain. No tests executed |
+| Compiler and lint | Earlier effort batch compilation passed | Final combined hook passed at `0ba500735` (2m24s); Core contract-feature targets compiled in 45.89s without execution; Rust 1.97.1 check/Clippy. iOS/tvOS app and test targets, Android app/unit sources compile at `32a556f7b`; Final Windows MSVC workspace/all-target check passed on `0ba500735` in 2m09s on lab6, Rust 1.97.1, 4 CPUs / 8 GiB; compiler warnings remain. No tests executed |
 
 ## Parallel builders and management audit
 
@@ -79,15 +79,15 @@ uses one owned integration clone with exclusive file ownership per builder.
 | Receiver/cluster | Main media-session, HLS, transcode and VOD integration | Integrated and compiled; Windows check passed on the exact integration tree |
 | Root | Coordination, status, promotion PR and review/validation | PR #829 holds the integration; PR #828 tracks review resolution and final qualification. Initial draft run 4233 skipped; no tests at `4d0aa44b3` |
 
-Rust builders install source and compile inside one owned lock on nuc4. Remote checks
+Rust builders install source and compile inside one owned lock on lab4. Remote checks
 use one canonical source directory with checksum copies and current write
 timestamps, retaining the warm dependency target. Separate source paths had
 reused stale workspace artifacts; the two workspace packages were cleaned
 once before this transition. Formatting checks the exact staged archive on
 the pinned local compiler without waiting for the remote lock. Six obsolete
-source extractions (about 636 MiB) were removed. Apple and Android compile independently. The old mba address
-`192.168.5.115` timed out on 2026-10-06; this is an unavailable build surface,
-not a client-code failure. Inventory identifies m6 as `192.168.4.14`.
+source extractions (about 636 MiB) were removed. Apple and Android compile independently. The old maca address
+`10.42.5.115` timed out on 2026-10-06; this is an unavailable build surface,
+not a client-code failure. Inventory identifies lab6 as `10.42.4.14`.
 
 **Audit findings being addressed:** failed Source Start cleanup cannot be
 inferred from task errors; B must forward a durable remote session to its
@@ -139,7 +139,7 @@ what each cell must establish.
 2. **Keep the effort isolated.** Batch commits into effort PRs. Paul lifted
    the handoff hold on 2026-10-06; main promotion is now authorized after
    review, fixes and passing fast-lane evidence.
-3. **Preserve the Tailscale acceptance contract.** The proposed nuc4/m6 pair
+3. **Preserve the Tailscale acceptance contract.** The proposed lab4/lab6 pair
    has no Tailscale according to the handoff. A pinned-TLS namespace fixture
    does not establish Tailscale or two-home acceptance. Use separate instance
    ports and data directories for qualification; do not replace fleet services.

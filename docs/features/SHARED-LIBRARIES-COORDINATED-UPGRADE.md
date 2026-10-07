@@ -20,7 +20,7 @@ archive hashes, compiler version and daemon binary hashes.
 Use a new disposable source directory and a dedicated warm compiler directory:
 
 ```bash
-export PATH=/Users/pjunod/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH
+export PATH=~/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH
 python3 scripts/qualify-sharing-coordinated-upgrade.py \
   --source-dir /private/tmp/plurx-coordinated-qualification-source \
   --target-dir /private/tmp/plurx-coordinated-qualification-target \
