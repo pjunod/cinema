@@ -1790,7 +1790,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let probed = tokio::select! {
             biased;
             () = shutdown.clone().signalled() => None,
-            probed = probe_system(&config, &store, &dirs.transcode, &dirs.runtime_cache) => Some(probed?),
+            probed = probe_system(&config, &store, &selected.identity.node_id, &dirs.transcode, &dirs.runtime_cache) => Some(probed?),
         };
         let Some((encoder_caps, system)) = probed else {
             tracing::info!("shutdown signal received during system probing; not serving");
@@ -2750,6 +2750,7 @@ fn create_dirs(data_dir: &std::path::Path) -> anyhow::Result<crate::state::Dirs>
 async fn probe_system(
     config: &Config,
     store: &Arc<dyn plurx_core::store::Store>,
+    node_id: &str,
     transcode_dir: &std::path::Path,
     runtime_cache: &std::path::Path,
 ) -> anyhow::Result<(plurx_core::transcode::EncoderCaps, SystemInfo)> {
@@ -2787,6 +2788,10 @@ async fn probe_system(
     }
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
+    let hwaccel_override = store
+        .get_setting(&crate::state::node_hwaccel_key(node_id))
+        .await?;
+    let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
     let probe_pref = probe_preference(&hwaccel_pref);
     let encoder_selected = encoder_caps.choose(&probe_pref).label().to_owned();
@@ -2839,7 +2844,7 @@ async fn probe_system(
         tone_map,
         dv_disk: crate::dv_disk::probe_capabilities().await,
     };
-    let system = system_info(
+    let mut system = system_info(
         config,
         ffmpeg,
         ffprobe,
@@ -2847,6 +2852,7 @@ async fn probe_system(
         encoder_caps.clone(),
         measured,
     );
+    system.hwaccel_override = hwaccel_override;
     Ok((encoder_caps, system))
 }
 
@@ -2892,6 +2898,7 @@ fn system_info(
         ffmpeg,
         ffprobe,
         hwaccel_pref,
+        hwaccel_override: None,
         encoders,
         decoders: measured.decoders,
         measured_decoders: measured.measured_decoders,

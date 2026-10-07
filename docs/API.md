@@ -425,6 +425,7 @@ of never storing it.
 | GET | `/api/v1/settings` | admin | Full settings snapshot, from one store read |
 | PUT | `/api/v1/settings` | admin | Partial update; returns the new full snapshot |
 | GET | `/api/v1/system` | admin | Environment diagnostics and counters |
+| PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
 | GET | `/api/v1/system/logs` | admin | Tail of the in-memory log ring |
 | GET | `/api/v1/system/playback-events` | admin | Node-local playback observations |
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
@@ -525,6 +526,22 @@ otherwise have a floor of 15 minutes, because the scheduler ticks once a
 minute and anything shorter would be a lie dressed as a setting.
 
 ### 5.2 `GET /api/v1/system`
+
+`node_id` identifies the responding node. `hwaccel_pref` is the preference
+applied at startup; `encoder_selected` and `tone_map` report what its probes
+actually selected. `hwaccel_requested` is the saved node preference, and
+`hwaccel_restart_required` distinguishes a pending change from active state.
+
+`PUT /api/v1/system/transcoder` accepts `{"node_id":"…","preference":"qsv"}`.
+The preference is one of `auto`, `nvenc`, `qsv`, `vaapi`, `videotoolbox` or
+`software`. The response contains `node_id`, `preference` and
+`restart_required`. A request routed to a different node returns 409 rather
+than changing that node by accident; an unknown preference returns 400.
+Unavailable hardware is advisory, so any recognized choice can be saved.
+The setting is stored under `node.<node_id>.transcode.hwaccel` and overrides
+the legacy cluster preference on that node after restart. Saving does not
+change active sessions. Restart selects the encoder and probes its HDR graph
+together; unavailable preferred hardware uses the existing encoder fallback.
 
 Two of its sub-objects are shaped by a diagnostic argument rather than by
 convenience.
