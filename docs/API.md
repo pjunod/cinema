@@ -606,7 +606,10 @@ three missing nodes and counting the rest.
 
 `GET /api/v1/activity/detail` is readable by any user — it is their household
 server — but three parts of the payload are admin-gated and the four stop
-actions are admin-only. `node_hostnames` is present for a clustered admin
+actions are admin-only. `clustered` identifies whether this response covers
+cluster activity; a standalone server reports `false`. A single responding
+node does not make a configured cluster standalone. `node_hostnames` is present
+for a clustered admin
 **even when empty**, deliberately: the field's presence answers "may this
 reader see machine names", and making an empty roster look identical to a
 refused one would leave the gate untestable from the wire. `analysis` is
@@ -620,7 +623,9 @@ node's children only, not its peers'.
 
 Analysis progress may include paired `durable_job_id` and `durable_fence`
 fields for an explicitly correlated execution attempt. Job summaries include
-`fence`, the monotonic attempt number, without claim or boot tokens. A stage
+`fence`, the monotonic attempt number, and `library_id` for library work,
+without claim or boot tokens. Activity uses the library identity to show a
+queued job's local path-readiness error from its scan status. A stage
 belongs to the job only while ID, fence and owner match, the lease is still
 live, and the observation is fresh. Old peers omit the correlation fields.
 Media probes report stage and elapsed time; they do not measure byte progress

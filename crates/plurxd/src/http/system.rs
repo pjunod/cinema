@@ -5166,6 +5166,7 @@ pub async fn activity_detail(
             })
         });
     let mut response = serde_json::json!({
+        "clustered": clustered,
         "sessions": sessions,
         "deliveries": deliveries,
         "offline": offline,

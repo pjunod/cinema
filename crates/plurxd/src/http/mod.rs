@@ -10198,6 +10198,14 @@ mod tests {
             .iter()
             .any(|a| a["label"] == "Queued scan for Recordings · waiting for a worker"));
         assert!(!activities.to_string().contains("Scanning Recordings"));
+        let (status, detail) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["clustered"], false);
+        assert!(detail.get("activity_nodes").is_none());
+        let (status, queued) =
+            call(&app, get("/api/v1/cluster/jobs?state=queued", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queued["jobs"][0]["library_id"], library.id);
 
         let record = state
             .store
