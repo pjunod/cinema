@@ -44,7 +44,7 @@ pub(crate) fn boot_authority_guard(parameter: usize) -> String {
     format!("({}) AND json_type(${parameter})='array' AND json_array_length(${parameter}) BETWEEN 1 AND 256 AND (SELECT count(*) FROM cluster_nodes WHERE removed_at IS NULL)=json_array_length(${parameter}) AND NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(${parameter}) expected JOIN sharing_source_boot_intents intent ON intent.node_id=node.node_id AND intent.raft_id=node.raft_id WHERE json_extract(expected.value,'$[0]')=intent.node_id AND json_extract(expected.value,'$[1]')=intent.raft_id AND json_extract(expected.value,'$[2]')=intent.attempt_id AND json_extract(expected.value,'$[3]')=intent.master_fingerprint AND json_extract(expected.value,'$[4]')=intent.membership_generation AND intent.membership_generation=(SELECT generation FROM cluster_sharing_membership_generation WHERE singleton=1) AND EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_source_boot_v1:'||intent.attempt_id)))",boot_shape_guard())
 }
 fn installed_shape_guard_at(version: i64) -> String {
-    format!("({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",boot_shape_guard(),exact_object(INSTALLATION_SCHEMA),exact_object(TRANSACTION_SCHEMA),sharing_source_sessions::schema_guard())
+    format!("({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",super::jellyfin_watch::session_dependency_guard(),boot_shape_guard(),exact_object(INSTALLATION_SCHEMA),exact_object(TRANSACTION_SCHEMA),sharing_source_sessions::schema_guard())
 }
 pub(crate) fn installed_shape_guard() -> String {
     format!(
@@ -180,6 +180,7 @@ pub(crate) fn predecessor_layout_guard() -> String {
         guards.push(format!("(SELECT count(*) FROM pragma_table_info('{table}'))={} AND NOT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE NOT ({expected})) AND EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='user_id' AND \"notnull\"=1) AND EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='main' AND name='{table}' AND strict=1)",columns.len()));
     }
     guards.push(legacy_object_guard());
+    guards.push(super::jellyfin_watch::session_dependency_guard());
     format!("({})", guards.join(") AND ("))
 }
 pub(crate) fn predecessor_guard(now_parameter: usize) -> String {
@@ -190,7 +191,7 @@ pub(crate) fn predecessor_guard(now_parameter: usize) -> String {
 /// Frozen statement order preserves child authority rows and then seeds the
 /// allocator before order-maintenance triggers can observe ordinary inserts.
 pub(crate) fn layout_statements() -> Vec<String> {
-    let mut statements = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+    let mut statements = super::media_session_principal_rebuild_schema()
         .split("-- next statement\n")
         .map(|part| {
             part.lines()
@@ -306,7 +307,7 @@ mod tests {
     #[test]
     fn sharing_source_schema_accepts_frozen_replicated_v10_additive_session_shape() {
         let conn = database();
-        conn.execute_batch("DROP TABLE media_sessions")
+        conn.execute_batch("DROP TRIGGER jellyfin_watch_own_insert; DROP TRIGGER jellyfin_watch_own_update; DROP TABLE media_sessions")
             .expect("replace empty SQL fixture family");
         conn.execute_batch(super::super::hiqlite_sessions::MEDIA_SESSIONS_V10_SCHEMA)
             .expect("exact historical v10 declaration");
@@ -330,7 +331,18 @@ mod tests {
                 }
             }
         }
+        for (_, sql) in super::super::jellyfin_watch::session_dependency_triggers() {
+            conn.execute_batch(sql)
+                .expect("restore exact external watch dependency");
+        }
         assert!(evaluate(&conn, &predecessor_guard(1)));
+    }
+    #[test]
+    fn sharing_source_schema_refuses_substituted_external_watch_authority_trigger() {
+        let conn = database();
+        assert!(evaluate(&conn, &predecessor_layout_guard()));
+        conn.execute_batch("DROP TRIGGER jellyfin_watch_own_update; CREATE TRIGGER jellyfin_watch_own_update AFTER UPDATE ON watch_state BEGIN SELECT 1; END;").expect("substituted authority fixture");
+        assert!(!evaluate(&conn, &predecessor_layout_guard()));
     }
     #[test]
     fn sharing_source_schema_boot_registry_refuses_shape_substitution_and_attached_triggers() {

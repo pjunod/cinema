@@ -792,7 +792,7 @@ mod pending_request_tests {
                     if rebuilt {
                         store
                             .sharing_txn(
-                                super::super::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+                                super::super::media_session_principal_rebuild_schema()
                                     .split("-- next statement\n")
                                     .map(|s| (s.trim().trim_end_matches(';').into(), vec![]))
                                     .collect(),

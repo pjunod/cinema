@@ -49,6 +49,32 @@ BEGIN
 END;
 "#;
 
+/// External watch-state triggers must be removed while the referenced session
+/// table is replaced, then restored verbatim in the same rebuild transaction.
+pub(crate) fn session_dependency_triggers() -> impl Iterator<Item = (&'static str, &'static str)> {
+    ["jellyfin_watch_own_insert", "jellyfin_watch_own_update"]
+        .into_iter()
+        .map(|name| {
+            let marker = format!("CREATE TRIGGER IF NOT EXISTS {name} ");
+            let start = SCHEMA
+                .find(&marker)
+                .expect("closed watch trigger definition");
+            let end = start
+                + SCHEMA[start..]
+                    .find("\nEND;")
+                    .expect("closed watch trigger body")
+                + "\nEND;".len();
+            (name, &SCHEMA[start..end])
+        })
+}
+
+pub(crate) fn session_dependency_guard() -> String {
+    session_dependency_triggers().map(|(name, sql)| {
+        let declaration = sql.trim_end_matches(';').replace("CREATE TRIGGER IF NOT EXISTS", "CREATE TRIGGER").replace('\'', "''");
+        format!("EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='{name}' AND tbl_name='watch_state' AND sql='{declaration}')")
+    }).collect::<Vec<_>>().join(" AND ")
+}
+
 pub(crate) fn origin_json(
     user_id: i64,
     origin: Option<&JellyfinPlayScope>,

@@ -5241,7 +5241,7 @@ mod sharing_route_decoder_tests {
                         "../../../tests/fixtures/session-principal-local.sql"
                     ))?;
                     conn.execute_batch("BEGIN IMMEDIATE")?;
-                    conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                    conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                     conn.execute_batch("COMMIT")?;
                     conn.execute_batch(include_str!(
                         "../../../tests/fixtures/session-principal-sharing.sql"
@@ -5413,7 +5413,7 @@ mod sharing_route_decoder_tests {
             store.with_conn(move |conn| {
                 conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-local.sql"))?;
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                 conn.execute_batch("COMMIT")?;
                 conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-sharing.sql"))?;
                 conn.execute("UPDATE media_sessions SET session_id=?1 WHERE incarnation_id=?2",params![fixture_session,incarnation])?;
@@ -5509,7 +5509,7 @@ mod sharing_route_decoder_tests {
             store.with_conn(move |conn| {
                 conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-local.sql"))?;
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                 conn.execute_batch("COMMIT")?;
                 conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-sharing.sql"))?;
                 conn.execute("UPDATE media_sessions SET session_id=?1 WHERE incarnation_id=?2",params![fixture_session,foreign])?;
@@ -5598,7 +5598,7 @@ mod sharing_route_decoder_tests {
             store.with_conn(move |conn| {
                 conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-local.sql"))?;
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                 conn.execute_batch("COMMIT")?;
                 conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-sharing.sql"))?;
                 conn.execute("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES(?1,'node',1,4,9000,10)", [format!("session:{foreign}")])?;
@@ -5816,7 +5816,7 @@ mod sharing_route_decoder_tests {
                         [predecessor],
                     )?;
                     conn.execute_batch("BEGIN IMMEDIATE")?;
-                    conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                    conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                     conn.execute_batch("COMMIT")?;
                     conn.execute_batch(include_str!(
                         "../../../tests/fixtures/session-principal-sharing.sql"
@@ -5977,7 +5977,7 @@ mod sharing_route_decoder_tests {
                         "../../../tests/fixtures/session-principal-local.sql"
                     ))?;
                     conn.execute_batch("BEGIN IMMEDIATE")?;
-                    conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                    conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                     conn.execute_batch("COMMIT")?;
                     conn.execute_batch(include_str!(
                         "../../../tests/fixtures/session-principal-sharing.sql"
@@ -6250,7 +6250,7 @@ mod sharing_route_decoder_tests {
                         [predecessor],
                     )?;
                     conn.execute_batch("BEGIN IMMEDIATE")?;
-                    conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                    conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                     conn.execute_batch("COMMIT")?;
                     conn.execute_batch(include_str!(
                         "../../../tests/fixtures/session-principal-sharing.sql"
@@ -6403,7 +6403,7 @@ mod sharing_route_decoder_tests {
                         "../../../tests/fixtures/session-principal-local.sql"
                     ))?;
                     conn.execute_batch("BEGIN IMMEDIATE")?;
-                    conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                    conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                     conn.execute_batch("COMMIT")?;
                     conn.execute_batch(include_str!(
                         "../../../tests/fixtures/session-principal-sharing.sql"
@@ -6517,7 +6517,7 @@ mod sharing_route_decoder_tests {
             store.with_conn(|conn| {
                 conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-local.sql"))?;
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                 conn.execute_batch("COMMIT")?;
                 conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-sharing.sql"))?;
                 conn.execute("INSERT INTO media_session_producer_recovery
@@ -6661,7 +6661,7 @@ mod sharing_route_decoder_tests {
                         "../../../tests/fixtures/session-principal-local.sql"
                     ))?;
                     conn.execute_batch("BEGIN IMMEDIATE")?;
-                    conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                    conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
                     conn.execute_batch("COMMIT")?;
                     conn.execute_batch(include_str!(
                         "../../../tests/fixtures/session-principal-sharing.sql"

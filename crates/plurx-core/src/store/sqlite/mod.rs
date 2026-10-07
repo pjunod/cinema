@@ -2514,6 +2514,16 @@ impl SettingsStore for SqliteStore {
 #[cfg(test)]
 #[cfg(feature = "hiqlite-store")]
 impl SqliteStore {
+    pub(crate) fn apply_next_migration_for_test(conn: &Connection) -> Result<(), StoreError> {
+        let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let index =
+            usize::try_from(current).map_err(|error| StoreError::Migration(error.to_string()))?;
+        let sql = MIGRATIONS
+            .get(index)
+            .ok_or_else(|| StoreError::Migration("no next migration".into()))?;
+        Self::apply_migration_step(conn, current + 1, sql, false)
+    }
+
     pub(crate) fn apply_migrations_for_test(
         conn: &Connection,
         through_version: i64,

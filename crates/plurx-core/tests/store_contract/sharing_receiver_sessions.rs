@@ -7,8 +7,8 @@ use plurx_core::{
     sharing_catalogue_details::FileRevision,
     sharing_receiver_sessions::{ReceiverProducerKind, ReceiverSessionIntent, RemoteSourceRecipe},
     store::{
-        sharing_catalogue::ReceiverCatalogueScope, SharingReceiverSessionStore,
-        MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA,
+        media_session_principal_rebuild_schema, sharing_catalogue::ReceiverCatalogueScope,
+        SharingReceiverSessionStore,
     },
 };
 use sha2::Digest;
@@ -39,9 +39,12 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
             .count(),
         3
     );
-    for statement in MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.split("-- next statement\n") {
+    for statement in media_session_principal_rebuild_schema().split("-- next statement\n") {
         client
-            .execute(statement.trim().trim_end_matches(';'), hiqlite::params!())
+            .execute(
+                statement.trim().trim_end_matches(';').to_owned(),
+                hiqlite::params!(),
+            )
             .await
             .expect("frozen principal fixture before first session query");
     }
@@ -1178,9 +1181,12 @@ async fn sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_i
             .count(),
         3
     );
-    for s in MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.split("-- next statement\n") {
+    for s in media_session_principal_rebuild_schema().split("-- next statement\n") {
         client
-            .execute(s.trim().trim_end_matches(';'), hiqlite::params!())
+            .execute(
+                s.trim().trim_end_matches(';').to_owned(),
+                hiqlite::params!(),
+            )
             .await
             .expect("exact principal layout");
     }
@@ -1409,9 +1415,12 @@ async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirme
             .count(),
         3
     );
-    for statement in MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.split("-- next statement\n") {
+    for statement in media_session_principal_rebuild_schema().split("-- next statement\n") {
         client
-            .execute(statement.trim().trim_end_matches(';'), hiqlite::params!())
+            .execute(
+                statement.trim().trim_end_matches(';').to_owned(),
+                hiqlite::params!(),
+            )
             .await
             .expect("principal layout");
     }

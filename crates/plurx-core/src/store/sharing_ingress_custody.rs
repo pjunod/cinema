@@ -140,8 +140,13 @@ mod tests {
                 .expect("previous census"),
             0
         );
-        SqliteStore::apply_migrations_for_test(&connection, SQLITE_SCHEMA_VERSION)
-            .expect("actual custody migration");
+        SqliteStore::apply_next_migration_for_test(&connection).expect("actual custody migration");
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("atomic current marker"),
+            SQLITE_SCHEMA_VERSION
+        );
         let incarnation = uuid::Uuid::new_v4().to_string();
         let json = "{\"version\":1,\"sealed\":true,\"slots\":[{\"closed_confirmation\":null}],\"highwater\":[]}";
         connection
