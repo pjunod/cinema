@@ -7046,6 +7046,81 @@ test("cold original recovery can try an unproved compatible lower route within m
   assert.equal(policy.selectQualityCandidate({candidates:[low,middle],target:f.target,aspect:16/9}),null);
 });
 
+// Run the shipped diagnostic functions with controlled output representations,
+// rather than a codec ladder whose acceptance says nothing about this stream.
+function decodePredictionHarness(answer){
+  const listeners=new Map(),calls=[];
+  const hls={currentLevel:0,levels:[{videoCodec:"avc1.640028",width:1920,height:1080,
+    bitrate:4000000,attrs:{"FRAME-RATE":29.97}}],on:(event,callback)=>listeners.set(event,callback)};
+  const player={method:"transcode",source:{video_codec:"hevc",width:3840,height:2160,
+    bitrate:69000000,frame_rate:"24/1"},mediaAttachment:{id:1},hls};
+  const holder={current:player};
+  const navigator={mediaCapabilities:{decodingInfo:config=>{calls.push(config);return answer(config);}}};
+  const funcs=["decodePredictionTuple","currentDecodePrediction","decodePredictionLabel","probeDecode"].map(shippedSource).join("\n");
+  // A getter preserves PLAYER's live ownership semantics when replacement
+  // happens while decodingInfo's promise is outstanding.
+  const withPlayer=funcs.replace("const p=PLAYER;", "const p=holder.current;");
+  const api=new Function("holder","navigator","Hls","playbackOwnsAttachedMedia",withPlayer+
+    "\nreturn {probe:probeDecode,label:decodePredictionLabel,current:currentDecodePrediction,tuple:decodePredictionTuple};")(
+      holder,navigator,{Events:{FRAG_CHANGED:"fragment",LEVEL_SWITCHED:"level",LEVEL_LOADED:"loaded"}},
+      p=>p===holder.current&&p.mediaAttachment!=null);
+  return {api,player,holder,navigator,calls,listeners};
+}
+asyncTest("browser_prediction_uses_delivered_representation_not_original_source",async()=>{
+  const h=decodePredictionHarness(async()=>({supported:true,smooth:false,powerEfficient:false}));
+  await h.api.probe();
+  assert.deepEqual(h.calls,[{type:"media-source",video:{contentType:'video/mp4; codecs="avc1.640028"',
+    width:1920,height:1080,bitrate:4000000,framerate:29.97}}]);
+  assert.equal(h.player.decodeInfo.supported,true);
+  assert.equal(h.player.decodeInfo.powerEfficient,false);
+  assert.match(h.api.label(h.player),/Active decoder unknown.*MediaCapabilities prediction/);
+  assert.doesNotMatch(h.api.label(h.player),/software|no GPU|hardware/);
+  // Repeated fragment events for the same attached tuple do not requery.
+  h.listeners.get("fragment")();
+  assert.equal(h.calls.length,1);
+});
+asyncTest("browser_prediction_missing_output_or_api_remains_unavailable",async()=>{
+  const h=decodePredictionHarness(async()=>({supported:true}));
+  await h.api.probe();
+  assert.equal(h.player.decodeInfo.smooth,null);
+  assert.equal(h.player.decodeInfo.powerEfficient,null);
+  delete h.player.hls.levels[0].attrs["FRAME-RATE"];
+  await h.api.probe();
+  assert.equal(h.calls.length,1);
+  assert.equal(h.player.decodeInfo,null);
+  assert.match(h.api.label(h.player),/unavailable/);
+  h.player.hls=null;
+  await h.api.probe();
+  assert.equal(h.calls.length,1,"progressive source metadata must not authorize a guessed RFC codec");
+  h.player.hls={currentLevel:0,levels:[{videoCodec:"avc1.640028",width:1920,height:1080,
+    bitrate:4000000,attrs:{"FRAME-RATE":30}}],on:()=>{}};
+  h.navigator.mediaCapabilities=null;
+  await h.api.probe();
+  assert.equal(h.player.decodeInfo,null);
+});
+asyncTest("browser_prediction_fences_representations_and_attachments",async()=>{
+  const resolve=[];
+  const h=decodePredictionHarness(()=>new Promise(done=>resolve.push(done)));
+  const first=h.api.probe();
+  h.player.hls.levels.push({videoCodec:"avc1.4d401f",width:1280,height:720,
+    bitrate:2000000,attrs:{"FRAME-RATE":60}});
+  h.player.hls.currentLevel=1;
+  const second=h.api.probe();
+  resolve[1]({supported:true,smooth:true,powerEfficient:true});await second;
+  resolve[0]({supported:false,smooth:false,powerEfficient:false});await first;
+  assert.equal(h.player.decodeInfo.powerEfficient,true,"older representation cannot overwrite the newer answer");
+  h.player.hls.currentLevel=0;
+  assert.equal(h.api.current(h.player),null,"stale facts clear before a new probe finishes");
+  const third=h.api.probe();
+  h.player.mediaAttachment={id:2};
+  resolve[2]({supported:true,smooth:true,powerEfficient:true});await third;
+  assert.equal(h.player.decodeInfo,null,"same player with a different attachment is fenced");
+  const fourth=h.api.probe();
+  h.holder.current={mediaAttachment:{id:3}};
+  resolve[3]({supported:true,smooth:true,powerEfficient:true});await fourth;
+  assert.equal(h.player.decodeInfo,null,"detached player cannot publish an answer");
+});
+
 // Drained last, in registration order, after every synchronous case has run.
 (async () => {
   for (const [name, run] of ASYNC_TESTS) {

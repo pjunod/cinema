@@ -586,12 +586,13 @@ diagnostics.
 `stall_end`, `stall_recovery`. `stall_end` closes a `stall` that was reported
 while it was still going (the web's persistent wait): its `ms` is the time
 after that report, and it adds to `plurx_stalled_seconds_total` without
-counting a second stall. Of the two dozen optional fields, `decode_hw` is the one
-that separates two failures every other field renders identically: a full
-buffer with late frames because the GPU is doing the work and something
-upstream hiccuped, versus a full buffer with late frames because a CPU is
-software-decoding 4K. A `null` from a browser without
-`navigator.mediaCapabilities` is honest; `false` is the finding.
+counting a second stall. `decode_hw` is an optional hardware observation for
+clients that can identify their active decoder. The web player leaves it
+`null`: MediaCapabilities predicts efficiency, not the decoder currently
+running. Its separate nullable `decode_supported`, `decode_smooth`, and
+`decode_power_efficient` fields describe the browser's prediction for the
+evidenced delivered stream. A false efficiency prediction does not prove
+software decoding, and missing output facts leave the prediction unknown.
 
 ### 5.6 Activity
 

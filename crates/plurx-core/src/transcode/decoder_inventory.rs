@@ -93,9 +93,72 @@ pub struct MeasuredDecoders {
     /// Versioned backend-aware sibling. Changing `by_codec` in place broke the
     /// public v1 response for consumers that deserialize its values as strings.
     by_codec_and_backend_v2: BTreeMap<String, BTreeMap<String, String>>,
+    /// Present only on a runtime advertising DRM. An operational row is not
+    /// a performance envelope or a diagnostic-health qualification.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    v4l2_request: Vec<RequestDecodeProbe>,
+}
+
+/// One independently exercised input depth and CPU transfer path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RequestDecodeProbe {
+    pub bit_depth: u8,
+    pub transfer_format: String,
+    pub status: RequestProbeStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestProbeStatus {
+    Unmeasured,
+    ClipUnavailable,
+    Failed,
+    Operational,
 }
 
 impl MeasuredDecoders {
+    /// Operational media-class rows only. Missing dimensions and cadence
+    /// deliberately do not pretend that a tiny clip qualified throughput.
+    pub fn operational_request_capabilities(&self) -> Vec<super::DecodeCapability> {
+        use super::{CapabilityStatus, DecodeCapability, DecodeSurfaceContract, FrameDomain};
+        self.v4l2_request
+            .iter()
+            .filter(|probe| probe.status == RequestProbeStatus::Operational)
+            .map(|probe| DecodeCapability {
+                backend: DecodeBackend::V4l2Request,
+                codec: "hevc".into(),
+                profile: Some(
+                    if probe.bit_depth == 10 {
+                        "main 10"
+                    } else {
+                        "main"
+                    }
+                    .into(),
+                ),
+                pixel_format: Some(probe.transfer_format.clone()),
+                bit_depth: Some(probe.bit_depth),
+                dynamic_range: None,
+                max_width: None,
+                max_height: None,
+                max_pixel_rate: None,
+                surface: Some(
+                    DecodeSurfaceContract::new(
+                        FrameDomain::DrmPrime,
+                        Some(probe.transfer_format.clone()),
+                        FrameDomain::SystemMemory,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                    )
+                    .expect("bounded request transfer format"),
+                ),
+                status: CapabilityStatus::Operational,
+            })
+            .collect()
+    }
+
     /// The decoder FFmpeg selected for `(codec, backend)`, when measured.
     ///
     /// `None` means unmeasured, never "the family name" — the caller must keep
@@ -204,8 +267,10 @@ pub fn selected_hardware_decoder(
     backend: DecodeBackend,
     decode_succeeded: bool,
 ) -> Option<String> {
-    if backend == DecodeBackend::Software
-        || !decode_succeeded
+    if matches!(
+        backend,
+        DecodeBackend::Software | DecodeBackend::V4l2Request
+    ) || !decode_succeeded
         || !hardware_runtime_evidence(stderr, backend)
     {
         return None;
@@ -242,13 +307,7 @@ fn hardware_runtime_evidence(stderr: &str, backend: DecodeBackend) -> bool {
 }
 
 fn hardware_output_format(backend: DecodeBackend) -> Option<&'static str> {
-    match backend {
-        DecodeBackend::Software => None,
-        DecodeBackend::VideoToolbox => Some("videotoolbox_vld"),
-        DecodeBackend::Cuda => Some("cuda"),
-        DecodeBackend::Qsv => Some("qsv"),
-        DecodeBackend::Vaapi => Some("vaapi"),
-    }
+    backend.hardware_frame_format()
 }
 
 /// `… Selecting decoder '<name>' because of requested hwaccel method <name>`
@@ -321,30 +380,41 @@ async fn measure_selected_decoders_with_budget(
     scratch: &std::path::Path,
     budget: std::time::Duration,
 ) -> MeasuredDecoders {
-    match tokio::time::timeout(
+    let mut measured = MeasuredDecoders::default();
+    if tokio::time::timeout(
         budget,
-        measure_selected_decoders_inner(ffmpeg_bin, codecs, scratch),
+        measure_selected_decoders_inner(ffmpeg_bin, codecs, scratch, &mut measured),
     )
     .await
+    .is_err()
     {
-        Ok(measured) => measured,
-        Err(_) => {
-            tracing::warn!(
-                timeout_ms = budget.as_millis(),
-                "the complete decoder inventory exceeded its startup budget"
-            );
-            MeasuredDecoders::default()
-        }
+        tracing::warn!(
+            timeout_ms = budget.as_millis(),
+            "decoder inventory budget exhausted; retaining only completed measurements"
+        );
     }
+    measured
 }
 
 async fn measure_selected_decoders_inner(
     ffmpeg_bin: &str,
     codecs: &[String],
     scratch: &std::path::Path,
-) -> MeasuredDecoders {
+    measured: &mut MeasuredDecoders,
+) {
     let backends = advertised_backends(ffmpeg_bin).await;
-    let mut measured = MeasuredDecoders::default();
+    // Give the two request classes their chance before unrelated AV1 probes
+    // consume the startup deadline. Successful rows survive a later timeout.
+    if cfg!(target_os = "linux")
+        && backends.contains(&DecodeBackend::V4l2Request)
+        && codecs.iter().any(|codec| codec == "hevc")
+    {
+        measure_request_decode(ffmpeg_bin, scratch, measured).await;
+    }
+    let backends: Vec<_> = backends
+        .into_iter()
+        .filter(|backend| *backend != DecodeBackend::V4l2Request)
+        .collect();
     for codec in codecs {
         let Some(encoders) = PROBE_ENCODERS
             .iter()
@@ -363,7 +433,6 @@ async fn measure_selected_decoders_inner(
             "no decoder implementation could be measured on this build; plans stay unnamed"
         );
     }
-    measured
 }
 
 /// Every decoder-inventory child: a capability probe nobody is waiting on.
@@ -394,7 +463,9 @@ fn parse_hwaccel_list(stdout: &str) -> Vec<DecodeBackend> {
         .into_iter()
         .filter(|backend| {
             *backend == DecodeBackend::Software
-                || stdout.lines().any(|line| line.trim() == backend.name())
+                || stdout
+                    .lines()
+                    .any(|line| line.trim() == backend.hwaccel_method())
         })
         .collect()
 }
@@ -511,12 +582,7 @@ async fn probe_decode(
         .kill_on_drop(true)
         .args(["-hide_banner", "-loglevel", "verbose"]);
     if backend != DecodeBackend::Software {
-        command.args([
-            "-hwaccel",
-            backend.name(),
-            "-hwaccel_output_format",
-            hardware_output_format(backend).expect("hardware backend has an output format"),
-        ]);
+        command.args(backend.input_args(true));
     }
     command
         .arg("-i")
@@ -537,9 +603,289 @@ async fn probe_decode(
     }
 }
 
+/// Request-specific initialization plus completed output from the exact
+/// download/CPU-encode graph. DRM advertisement and generic DRM frames alone
+/// cannot establish that the stateless request decoder did the work.
+fn request_probe_succeeded(stderr: &str, progress: &str, format: &str, succeeded: bool) -> bool {
+    succeeded
+        && selected_decoder(stderr, "hevc").as_deref() == Some("hevc")
+        && stderr.lines().any(|line| {
+            line.contains("Hwaccel V4L2 HEVC stateless V") && line.contains("; devices: ")
+                && line.contains("; swfmt=")
+        })
+        // hwdownload can consume only hardware frames. showinfo observes the
+        // downloaded planar format before the deliberate x264 downconversion.
+        && stderr.lines().any(|line| line.contains("Parsed_showinfo_")
+            && line.contains(&format!("fmt:{format} ")))
+        && stderr.lines().any(|line| line.contains(
+            "Selecting decoder 'hevc' because of requested hwaccel method drm"))
+        && progress.lines().filter_map(|line| line.strip_prefix("frame="))
+            .filter_map(|frame| frame.trim().parse::<u32>().ok())
+            .any(|frames| frames >= 2)
+        && progress.lines().any(|line| line == "progress=end")
+}
+
+async fn measure_request_decode(
+    ffmpeg_bin: &str,
+    scratch: &std::path::Path,
+    measured: &mut MeasuredDecoders,
+) {
+    measured.v4l2_request = [(8, "yuv420p"), (10, "yuv420p10le")]
+        .into_iter()
+        .map(|(bit_depth, transfer_format)| RequestDecodeProbe {
+            bit_depth,
+            transfer_format: transfer_format.into(),
+            status: RequestProbeStatus::Unmeasured,
+        })
+        .collect();
+    for (row, (depth, format)) in [(8, "yuv420p"), (10, "yuv420p10le")]
+        .into_iter()
+        .enumerate()
+    {
+        let clip = ProbeClip(scratch.join(format!(
+            "decoder-probe-request-{depth}-{}.mkv",
+            uuid::Uuid::new_v4().simple()
+        )));
+        let source =
+            format!("testsrc2=size={PROBE_SIZE}:rate={PROBE_FPS}:duration={PROBE_SECONDS}");
+        let encode_args: Vec<std::ffi::OsString> = vec![
+            "-nostdin".into(),
+            "-y".into(),
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-f".into(),
+            "lavfi".into(),
+            "-i".into(),
+            source.into(),
+            "-c:v".into(),
+            "libx265".into(),
+            "-preset".into(),
+            "ultrafast".into(),
+            "-x265-params".into(),
+            "pools=1:frame-threads=1:log-level=error".into(),
+            "-pix_fmt".into(),
+            format.into(),
+            "-f".into(),
+            PROBE_CONTAINER.into(),
+            clip.path().as_os_str().to_owned(),
+        ];
+        let made = crate::process::bounded::output(
+            ffmpeg_bin,
+            &encode_args,
+            PROBE_TIMEOUT,
+            128 * 1024,
+            INVENTORY,
+        )
+        .await
+        .is_ok_and(|output| output.status.success());
+        if !made {
+            measured.v4l2_request[row].status = RequestProbeStatus::ClipUnavailable;
+            continue;
+        }
+        let mut args: Vec<std::ffi::OsString> = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "verbose",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        args.extend(
+            DecodeBackend::V4l2Request
+                .input_args(true)
+                .into_iter()
+                .map(Into::into),
+        );
+        args.extend([
+            "-i".into(),
+            clip.path().as_os_str().to_owned(),
+            "-an".into(),
+            "-vf".into(),
+            format!("hwdownload,format={format},showinfo,scale=160:120,format=yuv420p").into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            "ultrafast".into(),
+            "-threads".into(),
+            "1".into(),
+            "-frames:v".into(),
+            "2".into(),
+            "-f".into(),
+            "null".into(),
+            "-".into(),
+        ]);
+        let operational = crate::process::bounded::output(
+            ffmpeg_bin,
+            &args,
+            PROBE_TIMEOUT,
+            128 * 1024,
+            INVENTORY,
+        )
+        .await
+        .is_ok_and(|output| {
+            request_probe_succeeded(
+                &String::from_utf8_lossy(&output.stderr),
+                &String::from_utf8_lossy(&output.stdout),
+                format,
+                output.status.success(),
+            )
+        });
+        measured.v4l2_request[row].status = if operational {
+            RequestProbeStatus::Operational
+        } else {
+            RequestProbeStatus::Failed
+        };
+        if operational {
+            measured.record("hevc", DecodeBackend::V4l2Request, "hevc");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request_diagnostics(format: &str) -> String {
+        format!("Selecting decoder 'hevc' because of requested hwaccel method drm\n\
+[vist#0:0/hevc @ 0x1] [dec:hevc @ 0x2] opened\n\
+[hevc @ 0x2] Hwaccel V4L2 HEVC stateless V4; devices: /dev/media0,/dev/video0; buffers: src MMAP, dst DMABUF; swfmt=rpi4_10\n\
+[Parsed_showinfo_2 @ 0x3] n: 0 fmt:{format} s:160x120\n")
+    }
+
+    #[test]
+    fn request_probe_requires_stateless_initialization_transfer_and_completed_frames() {
+        let stderr = request_diagnostics("yuv420p10le");
+        let progress = "frame=2\nprogress=end\n";
+        assert!(request_probe_succeeded(
+            &stderr,
+            progress,
+            "yuv420p10le",
+            true
+        ));
+        assert!(!request_probe_succeeded(&stderr, progress, "yuv420p", true));
+        assert!(!request_probe_succeeded(
+            &stderr,
+            progress,
+            "yuv420p10le",
+            false
+        ));
+        assert!(!request_probe_succeeded(
+            &stderr,
+            "frame=1\nprogress=end\n",
+            "yuv420p10le",
+            true
+        ));
+        assert!(!request_probe_succeeded(
+            &stderr,
+            "frame=2\n",
+            "yuv420p10le",
+            true
+        ));
+        for marker in [
+            "Hwaccel V4L2 HEVC stateless V",
+            "Parsed_showinfo_",
+            "requested hwaccel method drm",
+            "[dec:hevc @",
+        ] {
+            assert!(
+                !request_probe_succeeded(
+                    &stderr.replace(marker, "missing"),
+                    progress,
+                    "yuv420p10le",
+                    true
+                ),
+                "{marker}"
+            );
+        }
+        assert!(!request_probe_succeeded(
+            "Hardware acceleration methods:\ndrm\n",
+            progress,
+            "yuv420p10le",
+            true
+        ));
+    }
+
+    #[test]
+    fn request_operability_rows_never_expand_depth_or_mint_qualified_envelopes() {
+        let inventory = MeasuredDecoders {
+            v4l2_request: vec![
+                RequestDecodeProbe {
+                    bit_depth: 8,
+                    transfer_format: "yuv420p".into(),
+                    status: RequestProbeStatus::Operational,
+                },
+                RequestDecodeProbe {
+                    bit_depth: 10,
+                    transfer_format: "yuv420p10le".into(),
+                    status: RequestProbeStatus::Failed,
+                },
+            ],
+            ..MeasuredDecoders::default()
+        };
+        let caps = inventory.operational_request_capabilities();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].bit_depth, Some(8));
+        assert_eq!(caps[0].status, super::super::CapabilityStatus::Operational);
+        assert_eq!(caps[0].profile.as_deref(), Some("main"));
+        assert_eq!(caps[0].max_pixel_rate, None);
+        assert_eq!(caps[0].max_width, None);
+        assert_eq!(caps[0].max_height, None);
+        assert_eq!(
+            parse_hwaccel_list("Hardware acceleration methods:\ndrm\n"),
+            [DecodeBackend::Software, DecodeBackend::V4l2Request]
+        );
+        assert!(
+            MeasuredDecoders::from_measured(&[("hevc", DecodeBackend::V4l2Request, "hevc")])
+                .operational_request_capabilities()
+                .is_empty()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn request_graph_probe_records_only_the_depth_that_transferred_and_encoded() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = tempfile::tempdir().expect("scratch");
+        let fake = scratch.path().join("request-ffmpeg");
+        let diagnostics = request_diagnostics("yuv420p");
+        let script = format!(
+            "#!/bin/sh\ncase \" $* \" in\n\
+*\" -c:v libx265 \"*) for argument do output=\"$argument\"; done; printf fixture >\"$output\"; exit 0 ;;\n\
+*\"hwdownload,format=yuv420p10le,\"*) exit 1 ;;\n\
+*\"hwdownload,format=yuv420p,\"*) cat <<'DIAGNOSTICS' >&2\n{diagnostics}DIAGNOSTICS\n\
+printf 'frame=2\\nprogress=end\\n'; exit 0 ;;\n\
+*) exit 1 ;;\nesac\n"
+        );
+        std::fs::write(&fake, script).expect("fake ffmpeg");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        let mut measured = MeasuredDecoders::default();
+        measure_request_decode(fake.to_str().expect("path"), scratch.path(), &mut measured).await;
+        assert_eq!(
+            measured.v4l2_request[0].status,
+            RequestProbeStatus::Operational
+        );
+        assert_eq!(measured.v4l2_request[1].status, RequestProbeStatus::Failed);
+        assert_eq!(
+            measured.implementation("hevc", DecodeBackend::V4l2Request),
+            Some("hevc")
+        );
+        assert_eq!(measured.operational_request_capabilities().len(), 1);
+        assert!(std::fs::read_dir(scratch.path())
+            .expect("scratch files")
+            .all(|entry| {
+                !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("decoder-probe-")
+            }));
+    }
 
     /// Real FFmpeg 9.0.1 output, captured from a probe decode of an h264 clip.
     const FFMPEG_9_H264: &str = "\

@@ -186,8 +186,9 @@ pub struct DiagnosticContract {
     pub decoder: String,
     /// The decode backend this contract was qualified on, spelled as
     /// [`plurx_core::transcode::DecodeBackend::name`] spells it — the same
-    /// string FFmpeg takes for `-hwaccel`, and not the serde spelling, which
-    /// differs for VideoToolbox and of which only one parses.
+    /// durable semantic name, independent of FFmpeg CLI spelling. V4L2
+    /// Request uses the `drm` method; VideoToolbox serde uses a different
+    /// spelling. Contract lookup always uses the semantic name.
     ///
     /// Defaulted to `software`, so every contract written before this field
     /// existed keeps meaning exactly what it meant. Nothing silently widens.

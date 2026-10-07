@@ -385,6 +385,8 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [RASPBERRY-PI-IMPLEMENTATION.md](clients/RASPBERRY-PI-IMPLEMENTATION.md) | Build contract for existing Plurx server and web HDMI playback on Pi 5: request decoding, browser evidence, deployment and acceptance. | open |
+| [RASPBERRY-PI-STATUS.md](clients/RASPBERRY-PI-STATUS.md) | Existing Plurx on Pi 5: implementation progress, decisions, review and physical acceptance evidence. | open |
 | [Native library index scrolling](apple-builds/823-ios-library-index-scroll.md) | Why index taps resolved to their own buttons, and the distinct row-target repair. | open |
 | [Native grouped library rows](apple-builds/821-native-library-rows.md) | Apple release note for native grouped browsing, jump navigation, and saved Rows/Grid. | built |
 | [GROUPED-LIBRARY-ROWS-STATUS.md](clients/GROUPED-LIBRARY-ROWS-STATUS.md) | Approved grouped library browsing contract, progress, review, and merge evidence. | open |

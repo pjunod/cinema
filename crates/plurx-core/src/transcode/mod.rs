@@ -1692,37 +1692,15 @@ fn hls_args_inner(
     let pipeline_decode = opts.pipeline.decode_args();
     let (decode_args, hwdownload) = if let Some(plan) = plan {
         let decode = plan.decode();
-        let args = match decode.backend() {
-            // A named implementation is one the inventory measured, so the
-            // command names it. With none measured the command names none,
-            // which is what shipped before decode planning existed: FFmpeg
-            // chooses, and for some codecs its choice is better than the
-            // decoder named after the codec.
-            DecodeBackend::Software => {
-                let mut args = vec!["-hwaccel".to_owned(), "none".to_owned()];
-                if let Some(implementation) = decode.software_decoder() {
-                    args.push("-c:v".to_owned());
-                    args.push(implementation.to_owned());
-                }
-                args
+        let mut args = decode.backend().input_args(matches!(
+            decode.backend(),
+            DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request
+        ));
+        if decode.backend() == DecodeBackend::Software {
+            if let Some(implementation) = decode.software_decoder() {
+                args.extend(["-c:v".to_owned(), implementation.to_owned()]);
             }
-            DecodeBackend::VideoToolbox => {
-                vec!["-hwaccel".to_owned(), "videotoolbox".to_owned()]
-            }
-            DecodeBackend::Cuda => vec!["-hwaccel".to_owned(), "cuda".to_owned()],
-            DecodeBackend::Qsv => vec![
-                "-hwaccel".to_owned(),
-                "qsv".to_owned(),
-                "-hwaccel_output_format".to_owned(),
-                "qsv".to_owned(),
-            ],
-            DecodeBackend::Vaapi => vec![
-                "-hwaccel".to_owned(),
-                "vaapi".to_owned(),
-                "-hwaccel_output_format".to_owned(),
-                "vaapi".to_owned(),
-            ],
-        };
+        }
         let download = decode
             .surface()
             .decoder_download_format()

@@ -1431,7 +1431,26 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "Selecting decoder '<name>' because of requested hwaccel method <backend>",
             inventory,
         )
-        self.assertIn('"-hwaccel_output_format",', inventory)
+        # Inventory and production share backend-to-FFmpeg argument mapping.
+        # Keep the explicit hardware-frame contract pinned at its authority,
+        # and pin both call sites so moving it cannot silently drop probe flags.
+        decode = CORE_DECODE.read_text(encoding="utf-8")
+        arguments = decode.split("pub fn input_args(", 1)[1].split(
+            "/// Every backend", 1
+        )[0]
+        self.assertIn('"-hwaccel_output_format"', arguments)
+        self.assertIn("self.hwaccel_method()", arguments)
+        self.assertIn("self.hardware_frame_format()", arguments)
+        self.assertIn("command.args(backend.input_args(true))", inventory)
+        self.assertRegex(
+            inventory, r"DecodeBackend::V4l2Request\s*\.input_args\(true\)"
+        )
+        production = CORE_TRANSCODE.read_text(encoding="utf-8")
+        self.assertIn("decode.backend().input_args(matches!(", production)
+        self.assertIn(
+            "DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request",
+            production,
+        )
         self.assertIn("hardware_runtime_evidence(stderr, backend)", inventory)
         self.assertIn("const INVENTORY_TIMEOUT: std::time::Duration", inventory)
         self.assertIn("by_codec_and_backend_v2", inventory)

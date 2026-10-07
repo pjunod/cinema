@@ -164,7 +164,10 @@
  * @property {number} [_hitchReported]     hitches already reported
  * @property {any} [rescuedNote]           why a stall rescue changed the stream (stats panel)
  * @property {string} [surfaceTranscodeReason] why the surface moved this playback to a transcode
- * @property {any} [decodeInfo]            MediaCapabilities.decodingInfo() answer for this stream
+ * @property {any} [decodeInfo]            Nullable MediaCapabilities predictions, fenced to attached representation
+ * @property {any} [decodeProbeOwner]      HLS instance and attachment supplying diagnostic media events
+ * @property {number} [decodeProbeGeneration] Latest asynchronous diagnostic request
+ * @property {any} [decodeProbePending]    Pending request attachment, representation key and generation
  * @property {number} [mediaRecoveries]    media-error recoveries this playback
  * @property {number|null} [mediaRecoveredAtMs]
  * @property {boolean} [refusedOriginal]   the browser refused the original stream

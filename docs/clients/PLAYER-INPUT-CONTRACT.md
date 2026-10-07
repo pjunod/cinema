@@ -711,7 +711,7 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | `Frame rate` | – | – | – | ✓ | text | grid | web |  |
 | `Player state` | ✓ | ✓ | ✓ | ✓ | text | grid | all | One vocabulary: Playing · Paused · Buffering · Ended · Failed. |
 | `Waiting reason` | – | – | – | ✓ | text | notes | apple |  |
-| `Decoder` | – | – | – | ✓ | text | grid | web · android | hardware / software, with the reason when software. |
+| `Decoder` | – | – | – | ✓ | text | grid | web · android | Android reports decoder identity; web reports nullable MediaCapabilities predictions with provenance. Browser predictions do not identify active hardware or software decoding. |
 | `Buffering interruptions` | – | ✓ | ✓ | ✓ | text | grid | all | "2 (1 supply · 1 decode)" — player-side stall count this session. |
 | `Subtitles` | – | ✓ | ✓ | ✓ | text | grid | all | Track name; the delivery clause (native · burned · overlay) is a note under the same label. |
 
