@@ -43,6 +43,7 @@ pub(super) async fn validate_owner_locked(
     if tuple.owner_node_id != state.node_id {
         return Err(ReceiverStartError::Unavailable);
     }
+    tracing::debug!(target: "plurx::sharing", stage = "exact_route", "receiver ingress registration progress");
     let route = exact_route(state, tuple).await?;
     let actor = state
         .sharing
@@ -99,6 +100,7 @@ pub(super) async fn validate_forward_ingress(
     let _lease_observation = actor.0.lease_observation.lock().await;
     validate_owner_locked(state, tuple).await?;
     let route = exact_route(state, tuple).await?;
+    tracing::debug!(target: "plurx::sharing", stage = "proof_read", "receiver ingress registration progress");
     let proof = state
         .store
         .receiver_relay_read_authority(&route)
@@ -142,20 +144,25 @@ pub(super) async fn register_owner(
         .receiver_starts
         .by_session(tuple.session_id)
         .ok_or(ReceiverStartError::Unavailable)?;
+    tracing::debug!(target: "plurx::sharing", stage = "lease_gate waiting", "receiver ingress registration progress");
     #[cfg(test)]
     eprintln!("B Register stage=lease_gate waiting");
     let _lease_observation = actor.0.lease_observation.lock().await;
+    tracing::debug!(target: "plurx::sharing", stage = "lease_gate acquired", "receiver ingress registration progress");
     #[cfg(test)]
     eprintln!("B Register stage=lease_gate acquired");
     validate_owner_locked(state, tuple)
         .await
         .inspect_err(|_error| {
+            tracing::warn!(target: "plurx::sharing", stage = "actual_owner", error_class = "operation_refused", "receiver ingress registration refused");
             #[cfg(test)]
             eprintln!("B Register stage=actual_owner error={_error:?}");
         })?;
+    tracing::debug!(target: "plurx::sharing", stage = "actual_owner validated", "receiver ingress registration progress");
     #[cfg(test)]
     eprintln!("B Register stage=actual_owner validated");
     let route = exact_route(state, tuple).await.inspect_err(|_error| {
+        tracing::warn!(target: "plurx::sharing", stage = "exact_route", error_class = "operation_refused", "receiver ingress registration refused");
         #[cfg(test)]
         eprintln!("B Register stage=exact_route error={_error:?}");
     })?;
@@ -164,12 +171,14 @@ pub(super) async fn register_owner(
         .receiver_relay_read_authority(&route)
         .await
         .map_err(|_error| {
+            tracing::warn!(target: "plurx::sharing", stage = "proof_read", error_class = "operation_refused", "receiver ingress registration refused");
             #[cfg(test)]
             eprintln!("B Register stage=proof_read StoreError={_error:?}");
             ReceiverStartError::Unresolved
         })?
         .ok_or(ReceiverStartError::Unavailable)
         .inspect_err(|_error| {
+            tracing::warn!(target: "plurx::sharing", stage = "proof_read", error_class = "authority_absent", "receiver ingress registration refused");
             #[cfg(test)]
             eprintln!("B Register stage=proof_read absent");
         })?;
@@ -204,6 +213,7 @@ pub(super) async fn register_owner(
         "B Register stage=members begin replicated={}",
         state.membership.is_replicated()
     );
+    tracing::debug!(target: "plurx::sharing", stage = "members", "receiver ingress registration progress");
     let members = if state.membership.is_replicated() {
         Some(
             state
@@ -211,12 +221,14 @@ pub(super) async fn register_owner(
                 .observe_ingress_custody_members()
                 .await
                 .map_err(|_error| {
+                    tracing::warn!(target: "plurx::sharing", stage = "members", error_class = "operation_refused", "receiver ingress registration refused");
                     #[cfg(test)]
                     eprintln!("B Register stage=members error={_error:?}");
                     ReceiverStartError::Unresolved
                 })?
                 .ok_or(ReceiverStartError::Unavailable)
                 .inspect_err(|_error| {
+                    tracing::warn!(target: "plurx::sharing", stage = "members", error_class = "authority_absent", "receiver ingress registration refused");
                     #[cfg(test)]
                     eprintln!("B Register stage=members absent");
                 })?,
@@ -230,6 +242,7 @@ pub(super) async fn register_owner(
         .ok_or(ReceiverStartError::Unavailable)?;
     #[cfg(test)]
     eprintln!("B Register stage=CoreCAS begin members={} registration_valid={} registered_closed={} local_boot_equal={} registration_node_equal_owner={}", members.is_some(), registration.valid(), registration.closed_confirmation.is_some(), registration.boot_id==state.sharing.accepted_drivers.boot_id(), registration.node_id==tuple.owner_node_id);
+    tracing::debug!(target: "plurx::sharing", stage = "core_cas", "receiver ingress registration progress");
     let result = state
         .store
         .register_receiver_ingress(
@@ -240,10 +253,12 @@ pub(super) async fn register_owner(
         )
         .await
         .map_err(|_error| {
+            tracing::warn!(target: "plurx::sharing", stage = "CoreCAS", error_class = "operation_refused", "receiver ingress registration refused");
             #[cfg(test)]
             eprintln!("B Register stage=CoreCAS StoreError={_error:?}");
             ReceiverStartError::Unresolved
         })?;
+    tracing::debug!(target: "plurx::sharing", stage = "core_cas", outcome = ?result, "receiver ingress registration outcome");
     // A refused CAS may race another accepted write. It cannot discharge an
     // ingress reservation merely because this exchange did not observe it.
     #[cfg(test)]
@@ -368,7 +383,10 @@ async fn wait_admission(
         }
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), changed)
             .await
-            .map_err(|_| ReceiverStartError::Deadline)?;
+            .map_err(|_| {
+                tracing::warn!(target: "plurx::sharing", stage = "admission_wait", error_class = "deadline", "receiver ingress admission unresolved");
+                ReceiverStartError::Deadline
+            })?;
     }
 }
 pub(super) async fn receiver_forward_admit(
@@ -560,6 +578,7 @@ pub(super) async fn receiver_forward_admit(
                     ReceiverCustodyReply::Unresolved => "unresolved",
                 })
             );
+            tracing::debug!(target: "plurx::sharing", stage = "owner_exchange", outcome = ?outcome.as_ref().map(|reply| match reply { ReceiverCustodyReply::Applied => "applied", ReceiverCustodyReply::Replay => "replay", ReceiverCustodyReply::Refused => "refused", ReceiverCustodyReply::ReconciledClosed => "reconciled_closed", ReceiverCustodyReply::Unresolved => "unresolved" }), "receiver ingress registration exchange completed");
             let admitted = match outcome {
                 Ok(ReceiverCustodyReply::Applied | ReceiverCustodyReply::Replay) => {
                     permit.complete();

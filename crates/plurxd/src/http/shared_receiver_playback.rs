@@ -1033,28 +1033,32 @@ impl ReceiverStartActor {
         use futures_util::StreamExt;
         self.current_delivery_attachment(&state)
             .await
-            .inspect_err(|_error| {
+            .inspect_err(|error| {
+                tracing::warn!(target: "plurx::sharing", stage = "initial_attachment", error_class = ?error, "protected receiver Start refused");
                 #[cfg(test)]
-                eprintln!("B protected Start stage=initial_attachment error={_error:?}");
+                eprintln!("B protected Start stage=initial_attachment error={error:?}");
             })?;
         self.current_source_status(&state)
             .await
-            .inspect_err(|_error| {
+            .inspect_err(|error| {
+                tracing::warn!(target: "plurx::sharing", stage = "source_status", error_class = ?error, "protected receiver Start refused");
                 #[cfg(test)]
-                eprintln!("B protected Start stage=source_status error={_error:?}");
+                eprintln!("B protected Start stage=source_status error={error:?}");
             })?;
         self.current_delivery_attachment(&state)
             .await
-            .inspect_err(|_error| {
+            .inspect_err(|error| {
+                tracing::warn!(target: "plurx::sharing", stage = "attachment_recheck", error_class = ?error, "protected receiver Start refused");
                 #[cfg(test)]
-                eprintln!("B protected Start stage=attachment_recheck error={_error:?}");
+                eprintln!("B protected Start stage=attachment_recheck error={error:?}");
             })?;
         let guard = self
             .retain_delivery_connection(state, connection)
             .await
-            .inspect_err(|_error| {
+            .inspect_err(|error| {
+                tracing::warn!(target: "plurx::sharing", stage = "accepted_ingress", error_class = ?error, "protected receiver Start refused");
                 #[cfg(test)]
-                eprintln!("B protected Start stage=accepted_ingress error={_error:?}");
+                eprintln!("B protected Start stage=accepted_ingress error={error:?}");
             })?;
         let (parts, body) = response.into_parts();
         let stream = body.into_data_stream().map(move |frame| {
