@@ -4191,7 +4191,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # park the test before reporting its original HTTP refusal; no production timer.
 # Four test-only bounds: actual placement readiness, blocked lease read,
 # completed lease read, and one bounded real-clock wake; no production timer.
-expected_occurrences = 1559
+# +2 actual owner-lease regression bounds: owner-proof reader remains blocked
+# independently of the attachment reader, then finishes only after writeback.
+# Both observe the retained actor and exact SQL fences; no production timer.
+expected_occurrences = 1561
 
 
 [[module_structures]]

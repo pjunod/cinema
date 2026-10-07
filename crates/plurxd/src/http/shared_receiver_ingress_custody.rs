@@ -28,6 +28,18 @@ pub(super) async fn validate_owner(
     state: &AppState,
     tuple: &ReceiverForwardTuple,
 ) -> Result<ReceiverStartActor, ReceiverStartError> {
+    let actor = state
+        .sharing
+        .receiver_starts
+        .by_session(tuple.session_id)
+        .ok_or(ReceiverStartError::Unavailable)?;
+    let _lease_observation = actor.0.lease_observation.lock().await;
+    validate_owner_locked(state, tuple).await
+}
+pub(super) async fn validate_owner_locked(
+    state: &AppState,
+    tuple: &ReceiverForwardTuple,
+) -> Result<ReceiverStartActor, ReceiverStartError> {
     if tuple.owner_node_id != state.node_id {
         return Err(ReceiverStartError::Unavailable);
     }
@@ -84,6 +96,8 @@ pub(super) async fn validate_forward_ingress(
 ) -> Result<(), ReceiverStartError> {
     let actor = validate_owner(state, tuple).await?;
     actor.current_delivery_attachment(state).await?;
+    let _lease_observation = actor.0.lease_observation.lock().await;
+    validate_owner_locked(state, tuple).await?;
     let route = exact_route(state, tuple).await?;
     let proof = state
         .store
@@ -120,7 +134,16 @@ pub(super) async fn register_owner(
     tuple: &ReceiverForwardTuple,
     ingress: &ReceiverForwardIngress,
 ) -> Result<CustodyMutation, ReceiverStartError> {
-    validate_owner(state, tuple).await?;
+    // The actual retained actor serializes its exact lease observation with
+    // renewal's SQL commit/writeback. This includes fresh membership and both
+    // ledger CAS exchanges; no Source network exchange runs under this gate.
+    let actor = state
+        .sharing
+        .receiver_starts
+        .by_session(tuple.session_id)
+        .ok_or(ReceiverStartError::Unavailable)?;
+    let _lease_observation = actor.0.lease_observation.lock().await;
+    validate_owner_locked(state, tuple).await?;
     let route = exact_route(state, tuple).await?;
     let proof = state
         .store
@@ -131,11 +154,6 @@ pub(super) async fn register_owner(
     if proof.owner_identity() != tuple.owner_identity {
         return Err(ReceiverStartError::Conflict);
     }
-    let actor = state
-        .sharing
-        .receiver_starts
-        .by_session(tuple.session_id)
-        .ok_or(ReceiverStartError::Unavailable)?;
     {
         let mut owned = actor.0.state.lock().expect("receiver owner");
         if owned.retirement_started || owned.retired {

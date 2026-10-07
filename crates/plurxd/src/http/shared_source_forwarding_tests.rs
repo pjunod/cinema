@@ -131,6 +131,10 @@ async fn actual_nonowner_forwarding() {
     ingress.node_id = selected.identity.node_id.clone();
     ingress.catalogue = selected.catalogue_reader();
     ingress.replication = selected.replication_monitor();
+    ingress.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+        ingress.membership.clone(),
+        Arc::clone(&ingress.store),
+    );
     ingress.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&selected.credential_key),
         config.storage.data_dir.clone(),

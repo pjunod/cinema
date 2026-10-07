@@ -92,6 +92,10 @@ async fn build_receiver_fixture(
     state.store = Arc::clone(&selected.store);
     state.node_id = selected.identity.node_id.clone();
     state.membership = selected.membership_manager();
+    state.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+        state.membership.clone(),
+        Arc::clone(&state.store),
+    );
     state.clock_observer = if let Some(clock) = &startup_clock {
         clock
             .observer()
