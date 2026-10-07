@@ -85,7 +85,17 @@ async fn apply<T: Backend>(
     statements: Vec<Statement>,
     index: usize,
 ) -> Result<CustodyMutation, StoreError> {
-    match store.sharing_txn(statements).await {
+    let result = store.sharing_txn(statements).await;
+    #[cfg(feature = "fixtures")]
+    match &result {
+        Ok(counts) => {
+            eprintln!("B ingress Core actual transaction counts={counts:?} mutation_index={index}")
+        }
+        Err(error) => eprintln!(
+            "B ingress Core actual transaction StoreError={error:?} mutation_index={index}"
+        ),
+    }
+    match result {
         Ok(counts) if counts.get(index) == Some(&1) => Ok(CustodyMutation::Applied),
         Ok(_) => Ok(CustodyMutation::Refused),
         Err(error) if source_write_refused(&error) => Ok(CustodyMutation::Refused),
@@ -152,11 +162,15 @@ impl<T: Backend> SharingReceiverIngressStore for T {
             || actual_local_boot.get_version_num() != 4
             || self.sharing_is_replicated() != members.is_some()
         {
+            #[cfg(feature = "fixtures")]
+            eprintln!("B ingress Core Register stage=validation refused valid={} closed={} boot_nil={} boot_v4={} replicated={} members={}", registration.valid(), registration.closed_confirmation.is_some(), actual_local_boot.is_nil(), actual_local_boot.get_version_num()==4, self.sharing_is_replicated(), members.is_some());
             return Ok(CustodyMutation::Refused);
         }
         let mut attachment = proof.attachment.clone();
         attachment.owner.now_ms = super::sharing::wall_clock_ms()?;
         let Some(mut values) = source_values(&proof.authority, &attachment)? else {
+            #[cfg(feature = "fixtures")]
+            eprintln!("B ingress Core Register stage=source_values refused");
             return Ok(CustodyMutation::Refused);
         };
         let now = attachment.owner.now_ms;
@@ -167,6 +181,8 @@ impl<T: Backend> SharingReceiverIngressStore for T {
         ]);
         let floor = if let Some(members) = members {
             let Ok((guard, roster, cutoff, observed)) = members.write_guard(now, 23, 24, 25) else {
+                #[cfg(feature = "fixtures")]
+                eprintln!("B ingress Core Register stage=member_write_guard refused");
                 return Ok(CustodyMutation::Refused);
             };
             values.extend([roster.into(), cutoff.into(), observed.into()]);
@@ -196,11 +212,15 @@ impl<T: Backend> SharingReceiverIngressStore for T {
             CustodyMutation::Replay => {}
         }
         let Some(snapshot) = ledger::read(self, "receiver", inc, &owner).await? else {
+            #[cfg(feature = "fixtures")]
+            eprintln!("B ingress Core Register stage=ledger_read absent after guarded create");
             return Ok(CustodyMutation::Refused);
         };
         let mut next = snapshot.state.clone();
         let mutation = next.register(registration.clone());
         if mutation == CustodyMutation::Refused {
+            #[cfg(feature = "fixtures")]
+            eprintln!("B ingress Core Register stage=state_register refused sealed={} open_slots={} physical_sequence={} principal_sequence={}", snapshot.state.is_sealed(), snapshot.state.open().count(), registration.driver_sequence, registration.registration_sequence);
             return Ok(mutation);
         };
         let result = apply(

@@ -584,7 +584,19 @@ async fn bounded<T: Serialize>(
             tokio::time::Instant::from_std(deadline),
         )
         .await
-        .map_err(|_| unavailable())
+        .map_err(|_error| {
+            #[cfg(test)]
+            eprintln!(
+                "Source forwarding RPC {path} transport refused: {}",
+                match _error {
+                    crate::http::peer_transport::PeerTransportError::Unreachable => "unreachable",
+                    crate::http::peer_transport::PeerTransportError::TimedOut => "timed_out",
+                    crate::http::peer_transport::PeerTransportError::InvalidResponse =>
+                        "invalid_response",
+                }
+            );
+            unavailable()
+        })
 }
 async fn custody(
     state: &AppState,
@@ -855,7 +867,19 @@ async fn register(
         (held, guard)
     };
     monitor(state, connection, &held)?;
-    match custody(state, &held, CustodyAction::Register, deadline).await? {
+    let reply = custody(state, &held, CustodyAction::Register, deadline).await?;
+    #[cfg(test)]
+    eprintln!(
+        "Source forwarding custody Register reply={}",
+        match &reply {
+            CustodyReply::Registered => "registered",
+            CustodyReply::Acknowledged => "acknowledged",
+            CustodyReply::NeverRegistered => "never_registered",
+            CustodyReply::Unresolved => "unresolved",
+            CustodyReply::ReconciledClosed => "reconciled_closed",
+        }
+    );
+    match reply {
         CustodyReply::Registered => {
             held.registered.store(true, Ordering::Release);
             guard.complete();
@@ -1040,7 +1064,17 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         super::resolve_forward_route(&state, &headers, &path, &bytes, &connection, deadline),
     )
     .await
-    .map_err(|_| unavailable())??;
+    .map_err(|_| {
+        #[cfg(test)]
+        eprintln!("Source forwarding route resolution timed out");
+        unavailable()
+    })?
+    .inspect_err(|_error| {
+        #[cfg(test)]
+        eprintln!("Source forwarding route resolution refused");
+    })?;
+    #[cfg(test)]
+    eprintln!("Source forwarding route resolution succeeded");
     if matches!(route, ForwardRoute::Local) {
         return Ok(next
             .run(Request::from_parts(parts, Body::from(bytes)))
@@ -1052,6 +1086,16 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
     if !remote_operation_allowed(&route, op) {
         return Err(unavailable());
     }
+    #[cfg(test)]
+    eprintln!(
+        "Source forwarding route resolved: {}",
+        match &route {
+            ForwardRoute::Fresh(_) => "fresh",
+            ForwardRoute::Pending(_) => "pending",
+            ForwardRoute::Retained(_) => "retained",
+            ForwardRoute::Local => "local",
+        }
+    );
     let fresh_choice = matches!(&route, ForwardRoute::Fresh(_));
     let authority = match route {
         ForwardRoute::Retained(authority) => *authority,
@@ -1091,6 +1135,12 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
                 deadline,
             )
             .await?;
+            #[cfg(test)]
+            eprintln!(
+                "Source forwarding prepare reply status={} bytes={}",
+                prepared.status,
+                prepared.body.len()
+            );
             if op != Operation::Start || !prepared.status.is_success() {
                 let response = decode_control(&prepared.body)?;
                 if op == Operation::End
@@ -1140,6 +1190,8 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         )
         .await;
     }
+    #[cfg(test)]
+    eprintln!("Source forwarding assignment validated; registering protected ingress");
     let ingress = if op == Operation::End || (op == Operation::Status && authority.cleanup_only) {
         // End never admits another media debt after seal. The actual driver
         // tuple lets the retained End owner recognize its own response cycle.
@@ -1153,6 +1205,8 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
     } else {
         register(&state, &authority, &connection, deadline).await?
     };
+    #[cfg(test)]
+    eprintln!("Source forwarding ingress registered; dispatching owner operation");
     let wire = ForwardRequest {
         path,
         canonical_body,
@@ -1208,6 +1262,8 @@ async fn authenticate(
             Ok(Ok(true))
         )
     {
+        #[cfg(test)]
+        eprintln!("Source internal authentication refused path={path}");
         return Err(ApiError::Unauthorized);
     }
     Ok(auth)
@@ -1871,6 +1927,8 @@ pub(super) async fn collect_fresh_location(
     // Every current peer starts before we await any one of them. A blackhole
     // cannot conceal a later eligible node. The awaited stream owns all finite
     // network futures; dropping it cancels them without a detached task.
+    #[cfg(test)]
+    eprintln!("Source locate current eligible peers={}", peers.len());
     let mut probes = futures_util::stream::FuturesUnordered::new();
     for peer in peers {
         let wire = LocateEnvelope {
@@ -1889,10 +1947,22 @@ pub(super) async fn collect_fresh_location(
             let response = bounded(state, &peer.node_id, LOCATE_PATH, &wire, deadline)
                 .await
                 .ok()?;
+            #[cfg(test)]
+            eprintln!(
+                "Source locate RPC reply status={} bytes={}",
+                response.status,
+                response.body.len()
+            );
             if response.status != StatusCode::OK || response.body.len() > 8192 {
                 return None;
             }
             let reply = serde_json::from_slice::<LocationReply>(&response.body).ok()?;
+            #[cfg(test)]
+            eprintln!(
+                "Source locate reply exact={} available={}",
+                reply.exact(&peer.node_id, reference),
+                reply.available
+            );
             (reply.exact(&peer.node_id, reference) && reply.available)
                 .then_some((reply.node_id, reply.registry_boot_id))
         });

@@ -142,15 +142,44 @@ pub(super) async fn register_owner(
         .receiver_starts
         .by_session(tuple.session_id)
         .ok_or(ReceiverStartError::Unavailable)?;
+    #[cfg(test)]
+    eprintln!("B Register stage=lease_gate waiting");
     let _lease_observation = actor.0.lease_observation.lock().await;
-    validate_owner_locked(state, tuple).await?;
-    let route = exact_route(state, tuple).await?;
+    #[cfg(test)]
+    eprintln!("B Register stage=lease_gate acquired");
+    validate_owner_locked(state, tuple)
+        .await
+        .inspect_err(|_error| {
+            #[cfg(test)]
+            eprintln!("B Register stage=actual_owner error={_error:?}");
+        })?;
+    #[cfg(test)]
+    eprintln!("B Register stage=actual_owner validated");
+    let route = exact_route(state, tuple).await.inspect_err(|_error| {
+        #[cfg(test)]
+        eprintln!("B Register stage=exact_route error={_error:?}");
+    })?;
     let proof = state
         .store
         .receiver_relay_read_authority(&route)
         .await
-        .map_err(|_| ReceiverStartError::Unresolved)?
-        .ok_or(ReceiverStartError::Unavailable)?;
+        .map_err(|_error| {
+            #[cfg(test)]
+            eprintln!("B Register stage=proof_read StoreError={_error:?}");
+            ReceiverStartError::Unresolved
+        })?
+        .ok_or(ReceiverStartError::Unavailable)
+        .inspect_err(|_error| {
+            #[cfg(test)]
+            eprintln!("B Register stage=proof_read absent");
+        })?;
+    #[cfg(test)]
+    eprintln!(
+        "B Register stage=proof_read current lease_ms={} deadline_ms={} identity_equal={}",
+        route.lease_expires_at_ms,
+        proof.deadline_ms(),
+        proof.owner_identity() == tuple.owner_identity
+    );
     if proof.owner_identity() != tuple.owner_identity {
         return Err(ReceiverStartError::Conflict);
     }
@@ -170,14 +199,27 @@ pub(super) async fn register_owner(
         // the identity of an already-dispatched or commit-unknown registration.
         owned.ingress_owner_identity = Some(tuple.owner_identity.clone());
     }
+    #[cfg(test)]
+    eprintln!(
+        "B Register stage=members begin replicated={}",
+        state.membership.is_replicated()
+    );
     let members = if state.membership.is_replicated() {
         Some(
             state
                 .membership
                 .observe_ingress_custody_members()
                 .await
-                .map_err(|_| ReceiverStartError::Unresolved)?
-                .ok_or(ReceiverStartError::Unavailable)?,
+                .map_err(|_error| {
+                    #[cfg(test)]
+                    eprintln!("B Register stage=members error={_error:?}");
+                    ReceiverStartError::Unresolved
+                })?
+                .ok_or(ReceiverStartError::Unavailable)
+                .inspect_err(|_error| {
+                    #[cfg(test)]
+                    eprintln!("B Register stage=members absent");
+                })?,
         )
     } else {
         None
@@ -186,6 +228,8 @@ pub(super) async fn register_owner(
         .registration
         .as_ref()
         .ok_or(ReceiverStartError::Unavailable)?;
+    #[cfg(test)]
+    eprintln!("B Register stage=CoreCAS begin members={} registration_valid={} registered_closed={} local_boot_equal={} registration_node_equal_owner={}", members.is_some(), registration.valid(), registration.closed_confirmation.is_some(), registration.boot_id==state.sharing.accepted_drivers.boot_id(), registration.node_id==tuple.owner_node_id);
     let result = state
         .store
         .register_receiver_ingress(
@@ -195,9 +239,15 @@ pub(super) async fn register_owner(
             registration,
         )
         .await
-        .map_err(|_| ReceiverStartError::Unresolved)?;
+        .map_err(|_error| {
+            #[cfg(test)]
+            eprintln!("B Register stage=CoreCAS StoreError={_error:?}");
+            ReceiverStartError::Unresolved
+        })?;
     // A refused CAS may race another accepted write. It cannot discharge an
     // ingress reservation merely because this exchange did not observe it.
+    #[cfg(test)]
+    eprintln!("B Register stage=CoreCAS result={result:?}");
     if result == CustodyMutation::Refused {
         return Err(ReceiverStartError::Unresolved);
     }
@@ -269,6 +319,7 @@ async fn exchange_at_owner(
     operation: forwarding::ReceiverCustodyOperation,
     deadline: Instant,
 ) -> Result<ReceiverCustodyReply, ReceiverStartError> {
+    let deadline = forwarding::custody_deadline(deadline, Instant::now());
     if tuple.owner_node_id != state.node_id {
         return forwarding::exchange_custody(state, tuple, ingress, operation, deadline).await;
     }
@@ -498,6 +549,17 @@ pub(super) async fn receiver_forward_admit(
                 deadline,
             )
             .await;
+            #[cfg(test)]
+            eprintln!(
+                "B ingress actual Register exchange outcome={:?}",
+                outcome.as_ref().map(|reply| match reply {
+                    ReceiverCustodyReply::Applied => "applied",
+                    ReceiverCustodyReply::Replay => "replay",
+                    ReceiverCustodyReply::Refused => "refused",
+                    ReceiverCustodyReply::ReconciledClosed => "reconciled_closed",
+                    ReceiverCustodyReply::Unresolved => "unresolved",
+                })
+            );
             let admitted = match outcome {
                 Ok(ReceiverCustodyReply::Applied | ReceiverCustodyReply::Replay) => {
                     permit.complete();
@@ -720,15 +782,29 @@ pub(super) async fn close_receiver_ingress(
             Err(_) => result = Err(ReceiverStartError::Deadline),
         }
     }
-    result?;
-    let snapshot = state
-        .store
-        .receiver_ingress_snapshot(route)
-        .await
-        .map_err(|_| ReceiverStartError::Unresolved)?
-        .ok_or(ReceiverStartError::Unresolved)?;
-    if snapshot.owner_identity != original_identity || !snapshot.state.settled() {
-        return Err(ReceiverStartError::Unresolved);
+    // Natural-close monitors may have committed their authenticated receipts
+    // while this owner's close or ACK exchange failed. Drain every owned
+    // exchange first, then require this exact owner's sealed, settled ledger;
+    // an exchange failure, timeout, or absent row never supplies closure proof.
+    #[cfg(test)]
+    if result.is_err() {
+        eprintln!(
+            "Receiver retirement close/ack exchange raced or refused; checking exact sealed ledger"
+        );
+    }
+    let snapshot = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state.store.receiver_ingress_snapshot(route),
+    )
+    .await
+    .map_err(|_| ReceiverStartError::Deadline)?
+    .map_err(|_| ReceiverStartError::Unresolved)?
+    .ok_or(ReceiverStartError::Unresolved)?;
+    if snapshot.owner_identity != original_identity
+        || !snapshot.state.is_sealed()
+        || !snapshot.state.settled()
+    {
+        return Err(result.err().unwrap_or(ReceiverStartError::Unresolved));
     }
     Ok(())
 }

@@ -363,16 +363,35 @@ pub(crate) enum ReceiverPublished {
 pub(crate) struct ReceiverStartActor(Arc<ReceiverStartInner>);
 impl ReceiverStartRegistry {
     fn confirmed_end(&self, session: Uuid) -> bool {
-        self.settled
+        // Retirement publishes the actual receipt on its retained entry. The
+        // settled cache is populated only when a later Start prunes entries;
+        // exact End retries must not depend on an unrelated Start arriving.
+        let retained = self
+            .entries
             .lock()
-            .expect("settled receiver attempts")
+            .expect("receiver registry")
             .iter()
-            .any(|attempt| {
-                attempt
+            .any(|entry| {
+                entry
+                    .state
+                    .lock()
+                    .expect("receiver owner")
                     .end_confirmation
                     .as_ref()
                     .is_some_and(|proof| proof.session_id() == session)
-            })
+            });
+        retained
+            || self
+                .settled
+                .lock()
+                .expect("settled receiver attempts")
+                .iter()
+                .any(|attempt| {
+                    attempt
+                        .end_confirmation
+                        .as_ref()
+                        .is_some_and(|proof| proof.session_id() == session)
+                })
     }
     /// A live (not yet retired) local actor owns this Source request. Crash
     /// recovery never claims such a route: that actor is its owner.

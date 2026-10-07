@@ -1019,6 +1019,63 @@ fn publish_join_activation(
 #[cfg(feature = "hiqlite-store")]
 async fn finalize_pending_join_best_effort(config: &Config, selected: &SelectedStore) {
     if let Err(error) = finalize_pending_join(config, selected).await {
+        #[cfg(feature = "fixtures")]
+        {
+            // Closed error class/API code only: never log the identity-bound
+            // token, request body, credential, or unbounded remote message.
+            let (class, message) = match &error {
+                StoreError::Database(message) => ("database", Some(message.as_str())),
+                StoreError::Migration(message) => ("migration", Some(message.as_str())),
+                StoreError::JoinRefused(message) => ("join_refused", Some(message.as_str())),
+                StoreError::Task(_) => ("task", None),
+                StoreError::Identity(_) => ("identity", None),
+                _ => ("other", None),
+            };
+            let code = message
+                .and_then(|message| message.split(':').next())
+                .filter(|code| {
+                    !code.is_empty()
+                        && code.len() <= 64
+                        && code
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                })
+                .unwrap_or("no_closed_api_code");
+            let detail = match message {
+                Some(message)
+                    if message.contains("joining node has not committed voter membership") =>
+                {
+                    "voter_membership_not_committed"
+                }
+                Some(message)
+                    if message.contains("joining node has not committed learner membership") =>
+                {
+                    "learner_membership_not_committed"
+                }
+                Some(message)
+                    if message.contains(
+                        "installed sharing schema requires a compatible admitted member",
+                    ) =>
+                {
+                    "installed_sharing_admitted_capability_missing"
+                }
+                Some(message) if message.contains("sharing membership admission is in flight") => {
+                    "sharing_membership_intent_in_flight"
+                }
+                Some(message) if message.contains("no such table") => "sqlite_table_absent",
+                Some(message) if message.contains("no such column") => "sqlite_column_absent",
+                Some(message) if message.contains("constraint failed") => {
+                    "sqlite_constraint_failed"
+                }
+                Some(message) if message.contains("trigger") => "sqlite_trigger_failure",
+                Some(message) if message.contains("leader") => "leader_changed_or_unavailable",
+                _ => "unclassified",
+            };
+            eprintln!(
+                "Actual joined startup token finalization pending: class={class} code={code} detail={detail}"
+            );
+        }
+
         // The voter and activation marker are already durable at this point.
         // Finalization only consumes the coordinator's one-time record, so a
         // temporarily unavailable coordinator must not take this voter back
@@ -1065,6 +1122,16 @@ async fn finalize_pending_join(
             "staged join token does not match local membership identity".to_owned(),
         ));
     }
+    // Installed Sharing finalization requires capabilities from this exact
+    // admitted member's current heartbeat. Selection precedes the ordinary
+    // Source schema phase, so qualify the retained real master here before
+    // consuming the token; token-bound join declarations are not a substitute
+    // for the current member's verified purpose material.
+    selected
+        .membership
+        .prepare_purpose_master(Arc::clone(&selected.credential_key))
+        .await
+        .map_err(|error| StoreError::Migration(format!("{}: {}", error.code(), error)))?;
     finalize_remote_join(
         &payload,
         FinalizeJoinRequest {
