@@ -321,3 +321,25 @@ strict historical runner/source checks for older output. New runs preserve
 framed receipt snapshots in their logs as well as artifacts. Inherited passes
 still require their original authenticated provenance; skips are never passes.
 The live PR records final qualification and merge. No Pi process was restarted.
+
+
+## Docker-default setup — 2026-10-07
+
+[The installation plan](RASPBERRY-PI-INSTALLATION.md) continues the work after
+PR #843 merged with every required fast-lane job green. Docker will be the
+normal server choice; native/systemd remains selectable. A single setup flow
+will provision the media runtime and isolated desktop browser, manage device
+access, and own upgrades/uninstall without deleting user data.
+
+| Work | State | Evidence / next action |
+|---|---|---|
+| Independent clone and compiler | ready | Main `7f0142d45`; pinned Rust 1.97.1 all-target workspace check passed in 2m14s |
+| Docker runtime | in progress | Stock Jellyfin lacks request decoding; combine maintained Pi 8.1 request/SAND support with the pinned Jellyfin patch series |
+| Setup lifecycle | in progress | Sol 6.1 owns Docker/default, native selection, prerequisites, ownership, upgrade recovery and removal |
+| Host browser | in progress | Pin and verify the previously exercised HEVC browser; preserve ordinary Chromium and sandboxing |
+| Final review and fast lane | pending | No unit or physical acceptance run before the final review |
+| Pi state | unchanged | Read-only inspection confirms ARM64 Trixie and no Docker command; no services or tests started |
+
+The installer will build from the chosen checkout initially. This automates
+prerequisites rather than assuming prebuilt native releases that the project
+does not yet publish durably. Physical HDR output remains a separate claim.
