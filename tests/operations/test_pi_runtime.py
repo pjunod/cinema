@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import types
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -116,6 +117,45 @@ class PiRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "refusing overwrite"):
                 runtime.unchanged_owned(prefix, [output])
             self.assertEqual(output.read_text(), "operator edit")
+
+    def test_namespace_runtime_packages_are_pi_only_and_keep_standard_dockerfile(self):
+        plan = runtime.prepare(types.SimpleNamespace(command='plan', role='server', server_runtime='native', prefix='/opt/pi-plan-only'))
+        self.assertIn('bubblewrap', plan['apt_packages'])
+        docker = runtime.prepare(types.SimpleNamespace(command='plan', role='server', server_runtime='docker', prefix='/opt/pi-plan-only'))
+        self.assertNotIn('bubblewrap', docker['apt_packages'])
+        pi = (ROOT / 'Dockerfile.pi').read_text()
+        self.assertIn('install -y --no-install-recommends bubblewrap', pi)
+        self.assertIn('chmod 0755 /usr/bin/bwrap', pi)
+        self.assertNotIn('bubblewrap', (ROOT / 'Dockerfile').read_text())
+
+    def test_pi_seccomp_preserves_pinned_default_and_bounds_namespace_additions(self):
+        metadata = runtime.MANIFEST['sandbox']
+        baseline_path = runtime.ASSETS / metadata['moby']['profile']
+        baseline = json.loads(baseline_path.read_text())
+        self.assertEqual(hashlib.sha256(baseline_path.read_bytes()).hexdigest(), metadata['moby']['profile_sha256'])
+        self.assertEqual(metadata['moby']['revision'], '411e817ddf710ff8e08fa193da80cb78af708191')
+        profile_path = runtime.ASSETS / metadata['profile']
+        profile = json.loads(profile_path.read_text())
+        self.assertEqual(hashlib.sha256(profile_path.read_bytes()).hexdigest(), metadata['profile_sha256'])
+        inherited = {**profile, 'syscalls': profile['syscalls'][:len(baseline['syscalls'])]}
+        self.assertEqual(inherited, baseline)
+        additions = profile['syscalls'][len(baseline['syscalls']):]
+        self.assertEqual(additions, metadata['appended_rules'])
+        self.assertEqual({name for rule in additions for name in rule['names']}, {'clone', 'mount', 'umount2', 'pivot_root'})
+        for rule in additions:
+            self.assertEqual(rule['includes'], {'arches': ['arm64']})
+            self.assertEqual(rule['action'], 'SCMP_ACT_ALLOW')
+            if rule['names'] != ['pivot_root']:
+                self.assertTrue(rule['args'])
+        clone = next(rule for rule in additions if rule['names'] == ['clone'])
+        self.assertEqual(clone['args'], [{'index': 0, 'value': 0x7c020011, 'op': 'SCMP_CMP_EQ'}])
+        detach = next(rule for rule in additions if rule['names'] == ['umount2'])
+        self.assertEqual(detach['args'], [{'index': 1, 'value': 2, 'op': 'SCMP_CMP_EQ'}])
+        for name, digest in [('license', 'license_sha256'), ('notice', 'notice_sha256')]:
+            self.assertEqual(hashlib.sha256((runtime.ASSETS / metadata['moby'][name]).read_bytes()).hexdigest(), metadata['moby'][digest])
+        # Keep Docker's clone3 ENOSYS fallback; adding it unrestricted would
+        # bypass the clone argument filter through an indirect structure pointer.
+        self.assertTrue(any(rule['names'] == ['clone3'] and rule.get('errnoRet') == 38 for rule in profile['syscalls']))
 
     def test_docker_preserves_standard_assets_and_private_runtime(self):
         dockerfile = (ROOT / "Dockerfile.pi").read_text()

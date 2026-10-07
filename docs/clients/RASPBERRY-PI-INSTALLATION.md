@@ -1,6 +1,6 @@
 # Raspberry Pi installation — Docker by default, native by choice
 
-**Status:** open — installer implemented; stock-kernel playback compatibility blocked · **Written:** 2026-10-07
+**Status:** open — installer implemented; Pi namespace probe isolation in development · **Written:** 2026-10-07
 
 Companion to [the decoder implementation](RASPBERRY-PI-IMPLEMENTATION.md)
 and [the live status](RASPBERRY-PI-STATUS.md). This plan closes the installation
@@ -15,7 +15,9 @@ FFprobe launcher requires Landlock, so server playback on that stock kernel
 fails before streaming even though request decoding and browser playback pass.
 Docker shares this host-kernel limitation. A compatible sandbox or kernel is
 still required; these commands do not yet establish a working stock-OS server.
-The PR live status records the resolution and complete acceptance evidence.
+The Pi namespace backend below addresses this prerequisite without removing
+Landlock from other systems. The PR live status records implementation and
+complete acceptance evidence.
 
 ## 1. Decision — containers are the default server deployment
 
@@ -159,3 +161,57 @@ compiling Rust, while still provisioning its media tools and systemd service.
 The portable desk display cannot establish HDR/Dolby Vision HDMI acceptance.
 Keep that row pending for an appropriate display chain. No installer option
 may pretend that installing a decoder supplies missing display capabilities.
+
+## 6. Pi probe isolation — preserve Landlock elsewhere
+
+**Decision accepted by Paul, 2026-10-07.** Keep the existing Landlock-backed
+probe launcher for non-Pi systems. On a verified Linux ARM64 Raspberry Pi whose
+kernel reports Landlock unsupported, use namespaces to isolate the probe.
+Do not change the kernel, disable the sandbox, or add a feature switch.
+
+Selection combines the architecture, a Raspberry Pi device-tree compatible
+value, and the Landlock ABI result. A generic ARM64 host is not a Pi. Native
+installations read the platform's device-tree file; the Pi container receives
+that exact host file through a read-only mount at
+`/run/plurx-platform/compatible`. Landlock remains preferred when available;
+unexpected permission/setup errors do not silently select another backend.
+
+Bubblewrap creates the Pi probe's user, mount, PID, IPC, UTS and network namespaces.
+Expose only its trusted executable/runtime and held media input, give it
+private temporary storage, and keep the server's database, credentials and
+other processes outside its view. Bubblewrap copies the already-open daemon executable into a private read-only
+bootstrap file; the bootstrap verifies those bytes against the held descriptor
+before the parser starts. The bootstrap executes synchronously before the
+daemon runtime initializes. It installs the existing one-shot seccomp
+supervisor contract and executes the sealed parser descriptor. This preserves
+the parser/source identity, subsequent-execution restrictions, admission,
+bounded output, deadlines and cleanup ownership of the existing launcher.
+The parser runs as namespace PID 1, so no unsandboxed init peer remains visible
+and the kernel kills its descendants when it exits. Bubblewrap 0.8 in the container and 0.12 on the native acceptance OS must both
+be supported; descriptor inheritance and namespace-child cleanup need direct
+evidence, not an assumption from command-line compatibility.
+
+The Pi container's seccomp policy must retain its pinned Docker default rules
+and add only AArch64 rules needed for the nested namespace setup. The checked-in
+Moby 26.1.5 default profile, additions, hashes and license notices are installed
+as root-owned, receipt-tracked files; the normal Docker image and discovery
+service keep their existing policy. No privileged
+mode, unconfined policy, blanket `CAP_SYS_ADMIN`, host PID namespace or Docker
+socket is permitted. Native installation uses the distribution's Bubblewrap.
+The installer owns any added profile/configuration through its existing
+transaction and hash receipts. No additional service or watchdog is introduced.
+
+| Owner | New scope | Required evidence |
+|---|---|---|
+| Probe agent, Sol 6.1 | Existing Rust probe launcher, early internal bootstrap and focused Rust regressions | Non-Pi Landlock behavior retained; verified-Pi selection; exact descriptors; filesystem/process/network isolation; bounded failure and cleanup |
+| Setup agent, Sol 6.1 | Pi Bubblewrap package/image, narrow container policy and platform mount, installer ownership and focused operations regressions | Both packaged Bubblewrap versions; non-root nested operation; no broad privileges; rollback/uninstall preserve operator files |
+| Coordinator | This plan/status, integration, compiler loop, review and physical qualification | Native and Docker app-level playback; applicable evidence retained; complete cleanup; merge only after qualification |
+
+Compile committed source with Rust 1.97.1 on Linux before pushing. The earlier
+installer review did not cover this new security scope; the review convention
+must be reconciled before final qualification. Focused regressions must cover
+both the existing Landlock path and the Pi path, including rejected secondary
+execution, attempts to reach the server's processes/files, inherited descriptor
+identity, cancellation and descendant cleanup. Actual app playback must create
+the protected parser identity and stream on the stock Pi kernel before this
+work is considered accepted.

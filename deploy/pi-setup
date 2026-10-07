@@ -31,6 +31,9 @@ BINARY = Path('/usr/local/lib/plurx-setup/plurxd')
 JOURNAL = STATE.parent / 'transaction.json'
 BACKUPS = STATE.parent / 'backups'
 LOCK = STATE.parent / 'setup.lock'
+SECCOMP = STATE.parent / 'pi-worker-seccomp.json'
+PI_COMPATIBLE = Path('/sys/firmware/devicetree/base/compatible')
+ASSETS = ROOT / 'deploy/pi-runtime-assets'
 
 
 def load_script(name, folder='deploy'):
@@ -89,7 +92,7 @@ def receipt():
         raise ValueError('setup receipt must be root-owned and not writable by other users')
     if value.get('owner') != OWNER or value.get('uid') != os.getuid():
         raise ValueError('installation belongs to another owner or desktop user')
-    allowed = {str(ROOT / 'deploy/.env'), str(ROOT / 'deploy/docker-compose.override.yml'), str(UNIT), str(BINARY)}
+    allowed = {str(ROOT / 'deploy/.env'), str(ROOT / 'deploy/docker-compose.override.yml'), str(UNIT), str(BINARY), *map(str, seccomp_paths())}
     for filename, digest in value.get('files', {}).items():
         path = Path(filename)
         safe(path)
@@ -128,7 +131,7 @@ def conflict(previous, role, runtime, verify_daemon=True):
         return
     if UNIT.exists() or BINARY.exists() or Path(str(UNIT) + '.d').exists():
         raise ValueError('existing native server has no setup ownership receipt')
-    for path in (ROOT / 'deploy/.env', ROOT / 'deploy/docker-compose.override.yml'):
+    for path in (ROOT / 'deploy/.env', ROOT / 'deploy/docker-compose.override.yml', *seccomp_paths()):
         if path.exists():
             raise ValueError('existing Compose configuration has no setup ownership receipt')
     if verify_daemon and shutil.which('docker'):
@@ -257,9 +260,42 @@ def docker_files(args, runtime):
     if set(provider) - {'build', 'devices', 'group_add', 'environment', 'image'}:
         raise ValueError('runtime provider returned unsupported Compose settings')
     service.update(provider)
+    service['volumes'].append({'type': 'bind', 'source': str(PI_COMPATIBLE), 'target': '/run/plurx-platform/compatible', 'read_only': True, 'bind': {'create_host_path': False}})
+    service['security_opt'] = ['seccomp=' + str(SECCOMP)]
+    service['cap_drop'] = ['ALL']
     image = provider.get('image', 'plurx/pi-server:local')
     service['image'] = image
     return env, json.dumps({'services': {'plurxd': service, 'plurx-discovery': {'image': image}}}, indent=2) + '\n'
+
+
+def seccomp_paths():
+    return [SECCOMP, SECCOMP.parent / 'moby26-seccomp.default.json', SECCOMP.parent / 'MOBY-LICENSE',
+            SECCOMP.parent / 'MOBY-NOTICE', SECCOMP.parent / 'pi-worker-seccomp.provenance.json']
+
+
+def seccomp_artifacts():
+    metadata = json.loads((ASSETS / 'manifest.json').read_text())['sandbox']
+    sources = [(metadata['profile'], metadata['profile_sha256']),
+               (metadata['moby']['profile'], metadata['moby']['profile_sha256']),
+               (metadata['moby']['license'], metadata['moby']['license_sha256']),
+               (metadata['moby']['notice'], metadata['moby']['notice_sha256'])]
+    contents = []
+    for filename, expected in sources:
+        path = ASSETS / filename
+        if path.parent != ASSETS or sha(path) != expected:
+            raise ValueError('pinned namespace seccomp artifact identity changed')
+        contents.append(path.read_bytes())
+    profile, baseline = map(json.loads, contents[:2])
+    inherited = {**profile, 'syscalls': profile['syscalls'][:len(baseline['syscalls'])]}
+    if inherited != baseline or profile['syscalls'][len(baseline['syscalls']):] != metadata['appended_rules']:
+        raise ValueError('Pi seccomp profile must preserve the pinned baseline and reviewed additions exactly')
+    contents.append((json.dumps(metadata, indent=2) + '\n').encode())
+    return dict(zip(seccomp_paths(), contents))
+
+
+def install_seccomp_profile():
+    for path, content in seccomp_artifacts().items():
+        write(path, content)
 
 
 def provision(args):
@@ -375,7 +411,7 @@ def managed_paths(role, runtime):
     paths = {STATE: 'system'}
     if role != 'cinema':
         if runtime == 'docker':
-            paths.update({ROOT / 'deploy/.env': 'system', ROOT / 'deploy/docker-compose.override.yml': 'system'})
+            paths.update({ROOT / 'deploy/.env': 'system', ROOT / 'deploy/docker-compose.override.yml': 'system', **{path: 'system' for path in seccomp_paths()}})
         else:
             paths.update({UNIT: 'system', BINARY: 'system'})
     if role != 'server':
@@ -592,10 +628,11 @@ def install(args, previous):
         if args.role != 'server':
             browser = promote_browser(runtime, previous, transaction)
         if server and args.server_runtime == 'docker':
+            install_seccomp_profile()
             env, override = docker_files(args, runtime)
             write(ROOT / 'deploy/.env', env)
             write(ROOT / 'deploy/docker-compose.override.yml', override)
-            files = {str(path): sha(path) for path in (ROOT / 'deploy/.env', ROOT / 'deploy/docker-compose.override.yml')}
+            files = {str(path): sha(path) for path in (ROOT / 'deploy/.env', ROOT / 'deploy/docker-compose.override.yml', *seccomp_paths())}
             if not args.data_dir.exists():
                 run(['install', '-d', '-o', os.getuid(), '-g', os.getgid(), '-m', '0750', args.data_dir], root=True)
             # Root needs explicit identity to prevent make's environment overriding the deployment UID.

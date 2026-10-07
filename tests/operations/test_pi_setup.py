@@ -90,6 +90,38 @@ class PiSetupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             setup.docker_files(self.args(), {'compose_service': {'privileged': True}})
 
+    def test_pi_docker_scopes_namespace_profile_and_readonly_platform_proof_to_server(self):
+        _, text = setup.docker_files(self.args(), {'compose_service': {'build': {'dockerfile': 'Dockerfile.pi'}}})
+        services = json.loads(text)['services']
+        server = services['plurxd']
+        self.assertEqual(server['security_opt'], ['seccomp=' + str(setup.SECCOMP)])
+        self.assertEqual(server['cap_drop'], ['ALL'])
+        proof = next(volume for volume in server['volumes'] if volume['target'] == '/run/plurx-platform/compatible')
+        self.assertEqual(proof['source'], '/sys/firmware/devicetree/base/compatible')
+        self.assertTrue(proof['read_only'])
+        self.assertFalse(proof['bind']['create_host_path'])
+        self.assertNotIn('security_opt', services['plurx-discovery'])
+        self.assertNotIn('devices', services['plurx-discovery'])
+        self.assertNotIn('volumes', services['plurx-discovery'])
+        self.assertNotIn('privileged', server)
+        self.assertNotIn('cap_add', server)
+        self.assertNotIn('pid', server)
+        self.assertTrue(setup.SECCOMP in setup.managed_paths('server', 'docker'))
+        self.assertFalse(setup.SECCOMP in setup.managed_paths('server', 'native'))
+
+    def test_seccomp_profile_is_installed_with_ownership_and_licensing_receipts(self):
+        contents = setup.seccomp_artifacts()
+        self.assertEqual(set(contents), set(setup.seccomp_paths()))
+        self.assertTrue(all(path.parent == setup.SECCOMP.parent for path in contents))
+        self.assertIn(b'Apache License', contents[setup.SECCOMP.parent / 'MOBY-LICENSE'])
+        provenance = json.loads(contents[setup.SECCOMP.parent / 'pi-worker-seccomp.provenance.json'])
+        self.assertEqual(provenance['moby']['revision'], '411e817ddf710ff8e08fa193da80cb78af708191')
+        with patch.object(setup, 'write') as writes:
+            setup.install_seccomp_profile()
+        self.assertEqual(writes.call_count, len(contents))
+        for call in writes.call_args_list:
+            self.assertEqual(call.args[0].parent, setup.SECCOMP.parent)
+
     def test_same_owned_install_does_not_restart(self):
         previous = {'role': 'server', 'runtime': 'docker', 'source': 'abc', 'media': ['/mnt/media'],
                     'data_dir': '/srv/plurx', 'url': 'http://localhost:32400', 'autostart': False, 'binary_sha256': None, 'binary_source': None}
@@ -143,7 +175,7 @@ class PiSetupTests(unittest.TestCase):
                 return '{}'
             with patch.multiple(setup, ROOT=root, UNIT=unit, BINARY=binary, STATE=state_path,
                                 JOURNAL=state_path.parent / 'transaction.json', BACKUPS=state_path.parent / 'backups',
-                                LOCK=state_path.parent / 'setup.lock'), \
+                                LOCK=state_path.parent / 'setup.lock', SECCOMP=state_path.parent / 'pi-worker-seccomp.json'), \
                  patch.object(setup, 'write', side_effect=write), patch.object(setup, 'run', side_effect=run), \
                  patch.object(setup, 'root_protected', return_value=True):
                 yield root, previous, events, service

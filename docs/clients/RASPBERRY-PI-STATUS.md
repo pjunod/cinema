@@ -357,12 +357,12 @@ access, and own upgrades/uninstall without deleting user data.
 
 | Work | State | Evidence / next action |
 |---|---|---|
-| Independent clone and compiler | ready | Main `7f0142d45`; pinned Rust 1.97.1 all-target workspace check passed in 2m14s |
-| Pi media runtime | native compilation passed; container acceptance pending | Jellyfin patch series plus Pi request/SAND source links on ARM64 Trixie; AC-4, DV filter, tonemap and request build assertions pass |
+| Independent clone and compiler | ready | Main `96f668128`; Rust 1.97.1 all-target daemon checks passed on macOS and Linux; isolated ARM64 cross compiler prepared for the namespace implementation |
+| Pi media runtime | hardware and browser acceptance passed; app playback pending | Non-root Docker HEVC Main/Main10 each matched all 48 software-reference frame hashes; managed Chromium used V4L2VideoDecoder; stock-kernel Landlock absence blocks the existing protected probe |
 | Setup lifecycle | focused regressions passed | Sol 6.1 owns Docker/default, native selection, prerequisites, ownership, upgrade recovery and removal |
 | Host browser | focused regressions passed | Pin and verify the previously exercised HEVC browser; preserve ordinary Chromium and sandboxing |
-| Final review and fast lane | review complete; preflight and Linux Rust passed | Run 4296: 1,067 Python methods passed, two optional skips; Windows compilation continuing; current main integration requires renewed candidate qualification |
-| Pi state | Docker-default installation running | ARM64 Trixie; 84 build/Docker prerequisites added, no package upgrades; native FFmpeg compilation passed and the cold container server build is active; no media service/browser started yet |
+| Final review and fast lane | installer review complete; new sandbox scope in development | Prior Python successes retained through run 4307, whose preflight and Linux Rust passed; Windows was cancelled when the candidate changed; new scope requires affected qualification |
+| Pi state | clean | Acceptance services, containers, images, caches and scratch files removed; all 1,643 baseline package/version entries restored; no task process remains |
 
 The installer will build from the chosen checkout initially. This automates
 prerequisites rather than assuming prebuilt native releases that the project
@@ -378,7 +378,7 @@ assertions; no playback success is claimed from compilation.
 ### Installation review disposition
 
 The single adversarial review of `c55437408` against `7f0142d45` requested
-changes. It performed no tests or device mutations. The implementation agents addressed every finding; no second review is planned.
+changes. It performed no tests or device mutations. The implementation agents addressed every finding. The later authorized namespace sandbox was outside that review; its review disposition must be resolved before merge.
 All six focused regression groups passed in run 4296. Main subsequently added
 automatic Docker GPU discovery and receipt-continuation fixes; integration
 preserves the Pi override and its explicit request devices. Current-candidate
@@ -392,3 +392,21 @@ qualification follows, retaining applicable passing Python evidence.
 | Existing Docker without Compose fails provisioning | Detect and install missing Compose independently from Docker Engine | repaired; regression passed |
 | Native service cannot read some user-selected media mounts | Provision appropriate supplementary groups and validate access as the service identity | repaired; regression passed |
 | Native readiness ignores configured startup budget | Derive the deadline from the existing effective configuration contract | repaired; regression passed |
+
+### Stock Pi probe isolation
+
+Physical app acceptance identified a concrete prerequisite: stock Pi OS kernel
+`6.18.50+rpt-rpi-2712` has Landlock disabled, and the bound probe launch returns
+`ENOSYS` before streaming begins. Both Docker and native services share this
+kernel. The user approved a namespace backend for verified ARM64 Pi hardware
+while explicitly retaining Landlock on other systems and preferring it on a Pi
+when available. Unexpected permission errors do not select the alternative.
+
+The existing probe supervisor will retain sealed-parser/source identity,
+seccomp execution restrictions, output bounds, deadlines and cancellation.
+Bubblewrap supplies the missing process and filesystem isolation on the stock
+Pi kernel. Native Bubblewrap 0.12 completed an unprivileged namespace capability
+check; this is prerequisite evidence, not completed app playback. Container
+Bubblewrap 0.8 and the narrow Pi Docker policy still require direct acceptance.
+See [the installation plan](RASPBERRY-PI-INSTALLATION.md#6-pi-probe-isolation--preserve-landlock-elsewhere)
+for the boundary, ownership and evidence requirements.

@@ -19,11 +19,13 @@ RUN mkdir -p /usr/local/deploy \
 FROM ${BASE_IMAGE} AS runtime
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libudev1 libdrm2 libx264-164 libx265-199 libass9 \
+    && apt-get install -y --no-install-recommends bubblewrap libudev1 libdrm2 libx264-164 libx265-199 libass9 \
        libfreetype6 libfontconfig1 libfribidi0 libharfbuzz0b libopus0 libvorbis0a \
        libvorbisenc2 libmp3lame0 libdav1d6 libzimg2 libgnutls30 libbz2-1.0 liblzma5 zlib1g \
+    && chmod 0755 /usr/bin/bwrap \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=pi-ffmpeg-build /opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369 /opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369
 ENV PLURX_FFMPEG=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369/bin/ffmpeg \
     PLURX_FFPROBE=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369/bin/ffprobe
+COPY deploy/pi-runtime-assets/MOBY-LICENSE deploy/pi-runtime-assets/MOBY-NOTICE /usr/share/doc/plurx-pi-sandbox/
 USER plurx
