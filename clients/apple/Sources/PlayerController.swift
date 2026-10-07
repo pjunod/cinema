@@ -12855,7 +12855,7 @@ extension SharedPlayerController {
         coordinator.offer(offer.action, filmPositionMs: position)
         var lastProgressMs = PlaybackControlSession.monotonicMs()
         while coordinator.hasActivePreparation, !coordinator.ledger.isSwitching {
-            if preemptRequested { coordinator.abandonWithoutFallback(.aborted); break }
+            if preemptRequested || closing || Task.isCancelled { coordinator.abandonWithoutFallback(.aborted); break }
             guard let item = preparedItem else { coordinator.abandon(.failed); break }
             if item.status == .failed || coordinator.readinessBoundElapsed() { coordinator.abandon(.failed); break }
             if item.status == .readyToPlay {
@@ -12863,8 +12863,15 @@ extension SharedPlayerController {
                 if preparedSeekPending {
                     // Issued once, and only once the item can honour it.
                     preparedSeekPending = false
-                    _ = await item.seek(to: CMTime(value: CMTimeValue(preparedFilmPositionMs), timescale: 1_000),
-                                        toleranceBefore: .zero, toleranceAfter: .zero)
+                    let remaining = min(PreparedReplacementBounds.alignmentMs, coordinator.readinessRemainingMs() ?? 0)
+                    guard await alignPrepared(item, to: preparedFilmPositionMs, boundMs: remaining) else {
+                        if preemptRequested || closing || Task.isCancelled {
+                            coordinator.abandonWithoutFallback(.aborted)
+                        } else {
+                            coordinator.abandon(.failed)
+                        }
+                        break
+                    }
                     continue
                 }
                 if let through = preparedBufferedThroughMs(item),
@@ -12938,7 +12945,8 @@ extension SharedPlayerController {
     /// Local's alignment: the seek runs in its own task so giving up on it at
     /// `alignmentMs` is possible at all (`AVPlayerItem.seek` ignores
     /// cancellation); the generation stops a late landing reporting in.
-    private func alignPrepared(_ item: AVPlayerItem, to itemMs: Int) async -> Bool {
+    private func alignPrepared(_ item: AVPlayerItem, to itemMs: Int, boundMs: Int = PreparedReplacementBounds.alignmentMs) async -> Bool {
+        guard boundMs > 0, !preemptRequested, !closing, !Task.isCancelled else { return false }
         preparedAlignment = (preparedAlignment.generation &+ 1, nil)
         let generation = preparedAlignment.generation
         let seek = Task { @MainActor [weak self] in
@@ -12947,12 +12955,23 @@ extension SharedPlayerController {
             guard let self, self.preparedAlignment.generation == generation else { return }
             self.preparedAlignment.landed = landed
         }
+        defer {
+            // AVFoundation can ignore task cancellation. Invalidate the result
+            // before cancelling the actual item seek, so a late callback cannot
+            // satisfy this preparation or its successor generation.
+            preparedAlignment.generation &+= 1
+            seek.cancel()
+            item.cancelPendingSeeks()
+        }
         let landed = await awaitBoundedValue(
-            boundMs: PreparedReplacementBounds.alignmentMs, pollMs: PreparedReplacementBounds.pollMs,
+            boundMs: boundMs, pollMs: PreparedReplacementBounds.pollMs,
             now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
             sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
-            read: { [weak self] in self?.preparedAlignment.landed })
-        seek.cancel()
+            read: { [weak self] in
+                guard let self, !self.preemptRequested, !self.closing, !Task.isCancelled,
+                      self.preparedItem === item else { return false }
+                return self.preparedAlignment.landed
+            })
         return landed ?? false
     }
 
