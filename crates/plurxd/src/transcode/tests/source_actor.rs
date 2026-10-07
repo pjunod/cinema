@@ -98,7 +98,9 @@ fn source_fixture_store(
             + '_,
     >,
 > {
-    Box::pin(plurx_core::cluster::migration::select_daemon_store(config))
+    Box::pin(crate::sharing_fixture_clock::select_applied_singleton(
+        config,
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

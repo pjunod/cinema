@@ -8,6 +8,14 @@ use plurx_core::process::bounded as bounded_process;
 #[cfg(test)]
 #[path = "../../plurx-core/tests/support/queue_fixture.rs"]
 mod queue_fixture;
+// Reuse the exact Core fixture observer. The shared fixture exports helpers
+// used by different packages; this test-only include has no production path.
+#[cfg(test)]
+use plurx_core as observer_core;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../plurx-core/tests/fixtures/startup_observer.rs"]
+mod sharing_fixture_clock;
 
 mod artifact_integrity;
 mod background_jobs;

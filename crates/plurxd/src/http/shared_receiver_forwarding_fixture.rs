@@ -9,16 +9,15 @@ struct ServerOwner {
     task: tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
 }
 impl ServerOwner {
-    fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> Self {
+    fn serve(observation: Arc<crate::StartupObservationHttp>, router: axum::Router) -> Self {
         let (stop, stopped) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(crate::serve_http(
-            listener,
-            router,
-            async move {
-                let _ = stopped.await;
-            },
-            crate::HTTP_TIMEOUTS,
-        ));
+        let task = tokio::spawn(async move {
+            observation
+                .serve_normal(router, async move {
+                    let _ = stopped.await;
+                })
+                .await
+        });
         Self {
             stop: Some(stop),
             task,
@@ -91,6 +90,7 @@ async fn actual_nonowner_b(address: IpAddr) {
         .await
         .expect("B worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
+    drop(worker_listener); // Preserve the chosen origin for the startup socket owner.
     let fixture = real_receiver_fixture_at(address, SourceFixtureMode::Copy, worker_address).await;
     let tls = Arc::new(
         LiveNodeTls::open(
@@ -118,7 +118,15 @@ async fn actual_nonowner_b(address: IpAddr) {
         super::super::sharing::peer_router((*fixture.source.state).clone()),
     );
     fixture.pair(endpoint).await;
-    let worker_server = ServerOwner::serve(worker_listener, fixture_router(fixture.state.clone()));
+    let worker_server = ServerOwner::serve(
+        Arc::clone(
+            fixture
+                .startup_clock
+                .as_ref()
+                .expect("actual worker startup owner"),
+        ),
+        fixture_router(fixture.state.clone()),
+    );
     let second_directory = crate::test_tempdir().expect("isolated second B member");
     let second_listener = tokio::net::TcpListener::bind((address, 0))
         .await
@@ -143,9 +151,14 @@ async fn actual_nonowner_b(address: IpAddr) {
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
-    let mut selected = Box::pin(select_daemon_store(&config))
-        .await
-        .expect("actual second admitted B voter");
+    drop(second_listener);
+    let observation = Arc::new(crate::StartupObservationHttp::new(second_address));
+    let mut selected = Box::pin(select_daemon_store_observing(
+        &config,
+        Some(observation.as_ref()),
+    ))
+    .await
+    .expect("actual second admitted B voter");
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual startup factory"));
@@ -153,6 +166,10 @@ async fn actual_nonowner_b(address: IpAddr) {
     ingress.store = Arc::clone(&selected.store);
     ingress.node_id = selected.identity.node_id.clone();
     ingress.membership = selected.membership_manager();
+    ingress.clock_observer = observation
+        .observer()
+        .await
+        .expect("actual ingress clock observer");
     ingress.catalogue = selected.catalogue_reader();
     ingress.replication = selected.replication_monitor();
     ingress.sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -190,7 +207,8 @@ async fn actual_nonowner_b(address: IpAddr) {
     );
     // This ingress does no producer work; actual assigned B playback remains
     // owned by the serving worker and all data traverses signed member HTTP.
-    let ingress_server = ServerOwner::serve(second_listener, fixture_router(ingress.clone()));
+    let ingress_server =
+        ServerOwner::serve(Arc::clone(&observation), fixture_router(ingress.clone()));
     let (status, _, bytes) = b_request(
         worker_address,
         false,
