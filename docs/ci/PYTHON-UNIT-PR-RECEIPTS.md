@@ -40,6 +40,21 @@ replay. Authenticated all-skipped draft runs contain no unit execution and
 need no journal. Live PR head, base, open state and readiness are checked
 before prepare and each phase so queued stale events cannot execute units.
 
+Forgejo's `synchronized` event action and the `synchronize` action both retain
+the same repository, PR, source, base and readiness checks. Run4294/job43864/
+attempt1 failed at that action check on source
+`289c9c5f3d6c5bdd48ff937c0c76476c95e9b7b2`, before any unit or journal.
+Its one bounded recovery verifies the actual terminal run and complete nine-job
+inventory, original ready PR event/base, immutable workflow/producer/input/helper
+hashes, and original 139814-byte log SHA-256
+`2db26ec8a677447202a8fa03e3895db12e840c4c931d186e242b7a6a6083fd95`.
+That log must contain the exact early refusal followed by skipped start and
+final publication steps, with no unit outcomes, suite summaries or successful
+uploads; run, start and final artifacts must all be absent. This recovery
+imports zero successes and creates no journal. It admits no other failed
+attempt or changed evidence. The two new fake-API controls remain reserved
+for their first actual candidate-lane execution.
+
 Fixture, import, discovery and runner-abort errors remain in the durable
 journal even when earlier methods passed. They block later reuse until
 attributable evidence is recovered; retained method successes cannot hide a

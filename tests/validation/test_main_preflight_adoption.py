@@ -221,3 +221,104 @@ class MainPreflightAdoptionCase(unittest.TestCase):
                                git(*args).replace("Cases(Fixture)", "Cases(unknown.Fixture)")):
             with self.assertRaises(ReceiptError):
                 adoption.inventory("a" * 40)
+
+    def test_pull_request_sync_aliases_preserve_source_repository_and_readiness_binding(self):
+        import json
+        repo = {"id": 1, "full_name": "owner/repository"}
+        pull = {"number": 845, "draft": False, "state": "open",
+                "head": {"repo": repo, "sha": "a" * 40},
+                "base": {"repo": repo, "ref": "main"}}
+        def run(action, changed_pull=None):
+            return {"repository": repo, "commit_sha": "a" * 40, "workflow_id": "main-fast-lane.yml",
+                    "event": "pull_request", "event_payload": json.dumps({"number": 845,
+                        "repository": repo, "pull_request": changed_pull or pull, "action": action})}
+        scope = {"repository": 1, "pr": 845}
+        for action in ("synchronize", "synchronized"):
+            self.assertEqual(adoption.bind_event(run(action), scope)["action"], action)
+            for changed in ({**pull, "draft": True}, {**pull, "state": "closed"},
+                            {**pull, "head": {"repo": repo, "sha": "b" * 40}},
+                            {**pull, "base": {"repo": {**repo, "id": 2}, "ref": "main"}}):
+                with self.assertRaises(ReceiptError):
+                    adoption.bind_event(run(action, changed), scope)
+        with self.assertRaises(ReceiptError):
+            adoption.bind_event(run("synchronizing"), scope)
+
+    def test_exact_preunit4294_recovery_requires_every_bound_witness_and_imports_nothing(self):
+        import copy
+        import hashlib
+        import json
+        proof = copy.deepcopy(adoption.PREUNIT4294)
+        repo = {"id": 1, "full_name": "owner/repository"}
+        event = {"number": 845, "repository": repo, "action": "synchronized",
+                 "pull_request": {"number": 845, "draft": False, "state": "open",
+                    "head": {"repo": repo, "sha": proof["commit"]},
+                    "base": {"repo": repo, "ref": "main", "sha": proof["base"]}}}
+        prior = {"id": 4294, "commit_sha": proof["commit"], "status": "failure",
+                 "repository": repo, "workflow_id": "main-fast-lane.yml", "event": "pull_request",
+                 "event_payload": json.dumps(event)}
+        jobs = [{"id": identity, "name": name, "task_id": task, "status": status,
+                 "run_id": 4294, "repo_id": 1, "attempt": 1}
+                for identity, name, task, status in proof["jobs"]]
+        raw = (proof["commit"] + ":refs/remotes/pull/845/head\n"
+               "Main preflight receipt refusal: Prior event/source/PR/base/readiness binding mismatch\n"
+               "skipping post step for 'Publish preflight attempt-start journal'; main step was skipped\n"
+               "skipping post step for 'Preserve per-ID preflight journal even on failure'; main step was skipped\n"
+               "Job 'fast policy and contract preflight' failed\n").encode()
+        # Fake API/source bytes are an isolated control seam, not a recovery input.
+        proof["sources"] = {path: hashlib.sha256(b"synthetic source").hexdigest() for path in proof["sources"]}
+        proof["log_bytes"], proof["log_sha256"] = len(raw), hashlib.sha256(raw).hexdigest()
+        scope = {"repository": 1, "pr": 845}
+        class FakeAPI:
+            def __init__(self):
+                self.actual = copy.deepcopy(prior)
+                self.raw = raw
+                self.source = b"synthetic source"
+                self.artifacts = []
+                self.start = []
+
+            def get(self, path):
+                return self.actual if path == "/actions/runs/4294" else self.artifacts
+
+            def bytes(self, path, query=None):
+                return self.raw if path == "/actions/jobs/43864/logs" else self.source
+
+            def pages(self, path, query=None):
+                return self.start if query["name"].endswith("-start-4294") else self.artifacts
+
+        with mock.patch.object(adoption, "PREUNIT4294", proof), \
+             mock.patch.object(adoption, "atomic_json") as writer:
+            self.assertIs(adoption.recover_preunit4294(FakeAPI(), scope, prior, jobs), True)
+            self.assertIs(adoption.recover_preunit4294(FakeAPI(), scope, {**prior, "id": 4295}, jobs), False)
+            self.assertIs(adoption.recover_preunit4294(FakeAPI(), {**scope, "pr": 846}, prior, jobs), False)
+            for field, value in (("id", 43899), ("attempt", 2), ("run_id", 4295),
+                                 ("repo_id", 2), ("task_id", 0), ("status", "success")):
+                changed = copy.deepcopy(jobs)
+                changed[2][field] = value
+                with self.assertRaises(ReceiptError):
+                    adoption.recover_preunit4294(FakeAPI(), scope, prior, changed)
+            for failure in ("run", "source", "log", "artifact", "start", "event", "unit-marker"):
+                api = FakeAPI()
+                if failure == "run":
+                    api.actual["commit_sha"] = "b" * 40
+                elif failure == "source":
+                    api.source = b"changed source"
+                elif failure == "log":
+                    api.raw += b"changed log"
+                elif failure == "artifact":
+                    api.artifacts = [{"run_id": 4294}]
+                elif failure == "start":
+                    api.start = [{"run_id": 4294}]
+                elif failure == "event":
+                    changed = copy.deepcopy(event)
+                    changed["pull_request"]["base"]["sha"] = "b" * 40
+                    api.actual["event_payload"] = json.dumps(changed)
+                else:
+                    api.raw = raw.replace(b"Job 'fast", b"Main preflight outcome positive\nJob 'fast")
+                with self.subTest(failure=failure), self.assertRaises(ReceiptError):
+                    if failure == "unit-marker":
+                        changed_proof = {**proof, "log_bytes": len(api.raw), "log_sha256": hashlib.sha256(api.raw).hexdigest()}
+                        with mock.patch.object(adoption, "PREUNIT4294", changed_proof):
+                            adoption.recover_preunit4294(api, scope, prior, jobs)
+                    else:
+                        adoption.recover_preunit4294(api, scope, prior, jobs)
+            writer.assert_not_called()

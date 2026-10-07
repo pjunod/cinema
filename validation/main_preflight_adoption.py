@@ -37,6 +37,32 @@ LEGACY = {
     "log_sha256": "272d7509dc94961593f77ad3961f98ee2be097a167baff07e8e1eb0cd0eadd0b",
 }
 
+PREUNIT4294 = {
+    "repository": 1, "pr": 845, "run": 4294, "job": 43864, "attempt": 1,
+    "commit": "289c9c5f3d6c5bdd48ff937c0c76476c95e9b7b2",
+    "base": "854c206a7bb1d8b78c203e9d561991507264ee83",
+    "log_bytes": 139814,
+    "log_sha256": "2db26ec8a677447202a8fa03e3895db12e840c4c931d186e242b7a6a6083fd95",
+    "sources": {
+        "validation/__init__.py": "347a3ad6f8a7cdabc285fac0bdd906d7c579115edebde81b08fad15426de5b4e",
+        ".github/workflows/main-fast-lane.yml": "04d0aca9a4eaf66020f84905506bf0df92cdc203518004fdb4cfc6d86a14ef68",
+        "validation/main_preflight_adoption.py": "8bc1e892c5a22fb744939c6898b505c1ff28410c36dddfd61a226e12e0b44a79",
+        "validation/main-preflight-inputs.json": "a9554b88e1f98df3716530705197f716f846869499345bd0fc03b2e3219444ec",
+        "validation/python_unit_receipts.py": "8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258",
+    },
+    "jobs": (
+        (43862, "fast-lane validation scope", 16494, "success"),
+        (43863, "fast-lane mobile release version", 0, "skipped"),
+        (43864, "fast policy and contract preflight", 16495, "failure"),
+        (43865, "fast Rust gate", 16496, "skipped"),
+        (43866, "fast Windows compile", 0, "skipped"),
+        (43867, "fast web syntax gate", 0, "skipped"),
+        (43868, "fast Apple compile", 0, "skipped"),
+        (43869, "fast Android compile", 0, "skipped"),
+        (43870, "Main promotion gate", 16497, "failure"),
+    ),
+}
+
 
 def run_commands(workflow, job="preflight"):
     """Literal unconditional run steps; comments/disabled steps are not proof."""
@@ -80,7 +106,7 @@ def bind_event(run, scope, ready=True):
             and pull["base"]["ref"] == "main"
             and pull["state"] == "open" and pull["head"]["sha"] == run["commit_sha"]
             and run["workflow_id"] == "main-fast-lane.yml"
-            and event["action"] in ("opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"),
+            and event["action"] in ("opened", "synchronize", "synchronized", "reopened", "ready_for_review", "converted_to_draft"),
             "Prior event/source/PR/base/readiness binding mismatch")
     if ready:
         require(pull["draft"] is False and event["action"] != "converted_to_draft",
@@ -422,6 +448,58 @@ def require_missing_journal_safe(prior, jobs, scope):
             f"Missing final journal for prior attempt {prior['id']}; preserve possibly passed IDs")
 
 
+def recover_preunit4294(api, scope, prior, jobs):
+    """One authenticated early refusal; import neither outcomes nor a journal."""
+    proof = PREUNIT4294
+    if scope != {"repository": proof["repository"], "pr": proof["pr"]} or prior["id"] != proof["run"]:
+        return False
+    actual = api.get("/actions/runs/4294")
+    require(actual["id"] == prior["id"] == proof["run"]
+            and actual["commit_sha"] == prior["commit_sha"] == proof["commit"]
+            and terminal_status(actual) == "failure",
+            "Prepare4294 exact terminal run/source mismatch")
+    event = bind_event(actual, scope)
+    require(event == bind_event(prior, scope) and event["action"] == "synchronized"
+            and event["pull_request"]["base"]["sha"] == proof["base"],
+            "Prepare4294 original event/base mismatch")
+    require(len(jobs) == len(proof["jobs"])
+            and all(job["run_id"] == proof["run"] and job["repo_id"] == proof["repository"]
+                    and job["attempt"] == proof["attempt"] for job in jobs)
+            and tuple(sorted((job["id"], job["name"], job["task_id"], terminal_status(job))
+                             for job in jobs)) == proof["jobs"],
+            "Prepare4294 complete terminal job/attempt inventory mismatch")
+    for path, expected in proof["sources"].items():
+        original = api.bytes("/raw/" + path, {"ref": proof["commit"]})
+        require(hashlib.sha256(original).hexdigest() == expected,
+                "Prepare4294 immutable producer/workflow/source mismatch")
+    raw = api.bytes("/actions/jobs/43864/logs")
+    require(len(raw) == proof["log_bytes"] and hashlib.sha256(raw).hexdigest() == proof["log_sha256"],
+            "Prepare4294 original raw log mismatch")
+    lines = [re.sub(r"^\d{4}-\d\d-\d\dT[0-9:.]+Z ", "", line)
+             for line in raw.decode("utf-8").splitlines()]
+    refusal = "Main preflight receipt refusal: Prior event/source/PR/base/readiness binding mismatch"
+    start = "skipping post step for 'Publish preflight attempt-start journal'; main step was skipped"
+    final = "skipping post step for 'Preserve per-ID preflight journal even on failure'; main step was skipped"
+    log = "\n".join(lines)
+    require(raw.endswith(b"\n") and proof["commit"] + ":refs/remotes/pull/845/head" in log
+            and lines.count(refusal) == lines.count(start) == lines.count(final) == 1
+            and lines.index(refusal) < min(lines.index(start), lines.index(final))
+            and lines[-1] == "Job 'fast policy and contract preflight' failed"
+            and not any(marker in log for marker in (
+                "Main preflight outcome ", "Authenticated candidates=", "discovered=", "pending=",
+                "has been successfully uploaded!", "... ok", "... FAIL", "... ERROR"))
+            and not any(re.fullmatch(r"Ran \d+ tests in .*", line) for line in lines),
+            "Prepare4294 contradicts reviewed zero-unit phase evidence")
+    name = "main-preflight-v1-r1-pr845"
+    require(api.get("/actions/runs/4294/artifacts") == []
+            and not any(artifact["run_id"] == proof["run"] for artifact in
+                        api.pages("/actions/artifacts", {"name": name}))
+            and not api.pages("/actions/artifacts", {"name": name + "-start-4294"}),
+            "Prepare4294 unexpectedly has start/final/run artifacts")
+    print("Recovered exact prepare refusal run4294/job43864: zero units, no outcomes or journal imported")
+    return True
+
+
 def require_record_origin(record, journal, original):
     own = all(record[key] == journal[key] for key in ("run", "commit", "job", "attempt", "environment"))
     immutable = RECORD_FIELDS - {"inputs"}
@@ -486,6 +564,8 @@ def prepare():
         workflow = api.bytes("/raw/.github/workflows/main-fast-lane.yml", {"ref": prior["commit_sha"]})
         if "python3 -m validation.main_preflight_adoption prepare" in run_commands(workflow.decode()):
             jobs = api.pages(f"/actions/runs/{prior['id']}/jobs")
+            if recover_preunit4294(api, scope, prior, jobs):
+                continue
             require_missing_journal_safe(prior, jobs, scope)
     require(len({a["run_id"] for a in artifacts}) == len(artifacts), "Ambiguous duplicate journals")
     for artifact in sorted(artifacts, key=lambda a: a["run_id"]):
