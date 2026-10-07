@@ -15,7 +15,7 @@ mod qualification {
     use plurx_core::cluster::migration::select_daemon_store;
     use plurx_core::config::Config;
     use plurx_core::store::{
-        SqliteStore, AUTH_SCHEMA_VERSION, MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA,
+        media_session_principal_rebuild_schema, SqliteStore, AUTH_SCHEMA_VERSION,
         SQLITE_SCHEMA_VERSION,
     };
     use serde_json::{json, Value};
@@ -151,7 +151,8 @@ mod qualification {
         // Prove statement-error rollback without calling it a power-loss test.
         {
             let transaction = connection.transaction()?;
-            let first = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+            let rebuild = media_session_principal_rebuild_schema();
+            let first = rebuild
                 .split("-- next statement\n")
                 .next()
                 .ok_or("candidate first statement")?;
@@ -168,7 +169,7 @@ mod qualification {
         }
         {
             let transaction = connection.transaction()?;
-            transaction.execute_batch(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+            transaction.execute_batch(&media_session_principal_rebuild_schema())?;
             transaction.commit()?;
         }
         let rebuilt = sqlite_snapshot(&connection)?;
@@ -359,7 +360,7 @@ mod qualification {
                             client.execute("CREATE TABLE qualification_transition_guard(value INTEGER NOT NULL CHECK(value=1))",params!()).await?;
                             let mut statements=vec![(format!("INSERT INTO qualification_transition_guard SELECT CASE WHEN {} THEN 1 ELSE 0 END",sharing_member_transition_absence_predicate()),params!())];
                             statements.extend(
-                                MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+                                media_session_principal_rebuild_schema()
                                     .split("-- next statement\n")
                                     .map(|sql| {
                                         (sql.trim().trim_end_matches(';').to_owned(), params!())

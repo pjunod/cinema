@@ -12,8 +12,8 @@ use crate::{
     sharing::{InvitationRecord, ShareClaim, SourceId},
     sharing_catalogue_details::CatalogueRevisionKey,
     store::{
-        LibraryStore, MediaSessionStore, SharingStore, SqliteStore,
-        MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA,
+        media_session_principal_rebuild_schema, LibraryStore, MediaSessionStore, SharingStore,
+        SqliteStore,
     },
 };
 use std::{collections::BTreeSet, path::PathBuf};
@@ -74,7 +74,7 @@ async fn setup_with_media_id(store: &SqliteStore, media_id: i64) -> (Uuid, Crede
     ddl.extend(super::super::sharing_catalogue_source::candidate_item_identity_statements());
     ddl.push(super::super::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA.into());
     ddl.extend(
-        MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+        media_session_principal_rebuild_schema()
             .split("-- next statement\n")
             .map(|s| s.trim().trim_end_matches(';').to_owned()),
     );

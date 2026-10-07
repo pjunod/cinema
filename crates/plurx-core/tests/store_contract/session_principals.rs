@@ -1,6 +1,6 @@
 //! Replicated application of the candidate rebuild, before runtime admission.
 use super::*;
-use plurx_core::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA;
+use plurx_core::store::media_session_principal_rebuild_schema;
 
 const TABLES: [&str; 11] = [
     "media_session_requests",
@@ -38,7 +38,7 @@ async fn snapshot(client: &Client, table: &str, columns: &[String]) -> Vec<Strin
     .await
 }
 fn rebuild_statements() -> Vec<(String, hiqlite::Params)> {
-    MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+    media_session_principal_rebuild_schema()
         .split("-- next statement\n")
         .map(|sql| {
             (

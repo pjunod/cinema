@@ -1,6 +1,6 @@
 //! The frozen rebuild is exercised before installing it in either backend.
 //! These SQL-shape probes do not qualify a live mixed-version cluster.
-use crate::store::{SqliteStore, MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA, SQLITE_SCHEMA_VERSION};
+use crate::store::{media_session_principal_rebuild_schema, SqliteStore, SQLITE_SCHEMA_VERSION};
 use rusqlite::{params, Connection};
 
 const OWNER_TABLES: [&str; 7] = [
@@ -52,7 +52,7 @@ fn snapshot(conn: &Connection, table: &str, cols: &[String]) -> Vec<String> {
 fn rebuild(conn: &Connection) {
     conn.execute_batch("BEGIN IMMEDIATE")
         .expect("begin rebuild");
-    conn.execute_batch(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)
+    conn.execute_batch(&media_session_principal_rebuild_schema())
         .expect("rebuild all tables");
     conn.execute_batch("COMMIT").expect("commit rebuild");
 }
@@ -186,7 +186,7 @@ fn sharing_principal_rebuild_fences_legacy_writes_and_rolls_back_atomically() {
       (user_id, request_id, request_fingerprint, playback_id, state, claim_expires_at_ms,
        incarnation_id, updated_at_ms) VALUES (1, 'legacy', 'fp', 'legacy', 'starting', 9000, 'legacy', 10)";
     conn.execute_batch("BEGIN IMMEDIATE").expect("begin");
-    conn.execute_batch(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)
+    conn.execute_batch(&media_session_principal_rebuild_schema())
         .expect("candidate rebuild");
     let error = conn
         .execute(old_insert, [])
@@ -354,7 +354,7 @@ fn sharing_principal_rebuild_isolates_viewer_keys_and_existing_fence_triggers() 
 #[test]
 fn sharing_principal_rebuild_owner_deletion_and_revocation_retire_only_matching_authority() {
     let conn = current_database();
-    conn.execute_batch(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)
+    conn.execute_batch(&media_session_principal_rebuild_schema())
         .expect("candidate rebuild");
     let grant_a = "00000000-0000-4000-a000-000000000001";
     let grant_b = "00000000-0000-4000-a000-000000000002";
@@ -455,4 +455,60 @@ fn sharing_principal_rebuild_refuses_zero_and_negative_local_owners_in_every_fam
             );
         }
     }
+}
+
+#[test]
+fn sharing_principal_rebuild_preserves_external_watch_authority_triggers_atomically() {
+    let conn = current_database();
+    let before = snapshot(
+        &conn,
+        "sqlite_master",
+        &[
+            "type".into(),
+            "name".into(),
+            "tbl_name".into(),
+            "sql".into(),
+        ],
+    )
+    .into_iter()
+    .filter(|row| row.contains("jellyfin_watch_"))
+    .collect::<Vec<_>>();
+    assert_eq!(before.len(), 4);
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .expect("atomic rebuild");
+    conn.execute_batch(&media_session_principal_rebuild_schema())
+        .expect("current external dependencies rebuilt");
+    let during = snapshot(
+        &conn,
+        "sqlite_master",
+        &[
+            "type".into(),
+            "name".into(),
+            "tbl_name".into(),
+            "sql".into(),
+        ],
+    )
+    .into_iter()
+    .filter(|row| row.contains("jellyfin_watch_"))
+    .collect::<Vec<_>>();
+    assert_eq!(before, during);
+    assert!(conn
+        .prepare("UPDATE watch_state SET manual_revision=manual_revision+1 WHERE user_id=1")
+        .is_ok());
+    conn.execute_batch("ROLLBACK")
+        .expect("rollback whole rebuild");
+    let after = snapshot(
+        &conn,
+        "sqlite_master",
+        &[
+            "type".into(),
+            "name".into(),
+            "tbl_name".into(),
+            "sql".into(),
+        ],
+    )
+    .into_iter()
+    .filter(|row| row.contains("jellyfin_watch_"))
+    .collect::<Vec<_>>();
+    assert_eq!(before, after);
 }

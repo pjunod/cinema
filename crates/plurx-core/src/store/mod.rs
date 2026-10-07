@@ -434,6 +434,20 @@ pub(crate) fn local_media_principal_id(
 pub const MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA: &str =
     include_str!("session_principal_rebuild.sql");
 
+/// Current-schema orchestration around the unchanged frozen ownership layout.
+/// Execute every statement atomically; unrelated watch triggers stay installed.
+pub fn media_session_principal_rebuild_schema() -> String {
+    let separator = "\n-- next statement\n";
+    let dependencies = jellyfin_watch::session_dependency_triggers().collect::<Vec<_>>();
+    let mut statements = dependencies
+        .iter()
+        .map(|(name, _)| format!("DROP TRIGGER {name};"))
+        .collect::<Vec<_>>();
+    statements.push(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.to_owned());
+    statements.extend(dependencies.into_iter().map(|(_, sql)| sql.to_owned()));
+    statements.join(separator)
+}
+
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod session_principal_tests;
 

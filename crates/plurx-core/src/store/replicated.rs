@@ -158,6 +158,38 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Capsule shape and rows must share one read snapshot; no authority is
+    // inferred from missing optional objects.
+    SqliteTransactionSite {
+        module: "sharing.rs",
+        method: "sharing_purpose_archive_rows",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadSnapshot,
+    },
+    SqliteTransactionSite {
+        module: "sharing.rs",
+        method: "sharing_revision_key_rows",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadSnapshot,
+    },
+    SqliteTransactionSite {
+        module: "sharing.rs",
+        method: "sharing_file_locator_key_rows",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadSnapshot,
+    },
+    // Exact guarded SQL is supplied by the sharing owner and executed as one
+    // batch; returned counts never branch into a second authority write here.
+    SqliteTransactionSite {
+        module: "sharing.rs",
+        method: "sharing_txn",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
     // Explicit switch and fresh generation publish together; no observation
     // of readiness or caller data branches inside this fixed write batch.
     SqliteTransactionSite {
@@ -1113,6 +1145,7 @@ mod tests {
         ("reading.rs", include_str!("sqlite/reading.rs")),
         ("sessions.rs", include_str!("sqlite/sessions.rs")),
         ("shared_cache.rs", include_str!("sqlite/shared_cache.rs")),
+        ("sharing.rs", include_str!("sqlite/sharing.rs")),
         ("telemetry.rs", include_str!("sqlite/telemetry.rs")),
         (
             "timeline_annotations.rs",
@@ -1303,7 +1336,9 @@ mod tests {
         // `request_quality_cancellation` prunes, inserts and reads the winning
         // receipt back, and `settle_quality_cancellation` settles and reads
         // whether the receipt is settled for this owner.
-        assert_eq!(methods.len(), 103);
+        // Sharing adds three coherent capsule read snapshots and one verbatim
+        // guarded transaction, each measured in sqlite/sharing.rs.
+        assert_eq!(methods.len(), 107);
     }
 
     #[test]

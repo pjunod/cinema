@@ -245,6 +245,7 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 const EXPECTED_FRAGMENTS: usize = 7;
 
 /// One Rust string literal, with its escapes decoded.
+#[derive(Clone)]
 struct Literal {
     line: usize,
     start: usize,
@@ -603,6 +604,368 @@ fn string_bindings(
         }
     }
     bindings
+}
+
+/// Resolve only the new principal-composition family using the actual helper
+/// implementations. Bindings are collected before this template, so a later
+/// fixture or unrelated same-name binding cannot impersonate its authority.
+fn principal_bindings(
+    module: &str,
+    source: &str,
+    literal: &Literal,
+    literals: &[Literal],
+    is_code: &[bool],
+    rebuilt: bool,
+    source_principal: bool,
+) -> Vec<(String, Vec<String>)> {
+    let prefix = &source[..literal.start];
+    let prior = literals
+        .iter()
+        .filter(|value| value.end <= literal.start)
+        .cloned()
+        .collect::<Vec<_>>();
+    let scope_start = prefix
+        .match_indices("fn ")
+        .filter(|(at, _)| is_code[*at])
+        .map(|(at, _)| at)
+        .last()
+        .unwrap_or(0);
+    let scoped_literals = prior
+        .iter()
+        .filter(|value| value.start >= scope_start)
+        .cloned()
+        .map(|mut value| {
+            value.start -= scope_start;
+            value.end -= scope_start;
+            value
+        })
+        .collect::<Vec<_>>();
+    let mut bindings = string_bindings(
+        &prefix[scope_start..],
+        &scoped_literals,
+        &is_code[scope_start..literal.start],
+    );
+    if !matches!(module, "hiqlite_sessions.rs" | "sessions.rs") {
+        return bindings;
+    }
+    for (start, _) in prefix.match_indices("let ") {
+        if start < scope_start || !is_code[start] {
+            continue;
+        }
+        let tail = &prefix[start + 4..];
+        let Some(equals) = tail.find('=') else {
+            continue;
+        };
+        let name = tail[..equals].trim();
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || value == b'_')
+        {
+            continue;
+        }
+        let expression = tail[equals + 1..]
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        let expression_literals = prior
+            .iter()
+            .filter(|value| {
+                value.start > start && value.start < start + 4 + equals + 1 + expression.len()
+            })
+            .collect::<Vec<_>>();
+        let mut resolved =
+            if expression.starts_with("if source") || expression.starts_with("if rebuilt") {
+                let arm = if expression.starts_with("if source") {
+                    if source_principal {
+                        0
+                    } else if expression.contains("else if rebuilt") && !rebuilt {
+                        2
+                    } else {
+                        1
+                    }
+                } else if rebuilt {
+                    0
+                } else {
+                    1
+                };
+                expression_literals.get(arm).map(|value| value.text.clone())
+            } else {
+                None
+            };
+        if module == "hiqlite_sessions.rs" {
+            for receiver in ["layout.", "ownership."] {
+                if let Some(at) = expression.find(receiver) {
+                    let call = &expression[at + receiver.len()..];
+                    if let Some(open) = call.find('(') {
+                        let method = &call[..open];
+                        let args = call[open + 1..]
+                            .split(')')
+                            .next()
+                            .unwrap_or_default()
+                            .trim();
+                        let parameter = if matches!(
+                            method,
+                            "equals" | "insert_values" | "existing_user" | "user_id_value"
+                        ) {
+                            args.parse()
+                                .expect("principal helper index must be a literal")
+                        } else {
+                            0
+                        };
+                        let table = args.trim_matches('"');
+                        resolved = super::hiqlite_sessions::census_local_principal_fragment(
+                            method, parameter, table, rebuilt,
+                        );
+                        if source_principal {
+                            let activation = &source[source
+                                .find("impl ActivationSql<'_>")
+                                .expect("actual Source composition")..];
+                            let definition = activation
+                                .split(&format!("fn {method}("))
+                                .nth(1)
+                                .map(|value| value.split("\n    fn ").next().unwrap_or(value));
+                            if let Some(definition) = definition {
+                                if definition.contains("if self.source.is_some()") {
+                                    resolved = if method == "existing_user" {
+                                        Some(String::new())
+                                    } else {
+                                        literals_and_code_mask(definition).0.first().map(|value| {
+                                            value
+                                                .text
+                                                .replace("{parameter}", &parameter.to_string())
+                                        })
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for method in ["local_owner_predicate", "live_local_session_predicate"] {
+                if let Some(at) = expression.find(&format!("{method}(")) {
+                    let args = &expression[at + method.len() + 1..];
+                    // The final argument is a literal parameter or table name;
+                    // the first may itself contain the schema-reader call.
+                    let end = args.rfind(')').unwrap_or(args.len());
+                    let last = args[..end]
+                        .rsplit(',')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .trim_end_matches(')');
+                    let parameter = if method == "local_owner_predicate" {
+                        last.parse()
+                            .expect("principal owner index must be a literal")
+                    } else {
+                        0
+                    };
+                    let table = last.trim_matches('"');
+                    resolved = super::sqlite::census_local_principal_fragment(
+                        method, parameter, table, rebuilt,
+                    );
+                }
+            }
+            if let Some(at) = expression.find("owner_predicate(") {
+                let argument = expression[at + "owner_predicate(".len()..]
+                    .split(')')
+                    .next()
+                    .unwrap_or_default();
+                {
+                    let parameter = argument
+                        .parse()
+                        .expect("Source owner index must be a literal");
+                    resolved = super::sqlite::census_local_principal_fragment(
+                        "local_owner_predicate",
+                        parameter,
+                        "",
+                        rebuilt,
+                    );
+                    if source_principal {
+                        let closure = prefix
+                            .rsplit("let owner_predicate")
+                            .next()
+                            .expect("actual Source predicate closure");
+                        resolved = literals_and_code_mask(closure)
+                            .0
+                            .first()
+                            .map(|value| value.text.replace("{parameter}", &parameter.to_string()));
+                    }
+                }
+            }
+            if let Some(value) = resolved.as_mut() {
+                if expression.starts_with("format!(") {
+                    if let Some(format) = prior.iter().find(|value| {
+                        value.start > start
+                            && value.start < start + 4 + equals + 1 + expression.len()
+                    }) {
+                        if let Some(alias) = format.text.strip_suffix("{}") {
+                            *value = format!("{alias}{value}");
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(value) = resolved {
+            bindings.push((name.to_owned(), vec![value]));
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    bindings.reverse();
+    bindings.retain(|(name, _)| seen.insert(name.clone()));
+    bindings
+}
+
+fn principal_templates(
+    module: &str,
+    source: &str,
+    literal: &Literal,
+    literals: &[Literal],
+    is_code: &[bool],
+    constants: &[(String, String)],
+) -> Vec<String> {
+    if !matches!(module, "hiqlite_sessions.rs" | "sessions.rs") {
+        let bindings = string_bindings(source, literals, is_code);
+        return resolve_template(&literal.text, constants, &bindings);
+    }
+    let mut function_start = 0;
+    for (at, _) in source[..literal.start].match_indices("fn ") {
+        if is_code[at] {
+            function_start = at;
+        }
+    }
+    let context = &source[function_start..literal.start];
+    let source_activation = context.contains("ActivationSql {")
+        || context.contains("let owner_predicate=|parameter| if source");
+    let modes = if source_activation {
+        &[(false, false), (true, false), (true, true)][..]
+    } else {
+        &[(false, false), (true, false)][..]
+    };
+    static PARAMETERS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let parameters =
+        PARAMETERS.get_or_init(|| regex::Regex::new(r"\$(\d+)").expect("parameter grammar"));
+    let mut variants = Vec::new();
+    for &(rebuilt, source_principal) in modes {
+        let mut bindings = principal_bindings(
+            module,
+            source,
+            literal,
+            literals,
+            is_code,
+            rebuilt,
+            source_principal,
+        );
+        let mut template = literal.text.clone();
+        // Only these session composition sites pass layout helpers positionally.
+        // Evaluate their real output before numbering or ordering placeholders.
+        let mut arguments = &source[literal.end..];
+        let mut argument_index = 0;
+        while template.contains("{}") {
+            arguments = arguments
+                .trim_start()
+                .strip_prefix(',')
+                .unwrap_or(arguments)
+                .trim_start();
+            let end = arguments
+                .find("(),")
+                .map(|value| value + 2)
+                .or_else(|| arguments.find("()\n").map(|value| value + 2))
+                .or_else(|| arguments.find("),").map(|value| value + 1))
+                .unwrap_or(0);
+            if end == 0 {
+                break;
+            }
+            let expression = &arguments[..end];
+            let Some(receiver) = ["layout.", "ownership."]
+                .into_iter()
+                .find_map(|value| expression.strip_prefix(value))
+            else {
+                break;
+            };
+            let Some(open) = receiver.find('(') else {
+                break;
+            };
+            let method = &receiver[..open];
+            let argument = receiver[open + 1..].trim_end_matches(')');
+            let parameter = if matches!(
+                method,
+                "equals" | "insert_values" | "existing_user" | "user_id_value"
+            ) {
+                argument
+                    .parse()
+                    .expect("positional principal index must be a literal")
+            } else {
+                0
+            };
+            let value = super::hiqlite_sessions::census_local_principal_fragment(
+                method, parameter, "", rebuilt,
+            )
+            .expect("unsupported positional principal helper must be reviewed");
+            let name = format!("census_arg_{argument_index}");
+            template = template.replacen("{}", &format!("{{{name}}}"), 1);
+            bindings.push((name, vec![value]));
+            arguments = &arguments[end..];
+            argument_index += 1;
+        }
+        for name in template
+            .split('{')
+            .skip(1)
+            .filter_map(|part| part.split_once('}').map(|(name, _)| name))
+        {
+            if (matches!(
+                name,
+                "owner"
+                    | "request_owner"
+                    | "request_update_owner"
+                    | "live_route"
+                    | "live_route_sql"
+                    | "live_session"
+                    | "live_alias"
+                    | "local_inventory"
+                    | "existing_user"
+            ) || name.starts_with("owner_")
+                || name.starts_with("extra_")
+                || name.starts_with("user_value_")
+                || name.starts_with("principal_"))
+                && !bindings.iter().any(|(binding, _)| binding == name)
+                && !constants.iter().any(|(binding, _)| binding == name)
+            {
+                panic!(
+                    "{module}:{} unresolved principal fragment {name}",
+                    literal.line
+                );
+            }
+        }
+        for mut value in resolve_template(&template, constants, &bindings) {
+            if source_principal
+                && module == "hiqlite_sessions.rs"
+                && context.starts_with("fn activate_with_authority(")
+                && context.contains("let mut statements = vec![")
+                && is_statement(&value)
+            {
+                // This exact production branch maps every vector member through
+                // ordered_source_lifecycle_statement before the Raft proposal.
+                // Use its real canonicalizer, including rejection of holes or
+                // unused bindings; raw pre-remap introduction order is not wire SQL.
+                let max = parameters
+                    .captures_iter(&value)
+                    .map(|capture| capture[1].parse::<usize>().expect("parameter index"))
+                    .max()
+                    .unwrap_or(0);
+                value =
+                    super::sharing::ordered(&value, vec![super::sharing::Value::Integer(0); max])
+                        .expect("actual Source lifecycle canonicalization")
+                        .0;
+            }
+            if !variants.contains(&value) {
+                variants.push(value);
+            }
+        }
+    }
+    variants
 }
 
 /// At most this many arms per binding, and this many assembled variants per
@@ -970,7 +1333,6 @@ fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         let constants = constants_for(name, source, &literals);
-        let bindings = string_bindings(source, &literals, &is_code);
         for literal in &literals {
             if test_ranges
                 .iter()
@@ -979,7 +1341,9 @@ fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
             {
                 continue;
             }
-            for statement in resolve_template(&literal.text, &constants, &bindings) {
+            for statement in
+                principal_templates(name, source, literal, &literals, &is_code, &constants)
+            {
                 if !is_statement(&statement) {
                     continue;
                 }
@@ -1081,7 +1445,6 @@ fn every_replicated_placeholder_is_introduced_in_order() {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         let constants = constants_for(name, source, &literals);
-        let bindings = string_bindings(source, &literals, &is_code);
         for literal in &literals {
             if test_ranges
                 .iter()
@@ -1093,7 +1456,9 @@ fn every_replicated_placeholder_is_introduced_in_order() {
                 continue;
             }
             let mut judged = false;
-            for statement in resolve_template(&literal.text, &constants, &bindings) {
+            for statement in
+                principal_templates(name, source, literal, &literals, &is_code, &constants)
+            {
                 if !is_statement(&statement) {
                     continue;
                 }

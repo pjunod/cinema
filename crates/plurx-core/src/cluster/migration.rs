@@ -7028,6 +7028,7 @@ mod tests {
         };
         let before = make_runtime();
         let configs = before.block_on(async {
+            let observed = startup_observer::MeasuredPeers::default();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("join listener");
@@ -7039,7 +7040,8 @@ mod tests {
                 SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME))
                     .expect("baseline SQLite"),
             );
-            let source = select_daemon_store(&config)
+            let source = observed
+                .select(&config, false)
                 .await
                 .expect("actual first voter");
             let manager = source.membership_manager();
@@ -7049,7 +7051,8 @@ mod tests {
                     "/api/v1/cluster/join/finalize",
                     post(finalize_join_for_test),
                 )
-                .with_state(manager.clone());
+                .with_state(manager.clone())
+                .merge(startup_observer::MeasuredPeers::route(manager.clone()));
             let http_task = tokio::spawn(async move {
                 axum::serve(listener, app).await.expect("join gateway");
             });
@@ -7068,7 +7071,8 @@ mod tests {
                     .expect("distinct node HTTP origin");
                 joined_config.cluster.join_token_file = path;
                 members.push(
-                    select_daemon_store(&joined_config)
+                    observed
+                        .select(&joined_config, true)
                         .await
                         .expect("actual joined voter"),
                 );
@@ -7136,10 +7140,11 @@ mod tests {
         // listeners. This is a real full stop, not a serving-time schema rebuild.
         drop(before);
         make_runtime().block_on(async {
+            let observed = startup_observer::MeasuredPeers::default();
             let (first, second, third) = tokio::join!(
-                select_daemon_store(&configs[0]),
-                select_daemon_store(&configs[1]),
-                select_daemon_store(&configs[2])
+                observed.select(&configs[0], true),
+                observed.select(&configs[1], true),
+                observed.select(&configs[2], true)
             );
             let mut first = first.expect("first full-stop restart");
             let mut second = second.expect("second full-stop restart");
@@ -7175,9 +7180,10 @@ mod tests {
         install_default_crypto_provider();
         let directory = tempfile::tempdir().expect("legacy guard data");
         drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("legacy SQLite"));
-        let mut selected = select_daemon_store(&membership_test_config(directory.path()))
-            .await
-            .expect("actual admitted voter");
+        let mut selected =
+            startup_observer::select_applied_singleton(&membership_test_config(directory.path()))
+                .await
+                .expect("actual admitted voter");
         let client = selected.local_client().expect("actual client");
         for sql in super::super::membership::sharing_member_admission_guard_schema()
             .into_iter()
@@ -7245,9 +7251,10 @@ mod tests {
         selected.shutdown().await.expect("settled shutdown");
         drop(client);
         drop(selected);
-        let mut restart = select_daemon_store(&membership_test_config(directory.path()))
-            .await
-            .expect("master census remains readable");
+        let mut restart =
+            startup_observer::select_applied_singleton(&membership_test_config(directory.path()))
+                .await
+                .expect("master census remains readable");
         assert!(
             restart
                 .prepare_source_schema_before_serving()
@@ -7277,7 +7284,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("Local data");
         let config = membership_test_config(directory.path());
         drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("legacy SQLite"));
-        let mut selected = select_daemon_store(&config)
+        let mut selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("actual one voter");
         selected
@@ -7328,9 +7335,10 @@ mod tests {
         selected.shutdown().await.expect("settled shutdown");
         drop(client);
         drop(selected);
-        let mut restart = select_daemon_store(&membership_test_config(directory.path()))
-            .await
-            .expect("actual disabled-choice restart");
+        let mut restart =
+            startup_observer::select_applied_singleton(&membership_test_config(directory.path()))
+                .await
+                .expect("actual disabled-choice restart");
         assert!(!restart
             .prepare_source_schema_before_serving()
             .await
@@ -7369,7 +7377,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("Source coordinator data");
         let config = membership_test_config(directory.path());
         drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let mut selected = select_daemon_store(&config)
+        let mut selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("actual admitted one voter");
         selected
@@ -7417,7 +7425,7 @@ mod tests {
         drop(client);
         drop(selected);
         let restart_config = membership_test_config(directory.path());
-        let mut restarted = select_daemon_store(&restart_config)
+        let mut restarted = startup_observer::select_applied_singleton(&restart_config)
             .await
             .expect("exact installed shape reopens");
         assert!(restarted
@@ -7439,7 +7447,7 @@ mod tests {
         drop(client);
         drop(restarted);
         assert!(
-            select_daemon_store(&membership_test_config(directory.path()))
+            startup_observer::select_applied_singleton(&membership_test_config(directory.path()))
                 .await
                 .is_err(),
             "v71 missing index is refused without read repair"
@@ -7454,7 +7462,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("purpose coordinator data");
         let config = membership_test_config(directory.path());
         drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let selected = select_daemon_store(&config)
+        let selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("actual one voter selection");
         assert_eq!(selected.backend, SelectedBackend::Replicated);
@@ -7538,7 +7546,7 @@ mod tests {
         // Hiqlite's known TLS listener shutdown defect retains the old bind;
         // exercise the real supported sole-voter readdress/restart path.
         let restart_config = membership_test_config(directory.path());
-        let restarted = select_daemon_store(&restart_config)
+        let restarted = startup_observer::select_applied_singleton(&restart_config)
             .await
             .expect("actual voter restart");
         assert_eq!(
@@ -7591,7 +7599,7 @@ mod tests {
             SqliteStore::open(&directory.path().join(SQLITE_FILENAME))
                 .expect("legacy source store"),
         );
-        let selected = select_daemon_store(&config)
+        let selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("actual source voter");
         let client = selected.local_client.as_ref().expect("local voter client");

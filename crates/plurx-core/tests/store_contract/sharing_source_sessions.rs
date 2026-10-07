@@ -12,9 +12,9 @@ use plurx_core::{
     sharing_catalogue_details::CatalogueRevisionKey,
     sharing_source_sessions::*,
     store::{
-        sharing_catalogue_details::SourceDetailsRead,
+        media_session_principal_rebuild_schema, sharing_catalogue_details::SourceDetailsRead,
         sharing_source_sessions::candidate_statements, SharingSourceDetailsStore,
-        SharingSourceSessionStore, SharingStore, MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA,
+        SharingSourceSessionStore, SharingStore,
     },
 };
 use uuid::Uuid;
@@ -170,7 +170,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     ddl.extend(plurx_core::store::sharing_catalogue_source::candidate_item_identity_statements());
     ddl.push(plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA.into());
     ddl.extend(
-        MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+        media_session_principal_rebuild_schema()
             .split("-- next statement\n")
             .map(|s| s.trim().trim_end_matches(';').to_owned()),
     );

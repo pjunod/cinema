@@ -2121,6 +2121,7 @@ pub(crate) struct RealSourceStartFixture {
     pub grant: Uuid,
     invitation: SourceFixtureInvitation,
     selected: plurx_core::cluster::migration::SelectedStore,
+    startup_clock: Option<std::sync::Arc<crate::StartupObservationHttp>>,
     _directory: tempfile::TempDir,
 }
 #[cfg(test)]
@@ -2171,6 +2172,9 @@ impl RealSourceStartFixture {
         })
     }
     pub async fn shutdown(self) {
+        if let Some(clock) = &self.startup_clock {
+            clock.stop_and_drain().await;
+        }
         self.selected
             .shutdown()
             .await
@@ -2260,7 +2264,7 @@ async fn build_real_source_start_fixture(
     advertised_http: Option<std::net::SocketAddr>,
 ) -> RealSourceStartFixture {
     use plurx_core::{
-        cluster::migration::select_daemon_store,
+        cluster::migration::select_daemon_store_observing,
         config::Config,
         domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
         sharing::{new_secret, secret_hash, InvitationRecord, SecretDomain, ShareClaim, SourceId},
@@ -2281,9 +2285,14 @@ async fn build_real_source_start_fixture(
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
-    let mut selected = Box::pin(select_daemon_store(&config))
-        .await
-        .expect("actual one voter");
+    let startup_clock =
+        advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
+    let mut selected = if let Some(clock) = &startup_clock {
+        Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
+    } else {
+        crate::sharing_fixture_clock::select_applied_singleton(&config).await
+    }
+    .expect("actual one voter");
     selected
         .store
         .put_setting(keys::SHARING_ENABLED, "true")
@@ -2299,6 +2308,14 @@ async fn build_real_source_start_fixture(
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
     state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = selected.membership_manager();
+    state_mut.clock_observer = if let Some(clock) = &startup_clock {
+        clock
+            .observer()
+            .await
+            .expect("actual startup clock observer")
+    } else {
+        crate::clock_offset::ClockObserver::new(state_mut.membership.clone())
+    };
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut.catalogue = selected.catalogue_reader();
     state_mut.replication = selected.replication_monitor();
@@ -2731,6 +2748,7 @@ async fn build_real_source_start_fixture(
             expires_at_ms: now + 60000,
         },
         selected,
+        startup_clock,
         _directory: directory,
     }
 }

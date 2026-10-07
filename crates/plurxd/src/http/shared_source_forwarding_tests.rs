@@ -10,16 +10,15 @@ struct FixtureServer {
     task: tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
 }
 impl FixtureServer {
-    fn spawn(listener: tokio::net::TcpListener, router: axum::Router) -> Self {
+    fn spawn(observation: Arc<crate::StartupObservationHttp>, router: axum::Router) -> Self {
         let (stop, stopped) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(crate::serve_http(
-            listener,
-            router,
-            async move {
-                let _ = stopped.await;
-            },
-            crate::HTTP_TIMEOUTS,
-        ));
+        let task = tokio::spawn(async move {
+            observation
+                .serve_normal(router, async move {
+                    let _ = stopped.await;
+                })
+                .await
+        });
         Self {
             stop: Some(stop),
             task,
@@ -61,7 +60,7 @@ async fn sharing_source_nonowner_http_cold_probe_and_same_driver_end_require_act
 }
 async fn actual_nonowner_forwarding() {
     use plurx_core::{
-        cluster::{membership::ClusterRole, migration::select_daemon_store},
+        cluster::{membership::ClusterRole, migration::select_daemon_store_observing},
         config::Config,
     };
     // Reserve the real advertised endpoints before either startup; no SQL
@@ -70,10 +69,19 @@ async fn actual_nonowner_forwarding() {
         .await
         .expect("worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
+    drop(worker_listener); // The startup owner binds this exact reserved origin.
     let worker = real_source_start_fixture_at(worker_address).await;
     let worker_router = super::super::router((*worker.state).clone())
         .merge(super::super::sharing::peer_router((*worker.state).clone()));
-    let worker_server = FixtureServer::spawn(worker_listener, worker_router);
+    let worker_server = FixtureServer::spawn(
+        Arc::clone(
+            worker
+                .startup_clock
+                .as_ref()
+                .expect("actual worker startup owner"),
+        ),
+        worker_router,
+    );
     let ingress_directory = crate::test_tempdir().expect("isolated second member data");
     let ingress_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -99,15 +107,24 @@ async fn actual_nonowner_forwarding() {
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
-    let mut selected = Box::pin(select_daemon_store(&config))
-        .await
-        .expect("actual joined second voter");
+    drop(ingress_listener);
+    let observation = Arc::new(crate::StartupObservationHttp::new(ingress_address));
+    let mut selected = Box::pin(select_daemon_store_observing(
+        &config,
+        Some(observation.as_ref()),
+    ))
+    .await
+    .expect("actual joined second voter");
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual candidate startup"));
     let mut ingress = crate::http::source_actor_test_state();
     ingress.store = Arc::clone(&selected.store);
     ingress.membership = selected.membership_manager();
+    ingress.clock_observer = observation
+        .observer()
+        .await
+        .expect("actual ingress clock observer");
     ingress.node_id = selected.identity.node_id.clone();
     ingress.catalogue = selected.catalogue_reader();
     ingress.replication = selected.replication_monitor();
@@ -151,8 +168,19 @@ async fn actual_nonowner_forwarding() {
         .expect("actual non-serving ingress fence");
     assert!(!ingress.serving.accepting_new_media().await);
     let ingress_server = FixtureServer::spawn(
-        ingress_listener,
-        super::super::sharing::peer_router(ingress.clone()),
+        Arc::clone(&observation),
+        super::super::sharing::peer_router(ingress.clone()).merge(
+            axum::Router::new()
+                .route(
+                    crate::http::internal_clock::PATH,
+                    axum::routing::get(crate::http::internal_clock::observation_snapshot),
+                )
+                .with_state(crate::http::internal_clock::ObservationContext {
+                    membership: ingress.membership.clone(),
+                    node_id: ingress.node_id.clone(),
+                    observer: ingress.clock_observer.clone(),
+                }),
+        ),
     );
     let socket = tokio::net::TcpStream::connect(ingress_address)
         .await

@@ -1,7 +1,7 @@
 //! Production writers against the candidate layout, before schema installation.
 use super::*;
 use plurx_core::playback_principal::PlaybackPrincipal;
-use plurx_core::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA;
+use plurx_core::store::media_session_principal_rebuild_schema;
 
 const REQUEST_INCARNATION: &str = "00000000-0000-4000-a000-000000000080";
 const RETRY_INCARNATION: &str = "00000000-0000-4000-a000-000000000081";
@@ -41,15 +41,16 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
             result.expect("seed local rows");
         }
         if rebuilt {
-            let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
-                .split("-- next statement\n")
-                .map(|sql| {
-                    (
-                        sql.trim().trim_end_matches(';').to_owned(),
-                        hiqlite::params!(),
-                    )
-                })
-                .collect();
+            let statements: Vec<(String, hiqlite::Params)> =
+                media_session_principal_rebuild_schema()
+                    .split("-- next statement\n")
+                    .map(|sql| {
+                        (
+                            sql.trim().trim_end_matches(';').to_owned(),
+                            hiqlite::params!(),
+                        )
+                    })
+                    .collect();
             for result in client.txn(statements).await.expect("candidate transaction") {
                 result.expect("candidate rebuild");
             }
@@ -457,7 +458,7 @@ async fn sharing_rebuilt_local_preparation_rejoin_abort_preserve_principal_fence
         "candidate preparation",
     )
     .await;
-    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
         .split("-- next statement\n")
         .map(|sql| {
             (
@@ -606,7 +607,7 @@ async fn sharing_rebuilt_local_activation_preserves_owner_and_foreign_lease() {
     {
         result.expect("local seed");
     }
-    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
         .split("-- next statement\n")
         .map(|sql| {
             (
@@ -815,7 +816,7 @@ async fn sharing_rebuilt_local_commit_binds_receipt_to_actual_predecessor_sessio
     {
         result.expect("local seed");
     }
-    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
         .split("-- next statement\n")
         .map(|sql| {
             (
@@ -980,7 +981,7 @@ async fn sharing_rebuilt_local_renewal_takeover_refuse_shared_and_deleted_owners
     {
         result.expect("local seed");
     }
-    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
         .split("-- next statement\n")
         .map(|sql| {
             (
@@ -1132,7 +1133,7 @@ async fn sharing_rebuilt_cleanup_preserves_foreign_preparations_and_retires_shar
     {
         result.expect("local seed");
     }
-    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
         .split("-- next statement\n")
         .map(|sql| {
             (
@@ -1366,7 +1367,7 @@ async fn sharing_rebuilt_terminal_ack_and_projection_retire_only_exact_shared_ow
     {
         result.expect("local seed");
     }
-    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
         .split("-- next statement\n")
         .map(|sql| {
             (

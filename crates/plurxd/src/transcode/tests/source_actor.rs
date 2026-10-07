@@ -98,7 +98,9 @@ fn source_fixture_store(
             + '_,
     >,
 > {
-    Box::pin(plurx_core::cluster::migration::select_daemon_store(config))
+    Box::pin(crate::sharing_fixture_clock::select_applied_singleton(
+        config,
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -116,7 +118,7 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         sharing_catalogue_details::CatalogueRevisionKey,
         sharing_source_sessions::*,
         store::{
-            sharing_catalogue_details::SourceDetailsRead, MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA,
+            media_session_principal_rebuild_schema, sharing_catalogue_details::SourceDetailsRead,
         },
     };
     let directory = crate::test_tempdir().expect("actual Source root");
@@ -183,7 +185,7 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     ddl.extend(plurx_core::store::sharing_catalogue_source::candidate_item_identity_statements());
     ddl.push(plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA.into());
     ddl.extend(
-        MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+        media_session_principal_rebuild_schema()
             .split("-- next statement\n")
             .map(|sql| sql.trim().trim_end_matches(';').to_owned()),
     );

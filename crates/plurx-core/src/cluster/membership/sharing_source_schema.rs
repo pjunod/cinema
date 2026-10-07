@@ -163,9 +163,9 @@ async fn install(inner: &ReplicatedMembership) -> Result<bool, MembershipError> 
     );
     statements.extend([
         (layout::INSTALLATION_SCHEMA.to_owned(),params!()),
-        ("INSERT INTO sharing_source_schema_installation VALUES(1,71,$1,$2)".to_owned(),params!(master.sharing_purpose_master_fingerprint(),now)),
+        (format!("INSERT INTO sharing_source_schema_installation VALUES(1,{},$1,$2)", layout::SOURCE_LAYOUT_VERSION),params!(master.sharing_purpose_master_fingerprint(),now)),
         (layout::TRANSACTION_SCHEMA.to_owned(),params!()),
-        ("UPDATE cluster_meta SET schema_version=73,migrated_at=$1 WHERE singleton=1 AND schema_version=72".to_owned(),params!(now / 1000)),
+        (format!("UPDATE cluster_meta SET schema_version={},migrated_at=$1 WHERE singleton=1 AND schema_version={}", layout::SOURCE_SCHEMA_VERSION, layout::SOURCE_SCHEMA_PREDECESSOR),params!(now / 1000)),
         (format!("INSERT INTO sharing_source_schema_transaction_guard VALUES(1,CASE WHEN ({authority}) AND ({}) THEN 1 ELSE 0 END)",layout::installed_shape_guard()),params!(roster,cutoff,now,captured)),
 
     ]);
