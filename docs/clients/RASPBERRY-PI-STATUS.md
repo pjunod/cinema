@@ -1,7 +1,7 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
 **Status:** open — physical acceptance unfinished; initial implementation merged;
-PR #843 merged; Docker-default setup in progress on PR #851; isolated Pi installation active · **Updated:** 2026-10-07
+PR #843 merged; Docker-default setup and its live qualification are tracked on PR #851 · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -324,6 +324,12 @@ The live PR records final qualification and merge. No Pi process was restarted.
 
 
 ## Docker-default setup — 2026-10-07
+
+[PR #851](http://forge.lan:3000/noirr/plurx/pulls/851) is the live execution
+status for this installation effort, including its final hardware receipts,
+cleanup and merge disposition. The table below records the source-development
+snapshot; later acceptance evidence is retained on that PR without relabeling
+earlier compiler or unit results as hardware proof.
 
 [The installation plan](RASPBERRY-PI-INSTALLATION.md) continues the work after
 PR #843 merged with every required fast-lane job green. Docker will be the

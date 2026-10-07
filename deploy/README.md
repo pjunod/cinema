@@ -16,7 +16,7 @@ on-device install/update step.
 
 ## Raspberry Pi 5 — automated setup
 
-On 64-bit Raspberry Pi OS, run setup from the cloned repository as your normal
+On 64-bit Raspberry Pi OS Trixie Desktop, run setup from the cloned repository as your normal
 desktop user. It presents the installation plan and requests `sudo` for system
 changes. Docker is the default server runtime; the HDMI browser runs in the
 normal desktop session.

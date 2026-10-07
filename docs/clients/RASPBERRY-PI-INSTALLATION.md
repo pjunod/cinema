@@ -39,7 +39,7 @@ supervisor would add ownership and recovery paths without solving packaging.
 
 ## 2. User interface — one setup command
 
-Use 64-bit Raspberry Pi OS Desktop for HDMI Cinema or the combined role.
+Use 64-bit Raspberry Pi OS Trixie Desktop for HDMI Cinema or the combined role.
 The browser uses the logged-in desktop session; the installer does not create
 a display session or enable automatic login. Raspberry Pi OS Lite is suitable
 for the server-only role.
@@ -139,6 +139,14 @@ normal-user browser decoding, readiness and restart, unchanged reinstall,
 upgrade failure recovery, native selection and clean uninstall. Preserve the
 baseline desktop and packages; remove task-only services, containers, images,
 credentials, browser profiles, media fixtures and build scratch afterward.
+
+The first Docker installation builds from source. On the 16 GB acceptance Pi,
+the server release build alone took 41m22s and its compiler reached roughly
+9 GB resident memory; the companion utility and media runtime add more build
+time. This is not a validated cold-build path for smaller-memory models.
+A prebuilt ARM64 distribution is still needed to remove that first-install
+build cost. Native `--binary` accepts an existing server binary and avoids
+compiling Rust, while still provisioning its media tools and systemd service.
 
 The portable desk display cannot establish HDR/Dolby Vision HDMI acceptance.
 Keep that row pending for an appropriate display chain. No installer option

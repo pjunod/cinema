@@ -210,7 +210,7 @@ records setup, upgrades, ownership and hardware acceptance.
 
 | Deployment | Start here | Requirements |
 |---|---|---|
-| Raspberry Pi 5 (server and HDMI Cinema) | `make pi-setup` | 64-bit Pi OS; provisions Docker/media tools and the desktop browser; native/systemd selectable |
+| Raspberry Pi 5 (server and HDMI Cinema) | `make pi-setup` | 64-bit Pi OS Trixie Desktop; provisions Docker/media tools and browser; native/systemd selectable |
 | Docker / Compose | `make install-docker`, then `make docker-up` | Docker with Compose; configured media and data mounts |
 | Native service (systemd, launchd, or the Windows service) | `make install` | Repository-pinned Rust toolchain, or a prebuilt `plurxd` via `INSTALL_FLAGS=--binary` |
 | Native binary, no service | `make install-binary`, then `plurxd run` | `ffmpeg` and `ffprobe` (installed for you when missing) |
