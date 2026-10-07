@@ -7462,7 +7462,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("purpose coordinator data");
         let config = membership_test_config(directory.path());
         drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let selected = select_daemon_store(&config)
+        let selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("actual one voter selection");
         assert_eq!(selected.backend, SelectedBackend::Replicated);
@@ -7546,7 +7546,7 @@ mod tests {
         // Hiqlite's known TLS listener shutdown defect retains the old bind;
         // exercise the real supported sole-voter readdress/restart path.
         let restart_config = membership_test_config(directory.path());
-        let restarted = select_daemon_store(&restart_config)
+        let restarted = startup_observer::select_applied_singleton(&restart_config)
             .await
             .expect("actual voter restart");
         assert_eq!(
