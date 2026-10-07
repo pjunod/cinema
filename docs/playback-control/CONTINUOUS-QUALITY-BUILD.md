@@ -7919,3 +7919,25 @@ that has no AVPlayer item error. Outcomes, fences, deadlines and retention
 remain the same. iOS UI-runner source compilation and tvOS production/test
 source compilation pass; units remain deferred. The next failed-only phone
 request identifies the checkpoint before any alignment behavior changes.
+
+### 10.260 Fresh lab bearer and measured cadence refusal (2026-10-07)
+
+The first build-217 checkpoint run reaches an HTTP 401 before playback: the
+disposable app's saved Keychain bearer belongs to the previous backend
+window. Build 218 reads an explicitly supplied acceptance-launch argument
+before consulting the saved vault. This leaves normal bootstrap, proxy
+identity checking and saved credentials unchanged. Its focused regression
+covers argument precedence without vault reads/writes and is authored but
+unrun. iOS UI source and tvOS production/test source compile successfully.
+
+The failed-only phone request now reaches playback and its UI case completes.
+Seventeen probes retain 720p; the requested 1080p handoff reports
+`prepared_commit_failed:checkpoint=frame-duration:delta_ms=unknown`, with
+9,163ms of overlap remaining. This identifies the cadence lookup as the next
+diagnostic target; it does not establish whether track discovery, metadata
+loading or invalid cadence caused the refusal. Preserve
+`ios-0e778892d-prepared-failure-diagnostic5.json` and the fifth UI result.
+Client build 218 is paired with unchanged server component `0e778892d`; this
+is component-scoped diagnosis rather than final whole-tree qualification.
+No successful native transition, continuous physical audio/display evidence
+or unit-test execution is claimed.

@@ -71,6 +71,20 @@ struct SettingsStore {
             }
         }
     }
+    #if DEBUG
+    /// A supplied acceptance bearer belongs to this disposable server window,
+    /// not to the saved Keychain session. Read the explicit argument domain
+    /// before `token` can migrate a legacy preference into the vault.
+    func acceptanceBootstrapToken(active: Bool, argumentDomain: [String: Any]? = nil) -> String? {
+        if active,
+           let supplied = (argumentDomain ?? defaults.volatileDomain(forName: UserDefaults.argumentDomain))[Key.token] as? String,
+           !supplied.isEmpty {
+            return supplied
+        }
+        return token
+    }
+    #endif
+
     var username: String? {
         get { defaults.string(forKey: Key.username) }
         nonmutating set { defaults.set(newValue, forKey: Key.username) }

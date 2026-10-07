@@ -107,7 +107,11 @@ final class AppModel: ObservableObject {
         #else
         let savedOrigin = settings.origin
         #endif
+        #if DEBUG
+        let savedToken = settings.acceptanceBootstrapToken(active: acceptance != nil)
+        #else
         let savedToken = settings.token
+        #endif
         guard !savedOrigin.isEmpty else {
             #if DEBUG
             if acceptance != nil {
