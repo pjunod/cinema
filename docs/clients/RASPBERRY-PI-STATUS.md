@@ -1,6 +1,7 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** initial implementation merged; follow-up disposition on PR #843; Pi tests stopped and cleaned · **Updated:** 2026-10-07
+**Status:** open — physical acceptance unfinished; initial implementation merged;
+follow-up disposition on PR #843; Pi tests stopped and cleaned · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.

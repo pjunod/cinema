@@ -1825,7 +1825,14 @@ assert.equal(context.ACT_TIMER, null);
         effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
             "preflight"
         ]
-        for contract_preflight in (preflight, effort_preflight):
+        main_preflight = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
+            "preflight"
+        ]
+        for workflow, contract_preflight, unit_command in (
+            ("ci", preflight, "run: make operations-check"),
+            ("effort-ci", effort_preflight, "run: python3 -m validation.python_unit_receipts run"),
+            ("main-fast-lane", main_preflight, "run: python3 -m validation.main_unit_receipts run"),
+        ):
             self.assertIn(
                 "uses: https://data.forgejo.org/actions/setup-node@"
                 "49933ea5288caeca8642d1e84afbd3f7d6820020",
@@ -1836,16 +1843,12 @@ assert.equal(context.ACT_TIMER, null);
                 contract_preflight.index(
                     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
                 ),
-                contract_preflight.index(
-                    "run: python3 -m validation.python_unit_receipts run"
-                    if contract_preflight == effort_preflight
-                    else "run: python3 -m validation.main_unit_receipts run"
-                ),
+                contract_preflight.index(unit_command),
             )
             # The shared player-input fixtures compile into no Rust and no
             # client on a fixture-only diff, so without this step a ruling
             # could be edited out of the contract with nothing to notice.
-            if contract_preflight == effort_preflight:
+            if workflow == "effort-ci":
                 self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
                 self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
             else:
