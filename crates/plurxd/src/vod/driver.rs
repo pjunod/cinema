@@ -673,6 +673,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             let terminate = Step::Terminate {
                 why: Termination::IndefiniteHold,
             };
+            // Retirement joins the actual output writer. Its final trailer
+            // must acquire this manifest before it can settle the reaper.
+            drop(manifest);
             match perform_driver_step(shared, rendition, terminate).await {
                 Ok(_) => {}
                 Err(error) => {
@@ -692,6 +695,10 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         match step {
             Step::Nothing => {}
             Step::Stop | Step::Resume => {
+                // Even signaling may first join an already-retiring worker.
+                // The slot serializes/checks the actual current process; the
+                // manifest must remain available to its output writer.
+                drop(manifest);
                 // TODO(m3-wire): session progress clock — the manager's motion
                 // clock replaces this no-op touch when it attaches.
                 match perform_driver_step(shared, rendition, step).await {
@@ -711,6 +718,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     .as_ref()
                     .filter(|_| yielding_for_handoff)
                     .map(reserve_for_successor);
+                // Epoch and handoff decisions are committed above, as for
+                // Start/Restart. Join only after releasing the publication lock.
+                drop(manifest);
                 match perform_driver_step(shared, rendition, step).await {
                     Ok(_) => {}
                     Err(error) => {

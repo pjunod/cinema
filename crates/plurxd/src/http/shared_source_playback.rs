@@ -3656,20 +3656,28 @@ mod tests {
                     let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
                         .await
                         .expect("bounded failed resource body");
-                    let retained = fixture
-                        .state
-                        .transcode
-                        .hls_session_status(&decoded.response().session_id)
-                        .await;
-                    let retained = serde_json::to_value(&retained)
-                        .expect("retained HLS diagnostic serialization");
-                    let members = fixture
-                        .state
-                        .membership
-                        .observe_source_admission_members()
-                        .await;
+                    eprintln!("Source failed resource diagnostic begins: resource={resource} h2={h2} status={status} body={}", String::from_utf8_lossy(&body));
+                    let retained = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        fixture
+                            .state
+                            .transcode
+                            .hls_session_status(&decoded.response().session_id),
+                    )
+                    .await;
+                    let retained = match retained {
+                        Ok(value) => serde_json::to_value(value)
+                            .expect("retained HLS diagnostic serialization"),
+                        Err(_) => json!({"diagnostic_timeout":"retained_status"}),
+                    };
+                    eprintln!("Source retained diagnostic completed: {retained}");
+                    let members = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        fixture.state.membership.observe_source_admission_members(),
+                    )
+                    .await;
                     panic!("actual Source resource {resource} h2={h2} refused: {status}; body={}; retained={retained:?}; current_member_floor={:?}",
-                        String::from_utf8_lossy(&body), members.as_ref().map(|value| value.is_some()));
+                        String::from_utf8_lossy(&body), members.as_ref().map(|value| value.as_ref().map(|observation| observation.is_some())));
                 }
                 assert_eq!(response.status(), StatusCode::OK);
                 assert_eq!(response.headers()["cinemashare-resource"], resource);

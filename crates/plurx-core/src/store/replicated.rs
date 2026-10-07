@@ -301,6 +301,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         shape: TransactionShape::ReadExpandWrite,
     },
     SqliteTransactionSite {
+        module: "library.rs",
+        method: "delete_library",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
+    SqliteTransactionSite {
         module: "library_channels.rs",
         method: "create_library_channel",
         is_async: true,
@@ -1345,7 +1352,7 @@ mod tests {
         // whether the receipt is settled for this owner.
         // Sharing adds three coherent capsule read snapshots and one verbatim
         // guarded transaction, each measured in sqlite/sharing.rs.
-        assert_eq!(methods.len(), 107);
+        assert_eq!(methods.len(), 108);
     }
 
     #[test]
