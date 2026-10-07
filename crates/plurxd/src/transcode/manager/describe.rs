@@ -160,7 +160,13 @@ impl TranscodeManager {
     /// The encoder this node's capabilities resolve `prefer` (the stored
     /// [`keys::HWACCEL`] value; empty = auto) to, without a store read.
     pub fn encoder_for_preference(&self, prefer: &str) -> Encoder {
-        self.caps.choose(prefer)
+        self.caps
+            .choose(self.encoder_override.as_deref().unwrap_or(prefer))
+    }
+
+    pub(crate) fn with_encoder_override(mut self, preference: Option<String>) -> Self {
+        self.encoder_override = preference;
+        self
     }
 
     /// Choose the encoder given the admin preference setting (empty = auto).
@@ -172,7 +178,7 @@ impl TranscodeManager {
             .ok()
             .flatten()
             .unwrap_or_default();
-        self.caps.choose(&prefer)
+        self.encoder_for_preference(&prefer)
     }
 
     /// The conservative whole-node projection retained for legacy readers.

@@ -197,6 +197,14 @@ test("Activity detail response keeps the shared header indicator current", () =>
   assert.equal(working.at(-1), true);
   assert.equal(activity.style.display, "flex");
   assert.match(activity.innerHTML, /Scanning library/);
+  detail.scans[0].status.phase="queued";
+  harness.paintActivity(harness.detailActivitySummary(detail, []));
+  assert.match(activity.innerHTML, /Library work queued/);
+  assert.doesNotMatch(activity.innerHTML, /Scanning library/);
+  detail.scans[0].status.phase="enriching";
+  harness.paintActivity(harness.detailActivitySummary(detail, []));
+  assert.match(activity.innerHTML, /Fetching metadata/);
+  assert.doesNotMatch(activity.innerHTML, /Scanning library/);
   assert.match(shippedSource("paintActivityBody"), /paintActivity\(detailActivitySummary\(d,dels,recording\)\)/);
 
   harness.paintActivity([]);

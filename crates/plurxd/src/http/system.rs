@@ -151,6 +151,9 @@ pub async fn setup(
 
 #[derive(Serialize)]
 pub struct SystemDto {
+    pub node_id: String,
+    pub hwaccel_requested: String,
+    pub hwaccel_restart_required: bool,
     pub name: String,
     pub version: &'static str,
     pub build: &'static str,
@@ -294,12 +297,21 @@ pub async fn system_info(
     let (by_trigger, notifications) = state.jobs.metrics().snapshot();
     let (hw_in_use, hw_max) = state.transcode.hardware_slots().await;
     let replication = state.replication.status().await;
+    let hwaccel_requested = state
+        .store
+        .get_setting(&crate::state::node_hwaccel_key(&state.node_id))
+        .await?;
+    let hwaccel_restart_required =
+        hwaccel_requested.is_some() && hwaccel_requested != state.system.hwaccel_override;
     let name = state
         .store
         .get_setting(keys::SERVER_NAME)
         .await?
         .unwrap_or_else(|| state.server_name.clone());
     Ok(Json(SystemDto {
+        node_id: state.node_id.clone(),
+        hwaccel_requested: hwaccel_requested.unwrap_or_else(|| state.system.hwaccel_pref.clone()),
+        hwaccel_restart_required,
         name,
         version: crate::version::SEMVER,
         build: crate::version::BUILD,
@@ -349,6 +361,45 @@ pub async fn system_info(
         },
         info: (*state.system).clone(),
     }))
+}
+
+#[derive(Deserialize)]
+pub struct HardwarePreferenceRequest {
+    pub node_id: String,
+    pub preference: String,
+}
+
+/// Save for this node only. Activation waits for restart so the encoder and
+/// its probed HDR graph change together; active sessions retain their plan.
+pub async fn update_hardware_preference(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(request): Json<HardwarePreferenceRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if request.node_id != state.node_id {
+        return Err(ApiError::Conflict(
+            "The request reached a different server node. Reload System settings and try again."
+                .into(),
+        ));
+    }
+    if !matches!(
+        request.preference.as_str(),
+        "auto" | "nvenc" | "qsv" | "vaapi" | "videotoolbox" | "software"
+    ) {
+        return Err(ApiError::BadRequest("Unknown transcoding backend".into()));
+    }
+    state
+        .store
+        .put_setting(
+            &crate::state::node_hwaccel_key(&state.node_id),
+            &request.preference,
+        )
+        .await?;
+    Ok(Json(serde_json::json!({
+        "node_id": state.node_id,
+        "preference": request.preference,
+        "restart_required": Some(request.preference.as_str()) != state.system.hwaccel_override.as_deref(),
+    })))
 }
 
 #[derive(Serialize)]
@@ -5116,7 +5167,8 @@ pub async fn activity_detail(
             BTreeMap::new(),
         )
     };
-    let clustered = !matches!(peers, PeerActivityRead::LocalOnly);
+    // Topology is configuration, not the number of peers answering this read.
+    let clustered = replicated;
     let live_tv = clustered_live_tv(state.live_tv.activities(), &peers);
     let dvr_peers = match &peers {
         PeerActivityRead::Peers(outcomes) => Some(outcomes),
@@ -5166,6 +5218,7 @@ pub async fn activity_detail(
             })
         });
     let mut response = serde_json::json!({
+        "clustered": clustered,
         "sessions": sessions,
         "deliveries": deliveries,
         "offline": offline,

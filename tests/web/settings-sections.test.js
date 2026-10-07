@@ -44,6 +44,32 @@ const esc = (value) => String(value)
 let failures = 0, started = 0, finished = 0;
 const QUEUE = [];
 function test(name, run) { QUEUE.push({ name, run }); }
+
+test("node transcoder selector retains an unavailable saved choice and reports pending restart", () => {
+  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
+  const html = render({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
+  assert.match(html, /value="qsv" selected>Intel Quick Sync — not detected/);
+  assert.match(html, /waiting for this node to restart/);
+  assert.match(html, /data-node-id="rog&quot;node"/);
+  assert.match(html, /Active: <b>NVIDIA NVENC/);
+  assert.doesNotMatch(html, /disabled/);
+});
+
+test("node transcoder save binds the request to the displayed node and preserves the active backend", async () => {
+  const status = {textContent:""}, button = {disabled:false};
+  const sys = {node_id:"rog",hwaccel_pref:"nvenc"};
+  const calls=[];
+  const save = new Function("document","api","SETTINGS_DATA","toast", `${shippedSource("saveNodeHwaccel")}\nreturn saveNodeHwaccel;`)(
+    {getElementById:id=>id==="node-hwaccel"?{value:"qsv",dataset:{nodeId:"rog"}}:status},
+    async (url,options)=>{calls.push([url,JSON.parse(options.body)]);return {restart_required:true};},
+    {sys},()=>{});
+  await save(button);
+  assert.deepEqual(calls, [["/system/transcoder",{node_id:"rog",preference:"qsv"}]]);
+  assert.equal(sys.hwaccel_pref,"nvenc");
+  assert.equal(sys.hwaccel_requested,"qsv");
+  assert.match(status.textContent,/Restart this node/);
+  assert.equal(button.disabled,false);
+});
 async function main() {
   for (const { name, run } of QUEUE) {
     started += 1;

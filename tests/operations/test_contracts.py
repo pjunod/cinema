@@ -1858,7 +1858,8 @@ assert.equal(context.ACT_TIMER, null);
                 "49933ea5288caeca8642d1e84afbd3f7d6820020",
                 contract_preflight,
             )
-            self.assertIn('node-version: "22"', contract_preflight)
+            self.assertIn('node-version: "22.23.2"' if workflow == "main-fast-lane"
+                          else 'node-version: "22"', contract_preflight)
             self.assertLess(
                 contract_preflight.index(
                     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
@@ -1869,6 +1870,19 @@ assert.equal(context.ACT_TIMER, null);
             # client on a fixture-only diff, so without this step a ruling
             # could be edited out of the contract with nothing to notice.
             if workflow == "effort-ci":
+                self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
+            elif workflow == "main-fast-lane":
+                player_step = workflow_step_blocks(contract_preflight)[
+                    "Check the shared player input contract"
+                ]
+                self.assertEqual(
+                    workflow_step_scalar(player_step, "run"),
+                    "python3 -m validation.main_preflight_adoption node",
+                )
+                self.assertIn("GITHUB_TOKEN: ${{ github.token }}", player_step)
+                # Only the attributable adapter executes these scripts; an
+                # additional direct invocation would replay a retained pass.
                 self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
                 self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
             else:
@@ -2095,11 +2109,48 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('major: "6"', fast_rust_steps["Install the pinned FFmpeg"])
         self.assertIn("timeout-minutes: 60", fast_jobs["rust_compile"])
         fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
-        playback_contracts = workflow_step_literal(
+        playback_contracts = workflow_step_scalar(
             fast_preflight["Check the shared player input contract"], "run"
         )
-        self.assertIn("node tests/playback/web-policy.test.js", playback_contracts)
-        self.assertIn("node tests/playback/web-control.test.js", playback_contracts)
+        self.assertEqual(playback_contracts, "python3 -m validation.main_preflight_adoption node")
+        adapter = read("validation/main_preflight_adoption.py")
+        # Parse the actual producer inventory rather than accepting script
+        # names that occur only in a comment or another unrelated function.
+        import ast
+
+        producer = ast.parse(adapter)
+        node_assignments = [
+            node for node in producer.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "NODE"
+                    for target in node.targets)
+        ]
+        self.assertEqual(len(node_assignments), 1)
+        self.assertEqual(
+            ast.literal_eval(node_assignments[0].value),
+            (
+                "tests/playback/player-input-contract.test.js",
+                "tests/playback/web-policy.test.js",
+                "tests/playback/web-control.test.js",
+                "tests/web/seek-telemetry.test.js",
+                "tests/web/player-dom.test.js",
+                "tests/web/read-after.test.js",
+                "tests/web/live-tv.test.js",
+            ),
+        )
+        node_phase = adapter.split('    if phase == "node":', 1)[1].split(
+            '    in_progress = {"phase": phase,', 1
+        )[0]
+        self.assertIn("for script in NODE:", node_phase)
+        self.assertIn('if identity in journal["outcomes"]:', node_phase)
+        self.assertIn(
+            'command = ["node", "--test", script] if script.endswith("seek-telemetry.test.js") else ["node", script]',
+            node_phase,
+        )
+        self.assertIn("subprocess.run(command, check=True)", node_phase)
+        self.assertIn('record(identity, "success")', node_phase)
+        self.assertIn("needs: [scope, preflight, rust_compile]", fast_jobs["windows_compile"])
+        self.assertIn("cancel-in-progress: false", fast_lane)
         self.assertEqual(
             make_dry_run_commands("hiqlite-vendor-clippy"),
             [
@@ -3271,6 +3322,31 @@ assert.equal(context.ACT_TIMER, null);
         points = {entry["id"]: entry for entry in catalog["points"]}
         for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
             self.assertIn("cluster-transport-recovery", points[point]["checks"])
+
+    def test_main_preflight_runtime_is_job_local_bounded_and_precedes_receipts(self):
+        preflight = workflow_job_blocks('.github/workflows/main-fast-lane.yml')['preflight']
+        steps = workflow_step_blocks(preflight)
+        bootstrap = '\n'.join(workflow_step_literal(steps['Install the job-local Python receipt runtime'], 'run'))
+        cleanup = '\n'.join(workflow_step_literal(steps['Remove the exact job-local Python receipt runtime'], 'run'))
+        self.assertIn('mktemp -d "$RUNNER_TEMP/plurx-python312.XXXXXXXX"', bootstrap)
+        self.assertIn('curl -q --fail --location', bootstrap)
+        self.assertIn("--proto '=https' --proto-redir '=https'", bootstrap)
+        self.assertIn('--max-time 180 --max-filesize 34285590', bootstrap)
+        self.assertIn('731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91', bootstrap)
+        self.assertIn('sha256sum --check --status', bootstrap)
+        self.assertIn('sys.version_info[:2] == (3, 12)', bootstrap)
+        self.assertIn('sys.platform == "linux"', bootstrap)
+        self.assertIn('platform.machine() == "x86_64"', bootstrap)
+        self.assertNotIn('GITHUB_TOKEN', bootstrap)
+        self.assertLess(preflight.index('Install the job-local Python receipt runtime'),
+                        preflight.index('Restore attributable main Python successes'))
+        self.assertLess(preflight.index('Publish preflight attempt-start journal'),
+                        preflight.index('Audit corrective-history evidence'))
+        self.assertIn('if: always()', steps['Remove the exact job-local Python receipt runtime'])
+        self.assertIn('test "$(dirname "$PLURX_PYTHON_DIRECTORY")" = "$RUNNER_TEMP"', cleanup)
+        self.assertIn('test ! -L "$PLURX_PYTHON_DIRECTORY"', cleanup)
+        self.assertIn('rm -rf -- "$PLURX_PYTHON_DIRECTORY"', cleanup)
+        self.assertIn('plurx-python312.????????', cleanup)
 
     def test_workflow_cancellation_preserves_qualification_and_python_receipts(self):
         workflow = read(".github/workflows/ci.yml")

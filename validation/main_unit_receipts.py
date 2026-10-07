@@ -1,4 +1,4 @@
-"""Authenticated main-lane Python continuation, with no run-specific exceptions."""
+"""Authenticated main-lane Python continuation and bounded legacy bridge."""
 from __future__ import annotations
 
 import argparse
@@ -32,6 +32,22 @@ PREPARE_REFUSAL_HASHES = {
     'validation/main_unit_receipts.py': '5e86c38c2b2f97e0eb0341d5e95b50b33f0c2e170a6f0c37c7008400ef8ef3a8',
     'validation/python_unit_receipts.py': '8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258',
     '.github/workflows/main-fast-lane.yml': 'bf4b542a127ead30fd4239d38d75d3771258b0d7978e55afd8ebdc813aedfc0a',
+}
+# One reviewed infrastructure failure occurred during the first start upload,
+# before discovery or either Python/Node execution step. This is zero execution,
+# not a successful run or a replacement final journal.
+PREUNIT_UPLOAD4324 = {
+    'repository': 1, 'pr': 845, 'run': 4324, 'job': 44110, 'task': 16574,
+    'commit': '8d00bf43342cb88b833e2672d48dc0af73558489',
+    'base': '96f668128d8b714ed580fa913d3a5a13e6d77c2e',
+    'branch': 'codex/architecture-final-closeout-20261007',
+    'log_bytes': 494360,
+    'log_sha256': '62292b20e42403f2dcc7b5529a4beefee519accef6594fc11033be8b1ee4dca7',
+    'sources': {
+        'validation/main_unit_receipts.py': '1e5e5c5f56bb8326ce8a15e8154b0e5dd8f987a4fd77ae0505e91aa55f357bf1',
+        'validation/python_unit_receipts.py': '8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258',
+        '.github/workflows/main-fast-lane.yml': '414ba7aa7885a52cca54f0b0f80fbf6feaa03e94c17f241846a0696e414979b2',
+    },
 }
 
 
@@ -347,8 +363,77 @@ def verbose_passes(lines, inventories, inherited):
     return passes
 
 
+def recover_preunit_upload4324(api, scope, prior, job):
+    """Return the actual incomplete start only; authenticate origins elsewhere."""
+    from validation import main_preflight_adoption as adoption
+    proof = PREUNIT_UPLOAD4324
+    if (scope.get('repository'), scope.get('pr'), prior['id']) != (proof['repository'], proof['pr'], proof['run']):
+        return None
+    actual = api.get(f"/actions/runs/{proof['run']}")
+    require(actual['id'] == prior['id'] == proof['run']
+            and actual['commit_sha'] == prior['commit_sha'] == proof['commit']
+            and adoption.terminal_status(actual) == 'failure',
+            'Upload4324 terminal run/source mismatch')
+    event = adoption.bind_event(actual, {'repository': proof['repository'], 'pr': proof['pr']})
+    require(event == adoption.bind_event(prior, {'repository': proof['repository'], 'pr': proof['pr']})
+            and event['action'] == 'synchronized'
+            and event['pull_request']['head']['ref'] == proof['branch']
+            and event['pull_request']['base']['sha'] == proof['base'],
+            'Upload4324 original event/branch/base mismatch')
+    matching = [item for item in api.pages(f"/actions/runs/{proof['run']}/jobs") if item['name'] == JOB]
+    require(len(matching) == 1 and matching[0] == job
+            and job['id'] == proof['job'] and job['run_id'] == proof['run']
+            and job['repo_id'] == proof['repository'] and type(job['attempt']) is int and job['attempt'] == 1
+            and type(job.get('task_id')) is int and job['task_id'] == proof['task']
+            and adoption.terminal_status(job) == 'failure',
+            'Upload4324 terminal job/task/attempt mismatch')
+    for path, digest in proof['sources'].items():
+        raw = source(proof['commit'], path)
+        require(hashlib.sha256(raw).hexdigest() == digest
+                and raw == api.bytes('/raw/' + path, {'ref': proof['commit']}),
+                'Upload4324 immutable producer/workflow mismatch')
+    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
+    require(len(raw) == proof['log_bytes'] and hashlib.sha256(raw).hexdigest() == proof['log_sha256'],
+            'Upload4324 exact complete log mismatch')
+    lines = log_lines(raw)
+    snapshots = read_snapshots(lines)
+    require(set(snapshots) == {'start'}, 'Upload4324 requires only the original start snapshot')
+    expected_scope = {'repository': proof['repository'], 'pr': proof['pr'], 'branch': proof['branch'],
+                      'base': 'main', 'workflow': WORKFLOW}
+    require(all(scope.get(field, value) == value for field, value in expected_scope.items()),
+            'Upload4324 receipt scope mismatch')
+    start = snapshots['start']
+    receipts.validate_journal(start, expected_scope, proof['run'], proof['commit'], completed=False)
+    require(start['complete'] is False and start['fixture_errors'] == []
+            and all(type(value['run']) is int and value['run'] < proof['run']
+                    and value['commit'] is not None for value in start['passes'].values()),
+            'Upload4324 cannot originate unit successes')
+    validate_bridge_environment(start, start, proof['commit'])
+    ended = lines.index('MAIN-UNIT-END start')
+    uploads = [i for i, line in enumerate(lines) if line == 'Beginning upload of artifact content to blob storage']
+    failures = [i for i, line in enumerate(lines) if line ==
+                '::error::Error runner api getting task: task is not running%0A']
+    require(raw.endswith(b'\n') and lines[-1] == f"Job '{JOB}' failed"
+            and len(uploads) == len(failures) == 3 and ended < uploads[0]
+            and all(upload < failure for upload, failure in zip(uploads, failures))
+            and not any('discovered=' in line or 'Main preflight outcome ' in line
+                        or re.fullmatch(r'Ran \d+ tests? in .*', line) for line in lines),
+            'Upload4324 contradicts reviewed before-discovery failure')
+    require(api.get(f"/actions/runs/{proof['run']}/artifacts") == [],
+            'Upload4324 unexpectedly has run artifacts')
+    for name in (key(expected_scope), f"main-preflight-v1-r{proof['repository']}-pr{proof['pr']}"):
+        require(not any(item['run_id'] == proof['run'] for item in api.pages('/actions/artifacts', {'name': name}))
+                and not api.pages('/actions/artifacts', {'name': name + f"-start-{proof['run']}"}),
+                'Upload4324 unexpectedly has start/final artifacts')
+    print('Accounted failed run4324/job44110: zero units; retained start is incomplete and grants no outcomes')
+    return start
+
+
 def recover_log(api, scope, prior, job, older):
     rid, commit = receipts.positive(prior['id']), receipts.sha(prior['commit_sha'])
+    start = recover_preunit_upload4324(api, scope, prior, job)
+    if start is not None:
+        return start
     require(job['status'] == 'success', 'Missing artifact needs completed successful preflight')
     lines = log_lines(api.bytes(f"/actions/jobs/{receipts.positive(job['id'])}/logs"))
     require(sum(commit in line for line in lines) >= 2
@@ -441,7 +526,7 @@ def unexecuted_preflight(api, scope, prior, job):
     return True
 
 
-def restore(api, scope, current_run, applicability):
+def restore(api, scope, current_run, applicability, bridge=None):
     artifacts = api.pages('/actions/artifacts', {'name': key(scope)})
     indexed = {}
     for artifact in artifacts:
@@ -453,6 +538,9 @@ def restore(api, scope, current_run, applicability):
     runs = api.pages('/actions/runs', {'workflow_id': WORKFLOW,
                                      'ref': f"refs/pull/{scope['pr']}/head"}, 'workflow_runs')
     journals, trusted, bootstrap_passes, missing = [], {}, {}, []
+    if bridge is not None:
+        bootstrap_passes = {test: {'run': value['run'], 'commit': value['commit']}
+                            for test, value in bridge[0].items() if not test.startswith('node:')}
     for prior in sorted(runs, key=lambda item: receipts.positive(item['id']), reverse=True):
         authenticate_run(scope, prior)
         rid = receipts.positive(prior['id'])
@@ -484,6 +572,8 @@ def restore(api, scope, current_run, applicability):
                     continue
                 missing.append((prior, job))
                 continue
+            if bridge is not None and rid in bridge[1]:
+                continue  # Fully authenticated adapter-era attempt; no invented generic journal.
             # One exhaustive legacy baseline is the migration boundary. Older
             # pre-receipt attempts are not imported or declared unexecuted.
             if not bootstrap_passes and job['status'] in ('success', 'failure'):
@@ -503,6 +593,8 @@ def restore(api, scope, current_run, applicability):
         # upload incomplete. Positive atomic success records remain evidence;
         # absence from this map never establishes that a method did not run.
         receipts.validate_journal(journal, scope, rid, commit, completed=False)
+        if bridge is not None:
+            validate_bridge_environment(start, journal, commit)
         require(isinstance(journal.get('complete'), bool), 'Invalid completion marker')
         require(all(journal['passes'].get(test) == value for test, value in start['passes'].items()),
                 'Final journal discarded or changed inherited evidence')
@@ -514,6 +606,8 @@ def restore(api, scope, current_run, applicability):
     for prior, job in sorted(missing, key=lambda item: item[0]['id']):
         older = list(bootstrap_passes.items()) + [(test, value) for (test, _, _), value in trusted.items()]
         journal = recover_log(api, scope, prior, job, older)
+        if bridge is not None:
+            validate_bridge_environment(journal, journal, prior['commit_sha'])
         for test, value in journal['passes'].items():
             if value == {'run': prior['id'], 'commit': prior['commit_sha']}:
                 trusted[(test, prior['id'], prior['commit_sha'])] = value
@@ -531,6 +625,45 @@ def restore(api, scope, current_run, applicability):
             passes.setdefault(test, value)
     applicability.finish(passes)
     return passes
+
+
+def validate_bridge_environment(start, final, commit):
+    """Bind generic-origin evidence to its authenticated producer and runtime."""
+    from validation import main_preflight_adoption as adoption
+    expected_blob = adoption.git('rev-parse', commit + ':validation/main_unit_receipts.py')
+    require(start.get('environment') == final.get('environment') == adoption.environment()
+            and start.get('producer_blob') == final.get('producer_blob') == expected_blob,
+            'Main bridge producer/runtime provenance mismatch')
+    workflow = adoption.git('show', commit + ':.github/workflows/' + WORKFLOW)
+    require(adoption.adapter_workflow(adoption.run_commands(workflow)),
+            'Main bridge workflow producer mismatch')
+
+
+class DeclaredApplicability:
+    """PR845 retains method, fixture, environment and actual production inputs."""
+
+    def __init__(self, commit):
+        from validation import main_preflight_adoption as adoption
+        self.adoption, self.commit = adoption, commit
+        self.source = receipts.SourceApplicability(commit)
+        self.families = receipts.bounded_json(adoption.MANIFEST.read_bytes())['families']
+        self.paths = set(adoption.git('ls-tree', '-r', '--name-only', commit, 'tests').splitlines())
+
+    def __call__(self, test, value):
+        if receipts.test_source_path(test)[0] not in self.paths:
+            return False  # Authenticated source tree proves this module was removed.
+        row = self.adoption.witness(test, self.families)
+        return (self.source(test, value)
+                and self.adoption.input_digest(self.commit, row)
+                == self.adoption.input_digest(value['commit'], row))
+
+    def finish(self, passes):
+        self.source.finish(passes)
+
+
+def applicability_for(scope, commit):
+    return (DeclaredApplicability(commit) if scope['repository'] == 1 and scope['pr'] == 845
+            else receipts.SourceApplicability(commit))
 
 
 class MainResult(receipts.RecordingResult):
@@ -581,14 +714,29 @@ class MainResult(receipts.RecordingResult):
 def execute(journal, path, suites=None):
     """Keep main unittest semantics: a legitimate skip is not a cached pass."""
     require(journal.get('applicability_commit') == journal['commit'], 'Missing current-source prepare')
+    if suites is None and journal['scope']['repository'] == 1 and journal['scope']['pr'] == 845:
+        from validation import main_preflight_adoption as adoption
+        _api, scope, commit, run = adoption.api_context()
+        require(scope == {'repository': journal['scope']['repository'], 'pr': journal['scope']['pr']}
+                and commit == journal['commit'] and run == journal['run'],
+                'Live bridge attempt/source identity mismatch')
+        require(not adoption.git('diff', '--name-only', 'HEAD'),
+                'Current tracked source differs from prepared commit')
+        validate_bridge_environment(journal, journal, journal['commit'])
     if suites is None:
-        applicability = receipts.SourceApplicability(journal['commit'])
+        applicability = applicability_for(journal['scope'], journal['commit'])
         applicable = {test: value for test, value in journal['passes'].items() if applicability(test, value)}
         applicability.finish(applicable)
         require(applicable == journal['passes'], 'Prepared passes are no longer applicable')
     require(not journal['fixture_errors'], 'Unresolved fixture errors')
     inventories = {name: list(suites[name]) if suites is not None else receipts.discover(name)
                    for name in receipts.SUITES}
+    if suites is None and journal['scope']['repository'] == 1 and journal['scope']['pr'] == 845:
+        from validation import main_preflight_adoption as adoption
+        families = receipts.bounded_json(adoption.MANIFEST.read_bytes())['families']
+        for name, tests in inventories.items():
+            for test in tests:
+                adoption.witness(name + ':' + test.id(), families)
     failed = False
     for name, tests in inventories.items():
         ids = {test.id() for test in tests}
@@ -625,9 +773,15 @@ def main(argv=None):
     run = receipts.positive(int(os.environ['GITHUB_RUN_ID']))
     scope = identity(api, receipts.positive(int(os.environ['PR_NUMBER'])), commit)
     if args.command == 'prepare':
+        from validation import main_preflight_adoption as adoption
+        candidates, authenticated_runs = adoption.prepare(output_key='adoption_receipt_key')
+        bridge = (candidates, authenticated_runs) if scope['repository'] == 1 and scope['pr'] == 845 else None
         journal = {'version': receipts.VERSION, 'scope': scope, 'run': run, 'commit': commit,
                    'complete': False, 'fixture_errors': [], 'applicability_commit': commit,
-                   'passes': restore(api, scope, run, receipts.SourceApplicability(commit))}
+                   'passes': restore(api, scope, run, applicability_for(scope, commit), bridge)}
+        if bridge is not None:
+            journal.update(environment=adoption.environment(),
+                           producer_blob=adoption.git('rev-parse', commit + ':validation/main_unit_receipts.py'))
         receipts.atomic_json(PATH, journal)
         emit_snapshot(journal, 'start')
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
