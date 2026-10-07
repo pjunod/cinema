@@ -184,6 +184,10 @@ jobs:
         run: |
           make lint
       - name: Run the fast Rust unit and SQLite contract lane
+        # The daemon test binary is large; avoid compiling it alongside every
+        # workspace test target on a shared runner (run 4270 was SIGKILLed).
+        env:
+          CARGO_BUILD_JOBS: "1"
         run: |
           make unit
       - name: Enforce persistent Cargo bounds
