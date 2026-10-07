@@ -7941,3 +7941,34 @@ Client build 218 is paired with unchanged server component `0e778892d`; this
 is component-scoped diagnosis rather than final whole-tree qualification.
 No successful native transition, continuous physical audio/display evidence
 or unit-test execution is claimed.
+
+### 10.261 HLS cadence absence and refreshed TV failure (2026-10-07)
+
+Build 219 retains bounded numeric metadata diagnostics: asset track count,
+ready-item presentation track count, minimum-duration validity and exact
+time values, metadata error code or deadline exhaustion. It does not log
+URLs or credentials. The first case plays at 720p but the UI harness hides
+its controls with its permission-triggering tap and never submits a change.
+The own-app capture confirms the reveal surface; the harness now reveals it
+before waiting for the quality button.
+
+The corrected seventh phone case completes and identifies zero asset video
+tracks with 10,746ms overlap remaining. Build 220's eighth case also exposes
+two presentation tracks, including one video track; trying that actual
+track's minimum duration still returns invalid time (value/timescale zero).
+Both requests retain 720p. The ineffective presentation-track fallback is
+removed; its presence remains numeric diagnostic evidence only. Unknown
+cadence still cannot authorize exposure. Preserve diagnostics 6–8, including
+the failed harness receipt. Current iOS production/test source and tvOS UI
+source compile; no units execute. A trustworthy HLS sample duration remains
+an implementation task, rather than a larger readiness timeout.
+
+The fresh build-220 TV case now reaches initial playback and records six
+720p probes. It then fails before the quality request with
+CoreMediaErrorDomain -66681 (AudioQueue cannot start), reproducing the
+earlier SDK/audio-start refusal with current bootstrap credentials. The
+quality-control failure is downstream of that item failure, not a focus
+proof. Preserve `tv-0e778892d-prepared-failure-diagnostic2.json` and its UI
+result. Both app runners terminate their owned app; their proxy forwards
+close and private control copies retire. Continuous physical audio/display
+and a successful native quality transition remain unmeasured.

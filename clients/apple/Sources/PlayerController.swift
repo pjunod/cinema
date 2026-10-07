@@ -12092,7 +12092,9 @@ extension PlayerController: PreparedSuccessorHost {
     /// Load cadence from the actual successor track, within the original
     /// overlap. Unknown cadence retains the incumbent rather than inventing fps.
     private func awaitPreparedFrameDuration(of item: AVPlayerItem) async -> Double? {
-        await preparedDecodedFrameDuration(of: item, boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs))
+        await preparedDecodedFrameDuration(of: item, boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs)) { [weak self] detail in
+            self?.noteSurfaceLogOnly("prepared_cadence:\(detail)")
+        }
     }
 
     /// Whether the prepared commit captured as `commit` still belongs to the
@@ -13081,18 +13083,32 @@ extension SharedPlayerController: PreparedSuccessorHost {
 /// Actual successor cadence, bounded by its caller's existing preparation budget.
 /// Both Local and Shared use the track's sample grid; absence never invents fps.
 @MainActor
-private func preparedDecodedFrameDuration(of item: AVPlayerItem, boundMs remaining: Int) async -> Double? {
+private func preparedDecodedFrameDuration(
+    of item: AVPlayerItem, boundMs remaining: Int,
+    report: (@MainActor (String) -> Void)? = nil
+) async -> Double? {
         guard remaining > 0 else { return nil }
         var result: Double?
         let task = Task { @MainActor in
             do {
                 let tracks = try await item.asset.loadTracks(withMediaType: .video)
+                guard !Task.isCancelled else { return }
+                report?("tracks=\(tracks.count)")
+                // Inspect ready-item track presence without substituting
+                // nominal cadence for the required minimum sample duration.
+                let presentationTracks = item.tracks.filter { $0.isEnabled }.compactMap(\.assetTrack).filter { $0.mediaType == .video }
+                report?("item_tracks=\(item.tracks.count):video_tracks=\(presentationTracks.count)")
                 let duration = try await tracks.first?.load(.minFrameDuration)
                 guard !Task.isCancelled else { return }
                 let seconds = duration?.seconds ?? 0
-                result = seconds.isFinite && seconds > 0 && seconds <= 1 ? seconds : 0
+                let valid = seconds.isFinite && seconds > 0 && seconds <= 1
+                report?("duration_valid=\(valid):timescale=\(duration?.timescale ?? 0):value=\(duration?.value ?? 0)")
+                result = valid ? seconds : 0
             } catch {
-                if !Task.isCancelled { result = 0 }
+                if !Task.isCancelled {
+                    report?("metadata_error_code=\((error as NSError).code)")
+                    result = 0
+                }
             }
         }
         let cadence = await awaitBoundedValue(
@@ -13102,5 +13118,6 @@ private func preparedDecodedFrameDuration(of item: AVPlayerItem, boundMs remaini
             read: { result }
         )
         task.cancel()
+        if cadence == nil { report?("deadline_exhausted=true") }
         return cadence.flatMap { $0 > 0 ? $0 : nil }
 }
