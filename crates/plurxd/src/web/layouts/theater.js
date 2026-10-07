@@ -98,7 +98,7 @@ function theaterChrome(active, inner){
      <span class="spacer"></span>
      <button class="dvr-global" id="dvr-global" onclick="location.hash='#/activity'" aria-label="Recording status"></button>
      <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
-     <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
+     <input class="search" id="q" type="search" name="q" autocomplete="off" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
      <div class="th-ctl">
        <div class="th-pop">
          <button class="ghost sm lookbtn" onclick="toggleLookMenu(event)" title="Appearance — layout, theme, light or dark, poster size" aria-label="Appearance" aria-haspopup="menu"><span class="tsw"></span><span class="lookword">Appearance</span></button>
@@ -116,7 +116,7 @@ function theaterChrome(active, inner){
    <main id="main">${inner}</main>
    <nav class="th-pills" aria-label="Sections">${theaterNavHtml(active)}</nav>`;
   const q=document.getElementById("q");
-  let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  wireSearchInput(q);
   restoreSearchFocus(searchFocus);
   theaterWireOnce();
   pollActivity();
