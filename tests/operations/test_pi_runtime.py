@@ -44,7 +44,7 @@ class PiRuntimeTests(unittest.TestCase):
             prefix.mkdir()
             (prefix / "unchanged").write_text("owned")
             (prefix / "changed").write_text("original")
-            runtime.ownership_receipt(prefix)
+            runtime.ownership_receipt(prefix, [prefix / "unchanged", prefix / "changed"])
             (prefix / "changed").write_text("operator change")
             (prefix / "new").write_text("operator addition")
             result = runtime.uninstall(prefix)
@@ -59,7 +59,7 @@ class PiRuntimeTests(unittest.TestCase):
             directory = prefix / "runtime"
             directory.mkdir(parents=True)
             (directory / "binary").write_text("same")
-            runtime.ownership_receipt(prefix)
+            runtime.ownership_receipt(prefix, [directory / "binary"])
             (directory / "binary").unlink()
             directory.rmdir()
             outside = Path(temporary) / "outside"
@@ -69,6 +69,53 @@ class PiRuntimeTests(unittest.TestCase):
             result = runtime.uninstall(prefix)
             self.assertTrue((outside / "binary").exists())
             self.assertIn("runtime/binary", result["retained"])
+
+    def test_upgrade_does_not_adopt_operator_additions_or_changed_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "owned"
+            downloads = prefix / "downloads"
+            downloads.mkdir(parents=True)
+            original = downloads / "original"
+            original.write_text("installed")
+            rewritten = downloads / "provider-rewritten"
+            rewritten.write_text("old provider output")
+            runtime.ownership_receipt(prefix, [original, rewritten])
+            original.write_text("operator edit")
+            added = downloads / "operator-added"
+            added.write_text("operator addition")
+            outside = prefix / "operator-directory"
+            outside.mkdir()
+            outside_file = outside / "keep"
+            outside_file.write_text("operator addition")
+            before = set(prefix.rglob("*"))
+            upgrade = downloads / "new-provider-artifact"
+            locations = [rewritten, upgrade]
+            unchanged = runtime.unchanged_owned(prefix, locations)
+            upgrade.write_text("new installed output")
+            rewritten.write_text("new provider output")
+            runtime.record_outputs(prefix, before, unchanged, locations)
+            ledger = json.loads((prefix / ".plurx-runtime-owned.json").read_text())
+            self.assertNotIn("downloads/operator-added", ledger["files"])
+            self.assertEqual(ledger["files"]["downloads/original"]["sha256"], hashlib.sha256(b"installed").hexdigest())
+            result = runtime.uninstall(prefix)
+            self.assertTrue(original.exists())
+            self.assertTrue(added.exists())
+            self.assertTrue(outside_file.exists())
+            self.assertFalse(upgrade.exists())
+            self.assertFalse(rewritten.exists())
+            self.assertIn("downloads/original", result["retained"])
+
+    def test_upgrade_refuses_to_overwrite_changed_managed_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "owned"
+            prefix.mkdir()
+            output = prefix / "Dockerfile.base"
+            output.write_text("installed")
+            runtime.ownership_receipt(prefix, [output])
+            output.write_text("operator edit")
+            with self.assertRaisesRegex(RuntimeError, "refusing overwrite"):
+                runtime.unchanged_owned(prefix, [output])
+            self.assertEqual(output.read_text(), "operator edit")
 
     def test_docker_preserves_standard_assets_and_private_runtime(self):
         dockerfile = (ROOT / "Dockerfile.pi").read_text()

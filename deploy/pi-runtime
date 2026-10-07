@@ -210,19 +210,88 @@ def device_configuration():
     return {"devices": [f"{p}:{p}:rw" for p in devices], "group_add": sorted({str(p.stat().st_gid) for p in devices})}
 
 
-def ownership_receipt(prefix):
+def ownership_receipt(prefix, created=(), refreshed=()):
     manifest = prefix / ".plurx-runtime-owned.json"
-    files = {}
-    for path in prefix.rglob("*"):
+    expected = {"schema": 1, "prefix": str(prefix), "uid": os.getuid()}
+    inventory = json.loads(manifest.read_text()) if manifest.exists() else {**expected, "files": {}}
+    if any(inventory.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("runtime ownership receipt does not match caller/path")
+    # Only explicitly rewritten, previously unchanged outputs may advance.
+    files = inventory["files"]
+    refreshed = set(refreshed)
+    for path in [*created, *refreshed]:
         if path == manifest:
             continue
         name = str(path.relative_to(prefix))
+        if name in files and path not in refreshed:
+            continue
         if path.is_symlink():
             files[name] = {"link": os.readlink(path)}
         elif path.is_file():
             files[name] = {"sha256": sha(path)}
-    manifest.write_text(json.dumps({"schema": 1, "prefix": str(prefix), "uid": os.getuid(), "files": files}, sort_keys=True) + "\n")
+    manifest.write_text(json.dumps({**expected, "files": files}, sort_keys=True) + "\n")
     return str(manifest)
+
+
+def managed_locations(prefix, args):
+    roots = [prefix / ".plurx-runtime-owner.json"]
+    if args.role in ("cinema", "both"):
+        roots.append(prefix / MANIFEST["browser"]["tag"])
+        roots.extend(prefix / "downloads" / item["name"] for item in MANIFEST["browser"]["packages"])
+    if args.role in ("server", "both"):
+        if args.server_runtime == "docker":
+            roots.append(prefix / "Dockerfile.base")
+        else:
+            roots.extend(prefix / name for name in ("ffmpeg-8.1.3-pi-" + MANIFEST["patch_sha256"][:16], "bound-ffprobe", "downloads/jellyfin-source.tar.gz"))
+            if not args.skip_server_build:
+                roots.extend(prefix / name for name in ("cargo-target", "rustup", "cargo", "downloads/rustup-init"))
+    return roots
+
+
+def unchanged_owned(prefix, locations):
+    manifest = prefix / ".plurx-runtime-owned.json"
+    if not manifest.exists():
+        return set()
+    inventory = json.loads(manifest.read_text())
+    if any(inventory.get(key) != value for key, value in {"schema": 1, "prefix": str(prefix), "uid": os.getuid()}.items()):
+        raise RuntimeError("runtime ownership receipt does not match caller/path")
+    unchanged = set()
+    for name, identity in inventory["files"].items():
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("unsafe runtime ownership path")
+        path = prefix / relative
+        affected = any(path == root or root in path.parents for root in locations)
+        if not path.exists() and not path.is_symlink():
+            continue
+        parents_safe = not any(parent.is_symlink() for parent in path.parents if parent != prefix.parent)
+        matches = parents_safe and ((path.is_symlink() and identity.get("link") == os.readlink(path)) or (not path.is_symlink() and path.is_file() and identity.get("sha256") == sha(path)))
+        if path.lstat().st_uid == os.getuid() and matches:
+            unchanged.add(path)
+        elif affected:
+            raise RuntimeError(f"managed runtime output changed; refusing overwrite: {name}")
+    return unchanged
+
+
+def record_outputs(prefix, before, unchanged=(), locations=None):
+    # These are the provider's explicit output locations, never arbitrary
+    # prefix contents. Existing unowned files remain unowned on later runs.
+    roots = locations if locations is not None else [prefix / name for name in (MANIFEST["browser"]["tag"], "ffmpeg-8.1.3-pi-" + MANIFEST["patch_sha256"][:16], "bound-ffprobe", "cargo-target", "rustup", "cargo", "downloads", "Dockerfile.base", ".plurx-runtime-owner.json")]
+    created = []
+    refreshed = []
+    for root in roots:
+        if root.is_symlink() or root.is_file():
+            paths = [root]
+        elif root.is_dir():
+            paths = root.rglob("*")
+        else:
+            continue
+        for path in paths:
+            if path not in before:
+                created.append(path)
+            elif path in unchanged:
+                refreshed.append(path)
+    return ownership_receipt(prefix, created, refreshed)
 
 
 def uninstall(prefix):
@@ -274,6 +343,9 @@ def prepare(args):
         return result
     if platform.machine() not in ("aarch64", "arm64") or platform.system() != "Linux":
         raise RuntimeError("Pi provisioning requires Linux ARM64")
+    before = set(prefix.rglob("*")) if prefix.exists() else set()
+    locations = managed_locations(prefix, args)
+    unchanged = unchanged_owned(prefix, locations)
     prefix.mkdir(parents=True, exist_ok=True)
     owner = prefix / ".plurx-runtime-owner.json"
     if owner.exists():
@@ -304,7 +376,7 @@ def prepare(args):
                 run(["sh", ROOT / "scripts/build-static-ffprobe", bound, bound.parent / "receipt"])
             result.update(ffmpeg=str(ffmpeg / "bin/ffmpeg"), ffprobe=str(ffmpeg / "bin/ffprobe"), bound_ffprobe=str(bound), groups=device_configuration()["group_add"])
             if args.skip_server_build:
-                result["owned_manifest"] = ownership_receipt(prefix)
+                result["owned_manifest"] = record_outputs(prefix, before, unchanged, locations)
                 return result
             toolchain = "1.97.1"
             env = {**os.environ, "CARGO_BUILD_JOBS": "4", "CARGO_TARGET_DIR": str(prefix / "cargo-target"), "RUSTUP_HOME": str(prefix / "rustup"), "CARGO_HOME": str(prefix / "cargo")}
@@ -317,7 +389,7 @@ def prepare(args):
             run([rustup, "toolchain", "install", toolchain, "--profile", "minimal"], env=env)
             run([rustup, "run", toolchain, "cargo", "build", "--locked", "--release", "-p", "plurxd"], cwd=ROOT, env=env)
             result["server_binary"] = str(prefix / "cargo-target/release/plurxd")
-    result["owned_manifest"] = ownership_receipt(prefix)
+    result["owned_manifest"] = record_outputs(prefix, before, unchanged, locations)
     return result
 
 
