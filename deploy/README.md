@@ -26,16 +26,16 @@ It writes `deploy/.env` (with your uid/gid) and
 `deploy/docker-compose.override.yml` from their examples when they are
 missing, creates the data directory named in `.env`, runs `make docker-up`,
 and then waits for `/readyz` and prints the version the server reports.
-Host-specific bits (media mounts, GPU, and shared Docker networks) live in
+Host-specific bits (media mounts, explicit GPU selections, and shared Docker networks) live in
 that untracked override file, so pulling updates never conflicts with local
-edits — put your mounts and GPU there and run `make docker-up` again; that is
+edits — put your mounts there and run `make docker-up` again; that is
 the deploy from then on. By hand, the same first run is:
 
 ```sh
 cd deploy
 cp .env.example .env                   # PUID/PGID, ports, the data directory
 cp docker-compose.override.example.yml docker-compose.override.yml
-$EDITOR docker-compose.override.yml   # your media mounts (host:container:ro), your GPU
+$EDITOR docker-compose.override.yml   # your media mounts (host:container:ro)
 cd .. && make docker-up                  # builds from source; stamps the commit into the build
 ```
 
@@ -43,8 +43,9 @@ Open `http://<host>:32400` and create your admin account. If Plex still owns
 TCP 32400, set `PLURX_HTTP_PORT` in `.env` and use that port instead.
 Library paths in
 the web UI are the *container-side* paths (e.g. `/media/movies`). For
-hardware transcode, uncomment the GPU block in your override (Intel/AMD via
-`/dev/dri`, NVIDIA via the container toolkit). If another service (a
+hardware transcode, `make docker-up` detects local Linux GPUs and their
+device groups automatically. NVIDIA hosts need NVIDIA Container Toolkit
+installed and configured for Docker. If another service (a
 still-running Plex) owns UDP 32414, set `PLURX_GDM_PORT` in `.env`
 (see `.env.example`).
 
@@ -444,8 +445,34 @@ The Docker image defaults to **jellyfin-ffmpeg**, which bundles a current Intel
 media driver + libva + oneVPL. This matters for newer silicon: an Arc / Meteor
 Lake / **Arrow Lake** iGPU (on the kernel `xe` driver) is years newer than the
 VA driver Debian ships, so the distro ffmpeg fails VAAPI init with an I/O error
-while jellyfin-ffmpeg drives it fine. Pass the GPU through and add the render
-group in your compose override:
+while jellyfin-ffmpeg drives it fine. Both `make docker-up` and
+`make docker-image-up` prepare GPU access before their startup-budget check:
+
+- Local native Linux Docker: expose `/dev/dri` when present and add the numeric
+  groups owning its character devices, so the configured non-root user can
+  access them. Hosts without GPU devices need no special configuration.
+- NVIDIA: detect a working host driver, request the GPUs through NVIDIA
+  Container Toolkit, and include `compute,video,utility,graphics` driver capabilities.
+  `graphics` supplies the Vulkan libraries used by GPU tone mapping. Encoding
+  runs in the Plurx container; no GPU sidecar is needed.
+- Existing device selections and NVIDIA reservations keep their selected
+  devices/count. Existing groups and extra NVIDIA capabilities are preserved.
+- macOS, Docker Desktop, and remote Docker engines: keep explicit device
+  configuration; local host probes cannot describe the engine's hardware.
+  Native macOS Plurx already detects VideoToolbox; Linux containers cannot
+  use the macOS VideoToolbox framework.
+
+The helper writes one temporary Compose fragment, uses it for both preflight
+and startup, then removes it even if startup fails. It keeps the existing
+base/override selection and never rewrites your override. The
+`docker hardware:` line reports added device mappings, numeric groups, and
+NVIDIA capabilities; it reports configuration, not a passed encode probe.
+Plurx still validates encoders at startup and respects its encoder preference.
+
+For fully manual passthrough, put `PLURX_DOCKER_GPU=manual` in `deploy/.env`.
+This skips automatic configuration without disabling any server capability.
+Direct `docker compose up` also uses only your explicit device settings.
+For example, the Intel/AMD block in your override is:
 
 ```yaml
     devices:
