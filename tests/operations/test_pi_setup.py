@@ -309,6 +309,37 @@ class PiSetupTests(unittest.TestCase):
                 setup.package_tools('docker')
         self.assertFalse(any(call.args[0][:2] == ['apt-get', 'install'] for call in commands.call_args_list))
 
+    def test_docker_install_wait_uses_resolved_startup_grace_over_1500_seconds(self):
+        contract = setup.load_script('validate-docker-startup-budget', 'scripts')
+        with self.native_host() as (root, previous, events, service):
+            setup.STATE.unlink()
+            setup.UNIT.unlink()
+            setup.BINARY.unlink()
+            args = self.args(data_dir=root, media=[])
+            runtime = {'compose_service': {'image': 'plurx-pi:local', 'build': {'context': str(root), 'dockerfile': 'Dockerfile.pi'}}}
+            def command(argv, **kwargs):
+                values = list(map(str, argv))
+                events.append(('docker-command', values))
+                if values[:3] == ['git', 'log', '-1']:
+                    return '1700000000\n'
+                if '--emit-start-period' in values:
+                    return '18135s\n'
+                if values[0] == 'git':
+                    return 'abc\n'
+                return 'container-id\n'
+            with patch.object(setup, 'conflict'), patch.object(setup, 'package_tools'), \
+                 patch.object(setup, 'provision', return_value=runtime), \
+                 patch.object(setup, 'run', side_effect=command), \
+                 patch.object(setup, 'load_script', return_value=contract), \
+                 patch.object(setup, 'finish_transaction'), \
+                 patch.object(setup, 'wait_ready') as ready, contextlib.redirect_stdout(io.StringIO()):
+                setup.install(args, None)
+            ready.assert_called_once_with('http://127.0.0.1:32400', 18135.0)
+            commands = [event[1] for event in events if event[0] == 'docker-command']
+            deploy = next(i for i, command in enumerate(commands) if command[:2] == ['make', 'docker-up'])
+            resolved = next(i for i, command in enumerate(commands) if '--emit-start-period' in command)
+            self.assertLess(deploy, resolved)
+
     def test_native_readiness_budget_uses_retained_cluster_config(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'plurx.toml'

@@ -604,7 +604,9 @@ def install(args, previous):
             if not re.fullmatch(r'[A-Za-z0-9._-]+', ref) or not epoch.isdigit() or not re.fullmatch(r'[A-Za-z0-9_-]+', hostname):
                 raise ValueError('build identity contains unsupported characters')
             run(['make', 'docker-up', 'BUILD_REF=' + ref, 'BUILD_SHA=' + source, 'SOURCE_DATE_EPOCH=' + epoch, 'HOST_SHORTNAME=' + hostname], root=True)
-            wait_ready('http://127.0.0.1:32400')
+            period = run(['python3', ROOT / 'scripts/validate-docker-startup-budget', '--emit-start-period'], root=True, capture=True).strip()
+            contract = load_script('validate-docker-startup-budget', 'scripts')
+            wait_ready('http://127.0.0.1:32400', float(contract.parse_duration(period, 'deployment health grace')))
         elif server:
             binary = args.binary or (Path(runtime['server_binary']) if runtime.get('server_binary') else None)
             if binary is None:
