@@ -481,6 +481,16 @@ def recover_preunit4299(api, scope, prior, jobs):
                           "Legacy Linux/Python/Node environment applicability unavailable")
 
 
+def recover_preunit_upload4324(api, scope, prior, jobs):
+    """Share exact zero-execution proof; import no Node/Python outcomes."""
+    from validation import main_unit_receipts as main
+    if prior['id'] != main.PREUNIT_UPLOAD4324['run']:
+        return False
+    matches = [job for job in jobs if job['name'] == main.JOB]
+    require(len(matches) == 1, 'Upload4324 preflight job unavailable')
+    return main.recover_preunit_upload4324(api, scope, prior, matches[0]) is not None
+
+
 def recover_preunit(api, scope, prior, jobs, proof, reason):
     if scope != {"repository": proof["repository"], "pr": proof["pr"]} or prior["id"] != proof["run"]:
         return False
@@ -607,7 +617,8 @@ def prepare(output_key="receipt_key"):
         if adapter_workflow(run_commands(workflow.decode())):
             jobs = api.pages(f"/actions/runs/{prior['id']}/jobs")
             if (recover_preunit4294(api, scope, prior, jobs)
-                    or recover_preunit4299(api, scope, prior, jobs)):
+                    or recover_preunit4299(api, scope, prior, jobs)
+                    or recover_preunit_upload4324(api, scope, prior, jobs)):
                 authenticated_runs.add(prior["id"])
                 continue
             require_missing_journal_safe(prior, jobs, scope)

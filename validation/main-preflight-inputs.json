@@ -168,6 +168,22 @@
       "reason": "New synthetic adapter controls; first execution remains required."
     },
     {
+      "id_prefix": "validation:test_main_preflight_adoption.MainPreflightAdoptionCase.test_exact_upload_failure_bridge_accounts_zero_without_importing_outcomes",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/history.py",
+        "validation/main_preflight_adoption.py",
+        "validation/main_unit_receipts.py",
+        "validation/main-preflight-inputs.json",
+        "validation/python_unit_interrupted_recovery.py",
+        "validation/python_unit_receipts.py",
+        "validation/regression_field.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
+      ],
+      "reason": "This exact new bridge control imports the main receipt proof and constants; retain sibling input families unchanged."
+    },
+    {
       "id_prefix": "validation:test_caps_wire_conformance.",
       "inputs": [
         "validation/__init__.py",

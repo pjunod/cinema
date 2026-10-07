@@ -138,6 +138,22 @@ class MainPreflightAdoptionCase(unittest.TestCase):
             adoption.require_record_origin({**record, "outcome": "skipped"},
                                            {**journal, "run": 13, "job": 35}, record)
 
+    def test_exact_upload_failure_bridge_accounts_zero_without_importing_outcomes(self):
+        from validation import main_unit_receipts as main
+        prior = {'id': 4324}
+        jobs = [{'id': 44110, 'name': main.JOB}]
+        scope = {'repository': 1, 'pr': 845}
+        incomplete = {'complete': False, 'passes': {'validation:test_fixture.Case.test_ok': {'run': 4315}}}
+        with mock.patch.object(main, 'recover_preunit_upload4324', return_value=incomplete) as proof:
+            self.assertIs(adoption.recover_preunit_upload4324(None, scope, prior, jobs), True)
+            proof.assert_called_once_with(None, scope, prior, jobs[0])
+            self.assertIs(incomplete['complete'], False)
+            self.assertFalse(adoption.recover_preunit_upload4324(None, scope, {'id': 4323}, jobs))
+            with self.assertRaises(ReceiptError):
+                adoption.recover_preunit_upload4324(None, scope, prior, jobs + jobs)
+        with mock.patch.object(main, 'recover_preunit_upload4324', return_value=None):
+            self.assertFalse(adoption.recover_preunit_upload4324(None, scope, prior, jobs))
+
     def test_authenticated_all_skipped_draft_is_zero_execution_but_attempted_job_refuses(self):
         scope = {"repository": 1, "pr": 845}
         repo = {"id": 1, "full_name": "owner/repository"}

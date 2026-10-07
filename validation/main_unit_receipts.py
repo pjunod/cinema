@@ -33,6 +33,22 @@ PREPARE_REFUSAL_HASHES = {
     'validation/python_unit_receipts.py': '8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258',
     '.github/workflows/main-fast-lane.yml': 'bf4b542a127ead30fd4239d38d75d3771258b0d7978e55afd8ebdc813aedfc0a',
 }
+# One reviewed infrastructure failure occurred during the first start upload,
+# before discovery or either Python/Node execution step. This is zero execution,
+# not a successful run or a replacement final journal.
+PREUNIT_UPLOAD4324 = {
+    'repository': 1, 'pr': 845, 'run': 4324, 'job': 44110, 'task': 16574,
+    'commit': '8d00bf43342cb88b833e2672d48dc0af73558489',
+    'base': '96f668128d8b714ed580fa913d3a5a13e6d77c2e',
+    'branch': 'codex/architecture-final-closeout-20261007',
+    'log_bytes': 494360,
+    'log_sha256': '62292b20e42403f2dcc7b5529a4beefee519accef6594fc11033be8b1ee4dca7',
+    'sources': {
+        'validation/main_unit_receipts.py': '1e5e5c5f56bb8326ce8a15e8154b0e5dd8f987a4fd77ae0505e91aa55f357bf1',
+        'validation/python_unit_receipts.py': '8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258',
+        '.github/workflows/main-fast-lane.yml': '414ba7aa7885a52cca54f0b0f80fbf6feaa03e94c17f241846a0696e414979b2',
+    },
+}
 
 
 def identity(api, pr, commit):
@@ -347,8 +363,77 @@ def verbose_passes(lines, inventories, inherited):
     return passes
 
 
+def recover_preunit_upload4324(api, scope, prior, job):
+    """Return the actual incomplete start only; authenticate origins elsewhere."""
+    from validation import main_preflight_adoption as adoption
+    proof = PREUNIT_UPLOAD4324
+    if (scope.get('repository'), scope.get('pr'), prior['id']) != (proof['repository'], proof['pr'], proof['run']):
+        return None
+    actual = api.get(f"/actions/runs/{proof['run']}")
+    require(actual['id'] == prior['id'] == proof['run']
+            and actual['commit_sha'] == prior['commit_sha'] == proof['commit']
+            and adoption.terminal_status(actual) == 'failure',
+            'Upload4324 terminal run/source mismatch')
+    event = adoption.bind_event(actual, {'repository': proof['repository'], 'pr': proof['pr']})
+    require(event == adoption.bind_event(prior, {'repository': proof['repository'], 'pr': proof['pr']})
+            and event['action'] == 'synchronized'
+            and event['pull_request']['head']['ref'] == proof['branch']
+            and event['pull_request']['base']['sha'] == proof['base'],
+            'Upload4324 original event/branch/base mismatch')
+    matching = [item for item in api.pages(f"/actions/runs/{proof['run']}/jobs") if item['name'] == JOB]
+    require(len(matching) == 1 and matching[0] == job
+            and job['id'] == proof['job'] and job['run_id'] == proof['run']
+            and job['repo_id'] == proof['repository'] and type(job['attempt']) is int and job['attempt'] == 1
+            and type(job.get('task_id')) is int and job['task_id'] == proof['task']
+            and adoption.terminal_status(job) == 'failure',
+            'Upload4324 terminal job/task/attempt mismatch')
+    for path, digest in proof['sources'].items():
+        raw = source(proof['commit'], path)
+        require(hashlib.sha256(raw).hexdigest() == digest
+                and raw == api.bytes('/raw/' + path, {'ref': proof['commit']}),
+                'Upload4324 immutable producer/workflow mismatch')
+    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
+    require(len(raw) == proof['log_bytes'] and hashlib.sha256(raw).hexdigest() == proof['log_sha256'],
+            'Upload4324 exact complete log mismatch')
+    lines = log_lines(raw)
+    snapshots = read_snapshots(lines)
+    require(set(snapshots) == {'start'}, 'Upload4324 requires only the original start snapshot')
+    expected_scope = {'repository': proof['repository'], 'pr': proof['pr'], 'branch': proof['branch'],
+                      'base': 'main', 'workflow': WORKFLOW}
+    require(all(scope.get(field, value) == value for field, value in expected_scope.items()),
+            'Upload4324 receipt scope mismatch')
+    start = snapshots['start']
+    receipts.validate_journal(start, expected_scope, proof['run'], proof['commit'], completed=False)
+    require(start['complete'] is False and start['fixture_errors'] == []
+            and all(type(value['run']) is int and value['run'] < proof['run']
+                    and value['commit'] is not None for value in start['passes'].values()),
+            'Upload4324 cannot originate unit successes')
+    validate_bridge_environment(start, start, proof['commit'])
+    ended = lines.index('MAIN-UNIT-END start')
+    uploads = [i for i, line in enumerate(lines) if line == 'Beginning upload of artifact content to blob storage']
+    failures = [i for i, line in enumerate(lines) if line ==
+                '::error::Error runner api getting task: task is not running%0A']
+    require(raw.endswith(b'\n') and lines[-1] == f"Job '{JOB}' failed"
+            and len(uploads) == len(failures) == 3 and ended < uploads[0]
+            and all(upload < failure for upload, failure in zip(uploads, failures))
+            and not any('discovered=' in line or 'Main preflight outcome ' in line
+                        or re.fullmatch(r'Ran \d+ tests? in .*', line) for line in lines),
+            'Upload4324 contradicts reviewed before-discovery failure')
+    require(api.get(f"/actions/runs/{proof['run']}/artifacts") == [],
+            'Upload4324 unexpectedly has run artifacts')
+    for name in (key(expected_scope), f"main-preflight-v1-r{proof['repository']}-pr{proof['pr']}"):
+        require(not any(item['run_id'] == proof['run'] for item in api.pages('/actions/artifacts', {'name': name}))
+                and not api.pages('/actions/artifacts', {'name': name + f"-start-{proof['run']}"}),
+                'Upload4324 unexpectedly has start/final artifacts')
+    print('Accounted failed run4324/job44110: zero units; retained start is incomplete and grants no outcomes')
+    return start
+
+
 def recover_log(api, scope, prior, job, older):
     rid, commit = receipts.positive(prior['id']), receipts.sha(prior['commit_sha'])
+    start = recover_preunit_upload4324(api, scope, prior, job)
+    if start is not None:
+        return start
     require(job['status'] == 'success', 'Missing artifact needs completed successful preflight')
     lines = log_lines(api.bytes(f"/actions/jobs/{receipts.positive(job['id'])}/logs"))
     require(sum(commit in line for line in lines) >= 2
