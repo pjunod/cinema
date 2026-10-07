@@ -261,9 +261,11 @@ blocking findings. Focused checks then passed once on that candidate:
 | `python3 -m validation.regression_field` with the candidate, base and PR description | passed; focused Rust execution recorded above |
 
 Normal pinned Rust 1.97.1 compilation and commit hooks pass. The full Rust
-unit suite and main promotion gate are not claimed. PR #843 remains draft
-while the conflict between the requested focused validation and the current
-full-suite CI workflow awaits a decision. Earlier #832 evidence is retained.
+unit suite and main promotion gate are not claimed. Paul authorized resolving the CI conflict and merging PR #843 on 2026-10-07.
+The follow-up removes the full Rust unit step from the main fast lane while
+retaining all-target compilation, Clippy, policy and regression-field checks.
+Full CI and coverage remain separate. The CI amendment awaits final review
+and its fast-lane result; earlier #832 evidence is retained.
 
 [Sanitized device and validation evidence](http://forge.lan:3000/attachments/348a359f-ac02-4ec5-bf00-c9e89bd52f72)
 is attached to PR #843 and was downloaded again to verify its hash:

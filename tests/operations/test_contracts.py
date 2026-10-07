@@ -1623,7 +1623,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('major: "8"', unit_rust)
         self.assertIn("binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", unit_rust)
         # The shipped-runtime qualification uses FFmpeg 8; the independent
-        # main fast lane still retains FFmpeg 6 burst-honoring coverage.
+        # main fast lane retains its pinned FFmpeg 6 compiler environment.
         self.assertIn(
             'major: "6"',
             workflow_job_blocks(".github/workflows/main-fast-lane.yml")["rust_compile"],
@@ -2043,7 +2043,6 @@ assert.equal(context.ACT_TIMER, null);
                 "Restore the main fast Rust cache",
                 "Compile every Rust target without executing tests",
                 "Lint the workspace",
-                "Run the fast Rust unit and SQLite contract lane",
                 "Enforce persistent Cargo bounds",
                 "Restore persistent runner workspace ownership",
             ],
@@ -2060,13 +2059,18 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertEqual(
             workflow_step_literal(
-                fast_rust_steps["Run the fast Rust unit and SQLite contract lane"],
+                fast_rust_steps["Compile every Rust target without executing tests"],
                 "run",
             ),
-            ["make unit"],
+            ["make effort-rust-check", "make hiqlite-vendor-clippy"],
         )
+        # Full-suite execution belongs to manual CI. Exact step/command lists
+        # keep a renamed unit step or an appended broad test command from
+        # silently returning to the blocking PR lane.
+        self.assertNotIn("make unit", fast_jobs["rust_compile"])
+        self.assertNotIn("cargo test", fast_jobs["rust_compile"])
         self.assertIn('major: "6"', fast_rust_steps["Install the pinned FFmpeg"])
-        self.assertIn("timeout-minutes: 90", fast_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 30", fast_jobs["rust_compile"])
         fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
         playback_contracts = workflow_step_literal(
             fast_preflight["Check the shared player input contract"], "run"
@@ -3982,7 +3986,8 @@ assert.equal(context.ACT_TIMER, null);
         ]
         self.assertIn("container: ubuntu:24.04", fast)
         self.assertIn('major: "6"', fast)
-        self.assertIn("make unit", fast)
+        self.assertIn("make effort-rust-check", fast)
+        self.assertNotIn("make unit", fast)
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
         self.assertIn("container: ubuntu:24.04", coverage)
         self.assertIn('major: "6"', coverage)

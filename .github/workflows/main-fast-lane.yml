@@ -143,13 +143,12 @@ jobs:
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
     container: ubuntu:24.04
-    # A cold shared-runner build used 12 minutes before tests, and the core
-    # and SQLite suites used another 17. Allow the daemon and restart suites
-    # to finish as well, with bounded headroom for shared-runner contention.
-    # Measured 2026-10-04 on the architecture promotion: 16.5 min to the first
-    # test, core lib 15 min, store contracts 11.4 min, daemon ~11 min, which
-    # leaves no headroom under 60; 90 keeps the same bound with room again.
-    timeout-minutes: 90
+    # Compile all targets and enforce workspace/vendor Clippy here. The full
+    # Rust unit and SQLite suites belong to manual full CI, while each change
+    # carries its named, locally run focused regression through preflight.
+    # Cold compilation has exceeded 16 minutes; leave bounded headroom for
+    # provisioning, Clippy, and shared-runner contention.
+    timeout-minutes: 30
     steps:
       - name: Install Rust gate prerequisites
         run: |
@@ -183,9 +182,6 @@ jobs:
       - name: Lint the workspace
         run: |
           make lint
-      - name: Run the fast Rust unit and SQLite contract lane
-        run: |
-          make unit
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         continue-on-error: true
