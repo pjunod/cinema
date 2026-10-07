@@ -782,15 +782,29 @@ pub(super) async fn close_receiver_ingress(
             Err(_) => result = Err(ReceiverStartError::Deadline),
         }
     }
-    result?;
-    let snapshot = state
-        .store
-        .receiver_ingress_snapshot(route)
-        .await
-        .map_err(|_| ReceiverStartError::Unresolved)?
-        .ok_or(ReceiverStartError::Unresolved)?;
-    if snapshot.owner_identity != original_identity || !snapshot.state.settled() {
-        return Err(ReceiverStartError::Unresolved);
+    // Natural-close monitors may have committed their authenticated receipts
+    // while this owner's close or ACK exchange failed. Drain every owned
+    // exchange first, then require this exact owner's sealed, settled ledger;
+    // an exchange failure, timeout, or absent row never supplies closure proof.
+    #[cfg(test)]
+    if result.is_err() {
+        eprintln!(
+            "Receiver retirement close/ack exchange raced or refused; checking exact sealed ledger"
+        );
+    }
+    let snapshot = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state.store.receiver_ingress_snapshot(route),
+    )
+    .await
+    .map_err(|_| ReceiverStartError::Deadline)?
+    .map_err(|_| ReceiverStartError::Unresolved)?
+    .ok_or(ReceiverStartError::Unresolved)?;
+    if snapshot.owner_identity != original_identity
+        || !snapshot.state.is_sealed()
+        || !snapshot.state.settled()
+    {
+        return Err(result.err().unwrap_or(ReceiverStartError::Unresolved));
     }
     Ok(())
 }

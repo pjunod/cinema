@@ -4194,7 +4194,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +2 actual owner-lease regression bounds: owner-proof reader remains blocked
 # independently of the attachment reader, then finishes only after writeback.
 # Both observe the retained actor and exact SQL fences; no production timer.
-expected_occurrences = 1561
+# +1 receiver custody final-ledger read: the existing retirement owner bounds
+# its exact-owner sealed/settled observation by its retained315s deadline.
+# Timeout/read failure exits unresolved; only authenticated physical-close ACKs
+# settle debt. No timer elects work and no task or polling owner is added.
+expected_occurrences = 1562
 
 
 [[module_structures]]
