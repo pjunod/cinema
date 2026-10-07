@@ -668,19 +668,14 @@ pub struct ClientLog {
     pub seek_trace: Option<String>,
     /// Browser label the client computed ("Safari" | "Chrome" | …).
     pub ua: Option<String>,
-    /// Whether this browser will decode this stream in hardware, as reported
-    /// by `navigator.mediaCapabilities` for the real codec, resolution and
-    /// bitrate — not for a codec string alone.
-    ///
-    /// The one thing that separates two failures every other field here
-    /// renders identically: a full buffer with late frames because the GPU is
-    /// doing the work and something upstream hiccuped, versus a full buffer
-    /// with late frames because a CPU is software-decoding 4K. `null` from a
-    /// browser without the API is honest; `false` is the finding.
+    /// Legacy decoder identity, when independently observed. MediaCapabilities
+    /// efficiency predictions must not populate this field.
     pub decode_hw: Option<bool>,
-    /// The browser's own guess at whether it can keep up. `false` alongside
-    /// `decode_hw: false` is the browser saying so before it even started.
+    /// MediaCapabilities prediction for the delivered output tuple, not a
+    /// measurement of active playback or its platform decoder.
+    pub decode_supported: Option<bool>,
     pub decode_smooth: Option<bool>,
+    pub decode_power_efficient: Option<bool>,
     // -- playback measurements (M0) ------------------------------------------
     // These are the point of the beacons. Without them the log records THAT a
     // stream stalled and not the one number that says why, which is how much
@@ -1420,6 +1415,12 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
     if let Some(value) = ev.decode_hw {
         extra.insert("decode_hw".into(), value.into());
     }
+    if let Some(value) = ev.decode_supported {
+        extra.insert("decode_supported".into(), value.into());
+    }
+    if let Some(value) = ev.decode_power_efficient {
+        extra.insert("decode_power_efficient".into(), value.into());
+    }
     if let Some(value) = ev.decode_smooth {
         extra.insert("decode_smooth".into(), value.into());
     }
@@ -1706,6 +1707,18 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
         line.push_str(if hw { " decode=hw" } else { " decode=SOFTWARE" });
         if ev.decode_smooth == Some(false) {
             line.push_str("/not-smooth");
+        }
+    }
+    for (name, value) in [
+        ("decode_supported_prediction", ev.decode_supported),
+        ("decode_smooth_prediction", ev.decode_smooth),
+        (
+            "decode_power_efficient_prediction",
+            ev.decode_power_efficient,
+        ),
+    ] {
+        if let Some(value) = value {
+            line.push_str(&format!(" {name}={value}"));
         }
     }
     let msg = clip(&ev.message, 200);
@@ -6787,7 +6800,9 @@ mod tests {
             height: None,
             encoder: None,
             decode_hw: None,
+            decode_supported: None,
             decode_smooth: None,
+            decode_power_efficient: None,
             session_id: None,
             snapshot: None,
             link_sample: None,
@@ -7054,6 +7069,33 @@ mod tests {
         ev.decode_smooth = Some(false);
         let line = client_log_line(&ev, 0);
         assert!(line.contains(" decode=SOFTWARE/not-smooth"), "{line}");
+    }
+
+    #[test]
+    fn browser_predictions_do_not_claim_decoder_identity() {
+        let mut ev = beacon("stall", 900);
+        ev.decode_supported = Some(false);
+        ev.decode_smooth = Some(false);
+        ev.decode_power_efficient = Some(false);
+        let line = client_log_line(&ev, 0);
+        assert!(line.contains("decode_supported_prediction=false"), "{line}");
+        assert!(line.contains("decode_smooth_prediction=false"), "{line}");
+        assert!(
+            line.contains("decode_power_efficient_prediction=false"),
+            "{line}"
+        );
+        assert!(!line.contains("decode=SOFTWARE"), "{line}");
+        assert!(!line.contains("decode=hw"), "{line}");
+        let absent = beacon("stall", 900);
+        assert!(!client_log_line(&absent, 0).contains("_prediction="));
+        let event = client_playback_event(&ev, 1);
+        let extra: serde_json::Value =
+            serde_json::from_str(event.extra.as_deref().expect("prediction JSON"))
+                .expect("valid prediction JSON");
+        assert_eq!(extra["decode_supported"], false);
+        assert_eq!(extra["decode_smooth"], false);
+        assert_eq!(extra["decode_power_efficient"], false);
+        assert!(extra.get("decode_hw").is_none());
     }
 
     #[test]

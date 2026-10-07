@@ -817,3 +817,88 @@ fallback prevents custom TOML deadlines from accidentally shipping with a
 shorter health grace. An explicit command-line `--config` takes
 precedence over `PLURX_CONFIG`, matching the server. A direct `docker compose
 up` bypasses the preflight.
+
+## Raspberry Pi — native server and the existing fullscreen web player
+
+Use Raspberry Pi OS 64-bit and the existing ARM64 server binary. Install the
+server with `deploy/install linux --binary /absolute/path/plurxd`; the normal
+systemd installation and `/readyz` checks still apply. Select your native
+FFmpeg and matching ffprobe with `PLURX_FFMPEG` and `PLURX_FFPROBE` in the
+service's existing configuration. Capture both resolved executable paths and
+package versions in your private acceptance notes. A generic `drm`
+advertisement is only a candidate: the server's operational request-decoder
+probe must succeed for each selected HEVC bit-depth class. Software encoding
+still needs transferred CPU frames. Pi 5 has no hardware video encoder.
+
+The standard ARM64 container keeps its pinned Jellyfin media runtime. Its
+request-decoder support is unproven; replacing that runtime would risk the
+existing AC-4, Dolby Vision and tone-map contracts. Native compatible FFmpeg
+is the initial server acceleration route.
+
+**Desktop launcher:** run these commands as your normal desktop user. Python
+3 and an already installed Chromium are prerequisites. The installer neither
+installs a browser nor changes the server unit or desktop autostart settings.
+
+```bash
+python3 deploy/pi-player install --url http://localhost:32400 --dry-run
+python3 deploy/pi-player install --url http://localhost:32400
+# Open “Plurx HDMI” from the desktop application's menu; sign in normally.
+python3 deploy/pi-player launch                  # launch in your desktop session
+python3 deploy/pi-player uninstall --dry-run     # preview ownership checks
+python3 deploy/pi-player uninstall               # retain browser login/profile
+```
+
+Use `--chromium /absolute/path/chromium` if discovery cannot find your installed
+browser. URLs must be HTTP(S) origins with an optional trailing slash: paths,
+credentials, query strings and fragments are refused to keep tokens out of
+process arguments. The launcher uses Chromium's normal sandbox and a separate
+`~/.local/share/plurx-hdmi/profile`; it never opens your usual browser profile.
+Root launch is refused. A dedicated desktop application entry launches the
+existing web UI fullscreen; no new client or recovery supervisor is involved.
+
+Installation is repeatable while the recorded files remain unchanged.
+Uninstall checks ownership hashes before removing the launcher, its URL
+configuration and application entry; modified or unowned files require manual
+attention. It retains the isolated browser profile and an ownership receipt,
+so reinstall restores the launcher without deleting login state. To remove
+that profile yourself, first exit its Chromium process, then inspect and
+remove the dedicated directory. Symlinked installation paths are refused.
+No running browser is stopped by uninstall.
+
+**Device access:** inspect actual `/dev/video*`, `/dev/media*` and
+`/dev/dri/renderD*` ownership on the target. Grant the `plurx` service only the
+`video`/`render` groups its measured native path requires, through a systemd
+drop-in with `SupplementaryGroups=video render` where those groups exist.
+Restart the service after changing its groups. The desktop browser uses the
+logged-in user's session permissions; service group membership does not grant
+browser access. Never make nodes world-writable, hard-code a video-node number,
+or infer support from a node's filename. Existing service restrictions remain
+in force until you deliberately edit them.
+
+**Readiness report:** this command reads the host and runs bounded version and
+advertisement commands; it writes no configuration or packages. Each command
+has a three-second deadline and a 16 KiB output bound. Missing tools are
+reported without stopping the report. `--ffmpeg`, `--ffprobe` and `--chromium`
+select installed executable paths; these overrides are executed as the current
+user and should identify trusted tools.
+
+```bash
+python3 deploy/pi-player readiness
+python3 deploy/pi-player readiness --json > pi-readiness.json
+```
+
+How to read it: `missing`, `unavailable`, `failed`, `timeout` and `output_limit`
+identify a tool needing attention. `ok` means the command exited successfully,
+not that hardware decoding works. Versions may be `unknown`. Device read/write
+fields describe this diagnostic user's effective access, not service access.
+Only allowlisted version strings and hardware-method names are relayed; arbitrary
+tool output, environment variables and executable directory paths are omitted.
+Review OS/device identifiers before sharing the receipt outside your deployment.
+
+Browser HEVC also depends on the installed Chromium build, kernel, Mesa and
+Wayland path. Record their package versions and inspect Chromium media
+diagnostics during actual playback. MediaCapabilities predicts support and
+efficiency; it cannot identify the active decoder. No 4K60, HDR or concurrent
+capacity is established by this readiness report. The physical cases and
+pending evidence are listed in the
+[Pi implementation plan](../docs/clients/RASPBERRY-PI-IMPLEMENTATION.md).

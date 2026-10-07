@@ -2865,7 +2865,8 @@ fn all_lists_every_backend_and_a_new_one_cannot_be_added_quietly() {
             | DecodeBackend::VideoToolbox
             | DecodeBackend::Cuda
             | DecodeBackend::Qsv
-            | DecodeBackend::Vaapi => {}
+            | DecodeBackend::Vaapi
+            | DecodeBackend::V4l2Request => {}
         }
     }
 }
@@ -3219,5 +3220,269 @@ fn normalization_refuses_reflection_shear_and_missing_full_display_matrix() {
             ),
             Err(PlanError::InvalidFact("display_matrix"))
         );
+    }
+}
+
+fn request_input(depth: u8) -> DecodeFacts {
+    facts(video(
+        0,
+        Some("hevc"),
+        Some(if depth == 10 { "Main 10" } else { "Main" }),
+        1920,
+        1080,
+        Some(if depth == 10 {
+            "yuv420p10le"
+        } else {
+            "yuv420p"
+        }),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ))
+}
+
+fn operational_request_caps(depth: u8) -> DecodeCapabilities {
+    let input = request_input(depth);
+    let mut row = capability(
+        DecodeBackend::V4l2Request,
+        "hevc",
+        input.profile(),
+        input.pixel_format(),
+        CapabilityStatus::Operational,
+    );
+    row.bit_depth = Some(depth);
+    row.surface = Some(DecodeSurfaceContract::for_plan(
+        DecodeBackend::V4l2Request,
+        Pipeline::Cpu,
+        &input,
+        Encoder::Software,
+        SubtitleRendering::None,
+    ));
+    capabilities(vec![row])
+}
+
+#[test]
+fn request_backend_keeps_semantic_identity_separate_from_ffmpeg_method() {
+    assert_eq!(DecodeBackend::V4l2Request.name(), "v4l2_request");
+    assert_eq!(
+        DecodeBackend::parse("v4l2_request"),
+        Some(DecodeBackend::V4l2Request)
+    );
+    assert_eq!(DecodeBackend::parse("drm"), None);
+    assert_eq!(DecodeBackend::V4l2Request.hwaccel_method(), "drm");
+    assert_eq!(
+        DecodeBackend::V4l2Request.hardware_frame_format(),
+        Some("drm_prime")
+    );
+    assert_eq!(
+        DecodeBackend::V4l2Request.input_args(true),
+        ["-hwaccel", "drm", "-hwaccel_output_format", "drm_prime"]
+    );
+}
+
+#[test]
+fn operational_request_decode_pairs_with_software_encode_without_qualification() {
+    for depth in [8, 10] {
+        let input = request_input(depth);
+        let plan = resolve(
+            Encoder::Software,
+            Pipeline::Cpu,
+            &input,
+            &operational_request_caps(depth),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("operational CPU encode plan");
+        assert_eq!(plan.encoder(), Encoder::Software);
+        assert_eq!(plan.decode().backend(), DecodeBackend::V4l2Request);
+        assert_eq!(plan.decode().evidence(), DecodeEvidence::Operational);
+        assert_eq!(plan.decode().reason(), DecodeReason::MeasuredPreference);
+        assert_eq!(
+            plan.decode().surface().decode_domain(),
+            FrameDomain::DrmPrime
+        );
+        assert_eq!(
+            plan.decode().surface().decoder_download_format(),
+            input.pixel_format()
+        );
+        assert_eq!(plan.artifact_namespace(), UNQUALIFIED_ARTIFACT_NAMESPACE);
+        let software = resolve(
+            Encoder::Software,
+            Pipeline::Cpu,
+            &input,
+            &capabilities(vec![]),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("software fallback");
+        assert_ne!(plan.plan_digest(), software.plan_digest());
+    }
+}
+
+#[test]
+fn request_decode_requires_measured_depth_class_and_respects_existing_restrictions() {
+    let input = request_input(10);
+    let eight_only = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &operational_request_caps(8),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("unmeasured Main10 remains software");
+    assert_eq!(eight_only.decode().backend(), DecodeBackend::Software);
+    let snapshot = operational_request_caps(10);
+    for restrictions in [
+        AttemptRestrictions::none(),
+        AttemptRestrictions::excluding([DecodeBackend::V4l2Request]),
+    ] {
+        let override_value = if restrictions == AttemptRestrictions::none() {
+            Some("off")
+        } else {
+            None
+        };
+        let plan = resolve_transcode(
+            &TranscodeRequest::new(Encoder::Software, options(Pipeline::Cpu)),
+            &input,
+            &snapshot,
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, override_value),
+            &restrictions,
+        )
+        .expect("existing software override or exclusion");
+        assert_eq!(plan.decode().backend(), DecodeBackend::Software);
+    }
+    let forced = resolve_transcode(
+        &TranscodeRequest::new(Encoder::Software, options(Pipeline::Cpu)),
+        &input,
+        &capabilities(vec![]),
+        &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        &AttemptRestrictions::requiring(DecodeBackend::V4l2Request),
+    );
+    assert!(matches!(
+        forced,
+        Err(PlanError::CapabilityUnavailable(DecodeBackend::V4l2Request))
+    ));
+    for pixel_format in [None, Some("yuv422p10le")] {
+        let unsupported = facts(video(
+            0,
+            Some("hevc"),
+            Some("main 10"),
+            1920,
+            1080,
+            pixel_format,
+            "24/1",
+            "24/1",
+            Some("bt709"),
+        ));
+        let plan = resolve(
+            Encoder::Software,
+            Pipeline::Cpu,
+            &unsupported,
+            &snapshot,
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("unknown or unsupported input remains software");
+        assert_eq!(plan.decode().backend(), DecodeBackend::Software);
+    }
+}
+
+#[test]
+fn request_hls_and_vod_share_depth_preserving_download_and_software_encoder() {
+    for depth in [8, 10] {
+        let input = request_input(depth);
+        let plan = resolve(
+            Encoder::Software,
+            Pipeline::Cpu,
+            &input,
+            &operational_request_caps(depth),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("request plan");
+        let source = execution_file("/fixture/source.mkv");
+        let execution = TranscodeExecution::from_options(
+            &source,
+            &execution_options(),
+            Pacing::unpaced(),
+            "/fixture/out",
+        )
+        .expect("execution");
+        let hls = hls_args(&plan, &execution);
+        let vod = plurx_core::transcode::vod_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            plurx_core::transcode::VodFrameGrid::new(24, 1).expect("grid"),
+            12.0,
+        );
+        for args in [&hls, &vod] {
+            let input_position = args.iter().position(|arg| arg == "-i").expect("input");
+            let method = args
+                .windows(2)
+                .position(|pair| pair == ["-hwaccel", "drm"])
+                .expect("DRM input");
+            assert!(method < input_position);
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-hwaccel_output_format", "drm_prime"]));
+            let vf = args
+                .windows(2)
+                .find(|pair| pair[0] == "-vf")
+                .expect("filter graph");
+            let transfer = format!(
+                "hwdownload,format={}",
+                input.pixel_format().expect("format")
+            );
+            let download_position = vf[1].find(&transfer).expect("depth-preserving download");
+            let scale_position = vf[1].find("scale=").expect("CPU scale");
+            assert!(download_position < scale_position, "{}", vf[1]);
+            assert_eq!(vf[1].matches("hwdownload").count(), 1);
+            assert!(args.windows(2).any(|pair| pair == ["-c:v", "libx264"]));
+            assert!(!args
+                .iter()
+                .any(|arg| arg == "hevc_v4l2request" || arg == "v4l2_request"));
+        }
+    }
+}
+
+#[test]
+fn request_decode_requires_proven_identity_transform_even_for_continuations() {
+    let base = video(
+        0,
+        Some("hevc"),
+        Some("Main"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    );
+    let upright = facts(base.clone());
+    assert!(upright.normalization_transform_known());
+    assert_eq!(upright.rotation_degrees(), Some(0));
+    let mut rotated = base.clone();
+    rotated["tags"] = json!({"rotate": "90"});
+    let mut mirrored = base.clone();
+    mirrored["side_data_list"] = json!([{"side_data_type": "Display Matrix", "rotation": 0,
+        "displaymatrix": "00000000: -65536 0 0\n00000001: 0 65536 0\n00000002: 0 0 1073741824"}]);
+    let mut unknown = base;
+    unknown["side_data_list"] = json!([{"side_data_type": "Display Matrix"}]);
+    for stream in [rotated, mirrored, unknown] {
+        let input = facts(stream);
+        let plan = resolve(
+            Encoder::Software,
+            Pipeline::Cpu,
+            &input,
+            &operational_request_caps(8),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("software keeps autorotation ownership");
+        assert_eq!(plan.decode().backend(), DecodeBackend::Software);
+        let required = resolve_transcode(
+            &TranscodeRequest::new(Encoder::Software, options(Pipeline::Cpu)),
+            &input,
+            &operational_request_caps(8),
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::requiring(DecodeBackend::V4l2Request),
+        );
+        assert!(matches!(required, Err(PlanError::IncompatibleRenderer)));
     }
 }

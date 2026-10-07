@@ -18,7 +18,7 @@ import re
 # output, so every line still carries its leading `+`.
 TEST_ADDITION_RE = re.compile(
     r"^\+.*(?:#\[test\]|func test|@Test|assert(?:_eq|_ne)?!|XCTAssert|expect\(|"
-    r"test\(|describe\(|it\(|\.golden)",
+    r"test\(|\basyncTest\s*\(|describe\(|it\(|\.golden)",
     re.MULTILINE,
 )
 
@@ -58,8 +58,8 @@ _DECLARATION_TEMPLATE = (
 _NAME_IS_THE_MARKER = frozenset({"func", "def"})
 
 # A Node suite names its test in a string literal: `it("…")`, `test("…")`,
-# `describe("…")`.
-_NODE_TEMPLATE = r"(?:^|\W)(?:it|test|describe)\s*\(\s*(['\"`]){name}\1"
+# `describe("…")`, or the repository's queued `asyncTest("…")` harness.
+_NODE_TEMPLATE = r"(?:^|\W)(?:it|test|describe|asyncTest)\s*\(\s*(['\"`]){name}\1"
 
 # How far above a declaration its marker may sit. Doc comments and `#[cfg]`
 # attributes routinely separate `#[test]` from `fn`, and a wrapped

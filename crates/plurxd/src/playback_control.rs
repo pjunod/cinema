@@ -5333,6 +5333,8 @@ pub(crate) enum CopyProducerExitClassification {
 pub(crate) enum ProducerStartupKind {
     Hardware,
     Software,
+    /// Request hardware decode with CPU encoding; keep the software startup budget.
+    HardwareDecodeSoftwareEncode,
     /// A hardware encoder fed by software decode and software filters. It
     /// starts on the software budget rather than the hardware one, because the
     /// slow part of a start is the decode, not the encoder — and calling it
@@ -5347,7 +5349,9 @@ impl ProducerStartupKind {
     pub(crate) fn startup_budget(self) -> Duration {
         match self {
             Self::Hardware => PREPUBLICATION_HARDWARE_STARTUP_BUDGET,
-            Self::Software | Self::MixedSoftwareDecode => PREPUBLICATION_SOFTWARE_STARTUP_BUDGET,
+            Self::Software | Self::MixedSoftwareDecode | Self::HardwareDecodeSoftwareEncode => {
+                PREPUBLICATION_SOFTWARE_STARTUP_BUDGET
+            }
             Self::Copy => PREPUBLICATION_COPY_STARTUP_BUDGET,
         }
     }
@@ -5356,6 +5360,7 @@ impl ProducerStartupKind {
         match self {
             Self::Hardware => "hardware",
             Self::Software => "software",
+            Self::HardwareDecodeSoftwareEncode => "hardware_decode_software_encode",
             Self::MixedSoftwareDecode => "mixed-software-decode",
             Self::Copy => "copy",
         }
@@ -5393,9 +5398,9 @@ pub(crate) struct InitialProducerPolicy {
     /// *source that did not decode* asks for, and choosing between them is the
     /// decision's job rather than the policy's.
     ///
-    /// `None` on every session whose executor could not build one — a software
-    /// encoder has no hardware slot to keep, and a delivery that already
-    /// decodes in software has no alternate at all.
+    /// `None` on every session whose executor could not build one, including
+    /// a delivery that already decodes in software. A software encoder may
+    /// still have a hardware decoder to replace.
     pub decode_alternate: Option<ValidatedRetryRecipe>,
     pub presentation_contract_fingerprint: String,
     exit_classifier: ProducerExitClassifier,
@@ -5405,7 +5410,7 @@ pub(crate) struct InitialProducerPolicy {
 }
 
 impl InitialProducerPolicy {
-    /// A hardware-encoder policy, told which of the two shapes this is.
+    /// A policy for a hardware stage, told the resolved decode/encode shape.
     ///
     /// A hardware encoder fed by a software decode starts on the software
     /// budget, because the slow part of that start is the decode: calling it
@@ -5542,7 +5547,9 @@ impl InitialProducerPolicy {
                     self.retry_recipe.is_some(),
                 ),
                 (
-                    ProducerStartupKind::Hardware | ProducerStartupKind::MixedSoftwareDecode,
+                    ProducerStartupKind::Hardware
+                        | ProducerStartupKind::MixedSoftwareDecode
+                        | ProducerStartupKind::HardwareDecodeSoftwareEncode,
                     ProducerExitClassifier::Immediate,
                     ProducerRetryEligibility::AnyPrepublicationFailure,
                     true,

@@ -286,7 +286,7 @@ impl TranscodeManager {
         let decoders = self.decoders.clone();
         let capabilities = DecodeCapabilities::new(
             identity,
-            Vec::new(),
+            self.measured_decoders.operational_request_capabilities(),
             decoders
                 .into_iter()
                 // A measured name, or none — never the family. This node's

@@ -166,6 +166,7 @@ pub enum DecodeBackend {
     Cuda,
     Qsv,
     Vaapi,
+    V4l2Request,
 }
 
 impl DecodeBackend {
@@ -176,7 +177,40 @@ impl DecodeBackend {
             Self::Cuda => "cuda",
             Self::Qsv => "qsv",
             Self::Vaapi => "vaapi",
+            Self::V4l2Request => "v4l2_request",
         }
+    }
+
+    /// FFmpeg's method name, independently of the durable backend identity.
+    pub fn hwaccel_method(self) -> &'static str {
+        match self {
+            Self::Software => "none",
+            Self::V4l2Request => "drm",
+            _ => self.name(),
+        }
+    }
+
+    pub fn hardware_frame_format(self) -> Option<&'static str> {
+        match self {
+            Self::Software => None,
+            Self::VideoToolbox => Some("videotoolbox_vld"),
+            Self::Cuda => Some("cuda"),
+            Self::Qsv => Some("qsv"),
+            Self::Vaapi => Some("vaapi"),
+            Self::V4l2Request => Some("drm_prime"),
+        }
+    }
+
+    /// Shared by startup probes and production; optional implicit output is
+    /// retained for the existing CUDA and VideoToolbox production paths.
+    pub fn input_args(self, explicit_hardware_frames: bool) -> Vec<String> {
+        let mut args = vec!["-hwaccel".into(), self.hwaccel_method().into()];
+        if explicit_hardware_frames {
+            if let Some(format) = self.hardware_frame_format() {
+                args.extend(["-hwaccel_output_format".into(), format.into()]);
+            }
+        }
+        args
     }
 
     /// Every backend, in declaration order.
@@ -185,12 +219,13 @@ impl DecodeBackend {
     /// so it is checked by a test that matches exhaustively over the variants:
     /// adding one fails to compile there, and the arm it makes you write is
     /// the reminder to extend this list and [`Self::parse`] with it.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Software,
         Self::VideoToolbox,
         Self::Cuda,
         Self::Qsv,
         Self::Vaapi,
+        Self::V4l2Request,
     ];
 
     /// The exact inverse of [`Self::name`], and no more than that.
@@ -225,6 +260,7 @@ impl DecodeBackend {
             "cuda" => Some(Self::Cuda),
             "qsv" => Some(Self::Qsv),
             "vaapi" => Some(Self::Vaapi),
+            "v4l2_request" => Some(Self::V4l2Request),
             _ => None,
         }
     }
@@ -236,6 +272,7 @@ impl DecodeEvidence {
     pub fn name(self) -> &'static str {
         match self {
             Self::Qualified => "qualified_selection",
+            Self::Operational => "operational_selection",
             Self::LegacyUnverified => "legacy_unverified_selection",
         }
     }
@@ -247,6 +284,8 @@ impl DecodeEvidence {
 #[serde(rename_all = "snake_case")]
 pub enum DecodeEvidence {
     Qualified,
+    /// Startup decoded, transferred and encoded this class; no performance or health qualification.
+    Operational,
     LegacyUnverified,
 }
 
@@ -256,6 +295,8 @@ pub enum DecodeEvidence {
 pub enum CapabilityStatus {
     Unavailable,
     Advertised,
+    /// A bounded production-shaped probe succeeded, without a qualified envelope.
+    Operational,
     Qualified,
     Rejected,
 }
@@ -308,6 +349,7 @@ pub enum DecodeReason {
 #[serde(rename_all = "snake_case")]
 pub enum FrameDomain {
     SystemMemory,
+    DrmPrime,
     Qsv,
     Vaapi,
     Vulkan,
@@ -318,6 +360,7 @@ impl FrameDomain {
     fn name(self) -> &'static str {
         match self {
             Self::SystemMemory => "system_memory",
+            Self::DrmPrime => "drm_prime",
             Self::Qsv => "qsv",
             Self::Vaapi => "vaapi",
             Self::Vulkan => "vulkan",
@@ -3055,6 +3098,34 @@ pub fn resolve_transcode(
     };
 
     let (mut preferred, mut reason) = preferred_backend(request.encoder, options.pipeline, facts);
+    // Request decode is independent of the encoder. Require the exact known
+    // class and CPU transfer exercised at startup; generic DRM advertisement
+    // must never inherit Legacy's speculative hardware admission.
+    if request.encoder == Encoder::Software
+        && options.pipeline == Pipeline::Cpu
+        && facts.normalization_transform_known()
+        && facts.rotation_degrees() == Some(0)
+        && matches!(facts.codec(), Some("hevc"))
+        && matches!(
+            (facts.profile(), facts.pixel_format(), facts.bit_depth()),
+            (Some("main"), Some("yuv420p"), Some(8))
+                | (Some("main 10"), Some("yuv420p10le"), Some(10))
+        )
+    {
+        let surface = surface_contract(
+            DecodeBackend::V4l2Request,
+            options.pipeline,
+            facts,
+            request.encoder,
+            subtitle_rendering,
+        );
+        if capabilities.status(DecodeBackend::V4l2Request, facts, &surface)
+            == CapabilityStatus::Operational
+        {
+            preferred = DecodeBackend::V4l2Request;
+            reason = DecodeReason::MeasuredPreference;
+        }
+    }
     if let Some(required) = restrictions.required {
         preferred = required;
         reason = DecodeReason::ContinuationRestriction;
@@ -3075,6 +3146,19 @@ pub fn resolve_transcode(
     } else if request.encoder == Encoder::VideoToolbox && codec == "mpeg4" {
         if !restrictions.permits(DecodeBackend::Software) {
             return Err(PlanError::IncompatibleRestriction);
+        }
+        preferred = DecodeBackend::Software;
+        reason = DecodeReason::CompatibilityExclusion;
+    }
+
+    // FFmpeg skips autorotation on opaque hardware frames. The initial
+    // request path has no post-download transform, including continuations:
+    // scalar zero alone cannot rule out a mirrored or malformed matrix.
+    if preferred == DecodeBackend::V4l2Request
+        && (!facts.normalization_transform_known() || facts.rotation_degrees() != Some(0))
+    {
+        if restrictions.required == Some(DecodeBackend::V4l2Request) {
+            return Err(PlanError::IncompatibleRenderer);
         }
         preferred = DecodeBackend::Software;
         reason = DecodeReason::CompatibilityExclusion;
@@ -3111,15 +3195,25 @@ pub fn resolve_transcode(
         );
         match capabilities.status(preferred, facts, &preferred_surface) {
             CapabilityStatus::Qualified => (preferred, DecodeEvidence::Qualified, reason),
-            CapabilityStatus::Advertised if policy.plan_policy() == DecodePlanPolicy::Legacy => {
+            CapabilityStatus::Operational if policy.plan_policy() == DecodePlanPolicy::Legacy => {
+                (preferred, DecodeEvidence::Operational, reason)
+            }
+            CapabilityStatus::Advertised
+                if policy.plan_policy() == DecodePlanPolicy::Legacy
+                    && preferred != DecodeBackend::V4l2Request =>
+            {
                 (preferred, DecodeEvidence::LegacyUnverified, reason)
             }
-            CapabilityStatus::Unavailable if policy.plan_policy() == DecodePlanPolicy::Legacy => {
+            CapabilityStatus::Unavailable
+                if policy.plan_policy() == DecodePlanPolicy::Legacy
+                    && preferred != DecodeBackend::V4l2Request =>
+            {
                 // The old route inferred hardware decode from the encoder and
                 // did not carry an independent input capability inventory.
                 (preferred, DecodeEvidence::LegacyUnverified, reason)
             }
             CapabilityStatus::Rejected
+            | CapabilityStatus::Operational
             | CapabilityStatus::Unavailable
             | CapabilityStatus::Advertised => {
                 if !restrictions.permits(DecodeBackend::Software) {
@@ -3439,6 +3533,7 @@ fn software_evidence(
         }
         CapabilityStatus::Unavailable
         | CapabilityStatus::Advertised
+        | CapabilityStatus::Operational
         | CapabilityStatus::Rejected => {
             Err(PlanError::CapabilityUnavailable(DecodeBackend::Software))
         }
@@ -3492,6 +3587,7 @@ fn surface_contract(
     let decode_domain = match backend {
         DecodeBackend::Qsv => FrameDomain::Qsv,
         DecodeBackend::Vaapi => FrameDomain::Vaapi,
+        DecodeBackend::V4l2Request => FrameDomain::DrmPrime,
         DecodeBackend::Software | DecodeBackend::VideoToolbox | DecodeBackend::Cuda => {
             FrameDomain::SystemMemory
         }
@@ -3504,12 +3600,15 @@ fn surface_contract(
                 Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi
             )
     );
-    let decoder_download_format =
-        if matches!(decode_domain, FrameDomain::Qsv | FrameDomain::Vaapi) && !vendor_native {
-            Some(if ten_bit { "p010le" } else { "nv12" }.to_owned())
-        } else {
-            None
-        };
+    let decoder_download_format = if decode_domain == FrameDomain::DrmPrime {
+        // The Pi FFmpeg DRM transfer converts SAND to planar 4:2:0;
+        // preserve Main10 rather than requesting its lossy NV12 option.
+        Some(if ten_bit { "yuv420p10le" } else { "yuv420p" }.to_owned())
+    } else if matches!(decode_domain, FrameDomain::Qsv | FrameDomain::Vaapi) && !vendor_native {
+        Some(if ten_bit { "p010le" } else { "nv12" }.to_owned())
+    } else {
+        None
+    };
     let renderer_domain = match pipeline {
         Pipeline::VppQsv => FrameDomain::Qsv,
         Pipeline::TonemapVaapi => FrameDomain::Vaapi,
@@ -3527,7 +3626,10 @@ fn surface_contract(
             .clone()
             .or_else(|| facts.pixel_format.clone()),
         FrameDomain::OpenCl => Some("p010le".to_owned()),
-        FrameDomain::Qsv | FrameDomain::Vaapi | FrameDomain::SystemMemory => None,
+        FrameDomain::Qsv
+        | FrameDomain::Vaapi
+        | FrameDomain::SystemMemory
+        | FrameDomain::DrmPrime => None,
     };
     let renderer_download_format = match pipeline {
         Pipeline::Libplacebo => Some("nv12".to_owned()),
@@ -3568,7 +3670,13 @@ fn surface_contract(
             Some("p010le".to_owned())
         }
         Some(FrameDomain::Qsv | FrameDomain::Vaapi) => Some("nv12".to_owned()),
-        Some(FrameDomain::SystemMemory | FrameDomain::Vulkan | FrameDomain::OpenCl) | None => None,
+        Some(
+            FrameDomain::SystemMemory
+            | FrameDomain::Vulkan
+            | FrameDomain::OpenCl
+            | FrameDomain::DrmPrime,
+        )
+        | None => None,
     };
     DecodeSurfaceContract {
         decode_domain,
