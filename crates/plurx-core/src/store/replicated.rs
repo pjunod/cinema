@@ -719,7 +719,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "sessions.rs",
-        method: "activate_media_session",
+        method: "activate_with_authority",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -796,7 +796,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "sessions.rs",
-        method: "renew_media_sessions",
+        method: "renew_with_authority",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
@@ -1172,14 +1172,20 @@ mod tests {
     fn method_source(site: &SqliteTransactionSite) -> &'static str {
         let source = source_for(site.module);
         let keyword = if site.is_async { "async fn" } else { "fn" };
-        let declaration = format!("    {keyword} {}", site.method);
+        let declaration = format!("{keyword} {}", site.method);
         let start = source
             .match_indices(&declaration)
             .find_map(|(start, _)| {
-                matches!(
-                    source.as_bytes().get(start + declaration.len()),
-                    Some(b'(' | b'<')
-                )
+                (source[..start]
+                    .rsplit('\n')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                    && matches!(
+                        source.as_bytes().get(start + declaration.len()),
+                        Some(b'(' | b'<')
+                    ))
                 .then_some(start)
             })
             .unwrap_or_else(|| {
@@ -1189,9 +1195,10 @@ mod tests {
                 )
             });
         let tail = &source[start + declaration.len()..];
-        let next_async = tail.find("\n    async fn ");
-        let next_sync = tail.find("\n    fn ");
-        let end = [next_async, next_sync]
+        // Classify the actual boundary owner, including the shared free
+        // activation/renewal helpers, rather than their delegating methods.
+        let end = ["\n    async fn ", "\n    fn ", "\nasync fn ", "\nfn "]
+            .map(|declaration| tail.find(declaration))
             .into_iter()
             .flatten()
             .min()

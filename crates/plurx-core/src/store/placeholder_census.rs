@@ -657,6 +657,65 @@ fn principal_bindings(
             continue;
         };
         let name = tail[..equals].trim();
+        let expression_start = start + 4 + equals + 1;
+        let expression_end = prefix[expression_start..]
+            .find(';')
+            .map_or(prefix.len(), |at| expression_start + at);
+        let expression = prefix[expression_start..expression_end].trim();
+        // A closure definition supplies a helper, not a call with its bound
+        // parameter. Its literal arguments are resolved at the actual calls.
+        if expression.starts_with('|') {
+            continue;
+        }
+        if name.starts_with('(') {
+            if let Some(close) = name.find(')') {
+                let names = name[1..close].split(',').map(str::trim).collect::<Vec<_>>();
+                let principal_tuple = matches!(
+                    names.as_slice(),
+                    ["owner_column", "owner"]
+                        | ["columns", "values", "conflict", "owner_exists"]
+                        | ["columns", "values", "conflict"]
+                        | ["owner_columns", "owner_values", "conflict"]
+                        | ["projection", "owner", "identity"]
+                );
+                if principal_tuple && expression.starts_with("if ") {
+                    let arms =
+                        tuple_binding_arguments(source, is_code, expression_start, expression_end);
+                    assert_eq!(
+                        arms.len(),
+                        2,
+                        "principal tuple must enumerate both observed layouts"
+                    );
+                    assert!(
+                        arms.iter().all(|arm| arm.len() == names.len()),
+                        "principal tuple arity"
+                    );
+                    for (index, binding) in names.iter().enumerate() {
+                        let choices = arms
+                            .iter()
+                            .map(|arm| {
+                                let argument = arm[index].trim();
+                                literals
+                                    .iter()
+                                    .find(|value| {
+                                        value.start >= expression_start
+                                            && value.end <= expression_end
+                                            && source[value.start..value.end] == *argument
+                                    })
+                                    .map(|value| value.text.clone())
+                            })
+                            .collect::<Option<Vec<_>>>();
+                        if let Some(choices) = choices {
+                            bindings.push((
+                                (*binding).to_owned(),
+                                vec![choices[usize::from(!rebuilt)].clone()],
+                            ));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         if name.is_empty()
             || !name
                 .bytes()
@@ -664,11 +723,6 @@ fn principal_bindings(
         {
             continue;
         }
-        let expression = tail[equals + 1..]
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim();
         let expression_literals = prior
             .iter()
             .filter(|value| {
@@ -842,7 +896,17 @@ fn positional_format_arguments<'a>(
     if bytes.get(at) != Some(&b',') {
         return Vec::new();
     }
-    at += 1;
+    parenthesis_arguments(source, is_code, at + 1).0
+}
+
+/// Shared delimiter walk for the actual format arguments and the six finite
+/// principal-layout tuple bindings. It never reads past this parenthesis.
+fn parenthesis_arguments<'a>(
+    source: &'a str,
+    is_code: &[bool],
+    mut at: usize,
+) -> (Vec<&'a str>, usize) {
+    let bytes = source.as_bytes();
     let mut start = at;
     let mut depth = 0usize;
     let mut arguments = Vec::new();
@@ -854,10 +918,10 @@ fn positional_format_arguments<'a>(
                     if !source[start..at].trim().is_empty() {
                         arguments.push(&source[start..at]);
                     }
-                    return arguments;
+                    return (arguments, at);
                 }
                 b')' | b']' | b'}' => {
-                    depth = depth.checked_sub(1).expect("balanced format arguments")
+                    depth = depth.checked_sub(1).expect("balanced principal arguments")
                 }
                 b',' if depth == 0 => {
                     arguments.push(&source[start..at]);
@@ -868,7 +932,31 @@ fn positional_format_arguments<'a>(
         }
         at += 1;
     }
-    panic!("unterminated positional format arguments");
+    panic!("unterminated principal arguments");
+}
+
+fn tuple_binding_arguments<'a>(
+    source: &'a str,
+    is_code: &[bool],
+    mut at: usize,
+    end: usize,
+) -> Vec<Vec<&'a str>> {
+    let bytes = source.as_bytes();
+    let mut arms = Vec::new();
+    while let Some(open) = (at..end).find(|&index| is_code[index] && bytes[index] == b'{') {
+        let tuple = (open + 1..end)
+            .find(|&index| is_code[index] && !bytes[index].is_ascii_whitespace())
+            .expect("principal tuple arm");
+        assert_eq!(
+            bytes[tuple], b'(',
+            "principal layout branch must return an explicit tuple"
+        );
+        let (arguments, close) = parenthesis_arguments(source, is_code, tuple + 1);
+        assert!(close < end, "tuple remains in its binding");
+        arms.push(arguments);
+        at = close + 1;
+    }
+    arms
 }
 
 fn principal_templates(

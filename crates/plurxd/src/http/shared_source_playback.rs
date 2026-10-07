@@ -2113,6 +2113,27 @@ async fn fixture_start(
     ))
 }
 #[cfg(test)]
+pub(super) struct SourceFixtureMembershipOwner(tokio::task::JoinHandle<()>);
+#[cfg(test)]
+impl SourceFixtureMembershipOwner {
+    pub(super) fn start(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
+        Self(tokio::spawn(membership.heartbeat_loop()))
+    }
+    pub(super) async fn finish(&mut self) {
+        self.0.abort();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(15), &mut self.0)
+            .await
+            .expect("finite production membership owner join");
+        assert!(stopped.is_err_and(|error| error.is_cancelled()));
+    }
+}
+#[cfg(test)]
+impl Drop for SourceFixtureMembershipOwner {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+#[cfg(test)]
 pub(crate) struct RealSourceStartFixture {
     pub state: std::sync::Arc<crate::state::AppState>,
     pub reference: SourcePlaybackTarget,
@@ -2122,6 +2143,7 @@ pub(crate) struct RealSourceStartFixture {
     invitation: SourceFixtureInvitation,
     selected: plurx_core::cluster::migration::SelectedStore,
     startup_clock: Option<std::sync::Arc<crate::StartupObservationHttp>>,
+    membership_owner: SourceFixtureMembershipOwner,
     _directory: tempfile::TempDir,
 }
 #[cfg(test)]
@@ -2171,7 +2193,8 @@ impl RealSourceStartFixture {
             expires_at_ms: self.invitation.expires_at_ms,
         })
     }
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
+        self.membership_owner.finish().await;
         if let Some(clock) = &self.startup_clock {
             clock.stop_and_drain().await;
         }
@@ -2334,6 +2357,7 @@ async fn build_real_source_start_fixture(
         .await
         .expect("actual registry boot publication before admission");
 
+    let membership_owner = SourceFixtureMembershipOwner::start(state.membership.clone());
     let store = Arc::clone(&state.store);
     store
         .put_setting(keys::SW_POOL_THREADS, "4")
@@ -2749,6 +2773,7 @@ async fn build_real_source_start_fixture(
         },
         selected,
         startup_clock,
+        membership_owner,
         _directory: directory,
     }
 }
@@ -3626,6 +3651,26 @@ mod tests {
                     serde_json::to_vec(&recipe).expect("request"),
                 )
                 .await;
+                if response.status() != StatusCode::OK {
+                    let status = response.status();
+                    let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+                        .await
+                        .expect("bounded failed resource body");
+                    let retained = fixture
+                        .state
+                        .transcode
+                        .hls_session_status(&decoded.response().session_id)
+                        .await;
+                    let retained = serde_json::to_value(&retained)
+                        .expect("retained HLS diagnostic serialization");
+                    let members = fixture
+                        .state
+                        .membership
+                        .observe_source_admission_members()
+                        .await;
+                    panic!("actual Source resource {resource} h2={h2} refused: {status}; body={}; retained={retained:?}; current_member_floor={:?}",
+                        String::from_utf8_lossy(&body), members.as_ref().map(|value| value.is_some()));
+                }
                 assert_eq!(response.status(), StatusCode::OK);
                 assert_eq!(response.headers()["cinemashare-resource"], resource);
                 let len = response.headers()["content-length"]

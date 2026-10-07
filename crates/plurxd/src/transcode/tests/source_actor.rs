@@ -111,15 +111,12 @@ async fn source_unknown_local_register_actual_closure_and_exact_ack_clear_pendin
 async fn source_copy_preadmission_fixture(mode: u8) {
     use crate::http::hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget};
     use plurx_core::{
-        cluster::membership::*,
         config::Config,
         domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
         sharing::{new_secret, secret_hash, InvitationRecord, SecretDomain, ShareClaim, SourceId},
         sharing_catalogue_details::CatalogueRevisionKey,
         sharing_source_sessions::*,
-        store::{
-            media_session_principal_rebuild_schema, sharing_catalogue_details::SourceDetailsRead,
-        },
+        store::sharing_catalogue_details::SourceDetailsRead,
     };
     let directory = crate::test_tempdir().expect("actual Source root");
     eprintln!("Source fixture: actual standalone selection");
@@ -131,9 +128,17 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
-    let selected = source_fixture_store(&config)
+    let mut selected = source_fixture_store(&config)
         .await
         .expect("actual standalone voter");
+    selected
+        .store
+        .put_setting(keys::SHARING_ENABLED, "true")
+        .await
+        .expect("saved Source choice before startup");
+    assert!(Box::pin(selected.prepare_source_schema_before_serving())
+        .await
+        .expect("actual Source startup coordinator"));
     let client = selected.local_client().expect("actual local client");
     let master = Arc::clone(&selected.credential_key);
     let membership = selected.membership_manager();
@@ -181,22 +186,6 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .await
         .expect("library")
         .id;
-    let mut ddl = plurx_core::store::sharing_catalogue_source::candidate_statements();
-    ddl.extend(plurx_core::store::sharing_catalogue_source::candidate_item_identity_statements());
-    ddl.push(plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA.into());
-    ddl.extend(
-        media_session_principal_rebuild_schema()
-            .split("-- next statement\n")
-            .map(|sql| sql.trim().trim_end_matches(';').to_owned()),
-    );
-    ddl.extend(plurx_core::store::sharing_source_sessions::candidate_statements());
-    ddl.extend(sharing_member_admission_guard_schema());
-    for sql in ddl {
-        client
-            .execute(sql, hiqlite::params!())
-            .await
-            .expect("exact candidate fixture installation");
-    }
     let item = store
         .insert_item(&NewItem {
             library_id: library,
@@ -316,23 +305,16 @@ async fn source_copy_preadmission_fixture(mode: u8) {
             .await
             .expect("actual embedded subtitle facts");
     }
-    let envelope =
-        CatalogueRevisionKey::generate_sealed(&master, identity.clone()).expect("Source key");
-    let key = CatalogueRevisionKey::open(&master, identity.clone(), &envelope).expect("open key");
-    client
-        .execute(
-            "INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3)",
-            hiqlite::params!(
-                identity.server_id.to_string(),
-                identity.catalogue_epoch.to_string(),
-                envelope.as_stored().to_owned()
-            ),
-        )
+    let envelope = store
+        .source_catalogue_revision_key(identity.server_id, identity.catalogue_epoch)
         .await
-        .expect("actual sealed key");
+        .expect("installed Source key read")
+        .expect("startup-owned Source key");
+    let key = CatalogueRevisionKey::open(&master, identity.clone(), &envelope)
+        .expect("open startup-owned Source key");
     // A raw legacy heartbeat withdraws every capability, including this
     // process's actual ingress registry boot. Publish the canonical heartbeat
-    // after candidate DDL instead of reconstructing a partial capability set.
+    // after Source startup instead of reconstructing a partial capability set.
     membership
         .publish_ingress_custody_boot()
         .await
