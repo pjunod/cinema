@@ -157,7 +157,9 @@ class DockerHardwareTests(unittest.TestCase):
 
     def test_unrelated_devices_do_not_suppress_hybrid_gpu_detection(self):
         self.nodes()
-        value = self.overlay({"devices": [{"source": "/dev/dvb", "target": "/dev/dvb"}]}, nvidia=True)
+        value = self.overlay(
+            {"devices": [{"source": "/dev/dvb", "target": "/dev/dvb"}]}, nvidia=True
+        )
         self.assertIn("devices", value)
         self.assertIn("deploy", value)
 
@@ -165,7 +167,17 @@ class DockerHardwareTests(unittest.TestCase):
         self.nodes()
         for service in (
             {"gpus": [{"driver": "nvidia", "device_ids": ["GPU-chosen"]}]},
-            {"deploy": {"resources": {"reservations": {"devices": [{"driver": "nvidia", "device_ids": ["GPU-chosen"]}]}}}},
+            {
+                "deploy": {
+                    "resources": {
+                        "reservations": {
+                            "devices": [
+                                {"driver": "nvidia", "device_ids": ["GPU-chosen"]}
+                            ]
+                        }
+                    }
+                }
+            },
         ):
             value = self.overlay(service, nvidia=True)
             self.assertNotIn("devices", value)
@@ -176,17 +188,48 @@ class DockerHardwareTests(unittest.TestCase):
     def test_explicit_dri_and_cdi_do_not_require_legacy_nvidia_hook(self):
         (self.root / "docker-compose.yml").touch()
         for source in ("/dev/dri/renderD129", "nvidia.com/gpu=GPU-chosen"):
-            calls = mock.Mock(side_effect=["", json.dumps({"services": {"plurxd": {"devices": [{"source": source, "target": source}]}}})])
-            probe = mock.Mock(side_effect=AssertionError("explicit GPU must not probe NVIDIA"))
-            with mock.patch("pathlib.Path.cwd", return_value=self.root), mock.patch.dict(GLOBALS, run=calls, local_linux_engine=lambda: True, nvidia_available=probe):
+            calls = mock.Mock(
+                side_effect=[
+                    "",
+                    json.dumps(
+                        {
+                            "services": {
+                                "plurxd": {
+                                    "devices": [{"source": source, "target": source}]
+                                }
+                            }
+                        }
+                    ),
+                ]
+            )
+            probe = mock.Mock(
+                side_effect=AssertionError("explicit GPU must not probe NVIDIA")
+            )
+            with mock.patch(
+                "pathlib.Path.cwd", return_value=self.root
+            ), mock.patch.dict(
+                GLOBALS,
+                run=calls,
+                local_linux_engine=lambda: True,
+                nvidia_available=probe,
+            ):
                 HELPER["prepare"](self.root / "generated.json")
             probe.assert_not_called()
 
     def test_automatic_nvidia_without_toolkit_reports_actionable_error(self):
         (self.root / "docker-compose.yml").touch()
         calls = mock.Mock(side_effect=["", json.dumps({"services": {"plurxd": {}}})])
-        with mock.patch("pathlib.Path.cwd", return_value=self.root), mock.patch("shutil.which", return_value=None), mock.patch.dict(GLOBALS, run=calls, local_linux_engine=lambda: True, nvidia_available=lambda: True):
-            with self.assertRaisesRegex(HELPER["HardwareError"], "NVIDIA Container Toolkit"):
+        with mock.patch("pathlib.Path.cwd", return_value=self.root), mock.patch(
+            "shutil.which", return_value=None
+        ), mock.patch.dict(
+            GLOBALS,
+            run=calls,
+            local_linux_engine=lambda: True,
+            nvidia_available=lambda: True,
+        ):
+            with self.assertRaisesRegex(
+                HELPER["HardwareError"], "NVIDIA Container Toolkit"
+            ):
                 HELPER["prepare"](self.root / "generated.json")
 
     def test_symlinked_compose_base_keeps_lexical_project_directory(self):
@@ -195,7 +238,10 @@ class DockerHardwareTests(unittest.TestCase):
         (shared / "base.yml").touch()
         (self.root / "docker-compose.yml").symlink_to(shared / "base.yml")
         for environment in ({}, {"COMPOSE_FILE": "docker-compose.yml"}):
-            self.assertEqual(HELPER["compose_files"](environment, self.root), [str(self.root / "docker-compose.yml")])
+            self.assertEqual(
+                HELPER["compose_files"](environment, self.root),
+                [str(self.root / "docker-compose.yml")],
+            )
 
     def test_manual_mode_uses_compose_env_precedence_and_does_not_probe(self):
         (self.root / "docker-compose.yml").touch()

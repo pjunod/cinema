@@ -92,23 +92,39 @@ def nvidia_available() -> bool:
 
 
 def device_source(device: dict | str) -> str:
-    return device.get("source", "") if isinstance(device, dict) else str(device).split(":")[0]
+    return (
+        device.get("source", "")
+        if isinstance(device, dict)
+        else str(device).split(":")[0]
+    )
 
 
 def gpu_selection(service: dict, dri: Path) -> tuple[bool, bool]:
     """Explicit GPU choices suppress discovery, but unrelated devices do not."""
-    requests = service.get("deploy", {}).get("resources", {}).get("reservations", {}).get("devices") or []
-    nvidia = bool(service.get("gpus")) or service.get("runtime") == "nvidia" or any(
-        request.get("driver") == "nvidia" for request in requests
+    requests = (
+        service.get("deploy", {})
+        .get("resources", {})
+        .get("reservations", {})
+        .get("devices")
+        or []
     )
-    selected = nvidia or any("gpu" in request.get("capabilities", []) for request in requests)
+    nvidia = (
+        bool(service.get("gpus"))
+        or service.get("runtime") == "nvidia"
+        or any(request.get("driver") == "nvidia" for request in requests)
+    )
+    selected = nvidia or any(
+        "gpu" in request.get("capabilities", []) for request in requests
+    )
     for device in service.get("devices") or []:
         source = device_source(device)
         target = device.get("target", "") if isinstance(device, dict) else source
         if source.startswith(("nvidia.com/gpu=", "/dev/nvidia")):
             nvidia = True
             selected = True
-        if any(Path(name) == dri or dri in Path(name).parents for name in (source, target)):
+        if any(
+            Path(name) == dri or dri in Path(name).parents for name in (source, target)
+        ):
             selected = True
     return selected, nvidia
 
@@ -201,7 +217,7 @@ def prepare(output: Path) -> str:
             file=sys.stderr,
         )
     output.write_text(json.dumps(overlay) + "\n", encoding="utf-8")
-    files.append(str(output.resolve()))
+    files.append(os.path.abspath(output))
     if any(os.pathsep in name for name in files):
         raise HardwareError("Compose paths must not contain the path-list separator")
     return os.pathsep.join(files)
