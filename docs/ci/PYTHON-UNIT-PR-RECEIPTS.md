@@ -441,3 +441,36 @@ and player-DOM executions are removed; both remain in the unchanged mandatory
 after a Node success the gate must not be dispatched again until the separate
 static-only follow-up or attributable recovery preserves that success. These
 Python receipts do not claim to cache Node tests or exempt their contracts.
+
+
+## Ordinary main-lane continuation
+
+`validation.main_unit_receipts` applies the same source-attribution machinery
+to the main fast lane's validation and operations suites. It imports an
+exhaustive legacy unittest baseline only when exact-source static discovery
+and terminal counts account for every method and every non-success. Subsequent
+journals retain original run/commit attribution; changed methods or local
+fixtures invalidate their own evidence. This is not a claim that every possible
+production dependency change can be inferred from a test's source fingerprint.
+
+Forgejo can remove a run's artifacts when a different job in that run is
+retried. The successful Python job remains attempt 1 and retains its log.
+New main-lane attempts therefore write bounded, checksummed start/final journal
+frames into that log as well as publishing artifacts. Log-only restoration
+requires a successful Python job and a completed final snapshot; partial
+snapshots remain diagnostic evidence, not an automatic failure waiver.
+Restoration authenticates
+the same repository, PR, branch, workflow, source and Python job, and still
+requires original provenance for every inherited success. Framing detects
+truncation or corruption; its checksum does not replace API authentication.
+
+For pre-framing main receipt output, recovery accepts only the reviewed runner
+source digests, a successful attempt-1 Python job and inherited successes from
+older authenticated evidence. Each explicit pending method must resolve to
+immutable method/fixture source in exactly one suite. Discovery and pending
+counts, exhaustive verbose outcomes and terminal summaries must all agree.
+Only explicit successful methods add passes; optional skips do not. Ambiguous,
+incomplete or contradictory evidence stops continuation. Other receipt-policy
+attempts without either artifacts or sufficient authenticated logs remain
+blocking. This does not allow rerunning the Python job itself or replaying an
+entire suite to replace missing evidence.

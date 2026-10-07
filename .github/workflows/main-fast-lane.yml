@@ -166,9 +166,10 @@ jobs:
     # Compile all targets and enforce workspace/vendor Clippy here. The full
     # Rust unit and SQLite suites belong to manual full CI, while each change
     # carries its named, locally run focused regression through preflight.
-    # Cold compilation has exceeded 16 minutes; leave bounded headroom for
-    # provisioning, Clippy, and shared-runner contention.
-    timeout-minutes: 30
+    # A cold run spent 21m36s provisioning before compilation. Budget for
+    # that setup plus all-target checking and both Clippy stages; no tests
+    # are added by this ceiling.
+    timeout-minutes: 60
     steps:
       - name: Install Rust gate prerequisites
         run: |
@@ -221,7 +222,9 @@ jobs:
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container: ubuntu:26.04
-    timeout-minutes: 30
+    # Cold prerequisites/driver setup took 12 minutes before the intentionally
+    # serial all-target build. Keep its memory bound and allow it to finish.
+    timeout-minutes: 60
     steps:
       - name: Install Windows cross-build prerequisites
         run: |

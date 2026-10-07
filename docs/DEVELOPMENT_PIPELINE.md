@@ -285,9 +285,10 @@ When the project is complete:
    `integration/<project>-into-main`; the workflow treats that narrowly named
    branch as the same qualification candidate.
    Forgejo does not auto-cancel these promotion runs when a newer event arrives;
-   it retains the older result for diagnosis. Compile-only effort PRs, ordinary
-   main-bound PRs, and superseded `main` pushes still cancel obsolete work, and
-   immutable tags do not. This is an explicit event-context expression because
+   it retains the older result for diagnosis. Receipt-bearing effort and
+   ordinary main-bound PRs also serialize to preserve Python success evidence.
+   Superseded `main` pushes still cancel obsolete work, and immutable tags do
+   not. The full workflow uses an explicit event-context expression because
    workflow concurrency is evaluated before the scope job exists. The behavior
    follows Forgejo's
    [workflow concurrency contract](https://forgejo.org/docs/latest/user/actions/reference/#concurrency).

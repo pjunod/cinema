@@ -304,3 +304,20 @@ attribution. The PR records the final continuation result.
 The new main base was merged cleanly before qualification. Its integrated
 Rust compilation and Clippy passed; all four decoder regressions passed with
 `hiqlite-store`. This CI work did not start another process on the Pi.
+
+The next main update (#848, `854c206a7`) was integrated and reviewed cleanly;
+Rust 1.97.1 all-target checking, Clippy, formatting and embedded JavaScript
+syntax passed again on that base. Superseded run 4268 had passed Python,
+web, Apple and Android. Its Python evidence totals 301 validation and 733
+operations successes, with two optional skips. Rust and Windows exhausted
+the 30-minute budget without reporting a compiler error: Rust provisioning
+alone took 21m36s. Their ceiling is now 60 minutes, retaining all compile and
+Clippy commands and Windows' serial memory bound.
+
+Individual retries of the failed build jobs removed run 4268's artifacts
+while preserving its successful attempt-1 preflight log. Main Python receipt
+recovery therefore also supports authenticated, bounded log evidence, with
+strict historical runner/source checks for older output. New runs preserve
+framed receipt snapshots in their logs as well as artifacts. Inherited passes
+still require their original authenticated provenance; skips are never passes.
+The live PR records final qualification and merge. No Pi process was restarted.

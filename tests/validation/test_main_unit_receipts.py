@@ -10,6 +10,72 @@ from validation.python_unit_receipts import ReceiptError
 
 
 class MainUnitReceiptsCase(unittest.TestCase):
+    def test_log_snapshots_require_complete_ordered_digest_bound_frames(self):
+        import contextlib
+        import io
+        journal = {'passes': {'validation:test_fixture.Case.test_ok': {'run': 3, 'commit': 'a' * 40}}}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            main.emit_snapshot(journal, 'start')
+            main.emit_snapshot(dict(journal, complete=True), 'final')
+        lines = output.getvalue().splitlines()
+        self.assertEqual(main.read_snapshots(lines)['start'], journal)
+        for invalid in (lines[:-1], lines + lines, [line.replace('CHUNK start 0 ', 'CHUNK start 1 ') for line in lines],
+                        [line + 'A' if line.startswith('MAIN-UNIT-CHUNK') else line for line in lines]):
+            with self.subTest(lines=invalid), self.assertRaises(ReceiptError):
+                main.read_snapshots(invalid)
+
+    def test_verbose_recovery_requires_exact_pending_ids_counts_and_real_ok(self):
+        inherited = {'validation:test_validation.Case.test_cached': {'run': 2, 'commit': 'a' * 40}}
+        inventories = {'validation': set(inherited), 'operations': {
+            'operations:test_operations.Case.test_ok', 'operations:test_operations.Case.test_skip'}}
+        lines = ['test_ok (test_operations.Case.test_ok) ... ok',
+                 'test_skip (test_operations.Case.test_skip)', 'Documentation. ... skipped \'optional\'',
+                 'Ran 2 tests in 0.01s', '', 'OK (skipped=1)',
+                 'validation: discovered=1, historical-passes=1, pending=0',
+                 'operations: discovered=2, historical-passes=0, pending=2']
+        self.assertEqual(main.verbose_passes(lines, inventories, inherited), {'operations:test_operations.Case.test_ok'})
+        for invalid in (lines + lines, lines[1:],
+                        [line.replace('Ran 2', 'Ran 3') for line in lines],
+                        [line.replace('test_operations.Case.test_ok', 'test_other.Case.test_ok') for line in lines],
+                        [line.replace('OK (skipped=1)', 'OK') for line in lines],
+                        [line.replace('historical-passes=1', 'historical-passes=0') for line in lines]):
+            with self.subTest(lines=invalid), self.assertRaises(ReceiptError):
+                main.verbose_passes(invalid, inventories, inherited)
+
+    def test_verbose_recovery_refuses_unadmitted_runner_before_parsing_outcomes(self):
+        api = unittest.mock.Mock()
+        commit = 'a' * 40
+        api.bytes.return_value = (commit + '\n' + commit + '\ntriggered by event: pull_request\n').encode()
+        with patch.object(main, 'source', return_value=b'unsupported runner'), self.assertRaises(ReceiptError):
+            main.recover_log(api, {}, {'id': 3, 'commit_sha': commit}, {'id': 4, 'status': 'success'}, [])
+
+    def test_verbose_recovery_proves_explicit_methods_without_global_helper_inventory(self):
+        commit = 'a' * 40
+        inherited = [('validation:test_validation.Case.test_cached', {'run': 2, 'commit': commit})]
+        log = ('\n'.join([commit, commit, 'triggered by event: pull_request',
+            'test_ok (test_operations.Case.test_ok) ... ok', 'Ran 1 test in 0.01s', 'OK',
+            'validation: discovered=1, historical-passes=1, pending=0',
+            'operations: discovered=1, historical-passes=0, pending=1'])).encode()
+        runner = b'admitted runner'
+        workflow = b'run: python3 -m validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations'
+        class API:
+            def bytes(self, path, query=None):
+                return log if path.endswith('/logs') else workflow if path.endswith(main.WORKFLOW) else runner
+        class Applicability:
+            def __init__(self, *args, **kwargs): pass
+            def __call__(self, test, value): return True
+            def finish(self, passes): pass
+            def fingerprint(self, commit, test):
+                return 'fingerprint' if test == 'operations:test_operations.Case.test_ok' else None
+        with patch.object(main, 'LEGACY_RUNNER_HASHES', {'validation/main_unit_receipts.py': main.hashlib.sha256(runner).hexdigest()}), \
+             patch.object(main, 'source', side_effect=lambda commit, path: workflow if path.endswith(main.WORKFLOW) else runner), \
+             patch.object(main.receipts, 'SourceApplicability', Applicability), \
+             patch.object(main, 'inventory', side_effect=AssertionError('global helper discovery must not run')):
+            journal = main.recover_log(API(), {}, {'id': 3, 'commit_sha': commit}, {'id': 4, 'status': 'success'}, inherited)
+        self.assertEqual(journal['passes']['operations:test_operations.Case.test_ok'], {'run': 3, 'commit': commit})
+        self.assertEqual(journal['passes'][inherited[0][0]], inherited[0][1])
+
     def test_authenticated_partial_journal_preserves_positive_passes(self):
         scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
         commit = 'a' * 40

@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -17,6 +20,11 @@ WORKFLOW = 'main-fast-lane.yml'
 JOB = 'fast policy and contract preflight'
 PATH = Path('.main-python-unit-receipts/receipt.json')
 require = receipts.require
+# Reviewed pre-log-snapshot runner implementations, not run-specific waivers.
+LEGACY_RUNNER_HASHES = {
+    'validation/main_unit_receipts.py': '7b315d5940663e7d26d13bcec889dd16e9c7d4860d5bb708fb7bc4a3c374b6ba',
+    'validation/python_unit_receipts.py': '8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258',
+}
 
 
 def identity(api, pr, commit):
@@ -37,7 +45,7 @@ def key(scope):
 
 def source(commit, path):
     require(re.fullmatch(r'tests/(validation|operations)/test_[a-z0-9_]+\.py', path)
-            or path in ('.github/workflows/' + WORKFLOW, 'Makefile'), 'Unsafe historical source path')
+            or path in ('.github/workflows/' + WORKFLOW, 'Makefile', *LEGACY_RUNNER_HASHES), 'Unsafe historical source path')
     if path.startswith('tests/'):
         return receipts.read_git_test_source(commit, path)
     object_name = f'{receipts.sha(commit)}:{path}'
@@ -223,6 +231,175 @@ def authenticate_run(scope, prior):
             'Historical event repository/PR/head/base mismatch')
 
 
+def emit_snapshot(journal, phase):
+    raw = json.dumps(journal, sort_keys=True, separators=(',', ':')).encode()
+    require(len(raw) <= receipts.MAX_BYTES, 'Log journal exceeds bound')
+    encoded = base64.b64encode(raw).decode()
+    chunks = [encoded[i:i + 2048] for i in range(0, len(encoded), 2048)]
+    print(f'MAIN-UNIT-JOURNAL {phase} {len(chunks)} {hashlib.sha256(raw).hexdigest()}', flush=True)
+    for index, chunk in enumerate(chunks):
+        print(f'MAIN-UNIT-CHUNK {phase} {index} {chunk}', flush=True)
+    print(f'MAIN-UNIT-END {phase}', flush=True)
+
+
+def log_lines(raw):
+    require(len(raw) <= receipts.MAX_BYTES, 'Historical log exceeds bound')
+    return [re.sub(r'^\d{4}-\d\d-\d\dT[^ ]+ ', '', line) for line in raw.decode().splitlines()]
+
+
+def read_snapshots(lines):
+    snapshots = {}
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line.startswith('MAIN-UNIT-'):
+            index += 1
+            continue
+        marker = re.fullmatch(r'MAIN-UNIT-JOURNAL (start|final) ([1-9][0-9]*) ([0-9a-f]{64})', line)
+        require(marker is not None, 'Unknown log journal framing')
+        phase, count, digest = marker[1], int(marker[2]), marker[3]
+        require((phase == 'start' and not snapshots)
+                or (phase == 'final' and set(snapshots) == {'start'}),
+                'Reordered log journal phases')
+        require(phase not in snapshots and count <= (receipts.MAX_BYTES * 2 // 2048) + 1,
+                'Duplicate/oversized log journal')
+        chunks = []
+        for position in range(count):
+            index += 1
+            require(index < len(lines), 'Truncated log journal')
+            part = re.fullmatch(r'MAIN-UNIT-CHUNK ' + phase + r' ' + str(position) + r' ([A-Za-z0-9+/=]{1,2048})', lines[index])
+            require(part is not None, 'Missing/reordered log journal chunk')
+            chunks.append(part[1])
+        index += 1
+        require(index < len(lines) and lines[index] == f'MAIN-UNIT-END {phase}', 'Missing log journal end')
+        try:
+            raw = base64.b64decode(''.join(chunks), validate=True)
+        except ValueError:
+            raise receipts.ReceiptError('Invalid log journal encoding') from None
+        require(hashlib.sha256(raw).hexdigest() == digest, 'Log journal digest mismatch')
+        snapshots[phase] = receipts.bounded_json(raw)
+        index += 1
+    return snapshots
+
+
+def verbose_passes(lines, inventories, inherited):
+    """Bind every pending ID and terminal count; no success by subtraction."""
+    summaries = {}
+    for line in lines:
+        match = re.fullmatch(r'(validation|operations): discovered=(\d+), historical-passes=(\d+), pending=(\d+)', line)
+        if match:
+            suite = match[1]
+            require(suite not in summaries, 'Duplicate receipt suite summary')
+            summaries[suite] = tuple(map(int, match.groups()[1:]))
+    require(set(summaries) == set(receipts.SUITES), 'Missing receipt suite summaries')
+    pending = {}
+    for suite, ids in inventories.items():
+        cached = ids & set(inherited)
+        pending[suite] = ids - cached
+        require(summaries[suite] == (len(ids), len(cached), len(pending[suite])),
+                'Historical receipt discovery/pending mismatch')
+    expected = set().union(*pending.values())
+    observed, passes, outcomes = set(), set(), []
+    yield_status = []
+    terminal_counts = []
+    active = None
+    for line in lines:
+        header = re.fullmatch(r'(test\w+) \(([A-Za-z0-9_.]+)\)(?: (.*))?', line)
+        if header:
+            require(active is None and not yield_status, 'Historical method lacks terminal outcome/status')
+            candidates = [suite + ':' + header[2] for suite in receipts.SUITES
+                          if suite + ':' + header[2] in expected]
+            require(len(candidates) == 1 and candidates[0] not in observed,
+                    'Unknown/duplicate historical pending method')
+            require(header[1] == header[2].rsplit('.', 1)[-1], 'Historical method header mismatch')
+            active = candidates[0]
+            line = header[3] or ''
+        if active is not None:
+            outcome = re.search(r'(?:^| )\.\.\. (ok|skipped [\'\"].*[\'\"])$', line)
+            if outcome:
+                observed.add(active)
+                outcomes.append(outcome[1])
+                if outcome[1] == 'ok':
+                    passes.add(active)
+                active = None
+        terminal = re.fullmatch(r'Ran (\d+) tests? in [0-9.]+s', line)
+        if terminal:
+            require(active is None and not yield_status and int(terminal[1]) == len(outcomes), 'Historical unit terminal count mismatch')
+            skips = sum(value != 'ok' for value in outcomes)
+            terminal_counts.append(int(terminal[1]))
+            # The terminal status follows after blank lines, as in TextTestRunner.
+            outcomes = []
+            expected_status = 'OK' if not skips else f'OK (skipped={skips})'
+            yield_status.append(expected_status)
+        elif line == 'OK' or line.startswith(('OK (', 'FAILED (')):
+            require(yield_status and line == yield_status.pop(0), 'Historical unit terminal status mismatch')
+    require(active is None and observed == expected and not outcomes and not yield_status
+            and terminal_counts == [len(pending[suite]) for suite in receipts.SUITES if pending[suite]],
+            'Incomplete historical pending-method outcomes')
+    return passes
+
+
+def recover_log(api, scope, prior, job, older):
+    rid, commit = receipts.positive(prior['id']), receipts.sha(prior['commit_sha'])
+    require(job['status'] == 'success', 'Missing artifact needs completed successful preflight')
+    lines = log_lines(api.bytes(f"/actions/jobs/{receipts.positive(job['id'])}/logs"))
+    require(sum(commit in line for line in lines) >= 2
+            and any('triggered by event: pull_request' in line for line in lines),
+            'Recovery log lacks exact-source checkout evidence')
+    snapshots = read_snapshots(lines)
+    if snapshots:
+        require(set(snapshots) == {'start', 'final'}, 'Incomplete log journal pair')
+        start, final = snapshots['start'], snapshots['final']
+        receipts.validate_journal(start, scope, rid, commit, completed=False)
+        receipts.validate_journal(final, scope, rid, commit)
+        require(start['complete'] is False and all(final['passes'].get(test) == value
+                for test, value in start['passes'].items()), 'Log journal inheritance mismatch')
+        return final
+    for path, digest in LEGACY_RUNNER_HASHES.items():
+        raw = source(commit, path)
+        require(hashlib.sha256(raw).hexdigest() == digest
+                and raw == api.bytes('/raw/' + path, {'ref': commit}),
+                'Historical runner is not admitted for verbose recovery')
+    workflow = source(commit, '.github/workflows/' + WORKFLOW)
+    require(workflow == api.bytes('/raw/.github/workflows/' + WORKFLOW, {'ref': commit})
+            and workflow.count(b'run: python3 -m validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations') == 1,
+            'Historical receipt workflow mismatch')
+    applicable = receipts.SourceApplicability(commit, worktree_reader=lambda path: receipts.read_git_test_source(commit, path))
+    inherited = {}
+    for test, value in older:
+        if value['run'] < rid and applicable(test, value):
+            inherited.setdefault(test, value)
+    applicable.finish(inherited)
+    # Verbose recovery proves each newly executed method positively. Unlike
+    # the legacy dot-log migration, no unnamed method becomes a success, so
+    # exhaustive module reconstruction (including imported helper classes) is
+    # unnecessary. Bind each explicit ID to immutable method/fixture source.
+    inventories = {suite: {test for test in inherited if test.startswith(suite + ':')}
+                   for suite in receipts.SUITES}
+    checker = receipts.SourceApplicability(commit, worktree_reader=lambda path: receipts.read_git_test_source(commit, path))
+    for line in lines:
+        header = re.fullmatch(r'(test\w+) \(([A-Za-z0-9_.]+)\)(?: (.*))?', line)
+        if not header:
+            continue
+        candidates = []
+        for suite in receipts.SUITES:
+            test = suite + ':' + header[2]
+            try:
+                fingerprint = checker.fingerprint(commit, test)
+            except receipts.ReceiptError:
+                continue
+            if fingerprint is not None:
+                candidates.append(test)
+        require(len(candidates) == 1, 'Historical pending method lacks unique immutable source')
+        test = candidates[0]
+        inventories[test.split(':', 1)[0]].add(test)
+    fresh = verbose_passes(lines, inventories, inherited)
+    passes = dict(inherited)
+    passes.update({test: {'run': rid, 'commit': commit} for test in fresh})
+    return {'version': receipts.VERSION, 'scope': scope, 'run': rid, 'commit': commit,
+            'complete': True, 'passes': passes, 'fixture_errors': []}
+
+
 def restore(api, scope, current_run, applicability):
     artifacts = api.pages('/actions/artifacts', {'name': key(scope)})
     indexed = {}
@@ -234,7 +411,7 @@ def restore(api, scope, current_run, applicability):
         indexed[rid] = artifact
     runs = api.pages('/actions/runs', {'workflow_id': WORKFLOW,
                                      'ref': f"refs/pull/{scope['pr']}/head"}, 'workflow_runs')
-    journals, trusted, bootstrap_passes = [], {}, {}
+    journals, trusted, bootstrap_passes, missing = [], {}, {}, []
     for prior in sorted(runs, key=lambda item: receipts.positive(item['id']), reverse=True):
         authenticate_run(scope, prior)
         rid = receipts.positive(prior['id'])
@@ -253,8 +430,9 @@ def restore(api, scope, current_run, applicability):
         commit = receipts.sha(prior['commit_sha'])
         if rid not in indexed:
             workflow = api.bytes('/raw/.github/workflows/' + WORKFLOW, {'ref': commit})
-            require(b'validation.main_unit_receipts' not in workflow,
-                    'Receipt-policy attempt lacks final journal; retain its evidence')
+            if b'validation.main_unit_receipts' in workflow:
+                missing.append((prior, job))
+                continue
             # One exhaustive legacy baseline is the migration boundary. Older
             # pre-receipt attempts are not imported or declared unexecuted.
             if not bootstrap_passes and job['status'] in ('success', 'failure'):
@@ -282,6 +460,13 @@ def restore(api, scope, current_run, applicability):
                 trusted[(test, rid, commit)] = value
         journals.append(journal)
     require(not indexed, 'Final artifact lacks authenticated workflow/job')
+    for prior, job in sorted(missing, key=lambda item: item[0]['id']):
+        older = list(bootstrap_passes.items()) + [(test, value) for (test, _, _), value in trusted.items()]
+        journal = recover_log(api, scope, prior, job, older)
+        for test, value in journal['passes'].items():
+            if value == {'run': prior['id'], 'commit': prior['commit_sha']}:
+                trusted[(test, prior['id'], prior['commit_sha'])] = value
+        journals.append(journal)
     candidates = list(bootstrap_passes.items())
     for journal in journals:
         for test, attribution in journal['passes'].items():
@@ -393,13 +578,17 @@ def main(argv=None):
                    'complete': False, 'fixture_errors': [], 'applicability_commit': commit,
                    'passes': restore(api, scope, run, receipts.SourceApplicability(commit))}
         receipts.atomic_json(PATH, journal)
+        emit_snapshot(journal, 'start')
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             output.write(f'receipt_key={key(scope)}\n')
         return 0
     journal = receipts.bounded_json(PATH.read_bytes())
     receipts.validate_journal(journal, scope, run, commit, completed=False)
     require(journal['complete'] is False, 'Attempt already complete')
-    return execute(journal, PATH)
+    try:
+        return execute(journal, PATH)
+    finally:
+        emit_snapshot(receipts.bounded_json(PATH.read_bytes()), 'final')
 
 
 if __name__ == '__main__':

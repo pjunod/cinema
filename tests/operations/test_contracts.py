@@ -1692,7 +1692,10 @@ assert.equal(context.ACT_TIMER, null);
         ):
             jobs = workflow_job_blocks(workflow_path)
             self.assertIn("windows_compile", jobs)
-            self.assertIn("timeout-minutes: 30", jobs["windows_compile"])
+            self.assertIn(
+                "timeout-minutes: 60" if workflow_path.endswith("main-fast-lane.yml")
+                else "timeout-minutes: 30", jobs["windows_compile"]
+            )
             for package in ("lld", "llvm", "ninja-build", "nodejs", "pkg-config"):
                 self.assertRegex(
                     jobs["windows_compile"], rf"(?<![-\\w]){package}(?![-\\w])"
@@ -2073,7 +2076,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("make unit", fast_jobs["rust_compile"])
         self.assertNotIn("cargo test", fast_jobs["rust_compile"])
         self.assertIn('major: "6"', fast_rust_steps["Install the pinned FFmpeg"])
-        self.assertIn("timeout-minutes: 30", fast_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 60", fast_jobs["rust_compile"])
         fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
         playback_contracts = workflow_step_literal(
             fast_preflight["Check the shared player input contract"], "run"
