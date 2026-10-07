@@ -1683,3 +1683,18 @@ test("Cinema sharing reports current activation during rolling upgrade without a
   assert.match(activation.detail,/coordinated restart is not required/);
   assert.match(activation.detail,/never changes your saved choice/);
 });
+
+test("Cinema sharing lists endpoint setup and unverified host network without gating the switch", () => {
+  const requirements=[];let enabled;
+  const card=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("cinemaSharingCard")} return cinemaSharingCard;`)(
+      value=>value,()=>"",(id,title,detail,choice)=>{enabled=choice;return detail;},
+      (readiness,item,id,title,detail)=>{requirements.push({id,detail});return detail;},()=>"",()=>"");
+  const html=card({sharing_enabled:true},{items:[]});
+  assert.equal(enabled,true);
+  assert.match(requirements.find(row=>row.id==="endpoints").detail,/Settings → Sharing/);
+  assert.match(html,/Saved endpoints do not prove connectivity/);
+  assert.match(requirements.find(row=>row.id==="network").detail,/Tailscale installed and signed in/);
+  assert.match(html,/A container cannot infer host installation or remote reachability/);
+  assert.match(html,/Readiness observations never prevent saving/);
+});

@@ -47,7 +47,7 @@ Sharing activation: [Running-cluster activation and SQL transition safety](featu
 | You want to know… | Read |
 |---|---|
 | What does plurx actually do? | [FEATURES.md](FEATURES.md) |
-| How do I run it, and what does this output mean? | [OPERATIONS.md](OPERATIONS.md) |
+| How do I run it, configure Cinema sharing addresses, and read output? | [OPERATIONS.md](OPERATIONS.md) |
 | What do I type? | [CHEATSHEET.md](CHEATSHEET.md) |
 | How is it built, and why that way? | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | What endpoint do I call, and what authorizes it? | [API.md](API.md) |

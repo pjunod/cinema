@@ -4838,6 +4838,40 @@ available. The caption limit is eight tracks per source revision, each at
 most 256 KiB of normalized WebVTT. Downloaded tracks survive cache cleanup
 and ordinary rescans; replacing the media invalidates its old associations.
 
+## Sharing Cinema addresses — set up before creating invitations
+
+Settings → Sharing always lists the observed local TLS listener and sharing
+certificate, whether private addresses are configured, and the host network
+setup that remains unverified. A listening socket inside the container is
+not evidence that Tailscale is installed on the host or that another Cinema
+can reach it. Missing address information and a failed address read are
+shown separately. The Developer switch remains available.
+
+Settings → Sharing → Create invitation reads this Cinema's saved address
+manifest before allowing Create. If it is absent, choose **Configure this
+Cinema’s addresses**. Your selected movie/show libraries stay in the draft;
+**Return to invitation** reloads current address information and retains that
+selection. Saving addresses does not create an invitation or verify that the
+recipient can connect. Create remains an explicit action.
+
+Get each host's Tailscale IPv4 address (`100.64.0.0/10`), optional Tailscale
+IPv6 address and private `.ts.net` name from that host's Tailscale setup.
+Enter the published private TCP Serve port, normally **32443**, rather than
+the internal TLS listener port **32444**. Ask the Cinema administrator for
+the sharing certificate's SHA-256 public-key (SPKI) pin: its authenticated
+`GET /api/v1/sharing/status` exposes `certificate.spki_sha256` when that
+serving node has a certificate. Match each address to that host's certificate
+and verify the pin through a trusted channel. The form neither installs
+Tailscale nor configures Serve; follow the private transport setup in
+[Shared libraries implementation §2.1](features/SHARED-LIBRARIES-IMPLEMENTATION.md).
+
+A `409 sharing_endpoints_unavailable` during invitation creation means the
+address manifest was absent when the server handled the request. The form
+offers the same configuration action and keeps the draft. It never retries
+an invitation POST automatically. Other failures retain their error and
+require a fresh read before another mutation. API details are in
+[Sharing administration](API.md#24-sharing-administration--local-owners-manage-private-peer-authority).
+
 ## Pairing another application (Curator) — the runbook
 
 Another application can ask plurx to index exactly the folder it just wrote,
