@@ -1538,6 +1538,35 @@ impl TimedClient {
         .await
     }
 
+    /// Retain the existing timeout recovery contract for the one exact-state
+    /// activation confirmation, while each attempt uses guarded layout dispatch.
+    pub(super) async fn source_layout_idempotent<F, Fut>(
+        &self,
+        mut operation: F,
+    ) -> Result<usize, StoreError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<usize, StoreError>>,
+    {
+        time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, || {
+            let operation = operation();
+            async move {
+                let result = operation.await;
+                #[cfg(feature = "cluster-read-cost-validation")]
+                if result.is_ok()
+                    && self
+                        .operations
+                        .fail_next_idempotent_write_after_commit
+                        .swap(false, Ordering::Relaxed)
+                {
+                    return Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()));
+                }
+                result
+            }
+        })
+        .await
+    }
+
     pub(super) async fn execute_returning_map<S, T>(
         &self,
         sql: S,
@@ -1628,6 +1657,35 @@ impl TimedClient {
             StoreOperationClass::Write,
             timeout_store(self.inner().txn(statements)),
             |results| results.iter().all(Result::is_ok),
+        )
+        .await
+    }
+
+    /// A certificate is inspected before converting a vendor error into a
+    /// StoreError. None proves a first-layout-guard failure and explicit rollback.
+    pub(super) async fn txn_source_layout_attempt(
+        &self,
+        statements: Vec<(String, hiqlite::Params)>,
+    ) -> Result<Option<Vec<Result<usize, hiqlite::Error>>>, StoreError> {
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            timeout_store(async {
+                match self.inner().txn(statements).await {
+                    Err(error) if error.is_source_layout_guard_rollback() => Ok(None),
+                    result => result.map(Some),
+                }
+            }),
+            |result| {
+                result
+                    .as_ref()
+                    .is_none_or(|rows| rows.iter().all(Result::is_ok))
+            },
         )
         .await
     }
@@ -1937,6 +1995,7 @@ impl HiqliteAuthStore {
         for result in timeout_store(client.batch(super::sharing_ingress_custody::SCHEMA)).await? {
             result.map_err(database_error)?;
         }
+        super::sharing_source_schema::provision_dispatch_guard(&client).await?;
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
         // A fresh cluster starts on the oldest protocol this binary supports,
@@ -1974,6 +2033,7 @@ impl HiqliteAuthStore {
 
     /// Open an already-bootstrapped cluster, refusing incompatible state.
     pub async fn open(client: Client, telemetry_path: &Path) -> Result<Self, StoreError> {
+        super::sharing_source_schema::provision_dispatch_guard(&client).await?;
         let store = Self::with_clock(
             client,
             Arc::new(SystemClock),
@@ -2013,6 +2073,7 @@ impl HiqliteAuthStore {
         telemetry_path: &Path,
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<Self, StoreError> {
+        super::sharing_source_schema::provision_dispatch_guard(&client).await?;
         let store = Self::with_clock(
             client,
             Arc::new(SystemClock),
@@ -3738,7 +3799,7 @@ impl HiqliteAuthStore {
             _ => {
                 return Err(StoreError::Migration(
                     "custody migration predecessor changed".into(),
-                ))
+                ));
             }
         };
         let rows = self
@@ -3756,7 +3817,9 @@ impl HiqliteAuthStore {
         }
         let now = self.now()?;
         // Guard failure must abort, rather than silently mark a partial shape.
-        let assertion = format!("INSERT INTO cluster_meta(singleton) SELECT NULL WHERE NOT (({guard}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version=$1))");
+        let assertion = format!(
+            "INSERT INTO cluster_meta(singleton) SELECT NULL WHERE NOT (({guard}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version=$1))"
+        );
         let shape = super::sharing_ingress_custody::schema_guard();
         admit_schema_migration(admission)?;
         let attempt = self.schema_migration_transaction(vec![
@@ -3851,8 +3914,14 @@ impl HiqliteAuthStore {
         };
         let before = snapshot.fingerprint;
         let expected = schema_lineage::expected_fingerprint(Backend::Hiqlite, &objects, &plan)?;
-        let guard = format!("SELECT CASE WHEN (SELECT COUNT(*) FROM cluster_meta WHERE singleton=1 AND schema_version=$1 AND protocol_min=$2 AND protocol_max=$3)=1 AND ({})=$4 THEN 1 ELSE json('lineage marker/schema CAS mismatch') END", schema_lineage::FINGERPRINT_QUERY);
-        let post = format!("SELECT CASE WHEN ({})=$1 AND (SELECT COUNT(*) FROM pragma_foreign_key_check)=0 THEN 1 ELSE json('lineage post-schema/integrity mismatch') END", schema_lineage::FINGERPRINT_QUERY);
+        let guard = format!(
+            "SELECT CASE WHEN (SELECT COUNT(*) FROM cluster_meta WHERE singleton=1 AND schema_version=$1 AND protocol_min=$2 AND protocol_max=$3)=1 AND ({})=$4 THEN 1 ELSE json('lineage marker/schema CAS mismatch') END",
+            schema_lineage::FINGERPRINT_QUERY
+        );
+        let post = format!(
+            "SELECT CASE WHEN ({})=$1 AND (SELECT COUNT(*) FROM pragma_foreign_key_check)=0 THEN 1 ELSE json('lineage post-schema/integrity mismatch') END",
+            schema_lineage::FINGERPRINT_QUERY
+        );
         let mut statements = vec![(
             guard,
             params!(marker, rows[0].protocol_min, rows[0].protocol_max, before),
@@ -6074,6 +6143,16 @@ impl Clock for SystemClock {
 }
 
 pub(super) fn validate_sql(sql: &str) -> Result<(), StoreError> {
+    if sql.contains("__PLURX_") {
+        for layout in [
+            super::hiqlite_sessions::SessionLayout::Legacy,
+            super::hiqlite_sessions::SessionLayout::Principal,
+        ] {
+            let resolved = super::hiqlite_sessions::resolve_session_sql(sql, layout)?;
+            validate_sql_with_refusal_counter(&resolved, &STORE_VALIDATION_REFUSALS)?;
+        }
+        return Ok(());
+    }
     validate_sql_with_refusal_counter(sql, &STORE_VALIDATION_REFUSALS)
 }
 

@@ -1661,3 +1661,25 @@ main().then(() => {
   process.stdout.write(`${started - failures}/${started} passed\n`);
   process.exit(failures ? 1 : 0);
 });
+
+test("Cinema sharing reports current activation during rolling upgrade without a restart gate", () => {
+  const requirements=[];
+  const card=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("cinemaSharingCard")} return cinemaSharingCard;`)(
+      value=>value,()=>"",()=>"",
+      (readiness,item,id,title,detail)=>{
+        requirements.push({id,title,detail});
+        return readiness.items[0].requirements.find(row=>row.id===id)?.evidence || detail;
+      },()=>"",()=>"");
+  for(const ready of [false,true]) {
+    const evidence=ready?"Current layout verified.":"Source activation is pending.";
+    const html=card({sharing_enabled:true},{items:[{id:"cinema_sharing",requirements:[{id:"source_activation",status:ready?"met":"unmet",evidence}]}]});
+    assert.ok(html.includes(evidence));
+    assert.ok(!html.includes("coordinated drained restart"));
+  }
+  const activation=requirements.find(row=>row.id==="source_activation");
+  assert.equal(activation.title,"Current Source activation");
+  assert.match(activation.detail,/cluster compatibility and authority checks/);
+  assert.match(activation.detail,/coordinated restart is not required/);
+  assert.match(activation.detail,/never changes your saved choice/);
+});

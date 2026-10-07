@@ -1,9 +1,71 @@
 # Python unit receipts — one success per test per PR
 
-**Status:** open · **Decision:** Paul, 2026-10-01 · **Scope:** effort preflight
+**Status:** open · **Decision:** Paul, 2026-10-01 · **Scope:** effort and main preflight
 
 Companion to [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md): this
 policy changes repeated Python unit execution, not current-source compilation.
+
+## Main preflight — authenticated legacy outcomes and declared inputs
+
+The main fast lane uses
+[`main_preflight_adoption.py`](../../validation/main_preflight_adoption.py)
+and the reviewed
+[`main-preflight-inputs.json`](../../validation/main-preflight-inputs.json).
+Each Python ID binds its method/local-fixture AST and declared production
+inputs. The manifest records actual read closures, including filename
+inventories, absent paths, executable modes and narrowly declared Git-history
+consumers. Unknown witnesses refuse before execution; changing one sibling
+method does not invalidate unchanged methods through a whole test-file hash.
+
+PR #845 has one bounded legacy importer: run4275/job43709/attempt1, source
+`0c5ab4890316da40d44806eba9125ac2e1fead0e`. It authenticates the original
+same-repository ready PR event, API job success, original executable workflow,
+checkout identity and the 208075-byte raw log with SHA-256
+`272d7509dc94961593f77ad3961f98ee2be097a167baff07e8e1eb0cd0eadd0b`.
+It reconstructs exactly 293 validation and 735 operations IDs from immutable
+source and requires one ordered progress event per ID: 1026 successes and
+two skips. Summary totals alone cannot import a pass. The two skipped IDs
+retain their history and remain pending current controls. Linux x86_64,
+Python 3.12 and Node 22.23.2 are the proven legacy environment; the Node
+setup is pinned to that version. No unobserved Python patch is claimed.
+
+Future journals bind their exact schema, repository/PR, source, producer and
+manifest blobs, actual terminal job and attempt1. Own outcomes require an
+original executable outcome event; inherited records preserve the original
+run/job/attempt/source/outcome/environment chain. The declared input digest
+is independently verified against the producing journal's reviewed manifest.
+Both start and final artifact publications must exist. A missing final
+journal after an attempted preflight stops reuse before any positive ID can
+replay. Authenticated all-skipped draft runs contain no unit execution and
+need no journal. Live PR head, base, open state and readiness are checked
+before prepare and each phase so queued stale events cannot execute units.
+
+Fixture, import, discovery and runner-abort errors remain in the durable
+journal even when earlier methods passed. They block later reuse until
+attributable evidence is recovered; retained method successes cannot hide a
+failed class or module teardown. A phase-in-progress marker is persisted
+before Python discovery/fixtures and before each pending Node script; a
+timeout or hard cancellation retains it. Normal completion removes the
+marker atomically while preserving explicit fixture errors and individual
+successes. Failed Python methods remain individually pending. Existing
+history, catalog, static contracts,
+compiler checks and promotion requirements still apply to current source.
+
+**How to read output:** `adopted` counts applicable historical success IDs;
+`pending` counts current methods still needing execution. `Changed declared
+inputs/local fixture` identifies a specific invalidated ID, not a new blanket
+suite run. An evidence refusal requires inspection of the named original
+run/job/log/journal; deleting evidence does not create a first attempt.
+
+**Granularity limits:** the seven Node receipts identify successful scripts,
+not individual TAP cases. A failed or aborted Node script may contain passed
+cases; its original log is preserved and its journal blocks automatic replay
+until that partial evidence is recovered. Rust retries are not covered by
+this Python/Node adapter. No Rust test success is inferred from run4275, and
+these receipts cannot authorize repeating successful Rust cases. Compiler
+parallelism is bounded with `CARGO_BUILD_JOBS=1`; Windows compilation waits
+for the Rust gate to finish because their code generation exhausted a shared
+14 GiB guest. Test threads and target coverage are not reduced.
 
 The effort preflight discovers the validation and operations suites on every
 candidate. Each discovered test ID must have passed once for this repository

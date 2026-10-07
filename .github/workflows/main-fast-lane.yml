@@ -11,14 +11,14 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Returning a PR to draft cancels the active run: `converted_to_draft` enters
-# this group and every job below declines it, so the run in flight is
-# superseded and nothing replaces it. Marking it ready again starts one
-# exact-head promotion attempt. That is what removing and reapplying the
-# `fast-lane` label used to do.
+# Returning a PR to draft declines the queued replacement. An active attempt
+# retains its opportunity to publish positive per-ID evidence first. Only the
+# current ready source can qualify promotion; a historical result is not a
+# current gate. Marking it ready again starts an attributable new attempt.
 concurrency:
   group: main-fast-lane-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # Complete and publish per-ID successes before a newer source starts.
+  cancel-in-progress: false
 
 jobs:
   scope:
@@ -112,24 +112,43 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 -m validation.regression_field
-      - name: Check validation catalog and static contracts
-        run: |
-          make validation-lint
-          python3 -m unittest discover -s tests/validation -p 'test_*.py'
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
-      - name: Check CI, deploy, and shipping contracts
-        run: make operations-check
-      - name: Check the shared player input contract
+          node-version: "22.23.2"
+      - name: Restore authenticated applicable preflight outcomes
+        id: receipts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.main_preflight_adoption prepare
+      - name: Publish preflight attempt-start journal
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}
+          path: .main-preflight-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Check validation catalog and static contracts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          node tests/playback/player-input-contract.test.js
-          node tests/playback/web-policy.test.js
-          node tests/playback/web-control.test.js
-          node --test tests/web/seek-telemetry.test.js
-          node tests/web/player-dom.test.js
-          node tests/web/read-after.test.js
-          node tests/web/live-tv.test.js
+          make validation-lint
+          python3 -m validation.main_preflight_adoption validation
+      - name: Check CI, deploy, and shipping contracts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.main_preflight_adoption operations
+      - name: Check the shared player input contract
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.main_preflight_adoption node
+      - name: Preserve per-ID preflight journal even on failure
+        if: always() && steps.receipts.outcome == 'success'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.receipt_key }}
+          path: .main-preflight-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; compiler surfaces are skipped."
@@ -150,6 +169,10 @@ jobs:
     # test, core lib 15 min, store contracts 11.4 min, daemon ~11 min, which
     # leaves no headroom under 60; 90 keeps the same bound with room again.
     timeout-minutes: 90
+    env:
+      # Two daemon-sized rustc processes exhausted the shared no-swap guest.
+      # This changes compiler parallelism, not test threads or target coverage.
+      CARGO_BUILD_JOBS: "1"
     steps:
       - name: Install Rust gate prerequisites
         run: |
@@ -201,8 +224,10 @@ jobs:
           chown -R "$owner" "$GITHUB_WORKSPACE"
   windows_compile:
     name: fast Windows compile
-    needs: [scope, preflight]
-    if: needs.scope.outputs.rust == 'true'
+    # Both code-generation lanes share a bounded guest. Windows must not
+    # compete with the Rust gate's daemon/test targets for that memory.
+    needs: [scope, preflight, rust_compile]
+    if: needs.scope.outputs.rust == 'true' && needs.rust_compile.result == 'success'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container: ubuntu:26.04
     timeout-minutes: 30

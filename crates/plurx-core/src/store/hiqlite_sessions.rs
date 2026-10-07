@@ -350,48 +350,379 @@ const PRINCIPAL_ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playbac
     media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch,
     drain_deadline_ms, owner_key, principal_kind, share_grant_id, share_viewer_key";
 
-struct RouteProjectionRow(Result<i64, StoreError>);
-impl From<&mut Row<'_>> for RouteProjectionRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self(row.try_get("columns").map_err(database_error))
+// A runtime SQL template contains only these closed, generated fragments.
+// Values from requests remain bound parameters and are never templates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SessionLayout {
+    Legacy,
+    Principal,
+}
+impl SessionLayout {
+    fn version(self) -> i64 {
+        match self {
+            Self::Legacy => 81,
+            Self::Principal => 82,
+        }
+    }
+    fn concrete(self) -> LocalSessionSql {
+        LocalSessionSql {
+            rebuilt: self == Self::Principal,
+            template: false,
+        }
     }
 }
-async fn route_projection(store: &HiqliteAuthStore) -> Result<&'static str, StoreError> {
-    use std::sync::atomic::Ordering;
-    // Runtime installation is a coordinated schema transition. A Store is
-    // constructed after install_schema; its schema shape stays fixed until
-    // that process restarts. This cache is no grant or membership authority.
-    match store.media_session_projection.load(Ordering::Acquire) {
-        1 => return Ok(LEGACY_ROUTE_COLS),
-        2 => return Ok(PRINCIPAL_ROUTE_COLS),
-        _ => {}
+struct LayoutVersionRow(Result<i64, StoreError>);
+impl From<&mut Row<'_>> for LayoutVersionRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.try_get("version").map_err(database_error))
     }
-    let columns = store
+}
+struct LayoutGuardRow(Result<i64, StoreError>);
+impl From<&mut Row<'_>> for LayoutGuardRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.try_get("valid").map_err(database_error))
+    }
+}
+async fn session_layout(
+    store: &HiqliteAuthStore,
+    refresh: bool,
+) -> Result<SessionLayout, StoreError> {
+    use std::sync::atomic::Ordering;
+    let cached = store.media_session_projection.load(Ordering::Acquire);
+    // The installed v82 layout is permanent. Legacy is only a dispatch hint;
+    // proposals guard it and reads verify it again after buffering their result.
+    if cached == 2 {
+        return Ok(SessionLayout::Principal);
+    }
+    if cached == 1 && !refresh {
+        return Ok(SessionLayout::Legacy);
+    }
+    let version = store
         .client()
-        // authority: committed ownership layout selects principal-safe authority SQL.
-        .query_consistent_map::<RouteProjectionRow, _>(
-            "SELECT count(*) AS columns FROM pragma_table_info('media_sessions')
-         WHERE name IN ('owner_key','principal_kind','share_grant_id','share_viewer_key')",
+        .query_consistent_map::<LayoutVersionRow, _>(
+            "SELECT schema_version AS version FROM cluster_meta WHERE singleton=1",
             params!(),
         )
         .await?
         .into_iter()
         .next()
-        .ok_or_else(|| StoreError::Task("missing media-session schema projection".into()))?
+        .ok_or_else(|| StoreError::Task("missing session layout marker".into()))?
         .0?;
-    let (mode, projection) = match columns {
-        0 => (1, LEGACY_ROUTE_COLS),
-        4 => (2, PRINCIPAL_ROUTE_COLS),
+    if version == 81 && cached == 1 {
+        return Ok(
+            if store.media_session_projection.load(Ordering::Acquire) == 2 {
+                SessionLayout::Principal
+            } else {
+                SessionLayout::Legacy
+            },
+        );
+    }
+    let (layout, guard) = match version {
+        81 => (
+            SessionLayout::Legacy,
+            super::sharing_source_schema::predecessor_layout_guard(),
+        ),
+        82 => (
+            SessionLayout::Principal,
+            super::sharing_source_schema::installed_guard(),
+        ),
         _ => {
             return Err(StoreError::Task(
-                "incomplete media-session principal schema".into(),
-            ))
+                "unsupported session layout version".into(),
+            ));
         }
     };
-    store
-        .media_session_projection
-        .store(mode, Ordering::Release);
-    Ok(projection)
+    let valid = store
+        .client()
+        .query_consistent_map::<LayoutGuardRow, _>(
+            format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END AS valid"),
+            params!(),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| StoreError::Task("missing session layout proof".into()))?
+        .0?;
+    if valid != 1 {
+        // A valid legacy marker can move before its shape proof is read.
+        // Recheck the marker and admit only the single monotone transition.
+        if layout == SessionLayout::Legacy {
+            let latest = store
+                .client()
+                .query_consistent_map::<LayoutVersionRow, _>(
+                    "SELECT schema_version AS version FROM cluster_meta WHERE singleton=1",
+                    params!(),
+                )
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| StoreError::Task("missing session layout marker".into()))?
+                .0?;
+            if latest == 82 {
+                let guard = super::sharing_source_schema::installed_guard();
+                let installed = store
+                    .client()
+                    .query_consistent_map::<LayoutGuardRow, _>(
+                        format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END AS valid"),
+                        params!(),
+                    )
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| StoreError::Task("missing installed session proof".into()))?
+                    .0?;
+                if installed == 1 {
+                    store
+                        .media_session_projection
+                        .fetch_max(2, Ordering::AcqRel);
+                    return Ok(SessionLayout::Principal);
+                }
+            }
+        }
+        return Err(StoreError::Task(
+            "incomplete session ownership layout".into(),
+        ));
+    }
+    store.media_session_projection.fetch_max(
+        if layout == SessionLayout::Principal {
+            2
+        } else {
+            1
+        },
+        Ordering::AcqRel,
+    );
+    // Never let a delayed legacy proof overwrite another caller's v82 proof.
+    Ok(
+        if store.media_session_projection.load(Ordering::Acquire) == 2 {
+            SessionLayout::Principal
+        } else {
+            layout
+        },
+    )
+}
+
+pub(super) fn resolve_session_sql(sql: &str, layout: SessionLayout) -> Result<String, StoreError> {
+    let concrete = layout.concrete();
+    let mut resolved = sql.to_owned();
+    for (token, fragment) in [
+        ("__PLURX_LOCAL_COLUMN__", concrete.column()),
+        ("__PLURX_LOCAL_KEY__", concrete.key_expression()),
+        ("__PLURX_LOCAL_INSERT_COLUMNS__", concrete.insert_columns()),
+        ("__PLURX_LOCAL_PROJECTION__", concrete.projection()),
+        (
+            "__PLURX_ROUTE_PROJECTION__",
+            if layout == SessionLayout::Principal {
+                PRINCIPAL_ROUTE_COLS
+            } else {
+                LEGACY_ROUTE_COLS
+            },
+        ),
+    ] {
+        resolved = resolved.replace(token, fragment);
+    }
+    while let Some(start) = resolved.find("__PLURX_LOCAL_") {
+        let suffix = &resolved[start + "__PLURX_LOCAL_".len()..];
+        let end = suffix
+            .find("__")
+            .ok_or_else(|| StoreError::Task("unterminated session SQL fragment".into()))?;
+        let name = &suffix[..end];
+        let fragment = if let Some(table) = name.strip_prefix("LIVE_USER_") {
+            if !matches!(table, "media_sessions" | "route" | "session") {
+                return Err(StoreError::Task(
+                    "unsupported session SQL table fragment".into(),
+                ));
+            }
+            concrete.live_local_user(table)
+        } else {
+            let (kind, parameter) = name
+                .rsplit_once('_')
+                .ok_or_else(|| StoreError::Task("unsupported session SQL fragment".into()))?;
+            let parameter: usize = parameter
+                .parse()
+                .map_err(|_| StoreError::Task("invalid session SQL parameter fragment".into()))?;
+            if !(1..=256).contains(&parameter) {
+                return Err(StoreError::Task(
+                    "unsupported session SQL parameter fragment".into(),
+                ));
+            }
+            match kind {
+                "EQUALS" => concrete.equals(parameter),
+                "INSERT_VALUES" => concrete.insert_values(parameter),
+                "EXISTING_USER" => concrete.existing_user(parameter),
+                _ => return Err(StoreError::Task("unsupported session SQL fragment".into())),
+            }
+        };
+        let end = start + "__PLURX_LOCAL_".len() + end + 2;
+        resolved.replace_range(start..end, &fragment);
+    }
+    if resolved.contains("__PLURX_") {
+        return Err(StoreError::Task("unresolved session SQL fragment".into()));
+    }
+    Ok(resolved)
+}
+
+fn principal_lookup(
+    principal: &crate::playback_principal::PlaybackPrincipal,
+) -> Result<(String, Param), StoreError> {
+    if let Some(user_id) = principal.local_user_id() {
+        Ok(("__PLURX_LOCAL_EQUALS_1__".to_owned(), user_id.into()))
+    } else if principal.valid_admission_shape() {
+        Ok(("owner_key = $1".to_owned(), principal.owner_key().into()))
+    } else {
+        Err(StoreError::Task("invalid session lookup principal".into()))
+    }
+}
+
+fn guarded_session_statements(
+    templates: &[(std::borrow::Cow<'static, str>, hiqlite::Params)],
+    layout: SessionLayout,
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    let mut statements = vec![(
+        hiqlite::Error::SOURCE_LAYOUT_GUARD_SQL.to_owned(),
+        params!(layout.version()),
+    )];
+    for (template, bindings) in templates {
+        let mut bindings = bindings.clone();
+        for binding in &mut bindings {
+            match binding {
+                Param::StmtOutputNamed(index, _) | Param::StmtOutputIndexed(index, _) => {
+                    *index = index.checked_add(1).ok_or_else(|| {
+                        StoreError::Task("session statement index overflow".into())
+                    })?;
+                }
+                _ => {}
+            }
+        }
+        statements.push((resolve_session_sql(template, layout)?, bindings));
+    }
+    Ok(statements)
+}
+
+struct SessionClient<'a> {
+    store: &'a HiqliteAuthStore,
+}
+impl HiqliteAuthStore {
+    fn session_client(&self) -> SessionClient<'_> {
+        SessionClient { store: self }
+    }
+}
+impl SessionClient<'_> {
+    async fn query_consistent_map<T, S>(
+        &self,
+        sql: S,
+        bindings: hiqlite::Params,
+    ) -> Result<Vec<T>, StoreError>
+    where
+        T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
+        S: Into<std::borrow::Cow<'static, str>>,
+    {
+        let template = sql.into();
+        let layout = session_layout(self.store, false).await?;
+        let result = self
+            .store
+            .client()
+            .query_consistent_map(resolve_session_sql(&template, layout)?, bindings.clone())
+            .await;
+        if layout == SessionLayout::Legacy
+            && session_layout(self.store, true).await? == SessionLayout::Principal
+        {
+            // Mapping errors and empty results are buffered too: legacy route
+            // projection may have observed a Shared row after the migration.
+            return self
+                .store
+                .client()
+                .query_consistent_map(
+                    resolve_session_sql(&template, SessionLayout::Principal)?,
+                    bindings,
+                )
+                .await;
+        }
+        result
+    }
+    async fn execute<S>(&self, sql: S, bindings: hiqlite::Params) -> Result<usize, StoreError>
+    where
+        S: Into<std::borrow::Cow<'static, str>>,
+    {
+        let mut result = self.txn([(sql, bindings)]).await?;
+        if result.len() != 1 {
+            return Err(StoreError::Task(
+                "incomplete guarded session execute".into(),
+            ));
+        }
+        result.remove(0).map_err(database_error)
+    }
+    async fn execute_idempotent<S>(
+        &self,
+        sql: S,
+        bindings: hiqlite::Params,
+    ) -> Result<usize, StoreError>
+    where
+        S: Into<std::borrow::Cow<'static, str>>,
+    {
+        let template = sql.into();
+        self.store
+            .client()
+            .source_layout_idempotent(|| self.execute(template.clone(), bindings.clone()))
+            .await
+    }
+    async fn txn<C, Q>(
+        &self,
+        statements: Q,
+    ) -> Result<Vec<Result<usize, hiqlite::Error>>, StoreError>
+    where
+        Q: IntoIterator<Item = (C, hiqlite::Params)>,
+        C: Into<std::borrow::Cow<'static, str>>,
+    {
+        let templates = statements
+            .into_iter()
+            .map(|(sql, bindings)| (sql.into(), bindings))
+            .collect::<Vec<_>>();
+        let layout = session_layout(self.store, false).await?;
+        if let Some(result) = self.attempt(&templates, layout).await? {
+            return Ok(result);
+        }
+        if layout != SessionLayout::Legacy
+            || session_layout(self.store, true).await? != SessionLayout::Principal
+        {
+            return Err(StoreError::Task(
+                "guarded session proposal refused its layout".into(),
+            ));
+        }
+        // The vendor certificate proves the first assertion failed and an
+        // explicit rollback succeeded. Nothing else authorizes regeneration.
+        self.attempt(&templates, SessionLayout::Principal)
+            .await?
+            .ok_or_else(|| StoreError::Task("installed session proposal refused its layout".into()))
+    }
+    async fn attempt(
+        &self,
+        templates: &[(std::borrow::Cow<'static, str>, hiqlite::Params)],
+        layout: SessionLayout,
+    ) -> Result<Option<Vec<Result<usize, hiqlite::Error>>>, StoreError> {
+        let statements = guarded_session_statements(templates, layout)?;
+        let Some(mut result) = self
+            .store
+            .client()
+            .txn_source_layout_attempt(statements)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if result.len() != templates.len() + 1 || !matches!(result.first(), Some(Ok(0))) {
+            return Err(StoreError::Task(
+                "incomplete guarded session transaction".into(),
+            ));
+        }
+        result.remove(0).map_err(database_error)?;
+        Ok(Some(result))
+    }
+}
+
+async fn route_projection(store: &HiqliteAuthStore) -> Result<&'static str, StoreError> {
+    match session_layout(store, false).await? {
+        SessionLayout::Legacy => Ok(LEGACY_ROUTE_COLS),
+        SessionLayout::Principal => Ok(PRINCIPAL_ROUTE_COLS),
+    }
 }
 
 struct RouteRow(Result<MediaSessionRoute, StoreError>);
@@ -591,7 +922,7 @@ async fn desired_row(
     );
     validate_sql(&sql)?;
     store
-        .client()
+        .session_client()
         // authority: current desired revision fences playback preparation against competing asks.
         .query_consistent_map::<PrincipalDesiredRow, _>(sql, params!(user_id, playback_id))
         .await?
@@ -641,7 +972,7 @@ async fn commit_replay(
 ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
     let layout = LocalSessionSql::load(store).await?;
     let pointer = store
-        .client()
+        .session_client()
         .query_consistent_map::<PointerRow, _>(
             format!(
                 "SELECT current_incarnation_id FROM media_playback_pointers
@@ -659,7 +990,7 @@ async fn commit_replay(
     }
     let control_receipt = if let Some(expected) = expected_receipt {
         let stored = store
-            .client()
+            .session_client()
             .query_consistent_map::<TerminalAckRow, _>(
                 "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
                         client_instance_id, sequence, request_fingerprint, response_json,
@@ -735,23 +1066,16 @@ async fn staged_row(
     playback_id: &str,
 ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError> {
     let layout = LocalSessionSql::load(store).await?;
-    let owner_column = layout.column();
-    let bindings = if layout.rebuilt {
-        params!(principal.owner_key(), playback_id)
-    } else {
-        params!(
-            crate::store::local_media_principal_id(principal)?,
-            playback_id
-        )
-    };
+    let (owner, binding) = principal_lookup(principal)?;
+    let bindings = params!(binding, playback_id);
     let sql = format!(
         "SELECT {}, {STAGED_COLS} FROM media_session_preparations
-          WHERE {owner_column} = $1 AND playback_id = $2",
+          WHERE {owner} AND playback_id = $2",
         layout.projection()
     );
     validate_sql(&sql)?;
     let result = store
-        .client()
+        .session_client()
         // authority: current staged owner is required before publishing a preparation response.
         .query_consistent_map::<StagedRow, _>(sql, bindings)
         .await?
@@ -1208,16 +1532,21 @@ fn decode_request(row: &mut Row<'_>) -> Result<RequestState, StoreError> {
 #[derive(Clone, Copy)]
 struct LocalSessionSql {
     rebuilt: bool,
+    template: bool,
 }
 
 impl LocalSessionSql {
     async fn load(store: &HiqliteAuthStore) -> Result<Self, StoreError> {
         Ok(Self {
             rebuilt: route_projection(store).await? == PRINCIPAL_ROUTE_COLS,
+            template: true,
         })
     }
 
     fn column(self) -> &'static str {
+        if self.template {
+            return "__PLURX_LOCAL_COLUMN__";
+        }
         if self.rebuilt {
             "owner_key"
         } else {
@@ -1226,6 +1555,9 @@ impl LocalSessionSql {
     }
 
     fn equals(self, parameter: usize) -> String {
+        if self.template {
+            return format!("__PLURX_LOCAL_EQUALS_{parameter}__");
+        }
         if self.rebuilt {
             format!("owner_key = ('local:' || ${parameter})")
         } else {
@@ -1234,6 +1566,9 @@ impl LocalSessionSql {
     }
 
     fn key_expression(self) -> &'static str {
+        if self.template {
+            return "__PLURX_LOCAL_KEY__";
+        }
         if self.rebuilt {
             "owner_key"
         } else {
@@ -1242,6 +1577,9 @@ impl LocalSessionSql {
     }
 
     fn insert_columns(self) -> &'static str {
+        if self.template {
+            return "__PLURX_LOCAL_INSERT_COLUMNS__";
+        }
         if self.rebuilt {
             ", owner_key, principal_kind, share_grant_id, share_viewer_key"
         } else {
@@ -1250,6 +1588,9 @@ impl LocalSessionSql {
     }
 
     fn insert_values(self, parameter: usize) -> String {
+        if self.template {
+            return format!("__PLURX_LOCAL_INSERT_VALUES_{parameter}__");
+        }
         if self.rebuilt {
             format!(", ('local:' || ${parameter}), 'local', NULL, NULL")
         } else {
@@ -1258,6 +1599,9 @@ impl LocalSessionSql {
     }
 
     fn existing_user(self, parameter: usize) -> String {
+        if self.template {
+            return format!("__PLURX_LOCAL_EXISTING_USER_{parameter}__");
+        }
         if self.rebuilt {
             format!(" AND EXISTS (SELECT 1 FROM users WHERE id = ${parameter})")
         } else {
@@ -1268,15 +1612,25 @@ impl LocalSessionSql {
     /// Until shared admission is wired, incarnation-only writers may extend
     /// authority only for a retained Local principal with a current real user.
     fn live_local_user(self, table: &str) -> String {
+        if self.template {
+            return format!("__PLURX_LOCAL_LIVE_USER_{table}__");
+        }
         let principal = if self.rebuilt {
-            format!(" AND {table}.principal_kind = 'local' AND EXISTS (SELECT 1 FROM users WHERE id = {table}.user_id)")
+            format!(
+                " AND {table}.principal_kind = 'local' AND EXISTS (SELECT 1 FROM users WHERE id = {table}.user_id)"
+            )
         } else {
             String::new()
         };
-        format!("{principal} AND COALESCE(json_extract(CASE WHEN json_valid({table}.recipe_json) THEN {table}.recipe_json ELSE '{{}}' END,'$.kind'),'') != 'remote_source'")
+        format!(
+            "{principal} AND COALESCE(json_extract(CASE WHEN json_valid({table}.recipe_json) THEN {table}.recipe_json ELSE '{{}}' END,'$.kind'),'') != 'remote_source'"
+        )
     }
 
     fn projection(self) -> &'static str {
+        if self.template {
+            return "__PLURX_LOCAL_PROJECTION__";
+        }
         if self.rebuilt {
             "user_id, owner_key, principal_kind, share_grant_id, share_viewer_key"
         } else {
@@ -1294,7 +1648,10 @@ pub(super) fn census_local_principal_fragment(
     table: &str,
     rebuilt: bool,
 ) -> Option<String> {
-    let layout = LocalSessionSql { rebuilt };
+    let layout = LocalSessionSql {
+        rebuilt,
+        template: false,
+    };
     Some(match method {
         "column" => layout.column().to_owned(),
         "equals" => layout.equals(parameter),
@@ -1396,7 +1753,10 @@ fn ordered_source_lifecycle_statement(
             _ => Err(crate::sharing::invalid()),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    source_statement((statement.0, values))
+    source_statement((
+        resolve_session_sql(&statement.0, SessionLayout::Principal)?,
+        values,
+    ))
 }
 
 fn valid_terminal_ack(ack: &MediaSessionTerminalAck) -> bool {
@@ -1616,11 +1976,11 @@ async fn route_by(
     column: &str,
     value: &str,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
-    let route_cols = route_projection(store).await?;
+    let route_cols = "__PLURX_ROUTE_PROJECTION__";
     let sql = format!("SELECT {route_cols} FROM media_sessions WHERE {column} = $1");
     validate_sql(&sql)?;
     store
-        .client()
+        .session_client()
         .query_consistent_map::<RouteRow, _>(sql, params!(value))
         .await?
         .into_iter()
@@ -1633,12 +1993,12 @@ async fn live_local_route(
     store: &HiqliteAuthStore,
     incarnation_id: &str,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
-    let route_cols = route_projection(store).await?;
+    let route_cols = "__PLURX_ROUTE_PROJECTION__";
     let live_local = LocalSessionSql::load(store)
         .await?
         .live_local_user("media_sessions");
     store
-        .client()
+        .session_client()
         .query_consistent_map::<RouteRow, _>(
             format!(
                 "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = $1 {live_local}"
@@ -1661,7 +2021,7 @@ async fn request_row(
     let owner = ownership.equals(1);
     let projection = ownership.projection();
     let result = store
-        .client()
+        .session_client()
         .query_consistent_map::<RequestRow, _>(
             format!(
                 "SELECT request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
@@ -1731,7 +2091,7 @@ async fn claim_existing_or_reacquire(
         let owner = ownership.equals(4);
         let existing_user = ownership.existing_user(4);
         let reacquired = store
-            .client()
+            .session_client()
             .execute(
                 format!(
                     "UPDATE media_session_requests
@@ -1797,6 +2157,9 @@ async fn activate_with_authority(
     authority: Option<&crate::sharing_source_sessions::SourceSessionWriteAuthority>,
     receiver: Option<&crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority>,
 ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+    if authority.is_some() && session_layout(store, true).await? != SessionLayout::Principal {
+        return Ok(None);
+    }
     let local = LocalSessionSql::load(store).await?;
     let layout = ActivationSql {
         local,
@@ -1818,7 +2181,7 @@ async fn activate_with_authority(
             Ok(counts) if counts.as_slice() == [0] => {}
             Ok(_) => return Err(crate::sharing::invalid()),
             Err(error) if super::sharing_source_sessions::source_write_refused(&error) => {
-                return Ok(None)
+                return Ok(None);
             }
             Err(error) => return Err(error),
         }
@@ -1836,7 +2199,7 @@ async fn activate_with_authority(
     let user_exists_3 = layout.existing_user(3);
     let user_exists_6 = layout.existing_user(6);
     let current_pointer = store
-        .client()
+        .session_client()
         .query_consistent_map::<PointerRow, _>(
             format!(
                 "SELECT current_incarnation_id FROM media_playback_pointers
@@ -1868,7 +2231,7 @@ async fn activate_with_authority(
             .and_then(|id| id.strip_prefix("jellyfin:"))
         {
             // authority: native replay must observe current negotiation cancellation and login revocation.
-            let rows = store.client().query_consistent_map::<CompatibilityActivationAdmission, _>(
+            let rows = store.session_client().query_consistent_map::<CompatibilityActivationAdmission, _>(
                 "SELECT COUNT(*) AS admitted FROM jellyfin_plays WHERE play_id=$1 AND user_id=$2 AND playback_id=$3
                  AND ((state='pending' AND expires_at_ms>$4) OR (state='active' AND native_incarnation_id=$5))
                  AND json_extract(payload,'$.native_request_fingerprint')=$6
@@ -1918,7 +2281,7 @@ async fn activate_with_authority(
                 Ok(counts) if counts.as_slice() == [0, 0, 0] => {}
                 Ok(_) => return Err(crate::sharing::invalid()),
                 Err(error) if super::sharing_receiver_sessions::receiver_write_refused(&error) => {
-                    return Ok(None)
+                    return Ok(None);
                 }
                 Err(error) => return Err(error),
             }
@@ -2260,10 +2623,6 @@ async fn activate_with_authority(
         else {
             return Ok(None);
         };
-        statements = statements
-            .into_iter()
-            .map(ordered_source_lifecycle_statement)
-            .collect::<Result<Vec<_>, _>>()?;
         statements.insert(0, source_statement(guard)?);
         statements.extend(
             super::sharing_receiver_sessions::receiver_activation_binding(receiver, activation)?
@@ -2287,7 +2646,12 @@ async fn activate_with_authority(
         ));
     }
     let statement_count = statements.len();
-    let committed = match store.client().txn(statements).await.map_err(database_error) {
+    let committed = match store
+        .session_client()
+        .txn(statements)
+        .await
+        .map_err(database_error)
+    {
         Ok(committed) => committed,
         Err(error)
             if (authority.is_some()
@@ -2295,7 +2659,7 @@ async fn activate_with_authority(
                 || (receiver.is_some()
                     && super::sharing_receiver_sessions::receiver_write_refused(&error)) =>
         {
-            return Ok(None)
+            return Ok(None);
         }
         Err(error) => return Err(error),
     };
@@ -2311,7 +2675,7 @@ async fn activate_with_authority(
                 || (receiver.is_some()
                     && super::sharing_receiver_sessions::receiver_write_refused(&error)) =>
         {
-            return Ok(None)
+            return Ok(None);
         }
         Err(error) => return Err(error),
     };
@@ -2360,7 +2724,7 @@ async fn activate_with_authority(
         return Ok(None);
     };
     let committed_pointer = store
-        .client()
+        .session_client()
         .query_consistent_map::<PointerRow, _>(
             format!(
                 "SELECT current_incarnation_id FROM media_playback_pointers
@@ -2403,7 +2767,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let r = &observation.route;
         let s = &observation.scope;
         let results = self
-            .client()
+            .session_client()
             .txn([
                 (
                     crate::store::candidate_recovery::PRUNE_SQL,
@@ -2450,7 +2814,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(crate::store::CandidateRecoveryMemory::default());
         };
         let rows = self
-            .client()
+            .session_client()
             // authority: the recovery budget must include the failure just committed, or lag re-offers that recipe.
             .query_consistent_map::<CandidateRecoveryRecipeRow, _>(
                 crate::store::candidate_recovery::READ_SQL,
@@ -2505,7 +2869,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let principal_values = ownership.insert_values(1);
         let existing_user = ownership.existing_user(1);
         let inserted = self
-            .client()
+            .session_client()
             .execute(
                 format!(
                     "INSERT INTO media_session_requests
@@ -2593,7 +2957,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let principal_values = ownership.insert_values(1);
         let existing_user = ownership.existing_user(1);
         Ok(self
-            .client()
+            .session_client()
             .execute(
                 format!("INSERT INTO library_channel_session_recipes
                     (user_id, request_id, incarnation_id, recipe_json, created_at_ms{principal_columns})
@@ -2637,7 +3001,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let owner = ownership.equals(3);
         let existing_user = ownership.existing_user(3);
         Ok(self
-            .client()
+            .session_client()
             .execute(
                 format!(
                     "UPDATE media_session_requests SET owner_node_id = $1, updated_at_ms = $2
@@ -2711,7 +3075,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(None);
         }
         // authority: a committed quality cancellation must fence this preparation before it is admitted
-        let bindings = timeout_store(self.client().query_consistent_map::<PreparationCancellationBinding, _>(
+        let bindings = timeout_store(self.session_client().query_consistent_map::<PreparationCancellationBinding, _>(
             "SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = $1", params!(preparation.incarnation_id.as_str()))).await?;
         if bindings.first().is_some_and(|binding| {
             binding.0
@@ -2756,7 +3120,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             validate_sql(sql)?;
         }
         let changed = self
-            .client()
+            .session_client()
             .txn(statements)
             .await?
             .into_iter()
@@ -2848,7 +3212,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                      ELSE excluded.updated_at_ms
                  END");
         validate_sql(&sql)?;
-        let changed = timeout_store(self.client().execute(
+        let changed = timeout_store(self.session_client().execute(
             sql,
             params!(user_id, playback_id, digest, canonical_form, now_ms),
         ))
@@ -2870,15 +3234,16 @@ impl MediaSessionStore for HiqliteAuthStore {
     ) -> Result<Option<i64>, StoreError> {
         let user_id = crate::store::local_media_principal_id(principal)?;
         let layout = LocalSessionSql::load(self).await?;
-        let rows: Vec<PointerRevisionRow> = timeout_store(self.client().query_consistent_map(
-            format!(
-                "SELECT desired_revision FROM media_playback_pointers
+        let rows: Vec<PointerRevisionRow> =
+            timeout_store(self.session_client().query_consistent_map(
+                format!(
+                    "SELECT desired_revision FROM media_playback_pointers
               WHERE {} AND playback_id = $2",
-                layout.equals(1)
-            ),
-            params!(user_id, playback_id),
-        ))
-        .await?;
+                    layout.equals(1)
+                ),
+                params!(user_id, playback_id),
+            ))
+            .await?;
         Ok(rows.first().and_then(|row| row.0))
     }
 
@@ -2899,7 +3264,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     updated_at_ms = excluded.updated_at_ms";
         validate_sql(sql)?;
         timeout_store(
-            self.client()
+            self.session_client()
                 .execute(sql, params!(user_id, playback_id, incarnation_id, now_ms)),
         )
         .await?;
@@ -2916,15 +3281,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid desired-selection principal".into(),
             ));
         }
-        if route_projection(self).await? == LEGACY_ROUTE_COLS {
-            return desired_row(
-                self,
-                crate::store::local_media_principal_id(principal)?,
-                playback_id,
-            )
-            .await;
+        if let Some(user_id) = principal.local_user_id() {
+            return desired_row(self, user_id, playback_id).await;
         }
-        self.client()
+        self.session_client()
             .query_consistent_map::<PrincipalDesiredRow, _>(
                 "SELECT owner_key, principal_kind, user_id, share_grant_id, share_viewer_key,
                     playback_id, revision, digest, canonical_form, updated_at_ms
@@ -2966,7 +3326,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         });
         if exact_replay {
             // authority: a committed quality cancellation must fence the staged successor before it commits
-            let bindings = timeout_store(self.client().query_consistent_map::<PreparationCancellationBinding, _>(
+            let bindings = timeout_store(self.session_client().query_consistent_map::<PreparationCancellationBinding, _>(
                 "SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = $1",
                 params!(preparation.incarnation_id.as_str()))).await?;
             if bindings
@@ -3099,7 +3459,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             validate_sql(sql)?;
         }
         let statement_count = statements.len();
-        let results = match self.client().txn(statements).await {
+        let results = match self.session_client().txn(statements).await {
             Ok(results) => results,
             Err(error) => {
                 let message = error.to_string();
@@ -3112,14 +3472,12 @@ impl MediaSessionStore for HiqliteAuthStore {
                 .into_iter()
                 .any(|index| {
                     message.contains(&format!(
-                        "StmtIndex({index}) does not have observable row output"
+                        "StmtIndex({}) does not have observable row output",
+                        index + 1
                     ))
                 });
-                let assertion_failed = message.contains(if layout.rebuilt {
-                    "media_session_preparations.owner_key"
-                } else {
-                    "media_session_preparations.user_id"
-                });
+                let assertion_failed = message.contains("media_session_preparations.owner_key")
+                    || message.contains("media_session_preparations.user_id");
                 if guarded_step_lost || assertion_failed {
                     return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
                         .await;
@@ -3134,11 +3492,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                 // expected statement error. Hiqlite has rolled the proposal
                 // back. Classify only that exact constraint target; unrelated
                 // statement errors remain database faults.
-                if error.to_string().contains(if layout.rebuilt {
-                    "media_session_preparations.owner_key"
-                } else {
-                    "media_session_preparations.user_id"
-                }) {
+                if error
+                    .to_string()
+                    .contains("media_session_preparations.owner_key")
+                    || error
+                        .to_string()
+                        .contains("media_session_preparations.user_id")
+                {
                     return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
                         .await;
                 }
@@ -3519,12 +3879,12 @@ impl MediaSessionStore for HiqliteAuthStore {
             validate_sql(sql)?;
         }
         let statement_count = statements.len();
-        let results = match self.client().txn(statements).await {
+        let results = match self.session_client().txn(statements).await {
             Ok(results) => results,
             Err(error) => {
                 if error
                     .to_string()
-                    .contains("StmtIndex(0) does not have observable row output")
+                    .contains("StmtIndex(1) does not have observable row output")
                 {
                     return classify_preparation_commit_cas_loss(
                         self,
@@ -3542,7 +3902,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             Err(error) => {
                 if error
                     .to_string()
-                    .contains("StmtIndex(0) does not have observable row output")
+                    .contains("StmtIndex(1) does not have observable row output")
                 {
                     return classify_preparation_commit_cas_loss(
                         self,
@@ -3571,7 +3931,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             return classify_preparation_commit_cas_loss(self, user_id, playback_id, request).await;
         }
         let pointer = self
-            .client()
+            .session_client()
             .query_consistent_map::<PointerRow, _>(
                 format!(
                     "SELECT current_incarnation_id FROM media_playback_pointers
@@ -3665,7 +4025,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
-        self.client()
+        self.session_client()
             .txn(statements)
             .await?
             .into_iter()
@@ -3739,7 +4099,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 // ambiguous client timeout cannot strand a committed
                 // activation behind a lost response.
                 let changed = self
-                    .client()
+                    .session_client()
                     .execute_idempotent(
                         format!(
                             "UPDATE media_sessions SET publication_ready_at_ms = $1,
@@ -3791,7 +4151,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             && route.publication_ready_at_ms == publication_ready_at_ms
                     });
                 let committed_pointer = self
-                    .client()
+                    .session_client()
                     .query_consistent_map::<PointerRow, _>(
                         format!(
                             "SELECT current_incarnation_id FROM media_playback_pointers
@@ -3815,7 +4175,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 }
             }
             MediaSessionActivationSettlement::Abandon => {
-                self.client()
+                self.session_client()
                     .txn([
                         (
                             format!(
@@ -3982,7 +4342,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let owner_1 = layout.equals(1);
         let user_exists_1 = layout.existing_user(1);
         let nonce = uuid::Uuid::new_v4().to_string();
-        let results = self.client()
+        let results = self.session_client()
             .txn([
                 (super::jellyfin_play::BIND_NATIVE_PUBLICATION.to_owned(), params!(user_id, request_id, incarnation_id, now_ms, nonce.as_str())),
                 (
@@ -4126,14 +4486,14 @@ impl MediaSessionStore for HiqliteAuthStore {
             }
         };
         if expected_not_before_ms == 0 {
-            self.client()
+            self.session_client()
                 .execute(
                     statement,
                     params!(now_ms, incarnation_id, owner_node_id, owner_epoch),
                 )
                 .await?;
         } else {
-            self.client()
+            self.session_client()
                 .execute(
                     statement,
                     params!(
@@ -4180,7 +4540,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let live_local = LocalSessionSql::load(self)
             .await?
             .live_local_user("media_sessions");
-        self.client()
+        self.session_client()
             .execute(
                 format!(
                     "UPDATE media_sessions SET publication_ready_at_ms = $1, updated_at_ms = $2
@@ -4231,7 +4591,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session terminal projection arming".to_owned(),
             ));
         }
-        self.client()
+        self.session_client()
             .execute(
                 "UPDATE media_sessions SET publication_ready_at_ms = $1, updated_at_ms = $2
                   WHERE incarnation_id = $3 AND owner_node_id = $4 AND owner_epoch = $5
@@ -4301,14 +4661,14 @@ impl MediaSessionStore for HiqliteAuthStore {
             }
         };
         if expected_not_before_ms == 0 {
-            self.client()
+            self.session_client()
                 .execute(
                     statement,
                     params!(now_ms, incarnation_id, owner_node_id, owner_epoch),
                 )
                 .await?;
         } else {
-            self.client()
+            self.session_client()
                 .execute(
                     statement,
                     params!(
@@ -4349,7 +4709,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let ownership = LocalSessionSql::load(self).await?;
         let owner = ownership.equals(2);
         Ok(self
-            .client()
+            .session_client()
             .execute(
                 format!(
                     "UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = $1,
@@ -4399,22 +4759,14 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session playback route".to_owned(),
             ));
         }
-        let (owner_column, owner): (&str, Param) =
-            if route_projection(self).await? == PRINCIPAL_ROUTE_COLS {
-                ("owner_key", principal.owner_key().into())
-            } else {
-                (
-                    "user_id",
-                    crate::store::local_media_principal_id(principal)?.into(),
-                )
-            };
+        let (owner_predicate, owner) = principal_lookup(principal)?;
         let sql = format!(
             "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE {owner_column} = $1 AND playback_id = $2"
+                  WHERE {owner_predicate} AND playback_id = $2"
         );
         validate_sql(&sql)?;
         let incarnation = self
-            .client()
+            .session_client()
             .query_consistent_map::<PointerRow, _>(sql, params!(owner, playback_id))
             .await?
             .into_iter()
@@ -4443,7 +4795,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             owner_epoch,
             now_ms,
         )?;
-        let applied = timeout_store(self.client().execute(
+        let applied = timeout_store(self.session_client().execute(
             crate::store::continuous_family::BIND,
             params!(json, generation, owner_node_id, owner_epoch, now_ms),
         ))
@@ -4460,7 +4812,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             crate::store::quality_ledger::COLUMNS
         );
         let rows = timeout_store(
-            self.client()
+            self.session_client()
                 // authority: the ledger CAS compares against the committed revision; a stale replica would lose the write
                 .query_consistent_map::<QualityLedgerRow, _>(sql, params!(generation)),
         )
@@ -4484,10 +4836,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         rendition_id: &str,
     ) -> Result<Vec<crate::playback::continuous_quality::QualityInterval>, StoreError> {
         // authority: eviction may not miss a committed continuous reservation of the media it would delete
-        let rows = timeout_store(self.client().query_consistent_map::<QualityIntervalRow, _>(
-            crate::store::quality_ledger::RESERVED_INTERVALS,
-            params!(rendition_id),
-        ))
+        let rows = timeout_store(
+            self.session_client()
+                .query_consistent_map::<QualityIntervalRow, _>(
+                    crate::store::quality_ledger::RESERVED_INTERVALS,
+                    params!(rendition_id),
+                ),
+        )
         .await?;
         crate::store::quality_ledger::decode_reserved_intervals(
             rows.into_iter().map(|row| row.json).collect(),
@@ -4510,7 +4865,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         )?;
         let epoch = i64::try_from(ledger.control_epoch)
             .map_err(|error| StoreError::Task(error.to_string()))?;
-        Ok(timeout_store(self.client().execute(
+        Ok(timeout_store(self.session_client().execute(
             crate::store::quality_ledger::WRITE,
             params!(
                 ledger.generation.as_str(),
@@ -4540,7 +4895,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             owner_node_id,
             now_ms,
         )?;
-        let applied = timeout_store(self.client().execute(
+        let applied = timeout_store(self.session_client().execute(
             crate::store::quality_ledger::TERMINAL_WRITE,
             params!(
                 owner_node_id,
@@ -4597,7 +4952,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
-        timeout_store(self.client().txn(statements))
+        timeout_store(self.session_client().txn(statements))
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -4620,7 +4975,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             crate::store::quality_cancellation::CANCELLATION_COLS
         );
         let rows = timeout_store(
-            self.client()
+            self.session_client()
                 // authority: receipt replay must answer from the committed receipt, never a lagging replica
                 .query_consistent_map::<QualityCancellationRow, _>(sql, params!(receipt_key)),
         )
@@ -4635,13 +4990,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         owner_epoch: i64,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        timeout_store(self.client().execute(
+        timeout_store(self.session_client().execute(
             crate::store::quality_cancellation::SETTLE_CANCELLATION,
             params!(now_ms, receipt_key, owner_node_id, owner_epoch),
         ))
         .await?;
         Ok(timeout_store(
-            self.client()
+            self.session_client()
                 // authority: settlement must observe the committed staged-child state it is fencing
                 .query_consistent_map::<CancellationSettledRow, _>(
                     crate::store::quality_cancellation::CANCELLATION_SETTLED_FOR,
@@ -4662,7 +5017,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         recipe_revision: i64,
     ) -> Result<bool, StoreError> {
         // authority: an intent's cancellation must be observed exactly once the cancel is committed
-        let rows = timeout_store(self.client().query_consistent_map::<QualityCancellationRow, _>(
+        let rows = timeout_store(self.session_client().query_consistent_map::<QualityCancellationRow, _>(
             format!("SELECT {} FROM quality_cancellation_receipts WHERE generation = $1 AND client_instance_id = $2 AND lifetime_id = $3 AND recipe_revision = $4 LIMIT 1", crate::store::quality_cancellation::CANCELLATION_COLS),
             params!(generation, client_instance_id, lifetime_id, recipe_revision))).await?;
         Ok(!rows.is_empty())
@@ -4679,7 +5034,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         }
         let owner_column = LocalSessionSql::load(self).await?.column();
         let lease_resource = format!("session:{}", acknowledgement.incarnation_id);
-        self.client()
+        self.session_client()
             .txn([
                 (
                     "INSERT INTO media_session_terminal_acks
@@ -4790,7 +5145,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         let stored = self
-            .client()
+            .session_client()
             .query_consistent_map::<TerminalAckRow, _>(
                 "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
                         client_instance_id, sequence, request_fingerprint, response_json,
@@ -4823,7 +5178,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(None);
         }
         Ok(self
-            .client()
+            .session_client()
             .query_consistent_map::<TerminalAckRow, _>(
                 "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
                         client_instance_id, sequence, request_fingerprint, response_json,
@@ -4918,7 +5273,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             }
             None => (0_i64, 0_i64, String::new()),
         };
-        let route_cols = route_projection(self).await?;
+        let route_cols = "__PLURX_ROUTE_PROJECTION__";
         let owner_column = LocalSessionSql::load(self).await?.column();
         let sql = format!(
             "SELECT {route_cols} FROM media_sessions
@@ -4938,7 +5293,7 @@ impl MediaSessionStore for HiqliteAuthStore {
               ORDER BY lease_expires_at_ms, incarnation_id LIMIT $6"
         );
         validate_sql(&sql)?;
-        self.client()
+        self.session_client()
             .query_consistent_map::<RouteRow, _>(
                 sql,
                 params!(
@@ -4969,7 +5324,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let next_epoch = takeover.expected_owner_epoch.saturating_add(1);
         let removed_owner_key = removed_job_owner_key(&takeover.next_owner_node_id);
         let changed = self
-            .client()
+            .session_client()
             .txn([
                 (
                     format!("UPDATE job_leases
@@ -5152,7 +5507,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let owner_key = route.principal.owner_key();
         let lease_resource = format!("session:{}", end.incarnation_id);
         let changed = self
-            .client()
+            .session_client()
             .txn([
                 (
                     format!("UPDATE media_sessions SET state = 'ended', terminal_reason = $1, lease_expires_at_ms = $2,
@@ -5275,7 +5630,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // successor's cache pin behind, and hands the caller a route naming
         // the dead node — so the abort is sent to a host that is gone while
         // the replacement encoder keeps running.
-        self.client()
+        self.session_client()
             .txn([
                 (
                     format!("UPDATE media_sessions SET state = 'ended', terminal_reason = $1,
@@ -5349,7 +5704,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // statements affect zero rows. Keep idle clusters out of the write
         // log by proving that at least one bounded cleanup has work first.
         let pending = self
-            .client()
+            .session_client()
             .query_consistent_map::<PendingMaintenanceRow, _>(
                 format!(
                     "SELECT 1 AS pending WHERE
@@ -5622,7 +5977,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 params!(retained_cutoff, MAINTENANCE_BATCH),
             ),
         ];
-        self.client()
+        self.session_client()
             .txn(statements)
             .await?
             .into_iter()
@@ -5643,7 +5998,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let local_inventory = layout.live_local_user("media_sessions");
         let principal_cols = layout.projection();
         let owner_column = layout.column();
-        self.client()
+        self.session_client()
             .query_consistent_map::<OwnedLeaseRow, _>(
                 format!(
                     "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
@@ -5720,7 +6075,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // fenced on `failed_incarnation_id` and so can only be this caller's
         // own. `txn` cannot carry the read, because it returns affected rows
         // rather than result sets.
-        self.client()
+        self.session_client()
             .execute(
                 sql,
                 params!(
@@ -5812,7 +6167,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                       AND state = 'reserved'"
         );
         validate_sql(&sql)?;
-        self.client()
+        self.session_client()
             .execute(
                 sql,
                 params!(
@@ -5867,7 +6222,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         let changed = self
-            .client()
+            .session_client()
             .execute(
                 sql,
                 params!(
@@ -5937,28 +6292,16 @@ async fn recovery_row(
     recovery_epoch: &str,
 ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
     let layout = LocalSessionSql::load(store).await?;
-    let owner_column = layout.column();
+    let (owner, binding) = principal_lookup(principal)?;
     let principal_columns = layout.projection();
-    let bindings = if layout.rebuilt {
-        params!(
-            principal.owner_key(),
-            playback_id.to_owned(),
-            recovery_epoch.to_owned()
-        )
-    } else {
-        params!(
-            crate::store::local_media_principal_id(principal)?,
-            playback_id.to_owned(),
-            recovery_epoch.to_owned()
-        )
-    };
+    let bindings = params!(binding, playback_id.to_owned(), recovery_epoch.to_owned());
     let sql = format!(
         "SELECT {principal_columns}, {RECOVERY_COLS} FROM media_session_producer_recovery
-          WHERE {owner_column} = $1 AND playback_id = $2 AND recovery_epoch = $3"
+          WHERE {owner} AND playback_id = $2 AND recovery_epoch = $3"
     );
     validate_sql(&sql)?;
     let Some(row) = store
-        .client()
+        .session_client()
         .query_consistent_map::<RecoveryRow, _>(sql, bindings)
         .await?
         .into_iter()
@@ -5989,6 +6332,195 @@ async fn recovery_row(
         row.updated_at_ms,
     )
     .map(Some)
+}
+
+#[cfg(test)]
+mod live_layout_dispatch_tests {
+    use super::*;
+
+    fn request_fixture() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("fixture");
+        conn.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE users(id INTEGER PRIMARY KEY); INSERT INTO users VALUES(7); CREATE TABLE cluster_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER NOT NULL); INSERT INTO cluster_meta VALUES(1,81)").expect("base");
+        conn.execute_batch(hiqlite::Error::SOURCE_LAYOUT_GUARD_DDL)
+            .expect("dispatch guard");
+        type Object = (String, String, String, Vec<Option<String>>);
+        let objects: Vec<Object> =
+            serde_json::from_str(include_str!("sharing_source_legacy_schema.json"))
+                .expect("frozen predecessor");
+        let definition = objects
+            .iter()
+            .find(|(kind, name, _, _)| kind == "table" && name == "media_session_requests")
+            .expect("request definition")
+            .3
+            .iter()
+            .flatten()
+            .next()
+            .expect("request SQL");
+        conn.execute_batch(definition).expect("legacy requests");
+        conn
+    }
+
+    fn migrate_requests(conn: &mut rusqlite::Connection) {
+        let txn = conn.transaction().expect("migration");
+        let mut started = false;
+        for sql in super::super::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.split("-- next statement") {
+            let sql = sql.trim();
+            if sql.starts_with("CREATE TABLE media_session_requests_principal_new") {
+                started = true;
+            }
+            if started {
+                txn.execute_batch(sql)
+                    .expect("real frozen request migration");
+            }
+            if sql.starts_with("ALTER TABLE media_session_requests_principal_new") {
+                break;
+            }
+        }
+        txn.execute("UPDATE cluster_meta SET schema_version=82", [])
+            .expect("marker");
+        txn.commit().expect("migration commit");
+    }
+
+    fn execute_statement(
+        conn: &rusqlite::Connection,
+        statement: &(String, hiqlite::Params),
+    ) -> rusqlite::Result<usize> {
+        let bindings = statement.1.iter().map(|value| match value {
+            Param::Integer(value) => rusqlite::types::Value::Integer(*value),
+            Param::Text(value) => rusqlite::types::Value::Text(value.clone()),
+            Param::Null => rusqlite::types::Value::Null,
+            _ => panic!("unsupported fixture binding"),
+        });
+        conn.execute(&statement.0, rusqlite::params_from_iter(bindings))
+    }
+
+    fn request_template(
+        request: &str,
+        incarnation: &str,
+    ) -> Vec<(std::borrow::Cow<'static, str>, hiqlite::Params)> {
+        let layout = LocalSessionSql {
+            rebuilt: false,
+            template: true,
+        };
+        vec![(format!("INSERT INTO media_session_requests(user_id,request_id,request_fingerprint,playback_id,state,claim_expires_at_ms,incarnation_id,updated_at_ms{}) SELECT $1,$2,$3,$4,'starting',10000,$5,$6{} WHERE 1=1{} ON CONFLICT({},request_id) DO NOTHING",layout.insert_columns(),layout.insert_values(1),layout.existing_user(1),layout.column()).into(),params!(7,request,"fingerprint","playback",incarnation,1000))]
+    }
+
+    #[test]
+    fn local_request_proposal_prepared_before_live_migration_preserves_active_claims() {
+        let mut conn = request_fixture();
+        let retained = request_template("retained", "old-incarnation");
+        for statement in
+            guarded_session_statements(&retained, SessionLayout::Legacy).expect("legacy proposal")
+        {
+            execute_statement(&conn, &statement).expect("retained claim");
+        }
+        // This exact application proposal was constructed while the old schema
+        // was visible, but has not been submitted when migration commits.
+        let pending = request_template("pending", "new-incarnation");
+        let stale = guarded_session_statements(&pending, SessionLayout::Legacy).expect("old arm");
+        migrate_requests(&mut conn);
+        let txn = conn.transaction().expect("stale proposal");
+        let error = execute_statement(&txn, &stale[0]).expect_err("first guard must refuse");
+        assert!(error.to_string().contains("plurx_source_layout_guard_v1"));
+        assert_eq!(
+            txn.query_row(
+                "SELECT count(*) FROM media_session_requests WHERE request_id='pending'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .expect("no body execution"),
+            0
+        );
+        txn.rollback().expect("confirmed rollback");
+        let regenerated =
+            guarded_session_statements(&pending, SessionLayout::Principal).expect("installed arm");
+        let txn = conn.transaction().expect("regenerated proposal");
+        for statement in &regenerated {
+            execute_statement(&txn, statement).expect("compatible write");
+        }
+        txn.commit().expect("commit");
+        let rows: i64 = conn.query_row("SELECT count(*) FROM media_session_requests WHERE owner_key='local:7' AND principal_kind='local' AND state='starting' AND claim_expires_at_ms=10000",[],|row|row.get(0)).expect("live claims");
+        assert_eq!(rows, 2);
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sharing_source_dispatch_guard",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .expect("guard remains inert"),
+            0
+        );
+    }
+
+    #[test]
+    fn shared_request_read_after_migration_uses_principal_projection_instead_of_stale_local_projection(
+    ) {
+        let mut conn = request_fixture();
+        migrate_requests(&mut conn);
+        let grant = "00000000-0000-4000-a000-000000000001";
+        let viewer = "a".repeat(64);
+        let owner = format!("share:{grant}:{viewer}");
+        conn.execute("INSERT INTO media_session_requests(owner_key,principal_kind,user_id,share_grant_id,share_viewer_key,request_id,request_fingerprint,playback_id,state,claim_expires_at_ms,incarnation_id,updated_at_ms) VALUES(?1,'sharing',NULL,?2,?3,'shared','fingerprint','playback','starting',10000,'shared-incarnation',1000)",rusqlite::params![owner,grant,viewer]).expect("Shared claim");
+        let template = "SELECT request_fingerprint,playback_id,state,incarnation_id,owner_node_id,claim_expires_at_ms,__PLURX_LOCAL_PROJECTION__ FROM media_session_requests WHERE request_id='shared'";
+        let read = |layout| {
+            conn.query_row(
+                &resolve_session_sql(template, layout).expect("resolved read"),
+                [],
+                |row| Ok(decode_request(&mut Row::Borrowed(row))),
+            )
+            .expect("read")
+        };
+        // The bridge must buffer and discard this error when its post-read
+        // marker proves82, rather than exposing a false Local decoder fault.
+        assert!(read(SessionLayout::Legacy).is_err());
+        let current = read(SessionLayout::Principal).expect("actual principal");
+        assert_eq!(
+            current.principal,
+            crate::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str(grant).expect("grant"),
+                &viewer
+            )
+            .expect("Shared principal")
+        );
+    }
+
+    #[test]
+    fn guarded_proposals_preserve_named_and_indexed_statement_output_links() {
+        let templates = vec![
+            ("SELECT $1 AS result".into(), params!(7)),
+            (
+                "SELECT $1,$2".into(),
+                vec![
+                    Param::StmtOutputNamed(0, "result".into()),
+                    Param::StmtOutputIndexed(0, 0),
+                ],
+            ),
+        ];
+        let guarded =
+            guarded_session_statements(&templates, SessionLayout::Principal).expect("proposal");
+        assert_eq!(
+            guarded[2].1,
+            vec![
+                Param::StmtOutputNamed(1, "result".into()),
+                Param::StmtOutputIndexed(1, 0)
+            ]
+        );
+        assert_eq!(
+            templates[1].1,
+            vec![
+                Param::StmtOutputNamed(0, "result".into()),
+                Param::StmtOutputIndexed(0, 0)
+            ]
+        );
+        for invalid in [
+            "SELECT __PLURX_LOCAL_EQUALS_0__",
+            "SELECT __PLURX_LOCAL_LIVE_USER_arbitrary__",
+            "SELECT __PLURX_UNKNOWN__",
+        ] {
+            assert!(resolve_session_sql(invalid, SessionLayout::Legacy).is_err());
+            assert!(resolve_session_sql(invalid, SessionLayout::Principal).is_err());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6088,10 +6620,8 @@ mod tests {
         let source = method_source("commit_media_session_preparation");
         assert!(
             source.contains("RETURNING current_incarnation_id")
-                && source.contains(
-                    "Param::StmtOutputNamed(0, \"current_incarnation_id\".into())"
-                )
-                && source.contains("StmtIndex(0) does not have observable row output"),
+                && source.contains("Param::StmtOutputNamed(0, \"current_incarnation_id\".into())")
+                && source.contains("StmtIndex(1) does not have observable row output"),
             "a losing pointer CAS must roll back every dependent write before replay classification"
         );
         assert!(
@@ -6141,9 +6671,14 @@ mod tests {
             "the public preparation path must submit the shared statement vector unchanged"
         );
         let preparation = statement_test_preparation();
-        let statements =
-            prepare_statements(&preparation, super::LocalSessionSql { rebuilt: false })
-                .expect("local preparation statements");
+        let statements = prepare_statements(
+            &preparation,
+            super::LocalSessionSql {
+                rebuilt: false,
+                template: false,
+            },
+        )
+        .expect("local preparation statements");
         assert_eq!(
             statements.len(),
             4,
@@ -6245,7 +6780,10 @@ mod tests {
             "owner",
             1,
             1,
-            super::LocalSessionSql { rebuilt: false },
+            super::LocalSessionSql {
+                rebuilt: false,
+                template: false,
+            },
         );
         assert_eq!(
             statements.len(),
@@ -6522,6 +7060,9 @@ async fn renew_with_authority(
     if renewals.is_empty() {
         return Ok(Vec::new());
     }
+    if authority.is_some() && session_layout(store, true).await? != SessionLayout::Principal {
+        return Ok(Vec::new());
+    }
     let layout = LocalSessionSql::load(store).await?;
     let owner_column = layout.column();
     let live_local = if authority.is_some() {
@@ -6679,7 +7220,7 @@ async fn renew_with_authority(
             ),
         ));
     }
-    let result = store.client().txn(statements).await;
+    let result = store.session_client().txn(statements).await;
     let mut changed = match result {
         Err(error) => {
             let error = database_error(error);
@@ -6698,7 +7239,7 @@ async fn renew_with_authority(
                 if authority.is_some()
                     && super::sharing_source_sessions::source_write_refused(&error) =>
             {
-                return Ok(Vec::new())
+                return Ok(Vec::new());
             }
             Err(error) => return Err(error),
         },

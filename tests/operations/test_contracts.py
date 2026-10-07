@@ -2071,8 +2071,12 @@ assert.equal(context.ACT_TIMER, null);
         playback_contracts = workflow_step_literal(
             fast_preflight["Check the shared player input contract"], "run"
         )
-        self.assertIn("node tests/playback/web-policy.test.js", playback_contracts)
-        self.assertIn("node tests/playback/web-control.test.js", playback_contracts)
+        self.assertEqual(playback_contracts, ["python3 -m validation.main_preflight_adoption node"])
+        adapter = read("validation/main_preflight_adoption.py")
+        self.assertIn('"tests/playback/web-policy.test.js"', adapter)
+        self.assertIn('"tests/playback/web-control.test.js"', adapter)
+        self.assertIn("needs: [scope, preflight, rust_compile]", fast_jobs["windows_compile"])
+        self.assertIn("cancel-in-progress: false", fast_lane)
         self.assertEqual(
             make_dry_run_commands("hiqlite-vendor-clippy"),
             [
@@ -3461,7 +3465,9 @@ assert.equal(context.ACT_TIMER, null);
                     "make history-check",
                     "make validation-lint",
                     "python3 -m validation.python_unit_receipts run"
-                    if workflow == "effort-ci" else "make operations-check",
+                    if workflow == "effort-ci" else
+                    "python3 -m validation.main_preflight_adoption operations"
+                    if workflow == "main-fast-lane" else "make operations-check",
                 ):
                     self.assertIn(command, preflight)
 

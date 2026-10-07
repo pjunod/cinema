@@ -425,7 +425,9 @@ CREATE TABLE IF NOT EXISTS _metadata
                     Query::Transaction(req) => {
                         #[cfg(feature = "validation-test-helpers")]
                         let matches_hold = precommit_hold.as_ref().is_some_and(|hold| {
-                            req.queries.iter().any(|query| query.sql.as_ref() == hold.exact_statement)
+                            req.queries
+                                .iter()
+                                .any(|query| query.sql.as_ref() == hold.exact_statement)
                         });
                         sm_data.last_applied_log_id = req.last_applied_log_id;
 
@@ -442,6 +444,7 @@ CREATE TABLE IF NOT EXISTS _metadata
 
                         let mut results = Vec::with_capacity(req.queries.len());
                         let mut query_err = None;
+                        let mut layout_guard_failed = false;
                         let mut txn_env = TransactionEnv::default();
 
                         'outer: for (stmt_index, state_machine::Query { sql, params }) in
@@ -450,6 +453,9 @@ CREATE TABLE IF NOT EXISTS _metadata
                             if log_statements {
                                 info!("Query::Transaction:\n{sql}\n{params:?}");
                             }
+
+                            let exact_layout_guard =
+                                is_exact_source_layout_guard(stmt_index, sql.as_ref(), &params);
 
                             let mut stmt = match txn.prepare_cached(sql.as_ref()) {
                                 Ok(stmt) => stmt,
@@ -538,12 +544,15 @@ CREATE TABLE IF NOT EXISTS _metadata
                                     }
                                 }
                             } else {
-                                let res = stmt.raw_execute().map_err(Error::from);
+                                let res = stmt.raw_execute();
                                 match res {
                                     Ok(r) => {
                                         results.push(Ok(r));
                                     }
                                     Err(err) => {
+                                        layout_guard_failed = exact_layout_guard
+                                            && is_source_layout_check_failure(&err);
+                                        let err = Error::from(err);
                                         query_err =
                                             Some(Error::Transaction(err.to_string().into()));
                                         break;
@@ -553,9 +562,18 @@ CREATE TABLE IF NOT EXISTS _metadata
                         }
 
                         if let Some(err) = query_err {
-                            if let Err(e) = txn.rollback() {
-                                error!("Error during txn rollback: {:?}", e);
-                            }
+                            let rollback_succeeded = match txn.rollback() {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    error!("Error during txn rollback: {:?}", e);
+                                    false
+                                }
+                            };
+                            let err = source_layout_rollback_result(
+                                err,
+                                layout_guard_failed,
+                                rollback_succeeded,
+                            );
                             req.tx
                                 .send(Err(err))
                                 .expect("oneshot tx to never be dropped");
@@ -563,7 +581,9 @@ CREATE TABLE IF NOT EXISTS _metadata
                             #[cfg(feature = "validation-test-helpers")]
                             if matches_hold && let Some(hold) = precommit_hold.take() {
                                 let _ = hold.entered.send(());
-                                let remaining = hold.until.saturating_duration_since(std::time::Instant::now());
+                                let remaining = hold
+                                    .until
+                                    .saturating_duration_since(std::time::Instant::now());
                                 // Retain the actual uncommitted Transaction and writer.
                                 // Sender drop or the finite bound always releases it.
                                 let _ = hold.release.recv_timeout(remaining);
@@ -1604,5 +1624,106 @@ mod snapshot_cut_tests {
             std::fs::remove_file(path).unwrap();
         }
         shutdown(root, writer).await;
+    }
+}
+
+fn is_source_layout_check_failure(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(code, Some(message))
+        if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK
+        && message == "CHECK constraint failed: plurx_source_layout_guard_v1")
+}
+
+fn source_layout_rollback_result(
+    original: Error,
+    exact_guard_failed: bool,
+    rollback_succeeded: bool,
+) -> Error {
+    if exact_guard_failed && rollback_succeeded {
+        Error::Transaction(Error::SOURCE_LAYOUT_ROLLBACK_CERTIFICATE.into())
+    } else {
+        original
+    }
+}
+
+fn is_exact_source_layout_guard(index: usize, sql: &str, params: &[Param]) -> bool {
+    index == 0
+        && sql == Error::SOURCE_LAYOUT_GUARD_SQL
+        && matches!(params, [Param::Integer(81 | 82)])
+}
+
+#[cfg(test)]
+mod source_layout_rollback_tests {
+    use super::*;
+
+    #[test]
+    fn source_layout_certificate_requires_exact_first_guard_and_completed_rollback() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE cluster_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER); INSERT INTO cluster_meta VALUES(1,82); CREATE TABLE application(value INTEGER);").unwrap();
+        conn.execute_batch(Error::SOURCE_LAYOUT_GUARD_DDL).unwrap();
+        // A matching layout inserts zero guard rows and can commit application work.
+        let txn = conn.transaction().unwrap();
+        assert_eq!(
+            txn.execute(Error::SOURCE_LAYOUT_GUARD_SQL, [82]).unwrap(),
+            0
+        );
+        txn.execute("INSERT INTO application VALUES(1)", [])
+            .unwrap();
+        txn.commit().unwrap();
+        let txn = conn.transaction().unwrap();
+        let failure = txn
+            .execute(Error::SOURCE_LAYOUT_GUARD_SQL, [81])
+            .unwrap_err();
+        assert!(is_source_layout_check_failure(&failure));
+        let exact =
+            is_exact_source_layout_guard(0, Error::SOURCE_LAYOUT_GUARD_SQL, &[Param::Integer(81)]);
+        let original = Error::Transaction(Error::from(failure).to_string().into());
+        let result = source_layout_rollback_result(original, exact, txn.rollback().is_ok());
+        assert!(result.is_source_layout_guard_rollback());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM application", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sharing_source_dispatch_guard",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        for (index, sql, params) in [
+            (1, Error::SOURCE_LAYOUT_GUARD_SQL, vec![Param::Integer(81)]),
+            (0, "SELECT 1", vec![Param::Integer(81)]),
+            (0, Error::SOURCE_LAYOUT_GUARD_SQL, vec![Param::Integer(80)]),
+            (
+                0,
+                Error::SOURCE_LAYOUT_GUARD_SQL,
+                vec![Param::Text("81".into())],
+            ),
+            (
+                0,
+                Error::SOURCE_LAYOUT_GUARD_SQL,
+                vec![Param::Integer(81), Param::Integer(82)],
+            ),
+        ] {
+            assert!(!is_exact_source_layout_guard(index, sql, &params));
+        }
+        assert!(
+            !source_layout_rollback_result(Error::Transaction("original".into()), true, false)
+                .is_source_layout_guard_rollback()
+        );
+        assert!(
+            !source_layout_rollback_result(Error::Transaction("original".into()), false, true)
+                .is_source_layout_guard_rollback()
+        );
+        conn.execute_batch(
+            "CREATE TABLE other(value INTEGER CONSTRAINT other_check CHECK(value=1));",
+        )
+        .unwrap();
+        let other = conn.execute("INSERT INTO other VALUES(0)", []).unwrap_err();
+        assert!(!is_source_layout_check_failure(&other));
     }
 }

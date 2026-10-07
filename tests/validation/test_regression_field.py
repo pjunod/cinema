@@ -175,8 +175,10 @@ class RegressionFieldCase(unittest.TestCase):
         lane = (
             REPO_ROOT / ".github" / "workflows" / "main-fast-lane.yml"
         ).read_text(encoding="utf-8")
-        for path in files:
-            self.assertIn(path, lane)
+        from validation.main_preflight_adoption import NODE, run_commands
+
+        self.assertIn("python3 -m validation.main_preflight_adoption node", run_commands(lane))
+        self.assertEqual(tuple(sorted(NODE)), files)
 
     def test_every_field_line_in_a_body_is_read(self):
         body = textwrap.dedent(

@@ -245,8 +245,10 @@ passed 1/1 in 9.66 seconds and all 11 Hiqlite safety/decoder units passed in
 
 ## A rebuilt table is not shared admission authority
 
-The schema shape comes from the existing quorum-observed Store-lifetime
-projection. The shape remains fixed between coordinated restarts. It proves
+This historical checkpoint used a quorum-observed Store-lifetime projection.
+The [live activation change](SHARING-LIVE-ACTIVATION.md) replaces that
+fixed-layout assumption with guarded dispatch and transition-safe reads. Schema
+shape proves
 neither current export/grant scope nor compatible member capability. Shared
 mutations still hit the explicit local-only refusal before any request write.
 The Source grant/scope/lifetime proof, same-write all-member floor, source cap
