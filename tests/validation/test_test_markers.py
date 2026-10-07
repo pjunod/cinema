@@ -4,7 +4,7 @@ from pathlib import Path
 import textwrap
 import unittest
 
-from validation.test_markers import defines_test
+from validation.test_markers import TEST_ADDITION_RE, defines_test
 
 
 RUST = textwrap.dedent(
@@ -59,6 +59,19 @@ class DefinesTestCase(unittest.TestCase):
         self.assertTrue(defines_test("    def test_something(self):\n", "test_something"))
         self.assertTrue(defines_test("    @Test\n    fun decodesTheFrame() {\n", "decodesTheFrame"))
         self.assertFalse(defines_test(RUST, "no_such_test"))
+
+    def test_queued_node_async_tests_resolve_literal_names(self):
+        name = "keeps.output[1]+attached"
+        for quote in ('"', "'", "`"):
+            with self.subTest(quote=quote):
+                source = f"asyncTest(\n  {quote}{name}{quote}, async () => {{}});\n"
+                self.assertTrue(defines_test(source, name))
+                self.assertFalse(defines_test(source, "keepsXoutput1attached"))
+                self.assertIsNotNone(TEST_ADDITION_RE.search("+" + source))
+        self.assertFalse(defines_test('notAsyncTest("title", async () => {});', "title"))
+        self.assertFalse(defines_test('asyncTest(title, async () => {});', "title"))
+        self.assertFalse(defines_test('asyncTest("longer title", async () => {});', "title"))
+        self.assertFalse(defines_test('function asyncTest(title, run) {}', "title"))
 
     def test_a_test_prefixed_helper_needs_its_marker_where_the_language_does(self):
         # Rust, Kotlin and Java run only annotated tests; this repository has

@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""Install a normal-user fullscreen web launcher or report runtime candidates."""
+import argparse
+import glob
+import grp
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import selectors
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+from urllib.parse import urlsplit
+
+MARKER = 'plurx-hdmi-v1'
+
+
+def web_url(value):
+    # Only the web entry point: no credentials, tokens, escapes or control bytes.
+    if not re.fullmatch(r'https?://[A-Za-z0-9.\-\[\]:]+/?', value):
+        raise ValueError('URL must be an HTTP(S) origin with no credentials, path, query or fragment')
+    parsed = urlsplit(value)
+    if not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError('URL needs a hostname and cannot contain credentials')
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError('invalid URL port') from exc
+    return value
+
+
+def browser_path(value=None):
+    found = value or shutil.which('chromium') or shutil.which('chromium-browser')
+    if not found or not Path(found).is_absolute() or not os.access(found, os.X_OK):
+        raise ValueError('installed Chromium not found; supply --chromium /absolute/path')
+    return str(Path(found).resolve())
+
+
+def locations():
+    home = Path.home()
+    return home / '.local/share/plurx-hdmi', home / '.local/share/applications/plurx-hdmi.desktop'
+
+
+def safe_path(path):
+    for item in [path, *path.parents]:
+        if item.is_symlink():
+            raise ValueError('refusing symlink in launcher installation path')
+        if item.exists() and item.stat().st_uid != os.getuid():
+            # System ancestors are expected to be root-owned.
+            if item == Path.home() or Path.home() in item.parents:
+                raise ValueError('launcher installation path is not owned by this user')
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def desktop_quote(value):
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%') + '"'
+
+
+def owned(state, desktop):
+    safe_path(state)
+    safe_path(desktop)
+    manifest = state / 'ownership.json'
+    safe_path(manifest)
+    try:
+        data = json.loads(manifest.read_text())
+        if data['owner'] != MARKER:
+            raise ValueError('unrecognized launcher owner')
+        for filename, expected in data['files'].items():
+            if filename not in ('launcher', 'config.json', 'desktop'):
+                raise ValueError('unrecognized owned file')
+            path = desktop if filename == 'desktop' else state / filename
+            safe_path(path)
+            if not path.is_file() or digest(path) != expected:
+                raise ValueError('installed launcher was modified; preserve it and remove manually')
+        if set(data['files']) not in (set(), {'launcher', 'config.json', 'desktop'}):
+            raise ValueError('incomplete ownership receipt')
+        return data
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError('existing launcher has no valid ownership receipt') from exc
+
+
+def install(args):
+    url = web_url(args.url)
+    browser = browser_path(args.chromium)
+    state, desktop = locations()
+    safe_path(state)
+    safe_path(desktop)
+    if state.exists() or desktop.exists():
+        receipt = owned(state, desktop)
+        if not receipt['files'] and any(path.exists() or path.is_symlink() for path in (desktop, state / 'launcher', state / 'config.json')):
+            raise ValueError('unowned launcher file')
+    if args.dry_run:
+        print('Would install normal-user launcher and desktop entry; existing owned profile is retained.')
+        return
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    launcher = state / 'launcher'
+    config = state / 'config.json'
+    shutil.copyfile(Path(__file__), launcher)
+    launcher.chmod(0o700)
+    config.write_text(json.dumps({'url': url, 'chromium': browser}) + '\n')
+    config.chmod(0o600)
+    desktop.write_text('[Desktop Entry]\nType=Application\nName=Plurx HDMI\nTerminal=false\nExec=' + desktop_quote(sys.executable) + ' ' + desktop_quote(str(launcher)) + ' launch\n')
+    receipt = {'owner': MARKER, 'files': {'launcher': digest(launcher), 'config.json': digest(config), 'desktop': digest(desktop)}}
+    (state / 'ownership.json').write_text(json.dumps(receipt) + '\n')
+    (state / 'ownership.json').chmod(0o600)
+    print('Installed Plurx HDMI application. Open it in your desktop session and sign in normally.')
+
+
+def uninstall(args):
+    state, desktop = locations()
+    if not state.exists() and not desktop.exists():
+        print('Launcher is already absent.')
+        return
+    receipt = owned(state, desktop)
+    if args.dry_run:
+        print('Would remove verified launcher files; browser profile is retained.')
+        return
+    if receipt['files']:
+        for path in (desktop, state / 'launcher', state / 'config.json'):
+            path.unlink()
+    (state / 'ownership.json').write_text(json.dumps({'owner': MARKER, 'files': {}}) + '\n')
+    print('Removed launcher. Profile is retained for your explicit manual removal after Chromium exits.')
+
+
+def launch():
+    if not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
+        raise ValueError('launch from a logged-in graphical desktop session')
+    state, desktop = locations()
+    owned(state, desktop)
+    config = json.loads((state / 'config.json').read_text())
+    profile = state / 'profile'
+    safe_path(profile)
+    profile.mkdir(mode=0o700, exist_ok=True)
+    profile.chmod(0o700)
+    browser = browser_path(config['chromium'])
+    os.execv(browser, [browser, '--user-data-dir=' + str(profile), '--start-fullscreen', '--no-first-run', web_url(config['url'])])
+
+
+def bounded(command, timeout=3, limit=16384):
+    """Drain at most limit bytes, terminate the whole child process group."""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    output = bytearray()
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    status = 'ok'
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                status = 'timeout'
+                break
+            for key, _ in selector.select(min(remaining, .1)):
+                chunk = os.read(key.fd, min(4096, limit - len(output) + 1))
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                else:
+                    output.extend(chunk)
+                    if len(output) > limit:
+                        status = 'output_limit'
+                        break
+            if status != 'ok':
+                break
+        if status == 'ok':
+            try:
+                process.wait(timeout=max(.01, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                status = 'timeout'
+        if status == 'ok' and process.returncode != 0:
+            status = 'failed'
+    finally:
+        # Also stop descendants holding output descriptors or left by a tool.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        selector.close()
+        process.stdout.close()
+    return status, output[:limit].decode('utf-8', errors='replace')
+
+
+def tool_report(name, path, hardware=False):
+    selected = path or shutil.which(name)
+    if not selected:
+        return {'status': 'missing', 'version': None}
+    try:
+        status, output = bounded([selected, '-version' if name != 'chromium' else '--version'])
+        # Do not relay arbitrary executable output, paths, build flags or secrets.
+        match = re.search(r'(?:ffmpeg|ffprobe) version ([A-Za-z0-9.+~:_-]{1,80})|Chromium ([0-9.]{1,80})', output)
+        result = {'status': status, 'executable': Path(selected).name, 'version': next((v for v in match.groups() if v), None) if match else None}
+        if hardware:
+            method_status, methods = bounded([selected, '-hide_banner', '-hwaccels'])
+            known = {'vdpau', 'cuda', 'vaapi', 'dxva2', 'qsv', 'videotoolbox', 'd3d11va', 'drm', 'opencl', 'vulkan', 'mediacodec', 'amf', 'd3d12va'}
+            result['advertisement_status'] = method_status
+            result['advertised_candidates'] = sorted(set(methods.splitlines()) & known)
+        return result
+    except OSError:
+        return {'status': 'unavailable', 'version': None}
+
+
+def readiness(args):
+    devices = []
+    for path in sorted(set(glob.glob('/dev/video*') + glob.glob('/dev/media*') + glob.glob('/dev/dri/renderD*')))[:128]:
+        try:
+            info = os.stat(path)
+            if not stat.S_ISCHR(info.st_mode):
+                continue
+            try:
+                group = grp.getgrgid(info.st_gid).gr_name
+            except KeyError:
+                group = str(info.st_gid)
+            devices.append({'device': path, 'mode': oct(stat.S_IMODE(info.st_mode)), 'group': group, 'readable': os.access(path, os.R_OK), 'writable': os.access(path, os.W_OK)})
+        except OSError:
+            continue
+    report = {'os': platform.system(), 'architecture': platform.machine(), 'kernel': platform.release(), 'ffmpeg': tool_report('ffmpeg', args.ffmpeg, True), 'ffprobe': tool_report('ffprobe', args.ffprobe), 'chromium': tool_report('chromium', args.chromium or shutil.which('chromium') or shutil.which('chromium-browser')), 'devices': devices, 'hardware_decode': 'unproven', 'attention': ['Advertisements and visible devices are candidates only; inspect server operational probes and Chromium media diagnostics on the target.', 'Device access is for this process user, not the plurx system service.']}
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"{report['os']} {report['architecture']} kernel {report['kernel']}")
+        for name in ('ffmpeg', 'ffprobe', 'chromium'):
+            row = report[name]
+            print(f"{name}: {row['status']}; version {row['version'] or 'unknown'}")
+        print('FFmpeg advertised candidates: ' + ', '.join(report['ffmpeg'].get('advertised_candidates', [])))
+        for row in devices:
+            print(f"{row['device']}: {row['mode']} group={row['group']} read={row['readable']} write={row['writable']}")
+        for message in report['attention']:
+            print('Attention: ' + message)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    setup = commands.add_parser('install')
+    setup.add_argument('--url', required=True)
+    setup.add_argument('--chromium')
+    setup.add_argument('--dry-run', action='store_true')
+    remove = commands.add_parser('uninstall')
+    remove.add_argument('--dry-run', action='store_true')
+    commands.add_parser('launch')
+    diagnostic = commands.add_parser('readiness')
+    diagnostic.add_argument('--json', action='store_true')
+    diagnostic.add_argument('--ffmpeg')
+    diagnostic.add_argument('--ffprobe')
+    diagnostic.add_argument('--chromium')
+    args = parser.parse_args()
+    try:
+        if args.command != 'readiness' and os.getuid() == 0:
+            raise ValueError('run launcher commands as the normal desktop user, without sudo')
+        if args.command == 'install':
+            install(args)
+        elif args.command == 'uninstall':
+            uninstall(args)
+        elif args.command == 'launch':
+            launch()
+        else:
+            readiness(args)
+    except (ValueError, OSError, KeyError, json.JSONDecodeError):
+        # User arguments/config may contain credentials; do not echo them.
+        print('pi-player: command refused; check normal-user ownership, root-only HTTP(S) URL, installed tools and desktop session.', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

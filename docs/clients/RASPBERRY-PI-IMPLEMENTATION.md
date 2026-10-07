@@ -275,6 +275,7 @@ before push. Normal commits run the tracked lint/syntax hook.
 ```bash
 rustup run 1.97.1 rustc --version
 rustup run 1.97.1 cargo check --locked -p plurxd --all-targets
+rustup run 1.97.1 cargo check --locked -p plurx-core --test decoder_selection
 rustup run 1.97.1 cargo fmt --all --check
 rustup run 1.97.1 cargo clippy --workspace --all-targets -- -D warnings
 ```
