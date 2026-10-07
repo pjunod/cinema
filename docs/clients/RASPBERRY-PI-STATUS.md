@@ -1,6 +1,6 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** merged; physical Pi acceptance in progress · **Updated:** 2026-10-07
+**Status:** initial implementation merged; follow-up PR reviewed; Pi tests stopped and cleaned · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -22,7 +22,7 @@ validation receipt and merge result. Physical acceptance remains separate.
 | Deployment | implemented; tests passed | Sol 6.1; `deploy/pi-player`, safe launcher ownership, bounded report; all six regressions pass |
 | Adversarial review | complete; both findings addressed | Reviewed `dfa775112`; Sol repaired P1 fallback and P2 transforms, coordinator inspected the changes |
 | Validation | targeted checks passed; CI promotion incomplete | 292 validation methods, 729 operations methods, web inventory and all 10 named Rust regressions have passing evidence; one optional operations test skipped |
-| Physical Pi 5 | testing | 16 GB Pi 5, Raspberry Pi OS Trixie; 4K60 Wayland HDMI connected; real Main/Main10 decode-transfer probes passed |
+| Physical Pi 5 | bounded acceptance complete; cleaned | 16 GB Pi 5, Raspberry Pi OS Trixie; 4K60 Wayland HDMI connected; real Main/Main10 decode-transfer probes passed |
 
 ## Standing decisions
 
@@ -144,10 +144,10 @@ hardware download and software H.264 encode graph in under 0.2 seconds for
 two 160x120 frames. Driver diagnostics identify V4L2 stateless HEVC, DRM
 frames and the expected downloaded planar depth. The actual OS diagnostic
 uses `swfmt rpi4_8`/`swfmt rpi4_10`, whereas the original parser required
-`swfmt=`. The parser is being corrected at the existing inventory authority;
+`swfmt=`. The parser correction stays at the existing inventory authority;
 the earlier equals form is retained and the remaining proof requirements
-are unchanged. Captured-log positive and negative regressions are written,
-with unit execution reserved for the reviewed candidate.
+are unchanged. All four focused request-decoder regressions pass, including
+the captured-log positive and negative cases.
 
 The native daemon builds successfully with pinned Rust 1.97.1 (cold release
 build: 35m57s) and returns `/readyz`. Its actual inventory now reports both
@@ -162,8 +162,20 @@ by the existing planner. A legacy request without a capability document did
 produce H.264/AAC, but does not prove the modern web path. The correct existing
 deployment seam is `PLURX_BOUND_FFPROBE`, pointing to the project's pinned
 static local-file parser, alongside the native FFmpeg and scanning FFprobe.
-That parser is being built with the existing script; identity validation is
-unchanged. The deployment recipe now records this prerequisite.
+The existing script successfully built the pinned static FFprobe 8.1.3;
+identity validation is unchanged. With the bound parser configured, the real
+web caps-v2 request produces 720p H.264 from the long 1080p HEVC fixture.
+The worker opens `/dev/media3` and `/dev/video19`, requests DRM frames,
+downloads them and uses libx264. Playback advances without a media error;
+forward and backward seeks resume past 120 seconds and 15 seconds in the
+same session. The settled sample records 1,031 frames, 59 dropped and zero
+corrupted; this is functional conversion evidence, not frame-pacing acceptance.
+The deployment recipe now records the bound-parser prerequisite.
+
+The native runtime tested commit `ef6dd77653645fbaca9cbd62037ee7dc3a6ded1f`.
+The later reviewed candidate `457efbbff` adds browser reporting, tests and
+deployment documentation; its badge change was source-tested locally, not
+included in that native binary.
 
 Sustained concurrency, subtitles and HDR acceptance remain pending; small
 FFmpeg probes alone do not satisfy those rows. All changes and evidence are
@@ -231,4 +243,37 @@ The source audit also found an existing browser reporting error:
 repair keeps decoder and delivery admission intact, describes the delivered
 format/profile, and leaves actual display output unverified. Positive and
 negative CSS answers cannot turn a delivery fact into measured HDR, DV or
-SDR output. Its focused regression is written; execution follows final review.
+SDR output. Its focused regression passes after the final review.
+
+
+### Follow-up review, validation and cleanup
+
+The single final adversarial review approved candidate `457efbbff` without
+blocking findings. Focused checks then passed once on that candidate:
+
+| Check | Result |
+|---|---|
+| `cargo test --locked -p plurx-core --features hiqlite-store --lib transcode::decoder_inventory::tests::request_` | 4 passed |
+| `node tests/playback/web-policy.test.js` | 215 checks passed |
+| `node tests/playback/player-input-contract.test.js` | passed |
+| `python3 -m unittest tests.operations.test_docs_index tests.operations.test_infra_names` | 18 passed |
+| `make validation-lint history-check` | passed |
+| `python3 -m validation.regression_field` with the candidate, base and PR description | passed; focused Rust execution recorded above |
+
+Normal pinned Rust 1.97.1 compilation and commit hooks pass. The full Rust
+unit suite and main promotion gate are not claimed. PR #843 remains draft
+while the conflict between the requested focused validation and the current
+full-suite CI workflow awaits a decision. Earlier #832 evidence is retained.
+
+[Sanitized device and validation evidence](http://forge.lan:3000/attachments/348a359f-ac02-4ec5-bf00-c9e89bd52f72)
+is attached to PR #843 and was downloaded again to verify its hash:
+`8c21bf990859adb29c68f16eaef99863209619f6eb9e346765128d3ef2c36eac`.
+It excludes credentials, browser profiles, databases and media.
+
+All three transient Pi services (browser, daemon and fixture HTTP server)
+were stopped. The SSH tunnel was closed. The exact task scratch directory,
+including native builds, extracted browser, fixtures and test credentials,
+was removed. Verification found no task processes, matching user services
+or listeners on the test ports. System packages were not replaced.
+The 30-minute concurrency run was not performed; no background acceptance
+job remains running.
