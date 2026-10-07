@@ -1,7 +1,7 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
 **Status:** open — physical acceptance unfinished; initial implementation merged;
-follow-up disposition on PR #843; Pi tests stopped and cleaned · **Updated:** 2026-10-07
+PR #843 merged; Docker-default setup in progress on PR #851; Pi tests stopped · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -338,8 +338,12 @@ access, and own upgrades/uninstall without deleting user data.
 | Setup lifecycle | in progress | Sol 6.1 owns Docker/default, native selection, prerequisites, ownership, upgrade recovery and removal |
 | Host browser | in progress | Pin and verify the previously exercised HEVC browser; preserve ordinary Chromium and sandboxing |
 | Final review and fast lane | pending | No unit or physical acceptance run before the final review |
-| Pi state | unchanged | Read-only inspection confirms ARM64 Trixie and no Docker command; no services or tests started |
+| Pi state | compilation only | ARM64 Trixie; 61 build prerequisite packages added with baseline/delta recorded, no package upgrades; isolated FFmpeg C build in progress, no media service/browser started |
 
 The installer will build from the chosen checkout initially. This automates
 prerequisites rather than assuming prebuilt native releases that the project
 does not yet publish durably. Physical HDR output remains a separate claim.
+
+Implementation is tracked in [draft PR #851](http://forge.lan:3000/noirr/plurx/pulls/851).
+The source assembly applies all 100 Jellyfin patches and the adapted Pi
+request/SAND delta; native ARM64 compilation is in progress and physical acceptance is pending.

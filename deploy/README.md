@@ -14,6 +14,47 @@ accepted, each iPhone, iPad, and Apple TV installs that build through
 TestFlight. “Deploy to all Apple devices” therefore includes that explicit
 on-device install/update step.
 
+## Raspberry Pi 5 — automated setup
+
+On 64-bit Raspberry Pi OS, run setup from the cloned repository as your normal
+desktop user. It presents the installation plan and requests `sudo` for system
+changes. Docker is the default server runtime; the HDMI browser runs in the
+normal desktop session.
+
+```sh
+make pi-setup                                      # Docker server and HDMI launcher
+make pi-setup PI_SETUP_FLAGS='--server-runtime native' # native binary with systemd instead
+make pi-setup PI_SETUP_FLAGS='--role server'         # headless server only
+make pi-setup PI_SETUP_FLAGS='--role cinema --url http://media1:32400' # HDMI client only
+```
+
+These are alternative first-install commands. Add `--media /mnt/movies` for
+each existing media directory; Docker mounts these paths read-only at the same
+location. Add `--autostart` to start the launcher when you log into the desktop.
+Setup does not change OS login settings. Use `--dry-run` to inspect the plan and
+`--yes` for an unattended install.
+
+The Pi runtime supplies the request decoder, pixel-layout conversion and a
+separate static scanner parser; it also provisions an isolated HEVC-capable
+Chromium for the launcher. The browser sandbox remains enabled and the system
+browser remains available. Initial installation builds the server and media
+runtime from pinned source, so it needs network access, free disk space and
+time to compile.
+
+```sh
+make pi-status       # inspect the owned installation
+make pi-upgrade      # apply the checked-out revision, retaining installation choices
+make pi-uninstall    # remove owned installation files, retain databases and login profile
+```
+
+Setup refuses to overwrite an existing deployment it does not own. Upgrade
+stages its replacement before switching the server and restores the previous
+artifact if readiness fails. Shared prerequisites remain installed on ordinary
+uninstall. The [Pi installation plan](../docs/clients/RASPBERRY-PI-INSTALLATION.md)
+describes ownership and recovery; the [live Pi status](../docs/clients/RASPBERRY-PI-STATUS.md)
+records verification, including display-output limitations. An installed
+decoder does not establish HDR or Dolby Vision HDMI output on a particular TV.
+
 ## Docker / Compose (recommended for homelabs)
 
 One command from the repository root brings the stack up for the first time:

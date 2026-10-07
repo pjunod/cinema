@@ -1741,6 +1741,20 @@ release-check: ## Verify the tree is ready to tag the current version
 # `make install INSTALL_FLAGS='--binary ~/Downloads/plurxd'` to skip the build
 # or `make install-docker INSTALL_FLAGS=--dry-run` to see the plan first.
 INSTALL_FLAGS ?=
+PI_SETUP_FLAGS ?=
+
+.PHONY: pi-setup pi-upgrade pi-status pi-uninstall
+pi-setup: ## Set up Pi server and HDMI playback (Docker default; native/systemd selectable)
+	@python3 deploy/pi-setup install $(PI_SETUP_FLAGS)
+
+pi-upgrade: ## Upgrade an owned Pi installation, preserving its choices and data
+	@python3 deploy/pi-setup upgrade $(PI_SETUP_FLAGS)
+
+pi-status: ## Report the Pi installation, runtime and readiness
+	@python3 deploy/pi-setup status $(PI_SETUP_FLAGS)
+
+pi-uninstall: ## Remove an owned Pi installation while retaining data and browser profiles
+	@python3 deploy/pi-setup uninstall $(PI_SETUP_FLAGS)
 
 .PHONY: install install-linux install-macos install-windows install-docker install-binary uninstall uninstall-docker
 install: ## Install plurxd as a service on this OS (systemd, launchd, or the Windows service)

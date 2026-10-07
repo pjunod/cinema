@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+# The installer first builds the unchanged standard Dockerfile locally.
+# Its pinned image retains the static bound parser and ancillary media tools.
+ARG BASE_IMAGE=plurx-pi-base:local
+FROM ${BASE_IMAGE} AS pi-ffmpeg-build
+USER root
+COPY deploy/pi-runtime /usr/local/libexec/pi-runtime
+COPY deploy/pi-runtime-assets /usr/local/deploy/pi-runtime-assets
+# pi-runtime discovers assets relative to its repository root.
+RUN mkdir -p /usr/local/deploy \
+    && ln -s /usr/local/libexec/pi-runtime /usr/local/deploy/pi-runtime \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends python3 build-essential pkg-config patch git curl ca-certificates xz-utils \
+       libdrm-dev libudev-dev libx264-dev libx265-dev libass-dev libfreetype-dev \
+       libfontconfig-dev libfribidi-dev libharfbuzz-dev libopus-dev libvorbis-dev \
+       libmp3lame-dev libdav1d-dev libzimg-dev libgnutls28-dev zlib1g-dev libbz2-dev liblzma-dev \
+    && python3 /usr/local/deploy/pi-runtime build-ffmpeg --prefix /opt/plurx-runtime --json
+
+FROM ${BASE_IMAGE} AS runtime
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libudev1 libdrm2 libx264-164 libx265-199 libass9 \
+       libfreetype6 libfontconfig1 libfribidi0 libharfbuzz0b libopus0 libvorbis0a \
+       libvorbisenc2 libmp3lame0 libdav1d6 libzimg2 libgnutls30 libbz2-1.0 liblzma5 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=pi-ffmpeg-build /opt/plurx-runtime/ffmpeg-8.1.3-pi-bbd1f7a083e446fc /opt/plurx-runtime/ffmpeg-8.1.3-pi-bbd1f7a083e446fc
+ENV PLURX_FFMPEG=/opt/plurx-runtime/ffmpeg-8.1.3-pi-bbd1f7a083e446fc/bin/ffmpeg \
+    PLURX_FFPROBE=/opt/plurx-runtime/ffmpeg-8.1.3-pi-bbd1f7a083e446fc/bin/ffprobe
+USER plurx

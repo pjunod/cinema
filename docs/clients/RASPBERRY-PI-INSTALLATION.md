@@ -105,7 +105,7 @@ Pi plan; it does not create separate task PRs or a full-suite campaign.
 
 | Owner | Files and responsibility | Acceptance |
 |---|---|---|
-| Setup agent, Sol 6.1 | `deploy/pi-setup`, its focused operations regressions | Default Docker, selectable native, ownership, upgrade recovery, uninstall, no-mutation dry run |
+| Setup agent, Sol 6.1 | `deploy/pi-setup`, `deploy/pi-player` autostart, their focused operations regressions | Default Docker, selectable native, ownership, upgrade recovery, uninstall, no-mutation dry run |
 | Runtime agent, Sol 6.1 | Runtime provider, immutable artifact manifest, Pi media build/patch/container files, focused runtime regressions | Preserved media contracts and real container request decoding; verified isolated browser |
 | Coordinator | Make targets, README/deployment docs, this plan/index/status, integration and commits | One user-facing installation flow, exact-source builds, final review, fast lane and merged PR |
 
