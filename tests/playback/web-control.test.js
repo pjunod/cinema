@@ -7704,6 +7704,7 @@ test("forced continuous restart enrolls only its exact failed predecessor",async
   vodClientContract:()=>({session:{}}),newRequestId:()=>"request",currentCapsDocument:()=>null,capsDocumentIsUsable:()=>false,
   qualityForce:()=>"720",plannedHlsTransport:()=>"hlsjs"};
  require("node:vm").createContext(context);
+ require("node:vm").runInContext(FILE_CONTEXT_SOURCE,context);
  require("node:vm").runInContext(shippedSource("openSession"),context);
  assert.equal((await context.openSession(7,{height:720})).session_id,"legacy");
  assert.equal((await context.openSession(7,{height:720},null,null,"foreign-session")).session_id,"legacy");
