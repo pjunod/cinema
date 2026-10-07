@@ -1997,7 +1997,9 @@ cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_route_ 
 stored principal columns from a complete rebuilt table, retaining the explicit
 local projection on the legacy table. A partial rebuild is refused. SQLite
 checks the schema within its connection; Hiqlite caches the quorum-observed
-shape for the Store lifetime, which is fixed between coordinated restarts.
+shape for the Store lifetime in this historical checkpoint. The
+[live activation change](SHARING-LIVE-ACTIVATION.md) replaces that fixed-layout
+assumption with guarded dispatch and transition-safe reads.
 That cache proves neither grant authority nor member compatibility. Five
 route tests passed (zero ignored, 0.71 seconds), including actual rebuilt
 rows in memory and the pooled SQLite store. Both three-voter candidate
@@ -3596,6 +3598,10 @@ Feature-enabled all-target Clippy with denied warnings also passed (1 minute
 27 seconds), and the documentation index suite passed all four tests.
 
 ### S4 Source schema startup — bounded nonrolling factory
+
+**Superseded operational design:** the simultaneous-startup requirement is being
+replaced by [live activation](SHARING-LIVE-ACTIVATION.md). This section records
+the original implementation and its evidence; it is not a restart instruction.
 
 The normal daemon calls the single-use `SelectedStore` Source coordinator
 before constructing `State`, opening application listeners or probing media
