@@ -346,4 +346,7 @@ does not yet publish durably. Physical HDR output remains a separate claim.
 
 Implementation is tracked in [draft PR #851](http://forge.lan:3000/noirr/plurx/pulls/851).
 The source assembly applies all 100 Jellyfin patches and the adapted Pi
-request/SAND delta; native ARM64 compilation is in progress and physical acceptance is pending.
+request/SAND delta; native ARM64 compilation found a missing link dependency: request decoding
+uses `v4l2_fmt.o`, which upstream listed only for the stateful backend. The
+adapted patch now gives the request decoder its direct dependency. Recompilation
+is pending; no test or playback success is claimed from compilation.

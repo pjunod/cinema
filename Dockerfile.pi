@@ -23,7 +23,7 @@ RUN apt-get update \
        libfreetype6 libfontconfig1 libfribidi0 libharfbuzz0b libopus0 libvorbis0a \
        libvorbisenc2 libmp3lame0 libdav1d6 libzimg2 libgnutls30 libbz2-1.0 liblzma5 zlib1g \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=pi-ffmpeg-build /opt/plurx-runtime/ffmpeg-8.1.3-pi-bbd1f7a083e446fc /opt/plurx-runtime/ffmpeg-8.1.3-pi-bbd1f7a083e446fc
-ENV PLURX_FFMPEG=/opt/plurx-runtime/ffmpeg-8.1.3-pi-bbd1f7a083e446fc/bin/ffmpeg \
-    PLURX_FFPROBE=/opt/plurx-runtime/ffmpeg-8.1.3-pi-bbd1f7a083e446fc/bin/ffprobe
+COPY --from=pi-ffmpeg-build /opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369 /opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369
+ENV PLURX_FFMPEG=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369/bin/ffmpeg \
+    PLURX_FFPROBE=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369/bin/ffprobe
 USER plurx

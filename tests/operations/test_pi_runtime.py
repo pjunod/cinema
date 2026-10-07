@@ -30,6 +30,7 @@ class PiRuntimeTests(unittest.TestCase):
         patch = (runtime.ASSETS / "jellyfin-8.1.3-rpi.patch").read_text()
         for name in ("libavcodec/v4l2_request_hevc.c", "libavutil/rpi_sand_fns.c", "libavutil/hwcontext_drm.c"):
             self.assertIn(name, patch)
+        self.assertIn("v4l2_req_hevc_v4.o v4l2_fmt.o", patch)
         self.assertNotIn("tests/fate/filter-video.mak", patch)
         provider = (ROOT / "deploy/pi-runtime").read_text()
         self.assertIn('source / "debian/patches/series"', provider)

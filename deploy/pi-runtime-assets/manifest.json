@@ -11,7 +11,7 @@
     "url": "https://codeload.github.com/jc-kynesim/rpi-ffmpeg/tar.gz/f60aae17021abae85b1ba9759e8b2da33f723902",
     "sha256": "e591d2b837c3673dc233da6473495e9623c84726825525ee7380099d49aaddd3"
   },
-  "patch_sha256": "bbd1f7a083e446fc7608c35ebcf396a83ed6ee48084e4b3eb1674a619bb08258",
+  "patch_sha256": "a407e98fffa4c3694cd83106118e57224bae1c3ab1f8d74c51a3a03b7bf9d202",
   "browser": {
     "version": "154.0.8037.57-1~deb13u1+rpt1",
     "tag": "chromium-154.0.8037.57-1-rpt1-hevc1",

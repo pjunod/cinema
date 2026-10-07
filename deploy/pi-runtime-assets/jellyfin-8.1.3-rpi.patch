@@ -307,7 +307,7 @@ index a256619..4707f11 100644
      { "stdin",                  OPT_TYPE_BOOL, OPT_EXPERT,
          { &stdin_interaction },
 diff --git a/libavcodec/Makefile b/libavcodec/Makefile
-index 44baec7..b310fb0 100644
+index 44baec7..8409b66 100644
 --- a/libavcodec/Makefile
 +++ b/libavcodec/Makefile
 @@ -185,7 +185,10 @@ OBJS-$(CONFIG_VC1DSP)                  += vc1dsp.o
@@ -326,7 +326,7 @@ index 44baec7..b310fb0 100644
  OBJS-$(CONFIG_HEVC_D3D12VA_HWACCEL)       += dxva2_hevc.o d3d12va_hevc.o
  OBJS-$(CONFIG_HEVC_NVDEC_HWACCEL)         += nvdec_hevc.o
  OBJS-$(CONFIG_HEVC_QSV_HWACCEL)           += qsvdec.o
-+OBJS-$(CONFIG_HEVC_V4L2REQUEST_HWACCEL)   += v4l2_request_hevc.o v4l2_req_decode_q.o v4l2_req_hevc_v4.o
++OBJS-$(CONFIG_HEVC_V4L2REQUEST_HWACCEL)   += v4l2_request_hevc.o v4l2_req_decode_q.o v4l2_req_hevc_v4.o v4l2_fmt.o
 +OBJS-$(CONFIG_V4L2_REQ_HEVC_VX)           += v4l2_req_hevc_v1.o v4l2_req_hevc_v2.o v4l2_req_hevc_v3.o
  OBJS-$(CONFIG_HEVC_VAAPI_HWACCEL)         += vaapi_hevc.o h265_profile_level.o
  OBJS-$(CONFIG_HEVC_VDPAU_HWACCEL)         += vdpau_hevc.o h265_profile_level.o
