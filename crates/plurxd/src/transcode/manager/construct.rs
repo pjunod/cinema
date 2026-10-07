@@ -625,15 +625,21 @@ impl TranscodeManager {
                 encoder_families.push(family.to_owned());
             }
         }
+        // A saved node preference is an execution policy, not just inventory.
+        // Do not claim a pinned job through a detected GPU this node will not
+        // use, or advertise a hardware ceiling while running in CPU mode.
+        if let Some(preference) = &self.encoder_override {
+            encoder_families = vec![self
+                .encoder_for_preference(preference)
+                .family_name()
+                .to_owned()];
+        }
+        let uses_hardware = encoder_families.iter().any(|family| family != "software");
         PretranscodeWorkerCapabilities {
             version: plurx_core::domain::PretranscodeRequirements::VERSION,
             decoders: self.decoders.clone(),
             encoder_families,
-            max_target_height: if self.caps.nvenc
-                || self.caps.qsv
-                || self.caps.vaapi
-                || self.caps.videotoolbox
-            {
+            max_target_height: if uses_hardware {
                 MAX_HEIGHT
             } else {
                 AUTO_SOFTWARE_HEIGHT
@@ -1039,6 +1045,13 @@ impl TranscodeManager {
         // later bound-source planner may fall back to software, for which the
         // same conservative CPU reservation is already held.
         let encoder = self.encoder_for_preference(&policy.requested_encoder);
+        if !policy
+            .acceptable_encoder_families()
+            .iter()
+            .any(|family| family == encoder.family_name())
+        {
+            return Err("node backend does not satisfy the speculative encoder policy".to_owned());
+        }
         let threads = Workload::of(file, target_height).software_threads();
         let estimate = TranscodeResourceEstimate {
             hardware_slot: encoder != Encoder::Software,

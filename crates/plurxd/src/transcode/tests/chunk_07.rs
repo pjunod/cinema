@@ -2,6 +2,141 @@
 #[cfg(test)]
 use crate::queue_fixture::QueueFixture;
     #[tokio::test]
+    async fn node_backend_override_filters_claims_and_preserves_cluster_policy() {
+        use plurx_core::cluster::coordination::UnclusteredJobAuthority;
+        use plurx_core::domain::{NewPretranscodeJob, PretranscodeRequirements};
+        use plurx_core::store::background_jobs::JobKind;
+        use plurx_core::store::background_jobs_pretranscode::enqueue_request;
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed_file_at(&store, "/not-opened-by-claim/fixture.mkv").await;
+        let file = store.get_file(id).await.expect("file read").expect("file");
+        let root = crate::test_tempdir().expect("workdir");
+        let caps = EncoderCaps {
+            nvenc: true,
+            qsv: true,
+            ..EncoderCaps::default()
+        };
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            root.path().join("intel"),
+            caps.clone(),
+            Pipeline::VppQsv,
+        )
+        .with_encoder_override(Some("qsv".into()))
+        .with_decoders(vec!["hevc".into()]);
+        manager.scratch_bytes_free.store(1_000_000_000, Relaxed);
+        manager.scratch_sampled_at_unix_ms.store(unix_ms(), Relaxed);
+        let worker = manager.pretranscode_capabilities();
+        assert_eq!(worker.encoder_families, vec!["qsv"]);
+        let cpu = TranscodeManager::new(
+            Arc::clone(&store),
+            root.path().join("cpu"),
+            caps,
+            Pipeline::Cpu,
+        )
+        .with_encoder_override(Some("software".into()));
+        assert_eq!(
+            cpu.pretranscode_capabilities().encoder_families,
+            vec!["software"]
+        );
+        assert_eq!(
+            cpu.pretranscode_capabilities().max_target_height,
+            AUTO_SOFTWARE_HEIGHT
+        );
+
+        for preference in ["nvenc", "auto"] {
+            store
+                .put_setting(keys::HWACCEL, preference)
+                .await
+                .expect("cluster policy");
+            let policy = manager
+                .try_pretranscode_policy_snapshot()
+                .await
+                .expect("policy");
+            assert_eq!(policy.requested_encoder, preference);
+            assert_eq!(
+                policy.generation,
+                cpu.try_pretranscode_policy_snapshot()
+                    .await
+                    .expect("peer policy")
+                    .generation
+            );
+            let now = unix_ms();
+            let request = enqueue_request(&NewPretranscodeJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                dedupe_key: format!("node-backend-{preference}"),
+                file_id: id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                target_height: 240,
+                policy_generation: policy.generation.clone(),
+                requirements_json: serde_json::to_string(&PretranscodeRequirements {
+                    version: PretranscodeRequirements::VERSION,
+                    decoder: "hevc".into(),
+                    acceptable_encoder_families: policy.acceptable_encoder_families(),
+                    output_contract: "hls-mpegts-v1".into(),
+                    tone_map: false,
+                    output_grade: "sdr".into(),
+                    scratch_bytes: 1,
+                })
+                .expect("requirements"),
+                reason: "recent".into(),
+                priority: 1,
+                not_before_ms: now,
+                created_at_ms: now,
+            })
+            .expect("request");
+            store.enqueue_job(request).await.expect("enqueue");
+            let claimed = crate::background_jobs::claim_pretranscode(
+                Arc::clone(&store),
+                Arc::new(UnclusteredJobAuthority),
+                &manager,
+                "intel-node",
+                &[JobKind::TranscodePrepare],
+                &worker,
+                1_000_000_000,
+                0,
+                &[],
+            )
+            .await
+            .expect("claim");
+            if preference == "nvenc" {
+                assert!(
+                    claimed.is_none(),
+                    "NVENC-only job must remain for another worker"
+                );
+                assert!(
+                    manager.admit_pretranscode(&file, 240).await.is_err(),
+                    "direct admission cannot bypass the policy"
+                );
+                assert!(manager.pretranscode_worker_idle());
+            } else {
+                let Some(crate::background_jobs::PreparationClaim::Transcode(_, active, fence)) =
+                    claimed
+                else {
+                    panic!("auto job must be claimable by the selected integrated GPU");
+                };
+                let encoder = manager
+                    .encoder_for_file_with_preference(
+                        &file,
+                        &policy.requested_encoder,
+                        crate::process_control::ChildClass::Background,
+                    )
+                    .await
+                    .expect("production encoder");
+                assert_eq!(encoder, Encoder::Qsv);
+                assert_eq!(fence.admission.encoder, encoder);
+                assert!(policy
+                    .acceptable_encoder_families()
+                    .iter()
+                    .any(|family| family == encoder.family_name()));
+                active.finish().await;
+                drop(fence);
+            }
+        }
+    }
+    #[tokio::test]
     async fn node_encoder_override_applies_to_playback_without_changing_cluster_preference() {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));

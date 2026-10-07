@@ -5801,6 +5801,12 @@ fallback applies and **Active** shows what actually runs. Other nodes retain
 their own preferences. Nodes without an override keep the legacy
 `PLURX_HWACCEL`/stored cluster preference.
 
+Speculative jobs explicitly pinned to a different encoder family remain for
+compatible workers. A node advertises the backend it will execute, and CPU
+selection advertises the software resolution ceiling. The legacy cluster
+preference still defines queued job requirements; an Auto job can be claimed
+by either GPU family without changing its cluster-wide policy generation.
+
 For NVIDIA HDR10, the probe first tries NVDEC → `tonemap_cuda` → `scale_cuda`
 → NVENC, keeping frames on the GPU unless subtitles need a CPU composite.
 This needs an FFmpeg build with the CUDA filters and NVIDIA compute/video
