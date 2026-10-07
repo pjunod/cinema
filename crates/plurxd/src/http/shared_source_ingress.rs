@@ -39,7 +39,7 @@ async fn repair_local(
             .store
             .acknowledge_source_ingress_custody(value, &held.registration, receipt.confirmation())
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.repair.ack_store", error_class = "store", "Source admission refused"); unavailable() })?;
         if matches!(
             result,
             SourceCustodyWrite::Applied
@@ -48,7 +48,7 @@ async fn repair_local(
         ) {
             held.obligation
                 .release_after_ack(&receipt)
-                .map_err(|_| unavailable())?;
+                .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.repair.local_release", error_class = "refused", "Source admission refused"); unavailable() })?;
             if let Ok(permit) = permit {
                 permit.complete();
             }
@@ -595,29 +595,30 @@ pub(super) async fn register_local(
         .store
         .source_ingress_custody(value)
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.ledger_store", error_class = "store", "Source admission refused"); unavailable() })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.snapshot_0", error_class = "absent", "Source admission refused"); unavailable() })?;
     if existing.state.is_sealed() {
+        tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.ledger", error_class = "sealed", "Source admission refused");
         return Err(unavailable());
     }
     let members = state
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.members_store", error_class = "store", "Source admission refused"); unavailable() })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.snapshot_1", error_class = "absent", "Source admission refused"); unavailable() })?;
     let captured = state
         .sharing
         .accepted_drivers
         .capture(connection, &state.node_id)
-        .map_err(|_| unavailable())?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.capture", error_class = "refused", "Source admission refused"); unavailable() })?;
     let driver = captured.id().clone();
     let mut permit = state
         .sharing
         .accepted_drivers
         .registration_guard()
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.registration_permit", error_class = "refused", "Source admission refused"); unavailable() })?;
     let obligation = captured
         .prepare_obligation(
             &mut permit,
@@ -625,7 +626,7 @@ pub(super) async fn register_local(
             value.binding().incarnation_id(),
             &value.custody_identity(),
         )
-        .map_err(|_| unavailable())?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.prepare_obligation", error_class = "refused", "Source admission refused"); unavailable() })?;
     let reg = IngressRegistration {
         node_id: state.node_id.clone(),
         boot_id: driver.boot_id,
@@ -683,6 +684,7 @@ pub(super) async fn register_local(
         }
     });
     if monitor.is_err() {
+        tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.monitor", error_class = "refused", "Source admission refused");
         permit.complete();
         let _ = obligation.release_refused_registration();
         return Err(unavailable());
@@ -700,13 +702,13 @@ pub(super) async fn register_local(
         .register_source_ingress_custody(value, &reg, &members)
         .await;
     let _ = completed.send(());
-    match result.map_err(|_| unavailable())? {
+    match result.map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.register_store", error_class = "store", "Source admission refused"); unavailable() })? {
         SourceCustodyWrite::Applied | SourceCustodyWrite::ExactReplay => {
             permit.complete();
             entry.changed.notify_waiters();
             Ok(())
         }
-        SourceCustodyWrite::Refused | SourceCustodyWrite::ReconciledClosed => Err(unavailable()),
+        SourceCustodyWrite::Refused | SourceCustodyWrite::ReconciledClosed => { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.register_result", error_class = "refused_or_closed", "Source admission refused"); Err(unavailable()) },
     }
 }
 
@@ -906,14 +908,14 @@ pub(super) async fn publication_allowed(
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.members_store", error_class = "store", "Source admission refused"); unavailable() })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_0", error_class = "absent", "Source admission refused"); unavailable() })?;
     state
         .store
         .prepare_source_ingress_admission(value, state.sharing.accepted_drivers.boot_id(), &members)
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.admission_store", error_class = "store", "Source admission refused"); unavailable() })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_1", error_class = "absent", "Source admission refused"); unavailable() })?;
     Ok(())
 }
 

@@ -848,16 +848,16 @@ impl SourceProducerAuthority {
             .membership
             .observe_source_admission_members()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?
-            .ok_or(SourceWorkerError::Unavailable)?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_owner.members", error_class = "store", "Source admission refused"); SourceWorkerError::Unavailable })?
+            .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_owner.members", error_class = "absent", "Source admission refused"); SourceWorkerError::Unavailable })?;
         match self
             .store
             .prepare_source_owned_route_authority(assignment, &self.master, &members)
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_owner.authority", error_class = "store", "Source admission refused"); SourceWorkerError::Unresolved })?
         {
             SourceOwnedRouteAuthorityRead::Ready(proof) => Ok(proof),
-            _ => Err(SourceWorkerError::Unavailable),
+            _ => { tracing::warn!(target: "plurx::sharing", stage = "source_owner.authority", error_class = "refused", "Source admission refused"); Err(SourceWorkerError::Unavailable) },
         }
     }
     /// Renew this owner's Source session lease.
@@ -883,10 +883,12 @@ impl SourceProducerAuthority {
             }
             let current = self.current_owned(assignment).await?;
             if !observed.renewed_by_same_owner(&current) {
+                tracing::warn!(target: "plurx::sharing", stage = "source_owner.renew", error_class = "authority_changed_or_unchanged_refusal", "Source admission refused");
                 return Err(SourceWorkerError::Unavailable);
             }
             fresh = Some(current);
         }
+        tracing::warn!(target: "plurx::sharing", stage = "source_owner.renew", error_class = "revision_attempts_exhausted", "Source admission refused");
         Err(SourceWorkerError::Unavailable)
     }
     async fn renew_observed(
@@ -899,8 +901,8 @@ impl SourceProducerAuthority {
             .store
             .media_session_route_by_incarnation(&incarnation)
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
-            .ok_or(SourceWorkerError::Unavailable)?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_owner.route", error_class = "store", "Source admission refused"); SourceWorkerError::Unresolved })?
+            .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_owner.route", error_class = "absent", "Source admission refused"); SourceWorkerError::Unavailable })?;
         let now = crate::fragment_index_cluster::unix_ms();
         self.store
             .renew_source_media_session(
@@ -916,7 +918,7 @@ impl SourceProducerAuthority {
                 now.saturating_add(60_000),
             )
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_owner.renew_write", error_class = "store", "Source admission refused"); SourceWorkerError::Unresolved })
     }
 }
 
