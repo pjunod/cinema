@@ -611,7 +611,21 @@ fn request_probe_succeeded(stderr: &str, progress: &str, format: &str, succeeded
         && selected_decoder(stderr, "hevc").as_deref() == Some("hevc")
         && stderr.lines().any(|line| {
             line.contains("Hwaccel V4L2 HEVC stateless V") && line.contains("; devices: ")
-                && line.contains("; swfmt=")
+                // Raspberry Pi OS 7.1.5+rpt2 prints `swfmt <format>`;
+                // the inspected Pi FFmpeg 7.1.1 request implementation prints
+                // `swfmt=<format>`. Both follow successful stateless init.
+                && line
+                    .split_once("; swfmt ")
+                    .or_else(|| line.split_once("; swfmt="))
+                    .is_some_and(|(_, tail)| {
+                        tail.split(';').next().is_some_and(|format| {
+                            let format = format.trim();
+                            !format.is_empty()
+                                && format.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || byte == b'_'
+                                })
+                        })
+                    })
         })
         // hwdownload can consume only hardware frames. showinfo observes the
         // downloaded planar format before the deliberate x264 downconversion.
@@ -808,6 +822,52 @@ mod tests {
             "yuv420p10le",
             true
         ));
+    }
+
+    /// Sanitized excerpts from the real Main/Main10 probe on Raspberry Pi
+    /// OS FFmpeg 7.1.5+rpt2 (2026-10-07). Addresses and device indices are
+    /// normalized; wording, transfer formats, and completed frame counts are
+    /// preserved. This is parser evidence, not throughput qualification.
+    #[test]
+    fn request_probe_accepts_raspberry_pi_os_captured_init_grammar_at_both_depths() {
+        let selection = "Selecting decoder 'hevc' because of requested hwaccel method drm\n";
+        let context = "[vist#0:0/hevc @ 0x1] [dec:hevc @ 0x2] Starting thread...\n";
+        for (format, initialization, frames) in [
+            (
+                "yuv420p",
+                "[hevc @ 0x3] Hwaccel V4L2 HEVC stateless V4; devices: /dev/media0,/dev/video0; buffers: src DMABuf, dst DMABuf; swfmt rpi4_8; V4L2fmt Nc12\n",
+                "[Parsed_showinfo_2 @ 0x4] n:   0 pts:      0 pts_time:0       duration:    100 duration_time:0.1     fmt:yuv420p cl:left sar:1/1 s:160x120 i:P iskey:1 type:I\n\
+[Parsed_showinfo_2 @ 0x4] n:   1 pts:    100 pts_time:0.1     duration:    100 duration_time:0.1     fmt:yuv420p cl:left sar:1/1 s:160x120 i:P iskey:0 type:P\n",
+            ),
+            (
+                "yuv420p10le",
+                "[hevc @ 0x3] Hwaccel V4L2 HEVC stateless V4; devices: /dev/media0,/dev/video0; buffers: src DMABuf, dst DMABuf; swfmt rpi4_10; V4L2fmt Nc30\n",
+                "[Parsed_showinfo_2 @ 0x4] n:   0 pts:      0 pts_time:0       duration:    100 duration_time:0.1     fmt:yuv420p10le cl:left sar:1/1 s:160x120 i:P iskey:1 type:I\n\
+[Parsed_showinfo_2 @ 0x4] n:   1 pts:    100 pts_time:0.1     duration:    100 duration_time:0.1     fmt:yuv420p10le cl:left sar:1/1 s:160x120 i:P iskey:0 type:P\n",
+            ),
+        ] {
+            let stderr = format!("{selection}{context}{initialization}{frames}");
+            let progress = "frame=2\nprogress=end\n";
+            assert!(request_probe_succeeded(&stderr, progress, format, true));
+            for (from, to) in [
+                ("V4L2 HEVC stateless", "generic DRM"),
+                ("; swfmt ", "; unrelated "),
+                ("[dec:hevc @", "[dec:software @"),
+                ("requested hwaccel method drm", "requested hwaccel method cuda"),
+                ("fmt:yuv420p", "fmt:nv12"),
+            ] {
+                assert!(!request_probe_succeeded(&stderr.replace(from, to), progress, format, true), "{format}: {from}");
+            }
+            assert!(!request_probe_succeeded(&stderr, "frame=1\nprogress=end\n", format, true));
+            assert!(!request_probe_succeeded(&stderr, "frame=2\nprogress=continue\n", format, true));
+            assert!(!request_probe_succeeded(&stderr, progress, format, false));
+            for swfmt in ["", " ", "unknown format", "rpi4_8/invalid"] {
+                let tail = initialization.split_once("; swfmt ").expect("captured marker").1;
+                let captured_format = tail.split(';').next().expect("captured format");
+                let invalid = stderr.replace(&format!("; swfmt {captured_format};"), &format!("; swfmt {swfmt};"));
+                assert!(!request_probe_succeeded(&invalid, progress, format, true), "invalid swfmt {swfmt:?}");
+            }
+        }
     }
 
     #[test]

@@ -5164,7 +5164,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +4 metadata-only B coordination regression: three existing accepted-driver
 # capture calls and one real connection monitor registration. These construct
 # no media producer and manufacture no physical closure receipt.
-expected_occurrences = 712
+# 712 -> 716 after sharing live activation (#846): four manager.status()
+# assertions in sharing_current_activation_refresh_preserves_historical_boot_observation
+# read the boot and current readiness values before and after disablement.
+# status() clones SharingStatus under a read lock and receiver recovery under
+# its mutex; these test-only observations launch no task, timer, or process.
+expected_occurrences = 716
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

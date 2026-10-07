@@ -55,6 +55,11 @@ from validation.runner import REPO_ROOT
 _JOB_RE = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):$", re.MULTILINE)
 _NODE_SUITE_RE = re.compile(r"\bnode\s+(?P<path>[\w./-]+\.(?:test\.)?js)\b")
 _DISCOVER_RE = re.compile(r"\bunittest\s+discover\s+-s\s+(?P<path>[\w./-]+)")
+_RECEIPT_RUN_RE = re.compile(
+    r"\bpython3?\s+-m\s+validation\.main_unit_receipts\s+run"
+    r"(?P<suites>(?:\s+--suite-dir\s+[\w./-]+)+)[ \t]*(?=$|\n)", re.MULTILINE
+)
+_RECEIPT_SUITE_RE = re.compile(r"--suite-dir\s+([\w./-]+)")
 _MAKE_TARGET_RE = re.compile(r"\bmake\s+(?P<target>[a-z0-9][a-z0-9-]*)\b")
 
 
@@ -88,6 +93,10 @@ def executed_suites(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     one level through the Makefile, which is how `make operations-check`
     becomes `tests/operations`.
 
+    The main receipt runner declares its actual suite directories with repeated
+    --suite-dir flags and refuses any list different from its discovery list.
+    Retained applicable successes still satisfy that suite's per-PR evidence.
+
     Returns (files, directories).
     """
 
@@ -103,7 +112,9 @@ def executed_suites(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     text = "\n".join(commands)
     files = sorted({match.group("path") for match in _NODE_SUITE_RE.finditer(text)})
     directories = sorted({match.group("path") for match in _DISCOVER_RE.finditer(text)})
-    return tuple(files), tuple(directories)
+    declared = {path for match in _RECEIPT_RUN_RE.finditer(text)
+                for path in _RECEIPT_SUITE_RE.findall(match.group('suites'))}
+    return tuple(files), tuple(sorted(set(directories) | declared))
 
 
 def parse_fields(body: str) -> tuple[str, ...]:
