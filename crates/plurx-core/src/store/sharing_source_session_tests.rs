@@ -12,8 +12,8 @@ use crate::{
     sharing::{InvitationRecord, ShareClaim, SourceId},
     sharing_catalogue_details::CatalogueRevisionKey,
     store::{
-        media_session_principal_rebuild_schema, LibraryStore, MediaSessionStore, SharingStore,
-        SqliteStore,
+        media_session_principal_rebuild_schema, LibraryStore, MediaSessionStore,
+        SharingSourceIngressCustodyStore, SharingStore, SqliteStore,
     },
 };
 use std::{collections::BTreeSet, path::PathBuf};
@@ -201,6 +201,40 @@ fn proof() -> SourceAdmissionMembers {
     .expect("Source candidate fixture operation")
 }
 
+/// These Store fixtures never admit an accepted HTTP driver or producer. They
+/// qualify SQL accounting, not physical closure. Advance their exact retained
+/// empty ledger through the production CAS; do not bypass the sealed predicate
+/// or manufacture a joined-driver receipt from metadata.
+async fn seal_fixture_owned_empty_ingress(
+    store: &SqliteStore,
+    assignment: &SourceDispatchAssignment,
+) {
+    let snapshot = store
+        .source_ingress_custody(assignment)
+        .await
+        .expect("exact fixture custody read")
+        .expect("retained fixture ledger");
+    assert!(!snapshot.state.is_sealed());
+    assert_eq!(
+        snapshot.state.open().count(),
+        0,
+        "fixture construction registered no transport"
+    );
+    assert_eq!(
+        store
+            .seal_source_ingress_custody(assignment)
+            .await
+            .expect("guarded fixture seal"),
+        crate::store::sharing_source_ingress_custody::SourceCustodyWrite::Applied
+    );
+    let sealed = store
+        .source_ingress_custody(assignment)
+        .await
+        .expect("sealed fixture read")
+        .expect("same retained ledger");
+    assert!(sealed.state.settled());
+}
+
 #[tokio::test]
 async fn sharing_source_retained_zero_media_ids_claim_assign_and_release() {
     let directory = tempfile::tempdir().expect("zero ID fixture");
@@ -225,6 +259,14 @@ async fn sharing_source_retained_zero_media_ids_claim_assign_and_release() {
             .await
             .expect("zero dispatch")
             .expect("assigned zero media");
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("unsealed custody refuses release"),
+            SourceReleaseOutcome::Refused
+        );
+        seal_fixture_owned_empty_ingress(&store, &assignment).await;
         assert_eq!(
             store
                 .settle_source_assigned_without_activation(&assignment)
@@ -1526,6 +1568,14 @@ async fn sharing_source_assigned_no_spawn_settlement_is_atomic_and_independent_o
             .expect("actual worker");
         assert_eq!(
             store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("unsealed custody retains capacity"),
+            SourceReleaseOutcome::Refused
+        );
+        seal_fixture_owned_empty_ingress(&store, &assignment).await;
+        assert_eq!(
+            store
                 .release_source_never_dispatched(&binding)
                 .await
                 .expect("ordinary release"),
@@ -1693,6 +1743,14 @@ async fn sharing_source_terminal_settlement_fences_physical_rows_and_rolls_back(
                 .expect("exact terminal")
                 .expect("retained terminal");
             assert_eq!(terminal.lease_expires_at_ms == 0, !published);
+            assert_eq!(
+                store
+                    .settle_source_terminal_worker(&assignment, &terminal)
+                    .await
+                    .expect("terminal metadata alone cannot discharge unsealed custody"),
+                SourceReleaseOutcome::Refused
+            );
+            seal_fixture_owned_empty_ingress(&store, &assignment).await;
             let mut foreign = terminal.clone();
             foreign.session_id = Uuid::new_v4().to_string();
             assert_eq!(

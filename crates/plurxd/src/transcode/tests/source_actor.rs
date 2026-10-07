@@ -330,25 +330,14 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         )
         .await
         .expect("actual sealed key");
-    let now = crate::fragment_index_cluster::unix_ms();
-    client
-        .execute(
-            "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id=$2",
-            hiqlite::params!(now, selected.identity.node_id.clone()),
-        )
+    // A raw legacy heartbeat withdraws every capability, including this
+    // process's actual ingress registry boot. Publish the canonical heartbeat
+    // after candidate DDL instead of reconstructing a partial capability set.
+    membership
+        .publish_ingress_custody_boot()
         .await
-        .expect("fixture heartbeat");
-    for capability in [
-        SHARING_SESSION_PRINCIPAL_CAPABILITY.to_owned(),
-        SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY.to_owned(),
-        SHARING_PURPOSE_KEYS_CAPABILITY.to_owned(),
-        format!(
-            "sharing_purpose_master_v1:{}",
-            master.sharing_purpose_master_fingerprint()
-        ),
-    ] {
-        client.execute("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) VALUES($1,$2,$3) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at",hiqlite::params!(selected.identity.node_id.clone(),capability,now)).await.expect("explicit actual fixture capability");
-    }
+        .expect("actual complete ingress boot heartbeat after candidate installation");
+    let now = crate::fragment_index_cluster::unix_ms();
     let grant = uuid::Uuid::new_v4();
     let invitation = uuid::Uuid::new_v4();
     let secret = new_secret().expect("fixture secret");

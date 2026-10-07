@@ -4178,7 +4178,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Combined #810/#814: +2 from architecture close-out, +9 from output
 # containment and +1 test-only abandoned-link collection deadline.
 # Combined fence grace and close-out/preparation waits: 1288 + 12 = 1300.
-expected_occurrences = 1551
+# +1 for the H2 graceful-drain fixture's bounded terminal-frame reader.
+# It inspects empty END_STREAM DATA before EOF and retains the actual accepted
+# writer closure/receipt checks; no timer elects work and no task is added.
+expected_occurrences = 1552
 
 
 [[module_structures]]

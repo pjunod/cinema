@@ -78,20 +78,6 @@ fn live_local_session_predicate(rebuilt: bool, table: &str) -> String {
     format!("({principal}) AND COALESCE(json_extract(CASE WHEN json_valid({table}.recipe_json) THEN {table}.recipe_json ELSE '{{}}' END,'$.kind'),'') != 'remote_source'")
 }
 
-#[cfg(test)]
-pub(crate) fn census_local_principal_fragment(
-    method: &str,
-    parameter: usize,
-    table: &str,
-    rebuilt: bool,
-) -> Option<String> {
-    Some(match method {
-        "local_owner_predicate" => local_owner_predicate(rebuilt, parameter),
-        "live_local_session_predicate" => live_local_session_predicate(rebuilt, table),
-        _ => return None,
-    })
-}
-
 fn quality_cancellation_from_row(
     row: &Row<'_>,
 ) -> rusqlite::Result<crate::store::QualityCancellationReceipt> {
@@ -5222,6 +5208,20 @@ async fn renew_with_authority(
             Ok(renewed)
         })
         .await
+}
+
+#[cfg(test)]
+pub(crate) fn census_local_principal_fragment(
+    method: &str,
+    parameter: usize,
+    table: &str,
+    rebuilt: bool,
+) -> Option<String> {
+    Some(match method {
+        "local_owner_predicate" => local_owner_predicate(rebuilt, parameter),
+        "live_local_session_predicate" => live_local_session_predicate(rebuilt, table),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

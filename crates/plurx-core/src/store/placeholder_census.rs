@@ -768,7 +768,14 @@ fn principal_bindings(
                     );
                 }
             }
-            if let Some(at) = expression.find("owner_predicate(") {
+            if let Some((at, _)) = expression
+                .match_indices("owner_predicate(")
+                .find(|(at, _)| {
+                    *at == 0
+                        || !expression.as_bytes()[at - 1].is_ascii_alphanumeric()
+                            && expression.as_bytes()[at - 1] != b'_'
+                })
+            {
                 let argument = expression[at + "owner_predicate(".len()..]
                     .split(')')
                     .next()
@@ -818,6 +825,52 @@ fn principal_bindings(
     bindings
 }
 
+/// Walk just this format call's argument list. The closing outer parenthesis
+/// ends the list even when its final argument has no trailing comma; later
+/// SQL bindings cannot become part of a principal parameter. Strings and
+/// comments use the existing code mask, so delimiters inside them are inert.
+fn positional_format_arguments<'a>(
+    source: &'a str,
+    is_code: &[bool],
+    after_literal: usize,
+) -> Vec<&'a str> {
+    let bytes = source.as_bytes();
+    let mut at = after_literal;
+    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    if bytes.get(at) != Some(&b',') {
+        return Vec::new();
+    }
+    at += 1;
+    let mut start = at;
+    let mut depth = 0usize;
+    let mut arguments = Vec::new();
+    while at < bytes.len() {
+        if is_code[at] {
+            match bytes[at] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' if depth == 0 => {
+                    if !source[start..at].trim().is_empty() {
+                        arguments.push(&source[start..at]);
+                    }
+                    return arguments;
+                }
+                b')' | b']' | b'}' => {
+                    depth = depth.checked_sub(1).expect("balanced format arguments")
+                }
+                b',' if depth == 0 => {
+                    arguments.push(&source[start..at]);
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        at += 1;
+    }
+    panic!("unterminated positional format arguments");
+}
+
 fn principal_templates(
     module: &str,
     source: &str,
@@ -861,24 +914,27 @@ fn principal_templates(
         let mut template = literal.text.clone();
         // Only these session composition sites pass layout helpers positionally.
         // Evaluate their real output before numbering or ordering placeholders.
-        let mut arguments = &source[literal.end..];
+        let positional_at = |template: &str| {
+            template.match_indices("{}").find_map(|(at, _)| {
+                (template.as_bytes().get(at.wrapping_sub(1)) != Some(&b'{')
+                    && template.as_bytes().get(at + 2) != Some(&b'}'))
+                .then_some(at)
+            })
+        };
+        let formatted = source[..literal.start].trim_end().ends_with("format!(");
+        // Plain SQL JSON braces and SQL arrays are not format argument lists.
+        let argument_list = if formatted && positional_at(&template).is_some() {
+            positional_format_arguments(source, is_code, literal.end)
+        } else {
+            Vec::new()
+        };
+        let mut arguments = argument_list.into_iter();
         let mut argument_index = 0;
-        while template.contains("{}") {
-            arguments = arguments
-                .trim_start()
-                .strip_prefix(',')
-                .unwrap_or(arguments)
-                .trim_start();
-            let end = arguments
-                .find("(),")
-                .map(|value| value + 2)
-                .or_else(|| arguments.find("()\n").map(|value| value + 2))
-                .or_else(|| arguments.find("),").map(|value| value + 1))
-                .unwrap_or(0);
-            if end == 0 {
-                break;
-            }
-            let expression = &arguments[..end];
+        while let Some(at) = formatted.then(|| positional_at(&template)).flatten() {
+            let expression = arguments
+                .next()
+                .expect("positional SQL format argument")
+                .trim();
             let Some(receiver) = ["layout.", "ownership."]
                 .into_iter()
                 .find_map(|value| expression.strip_prefix(value))
@@ -889,7 +945,10 @@ fn principal_templates(
                 break;
             };
             let method = &receiver[..open];
-            let argument = receiver[open + 1..].trim_end_matches(')');
+            let argument = receiver[open + 1..]
+                .strip_suffix(')')
+                .expect("complete principal helper call")
+                .trim();
             let parameter = if matches!(
                 method,
                 "equals" | "insert_values" | "existing_user" | "user_id_value"
@@ -898,6 +957,10 @@ fn principal_templates(
                     .parse()
                     .expect("positional principal index must be a literal")
             } else {
+                assert!(
+                    argument.is_empty(),
+                    "unsupported positional principal arguments"
+                );
                 0
             };
             let value = super::hiqlite_sessions::census_local_principal_fragment(
@@ -905,9 +968,8 @@ fn principal_templates(
             )
             .expect("unsupported positional principal helper must be reviewed");
             let name = format!("census_arg_{argument_index}");
-            template = template.replacen("{}", &format!("{{{name}}}"), 1);
+            template.replace_range(at..at + 2, &format!("{{{name}}}"));
             bindings.push((name, vec![value]));
-            arguments = &arguments[end..];
             argument_index += 1;
         }
         for name in template
@@ -1541,9 +1603,9 @@ fn the_census_covers_every_slice_exactly_once() {
 
 mod scanner {
     use super::{
-        is_sql_candidate, is_statement, literals_and_code_mask, resolve_template,
-        same_statement_binding_arity, string_bindings, string_constants, test_item_ranges,
-        validate_sql, validate_sqlite_placeholders,
+        is_sql_candidate, is_statement, literals_and_code_mask, positional_format_arguments,
+        principal_templates, resolve_template, same_statement_binding_arity, string_bindings,
+        string_constants, test_item_ranges, validate_sql, validate_sqlite_placeholders,
     };
 
     /// A statement inside a `#[cfg(test)]` module is a fixture, not a
@@ -1664,6 +1726,47 @@ fn insert() {
             vec!["SELECT 1 FROM t ORDER BY 1 LIMIT $1".to_owned()]
         );
         validate_sql(&resolved[0]).expect("the neutral token keeps the statement well formed");
+    }
+
+    #[test]
+    fn principal_format_arguments_end_at_their_own_call_without_a_trailing_comma() {
+        let source = r#"fn read() { let sql = format!("SELECT {} WHERE {} AND playback_id=$2", layout.projection(), layout.equals(1)); let later = layout.equals(9); }"#;
+        let (literals, mask) = literals_and_code_mask(source);
+        let sql = literals
+            .iter()
+            .find(|literal| literal.text.starts_with("SELECT"))
+            .expect("SQL literal");
+        assert_eq!(
+            positional_format_arguments(source, &mask, sql.end)
+                .iter()
+                .map(|argument| argument.trim())
+                .collect::<Vec<_>>(),
+            ["layout.projection()", "layout.equals(1)"]
+        );
+        let variants =
+            principal_templates("hiqlite_sessions.rs", source, sql, &literals, &mask, &[]);
+        assert_eq!(variants.len(), 2);
+        for variant in variants {
+            validate_sql(&variant).expect("real principal predicate retains parameter one");
+        }
+    }
+
+    #[test]
+    fn local_owner_helper_is_not_misread_as_the_source_owner_closure() {
+        let source = r#"fn read() { let owner_1 = local_owner_predicate(rebuilt, 1); let sql = format!("SELECT ?2 WHERE {owner_1}"); }"#;
+        let (literals, mask) = literals_and_code_mask(source);
+        let sql = literals
+            .iter()
+            .find(|literal| literal.text.starts_with("SELECT"))
+            .expect("SQL literal");
+        let variants = principal_templates("sessions.rs", source, sql, &literals, &mask, &[]);
+        assert_eq!(variants.len(), 2);
+        for variant in variants {
+            assert_eq!(
+                validate_sqlite_placeholders(&variant).expect("complete actual owner binding"),
+                2
+            );
+        }
     }
 
     /// A compound `cfg` guards a test module just as completely as the bare

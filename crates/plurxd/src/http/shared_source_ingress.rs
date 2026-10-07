@@ -183,11 +183,30 @@ pub(super) async fn assigned(
 ) -> Result<SourceDispatchAssignment, ApiError> {
     loop {
         let changed = entry.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        // A completed refusal is retained invocation evidence, not a dispatch
+        // assignment or negative-admission proof. Preserve its typed response
+        // before the caller can register a protected writer on this entry.
+        if let Some(failure) = entry
+            .result
+            .lock()
+            .expect("owned Source result")
+            .as_ref()
+            .and_then(|result| result.as_ref().err())
+            .copied()
+        {
+            return Err(failure.response());
+        }
         if let Some(value) = actual_assignment(entry) {
             return Ok(value);
         }
-        if entry.result.lock().expect("owned Source result").is_some() {
-            return Err(unavailable());
+        // Completion can race the assignment observation. Match this final
+        // snapshot too, so a newly observed refusal never becomes generic503.
+        match entry.result.lock().expect("owned Source result").as_ref() {
+            Some(Err(failure)) => return Err(failure.response()),
+            Some(Ok(_)) => return Err(unavailable()),
+            None => {}
         }
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), changed)
             .await

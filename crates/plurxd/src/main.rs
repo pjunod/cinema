@@ -5165,6 +5165,24 @@ mod startup_tests {
     #[tokio::test]
     async fn sharing_h2_graceful_predecessor_drain_preserves_existing_successor_writer() {
         use http_body_util::BodyExt;
+        async fn expect_empty_terminal_eof(body: &mut hyper::body::Incoming, label: &str) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(frame) = body.frame().await {
+                    let frame =
+                        frame.expect("graceful terminal frame must not be a transport error");
+                    let data = frame
+                        .into_data()
+                        .expect("fixture emits no terminal trailers");
+                    eprintln!("{label} terminal DATA length={}", data.len());
+                    assert!(
+                        data.is_empty(),
+                        "{label} unexpected queued terminal DATA: {data:?}"
+                    );
+                }
+            })
+            .await
+            .expect("bounded terminal stream EOF");
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -5301,13 +5319,16 @@ mod startup_tests {
             "queued predecessor ownership is unsettled"
         );
         drop(first_tx);
-        assert!(predecessor.frame().await.is_none());
+        // Hyper may expose its legal empty END_STREAM DATA frame before EOF.
+        // Inspect every frame and reject errors/bytes; stream EOF still does
+        // not prove the accepted driver closed while the successor owns it.
+        expect_empty_terminal_eof(&mut predecessor, "predecessor").await;
         assert!(
             !connection.closed().is_closed(),
             "successor still owns its accepted writer"
         );
         drop(second_tx);
-        assert!(successor.frame().await.is_none());
+        expect_empty_terminal_eof(&mut successor, "successor").await;
         drop(client);
         tokio::time::timeout(Duration::from_secs(5), connection.closed().wait())
             .await
