@@ -148,6 +148,10 @@ impl JobManager {
             }
         };
         let mut statuses = HashMap::new();
+        let readiness = self
+            .library_readiness
+            .current_problems(self.store.as_ref())
+            .await;
         let now_ms = clock_ms();
         for record in records {
             if !matches!(record.input, LibraryWorkInput::Full { .. })
@@ -180,7 +184,7 @@ impl JobManager {
                 None => (None, record.error_code),
             };
             if pending && !executing && error.is_none() {
-                error = self.library_readiness.problem(record.library_id);
+                error = readiness.get(&record.library_id).cloned();
             }
             statuses.insert(
                 record.library_id,

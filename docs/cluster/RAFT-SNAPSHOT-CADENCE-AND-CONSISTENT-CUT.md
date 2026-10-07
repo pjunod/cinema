@@ -595,7 +595,7 @@ crash, measure K-01 RPO/RTO or qualify an entire release tree.
 
 **Current-source applicability:** the evidence writer and snapshot builder
 are byte-identical from measured `42eb851e` through fresh docs base
-`a1320fef340318485574143b20cc97bb0c0f4e01`. Their Git blobs are respectively
+`9994c23d6090a897c93c09d2639be6953967027e`. Their Git blobs are respectively
 `5b35806bf36ca7ae00c2f1f8ee685e09d8cc85ba` and
 `f81bfa899bed8635a48e2ffc2b670818c8203a30`. This supports the narrow unchanged
 snapshot mechanism, not deployment of the newer GPU or other unrelated work.
@@ -622,7 +622,7 @@ Reproduce the source comparison without contacting the fleet:
 
 ```bash
 git diff --exit-code 42eb851ec48df72488d45b5d3d29bdb67d37d3d0 \
-  a1320fef340318485574143b20cc97bb0c0f4e01 -- \
+  9994c23d6090a897c93c09d2639be6953967027e -- \
   vendor/hiqlite/src/store/state_machine/sqlite/writer.rs \
   vendor/hiqlite/src/store/state_machine/sqlite/snapshot_builder.rs
 ```

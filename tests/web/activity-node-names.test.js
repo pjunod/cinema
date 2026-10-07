@@ -76,6 +76,8 @@ const BORROWED = [
   "fmtDur",
   "durableQueueHtml",
   "clusterWorkersHtml",
+  "activityIsClustered",
+  "durableJobReason",
   "restoreDurableFocus",
   "paintActivityBody",
 ];
@@ -527,7 +529,7 @@ test("durable owners, attempts and repair destinations use roster names", () => 
   assert.match(html, /Since requested/);
   assert.match(html, /23h 47m/);
   assert.doesNotMatch(html, /1427 min/);
-  const missing=paint(snapshot());
+  const missing=paint(snapshot({clustered:true}));
   assert.match(missing, /title="owner-id">owner-id<\/span>/);
   Object.assign(painter.durable,{rows:[],repairs:[],detail:null});
 });
@@ -557,7 +559,7 @@ function refreshingQueue(q,api){
     const ACTIVITY_VIEW={inspector:{kind:"job",id:"job"},detailTab:"history"};
     const ACTIVITY_SNAPSHOT={node_hostnames:{node:"lab6"}};
     function paintDurableActivity(){}
-    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
+    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","activityIsClustered","durableJobReason","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
     return {page:pageDurableJobs,previous:previousDurableJobs,resize:resizeDurableJobs,filter:filterDurableJobs,refresh:refreshDurableActivity,reset:()=>{resetActivityWork();PAGE_RENDER_GENERATION++;},html:()=>activityInspectorHtml()};
   `)(q,api);
 }
@@ -755,4 +757,40 @@ test("yield history explains recorded reasons and missing legacy reasons", () =>
   assert.doesNotMatch(html,/<hostile/);
   painter.view.inspector=null;
   Object.assign(painter.durable,{rows:[],detail:null});
+});
+
+test("standalone Activity presents server work without cluster controls", () => {
+  const now=Date.now();
+  Object.assign(painter.durable,{observed:now,rows:[],counts:[],activeJobs:[]});
+  const workers={[NODE_A]:{observed_at_ms:now,accepting_work:true,heavy_limit:1,heavy_in_use:0,heavy_available:1,software_used:0,software_limit:8,hardware_used:0,hardware_limit:2,child_count:0}};
+  for(const topology of [{},{clustered:false}]){
+    const html=paint(snapshot({...topology,deliveries:[],workers}));
+    assert.match(html, /Server work/);
+    assert.match(html, />This server<\/button>/);
+    assert.match(html, /Server totals, independent of filters/);
+    assert.doesNotMatch(html, /Cluster workers|nodes reporting capacity|Cluster-wide|in cluster|All nodes|Durable cluster jobs/);
+    assert.doesNotMatch(html, /data-durable-focus="node"/);
+  }
+  const clustered=paint(snapshot({clustered:true,deliveries:[],workers,activity_nodes:[{node_id:NODE_A,status:"answered"}]}));
+  assert.match(clustered, /Cluster workers/);
+  assert.match(clustered, /1 \/ 1<\/b><span>nodes reporting capacity/);
+  assert.match(clustered, /All nodes/);
+});
+
+test("queued library jobs show their local mount problem by library identity", () => {
+  const now=Date.now();
+  const job={id:"blocked",kind:"library_scan",library_id:1,library:"Movies",state:"queued",supported:true,priority:2,age_ms:60000};
+  Object.assign(painter.durable,{observed:now,rows:[job],counts:[]});
+  const scans=[{library_id:1,library:"Movies",status:{running:true,phase:"queued",error:"Cannot read /media/<movies>; check the mount."}},{library_id:2,library:"Movies",status:{running:true,phase:"queued",error:"A different library problem"}}];
+  for(const kind of ["library_scan","metadata_refresh"]){
+    job.kind=kind;
+    const html=paint(snapshot({clustered:false,deliveries:[],scans}));
+    assert.match(html, /durable-reason[^>]*>Cannot read \/media\/&lt;movies&gt;; check the mount\./);
+    assert.doesNotMatch(html, /A different library problem|\/media\/<movies>/);
+  }
+  job.state="running";
+  assert.doesNotMatch(paint(snapshot({scans})), /durable-reason[^>]*>Cannot read/);
+  job.state="queued";job.error_code="recorded_failure";
+  assert.match(paint(snapshot({scans})), /durable-reason[^>]*>recorded_failure/);
+  Object.assign(painter.durable,{rows:[],counts:[]});
 });
