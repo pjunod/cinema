@@ -25,6 +25,37 @@ use plurx_core::transcode::{
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
+#[cfg(target_os = "linux")]
+mod pi_namespace;
+
+/// Internal synchronous launcher dispatch; normal daemon startup stays unchanged.
+pub(crate) fn dispatch_probe_bootstrap() -> Option<std::io::Result<()>> {
+    #[cfg(target_os = "linux")]
+    {
+        pi_namespace::dispatch()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn probe_launch_path(
+    snapshot: &ExecutableSnapshot,
+    mode: ProbeLaunchMode,
+) -> Result<PathBuf, DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    {
+        pi_namespace::launch_path(snapshot, mode)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = mode;
+        Ok(snapshot_execution_path(snapshot))
+    }
+}
+
 const MAX_PROBE_STDOUT_BYTES: usize = 256 * 1024;
 const MAX_PROBE_STDERR_BYTES: usize = 16 * 1024;
 const MAX_PROBE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
@@ -340,20 +371,25 @@ impl DecodeFactMetrics {
                     let _ = writeln!(
                         out,
                         "plurx_decode_facts_phase_seconds_bucket{{phase=\"{}\",outcome=\"{}\",le=\"{}\"}} {}",
-                        phase.label(), outcome.label(), upper, cumulative
+                        phase.label(),
+                        outcome.label(),
+                        upper,
+                        cumulative
                     );
                 }
                 let count = cell.count.load(Ordering::Relaxed);
                 let _ = writeln!(
                     out,
                     "plurx_decode_facts_phase_seconds_bucket{{phase=\"{}\",outcome=\"{}\",le=\"+Inf\"}} {count}",
-                    phase.label(), outcome.label()
+                    phase.label(),
+                    outcome.label()
                 );
                 let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
                 let _ = writeln!(
                     out,
                     "plurx_decode_facts_phase_seconds_sum{{phase=\"{}\",outcome=\"{}\"}} {seconds:.9}",
-                    phase.label(), outcome.label()
+                    phase.label(),
+                    outcome.label()
                 );
                 let _ = writeln!(
                     out,
@@ -446,6 +482,8 @@ pub(crate) enum ProbeStreamSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeLaunchMode {
     Production,
+    #[cfg(all(test, target_os = "linux"))]
+    ProductionNamespace,
     #[cfg(test)]
     Fixture,
     #[cfg(all(test, target_os = "linux"))]
@@ -503,7 +541,8 @@ impl ProbeLaunchMode {
             #[cfg(test)]
             Self::Fixture => false,
             #[cfg(all(test, target_os = "linux"))]
-            Self::ProductionPidfdOpenFailure
+            Self::ProductionNamespace
+            | Self::ProductionPidfdOpenFailure
             | Self::ProductionPidfdReadFailure
             | Self::ProductionSupervisorDelay
             | Self::ProductionSupervisorReceiveFailure
@@ -2554,6 +2593,20 @@ fn configure_probe_execution(
     arguments: &[OsString],
     class: crate::process_control::ChildClass,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    if command.as_std().get_program() == OsStr::new("/usr/bin/bwrap") {
+        return pi_namespace::configure(
+            command,
+            launch_mode,
+            executable_fd,
+            source_fd,
+            arg0,
+            arguments,
+            class,
+            launch_deadline,
+        );
+    }
+    command.args(arguments);
     #[cfg(not(target_os = "linux"))]
     let _ = launch_deadline;
     #[cfg(target_os = "linux")]
@@ -3239,10 +3292,10 @@ async fn probe_version_with_deadline_on(
         let _version_permit = version_permit;
         let executable_fd = executable.as_file().as_raw_fd();
         let arguments = vec![OsString::from("-version")];
-        let mut command = tokio::process::Command::new(snapshot_execution_path(&executable));
+        let mut command =
+            tokio::process::Command::new(probe_launch_path(&executable, launch_mode)?);
         command.as_std_mut().arg0(&configured_path);
         command
-            .args(&arguments)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -4179,13 +4232,14 @@ async fn collect_idet_verdict(
         OsString::from("compact=p=0:nk=1"),
     ];
     let executable_fd = probe.executable_snapshot.as_file().as_raw_fd();
-    let mut command =
-        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
+    let mut command = tokio::process::Command::new(probe_launch_path(
+        &probe.executable_snapshot,
+        probe.launch_mode,
+    )?);
     command.as_std_mut().arg0(probe.executable());
     #[cfg(test)]
     command.env("PLURX_TEST_PROBE_PATH", probe.executable());
     command
-        .args(&arguments)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -4393,12 +4447,13 @@ async fn collect(
         .map(OsString::from)
         .collect::<Vec<_>>();
     arguments.push(OsString::from("/dev/fd/3"));
-    let mut command =
-        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
+    let mut command = tokio::process::Command::new(probe_launch_path(
+        &probe.executable_snapshot,
+        probe.launch_mode,
+    )?);
     command.as_std_mut().arg0(probe.executable());
     #[cfg(test)]
     command.env("PLURX_TEST_PROBE_PATH", probe.executable());
-    command.args(&arguments);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -5436,6 +5491,45 @@ void probe_main(unsigned long *stack) {
             .expect("sealed production collection");
         assert_eq!(facts.input_video_stream(), 4);
         assert_eq!(facts.codec(), Some("h264"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
+    async fn namespace_probe_executes_bound_source_and_denies_secondary_images() {
+        assert!(
+            std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some(),
+            "provide the exact compiled daemon bootstrap"
+        );
+        let root = crate::test_tempdir().expect("tempdir");
+        for mode in 0..=3 {
+            let probe = root.path().join(format!("namespace-probe-{mode}"));
+            build_static_probe(&probe, mode);
+            let identity = DecodeProbeIdentity::discover_with_mode(
+                probe.to_str().expect("probe path"),
+                ProbeLaunchMode::ProductionNamespace,
+            )
+            .await
+            .expect("namespace-bound sealed discovery and one-shot exec");
+            if mode == 0 {
+                let media = root.path().join("namespace-media.bin");
+                std::fs::write(&media, b"production-bound source").expect("media");
+                let source = Arc::new(std::fs::File::open(media).expect("source"));
+                let facts = DecodeFactCache::new()
+                    .get_or_probe(
+                        &identity,
+                        DecodeFactSource::isolated(source),
+                        None,
+                        ProbeStreamSelection::Absolute(4),
+                        Duration::from_secs(5),
+                        None,
+                    )
+                    .await
+                    .expect("namespace-bound exact FD source collection");
+                assert_eq!(facts.input_video_stream(), 4);
+                assert_eq!(facts.codec(), Some("h264"));
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
