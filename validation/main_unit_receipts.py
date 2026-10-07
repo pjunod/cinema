@@ -25,6 +25,14 @@ LEGACY_RUNNER_HASHES = {
     'validation/main_unit_receipts.py': '7b315d5940663e7d26d13bcec889dd16e9c7d4860d5bb708fb7bc4a3c374b6ba',
     'validation/python_unit_receipts.py': '8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258',
 }
+# Historical prepare could refuse before it published a start journal. Only
+# this reviewed source/workflow combination permits proving that phase from
+# its complete runner log; this grants no test successes.
+PREPARE_REFUSAL_HASHES = {
+    'validation/main_unit_receipts.py': '5e86c38c2b2f97e0eb0341d5e95b50b33f0c2e170a6f0c37c7008400ef8ef3a8',
+    'validation/python_unit_receipts.py': '8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258',
+    '.github/workflows/main-fast-lane.yml': 'bf4b542a127ead30fd4239d38d75d3771258b0d7978e55afd8ebdc813aedfc0a',
+}
 
 
 def identity(api, pr, commit):
@@ -400,6 +408,39 @@ def recover_log(api, scope, prior, job, older):
             'complete': True, 'passes': passes, 'fixture_errors': []}
 
 
+def unexecuted_preflight(api, scope, prior, job):
+    """Prove no unit execution, without treating missing evidence as a pass."""
+    rid = receipts.positive(prior['id'])
+    # Forgejo assigns task_id only when a runner receives the job. Cancelling
+    # a failed scope also cancels its still-unassigned dependent jobs.
+    unassigned = job['status'] == 'cancelled' and type(job.get('task_id')) is int and job['task_id'] == 0
+    if not unassigned:
+        if job['status'] != 'failure':
+            return False
+        commit = receipts.sha(prior['commit_sha'])
+        for path, digest in PREPARE_REFUSAL_HASHES.items():
+            raw = source(commit, path)
+            if hashlib.sha256(raw).hexdigest() != digest or raw != api.bytes('/raw/' + path, {'ref': commit}):
+                return False
+        lines = log_lines(api.bytes(f"/actions/jobs/{receipts.positive(job['id'])}/logs"))
+        # The admitted workflow runs prepare before publishing the marker and
+        # before every test. The failed prepare and skipped marker establish
+        # the phase positively; a partial log or a unit-phase refusal does not.
+        refused = [i for i, line in enumerate(lines) if line.startswith('Main Python receipt refused: ')]
+        skipped = [i for i, line in enumerate(lines) if line ==
+                   "skipping post step for 'Publish main Python attempt-start marker'; main step was skipped"]
+        ended = [i for i, line in enumerate(lines) if line == f"Job '{JOB}' failed"]
+        if not (len(refused) == len(skipped) == len(ended) == 1
+                and refused[0] < skipped[0] < ended[0]
+                and sum(commit in line for line in lines[:refused[0]]) >= 2
+                and any('triggered by event: pull_request' in line for line in lines[:refused[0]])
+                and not any(line.startswith('MAIN-UNIT-') for line in lines)):
+            return False
+    markers = api.pages('/actions/artifacts', {'name': key(scope) + f'-start-{rid}'})
+    require(not markers, 'Unexecuted preflight has an attempt-start marker')
+    return True
+
+
 def restore(api, scope, current_run, applicability):
     artifacts = api.pages('/actions/artifacts', {'name': key(scope)})
     indexed = {}
@@ -423,14 +464,24 @@ def restore(api, scope, current_run, applicability):
         require(len(matches) == 1, 'Ambiguous main preflight job')
         job = matches[0]
         require(job['repo_id'] == scope['repository'] and job['run_id'] == rid
-                and job['attempt'] == 1, 'Historical job repository/run/attempt mismatch')
+                and type(job['attempt']) is int and job['attempt'] > 0,
+                'Historical job repository/run/attempt mismatch')
+        commit = receipts.sha(prior['commit_sha'])
+        workflow = api.bytes('/raw/.github/workflows/' + WORKFLOW, {'ref': commit})
+        receipt_workflow = b'validation.main_unit_receipts' in workflow
+        if receipt_workflow or rid in indexed:
+            require(job['attempt'] == 1, 'Receipt job retry has ambiguous artifact identity')
         if job['status'] == 'skipped':
             require(rid not in indexed, 'Skipped job has final journal')
             continue
-        commit = receipts.sha(prior['commit_sha'])
+        if job['status'] == 'cancelled' and type(job.get('task_id')) is int and job['task_id'] == 0:
+            require(rid not in indexed, 'Unassigned preflight has final journal')
+            require(unexecuted_preflight(api, scope, prior, job), 'Unassigned preflight is ambiguous')
+            continue
         if rid not in indexed:
-            workflow = api.bytes('/raw/.github/workflows/' + WORKFLOW, {'ref': commit})
-            if b'validation.main_unit_receipts' in workflow:
+            if receipt_workflow:
+                if unexecuted_preflight(api, scope, prior, job):
+                    continue
                 missing.append((prior, job))
                 continue
             # One exhaustive legacy baseline is the migration boundary. Older

@@ -39,6 +39,11 @@ supervisor would add ownership and recovery paths without solving packaging.
 
 ## 2. User interface — one setup command
 
+Use 64-bit Raspberry Pi OS Desktop for HDMI Cinema or the combined role.
+The browser uses the logged-in desktop session; the installer does not create
+a display session or enable automatic login. Raspberry Pi OS Lite is suitable
+for the server-only role.
+
 ```bash
 make pi-setup                                      # server and HDMI, Docker
 make pi-setup PI_SETUP_FLAGS='--server-runtime native' # systemd alternate

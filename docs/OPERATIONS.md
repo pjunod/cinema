@@ -20,7 +20,7 @@ run it, in order of how most people do:
 # Docker / Compose (recommended for homelabs) — builds from source the first time
 make install-docker          # writes deploy/.env + the override file, creates the data dir, runs docker-up
 $EDITOR deploy/docker-compose.override.yml                          # your mounts + GPU
-make docker-up               # builds + starts, and stamps the commit so the server can name it
+make docker-up               # detects Linux GPUs, builds + starts, and stamps the commit
 
 # As a service — systemd on Linux, launchd on macOS, the native Windows service
 make install                 # builds, installs, starts, and waits for /readyz; `make uninstall` reverses it
@@ -35,6 +35,12 @@ plurxd run            # serves :32400
 # From source (development)
 cargo run -p plurxd   # or: make run
 ```
+
+Both Docker startup targets detect local Linux GPU devices and their numeric
+access groups. NVIDIA hosts also need NVIDIA Container Toolkit; the container
+receives the video encode/decode libraries automatically. Explicit GPU
+selections remain authoritative. See the [hardware deployment contract](../deploy/README.md#hardware-transcode--recent-intel-gpus)
+for manual configuration, remote engines, and native macOS VideoToolbox.
 
 Open `http://<host>:32400`, create the admin account, add a library. Library
 paths you type in the UI are **container-side** paths under Docker (e.g.

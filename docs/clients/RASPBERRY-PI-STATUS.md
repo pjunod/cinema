@@ -1,7 +1,7 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
 **Status:** open — physical acceptance unfinished; initial implementation merged;
-PR #843 merged; Docker-default setup in progress on PR #851; Pi tests stopped · **Updated:** 2026-10-07
+PR #843 merged; Docker-default setup in progress on PR #851; isolated Pi installation active · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -335,16 +335,16 @@ access, and own upgrades/uninstall without deleting user data.
 |---|---|---|
 | Independent clone and compiler | ready | Main `7f0142d45`; pinned Rust 1.97.1 all-target workspace check passed in 2m14s |
 | Pi media runtime | native compilation passed; container acceptance pending | Jellyfin patch series plus Pi request/SAND source links on ARM64 Trixie; AC-4, DV filter, tonemap and request build assertions pass |
-| Setup lifecycle | repaired; regression pending | Sol 6.1 owns Docker/default, native selection, prerequisites, ownership, upgrade recovery and removal |
-| Host browser | repaired; regression pending | Pin and verify the previously exercised HEVC browser; preserve ordinary Chromium and sandboxing |
-| Final review and fast lane | review complete; repairs implemented | One review of `c55437408` found six issues below; repairs are implemented and the fast lane is next |
-| Pi state | compilation only | ARM64 Trixie; 61 build prerequisite packages added with baseline/delta recorded, no package upgrades; isolated FFmpeg C build complete, no media service/browser started |
+| Setup lifecycle | focused regressions passed | Sol 6.1 owns Docker/default, native selection, prerequisites, ownership, upgrade recovery and removal |
+| Host browser | focused regressions passed | Pin and verify the previously exercised HEVC browser; preserve ordinary Chromium and sandboxing |
+| Final review and fast lane | review complete; preflight and Linux Rust passed | Run 4296: 1,067 Python methods passed, two optional skips; Windows compilation continuing; current main integration requires renewed candidate qualification |
+| Pi state | Docker-default installation running | ARM64 Trixie; 84 build/Docker prerequisites added, no package upgrades; native FFmpeg compilation passed and the cold container server build is active; no media service/browser started yet |
 
 The installer will build from the chosen checkout initially. This automates
 prerequisites rather than assuming prebuilt native releases that the project
 does not yet publish durably. Physical HDR output remains a separate claim.
 
-Implementation is tracked in [draft PR #851](http://forge.lan:3000/noirr/plurx/pulls/851).
+Implementation is tracked in [PR #851](http://forge.lan:3000/noirr/plurx/pulls/851).
 The source assembly applies all 100 Jellyfin patches and the adapted Pi
 request/SAND delta; native ARM64 compilation found a missing link dependency: request decoding
 uses `v4l2_fmt.o`, which upstream listed only for the stateful backend. The
@@ -355,13 +355,16 @@ assertions; no playback success is claimed from compilation.
 
 The single adversarial review of `c55437408` against `7f0142d45` requested
 changes. It performed no tests or device mutations. The implementation agents addressed every finding; no second review is planned.
-Focused regressions are written and unrun pending the fast lane.
+All six focused regression groups passed in run 4296. Main subsequently added
+automatic Docker GPU discovery and receipt-continuation fixes; integration
+preserves the Pi override and its explicit request devices. Current-candidate
+qualification follows, retaining applicable passing Python evidence.
 
 | Finding | Required correction | State |
 |---|---|---|
-| Native rollback can leave a failed replacement active | Stop the replacement before restoring files; restore and verify the prior running state | repaired; regression pending |
-| Upgrade adopts operator runtime additions/changes | Preserve prior identities, refuse modified managed outputs, and record only new or legitimate provider rewrites | repaired; regression pending |
-| Interruption leaves no recoverable installation ownership | Persist transaction journal and backups before mutation; reconcile interrupted work deterministically | repaired; regression pending |
-| Existing Docker without Compose fails provisioning | Detect and install missing Compose independently from Docker Engine | repaired; regression pending |
-| Native service cannot read some user-selected media mounts | Provision appropriate supplementary groups and validate access as the service identity | repaired; regression pending |
-| Native readiness ignores configured startup budget | Derive the deadline from the existing effective configuration contract | repaired; regression pending |
+| Native rollback can leave a failed replacement active | Stop the replacement before restoring files; restore and verify the prior running state | repaired; regression passed |
+| Upgrade adopts operator runtime additions/changes | Preserve prior identities, refuse modified managed outputs, and record only new or legitimate provider rewrites | repaired; regression passed |
+| Interruption leaves no recoverable installation ownership | Persist transaction journal and backups before mutation; reconcile interrupted work deterministically | repaired; regression passed |
+| Existing Docker without Compose fails provisioning | Detect and install missing Compose independently from Docker Engine | repaired; regression passed |
+| Native service cannot read some user-selected media mounts | Provision appropriate supplementary groups and validate access as the service identity | repaired; regression passed |
+| Native readiness ignores configured startup budget | Derive the deadline from the existing effective configuration contract | repaired; regression passed |
