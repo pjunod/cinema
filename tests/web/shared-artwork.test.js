@@ -80,7 +80,8 @@ test("actual logout and route entry retire artwork before current authority chan
  vm.runInContext(fs.readFileSync("crates/plurxd/src/web/core/auth.js","utf8"),auth);
  assert.equal(vm.runInContext("clearLocalSession(3)",auth),false);assert.equal(retired,0);
  assert.throws(()=>vm.runInContext("clearLocalSession(4)",auth),e=>e===sentinel);assert.equal(retired,1);
- const router=vm.createContext({window:{addEventListener(){}},NATIVE_READER_BOOT:false,boot(){},TOKEN:null,ME:null,WATCH:null,sharedArtworkRetire(){retired++;}});
+ const router=vm.createContext({window:{addEventListener(){}},NATIVE_READER_BOOT:false,boot(){},TOKEN:null,ME:null,WATCH:null,PLAYER:null,PAGE_RENDER_GENERATION:0,sharedArtworkRetire(){retired++;}});
+ vm.runInContext(fs.readFileSync("crates/plurxd/src/web/player/autoplay-next.js","utf8"),router);
  vm.runInContext(fs.readFileSync("crates/plurxd/src/web/router.js","utf8"),router);await vm.runInContext("render()",router);assert.equal(retired,2);
 });
 test("unconfirmed bitmap retirement remains charged and current403 retires only its Source",async()=>{
