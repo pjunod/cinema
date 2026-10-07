@@ -1,6 +1,44 @@
 version = 1
 enforce_after = "e8a910f"
 
+# 2026-10-06 — fix(sharing): bound initial Apple successor parking.
+# Current regression definitions for 39a72929; execution qualification is
+# recorded separately by the main fast lane, never inferred from this mapping.
+[[fixes]]
+id = "apple.shared-initial-parking-readiness-budget"
+commits = ["39a72929788172b04d868618defbdc3eed69ae16"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "guard await alignPrepared(item, to: preparedFilmPositionMs, boundMs: remaining)"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testStalledInitialSeekConsumesRemainingReadinessAndSettlesFailed"
+
+[[fixes]]
+id = "apple.shared-initial-parking-preemption"
+commits = []
+supplements = "apple.shared-initial-parking-readiness-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "coordinator.abandonWithoutFallback(.aborted)"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testPreemptedInitialSeekSettlesAbortedWithoutWaitingForCompletion"
+
+[[fixes]]
+id = "apple.shared-initial-parking-cancellation"
+commits = []
+supplements = "apple.shared-initial-parking-readiness-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "preparedAlignment.generation &+= 1"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testCancelledInitialSeekReturnsWithoutAVFoundationCompletion"
+
+[[fixes]]
+id = "apple.shared-initial-parking-production-generation"
+commits = []
+supplements = "apple.shared-initial-parking-readiness-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func prime(_ offer: SharedPreparedOffer"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testSharedInitialParkingUsesBoundedGenerationAndAbortOrFailureSettlement"
+
 # Current once-passed A05 bridges, not historical execution claims. Native
 # adapter compile evidence and physical device acceptance remain separate.
 [[fixes]]
