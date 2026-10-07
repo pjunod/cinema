@@ -11062,14 +11062,12 @@ impl MembershipManager {
         let Some(inner) = &self.inner else {
             return Ok(());
         };
-        if inner
+        let saved = inner
             .store
             .get_setting("sharing_enabled")
             .await
-            .map_err(|_| MembershipError::Incompatible)?
-            .as_deref()
-            != Some("true")
-        {
+            .map_err(|_| MembershipError::Incompatible)?;
+        if !crate::store::stored_switch(saved.as_deref(), false) {
             return Ok(());
         }
         let master = inner

@@ -7242,6 +7242,60 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_source_schema_coordinator_accepts_api_numeric_enablement() {
+        install_default_crypto_provider();
+        for (saved, expected) in [("1", true), ("0", false), ("invalid", false)] {
+            let directory = tempfile::tempdir().expect("API switch startup data");
+            let baseline = SqliteStore::open(&directory.path().join(SQLITE_FILENAME))
+                .expect("actual baseline SQLite");
+            baseline
+                .put_setting("sharing_enabled", saved)
+                .await
+                .expect("persist the public settings API representation");
+            drop(baseline);
+            let mut selected = startup_observer::select_applied_singleton(&membership_test_config(
+                directory.path(),
+            ))
+            .await
+            .expect("actual admitted voter and authenticated startup clock");
+            assert_eq!(
+                selected
+                    .prepare_source_schema_before_serving()
+                    .await
+                    .expect("actual startup coordinator"),
+                expected,
+                "canonical saved choice {saved}"
+            );
+            assert_eq!(
+                HiqliteAuthStore::committed_schema_version_for_client(
+                    &selected.local_client().expect("actual client"),
+                )
+                .await
+                .expect("actual committed schema"),
+                if expected {
+                    AUTH_SCHEMA_VERSION
+                } else {
+                    AUTH_SCHEMA_BASELINE_VERSION
+                }
+            );
+            assert_eq!(
+                selected
+                    .store
+                    .get_setting("sharing_enabled")
+                    .await
+                    .expect("saved choice remains unchanged")
+                    .as_deref(),
+                Some(saved)
+            );
+            selected
+                .shutdown()
+                .await
+                .expect("bounded actual voter shutdown");
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actual_source_schema_coordinator_keeps_complete_legacy_guard_local_only_without_repair(
     ) {
         install_default_crypto_provider();

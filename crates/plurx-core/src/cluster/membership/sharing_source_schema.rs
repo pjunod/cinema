@@ -145,7 +145,7 @@ async fn install(inner: &ReplicatedMembership) -> Result<bool, MembershipError> 
     let boot = layout::boot_authority_guard(4);
     let closed_admission = sharing_admission_schema_shape_predicate();
     let ingress_floor = sharing_member_guard_predicate(SharingMemberFloor::IngressCustody, 1, 2, 3);
-    let authority=format!("({closed_admission}) AND ({floor}) AND ({ingress_floor}) AND ({boot}) AND EXISTS(SELECT 1 FROM settings WHERE key='sharing_enabled' AND value='true') AND NOT EXISTS(SELECT 1 FROM sharing_source_boot_intents intent JOIN cluster_nodes node ON node.node_id=intent.node_id AND node.raft_id=intent.raft_id WHERE node.removed_at IS NULL AND intent.master_fingerprint!=\'{}\') AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) AND EXISTS(SELECT 1 FROM sharing_purpose_key_installation ready JOIN sharing_identity identity ON identity.singleton=ready.singleton AND identity.server_id=ready.server_id AND identity.catalogue_epoch=ready.catalogue_epoch WHERE ready.singleton=1 AND ready.state='ready') AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={} AND role IS NOT 'learner' AND removed_at IS NULL)",master.sharing_purpose_master_fingerprint(),inner.identity.raft_id);
+    let authority=format!("({closed_admission}) AND ({floor}) AND ({ingress_floor}) AND ({boot}) AND EXISTS(SELECT 1 FROM settings WHERE key='sharing_enabled' AND CASE WHEN typeof(value)='text' AND length(CAST(value AS BLOB))<=64 THEN lower(trim(value)) IN('1','true','yes','on') ELSE 0 END) AND NOT EXISTS(SELECT 1 FROM sharing_source_boot_intents intent JOIN cluster_nodes node ON node.node_id=intent.node_id AND node.raft_id=intent.raft_id WHERE node.removed_at IS NULL AND intent.master_fingerprint!=\'{}\') AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) AND EXISTS(SELECT 1 FROM sharing_purpose_key_installation ready JOIN sharing_identity identity ON identity.singleton=ready.singleton AND identity.server_id=ready.server_id AND identity.catalogue_epoch=ready.catalogue_epoch WHERE ready.singleton=1 AND ready.state='ready') AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={} AND role IS NOT 'learner' AND removed_at IS NULL)",master.sharing_purpose_master_fingerprint(),inner.identity.raft_id);
     if !predicate(
         &inner.client,
         format!("({authority}) AND ({})", layout::predecessor_guard(3)),
@@ -322,13 +322,14 @@ impl MembershipManager {
         if ready {
             return Ok(true);
         }
-        let enabled = inner
+        let saved = inner
             .store
             .get_setting("sharing_enabled")
             .await
-            .map_err(|_| MembershipError::Incompatible)?
-            .as_deref()
-            == Some("true");
+            .map_err(|_| MembershipError::Incompatible)?;
+        // The public settings API persists booleans as "1"/"0". Use the same
+        // decoder as serving/settings; an unknown or missing choice stays off.
+        let enabled = crate::store::stored_switch(saved.as_deref(), false);
         if !enabled || admission == StartupAdmissionLayout::Legacy {
             // verify_layout has proved complete legacy session/catalogue shape;
             // actual SelectedStore startup has already AEAD-opened its census.
