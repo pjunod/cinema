@@ -1855,6 +1855,19 @@ assert.equal(context.ACT_TIMER, null);
             if workflow == "effort-ci":
                 self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
                 self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
+            elif workflow == "main-fast-lane":
+                player_step = workflow_step_blocks(contract_preflight)[
+                    "Check the shared player input contract"
+                ]
+                self.assertEqual(
+                    workflow_step_scalar(player_step, "run"),
+                    "python3 -m validation.main_preflight_adoption node",
+                )
+                self.assertIn("GITHUB_TOKEN: ${{ github.token }}", player_step)
+                # Only the attributable adapter executes these scripts; an
+                # additional direct invocation would replay a retained pass.
+                self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
             else:
                 self.assertIn("node tests/playback/player-input-contract.test.js", contract_preflight)
                 self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
@@ -2079,13 +2092,46 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('major: "6"', fast_rust_steps["Install the pinned FFmpeg"])
         self.assertIn("timeout-minutes: 60", fast_jobs["rust_compile"])
         fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
-        playback_contracts = workflow_step_literal(
+        playback_contracts = workflow_step_scalar(
             fast_preflight["Check the shared player input contract"], "run"
         )
-        self.assertEqual(playback_contracts, ["python3 -m validation.main_preflight_adoption node"])
+        self.assertEqual(playback_contracts, "python3 -m validation.main_preflight_adoption node")
         adapter = read("validation/main_preflight_adoption.py")
-        self.assertIn('"tests/playback/web-policy.test.js"', adapter)
-        self.assertIn('"tests/playback/web-control.test.js"', adapter)
+        # Parse the actual producer inventory rather than accepting script
+        # names that occur only in a comment or another unrelated function.
+        import ast
+
+        producer = ast.parse(adapter)
+        node_assignments = [
+            node for node in producer.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "NODE"
+                    for target in node.targets)
+        ]
+        self.assertEqual(len(node_assignments), 1)
+        self.assertEqual(
+            ast.literal_eval(node_assignments[0].value),
+            (
+                "tests/playback/player-input-contract.test.js",
+                "tests/playback/web-policy.test.js",
+                "tests/playback/web-control.test.js",
+                "tests/web/seek-telemetry.test.js",
+                "tests/web/player-dom.test.js",
+                "tests/web/read-after.test.js",
+                "tests/web/live-tv.test.js",
+            ),
+        )
+        node_phase = adapter.split('    if phase == "node":', 1)[1].split(
+            '    in_progress = {"phase": phase,', 1
+        )[0]
+        self.assertIn("for script in NODE:", node_phase)
+        self.assertIn('if identity in journal["outcomes"]:', node_phase)
+        self.assertIn(
+            'command = ["node", "--test", script] if script.endswith("seek-telemetry.test.js") else ["node", script]',
+            node_phase,
+        )
+        self.assertIn("subprocess.run(command, check=True)", node_phase)
+        self.assertIn('record(identity, "success")', node_phase)
         self.assertIn("needs: [scope, preflight, rust_compile]", fast_jobs["windows_compile"])
         self.assertIn("cancel-in-progress: false", fast_lane)
         self.assertEqual(
