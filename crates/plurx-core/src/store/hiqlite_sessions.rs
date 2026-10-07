@@ -399,6 +399,7 @@ async fn session_layout(
     }
     let version = store
         .client()
+        // authority: read the committed layout before choosing authority predicates.
         .query_consistent_map::<LayoutVersionRow, _>(
             "SELECT schema_version AS version FROM cluster_meta WHERE singleton=1",
             params!(),
@@ -434,6 +435,7 @@ async fn session_layout(
     };
     let valid = store
         .client()
+        // authority: prove the committed session shape before decoding authoritative rows.
         .query_consistent_map::<LayoutGuardRow, _>(
             format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END AS valid"),
             params!(),
@@ -449,6 +451,7 @@ async fn session_layout(
         if layout == SessionLayout::Legacy {
             let latest = store
                 .client()
+                // authority: recheck a concurrent layout transition before accepting its shape.
                 .query_consistent_map::<LayoutVersionRow, _>(
                     "SELECT schema_version AS version FROM cluster_meta WHERE singleton=1",
                     params!(),
@@ -462,6 +465,7 @@ async fn session_layout(
                 let guard = super::sharing_source_schema::installed_guard();
                 let installed = store
                     .client()
+                    // authority: prove the installed shape after the marker advances.
                     .query_consistent_map::<LayoutGuardRow, _>(
                         format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END AS valid"),
                         params!(),
@@ -573,6 +577,27 @@ fn principal_lookup(
     }
 }
 
+#[cfg(test)]
+pub(super) fn census_principal_lookup(rebuilt: bool) -> Vec<String> {
+    use crate::playback_principal::PlaybackPrincipal;
+    let layout = if rebuilt {
+        SessionLayout::Principal
+    } else {
+        SessionLayout::Legacy
+    };
+    [
+        PlaybackPrincipal::LocalUser { user_id: 1 },
+        PlaybackPrincipal::sharing(uuid::Uuid::from_u128(1), &"a".repeat(64))
+            .expect("valid census principal"),
+    ]
+    .iter()
+    .map(|principal| {
+        let (template, _) = principal_lookup(principal).expect("valid lookup");
+        resolve_session_sql(&template, layout).expect("resolved lookup")
+    })
+    .collect()
+}
+
 fn guarded_session_statements(
     templates: &[(std::borrow::Cow<'static, str>, hiqlite::Params)],
     layout: SessionLayout,
@@ -607,6 +632,7 @@ impl HiqliteAuthStore {
     }
 }
 impl SessionClient<'_> {
+    // authority: dispatch authoritative reads through the layout fence.
     async fn query_consistent_map<T, S>(
         &self,
         sql: S,
@@ -621,6 +647,7 @@ impl SessionClient<'_> {
         let result = self
             .store
             .client()
+            // authority: read the owner state using the committed layout.
             .query_consistent_map(resolve_session_sql(&template, layout)?, bindings.clone())
             .await;
         if layout == SessionLayout::Legacy
@@ -631,6 +658,7 @@ impl SessionClient<'_> {
             return self
                 .store
                 .client()
+                // authority: reread authoritative state after the layout transition.
                 .query_consistent_map(
                     resolve_session_sql(&template, SessionLayout::Principal)?,
                     bindings,
@@ -1981,6 +2009,7 @@ async fn route_by(
     validate_sql(&sql)?;
     store
         .session_client()
+        // authority: routing requires the current principal-owned incarnation.
         .query_consistent_map::<RouteRow, _>(sql, params!(value))
         .await?
         .into_iter()
@@ -6843,7 +6872,15 @@ mod tests {
 
     #[test]
     fn activation_losing_pointer_read_race_is_a_read_only_replay() {
-        let source = method_source("activate_media_session");
+        let wrapper = method_source("activate_media_session");
+        assert!(wrapper.contains("activate_with_authority(self, activation, None, None).await"));
+        let source = SOURCE
+            .split_once("async fn activate_with_authority(")
+            .expect("activation helper")
+            .1
+            .split_once("\n#[async_trait]")
+            .expect("activation helper boundary")
+            .0;
         assert_eq!(
             source.matches("current_incarnation_id = $8)").count(),
             2,

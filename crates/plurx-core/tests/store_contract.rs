@@ -746,6 +746,10 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "record_library_channel_session_recipe",
     "assign_media_session_request_owner",
     "activate_media_session",
+    // Sharing acceptance contracts exercise principal/receiver authority and renewal.
+    "activate_source_media_session",
+    "activate_receiver_media_session",
+    "renew_source_media_session",
     "settle_media_session_activation",
     "publish_media_session_activation",
     "arm_media_session_handoff",
@@ -19059,7 +19063,7 @@ fn contract_inventory_matches_every_store_method() {
     // +9 -> 475: continuous quality's ledger, reservation, family-binding and
     // cancellation-receipt methods on `MediaSessionStore`, listed in
     // `MEDIA_SESSION_METHODS` with the scenarios that cover them.
-    assert_eq!(declared.len(), 475, "review the Store method count");
+    assert_eq!(declared.len(), 478, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

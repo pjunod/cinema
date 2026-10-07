@@ -5164,7 +5164,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +4 metadata-only B coordination regression: three existing accepted-driver
 # capture calls and one real connection monitor registration. These construct
 # no media producer and manufacture no physical closure receipt.
-expected_occurrences = 712
+# +4: live Source activation tests read MembershipManager::status().
+# These inspect boot/current readiness; none launches or owns a process.
+expected_occurrences = 716
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
