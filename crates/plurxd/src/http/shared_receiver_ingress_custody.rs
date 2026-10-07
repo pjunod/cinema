@@ -319,6 +319,7 @@ async fn exchange_at_owner(
     operation: forwarding::ReceiverCustodyOperation,
     deadline: Instant,
 ) -> Result<ReceiverCustodyReply, ReceiverStartError> {
+    let deadline = forwarding::custody_deadline(deadline, Instant::now());
     if tuple.owner_node_id != state.node_id {
         return forwarding::exchange_custody(state, tuple, ingress, operation, deadline).await;
     }

@@ -767,13 +767,27 @@ pub(super) async fn retire_custody_with_mode(
                         .accepted_drivers
                         .close(value.owner_node_id(), &request)
                         .await
-                        .map_err(|_| unavailable())
+                        .map_err(|_| {
+                            #[cfg(test)]
+                            eprintln!(
+                                "Source retirement actual close refused local={}",
+                                slot.node_id == state.node_id
+                            );
+                            unavailable()
+                        })
                 } else {
                     state
                         .media_sessions
                         .close_sharing_ingress(&slot.node_id, &request)
                         .await
-                        .map_err(|_| unavailable())
+                        .map_err(|_| {
+                            #[cfg(test)]
+                            eprintln!(
+                                "Source retirement actual close refused local={}",
+                                slot.node_id == state.node_id
+                            );
+                            unavailable()
+                        })
                 }
             };
             let receipt = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), close)
@@ -815,9 +829,18 @@ pub(super) async fn retire_custody_with_mode(
             failed = true;
         }
     }
+    // A connection-owned natural-close monitor can commit its exact receipt
+    // while this owner's close exchange or acknowledgement is in flight.
+    // Those exchange errors do not invalidate an already committed receipt;
+    // only this exact assignment's sealed ledger decides settlement below.
+    #[cfg(test)]
     if failed {
-        return Err(unavailable());
+        eprintln!(
+            "Source retirement close/ack exchange raced or refused; checking exact sealed ledger"
+        );
     }
+    #[cfg(not(test))]
+    let _ = failed;
     let ledger = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         state.store.source_ingress_custody(value),
@@ -826,6 +849,13 @@ pub(super) async fn retire_custody_with_mode(
     .map_err(|_| unavailable())?
     .map_err(|_| unavailable())?
     .ok_or_else(unavailable)?;
+    #[cfg(test)]
+    eprintln!(
+        "Source retirement exact ledger sealed={} settled={} open={}",
+        ledger.state.is_sealed(),
+        ledger.state.settled(),
+        ledger.state.open().count()
+    );
     if !ledger.state.is_sealed() || !ledger.state.settled() {
         return Err(unavailable());
     }

@@ -16,6 +16,12 @@ const MAX_REPLY: usize = 64 * 1024;
 const MEDIA_BUDGET: Duration = Duration::from_secs(25);
 const CONTROL_BUDGET: Duration = Duration::from_secs(9);
 
+/// Custody is a control operation even when its caller is opening media.
+/// Cap the inherited budget without resetting a shorter parent deadline.
+pub(super) fn custody_deadline(parent: Instant, now: Instant) -> Instant {
+    parent.min(now + CONTROL_BUDGET)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReceiverForwardTuple {
@@ -392,6 +398,7 @@ pub(super) async fn exchange_custody(
     operation: ReceiverCustodyOperation,
     deadline: Instant,
 ) -> Result<ReceiverCustodyReply, ReceiverStartError> {
+    let deadline = custody_deadline(deadline, Instant::now());
     let path = match &operation {
         ReceiverCustodyOperation::Register => REGISTER_PATH,
         ReceiverCustodyOperation::Ack { .. } => ACK_PATH,
