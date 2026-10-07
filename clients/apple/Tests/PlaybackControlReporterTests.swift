@@ -1451,6 +1451,276 @@ final class PlaybackControlReporterTests: XCTestCase {
 }
 
 final class DisplayAwareAutoEvidenceTests: XCTestCase {
+    func testA05EvidenceAcknowledgementRequiresTheExactSingleEvent() {
+        let event = "12345678-1234-1234-1234-123456789abc"
+        XCTAssertTrue(autoNegativeLinkAcknowledgement(receipt: event, values: [event], status: 204, sameEndpoint: true, remainingMs: 250))
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: event, values: [], status: 204, sameEndpoint: true, remainingMs: 250))
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: event, values: [event, event], status: 204, sameEndpoint: true, remainingMs: 250))
+    }
+    func testDecoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement() {
+        var rejected: Set<String> = []
+        XCTAssertTrue(rejectFailedDecoderCandidate(&rejected, candidateId: "candidate-a"))
+        XCTAssertEqual(rejected, ["candidate-a"])
+        XCTAssertFalse(rejectFailedDecoderCandidate(&rejected, candidateId: "candidate-a"))
+        XCTAssertTrue(rejectFailedDecoderCandidate(&rejected, candidateId: "candidate-b"))
+    }
+    func testA05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline() {
+        let nonce = "12345678-1234-1234-1234-123456789abc"
+        XCTAssertTrue(autoNegativeLinkAcknowledgement(receipt: nonce, values: [nonce], status: 204, sameEndpoint: true, remainingMs: 1))
+        for values in [[], [nonce, nonce], [nonce + "," + nonce], ["other"], [nonce.uppercased()]] {
+            XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: nonce, values: values, status: 204, sameEndpoint: true, remainingMs: 1))
+        }
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: "malformed", values: ["malformed"], status: 204, sameEndpoint: true, remainingMs: 1))
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: nonce, values: [nonce], status: 200, sameEndpoint: true, remainingMs: 1))
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: nonce, values: [nonce], status: 204, sameEndpoint: false, remainingMs: 1))
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: nonce, values: [nonce], status: 204, sameEndpoint: true, remainingMs: 0))
+        let item = NSObject(), other = NSObject()
+        let ticket = AutoRecoveryCauseTicket(session: "incumbent", attachment: ObjectIdentifier(item), incumbentCandidate: "a", proposedCandidate: "b", cause: .link, observedAtMs: 100, linkReceipt: nonce)
+        XCTAssertEqual(ticket.receiptForRequest(previous: "incumbent", candidate: "b", cause: "link"), nonce)
+        XCTAssertNil(ticket.receiptForRequest(previous: "other", candidate: "b", cause: "link"))
+        XCTAssertNil(ticket.receiptForRequest(previous: "incumbent", candidate: "c", cause: "link"))
+        XCTAssertNil(ticket.receiptForRequest(previous: "incumbent", candidate: "b", cause: "decode"))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(other), candidate: "a", proposed: "b", nowMs: 200))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "a", proposed: "b", nowMs: 15_101))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "a", proposed: "b", nowMs: 99))
+    }
+    func testA05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals() {
+        let item = NSObject(), replacement = NSObject()
+        var window = AutoDecodePressureWindow()
+        func sample(_ now: Int, _ position: Int, _ drops: Int, _ eligible: Bool = true) -> Bool {
+            window.observe(attachment: ObjectIdentifier(item), candidate: "full-recipe-a",
+                nowMs: now, positionMs: position, cumulativeDropped: drops, eligible: eligible)
+        }
+        XCTAssertFalse(sample(0, 0, 0))
+        XCTAssertFalse(sample(2_000, 2_000, 3))
+        XCTAssertTrue(sample(4_000, 4_000, 6))
+        XCTAssertEqual(window.evidence?.elapsedMs, 4_000)
+        XCTAssertEqual(window.evidence?.progressMs, 4_000)
+        XCTAssertEqual(window.evidence?.droppedFrames, 6)
+        XCTAssertFalse(sample(6_000, 4_000, 10), "a stagnant clock is not rendered progress")
+        XCTAssertFalse(sample(8_000, 6_000, 13, false), "supply/pause/seek contamination discards the interval")
+        XCTAssertFalse(sample(10_000, 8_000, 16))
+        XCTAssertFalse(window.observe(attachment: ObjectIdentifier(replacement), candidate: "full-recipe-a",
+            nowMs: 12_000, positionMs: 10_000, cumulativeDropped: 20, eligible: true))
+        XCTAssertFalse(window.observe(attachment: ObjectIdentifier(replacement), candidate: "full-recipe-a",
+            nowMs: 11_000, positionMs: 11_000, cumulativeDropped: 23, eligible: true), "rollback is Unknown")
+        let ticket = AutoRecoveryCauseTicket(session: "incumbent", attachment: ObjectIdentifier(item),
+            incumbentCandidate: "full-recipe-a", proposedCandidate: "full-recipe-b", cause: .decode, observedAtMs: 100)
+        XCTAssertTrue(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "full-recipe-a", proposed: "full-recipe-b", nowMs: 15_100))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "full-recipe-a", proposed: "full-recipe-b", nowMs: 15_101))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(replacement), candidate: "full-recipe-a", proposed: "full-recipe-b", nowMs: 200))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "other-recipe", proposed: "full-recipe-b", nowMs: 200))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "full-recipe-a", proposed: "full-recipe-b", nowMs: 99))
+        XCTAssertEqual([AutoRecoveryCause.link, .encode, .decode, .hold, .authority].map(\.rawValue), ["link", "encode", "decode", "hold", "authority"])
+    }
+    func testA05BoundaryEpochFencesKeepCapturedOwnershipAndIndependentScopes() throws {
+        func attempt(lifecycle: Int = 1, open: Int = 2, viewer: Int = 3,
+                     seek: Int = 7, decision: Int = 4) -> Attempt {
+            Attempt(lifecycle: lifecycle, open: open, viewerAction: viewer,
+                initialDecision: decision, createRetry: 5, preparedAlignment: 6,
+                seek: seek, pgsSelection: 8, pgsItem: 9, item: nil)
+        }
+        let captured = attempt()
+        let expected: [(AttemptFence, Set<Attempt.Scope>)] = [
+            (.autoBoundaryOwnerCurrent, [.lifecycle, .open, .viewerAction]),
+            (.autoBoundaryReplanCurrent, [.lifecycle, .viewerAction])
+        ]
+        for (fence, scopes) in expected {
+            XCTAssertEqual(fence.scopes, scopes, fence.rawValue)
+            XCTAssertTrue(captured.stillCurrent(attempt(), scopes: fence.scopes))
+            XCTAssertTrue(captured.stillCurrent(attempt(decision: 99), scopes: fence.scopes),
+                "unrelated initial decision must not widen a boundary fence")
+            for (scope, changed) in [
+                (Attempt.Scope.lifecycle, attempt(lifecycle: 99)),
+                (.open, attempt(open: 99)), (.viewerAction, attempt(viewer: 99)),
+                (.seek, attempt(seek: 99))
+            ] {
+                XCTAssertEqual(captured.stillCurrent(changed, scopes: fence.scopes), !scopes.contains(scope), fence.rawValue)
+            }
+        }
+        let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("AutoBoundaryAttempt(attempt: snapshotAttempt(), item:"))
+        XCTAssertTrue(source.contains("attemptStillCurrent(boundary.attempt, fence: .autoBoundaryOwnerCurrent)"))
+        XCTAssertTrue(source.contains("attemptStillCurrent($0, fence: .autoBoundaryReplanCurrent)"))
+        XCTAssertFalse(source.contains("lifecycleGeneration == boundary.lifecycle"))
+        XCTAssertFalse(source.contains("AutoBoundaryResumeOwner"))
+    }
+
+    func testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance() throws {
+        // Check the actual controller callers, not just the budget helper:
+        // buttons and relative remote commands share skip(seconds:), whereas
+        // the position-clock marker writer must not open a viewer trial.
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        func body(_ start: String, until end: String) throws -> String {
+            let lower = try XCTUnwrap(source.range(of: start))
+            let upper = try XCTUnwrap(source.range(of: end, range: lower.upperBound..<source.endIndex))
+            return String(source[lower.upperBound..<upper.lowerBound])
+        }
+        let relative = try body("func skip(seconds: Double) {", until: "func skipActiveMarker()")
+        XCTAssertTrue(relative.contains("seekState.relative("))
+        XCTAssertTrue(relative.contains("by: Int(seconds * 1000)"))
+        XCTAssertTrue(relative.contains("issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)"))
+        let automatic = try body("func autoSkipActiveMarkerIfNeeded() {", until: "func reportMarkerOffer")
+        XCTAssertTrue(automatic.contains("beginSeek(toMs: marker.endMs, viewerOrigin: false)"))
+        XCTAssertFalse(automatic.contains("seek(toMs:"))
+        let absolute = try body("func seek(toMs requested: Int) {", until: "private func beginSeek")
+        XCTAssertTrue(absolute.contains("beginSeek(toMs: requested, viewerOrigin: true)"))
+        let forwarding = try body("private func beginSeek(toMs requested: Int, viewerOrigin: Bool) {", until: "private func issueSeek(")
+        XCTAssertTrue(forwarding.contains("viewerBoundary: viewerOrigin"))
+    }
+
+    func testPlayAfterALongPauseIsAppliedAtOnceAndOnlyArmsTheReplan() throws {
+        // The decision whether Play is applied is not a decision at all: the
+        // long pause only arms the original-first re-plan.
+        XCTAssertTrue(AutoViewerBoundary.resumeArmsReplan(viewerOrigin: true,
+            pauseDurationMs: AutoViewerBoundary.longPauseMs, samePauseOwner: true))
+        XCTAssertFalse(AutoViewerBoundary.resumeArmsReplan(viewerOrigin: true,
+            pauseDurationMs: AutoViewerBoundary.longPauseMs - 1, samePauseOwner: true))
+        XCTAssertFalse(AutoViewerBoundary.resumeArmsReplan(viewerOrigin: false,
+            pauseDurationMs: 3_600_000, samePauseOwner: true), "an internal resume is no viewer boundary")
+        XCTAssertFalse(AutoViewerBoundary.resumeArmsReplan(viewerOrigin: true,
+            pauseDurationMs: 3_600_000, samePauseOwner: false), "a pause on another attachment owes nothing")
+
+        // The controller writes Play to AVPlayer in the buffered branch with
+        // nothing between the press and the command, and never parks the
+        // resume task behind an optional original stage.
+        let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let lower = try XCTUnwrap(source.range(of: "private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {"))
+        let upper = try XCTUnwrap(source.range(of: "nonisolated static func applyPlaybackCommand(",
+                                               range: lower.upperBound..<source.endIndex))
+        let resume = String(source[lower.upperBound..<upper.lowerBound])
+        let buffered = try XCTUnwrap(resume.range(of: "path: \"buffered-immediate\","))
+        let tail = resume[buffered.upperBound...]
+        let play = try XCTUnwrap(tail.range(of: "Self.applyPlaybackCommand(to: player, preferredRate: preferredRate, immediately: true)"))
+        let nextBranch = try XCTUnwrap(tail.range(of: "} else if established {"))
+        XCTAssertLessThan(play.lowerBound, nextBranch.lowerBound)
+        XCTAssertNil(tail[..<play.lowerBound].range(of: "isPlaying = false"), "Play is not withheld")
+        XCTAssertTrue(resume.contains("autoBoundaryReplan.arm(snapshotAttempt())"))
+        XCTAssertFalse(resume.contains("attemptAutoOriginalBoundary"))
+        XCTAssertFalse(source.contains("attemptAutoOriginalBoundary"))
+        XCTAssertFalse(source.contains("pollMs: 25"), "no 25 ms polling loop remains on the main actor")
+        XCTAssertFalse(source.contains("Task.sleep(nanoseconds: 25_000_000)"))
+
+        // A viewer seek is executed without an optional stage in front of it.
+        let seekLower = try XCTUnwrap(source.range(of: "private func issueSeek("))
+        let seekUpper = try XCTUnwrap(source.range(of: "let route = Self.seekRoute(",
+                                                   range: seekLower.upperBound..<source.endIndex))
+        let seek = String(source[seekLower.upperBound..<seekUpper.lowerBound])
+        XCTAssertTrue(seek.contains("if viewerBoundary { autoBoundaryReplan.arm(snapshotAttempt()) }"))
+        XCTAssertFalse(seek.contains("await attemptAutoOriginalBoundary"))
+    }
+
+    func testOptionalOriginalReplanNeverBlocksAndIsServedOnceBesideThePlayingIncumbent() {
+        func attempt(viewer: Int) -> Attempt {
+            Attempt(lifecycle: 1, open: 2, viewerAction: viewer, initialDecision: 4, createRetry: 5,
+                    preparedAlignment: 6, seek: 7, pgsSelection: 8, pgsItem: 9, item: nil)
+        }
+        let armed = attempt(viewer: 3)
+        let isCurrent: (Attempt) -> Bool = {
+            $0.stillCurrent(armed, scopes: AttemptFence.autoBoundaryReplanCurrent.scopes)
+        }
+        var asked = 0
+        let produce: () -> String? = { asked += 1; return "original" }
+        var replan = AutoBoundaryReplan()
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: produce), "nothing armed, nothing owed")
+        replan.arm(armed)
+        // The incumbent is already playing; the re-plan waits for handoff
+        // runway on the ordinary Auto evaluation, not on the viewer.
+        XCTAssertNil(replan.take(runwaySeconds: AutoViewerBoundary.handoffRunwaySeconds - 0.001,
+                                 isCurrent: isCurrent, produce: produce))
+        XCTAssertNil(replan.take(runwaySeconds: nil, isCurrent: isCurrent, produce: produce))
+        XCTAssertTrue(replan.isArmed, "short runway keeps the boundary owed")
+        XCTAssertEqual(asked, 0, "no candidate is asked for without runway")
+        XCTAssertEqual(replan.take(runwaySeconds: AutoViewerBoundary.handoffRunwaySeconds,
+                                   isCurrent: isCurrent, produce: produce), "original")
+        XCTAssertFalse(replan.isArmed)
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: produce), "served exactly once")
+        XCTAssertEqual(asked, 1)
+
+        // A newer viewer action makes the armed boundary stale without a timer.
+        replan.arm(attempt(viewer: 2))
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: produce))
+        XCTAssertFalse(replan.isArmed)
+        replan.arm(armed)
+        replan.clear()
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: produce))
+    }
+
+    func testBoundaryReplanIsSpentOnlyOnACandidate() {
+        // Runway alone does not consume the boundary: with no fresh transfer
+        // sample (or every original blocked) there is no candidate, and the
+        // re-plan stays owed for the next evaluation.
+        let armed = Attempt(lifecycle: 1, open: 2, viewerAction: 3, initialDecision: 4, createRetry: 5,
+                            preparedAlignment: 6, seek: 7, pgsSelection: 8, pgsItem: 9, item: nil)
+        let isCurrent: (Attempt) -> Bool = {
+            $0.stillCurrent(armed, scopes: AttemptFence.autoBoundaryReplanCurrent.scopes)
+        }
+        var replan = AutoBoundaryReplan()
+        replan.arm(armed)
+        for _ in 0..<3 {
+            XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: { nil as String? }))
+            XCTAssertTrue(replan.isArmed, "no candidate, nothing spent")
+        }
+        XCTAssertEqual(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: { "original" }), "original")
+        XCTAssertFalse(replan.isArmed)
+        // What ends an unserved boundary is an event, not a clock.
+        replan.arm(armed)
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: { nil as String? }))
+        replan.clear()
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: { "original" }))
+    }
+
+    func testArmedBoundaryReplanEndsWithStallRecoveryAndSkipsBlockedCandidates() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        func body(_ start: String, until end: String) throws -> String {
+            let lower = try XCTUnwrap(source.range(of: start))
+            let upper = try XCTUnwrap(source.range(of: end, range: lower.upperBound..<source.endIndex))
+            return String(source[lower.upperBound..<upper.lowerBound])
+        }
+        // Every stall recovery (hold, downgrade, reopen) ends the armed re-plan
+        // before it acts.
+        let stall = try body("private func retrySameDeliveryAfterStall(",
+                             until: "await selectAutoStallRecoveryCandidate(attempt: stallAttempt")
+        let cleared = try XCTUnwrap(stall.range(of: "autoBoundaryReplan.clear()"))
+        let verdict = try XCTUnwrap(stall.range(of: "applyStallVerdict(verdict, event: event"))
+        XCTAssertLessThan(cleared.lowerBound, verdict.lowerBound)
+        // A blocked original is not offered by a boundary either.
+        let candidate = try body("private func autoOriginalBoundaryCandidate(now: Int)",
+                                 until: "private func beginAutoBoundaryPreparation(")
+        XCTAssertTrue(candidate.contains("(autoBlockedUntil[$0.id] ?? 0) <= now"))
+        // The tick asks for the candidate inside take, so only a produced
+        // candidate spends the boundary.
+        let tick = try body("private func tickDisplayAwareAuto() {", until: "let link: Double? = {")
+        XCTAssertTrue(tick.contains("produce: { autoOriginalBoundaryCandidate(now: now) }"))
+        // A viewer quality change bumps the viewer action the re-plan fence reads.
+        let quality = try body("func selectQuality(_ height: Int?) {", until: "selectedHeight = height")
+        XCTAssertTrue(quality.contains("beginViewerAction()"))
+        XCTAssertTrue(AttemptFence.autoBoundaryReplanCurrent.scopes.contains(.viewerAction))
+        // An offer that does not own the change withdraws the boundary.
+        let begin = try body("private func beginAutoBoundaryPreparation(", until: "private func withdrawAutoBoundary(")
+        XCTAssertTrue(begin.contains("if !offered { self.withdrawAutoBoundary(boundary) }"))
+    }
+
+    func testA05UpgradeEvidenceCliffIsNotRenewedByRereading() {
+        // Quiet/cliff windows are still meaningful for ordinary mid-play, but
+        // observing an expired original EOF cannot renew the cliff timestamp.
+        let item = NSObject()
+        var window = AutoUpgradeEvidenceWindow()
+        window.bind(attachment: ObjectIdentifier(item), attempt: "viewer", nowMs: 0)
+        window.cliff(completedAtMs: 1_000, nowMs: 2_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 90_999))
+        window.cliff(completedAtMs: 1_000, nowMs: 91_000)
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 91_000))
+    }
     private func candidate(_ height: Int, route: String = "encode", peak: UInt64? = 3_000_000, grade: String = "sdr") -> QualityCandidate {
         QualityCandidate(id: "0a7ba9bab6fbdd31bab5e5e362a3fac7", recipeDigest: Array(repeating: 0, count: 32),
             route: route, width: height * 16 / 9, height: height, targetHeight: height,
@@ -1528,6 +1798,121 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertFalse(autoOriginalTransferMarginProven([sample("a", bodySeconds: 0.6), sample("b")], sessionId: "staged", nowMs: 2_000))
         XCTAssertFalse(autoOriginalTransferMarginProven([sample("a"), sample("b", mediaSeconds: nil)], sessionId: "staged", nowMs: 2_000))
         XCTAssertFalse(autoOriginalTransferMarginProven([sample("a"), sample("b")], sessionId: "another", nowMs: 2_000))
+    }
+
+    func testA05PacingAndAttachmentUpgradeWindowsUseActualEvidence() {
+        var status = PlaybackSessionStatus(id: "incumbent")
+        status.producerState = "held"
+        status.activeEncodeCandidateId = "candidate"
+        status.activeEncodeMilliRealtime = 2_000
+        status.activeEncodeAgeMs = 1_000
+        status.activeEncodeActiveMs = 2_000
+        status.activeEncodeSegments = 2
+        func pressure(_ snapshot: PlaybackSessionStatus?, session: String? = "incumbent", at: Int = 2_000) -> Bool {
+            autoActiveProductionPressure(status: snapshot, observedAtMs: 1_000, nowMs: at,
+                sessionId: session, candidateId: "candidate", runwaySeconds: 3)
+        }
+        XCTAssertFalse(pressure(status), "paced wall delivery with actual 2x work is not pressure")
+        status.activeEncodeMilliRealtime = 800
+        XCTAssertTrue(pressure(status), "fresh saturation still counts while producer currently held")
+        XCTAssertFalse(pressure(status, at: 16_001))
+        XCTAssertFalse(pressure(status, session: "replacement"))
+        XCTAssertFalse(pressure(nil))
+        status.activeEncodeActiveMs = nil
+        XCTAssertFalse(pressure(status), "unknown active time is not saturation proof")
+        let item = NSObject(), successor = NSObject()
+        var window = AutoUpgradeEvidenceWindow()
+        window.bind(attachment: ObjectIdentifier(item), attempt: "attempt1", nowMs: 0)
+        window.stalled(at: 1_000)
+        window.cliff(completedAtMs: 2_000, nowMs: 3_000)
+        window.cliff(completedAtMs: 2_000, nowMs: 10_000)
+        XCTAssertEqual(window.lastCliffMs, 2_000, "same completion never renews cliff")
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 60_999))
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 91_999))
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 92_000))
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 999))
+        window.bind(attachment: ObjectIdentifier(successor), attempt: "attempt1", nowMs: 92_000)
+        XCTAssertNil(window.lastStallMs)
+        XCTAssertNil(window.lastCliffMs)
+        window.stalled(at: 93_000)
+        window.bind(attachment: ObjectIdentifier(successor), attempt: "attempt2", nowMs: 93_000)
+        XCTAssertNil(window.lastStallMs)
+        window.cliff(completedAtMs: 1, nowMs: 93_000)
+        XCTAssertNil(window.lastCliffMs)
+        window.bind(attachment: nil, attempt: "attempt2", nowMs: 93_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 200_000))
+    }
+
+    func testA05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade() {
+        let item = NSObject(), replacement = NSObject()
+        var window = AutoUpgradeEvidenceWindow()
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 100_000), "unobserved attachment is Unknown")
+        window.bind(attachment: ObjectIdentifier(item), attempt: "first", nowMs: 1_000)
+        let headroomStartedAt = 1_000
+        XCTAssertTrue(46_000 - headroomStartedAt >= 45_000, "independent headroom is ready")
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 46_000), "45s headroom cannot bypass 60s observation")
+        XCTAssertFalse(window.allowsProposal(nowMs: 46_000, headroomStartedAtMs: headroomStartedAt))
+        window.bind(attachment: ObjectIdentifier(item), attempt: "first", nowMs: 50_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 60_999))
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 61_000), "same binding does not renew observation")
+        XCTAssertTrue(window.allowsProposal(nowMs: 61_000, headroomStartedAtMs: headroomStartedAt), "concurrent windows first allow max(45s,60s), not 105s")
+        XCTAssertFalse(window.allowsProposal(nowMs: 61_000, headroomStartedAtMs: nil))
+        XCTAssertFalse(window.allowsProposal(nowMs: 61_000, headroomStartedAtMs: 61_001))
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 999), "clock rollback is Unknown")
+        window.stalled(at: 62_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 121_999))
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 122_000))
+        window.bind(attachment: ObjectIdentifier(item), attempt: "second", nowMs: 123_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 182_999))
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 183_000))
+        window.bind(attachment: ObjectIdentifier(replacement), attempt: "second", nowMs: 184_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 243_999))
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 244_000))
+        window.cliff(completedAtMs: 244_000, nowMs: 245_000)
+        window.cliff(completedAtMs: 244_000, nowMs: 250_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 333_999))
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 334_000), "original EOF age is not renewed")
+        window.bind(attachment: nil, attempt: "second", nowMs: 335_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 500_000))
+    }
+
+    func testA05StagedAdvertisedIntervalsRequireCapturedScopeAndOriginalDeadline() {
+        let manifest = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.000000,\nseg00000.m4s\n#EXTINF:1.000000,\nseg00001.m4s\n#EXT-X-ENDLIST\n"
+        let intervals = autoVODAdvertisedIntervals(Data(manifest.utf8))!
+        XCTAssertEqual(intervals["seg00001.m4s"]?.startSeconds, 1)
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(manifest.replacingOccurrences(of: "seg00001", with: "seg00000").utf8)))
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(manifest.replacingOccurrences(of: "seg00001", with: "seg1").utf8)))
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(manifest.replacingOccurrences(of: "#EXT-X-ENDLIST", with: "#EXT-X-DISCONTINUITY").utf8)))
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(repeating: 65, count: 1_048_577)))
+        let scope = UUID()
+        func transfer(_ index: Int) -> PlayerController.AutoCompletedTransfer {
+            .init(bodyBytes: 100_000, bodyDurationSeconds: 0.1, completedAtMs: 1_000,
+                origin: "https://node", networkLoad: true, fromLocalCache: false, producerPaced: false,
+                statusCode: 200, segmentId: "https://node/hls/staged/seg0000\(index).m4s", mediaDurationSeconds: nil,
+                receipt: "00000000-0000-0000-0000-00000000000\(index)", etag: "object\(index)",
+                installedSessionId: "staged", installedCandidateId: "candidate", observedMediaDurationMs: 1_000,
+                stageScope: scope)
+        }
+        let first = transfer(0), second = transfer(1)
+        func margin(_ samples: [PlayerController.AutoCompletedTransfer], now: Int = 2_000, token: UUID? = nil) -> Bool {
+            autoVODEmpiricalMargin(samples, intervals: intervals, scope: token ?? scope,
+                sessionId: "staged", candidateId: "candidate", nowMs: now, deadlineMs: 15_000)
+        }
+        XCTAssertTrue(margin([first, second]))
+        XCTAssertFalse(margin([first, first]))
+        XCTAssertFalse(margin([first, second], token: UUID()))
+        XCTAssertFalse(margin([first, second], now: 15_000))
+        XCTAssertFalse(margin([first, second], now: 999))
+        var mismatched = second
+        mismatched.observedMediaDurationMs = 1_002
+        XCTAssertFalse(margin([first, mismatched]))
+        mismatched = second
+        mismatched.installedCandidateId = "replacement"
+        XCTAssertFalse(margin([first, mismatched]))
+        let overlapping = ["seg00000.m4s": intervals["seg00000.m4s"]!,
+            "seg00001.m4s": AutoVODAdvertisedInterval(startSeconds: 0.5, durationSeconds: 1)]
+        XCTAssertFalse(autoVODEmpiricalMargin([first, second], intervals: overlapping, scope: scope,
+            sessionId: "staged", candidateId: "candidate", nowMs: 2_000, deadlineMs: 15_000))
     }
 
     func testStagedProductionProofRequiresExactCandidateAndCombinedAge() {

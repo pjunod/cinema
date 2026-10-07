@@ -8,6 +8,13 @@ pub(super) struct Session {
     /// additional immutable coordinate.
     pub(super) response_incarnation: uuid::Uuid,
     pub(super) frozen_presentation: Option<FrozenHlsPresentation>,
+    /// Actual held producer input and execution identity, never wire metadata.
+    pub(super) rolling_provenance: Option<Arc<crate::rolling_provenance::RollingProduction>>,
+    pub(super) rolling_collection: Option<Arc<crate::vodserve::retained::RollingCollection>>,
+    pub(super) rolling_artifact: Option<Arc<crate::vodserve::retained::RollingArtifact>>,
+    pub(super) copy_output_measurement: std::sync::Mutex<
+        Option<Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>>,
+    >,
     /// True for every rolling generation whose response publication is
     /// admitted by the actor. Producer recovery may still remain compatibility
     /// owned; response ownership does not imply prepublication retry policy.
@@ -152,6 +159,7 @@ pub(super) struct Session {
     /// bound to a manual session repeats this exact route instead of silently
     /// turning an Original/copy delivery into a transcode.
     pub(super) kind: SessionKind,
+    pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     /// Re-encoding the picture, or only repackaging it. Immutable, unlike
     /// `encoder_label`: what this session *is* does not change when the
     /// encoder behind it does, and the activity page must not relabel a copy
@@ -1094,13 +1102,111 @@ impl Session {
                 })
             });
             let Some(selected) = floor else {
-                if budget.demand_sequence.is_some()
-                    && index
+                if let Some(first_new) = budget.demand_sequence.and_then(|_| {
+                    index
                         .segs
                         .iter()
-                        .any(|segment| segment.index >= first_new_segment)
-                {
-                    return Err("rolling_window_budget_exhausted: next completed segment exceeds the active publication safety floor".to_owned());
+                        .find(|segment| segment.index >= first_new_segment)
+                }) {
+                    // The next segment is only early: publishing nothing never
+                    // moves the served window, so the protected segment stays
+                    // served (the window check below is the invariant). Wait
+                    // for the viewer to consume into the floor instead of
+                    // ending the session, whenever that wait is bounded or
+                    // owned elsewhere:
+                    //
+                    // - not consuming (paused, waiting, seeking): the floor walk
+                    //   reaches the reserve ceiling after one to two minutes of
+                    //   pause, and before this every pause that long ended the
+                    //   session (2026-10-04, file 5208, retired two seconds
+                    //   after a 1x resume). The pause grace owns how long a
+                    //   paused viewer is kept;
+                    // - consuming at 1x or faster: the overshoot drains at least
+                    //   as fast as wall time, and is at most one segment after
+                    //   a pause (longer only after a seek back into the buffer);
+                    // - a slower viewer whose wait still fits the hard deadline.
+                    //
+                    // Only a slow viewer who would wait past the hard deadline
+                    // is retired, which is the case this guard exists for, and
+                    // every deferral episode is bounded by the pause grace.
+                    let overshoot_ms = first_new.end_ms.saturating_sub(
+                        budget
+                            .consumed_end_ms
+                            .saturating_add(ROLLING_RESERVE_MAX_MS),
+                    );
+                    let consuming = demand.is_some_and(|demand| {
+                        demand.demand == crate::playback_control::PlaybackDemand::Active
+                            && demand.render_state
+                                == crate::playback_control::RenderState::Rendering
+                    });
+                    let eligible_in_ms = if consuming {
+                        // `rolling_playback_rate` clamps to at least 0.25x.
+                        ((overshoot_ms as f64) / playback_rate.max(0.25)).ceil() as i64
+                    } else {
+                        i64::MAX
+                    };
+                    // A slower viewer must see the next segment before the hard
+                    // deadline measured from the *last* publication, not from
+                    // this cycle, which already runs a full cycle after it.
+                    let slow_wait_fits = previous_served.as_ref().is_some_and(|served| {
+                        let window_left = served
+                            .available_at
+                            .checked_add(ROLLING_PUBLICATION_HARD)
+                            .map_or(Duration::ZERO, |deadline| {
+                                deadline.saturating_duration_since(now)
+                            });
+                        u128::try_from(eligible_in_ms.max(0)).unwrap_or(u128::MAX)
+                            <= window_left.as_millis()
+                    });
+                    // Every deferral episode is bounded whatever its reason: a
+                    // wedged client that keeps reporting Waiting, or a
+                    // Rendering client whose position never advances, must not
+                    // hold a producer forever.
+                    let (deferred_for, first_deferral) = {
+                        let mut clock = self.publication.lock().await;
+                        let first = clock.deferred_since.is_none();
+                        let since = *clock.deferred_since.get_or_insert(now);
+                        (now.saturating_duration_since(since), first)
+                    };
+                    if previous_served.is_some()
+                        && deferred_for <= crate::playback_control::ROLLING_PAUSE_GRACE
+                        && (!consuming || playback_rate >= 1.0 || slow_wait_fits)
+                    {
+                        if first_deferral {
+                            tracing::info!(
+                                target: "plurxd::transcode",
+                                session = %crate::transcode::session_log_id(session_id),
+                                consumed_end_ms = budget.consumed_end_ms,
+                                first_new_end_ms = first_new.end_ms,
+                                served_end_ms = previous_served
+                                    .as_ref()
+                                    .map_or(-1, |served| served.end_ms),
+                                consuming,
+                                playback_rate,
+                                "rolling publication waiting for the viewer: the next segment is past the reserve ceiling"
+                            );
+                        }
+                        return Ok(());
+                    }
+                    // The verdict ends the viewer's session, so it carries the
+                    // numbers that produced it.
+                    return Err(format!(
+                        "rolling_window_budget_exhausted: next completed segment exceeds the active publication safety floor \
+                         (consumed_end_ms={} desired_end_ms={} allowed_end_ms={} reserve_max_ms={} \
+                         first_new_segment={} first_new_end_ms={} served_end_ms={} demand_sequence={} observation_age_ms={} \
+                         consuming={consuming} playback_rate={playback_rate:.2} eligible_in_ms={eligible_in_ms} \
+                         deferred_for_ms={})",
+                        budget.consumed_end_ms,
+                        budget.desired_end_ms,
+                        budget.allowed_end_ms,
+                        ROLLING_RESERVE_MAX_MS,
+                        first_new.index,
+                        first_new.end_ms,
+                        previous_served.as_ref().map_or(-1, |served| served.end_ms),
+                        budget.demand_sequence.unwrap_or_default(),
+                        budget.observation_age_ms.unwrap_or(-1),
+                        deferred_for.as_millis(),
+                    ));
                 }
                 return Ok(());
             };
@@ -1273,6 +1379,7 @@ impl Session {
             }
             segments.revision = segments.revision.wrapping_add(1);
         }
+        clock.deferred_since = None;
         clock.served = Some(ServedPlaylistSnapshot {
             raw: Arc::from(served_raw),
             producer_attempt,

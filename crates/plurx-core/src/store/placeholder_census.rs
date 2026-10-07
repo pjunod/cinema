@@ -36,6 +36,10 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
         "hiqlite_background_jobs.rs",
         include_str!("hiqlite_background_jobs.rs"),
     ),
+    (
+        "hiqlite_jellyfin_catalog.rs",
+        include_str!("hiqlite_jellyfin_catalog.rs"),
+    ),
     ("hiqlite_catalog.rs", include_str!("hiqlite_catalog.rs")),
     (
         "hiqlite_classification.rs",
@@ -56,6 +60,18 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
         include_str!("hiqlite_fragment_index_cluster.rs"),
     ),
     ("hiqlite_import.rs", include_str!("hiqlite_import.rs")),
+    (
+        "hiqlite_jellyfin_play.rs",
+        include_str!("hiqlite_jellyfin_play.rs"),
+    ),
+    (
+        "hiqlite_jellyfin_login.rs",
+        include_str!("hiqlite_jellyfin_login.rs"),
+    ),
+    (
+        "hiqlite_jellyfin_identity.rs",
+        include_str!("hiqlite_jellyfin_identity.rs"),
+    ),
     (
         "hiqlite_library_channels.rs",
         include_str!("hiqlite_library_channels.rs"),
@@ -112,6 +128,19 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
         include_str!("sqlite/fragment_index_cluster.rs"),
     ),
     ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
+    (
+        "jellyfin_identity.rs",
+        include_str!("sqlite/jellyfin_identity.rs"),
+    ),
+    (
+        "jellyfin_catalog.rs",
+        include_str!("sqlite/jellyfin_catalog.rs"),
+    ),
+    ("jellyfin_play.rs", include_str!("sqlite/jellyfin_play.rs")),
+    (
+        "jellyfin_login.rs",
+        include_str!("sqlite/jellyfin_login.rs"),
+    ),
     ("library.rs", include_str!("sqlite/library.rs")),
     (
         "library_channels.rs",
@@ -148,6 +177,10 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
 /// these, such a statement resolves to a neutral token, stops looking like a
 /// statement, and is never judged.
 const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
+    ("jellyfin_login.rs", include_str!("jellyfin_login.rs")),
+    ("jellyfin_catalog.rs", include_str!("jellyfin_catalog.rs")),
+    ("jellyfin_play.rs", include_str!("jellyfin_play.rs")),
+    ("jellyfin_watch.rs", include_str!("jellyfin_watch.rs")),
     (
         "../live_tv_resource.rs",
         include_str!("../live_tv_resource.rs"),
@@ -156,6 +189,12 @@ const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
         "downloaded_subtitles.rs",
         include_str!("downloaded_subtitles.rs"),
     ),
+    ("continuous_family.rs", include_str!("continuous_family.rs")),
+    (
+        "quality_cancellation.rs",
+        include_str!("quality_cancellation.rs"),
+    ),
+    ("quality_ledger.rs", include_str!("quality_ledger.rs")),
     ("dv_conversion.rs", include_str!("dv_conversion.rs")),
     ("fragindex.rs", include_str!("fragindex.rs")),
     (
@@ -907,7 +946,20 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // analysis_reconciliation_preserves_work_and_fences_changed_requests executes
 // the paginated query; the separate preparation keeps its arity out of this
 // same-statement scanner's reach.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
+// J3 removes three separately prepared watch-tree loop statements; the shared
+// atomic manual SQL is exercised by both-backend revision contracts.
+// 89 -> 92: three continuous-quality SQLite statements bind their values
+// away from the literal's own statement, where this scanner cannot count them.
+// They are the continuous-quality ledger, reservation and cancellation-receipt
+// paths; the continuous_quality_ledger_* and quality_cancellation_* store
+// contracts execute every one of them on both backends.
+// 92 -> 93: K-05's plan pin moves `watch_rollup`'s statement into
+// `watch_rollup_sql()` so `watch_rollup_plans_do_not_depend_on_statistics` can
+// plan the exact text; `query_row` binds `?1`/`?2` beside the call, out of
+// this scanner's reach. `marking_a_show_reaches_every_episode_under_it` and
+// `a_page_of_containers_rolls_up_in_one_pass_and_agrees_with_the_single_walk`
+// execute it.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
@@ -1014,11 +1066,18 @@ fn every_replicated_placeholder_is_introduced_in_order() {
     let mut offenders = Vec::new();
     let mut fragments = Vec::new();
     let mut scanned = 0_usize;
-    for (name, source) in STORE_SOURCES.iter().chain(
-        SHARED_CONSTANT_SOURCES
-            .iter()
-            .filter(|(name, _)| *name == "../live_tv_resource.rs"),
-    ) {
+    for (name, source) in STORE_SOURCES
+        .iter()
+        .chain(SHARED_CONSTANT_SOURCES.iter().filter(|(name, _)| {
+            matches!(
+                *name,
+                "../live_tv_resource.rs"
+                    | "continuous_family.rs"
+                    | "quality_cancellation.rs"
+                    | "quality_ledger.rs"
+            )
+        }))
+    {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         let constants = constants_for(name, source, &literals);

@@ -38,7 +38,7 @@ struct PlaybackControlTransport {
         return URLSession(configuration: configuration)
     }()
 
-    func send(_ path: String, _ request: ControlRequest) async throws -> ControlResponse {
+    func send(_ path: String, _ request: ControlRequest, linkReceipt: String? = nil) async throws -> ControlResponse {
         guard ControlBootstrap.isSessionControlPath(path),
               let url = URL(string: origin.hasSuffix("/")
                   ? String(origin.dropLast()) + path
@@ -53,6 +53,9 @@ struct PlaybackControlTransport {
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.httpBody = try PlaybackControl.encoder.encode(request)
         authorize(&urlRequest)
+        if let linkReceipt, UUID(uuidString: linkReceipt)?.uuidString.lowercased() == linkReceipt {
+            urlRequest.setValue(linkReceipt, forHTTPHeaderField: "X-Plurx-Link-Receipt")
+        }
 
         let data: Data
         let response: URLResponse
@@ -212,6 +215,7 @@ final class PlaybackControlSession {
         bootstrap: ControlBootstrap,
         transport: PlaybackControlTransport,
         observe: @escaping () -> PlayerControlObservation?,
+        linkReceipt: @escaping @MainActor @Sendable () -> String? = { nil },
         onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {},
         // The prepared-handoff return path. A `prepare` reaches the player
         // already proven whole — the reporter refuses a malformed one as a
@@ -256,7 +260,10 @@ final class PlaybackControlSession {
                 guard let value = latest.load(), value.owner == owner else { return nil }
                 return value
             },
-            send: { path, request in try await transport.send(path, request) },
+            send: { path, request in
+                let receipt = await linkReceipt()
+                return try await transport.send(path, request, linkReceipt: receipt)
+            },
             sleep: { milliseconds, _ in
                 try await Task.sleep(nanoseconds: UInt64(max(0, milliseconds)) * 1_000_000)
             },

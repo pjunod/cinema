@@ -34,7 +34,10 @@ function test(name, run) {
 }
 
 async function runAll() {
+  let executed = 0;
   for (const [name, run] of pending) {
+    if (process.env.PLAYBACK_LAB_TEST_FILTER && !new RegExp(process.env.PLAYBACK_LAB_TEST_FILTER).test(name)) continue;
+    executed++;
     try {
       await run();
       process.stdout.write(`PASS ${name}\n`);
@@ -43,11 +46,300 @@ async function runAll() {
       process.stdout.write(`FAIL ${name}: ${error.message}\n`);
     }
   }
+  if (!executed) failures.push("test filter matched no contracts");
+  return executed;
 }
+
+test("D3 intent samples are independent of transport pause and retain lifecycle, replacement and stop", () => {
+  const vm = require("node:vm");
+  let now = 0, tick;
+  const listeners = new Map();
+  let element = { currentTime: 1, paused: true, seeking: false, ended: false, videoHeight: 720 };
+  const context = { performance: { now: () => now }, WeakMap, AUTO_SWITCH_SEQ: 0,
+    PLAYER: { wantsPlayback: true, sessionId: "a", attemptId: "one", offset: 0 },
+    document: { visibilityState: "visible", getElementById: () => element,
+      addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
+    setInterval: fn => { tick = fn; return 1; }, clearInterval: () => { tick = null; } };
+  vm.createContext(context);
+  vm.runInContext(`(${lab.installD3Acquisition.toString()})(32,100)`, context);
+  now = 100; tick();
+  context.AUTO_SWITCH_SEQ = 1;
+  context.PLAYER.abr = { switches: [{ seq: 1, at_ms: 101, from_height: 720,
+    to_height: 360, target_session_id: "b", target_attempt_id: "two" }] };
+  context.document.visibilityState = "hidden"; now = 120; listeners.get("visibilitychange")();
+  element = { ...element, currentTime: 0 }; context.PLAYER.sessionId = "b";
+  now = 200; tick();
+  now = 300; context.__plurxLabD3.stop("terminal-unrecovered");
+  const capture = JSON.parse(JSON.stringify(context.__plurxLabD3));
+  assert.equal(capture.records.find(r => r.kind === "start").wants_playback, true,
+    "paused transport must not erase independent viewer intent");
+  assert.ok(capture.records.some(r => r.kind === "lifecycle" && r.visible === false));
+  assert.equal(capture.records.filter(r => r.kind === "attachment").length, 2);
+  assert.equal(capture.records.at(-1).reason, "terminal-unrecovered");
+  assert.equal(capture.auto_switch_end - capture.auto_switch_baseline, 1);
+  assert.equal(capture.records.find(r => r.kind === "automatic_switch").target_session_id, "b");
+  assert.equal(tick, null);
+  assert.equal(listeners.size, 0);
+  assert.equal(lab.d3PresentationEvidence(capture).stalled_seconds, null);
+});
+
+test("D3 overflow preserves the head and makes loss and censored absence explicit", () => {
+  const vm = require("node:vm");
+  let now = 0;
+  const context = { performance: { now: () => ++now }, WeakMap,
+    document: { visibilityState: "visible", getElementById: () => null,
+      addEventListener() {}, removeEventListener() {} }, setInterval: () => 1, clearInterval() {} };
+  vm.createContext(context);
+  vm.runInContext(`(${lab.installD3Acquisition.toString()})(1,100)`, context);
+  context.__plurxLabD3.stop("observation-end");
+  const capture = JSON.parse(JSON.stringify(context.__plurxLabD3));
+  assert.equal(capture.records.length, 1);
+  assert.ok(capture.dropped > 0);
+  const evidence = lab.d3PresentationEvidence(capture);
+  assert.equal(evidence.status, "incomplete");
+  assert.equal(evidence.stationary_integral_bounds_seconds, null);
+  assert.equal(evidence.automatic_switches, null);
+  assert.ok(evidence.missing.includes("record limit exceeded"));
+});
+
+test("D3 skipped and backward composition frames never become an exact zero stall", () => {
+  const capture = { stopped: true, records: [
+    { kind: "start", at_ms: 0, wants_playback: true, visible: true, seeking: false, ended: false, element_id: 1, current_time: 1 },
+    { kind: "composition_submission", at_ms: 10, visible: true, element_id: 1, media_time: 1, presented_frames: 1 },
+    { kind: "composition_submission", at_ms: 50, visible: true, element_id: 1, media_time: .9, presented_frames: 4 },
+    { kind: "stop", at_ms: 100, wants_playback: true, visible: true, seeking: false, ended: false, element_id: 1, current_time: 1 },
+    { kind: "censor", at_ms: 100, reason: "terminal" },
+  ] };
+  const result = lab.d3PresentationEvidence(capture);
+  assert.equal(result.skipped_submissions, 2);
+  assert.equal(result.backward_frames, 1);
+  assert.equal(result.sampled_equal_clock_seconds, .1);
+  assert.equal(result.stalled_seconds, null);
+  assert.equal(result.stationary_integral_bounds_seconds, null);
+  assert.equal(result.terminal_censor[0].reason, "terminal");
+});
+
+test("D3 clock brackets bound drift and frame times without interpolating an offset", () => {
+  const anchors = [{ sent_ms: 100, received_ms: 110, browser_ms: 20 },
+    { sent_ms: 200, received_ms: 230, browser_ms: 110 }];
+  const alignment = lab.d3ClockAlignment(anchors);
+  assert.equal(alignment.status, "bracketed");
+  assert.equal(alignment.drift_lower_ms, 0);
+  assert.equal(alignment.drift_upper_ms, 40);
+  assert.deepEqual(lab.d3ControllerTimeBounds(50, anchors), [100, 230]);
+  assert.equal(lab.d3ControllerTimeBounds(5, anchors), null);
+  assert.equal(lab.d3ClockAlignment(anchors.slice(0, 1)).status, "missing");
+  assert.equal(lab.d3ClockAlignment([anchors[0], { ...anchors[1], browser_ms: 10 }]).status, "missing");
+});
+
+test("D3 two cliffs use exact final sixty-second completion boundaries and keep advertisements separate", () => {
+  const stage = { index: 1, entered_at_ms: 12_000, left_at_ms: 87_000 };
+  const samples = [{ at_ms: 26_999, bytes: 900, media: true, session_id: "a" },
+    { at_ms: 27_000, bytes: 500, media: true, session_id: "a" },
+    { at_ms: 27_001, bytes: 60_000, media: true, session_id: "a" },
+    { at_ms: 87_000, bytes: 60_000, media: true, session_id: "a" },
+    { at_ms: 87_001, bytes: 999, media: true, session_id: "a" },
+    { at_ms: 50_000, bytes: 999, media: false, session_id: "a" }];
+  const capture = { stopped: true, records: [
+    { kind: "composition_submission", visible: true, session_id: "a", height: 240 },
+    { session_id: "a", ladder: [{ height: 240, total_kbps: 900 }] },
+  ] };
+  const first = lab.d3FinalDeliveryWindow(stage, samples, 0, capture);
+  assert.equal(first.media_bytes, 120_000);
+  assert.equal(first.delivered_kbps, 16);
+  assert.equal(first.advertised_total_kbps, 900);
+  assert.equal(first.samples.length, 2);
+  assert.match(first.interval, /socket-completion.*not client consumption/);
+  const second = lab.d3FinalDeliveryWindow({ index: 2, entered_at_ms: 87_000, left_at_ms: 162_000 },
+    [{ at_ms: 102_001, bytes: 30_000, media: true, session_id: "b" }]);
+  assert.equal(second.socket_completion_media_bytes, 30_000);
+  assert.equal(second.media_bytes, null);
+  assert.equal(second.delivered_kbps, null);
+  assert.equal(second.advertised_total_kbps, null);
+  assert.ok(second.missing.length);
+  assert.equal(lab.d3FinalDeliveryWindow(stage, samples, 1).media_bytes, null);
+  assert.equal(lab.d3FinalDeliveryWindow({ ...stage, left_at_ms: 50_000 }, samples).media_bytes, null);
+});
+
+test("D3 ambiguous or missing rung evidence stays missing instead of using the cap", () => {
+  const stage = { index: 1, kbps: 1500, entered_at_ms: 0, left_at_ms: 75_000 };
+  const result = lab.d3FinalDeliveryWindow(stage, [{ at_ms: 20_000, media: true, bytes: 123, session_id: null }]);
+  assert.equal(result.advertised_total_kbps, null);
+  assert.ok(result.missing.some(reason => reason.includes("cannot be attributed")));
+});
+
+test("D3 write acquisition timestamps callback completion without changing limiter settlement", async () => {
+  const { Writable } = require("node:stream");
+  const shaper = new lab.ShapingProxy(lab.parseNetworkProfile("8mbps-to-1.5mbps"), "http://127.0.0.1:1");
+  let now = 27_001, complete;
+  shaper.startedAt = 0;
+  shaper.now = () => now;
+  shaper.reserveSlice = async () => null;
+  const sink = new Writable({ highWaterMark: 64 * 1024,
+    write(_chunk, _encoding, callback) { complete = callback; } });
+  await shaper.writeShaped(Buffer.alloc(1024), sink, true, () => false, "session");
+  assert.equal(sink.writableLength, 1024);
+  assert.equal(shaper.deliverySamples[0][0].at_ms, 27_001, "legacy accepted-write accounting stays unchanged");
+  assert.equal(shaper.d3DeliverySamples[0].length, 0, "buffer admission is not completion");
+  assert.equal(shaper.d3WriteRecords[0].status, "pending");
+  const stage = { index: 0, entered_at_ms: 12_000, left_at_ms: 87_000 };
+  let evidence = { records: shaper.d3WriteRecords, dropped: 0 };
+  assert.equal(lab.d3FinalDeliveryWindow(stage, [], 0, null, evidence).socket_completion_media_bytes, null);
+  now = 87_001; shaper.stageIndex = 1; complete();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(shaper.d3WriteRecords[0].completed_at_ms, 87_001);
+  assert.equal(shaper.d3DeliverySamples[1][0].at_ms, 87_001);
+  assert.equal(lab.d3FinalDeliveryWindow(stage, shaper.d3DeliverySamples.flat(), 0, null, evidence)
+    .socket_completion_media_bytes, 0, "completion past the window is excluded");
+  await shaper.writeShaped(Buffer.alloc(100), { writable: true, destroyed: false,
+    write(_slice, callback) { callback(Object.assign(new Error("fixture failure"), { code: "EPIPE" })); return true; } },
+  true, () => false, "session");
+  assert.equal(shaper.d3WriteRecords.at(-1).status, "failed");
+  assert.equal(shaper.d3WriteRecords.at(-1).callback_at_ms, 87_001);
+  const later = { index: 1, entered_at_ms: 87_000, left_at_ms: 162_000 };
+  assert.equal(lab.d3FinalDeliveryWindow(later, shaper.d3DeliverySamples[1], 0, null, evidence)
+    .socket_completion_media_bytes, null, "failed completion cannot mean zero lost bytes");
+  assert.equal(lab.d3FinalDeliveryWindow(later, [], 0, null, { records: [], dropped: 1 })
+    .socket_completion_media_bytes, null);
+  sink.destroy(); shaper.agent.destroy();
+});
+
+test("D3 automatic event provenance separates method-only reopens from proven rung changes", () => {
+  const vm = require("node:vm");
+  let now = 0, tick;
+  const element = { currentTime: 1, seeking: false, ended: false, videoHeight: 720 };
+  const context = { performance: { now: () => now }, WeakMap, AUTO_SWITCH_SEQ: 0,
+    PLAYER: { wantsPlayback: true, sessionId: "session", attemptId: "attempt", abr: { switches: [] } },
+    document: { visibilityState: "visible", getElementById: () => element,
+      addEventListener() {}, removeEventListener() {} },
+    setInterval: fn => { tick = fn; return 1; }, clearInterval() {} };
+  vm.createContext(context);
+  vm.runInContext(`(${lab.installD3Acquisition.toString()})(32,100)`, context);
+  context.__plurxLabD3.appendFrame(element, 0, { mediaTime: 1, presentedFrames: 1, height: 720 }, context.PLAYER);
+  now = 100; context.AUTO_SWITCH_SEQ = 2;
+  context.PLAYER.abr.switches = [
+    { seq: 1, at_ms: 90, from: "copy_hls", to: "transcode", reason: "auto supply",
+      target_method: "transcode", position: 10, from_height: null, to_height: null },
+    { seq: 2, at_ms: 99, from: "720p", to: "360p", reason: "bandwidth cliff", from_height: 720, to_height: 360 },
+  ];
+  tick(); now = 200; context.__plurxLabD3.stop("observation-end");
+  const capture = JSON.parse(JSON.stringify(context.__plurxLabD3));
+  let measured = lab.d3PresentationEvidence(capture);
+  assert.equal(measured.automatic_event_sequence_complete, true);
+  assert.equal(measured.automatic_events, 2);
+  assert.equal(measured.proven_automatic_rung_changes, 1);
+  assert.equal(measured.automatic_switches, null, "unknown Auto heights must not be counted as rung changes");
+  const method = capture.records.find(r => r.kind === "automatic_switch");
+  assert.equal(method.from, "copy_hls"); assert.equal(method.to, "transcode");
+  assert.equal(method.reason, "auto supply"); assert.equal(method.position, 10);
+  assert.equal(method.target_method, "transcode");
+  const knownOnly = { ...capture, auto_switch_baseline: 1,
+    records: capture.records.filter(r => r.kind !== "automatic_switch" || r.switch_seq === 2) };
+  assert.equal(lab.d3PresentationEvidence(knownOnly).automatic_switches, 1);
+  assert.equal(lab.d3PresentationEvidence({ ...knownOnly, stopped: false }).automatic_switches, null,
+    "a last sample is not a completed observation boundary");
+  for (const record of capture.records) if (Object.hasOwn(record, "current_time")) record.current_time = null;
+  measured = lab.d3PresentationEvidence(capture);
+  assert.equal(measured.sampled_equal_clock_seconds, null, "missing sampled clocks are not zero stationary seconds");
+  assert.ok(measured.missing.includes("sampled media clock unavailable"));
+  capture.records.find(r => r.kind === "start").wants_playback = null;
+  assert.equal(lab.d3PresentationEvidence(capture).sampled_intent_eligible_seconds, null);
+});
+
+test("D3 normalization preserves failed raw acquisition, null metrics and provenance verbatim", () => {
+  const acquisition = { acceptance: "incomplete", clock_alignment: { anchors: [{ sent_ms: 12 }] },
+    presentation: { stalled_seconds: null, backward_frames: 1, raw: { records: [{ at_ms: 4 }] } },
+    missing: ["physical grade unavailable"] };
+  const provenance = { runtime_build: "unqualified", missing: ["binary digest unavailable"] };
+  const report = { schema_version: 1, summary: { failed: 1 }, d3_provenance: provenance,
+    results: [{ name: "failed", status: "failed", d3_acquisition: acquisition }] };
+  const normalized = lab.normalizeTrace(report);
+  assert.deepEqual(normalized.results[0].d3_acquisition, acquisition);
+  assert.deepEqual(normalized.d3_provenance, provenance);
+  assert.equal(normalized.results[0].status, "failed");
+  assert.equal(Object.hasOwn(lab.normalizeTrace({ results: [{}] }).results[0], "d3_acquisition"), false);
+});
 
 function cli(args) {
   return spawnSync(process.execPath, [LAB, ...args], { encoding: "utf8", cwd: ROOT });
 }
+
+test("quality baseline requires an advancing outgoing frame rather than preload", () => {
+  const snapshot = {frame_probe: {supported: true, sequence: 1,
+    last_frame_at_ms: 2400, last_frame: {media_time: 0}},
+    video: {paused: false, seeking: false}};
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 0), false);
+  snapshot.frame_probe.last_frame.media_time = 0.041667;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  snapshot.frame_probe.sequence = 2;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), true);
+  snapshot.video.paused = true;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  snapshot.video.paused = false;
+  snapshot.video.seeking = true;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  assert.ok(Math.abs(lab.frameGapSince(2900, 3416.6) - 516.6) < 1e-6,
+    "a real outgoing-frame blackout is still measured in full");
+});
+
+test("presentation gaps retain late callback diagnostics and refuse invalid display evidence", () => {
+  // Exact Firefox receipt: the first callback precedes display by one refresh;
+  // the next arrives at display. Dispatch spacing is not presentation spacing.
+  const before={at_ms:71831.76,expected_display_time_ms:71848.72,
+    media_time:69.5,presented_frames:1669,element_id:1};
+  const after={at_ms:71933.34,expected_display_time_ms:71933.34,
+    media_time:69.583333,presented_frames:1671,element_id:1};
+  const gap=lab.framePresentationGap(before,after);
+  assert.equal(gap.clock,"expected_display");
+  assert.ok(Math.abs(gap.gap_ms-84.62)<1e-6);
+  assert.ok(Math.abs(gap.callback_gap_ms-101.58)<1e-6);
+  const stalled={...after,at_ms:72000,expected_display_time_ms:72000};
+  assert.ok(lab.framePresentationGap(before,stalled).gap_ms>100,
+    "a real compositor gap still exceeds the unchanged presentation bound");
+  for(const invalid of [
+    {...after,expected_display_time_ms:null},
+    {...after,expected_display_time_ms:71840},
+    {...after,expected_display_time_ms:71933.34+10000},
+    {...after,presented_frames:1669},
+    {...after,media_time:69.4},
+  ]){
+    const refused=lab.framePresentationGap(before,invalid);
+    assert.equal(refused.clock,"callback");
+    assert.ok(refused.gap_ms>100,"unknown evidence cannot erase the raw failure");
+  }
+  const scored=lab.transitionMetrics({media_event_seq:0},{
+    media_event_seq:0,media_events:[],sampled_at_ms:71940,
+    frame_probe:{supported:true,last_frame_at_ms:after.at_ms,last_frame:after,
+      maximum_gap_ms:gap.gap_ms,maximum_callback_gap_ms:gap.callback_gap_ms},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(Math.abs(scored.maximum_video_gap_ms-84.62)<1e-6);
+  assert.ok(Math.abs(scored.maximum_callback_gap_ms-101.58)<1e-6);
+  const silent=lab.transitionMetrics({media_event_seq:0},{
+    media_event_seq:0,media_events:[],sampled_at_ms:72100,
+    frame_probe:{supported:true,last_frame_at_ms:after.at_ms,last_frame:after,maximum_gap_ms:0},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(silent.maximum_video_gap_ms>100,"an open presentation gap must still fail");
+});
+
+test("steady frame window excludes preload time but preserves later and switch gaps", () => {
+  assert.ok(Math.abs(lab.frameGapSince(4921.2, 5421.2, 5300) - 121.2) < 1e-6);
+  assert.equal(lab.frameGapSince(5421.2, 5921.2, 5300), 500,
+    "a blackout wholly inside the observed window still fails the 250 ms bound");
+  assert.equal(lab.frameGapSince(4921.2, 5421.2), 500,
+    "a quality switch retains the complete outgoing-to-target frame gap");
+  assert.equal(lab.frameGapSince(null, 5421.2, 5300), 0,
+    "missing first-frame evidence is not invented by a window origin");
+  const measured = lab.transitionMetrics({media_event_seq:0}, {
+    media_event_seq:0,media_events:[],sampled_at_ms:5921.2,
+    frame_probe:{supported:true,last_frame_at_ms:4921.2,
+      maximum_gap_ms:0,measurement_start_at_ms:5300},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(Math.abs(measured.maximum_video_gap_ms - 621.2) < 1e-6,
+    "no new callback after the origin remains an open blackout");
+});
 
 test("VOD readiness requires a pass that stored an index", () => {
   const empty = { message: "fragment indexing pass finished attempted=1 built=0" };
@@ -2158,6 +2450,41 @@ test("VOD readiness waits for the exact file built by an indexing pass", () => {
   }, 42), false);
 });
 
+test("actual Auto pressure uses measured peaks and refuses an unsafe two-rung interval", () => {
+  const qualification = require("../../scripts/continuous-quality-qualification");
+  const catalog = [{route: "encode", height: 720, peak_bps: 6160000},
+    {route: "encode", height: 1080, peak_bps: 12160000},
+    {route: "copy", height: 1080, peak_bps: 999999999}];
+  const profile = qualification.autoLinkProfile(catalog);
+  assert.equal(profile.stages.length, 5);
+  assert.equal(profile.stages[0], profile.stages[2]);
+  assert.equal(profile.stages[2], profile.stages[4]);
+  assert.equal(profile.stages[1], profile.stages[3]);
+  assert.ok(profile.stages[1] * 1000 >= profile.low_floor_bps);
+  assert.ok(profile.stages[1] * 1000 < profile.low_ceiling_bps);
+  assert.throws(() => qualification.autoLinkProfile([]), /safe pressure interval/);
+  assert.throws(() => qualification.autoLinkProfile([
+    {route: "encode", height: 720, peak_bps: 1000000},
+    {route: "encode", height: 1080, peak_bps: 1548000}]), /shaper rate resolution/);
+  assert.throws(() => qualification.autoLinkProfile([
+    {route: "encode", height: 720, peak_bps: 9000000},
+    {route: "encode", height: 1080, peak_bps: 10000000}]), /safe pressure interval/);
+});
+
+test("encoded-only qualification does not wait for an impossible copy fragment index", () => {
+  const files = new Map([
+    ["encoded.mp4", {id: 1, video_codec: "mpeg4"}],
+    ["avc.mp4", {id: 2, video_codec: "h264"}],
+    ["hevc.mp4", {id: 3, video_codec: "hevc"}],
+    ["unknown.mp4", {id: 4}],
+  ]);
+  assert.deepEqual(lab.fragmentIndexTargets(files, ["encoded.mp4"]), []);
+  assert.deepEqual(lab.fragmentIndexTargets(files, ["encoded.mp4", "avc.mp4", "hevc.mp4"])
+    .map(file => file.id), [2, 3]);
+  assert.throws(() => lab.fragmentIndexTargets(files, ["unknown.mp4"]), /video codec/);
+  assert.throws(() => lab.fragmentIndexTargets(files, ["missing.mp4"]), /scan missed/);
+});
+
 test("VOD acceptance pauses startup indexing until its fixture scan is complete", () => {
   const source = fs.readFileSync(LAB, "utf8");
   const start = source.indexOf("async function startServer");
@@ -2417,6 +2744,7 @@ test("quality cycles wait for the requested rendition and a presented frame", as
   let lastFrame = null;
   let maximumGapMs = 0;
   let switchPolls = null;
+  const targetFrames = [];
   const presentFrame = () => {
     frames += 1;
     frameSequence += 1;
@@ -2436,14 +2764,22 @@ test("quality cycles wait for the requested rendition and a presented frame", as
   const state = () => {
     sampledAt += 50;
     position += 0.05;
-    if (switchPolls === null && frames === 0) presentFrame();
+    // Playback advances before each request: the lab waits for a fresh
+    // outgoing frame before it issues one.
+    if (switchPolls === null) presentFrame();
     if (switchPolls !== null) {
       switchPolls += 1;
       renditionPolls = switchPolls;
       if (switchPolls === 1) presentFrame(); // one late frame from the outgoing rendition
       if (switchPolls === 2) committed = selected;
-      if (switchPolls === 4) presentFrame(); // first frame after target state was observed
-      if (switchPolls >= 5) maximumGapMs = Math.max(maximumGapMs, 150);
+      if (switchPolls === 4) { // first frame after target state was observed
+        presentFrame();
+        targetFrames.push(frameSequence);
+      }
+      if (switchPolls >= 5) {
+        maximumGapMs = Math.max(maximumGapMs, 150);
+        presentFrame(); // the target rendition keeps playing
+      }
     }
     const down = committed === "720";
     return {
@@ -2507,7 +2843,10 @@ test("quality cycles wait for the requested rendition and a presented frame", as
   assert.equal(operation.changes.length, 2);
   assert.deepEqual(operation.changes.map((change) => change.actual_method), ["transcode", "remux"]);
   assert.deepEqual(operation.changes.map((change) => change.decoded_height), [720, 1080]);
-  assert.deepEqual(operation.changes.map((change) => change.committed_frame_sequence), [4, 7]);
+  // Frames keep arriving before and after each switch, so the committed
+  // frame is named by the poll that produced it, not by a count.
+  assert.equal(targetFrames.length, 2);
+  assert.deepEqual(operation.changes.map((change) => change.committed_frame_sequence), targetFrames);
   assert.ok(renditionPolls >= 4,
     "the old frame and the target-state poll were not accepted without a later target frame");
   assert.ok(
@@ -2594,6 +2933,61 @@ test("quality-cycle scoring rejects missing runway and a single excessive gap", 
   assert.match(score.errors.join("; "), /no measured runway/);
   assert.match(score.errors.join("; "), /video-gap p95 150 ms/);
   assert.match(score.errors.join("; "), /video-gap max 300 ms/);
+});
+
+test("continuous switch evidence refuses replacement, future removal and stale presentation", () => {
+  const before = { family_id: "family", closed: false, element: 1, hls: 2, media_source: 3,
+    buffers: ["video", "audio"].map((type, index) => ({ type, identity: index + 4, removal_sequence: 0, completed_removals: [] })) };
+  const after = { ...before, wanted_candidate: "target", presented: { candidate_id: "target", height: 720 },
+    transaction: { first_presented_tick: 50, first_presented_at_ms: 1100,
+      appended: [{ from_tick: 40, through_tick: 60, timescale: 24 }] } };
+  assert.deepEqual(lab.continuousSwitchErrors(before, after, 1000, 720), []);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, hls: 99 }, 1000, 720).join(";"), /hls.*replaced/);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, transaction: { ...after.transaction,
+    first_presented_at_ms: 900 } }, 1000, 720).join(";"), /fresh presented receipt/);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, transaction: { ...after.transaction,
+    first_presented_tick: 60 } }, 1000, 720).join(";"), /actual appended interval/);
+  const removed = { ...after, buffers: after.buffers.map((row) => row.type === "audio" ? { ...row,
+    removal_sequence: 1, completed_removals: [{ sequence: 1, from: 20, through: 22, playhead: 10 }] } : row) };
+  assert.match(lab.continuousSwitchErrors(before, removed, 1000, 720).join(";"), /audio removed media ahead/);
+  removed.buffers[1].completed_removals[0].through = 9;
+  assert.deepEqual(lab.continuousSwitchErrors(before, removed, 1000, 720), [], "ordinary back-buffer eviction is allowed");
+  removed.buffers[1].completed_removals = [];
+  assert.match(lab.continuousSwitchErrors(before, removed, 1000, 720).join(";"), /evidence was truncated/);
+  assert.match(lab.continuousSwitchErrors(before, after, undefined, 720).join(";"), /fresh presented receipt/);
+});
+
+test("continuous snapshots count only completed removals and keep weak transport identities", () => {
+  const listeners = {};
+  const buffer = { updating: false, remove() {}, addEventListener(name, fn) { listeners[name] = fn; } };
+  const video = { currentTime: 20 };
+  const player = { hls: { bufferController: { mediaSource: {}, tracks: { audio: { buffer } } } } };
+  const objects = { next: 0, ids: new WeakMap() };
+  const before = lab.continuousTransportSnapshot(player, video, objects);
+  buffer.remove(0, 10);
+  assert.equal(lab.continuousTransportSnapshot(player, video, objects).buffers[0].removal_sequence, 0);
+  listeners.updateend();
+  const completed = lab.continuousTransportSnapshot(player, video, objects);
+  assert.equal(completed.element, before.element);
+  assert.equal(completed.hls, before.hls);
+  assert.equal(completed.media_source, before.media_source);
+  assert.equal(completed.buffers[0].removal_sequence, 1);
+  buffer.remove(10, 12); listeners.error(); listeners.updateend();
+  assert.equal(lab.continuousTransportSnapshot(player, video, objects).buffers[0].removal_sequence, 1);
+  player.hls.bufferController.tracks.audio.buffer = { ...buffer, addEventListener() {} };
+  assert.notEqual(lab.continuousTransportSnapshot(player, video, objects).buffers[0].identity, before.buffers[0].identity);
+});
+
+test("the continuous suite requires actual production proof for twenty future-load switches", () => {
+  const manifest = lab.loadManifest();
+  const [testCase] = lab.expandCases(manifest, "continuous");
+  assert.equal(testCase.require_continuous, true);
+  assert.equal(testCase.require_vod, true);
+  assert.equal(testCase.repetitions * testCase.switches.length, 20);
+  assert.equal(manifest.suites.continuous.requires_vod, true);
+  const fixture = manifest.fixtures.find((row) => row.id === testCase.fixture);
+  assert.equal(fixture.opt_in, true);
+  assert.ok(fixture.duration_seconds > 20 * 60, "the normal sixty-second frontier must fit without shortening playback buffers");
 });
 
 test("the VOD suite makes native seeking and resume invariants executable", () => {
@@ -2908,11 +3302,59 @@ test("the isolated playback server reserves distinct HTTP, Raft, and API ports",
   assert.doesNotMatch(config, /3240[12]/);
 });
 
-runAll().then(() => {
+runAll().then(executed => {
   if (failures.length) {
     process.stderr.write(`\n${failures.length} shaping contract failure(s)\n`);
     process.exitCode = 1;
     return;
   }
-  process.stdout.write(`\n${pending.length} shaping contracts hold\n`);
+  process.stdout.write(`\n${executed} shaping contracts hold\n`);
+});
+
+
+test("VOD attachment census survives console eviction and counts same-session replacement",()=>{
+ const event={event:"session_start",encoder:"vod",file_id:"9007199254740999",
+  at_unix_ms:2000,session_id:"redacted",extra:'{"presentation":"vod"}'};
+ assert.equal(lab.vodAttachmentCensus([event],event.file_id,1000),1);
+ assert.equal(lab.vodAttachmentCensus([event,{...event,at_unix_ms:3000}],event.file_id,1000),2);
+ assert.equal(lab.vodAttachmentCensus([event,{...event,file_id:"9007199254740998"},
+  {...event,at_unix_ms:999},{...event,encoder:"legacy"}],event.file_id,1000),1);
+ assert.throws(()=>lab.vodAttachmentCensus(Array(2000).fill(event),event.file_id,1000),/truncated/);
+ assert.throws(()=>lab.vodAttachmentCensus(null,event.file_id,1000),/unavailable/);
+});
+
+
+test("sampled removal evidence survives a long Auto window and refuses observation gaps", () => {
+  const listeners = new Map();
+  const makeBuffer = () => {
+    const handlers = {};
+    const buffer = { updating: false, remove() {}, addEventListener(name, fn) { handlers[name] = fn; } };
+    listeners.set(buffer, handlers); return buffer;
+  };
+  const video = { currentTime: 1000 };
+  const tracks = { video: { buffer: makeBuffer() }, audio: { buffer: makeBuffer() } };
+  const player = { hls: { bufferController: { mediaSource: {}, tracks } } };
+  const objects = { next: 0, ids: new WeakMap() };
+  const snapshot = () => ({ ...lab.continuousTransportSnapshot(player, video, objects),
+    family_id: "family", closed: false, wanted_candidate: "target", presented: { candidate_id: "target", height: 720 },
+    transaction: { first_presented_tick: 50, first_presented_at_ms: 1100,
+      appended: [{ from_tick: 40, through_tick: 60, timescale: 24 }] } });
+  const before = snapshot(), evidence = lab.continuousRemovalEvidence(before);
+  for (let index = 0; index < 300; index++) {
+    for (const { buffer } of Object.values(tracks)) { buffer.remove(index, index + 1); listeners.get(buffer).updateend(); }
+    if (index % 16 === 15) lab.observeContinuousRemovals(evidence, snapshot());
+  }
+  const after = snapshot();lab.observeContinuousRemovals(evidence, after);
+  assert.equal(after.buffers[0].completed_removals.length, 64, "the browser journal stays bounded");
+  assert.match(lab.continuousSwitchErrors(before, after, 1000, 720).join(";"), /truncated/);
+  assert.deepEqual(lab.continuousSwitchErrors(before, after, 1000, 720, evidence), []);
+  assert.equal(evidence.buffers[0].completed_count, 300);
+  const missed = lab.continuousRemovalEvidence(before);lab.observeContinuousRemovals(missed, after);
+  assert.match(lab.continuousSwitchErrors(before, after, 1000, 720, missed).join(";"), /truncated/);
+  const next = lab.continuousRemovalEvidence(after);
+  tracks.audio.buffer.remove(1001, 1002);listeners.get(tracks.audio.buffer).updateend();
+  const futureRemoval = snapshot();lab.observeContinuousRemovals(next, futureRemoval);
+  assert.match(lab.continuousSwitchErrors(after, futureRemoval, 1000, 720, next).join(";"), /audio removed media ahead/);
+  tracks.video.buffer = makeBuffer();const replaced = snapshot();lab.observeContinuousRemovals(next, replaced);
+  assert.match(lab.continuousSwitchErrors(after, replaced, 1000, 720, next).join(";"), /buffer.*replaced/);
 });

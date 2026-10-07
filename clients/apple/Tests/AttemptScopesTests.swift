@@ -89,6 +89,14 @@ final class AttemptScopesTests: XCTestCase {
         .stallRecovery: [.open, .viewerAction],
         // `openGeneration == generation`, `viewerActionEpoch == actionEpoch`
         .itemFailureLadder: [.open, .viewerAction],
+        // The exact pre/post-acknowledgement continuations each keep the
+        // conjunction of the handler they continue; none is widened.
+        .blackFrameDecoderAcknowledgement: [.lifecycle, .viewerAction],
+        .itemDecoderAcknowledgement: [.open, .viewerAction],
+        .stallCandidateAcknowledgement: [.open, .viewerAction],
+        .stallCandidateReturn: [.open, .viewerAction],
+        .preparedPressureEntry: [.lifecycle, .viewerAction],
+        .preparedPressureAcknowledgement: [.lifecycle, .viewerAction],
         // `generation == seekState.generation`, `actionEpoch == viewerActionEpoch`
         .seekIntent: [.viewerAction, .seek],
         // The same captured intent is checked again after the control await.
@@ -97,12 +105,24 @@ final class AttemptScopesTests: XCTestCase {
         .nativeSeekCompletion: [.open, .viewerAction, .seek],
         // The same native attempt is checked after subtitle reconciliation.
         .nativeSeekAfterSelection: [.open, .viewerAction, .seek],
+        // A boundary's optional original preparation belongs to the title,
+        // attachment and viewer action that started it.
+        .autoBoundaryOwnerCurrent: [.lifecycle, .open, .viewerAction],
+        // The armed re-plan is owed while its viewer action is the latest; a
+        // reopen for the same seek does not supersede it.
+        .autoBoundaryReplanCurrent: [.lifecycle, .viewerAction],
         // Status sampling follows an attachment through Pause but not reopen.
         .recoveryEvidencePoll: [.open],
         .autoInitialLayout: [.initialDecision],
         .autoCatalogRefresh: [.lifecycle, .viewerAction],
         .autoQualityOffer: [.lifecycle, .viewerAction],
-        .autoQualityRollback: [.lifecycle, .open, .viewerAction],
+        // Rollback keeps the viewer's newer transport intent, so it answers
+        // to the title, the attachment and a seek, never to a Pause.
+        .preparedPipelineRollback: [.lifecycle, .open, .seek],
+        // `viewerActionEpoch == commitViewerEpoch`, at every commit suspension.
+        .preparedCommit: [.viewerAction],
+        // `self.viewerActionEpoch == actionEpoch` after the intent report.
+        .retainedQualityRestart: [.viewerAction],
     ]
 
     func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid() {
@@ -124,7 +144,8 @@ final class AttemptScopesTests: XCTestCase {
 
     /// A viewer Pause moves only `viewerActionEpoch`. Action continuations
     /// refuse it, while the attachment-scoped status poll keeps collecting
-    /// recovery evidence through Pause.
+    /// recovery evidence through Pause and a prepared-pipeline rollback keeps
+    /// the viewer's newer transport intent.
     @MainActor
     func testEveryMigratedFenceRefusesAContinuationAcrossAViewerPause() {
         for fence in AttemptFence.allCases {
@@ -141,9 +162,10 @@ final class AttemptScopesTests: XCTestCase {
                 [.viewerAction],
                 "a Pause is expected to move the viewer-action epoch and nothing else"
             )
-            if fence == .recoveryEvidencePoll || fence == .seekTelemetrySupersession || fence == .autoInitialLayout {
+            if fence == .recoveryEvidencePoll || fence == .seekTelemetrySupersession || fence == .autoInitialLayout
+                || fence == .preparedPipelineRollback {
                 XCTAssertTrue(controller.attemptStillCurrent(captured, fence: fence),
-                              "status sampling and seek telemetry must survive a viewer Pause")
+                              "status sampling, seek telemetry and prepared rollback must survive a viewer Pause")
                 XCTAssertNil(controller.lastAttemptStaleDetail)
             } else {
                 XCTAssertFalse(
@@ -171,13 +193,23 @@ final class AttemptScopesTests: XCTestCase {
             .blackFrameDecodeFailure: .lifecycle,
             .stallRecovery: .open,
             .itemFailureLadder: .open,
+            .blackFrameDecoderAcknowledgement: .lifecycle,
+            .itemDecoderAcknowledgement: .open,
+            .stallCandidateAcknowledgement: .open,
+            .stallCandidateReturn: .open,
+            .preparedPressureEntry: .lifecycle,
+            .preparedPressureAcknowledgement: .lifecycle,
+            .autoBoundaryOwnerCurrent: .lifecycle,
+            .autoBoundaryReplanCurrent: .lifecycle,
             .nativeSeekCompletion: .open,
             .nativeSeekAfterSelection: .open,
             .recoveryEvidencePoll: .open,
             .autoInitialLayout: .initialDecision,
             .autoCatalogRefresh: .lifecycle,
             .autoQualityOffer: .lifecycle,
-            .autoQualityRollback: .lifecycle,
+            .preparedPipelineRollback: .lifecycle,
+            .preparedCommit: .viewerAction,
+            .retainedQualityRestart: .viewerAction,
         ]
         for fence in AttemptFence.allCases {
             // The intent fences are intentionally scoped to the seek and

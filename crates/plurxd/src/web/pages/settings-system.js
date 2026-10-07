@@ -39,26 +39,29 @@ function userDrawerHtml(u){
 function buildTag(sys){
   const b=sys.build;
   if(!b || b==="unknown")
-    return ` <span class="muted" style="font-size:12px" title="Built from a context with no .git and no PLURX_BUILD_REF, so the image cannot name its commit — the build time below is the next best thing. Deploy with 'make docker-up', which stamps it.">(unstamped · built ${esc(builtAtLabel(sys.built_at))})</span>`;
+    return ` <span class="muted" style="font-size:12px" title="Built from a context with no .git and no PLURX_BUILD_REF, so the image cannot name its commit — its source date below (the commit time when the build was given one, otherwise the compile time) is the next best thing. Deploy with 'make docker-up', which stamps it.">(unstamped · dated ${esc(sourceDateLabel(sys.built_at))})</span>`;
   if(b==="v"+sys.version || b===sys.version) return "";
   return ` <span class="muted" style="font-size:12px">(${esc(b)})</span>`;
 }
-// The compile timestamp, shortened for a UI: the date is what distinguishes
-// one deploy from another, the seconds never are.
-function builtAtLabel(s){
+// The build's source date (`built_at`: SOURCE_DATE_EPOCH, else the commit
+// time, else the compile time; crates/plurxd/build_support/source_date.rs),
+// shortened for a UI: the date distinguishes one deploy from another, the
+// seconds never do.
+function sourceDateLabel(s){
   if(!s) return "unknown";
   const m=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(s);
   return m? `${m[3]} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m[2]-1]} ${m[4]}:${m[5]}Z` : s;
 }
 // One string that answers "which build am I looking at". Prefers the commit,
-// falls back to when it was compiled — because "unknown" cannot answer the
-// only question anybody asks this for, and a build time can.
+// falls back to the build's source date -- because "unknown" cannot answer the
+// only question anybody asks this for, and a date can. For an exact-tag
+// release that date is the tagged commit's, not when the binary was compiled.
 function buildLabel(){
   const s=SERVER||{};
   const v=s.version||"?";
   const b=s.build;
   if(b && b!=="unknown" && b!=="v"+v && b!==v) return `${v} · ${b}`;
-  return `${v} · built ${builtAtLabel(s.built_at)}`;
+  return `${v} · dated ${sourceDateLabel(s.built_at)}`;
 }
 // What the boot probe found out about tone-mapping HDR on this machine.
 //
@@ -66,8 +69,8 @@ function buildLabel(){
 // everything still plays, 4K just stays slow, and there is nothing on screen to
 // distinguish "this box has no GPU tone-map" from "the driver refused the
 // graph" — which are the difference between shrugging and installing a package.
-// Each rejected candidate says what it failed on, so the answer is here rather
-// than in a log line from startup.
+// Rejected candidates remain available in a collapsed disclosure, so a working
+// GPU selection is not buried under diagnostics from the other probes.
 function toneMapHtml(tm){
   if(!tm) return `<span class="muted">—</span>`;
   const gpu = tm.selected && tm.selected!=="cpu";
@@ -93,7 +96,10 @@ function toneMapHtml(tm){
   const rows=rejected.map(v=>
     `<div class="muted" style="font-size:12px">${esc(v.label)}: ${esc(v.rejected||"rejected")}</div>`
   ).join("");
-  return `${head}${note}${rows}`;
+  const details=rows
+    ? `<details class="muted" style="margin-top:4px;font-size:12px"><summary style="cursor:pointer">Probe details</summary><div style="margin-top:6px;overflow-wrap:anywhere">${rows}</div></details>`
+    : "";
+  return `${head}${note}${details}`;
 }
 // What each library's storage reads at, in the unit the rest of the page uses
 // for bitrates — so "this mount does 240 Mb/s" and "this file is 69 Mb/s" can

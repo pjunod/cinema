@@ -109,7 +109,7 @@ fn direct_url(
 struct Peer {
     address: std::net::SocketAddr,
     stop: tokio::sync::oneshot::Sender<()>,
-    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    server: tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
 }
 async fn peer(fixture: &RealSourceStartFixture, gate: Option<Arc<SourceReadJobGate>>) -> Peer {
     let mut app = crate::http::sharing::peer_router((*fixture.state).clone());
@@ -138,7 +138,10 @@ async fn peer(fixture: &RealSourceStartFixture, gate: Option<Arc<SourceReadJobGa
 impl Peer {
     async fn stop(self) {
         let _ = self.stop.send(());
-        self.server.await.expect("server").expect("shutdown");
+        assert_eq!(
+            self.server.await.expect("server").expect("shutdown"),
+            crate::HttpDrain::Complete
+        );
     }
 }
 

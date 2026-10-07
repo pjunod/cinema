@@ -8,8 +8,83 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- **Jellyfin client compatibility (experimental, off by default).** Settings →
+  Developer → *Allow Jellyfin clients* opens a Jellyfin facade, reachable by
+  the server's address alone on Jellyfin's standard port 8096 or at
+  `/jellyfin` on Plurx's port, for the pinned
+  Infuse 8.5.6 and Jellyfin Android TV 0.19.10 clients: sign-in, movie and TV
+  browsing, direct play with Range, native VOD over HLS (copy or encoded, with
+  the fMP4 initialization prefix Infuse needs), subtitles, markers and watch
+  progress that respects manual edits. Every play runs on the native media
+  owners; nothing in it starts a second encoder, timer or background task.
+  Mapped posters and backdrops answer without a login while the switch is on,
+  and a direct-play link for one title works without a login header for up to
+  24 hours (both approved for client parity; see docs/SECURITY.md). A
+  compatibility login authenticates only `/jellyfin`. Saving the switch off
+  ends every play negotiated under it. Physical client qualification is still
+  open, so the switch stays in Developer. (#797)
+- **The architecture review's implementation plans are on `main` (#793).**
+  The effort branch `effort/architecture-review-2026-09-20` landed as one
+  merge on 2026-10-04 and carries SQLite and replicated schema migrations
+  that every node has since applied, so going back means a forward fix, not
+  a revert. Most of it is internal; the changes an operator or viewer can
+  notice are listed under *Changed* below. New here:
+  - **A cluster clock guard, advisory by default.** Each voter measures its
+    clock offset to every member and exports it on `/metrics`. Settings →
+    Developer → *Cluster clock guard* → *Enforce the cluster clock guard*
+    (default off) decides
+    whether an unbounded clock refuses session takeover, the expired-session
+    scan and membership changes (and turns `/readyz` 503 after two violating
+    rounds); while off, the guard only counts what it
+    would have refused in `plurx_cluster_clock_advisory_refusals_total`, and
+    `plurx_cluster_clock_enforced` says which mode a node is in. See
+    docs/OPERATIONS.md.
+  - **Typed recovery for display-aware Auto (`route-v1`).** A client can say
+    why it reopens a session (`link`, `encode`, `decode`, `hold` or
+    `authority`) and report decoder failures; only an authenticated decoder
+    failure changes which candidates Auto admits afterwards. Behind the two
+    Auto Developer switches, both default off; the wire contract is in
+    docs/API.md §7.4.
+
 ### Fixed
 
+- **Station logos on the Apple and Android Live TV guides.** The web guide
+  has drawn HDHomeRun's station artwork since 2026-10-03; the Apple TV, iOS
+  and Android guides still showed only callsigns, because the rule that picks
+  a channel's logo lived in the web page instead of the shared guide contract
+  the three clients reproduce, so nothing asked the native clients for it.
+  The rule is now `station_logo` in `tests/playback/live-tv-guide-cases.json`,
+  answered identically by the web, Apple and Android reducers, and the native
+  list rows, grid headers, programme details, picture badge and fullscreen
+  identity draw the logo with the callsign as fallback. Native clients fetch
+  the third-party artwork without the account token. The web applies the same
+  textual rule, which is stricter than the browser's URL parser it replaced:
+  an address with an underscore or non-ASCII host, or a space, now shows the
+  callsign.
+- **Web: Play after a long pause no longer pulls the picture back about a
+  second.** A pause of 60 seconds or more is an Auto quality boundary; the
+  web player resumed through a seek to the position Play was pressed at,
+  and the Auto ask took about a second, so a retained route jumped back.
+  It now asks for the route before seeking, and a retained route leaves the
+  position alone. Web only. (#802)
+- **Jellyfin clients get subtitles and can play.** Re-checking the `/jellyfin`
+  facade against the J0 traces found that neither pinned client could finish
+  a play: Infuse's own PlaybackInfo was refused (it names
+  `DirectPlayProtocols`), and its direct and HLS requests were refused (it
+  sends no `PlaySessionId` on direct play and lower-cases query names), Jellyfin for
+  Android TV's HLS and subtitle requests carried no credential the facade
+  accepted, every returned media URL doubled the `/jellyfin` base, and the
+  subtitle route both clients request did not exist. Subtitles now follow each
+  client's subtitle profile the way Jellyfin decides them (embedded in the
+  file, or a VTT/SRT sidecar), returned URLs are base-relative and carry the
+  compatibility login as `ApiKey` like Jellyfin's, and the missing contract
+  routes answer (`System/Info`, `Users/Public`, session capabilities, `Ping`,
+  `ActiveEncodings`, search hints, the newer played-items route, and an honest
+  download refusal). `plurx_jellyfin_requests_total{route,outcome}` names any
+  route a client asks for that the facade does not have. The switch stays in
+  Developer until the physical client check passes.
 - **A day of settled background work no longer stops every new job for a
   week.** The durable queue keeps finished jobs for seven days as receipts,
   and its 10,000-row bound counted them. On 2026-09-28 an embedding backfill
@@ -67,6 +142,40 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- **From the architecture effort (#793), on by default:**
+  - **Sign-ins expire after 90 idle days.** A login token unused for the
+    idle window stops authenticating (`auth.token_expiry_enabled`, absent is
+    on; `auth.token_idle_days`, absent is 90). The idle clock starts when
+    expiry takes effect, so upgrading signs nobody out at once.
+  - **Bounded replica reads.** Followers answer eligible catalogue reads
+    from their own replica when it is provably within the lag bound, and
+    fall back to the leader otherwise; the web client echoes
+    `X-Plurx-Read-After` after a watch-state write. Apple and Android send
+    no echo, so their reads keep going to the authority.
+  - **Software tone-mapping keeps the source's peak.** MaxCLL, MaxFALL and
+    the mastering peak are retained through probe, and the CPU HDR→SDR chain
+    applies an explicit peak before gamut conversion with error-diffusion
+    dithering; playback info shows the peak and its provenance. Hardware
+    tone-map graphs are unchanged.
+  - **Stereo downmix is typed.** Audio is resolved separately from the
+    picture's rung, encoded AAC is pinned to 48 kHz, and a typed stereo
+    encode of a 5.1 or 7.1 source uses a Lo/Ro fold with a −4 dBFS limiter.
+    Progressive untyped, legacy untyped and Live TV audio are unchanged.
+  - **SDR master playlists can name their codecs — now off by default.**
+    #793 shipped SDR masters carrying `CODECS` once the video is proven (a
+    boot-time AVC qualification or the session's own `avc1` init) and the
+    audio is known. The 2026-10-04 close-out puts that behind Settings →
+    Developer → *Master playlist codecs* → *Print CODECS on SDR variants*
+    (`playback_sdr_master_codecs`), **default off**, until the Apple TV and
+    iPhone device check confirms every SDR variant is still offered; off
+    serves the SDR master every client has played. HDR and Dolby Vision
+    masters are unchanged either way. See docs/OPERATIONS.md.
+  - **Raft snapshots are copied off the writer.** The snapshot cut stays on
+    the writer; the copy runs beside it, behind a storage admission check
+    (vendored hiqlite patch 22). No switch.
+  - **Release builds use profile C.** `lto = "thin"`, line-table debug info
+    and packed split debug info; every image ships `plurxd.dwp` and
+    `plurx-cluster-check.dwp` beside the executables in `/usr/local/bin`.
 - **The web watch view shows the title's facts and its chapters instead of
   hiding them.** Once a movie or episode is playing on the page, the media
   ledger — video, audio tracks, subtitle tracks, delivery mode, file — is

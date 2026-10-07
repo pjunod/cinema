@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{FromRef, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use plurx_core::auth;
 #[cfg(test)]
@@ -34,7 +35,8 @@ pub struct ServerInfo {
     pub version: &'static str,
     /// Git description of the exact build ("v0.1.0-14-gc0ffee"), for support.
     pub build: &'static str,
-    /// Compile time, always present — the fallback when `build` is "unknown".
+    /// Source date (SOURCE_DATE_EPOCH, else commit time, else compile time),
+    /// always present — the fallback when `build` is "unknown".
     pub built_at: &'static str,
     pub instance_id: String,
     /// Stable local identity used to distinguish this node's LAN records.
@@ -705,6 +707,9 @@ pub struct ClientLog {
     /// historically call this `session`; the alias keeps that field additive.
     #[serde(alias = "session")]
     pub session_id: Option<String>,
+    /// Exact local completed-body claim; never inferred from bandwidth or detail.
+    pub(crate) link_sample: Option<super::hls::link_receipts::ClientLinkSample>,
+    pub(crate) candidate_recovery: Option<super::hls::candidate_recovery::ClientRecoverySample>,
     /// Correlated AVPlayer and last-polled server state for stall attribution.
     pub snapshot: Option<ClientPlaybackSnapshot>,
     /// Client-reported last accepted protocol state preceding this event.
@@ -867,6 +872,41 @@ pub(super) fn pause_next_client_log_after_capture(
     (captured_rx, release_tx)
 }
 
+#[cfg(test)]
+static CLIENT_LOG_DETACHED_HOOK: std::sync::Mutex<
+    Option<(&'static str, tokio::sync::oneshot::Sender<()>)>,
+> = std::sync::Mutex::new(None);
+
+/// Fires its sender when the last holder drops it: the handler and every
+/// detached task it spawned for one client-log request.
+#[cfg(test)]
+struct ClientLogDetachedDone(Option<tokio::sync::oneshot::Sender<()>>);
+
+#[cfg(test)]
+impl Drop for ClientLogDetachedDone {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            let _ = done.send(());
+        }
+    }
+}
+
+/// Resolves once the next client-log request whose message is `message` has
+/// returned AND every detached task it spawned (the link-sample claim, the
+/// measured-Link fold, the playback-event emit) has finished. A test that
+/// asserts something durable was *not* written awaits this instead of
+/// yielding and hoping, so a late write is caught rather than raced.
+#[cfg(test)]
+pub(super) fn notify_when_client_log_detached_work_finishes(
+    message: &'static str,
+) -> tokio::sync::oneshot::Receiver<()> {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    *CLIENT_LOG_DETACHED_HOOK
+        .lock()
+        .expect("client-log detached hook lock") = Some((message, done_tx));
+    done_rx
+}
+
 /// POST /api/v1/client-log — any signed-in user. Records one browser playback
 /// error into the server log ring so it surfaces in `Settings → Logs`. Bounded
 /// by per-field clipping and by a global rate limit (this is diagnostics, not an
@@ -877,8 +917,8 @@ pub async fn client_log(
     State(state): State<AppState>,
     headers: HeaderMap,
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
-    Json(ev): Json<ClientLog>,
-) -> StatusCode {
+    Json(mut ev): Json<ClientLog>,
+) -> axum::response::Response {
     let suppressed = match CLIENT_LOG_LIMITER.lock() {
         Ok(mut limiter) => limiter.admit(user.id, std::time::Instant::now()),
         // Fail open: a poisoned lock must not silence diagnostics.
@@ -887,9 +927,24 @@ pub async fn client_log(
     // Still 204 when dropped. The client is reporting, not asking, and an error
     // response would only give it something new to report about.
     let Some(suppressed) = suppressed else {
-        return StatusCode::NO_CONTENT;
+        return StatusCode::NO_CONTENT.into_response();
     };
     let line = client_log_line(&ev, suppressed);
+    #[cfg(test)]
+    let detached_done = {
+        let mut hook = CLIENT_LOG_DETACHED_HOOK
+            .lock()
+            .expect("client-log detached hook lock");
+        if hook
+            .as_ref()
+            .is_some_and(|(message, _)| *message == ev.message)
+        {
+            hook.take()
+                .map(|(_, done)| Arc::new(ClientLogDetachedDone(Some(done))))
+        } else {
+            None
+        }
+    };
 
     // Both WARN and ERROR clear the default `info` filter, so either shows in
     // the admin log without the operator touching PLURX_LOG.
@@ -929,6 +984,72 @@ pub async fn client_log(
             &user.password_hash,
         ));
     }
+    let mut link_sample = ev.link_sample.take();
+    let acknowledged_link = if link_sample.as_ref().is_some_and(|sample| sample.negative) {
+        let sample = link_sample.take();
+        if let (Some(identity), Some(sample)) = (network.as_ref(), sample.as_ref()) {
+            state
+                .link_receipts
+                .accept_negative_for_ack(&state, identity, ev.session_id.as_deref(), sample)
+                .await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let recovery_sample = ev.candidate_recovery.take();
+    let acknowledged_recovery =
+        if let (Some(identity), Some(sample)) = (network.as_ref(), recovery_sample.as_ref()) {
+            super::hls::candidate_recovery::accept_sample(
+                &state,
+                identity,
+                ev.session_id.as_deref(),
+                sample,
+            )
+            .await
+        } else {
+            None
+        };
+    if let Some(identity) = network.clone().filter(|_| link_sample.is_some()) {
+        let proof_state = state.clone();
+        let proof_session = ev.session_id.clone();
+        #[cfg(test)]
+        let detached_done = detached_done.clone();
+        tokio::spawn(async move {
+            #[cfg(test)]
+            let _detached_done = detached_done;
+            // The claim itself is the owner's in-memory receipt and needs no
+            // opt-in: it is what later proves a fresh transfer (an upgrade)
+            // or backs a Link negative's acknowledgement (D6). Only keeping
+            // it as per-network history is `playback.network_priors`.
+            let Some(sample) = link_sample else {
+                return;
+            };
+            let Some(value) = proof_state
+                .link_receipts
+                .accept(&proof_state, &identity, proof_session.as_deref(), &sample)
+                .await
+            else {
+                return;
+            };
+            if super::hls::link_receipts::network_priors_enabled(&proof_state).await {
+                // A client-reported link sample is a prior, not a
+                // record anything waits on: losing one costs a
+                // slightly staler estimate, so the failure is counted
+                // and rate-limit logged rather than propagated to a
+                // detached task nobody joins.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ObserveCandidateLink,
+                    crate::store_result::Discard::BestEffort,
+                    proof_state
+                        .store
+                        .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                        .await,
+                );
+            }
+        });
+    }
     #[cfg(test)]
     let capture_hook = {
         let mut hook = CLIENT_LOG_CAPTURE_HOOK
@@ -950,10 +1071,28 @@ pub async fn client_log(
     let progressive_ambiguous = marker_placeholder
         .as_ref()
         .is_some_and(|(file_id, _)| state.streams.contains_delivery(user.id, *file_id));
+    // Priors on only: the acknowledged negative's attributed measured-Link
+    // verdict for this network. Folded after the answer, in the task below,
+    // so the native recovery's 250 ms wait never covers this write.
+    let (acknowledged_link, measured_link_prior) = match acknowledged_link {
+        Some(ack) => (Some(ack.receipt), ack.measured_prior),
+        None => (None, None),
+    };
     let transcode = Arc::clone(&state.transcode);
     let store = Arc::clone(&state.store);
     let user_id = user.id;
+    #[cfg(test)]
+    let emit_done = detached_done.clone();
     tokio::spawn(async move {
+        #[cfg(test)]
+        let _detached_done = emit_done;
+        if let Some(observation) = measured_link_prior {
+            crate::store_result::observe(
+                crate::store_result::Operation::ObserveMeasuredLinkPrior,
+                crate::store_result::Discard::BestEffort,
+                store.observe_network_prior(&observation).await,
+            );
+        }
         // The shipped clients send this historical placeholder without a
         // session id. Correlate it by authenticated user, file and delivery
         // method to exactly one VOD ledger; that ledger then waits for a
@@ -974,7 +1113,22 @@ pub async fn client_log(
         };
         emit_client_playback_event(store, event, info.as_ref(), network, Some(client));
     });
-    StatusCode::NO_CONTENT
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Some(value) =
+        acknowledged_recovery.and_then(|event| axum::http::HeaderValue::from_str(&event).ok())
+    {
+        response
+            .headers_mut()
+            .insert("x-plurx-recovery-accepted", value);
+    }
+    if let Some(value) =
+        acknowledged_link.and_then(|nonce| axum::http::HeaderValue::from_str(&nonce).ok())
+    {
+        response
+            .headers_mut()
+            .insert("x-plurx-link-accepted", value);
+    }
+    response
 }
 
 fn vod_marker_prewarm_placeholder(event: &PlaybackEvent) -> Option<(i64, &str)> {
@@ -1698,6 +1852,7 @@ pub struct SettingsDto {
     pub server_name: String,
     /// Always-compiled Library channels. Readiness is advisory and never
     /// vetoes this explicit runtime choice.
+    pub jellyfin_compatibility_enabled: bool,
     pub library_channels_enabled: bool,
     pub library_channel_subject_matching_enabled: bool,
     /// Always-compiled HDHomeRun integration. The switch is runtime-only and
@@ -1710,6 +1865,9 @@ pub struct SettingsDto {
     pub live_tv_max_output_height: u16,
     pub live_tv_deinterlace_output: String,
     pub live_tv_config_generation: i64,
+    /// Legacy owner-handoff barrier from the single-owner model #537
+    /// replaced. Nothing sets or reads it any more; it is always `""` / `0`
+    /// and stays in the response only because older clients decode it.
     pub live_tv_transition_from_owner_node_id: String,
     pub live_tv_transition_drain_before: i64,
     pub live_tv_guide_source: String,
@@ -1755,12 +1913,31 @@ pub struct SettingsDto {
     /// How fast a remux may be delivered, as a multiple of real time. "0" means
     /// unpaced — which lets a single stream take the whole link.
     pub stream_readrate: String,
-    /// Requested N1 rate control. The production-effective value may be VBR
-    /// when a family refuses quality mode; `/system` capabilities and boot
-    /// logs carry that validation result.
-    pub transcode_rate_mode: String,
+    /// Requested N1 rate control. JSON `null` means the operator has not
+    /// chosen a mode, so each encoder family's code default applies; an
+    /// explicit `"bitrate"` is an override that survives a family default
+    /// flip. Reporting the unset pair as `"bitrate"` made every client that
+    /// wrote back what it read pin the cluster to an explicit bitrate, which
+    /// left a per-family default flip inert. The production-effective value
+    /// may still be VBR when a family refuses quality mode; `/system`
+    /// capabilities and boot logs carry that validation result.
+    pub transcode_rate_mode: Option<String>,
+    /// Requested content-aware encoding and its advisory scorer applicability.
+    pub content_aware_encoding: bool,
+    pub content_encoding_scorer_ready: Option<bool>,
+    pub content_encoding_applicability: serde_json::Value,
+    pub vod_reorder_frames: u8,
     /// `None` means use the validated family-tuned default.
     pub transcode_quality: Option<u8>,
+    /// What an unset `transcode_rate_mode` resolves to on this node: the code
+    /// default of the encoder family this node's preference selects. Display
+    /// only — never write it back as a request.
+    pub transcode_rate_mode_default: String,
+    /// The family (`software`, `qsv`, ...) `transcode_rate_mode_default` and
+    /// `transcode_quality_default` describe.
+    pub transcode_rate_mode_default_encoder: String,
+    /// The family-tuned quality an unset `transcode_quality` resolves to.
+    pub transcode_quality_default: u8,
     /// How an HLS session (transcode or copy-video) is paced: the multiple of
     /// real time it settles at, how many seconds it may deliver flat-out first
     /// (that burst IS the viewer's opening buffer), and how far ahead of the
@@ -1804,6 +1981,11 @@ pub struct SettingsDto {
     pub decoder_health_qualified_artifacts: bool,
     /// Explicit operator override, applied to new copy starts.
     pub hevc_unverified_copy: bool,
+    /// Print `CODECS` on SDR HLS master variants (S-10). Off by default, which
+    /// is the pre-S-10 master. Fixed when a session is created; a session
+    /// rebuilt after an owner takeover or VOD resurrection reads the current
+    /// value. Developer readiness is advisory only.
+    pub playback_sdr_master_codecs: bool,
     /// Advisory engine observation, never used to authorize a settings save.
     pub hevc_header_trace_available: Option<bool>,
     /// What this node measured about itself, and the identity it therefore
@@ -1876,6 +2058,17 @@ pub struct SettingsDto {
     /// Opt-in replacement of expired HLS owners. This remains independently
     /// gated after remote placement is enabled so operators can stage rollout.
     pub cluster_session_takeover_enabled: bool,
+    /// Whether the cluster clock guard refuses takeover, expiry scans,
+    /// membership changes and readiness when clock evidence is unbounded.
+    /// Off by default: the guard then only measures and reports. The
+    /// Developer readiness rows are advisory and never block this switch.
+    pub cluster_clock_guard_enforced: bool,
+    /// Developer switch: which complete-output preparation a VOD start may
+    /// queue — `off` (the default), `copy`, or `copy_and_encoded`.
+    pub vod_output_preparation: &'static str,
+    /// Developer switch: retain a rolling session's complete output as a
+    /// reusable artifact. Off by default.
+    pub vod_rolling_retention: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
     pub probe_retry_mins: i64,
@@ -2018,14 +2211,17 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             transcode_rate_mode.as_deref(),
             transcode_quality.as_deref(),
         );
-    // The settings form keeps its existing compatibility value for an unset
-    // pair. The tri-state is an internal policy distinction: `/system`
-    // reports family defaults, while the form still presents the legacy
-    // bitrate choice until the operator explicitly changes it.
-    let transcode_rate_mode = transcode_rate_mode
-        .unwrap_or(plurx_core::transcode::RateMode::Bitrate)
-        .as_str()
-        .to_owned();
+    // Unset stays unset on the wire. Presenting the family default as if it
+    // were the stored request is what turned every read-modify-write client
+    // (the bench harness's restore, any form Save) into an explicit
+    // `bitrate` pin. The default is reported beside it, for display only.
+    let transcode_rate_mode = transcode_rate_mode.map(|mode| mode.as_str().to_owned());
+    let default_family = state
+        .transcode
+        .encoder_for_preference(setting(keys::HWACCEL).as_deref().unwrap_or_default());
+    let transcode_rate_mode_default = default_family.default_rate_mode().as_str().to_owned();
+    let transcode_rate_mode_default_encoder = default_family.family_name().to_owned();
+    let transcode_quality_default = default_family.default_quality();
     let text = |v: Option<String>, default: &str| -> String {
         v.map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
@@ -2066,10 +2262,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         .max(0);
     let transcode_cleanup_mins = mins(setting(keys::JOB_TRANSCODE_CLEANUP_MINS));
     let cache_produce_mins = mins(setting(keys::JOB_CACHE_PRODUCE_MINS));
-    let cache_max_gb = setting(keys::CACHE_MAX_GB)
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .unwrap_or(crate::cachekeep::DEFAULT_MAX_GB)
-        .max(0);
+    // One rule with cachekeep and the two switched preparation features:
+    // unset is the 50 GB default, `0` is off.
+    let cache_max_gb = crate::cachekeep::cache_budget(setting(keys::CACHE_MAX_GB).as_deref())
+        .map_or(0, |bytes| i64::try_from(bytes >> 30).unwrap_or(i64::MAX));
     let cache_used_bytes = match state.transcode.cache_location() {
         Some((_, node)) => state.store.cache_bytes(node).await.unwrap_or(0),
         None => 0,
@@ -2145,6 +2341,15 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     let cluster_media_pool_ready = state.media_pool.remote_rollout_ready().await;
     let cluster_session_takeover_enabled =
         setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
+    let cluster_clock_guard_enforced = plurx_core::store::stored_switch(
+        setting(keys::CLUSTER_CLOCK_GUARD_ENFORCED).as_deref(),
+        false,
+    );
+    let vod_output_preparation =
+        crate::vodserve::OutputPreparation::parse(setting(keys::VOD_OUTPUT_PREPARATION).as_deref())
+            .as_str();
+    let vod_rolling_retention =
+        plurx_core::store::stored_switch(setting(keys::VOD_ROLLING_RETENTION).as_deref(), false);
     let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
         setting(keys::ANALYSIS_MAX_ATTEMPTS).as_deref(),
     );
@@ -2167,6 +2372,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(crate::channel_subjects::ENABLE_KEY).as_deref(),
             true,
         ),
+        jellyfin_compatibility_enabled: plurx_core::store::stored_switch(
+            setting(keys::JELLYFIN_COMPATIBILITY_ENABLED).as_deref(),
+            false,
+        ),
         library_channels_enabled: plurx_core::store::stored_switch(
             setting(keys::LIBRARY_CHANNELS_ENABLED).as_deref(),
             false,
@@ -2182,8 +2391,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         live_tv_max_output_height: live_tv.max_output_height,
         live_tv_deinterlace_output: live_tv.deinterlace_output.as_str().to_owned(),
         live_tv_config_generation: live_tv.generation,
-        live_tv_transition_from_owner_node_id: live_tv.transition_from_owner_node_id,
-        live_tv_transition_drain_before: live_tv.transition_drain_before,
+        live_tv_transition_from_owner_node_id: String::new(),
+        live_tv_transition_drain_before: 0,
         live_tv_guide_source: live_tv.guide_source.as_str().to_owned(),
         live_tv_xmltv_url: live_tv.xmltv_url,
         live_tv_guide_hours: live_tv.guide_hours,
@@ -2210,8 +2419,21 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         default_sub_lang: prefs.sub_lang,
         sub_mode: prefs.sub_mode.as_str().to_owned(),
         stream_readrate,
+        content_aware_encoding: setting(keys::CONTENT_AWARE_ENCODING).as_deref() == Some("1"),
+        content_encoding_scorer_ready: state.transcode.content_encoding_scorer_ready(),
+        content_encoding_applicability: state
+            .transcode
+            .content_encoding_applicability(&setting(keys::HWACCEL).unwrap_or_default()),
+        vod_reorder_frames: setting(keys::VOD_REORDER_FRAMES)
+            .as_deref()
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|v| matches!(v, 0 | 2))
+            .unwrap_or(0),
         transcode_rate_mode,
         transcode_quality,
+        transcode_rate_mode_default,
+        transcode_rate_mode_default_encoder,
+        transcode_quality_default,
         hls_readrate,
         hls_burst_secs,
         hls_ahead_max_secs,
@@ -2240,6 +2462,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),
             false,
         ),
+        playback_sdr_master_codecs: plurx_core::store::stored_switch(
+            setting(keys::PLAYBACK_SDR_MASTER_CODECS).as_deref(),
+            false,
+        ),
         hevc_header_trace_available: crate::ffmpeg::hevc_header_trace_available().await,
         decoder_health_qualification: DecoderHealthQualification::of(
             &state.transcode.published_artifact_qualification(),
@@ -2258,8 +2484,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
         vod_blocked_get_cap: setting(keys::VOD_BLOCKED_GET_CAP).unwrap_or_default(),
         vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
-        vod_index_cluster_cache: setting(keys::VOD_INDEX_CLUSTER_CACHE)
-            .is_some_and(|value| value.trim() == "1"),
+        vod_index_cluster_cache: plurx_core::store::stored_switch(
+            setting(keys::VOD_INDEX_CLUSTER_CACHE).as_deref(),
+            false,
+        ),
         bounded_replica_reads: plurx_core::store::stored_switch(
             setting(keys::BOUNDED_REPLICA_READS).as_deref(),
             state.catalogue.bounded_reads_default(),
@@ -2304,6 +2532,9 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
+        cluster_clock_guard_enforced,
+        vod_output_preparation,
+        vod_rolling_retention,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -2466,12 +2697,15 @@ pub struct UpdateSettings {
     /// Rename the logical server on every voter. Configuration is only the
     /// bootstrap seed and is not edited by this operation.
     pub server_name: Option<String>,
+    pub jellyfin_compatibility_enabled: Option<bool>,
     pub library_channels_enabled: Option<bool>,
     pub library_channel_subject_matching_enabled: Option<bool>,
     /// HDHomeRun settings are a generation-CAS tuple. Save the address/owner
     /// while disabled, run readiness, then enable in a separate request.
     pub live_tv_enabled: Option<bool>,
     pub live_tv_device_ipv4: Option<String>,
+    /// Legacy; accepted and ignored since #537 (the owner is always the
+    /// node that answers). See `update_settings`.
     pub live_tv_owner_node_id: Option<String>,
     pub live_tv_max_sessions: Option<u8>,
     pub live_tv_output_height: Option<u16>,
@@ -2505,7 +2739,8 @@ pub struct UpdateSettings {
     pub backup_destination: Option<String>,
     pub backup_schedule_utc: Option<String>,
     pub backup_keep: Option<i64>,
-    /// Explicit admin attestation, never an automatic timeout override.
+    /// Legacy single-owner attestation (`{node_id, …}`), still sent by shipped
+    /// native clients. Accepted and ignored since #537; see `update_settings`.
     pub live_tv_fenced_owner: Option<serde_json::Value>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
     pub tmdb_api_key: Option<String>,
@@ -2528,6 +2763,7 @@ pub struct UpdateSettings {
     pub automatic_decoder_recovery: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
     pub hevc_unverified_copy: Option<bool>,
+    pub playback_sdr_master_codecs: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
@@ -2558,8 +2794,13 @@ pub struct UpdateSettings {
     /// N1 requested rate-control family. Whenever either rate-control field is
     /// sent, both are required so a replicated update is one complete pair.
     /// A quality request is behavior-probed before the effective snapshot
-    /// changes; a refused driver remains VBR.
-    pub transcode_rate_mode: Option<String>,
+    /// changes; a refused driver remains VBR. JSON `null` clears the request
+    /// back to each encoder family's code default (absent = unchanged).
+    #[serde(default, deserialize_with = "deserialize_nullable")]
+    pub transcode_rate_mode: Option<Option<String>>,
+    /// Content-aware and reorder requests retain their independent validation.
+    pub content_aware_encoding: Option<bool>,
+    pub vod_reorder_frames: Option<u8>,
     /// JSON null clears the override back to the family-tuned default.
     #[serde(default, deserialize_with = "deserialize_nullable")]
     pub transcode_quality: Option<Option<u8>>,
@@ -2580,6 +2821,13 @@ pub struct UpdateSettings {
     /// Replace an expired remote HLS owner while retaining the public session
     /// id. Requires remote placement to remain enabled and rollout-ready.
     pub cluster_session_takeover_enabled: Option<bool>,
+    /// Turn the cluster clock guard's refusals on or off cluster-wide. Never
+    /// refused: readiness prerequisites are advisory only.
+    pub cluster_clock_guard_enforced: Option<bool>,
+    /// `off`, `copy` or `copy_and_encoded`. Never refused by readiness;
+    /// turning it off cancels queued rows of the kinds it no longer admits.
+    pub vod_output_preparation: Option<String>,
+    pub vod_rolling_retention: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -2646,14 +2894,10 @@ fn live_tv_setting_values(config: &crate::live_tv::LiveTvConfig) -> Vec<(&'stati
             keys::LIVE_TV_MAX_OUTPUT_HEIGHT,
             config.max_output_height.to_string(),
         ),
-        (
-            keys::LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID,
-            config.transition_from_owner_node_id.clone(),
-        ),
-        (
-            keys::LIVE_TV_TRANSITION_DRAIN_BEFORE,
-            config.transition_drain_before.to_string(),
-        ),
+        // The retired handoff barrier is still written as "no handoff" so a
+        // binary from before #537 that reads it in a mixed cluster sees none.
+        (keys::LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID, String::new()),
+        (keys::LIVE_TV_TRANSITION_DRAIN_BEFORE, "0".to_owned()),
         (
             keys::LIVE_TV_CONFIG_GENERATION,
             config.generation.to_string(),
@@ -2673,7 +2917,8 @@ impl UpdateSettings {
     /// losing CAS reports 409, so the API makes that transaction boundary
     /// explicit.
     fn has_non_live_tv_update(&self) -> bool {
-        self.server_name.is_some()
+        self.jellyfin_compatibility_enabled.is_some()
+            || self.server_name.is_some()
             || self.tmdb_api_key.is_some()
             || self.omdb_api_key.is_some()
             || self.trakt_client_id.is_some()
@@ -2688,6 +2933,7 @@ impl UpdateSettings {
             || self.automatic_decoder_recovery.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
             || self.hevc_unverified_copy.is_some()
+            || self.playback_sdr_master_codecs.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.vod_working_set_bytes.is_some()
@@ -2712,6 +2958,8 @@ impl UpdateSettings {
             || self.default_sub_lang.is_some()
             || self.sub_mode.is_some()
             || self.stream_readrate.is_some()
+            || self.content_aware_encoding.is_some()
+            || self.vod_reorder_frames.is_some()
             || self.transcode_rate_mode.is_some()
             || self.transcode_quality.is_some()
             || self.hls_readrate.is_some()
@@ -2722,6 +2970,9 @@ impl UpdateSettings {
             || self.hls_typeless_sliding.is_some()
             || self.cluster_media_pool_enabled.is_some()
             || self.cluster_session_takeover_enabled.is_some()
+            || self.cluster_clock_guard_enforced.is_some()
+            || self.vod_output_preparation.is_some()
+            || self.vod_rolling_retention.is_some()
             || self.probe_retry_mins.is_some()
             || self.artwork_retry_mins.is_some()
             || self.transcode_cleanup_mins.is_some()
@@ -2791,6 +3042,23 @@ pub async fn update_settings(
             )));
         }
     }
+    // `live_tv_owner_node_id` and `live_tv_fenced_owner` are legacy fields of
+    // the single-owner model #537 replaced; both are accepted and ignored: the
+    // owner is always this node's id and the attestation is never read.
+    // Shipped Apple and Android clients send `live_tv_owner_node_id` with every
+    // tuner-configuration save, beside real Live TV fields. No shipped client
+    // sends `live_tv_fenced_owner`: both still define the change (`FencedOwner`
+    // in LiveTvApi.kt, `.fencedOwner` in LiveTv.swift) but no production path
+    // constructs it, so it stays accepted only so an older or third-party
+    // client that does send it is not refused (pinned by
+    // `live_tv_legacy_fenced_owner_attestation_is_still_accepted_and_ignored`).
+    // Both still count as a Live TV save here, so a request carrying only them
+    // (plus `live_tv_config_generation`) is a generation-CAS save that changes
+    // nothing else and bumps the generation (pinned by
+    // `live_tv_legacy_owner_metadata_never_requires_physical_fence_recovery`,
+    // which saves the owner alone). Left as-is deliberately: narrowing the set
+    // would change only what a lone legacy save does, and it would stop
+    // requiring the generation for it.
     let live_tv_requested = req.live_tv_enabled.is_some()
         || req.live_tv_device_ipv4.is_some()
         || req.live_tv_owner_node_id.is_some()
@@ -2840,8 +3108,6 @@ pub async fn update_settings(
             .map(str::trim)
             .unwrap_or(&current.xmltv_url)
             .to_owned();
-        let transition_from_owner_node_id = String::new();
-        let transition_drain_before = 0;
         let next_generation = current
             .generation
             .checked_add(1)
@@ -2863,8 +3129,6 @@ pub async fn update_settings(
             // Readiness runs against the still-current owner tuple. The CAS
             // publishes the increment only after every precondition passes.
             generation: current.generation,
-            transition_from_owner_node_id,
-            transition_drain_before,
         };
         candidate
             .validate_static()
@@ -3017,12 +3281,25 @@ pub async fn update_settings(
     } else {
         None
     };
+    if req.vod_reorder_frames.is_some_and(|v| !matches!(v, 0 | 2)) {
+        return Err(ApiError::BadRequest(
+            "vod_reorder_frames must be 0 or 2".into(),
+        ));
+    }
     let rate_control = match (&req.transcode_rate_mode, req.transcode_quality) {
         (None, None) => None,
         (Some(requested_mode), Some(quality)) => {
-            let mode = plurx_core::transcode::RateMode::parse(requested_mode).ok_or_else(|| {
-                ApiError::BadRequest("transcode_rate_mode must be bitrate or quality".into())
-            })?;
+            // `null` is the explicit "use each family's default" request.
+            let mode = requested_mode
+                .as_deref()
+                .map(|requested_mode| {
+                    plurx_core::transcode::RateMode::parse(requested_mode).ok_or_else(|| {
+                        ApiError::BadRequest(
+                            "transcode_rate_mode must be bitrate, quality or null".into(),
+                        )
+                    })
+                })
+                .transpose()?;
             Some((mode, quality))
         }
         _ => {
@@ -3251,6 +3528,18 @@ pub async fn update_settings(
             )));
         }
     }
+    if req.vod_output_preparation.as_deref().is_some_and(|mode| {
+        ![
+            crate::vodserve::OutputPreparation::OFF,
+            crate::vodserve::OutputPreparation::COPY,
+            crate::vodserve::OutputPreparation::COPY_AND_ENCODED,
+        ]
+        .contains(&mode.trim())
+    }) {
+        return Err(ApiError::BadRequest(
+            "vod_output_preparation must be off, copy or copy_and_encoded".into(),
+        ));
+    }
     if req
         .cache_max_gb
         .is_some_and(|gb| !(0..=10_240).contains(&gb))
@@ -3312,6 +3601,21 @@ pub async fn update_settings(
                 ))
             }
         }
+    }
+    if let Some(enabled) = req.content_aware_encoding {
+        state
+            .store
+            .put_setting(
+                keys::CONTENT_AWARE_ENCODING,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
+    }
+    if let Some(frames) = req.vod_reorder_frames {
+        state
+            .store
+            .put_setting(keys::VOD_REORDER_FRAMES, &frames.to_string())
+            .await?;
     }
     if let Some(values) = &analysis_settings {
         let borrowed = values
@@ -3557,6 +3861,9 @@ pub async fn update_settings(
             )
             .await?;
     }
+    if let Some(on) = req.jellyfin_compatibility_enabled {
+        state.store.set_jellyfin_compatibility(on).await?;
+    }
     if let Some(on) = req.library_channels_enabled {
         // Deliberately no readiness lookup here. The Developer card is advice;
         // an administrator's explicit choice is the authority.
@@ -3613,6 +3920,15 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::HEVC_UNVERIFIED_COPY, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.playback_sdr_master_codecs {
+        // Saved unconditionally: the device re-qualification row on the
+        // Developer card is advice, not a precondition. New sessions read the
+        // value at create; running sessions keep the master they started with.
+        state
+            .store
+            .put_setting(keys::PLAYBACK_SDR_MASTER_CODECS, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.decoder_health_qualified_artifacts {
@@ -3725,6 +4041,31 @@ pub async fn update_settings(
         // loop now. An "on" is never cached, so turning takeover off is seen
         // on the next 2 s tick here and on every other node.
         crate::media_sessions::takeover_settings_changed();
+    }
+    if let Some(mode) = &req.vod_output_preparation {
+        let mode = crate::vodserve::OutputPreparation::parse(Some(mode)).as_str();
+        state
+            .store
+            .put_setting(keys::VOD_OUTPUT_PREPARATION, mode)
+            .await?;
+    }
+    if let Some(enabled) = req.vod_rolling_retention {
+        state
+            .store
+            .put_setting(keys::VOD_ROLLING_RETENTION, if enabled { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(enabled) = req.cluster_clock_guard_enforced {
+        state
+            .store
+            .put_setting(
+                keys::CLUSTER_CLOCK_GUARD_ENFORCED,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
+        // Apply on this node now; every other node picks the replicated value
+        // up on its next enforcement refresh (`clock_offset::run`).
+        state.membership.clock_guard().set_enforced(enabled);
     }
     if let Some(mode) = &req.sub_mode {
         // Normalize through the parser so only valid modes are stored.
@@ -4817,6 +5158,16 @@ pub async fn activity_detail(
         "offline": offline,
         "scans": scans,
         "producing": state.jobs.producing_now().await,
+        // Rolling complete output this node retains or is collecting. These
+        // registries are process-private, so the list is this node's only;
+        // the Activity card says so.
+        "retained_output": if user.0.is_admin {
+            serde_json::to_value(state.transcode.retained_output_snapshot())
+                .map_err(|error| ApiError::Internal(error.to_string()))?
+        } else {
+            serde_json::json!([])
+        },
+        "retained_output_node": state.node_id,
         "trakt": {
             "configured": trakt.configured,
             "linked": linked,
@@ -4909,10 +5260,12 @@ pub async fn stop_process(
 
 /// DELETE /api/v1/activity/producer (admin) — stop the pre-transcode pass.
 ///
-/// It stops after the title it is on rather than mid-encode: the producer
-/// resumes from published segment boundaries, so a clean stop keeps the part
-/// it has already made and a kill throws it away. The next scheduled pass
-/// picks up from there.
+/// A speculative pre-transcode stops after the title it is on rather than
+/// mid-encode: the producer resumes from published segment boundaries, so a
+/// clean stop keeps the part it has already made and a kill throws it away.
+/// The next scheduled pass picks up from there. A copy or encoded output
+/// preparation the same pass is running is cancelled at once instead, on this
+/// node only; the title's next play may queue it again.
 pub async fn stop_producer(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -4920,9 +5273,38 @@ pub async fn stop_producer(
     if !state.jobs.stop_producing() {
         return Err(ApiError::NotFound("producer"));
     }
-    Ok(Json(
-        serde_json::json!({ "ok": true, "note": "stopping after the current title" }),
-    ))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "note": "stopping: a pre-transcode finishes its current title first; \
+                 an output preparation on this node is cancelled now"
+    })))
+}
+
+/// DELETE /api/v1/activity/retained/:nonce (admin) — stop retaining one
+/// rolling output on this node. A collection is abandoned and its links
+/// released; a retained artifact nobody is reading goes to the collector.
+/// 409 while a session reads it. Node-local, like the list it comes from.
+pub async fn stop_retained_output(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    axum::extract::Path(nonce): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let nonce = uuid::Uuid::parse_str(&nonce)
+        .map_err(|_| ApiError::BadRequest("retained output id must be a uuid".into()))?;
+    match state.transcode.release_retained_output(nonce) {
+        crate::vodserve::retained::RetainedRelease::Released => Ok(Json(serde_json::json!({
+            "ok": true,
+            "note": "released; it is no longer served, and the collector deletes it \
+                     once nothing holds it (a published output waits for its producing \
+                     session to end)"
+        }))),
+        crate::vodserve::retained::RetainedRelease::Attached => Err(ApiError::Conflict(
+            "a session is reading this output; stop the session first".into(),
+        )),
+        crate::vodserve::retained::RetainedRelease::Unknown => {
+            Err(ApiError::NotFound("retained output"))
+        }
+    }
 }
 
 /// DELETE /api/v1/activity/sessions/:id (admin) — stop a transcode session.
@@ -4993,6 +5375,7 @@ pub async fn stop_offline_package(
 /// the handler cannot reach `AppState::store` through this type.
 #[derive(Clone)]
 pub(crate) struct MetricsState {
+    clock: Arc<plurx_core::cluster::clock::ClusterClockGuard>,
     started_at: Instant,
     transcode: crate::transcode::TranscodeMetrics,
     integration: Arc<IntegrationMetrics>,
@@ -5014,6 +5397,7 @@ pub(crate) struct MetricsState {
 impl FromRef<AppState> for MetricsState {
     fn from_ref(state: &AppState) -> Self {
         Self {
+            clock: state.membership.clock_guard(),
             started_at: state.started_at,
             transcode: state.transcode.metrics_handle(),
             integration: state.jobs.metrics_handle(),
@@ -5192,6 +5576,19 @@ fn render_passive_raft_metrics(
 }
 
 fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot) {
+    if let Some(required) = snapshot.required_storage_bytes {
+        out.push_str(&format!(
+            "# HELP plurx_raft_snapshot_required_storage_bytes Last target-local snapshot storage floor.\n\
+             # TYPE plurx_raft_snapshot_required_storage_bytes gauge\n\
+             plurx_raft_snapshot_required_storage_bytes {required}\n"
+        ));
+    }
+    out.push_str(&format!(
+        "# HELP plurx_raft_snapshot_deferrals_total Snapshot storage admission retries.\n\
+         # TYPE plurx_raft_snapshot_deferrals_total counter\n\
+         plurx_raft_snapshot_deferrals_total{{reason=\"storage\"}} {}\n",
+        snapshot.storage_deferrals_total,
+    ));
     out.push_str(
         "# HELP plurx_raft_snapshot_seconds Database Raft snapshot build and install duration.\n\
          # TYPE plurx_raft_snapshot_seconds histogram\n",
@@ -5489,8 +5886,8 @@ pub(crate) async fn metrics(
         state.plex_census.prometheus(),
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
-        crate::state::fragment_index_validation_prometheus(),
-        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus(),
+        crate::state::fragment_index_validation_prometheus() + &super::browse::detail_projection_prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &state.clock.prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
@@ -5528,7 +5925,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{jellyfin_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{availability_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         // The takeover statics, then this node's route-cache instrumentation
@@ -5536,6 +5933,7 @@ pub(crate) async fn metrics(
         takeover_metrics = crate::media_sessions::prometheus() + &state.route_cache.prometheus(),
         control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
+        availability_metrics = crate::availability::prometheus(),
         // The retained live-HLS engine spends real encode time. Zero on a node
         // whose VOD coverage is complete, which is the number that says the
         // fallback can be turned off.
@@ -5553,6 +5951,7 @@ pub(crate) async fn metrics(
         codec_qualification_metrics = codec_qualification_metrics,
         live_tv_metrics = live_tv_metrics,
         library_channel_metrics = crate::http::library_channels::prometheus(),
+        jellyfin_metrics = crate::http::jellyfin::prometheus(),
         artwork_metrics = crate::http::images::prometheus(),
     );
     (
@@ -5843,6 +6242,35 @@ mod tests {
                 "5", "10", "30", "60", "120", "300",
             ]
         );
+    }
+
+    #[test]
+    fn snapshot_storage_metrics_are_passive_fixed_label_and_unknown_is_absent() {
+        let zero = plurx_core::cluster::migration::status::DbSnapshotHistogram {
+            count: 0,
+            sum_nanos: 0,
+            cumulative_buckets: [0; 16],
+        };
+        let mut sample = DbSnapshotMetricsSnapshot {
+            storage_deferrals_total: 7,
+            required_storage_bytes: Some(123456),
+            build_ok: zero,
+            build_error: zero,
+            install_ok: zero,
+            install_error: zero,
+            last_build: None,
+            last_install: None,
+        };
+        let mut output = String::new();
+        render_snapshot_metrics(&mut output, sample);
+        assert!(output.contains("plurx_raft_snapshot_deferrals_total{reason=\"storage\"} 7\n"));
+        assert!(output.contains("plurx_raft_snapshot_required_storage_bytes 123456\n"));
+        assert!(!output.contains("node_id="));
+        sample.required_storage_bytes = None;
+        output.clear();
+        render_snapshot_metrics(&mut output, sample);
+        assert!(!output.contains("plurx_raft_snapshot_required_storage_bytes"));
+        assert!(output.contains("plurx_raft_snapshot_deferrals_total{reason=\"storage\"} 7\n"));
     }
 
     /// Every route that reads the roster's machine names, enumerated.
@@ -6219,6 +6647,8 @@ mod tests {
             watermark_local_reads_supported: true,
             watermark_errors: 5,
             snapshot_metrics: Some(DbSnapshotMetricsSnapshot {
+                storage_deferrals_total: 0,
+                required_storage_bytes: None,
                 build_ok: DbSnapshotHistogram {
                     count: 2,
                     sum_nanos: 1_250_000_000,
@@ -6360,6 +6790,8 @@ mod tests {
             decode_smooth: None,
             session_id: None,
             snapshot: None,
+            link_sample: None,
+            candidate_recovery: None,
             control: None,
             control_trigger: None,
             delivered_range: None,

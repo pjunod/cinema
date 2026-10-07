@@ -18,6 +18,74 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 /** The caller supplies the transport; the role selects only player behavior. */
 internal enum class PlayerRole { Finite, Successor, LiveTv, LibraryChannel, Offline, Audio }
 
+/** The attributes every plurx player plays under. */
+internal val PLURX_MEDIA_AUDIO_ATTRIBUTES: AudioAttributes = AudioAttributes.Builder()
+    .setUsage(C.USAGE_MEDIA)
+    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+    .build()
+
+/**
+ * Audio focus, and pausing when the output becomes noisy, belong to the one
+ * player the viewer hears. A prepared successor plays silently before its
+ * switch; if it requested focus, the platform would take focus away from the
+ * player on screen and Media3 would pause it — a quality change that freezes
+ * the picture it was meant to replace without a gap.
+ */
+internal fun handlesAudioFocus(role: PlayerRole): Boolean = role != PlayerRole.Successor
+
+/** The one player capability that focus ownership moves. */
+internal fun interface AudioFocusOwner {
+    fun ownAudioFocus(owns: Boolean)
+}
+
+internal fun ExoPlayer.asAudioFocusOwner(): AudioFocusOwner = AudioFocusOwner { owns ->
+    setAudioAttributes(PLURX_MEDIA_AUDIO_ATTRIBUTES, owns)
+    setHandleAudioBecomingNoisy(owns)
+}
+
+/**
+ * Move focus from the player going silent to the player becoming audible.
+ * The release is issued first, but each player applies it on its own
+ * playback thread, so the platform may still see the new request before the
+ * old abandon; a late loss on the outgoing player is harmless because it is
+ * already paused (commit) or being retired (rollback).
+ */
+internal fun handOverAudioFocus(from: AudioFocusOwner, to: AudioFocusOwner) {
+    from.ownAudioFocus(false)
+    to.ownAudioFocus(true)
+}
+
+/**
+ * The prepared-handoff view of the same ownership. [handOverAudioFocus] is the
+ * one move; this adds the staged successor (it never requests focus) and the
+ * rollback, whose failed successor stays parked behind the surface overlap
+ * until it is collected, up to the overlap bound. Losing focus alone left it
+ * playing and audible over the restored player, so it is paused and muted
+ * before focus moves back. The caller reads any viewer volume it carries over
+ * before this runs.
+ */
+internal fun interface AudioFocusHandling { fun handle(owned: Boolean) }
+
+internal object PreparedAudioFocus {
+    fun stage(successor: AudioFocusHandling) = successor.handle(false)
+    fun move(from: AudioFocusHandling, to: AudioFocusHandling) =
+        handOverAudioFocus(AudioFocusOwner { from.handle(it) }, AudioFocusOwner { to.handle(it) })
+
+    fun rollback(failed: AudioFocusHandling, failedOutput: PlaybackSilencing, restored: AudioFocusHandling) {
+        failedOutput.silence()
+        move(failed, restored)
+    }
+}
+
+internal fun interface PlaybackSilencing { fun silence() }
+
+internal fun ExoPlayer.audioFocusHandling(): AudioFocusHandling {
+    val owner = asAudioFocusOwner()
+    return AudioFocusHandling { owner.ownAudioFocus(it) }
+}
+
+internal fun ExoPlayer.playbackSilencing() = PlaybackSilencing { volume = 0f; playWhenReady = false }
+
 /**
  * One construction path for every player. In particular, Offline still has a
  * cache-only source with no account-bearing upstream, and only finite players
@@ -29,6 +97,8 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
         dataSource: DataSource.Factory,
         audioLanguage: String? = null,
         transferListener: TransferListener? = null,
+        continuousSources: ContinuousSourceRegistry? = null,
+        continuousOutput: ContinuousOutputEvidence? = null,
     ): ExoPlayer {
         require(role != PlayerRole.Offline || dataSource is CacheDataSource.Factory) {
             "Offline playback requires a cache-only data source"
@@ -41,7 +111,8 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
             }
             dataSource.setTransferListener(transferListener)
         }
-        val selector = DefaultTrackSelector(context).apply {
+        val selector = (if (continuousSources == null) DefaultTrackSelector(context)
+            else DefaultTrackSelector(context, ContinuousTrackSelectionFactory(continuousSources::binding))).apply {
             parameters = buildUponParameters()
                 .setPreferredAudioLanguage(audioLanguage)
                 .setTunnelingEnabled(
@@ -60,20 +131,28 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
                 }
                 .build()
         }
-        val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+        val renderers = (if (role in setOf(PlayerRole.Finite, PlayerRole.Successor))
+            PreparedFrameRenderersFactory(context, continuousOutput) else DefaultRenderersFactory(context))
+            .setEnableDecoderFallback(true)
+        val ordinaryLoadControl = playbackLoadControl(
+            context,
+            live = role == PlayerRole.LiveTv,
+            role = when (role) {
+                PlayerRole.Successor -> BufferRole.Successor
+                PlayerRole.LiveTv -> BufferRole.Live
+                else -> BufferRole.Incumbent
+            },
+        )
+        val loadControl = continuousSources?.let { sources ->
+            ContinuousLoadControl(ordinaryLoadControl, continuousOutput?.allocations) { id, timeline -> sources.binding(id, timeline) != null }
+        } ?: ordinaryLoadControl
         val player = ExoPlayer.Builder(context)
-            .setLoadControl(playbackLoadControl(context, live = role == PlayerRole.LiveTv))
+            .setLoadControl(loadControl)
             .setTrackSelector(selector)
             .setRenderersFactory(renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(source))
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                    .build(),
-                /* handleAudioFocus = */ true,
-            )
-            .setHandleAudioBecomingNoisy(true)
+            .setAudioAttributes(PLURX_MEDIA_AUDIO_ATTRIBUTES, handlesAudioFocus(role))
+            .setHandleAudioBecomingNoisy(handlesAudioFocus(role))
             .build()
         if (role == PlayerRole.Audio) player.setWakeMode(C.WAKE_MODE_NETWORK)
         return player

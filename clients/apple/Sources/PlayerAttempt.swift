@@ -157,10 +157,23 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case stallRecovery = "stall_recovery"
     /// `handleItemFailure`: the failure ladder after its control ask.
     case itemFailureLadder = "item_failure_ladder"
+    case blackFrameDecoderAcknowledgement = "black_frame_decoder_acknowledgement"
+    case itemDecoderAcknowledgement = "item_decoder_acknowledgement"
+    case stallCandidateAcknowledgement = "stall_candidate_acknowledgement"
+    case stallCandidateReturn = "stall_candidate_return"
+    case preparedPressureEntry = "prepared_pressure_entry"
+    case preparedPressureAcknowledgement = "prepared_pressure_acknowledgement"
     /// `issueSeek`: coalesced intent before reporting to control.
     case seekIntent = "seek_intent"
     /// `issueSeek`: the intent after the awaited control report.
     case seekIntentAfterControl = "seek_intent_after_control"
+    /// `autoBoundaryIsCurrent`: a boundary's optional original preparation
+    /// belongs to the title, attachment and viewer action that started it.
+    case autoBoundaryOwnerCurrent = "auto_boundary_owner_current"
+    /// `tickDisplayAwareAuto`: the re-plan a viewer seek or long-pause resume
+    /// armed is owed only while that viewer action is still the latest. A
+    /// reopen for the same seek does not supersede it.
+    case autoBoundaryReplanCurrent = "auto_boundary_replan_current"
     /// `issueSeek`: the awaited native seek completion.
     case nativeSeekCompletion = "native_seek_completion"
     /// `issueSeek`: the native seek after awaited subtitle reconciliation.
@@ -174,8 +187,17 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case autoCatalogRefresh = "auto_catalog_refresh"
     /// An asynchronous Auto offer cannot alter a newer title or viewer intent.
     case autoQualityOffer = "auto_quality_offer"
-    /// Failed exposure may restore only the incumbent belonging to this owner.
-    case autoQualityRollback = "auto_quality_rollback"
+    /// `commitPreparedSuccessor`: failed exposure may restore only the
+    /// incumbent belonging to this title and attachment. Preserve newer
+    /// transport intent; the caller separately fences the recipe.
+    case preparedPipelineRollback = "prepared_pipeline_rollback"
+    /// `preparedCommitStillOwned`: the prepared commit, including its
+    /// rendezvous and decoded-alignment waits, belongs to the viewer action
+    /// it began under. A Play, Pause, seek or track change ends it.
+    case preparedCommit = "prepared_commit"
+    /// `applyRetainedQualityWithRestart`: the reopen after the awaited intent
+    /// report belongs to the explicit Apply with restart that asked for it.
+    case retainedQualityRestart = "retained_quality_restart"
 
     /// The epochs this fence depends on — exactly the fields its old
     /// conjunction compared.
@@ -186,15 +208,25 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .blackFrameDecodeFailure: return [.lifecycle, .viewerAction]
         case .stallRecovery: return [.open, .viewerAction]
         case .itemFailureLadder: return [.open, .viewerAction]
+        case .blackFrameDecoderAcknowledgement: return [.lifecycle, .viewerAction]
+        case .itemDecoderAcknowledgement: return [.open, .viewerAction]
+        case .stallCandidateAcknowledgement: return [.open, .viewerAction]
+        case .stallCandidateReturn: return [.open, .viewerAction]
+        case .preparedPressureEntry: return [.lifecycle, .viewerAction]
+        case .preparedPressureAcknowledgement: return [.lifecycle, .viewerAction]
         case .seekIntent: return [.viewerAction, .seek]
         case .seekIntentAfterControl: return [.viewerAction, .seek]
+        case .autoBoundaryOwnerCurrent: return [.lifecycle, .open, .viewerAction]
+        case .autoBoundaryReplanCurrent: return [.lifecycle, .viewerAction]
         case .nativeSeekCompletion: return [.open, .viewerAction, .seek]
         case .nativeSeekAfterSelection: return [.open, .viewerAction, .seek]
         case .recoveryEvidencePoll: return [.open]
         case .autoInitialLayout: return [.initialDecision]
         case .autoCatalogRefresh: return [.lifecycle, .viewerAction]
         case .autoQualityOffer: return [.lifecycle, .viewerAction]
-        case .autoQualityRollback: return [.lifecycle, .open, .viewerAction]
+        case .preparedPipelineRollback: return [.lifecycle, .open, .seek]
+        case .preparedCommit: return [.viewerAction]
+        case .retainedQualityRestart: return [.viewerAction]
         }
     }
 }

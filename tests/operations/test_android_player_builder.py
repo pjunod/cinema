@@ -25,7 +25,16 @@ class AndroidPlayerBuilderContract(unittest.TestCase):
                 "Net.dataSourceFactory()",
                 "val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)",
                 "transferListener = autoTransfers",
-                "return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers)",
+                # The continuous-quality registry and output evidence are built
+                # once per pipeline, handed to the builder, and returned with
+                # the player, so the owner reads the evidence its own pipeline
+                # produced rather than a defaulted, unwired instance.
+                "val continuousSources = ContinuousSourceRegistry()",
+                "val continuousOutput = ContinuousOutputEvidence()",
+                "continuousSources = continuousSources",
+                "continuousOutput = continuousOutput",
+                "return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, "
+                "continuousSources, continuousOutput)",
             ),
             "livetv/LiveTvPlayer.kt": (
                 "PlayerRole.LiveTv",

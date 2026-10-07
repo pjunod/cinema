@@ -179,6 +179,61 @@ pub(crate) async fn drain_diagnostics(mut input: impl AsyncRead + Unpin) -> Stri
     String::from_utf8_lossy(&tail).into_owned()
 }
 
+/// A producer's drained stderr tail, split into the lines an operator should
+/// see and the informational lines a library prints on every start.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProducerDiagnostic {
+    /// Everything not known to be informational, in order. A warning's worth.
+    pub(crate) actionable: String,
+    /// Known informational lines, in order. Debug detail only.
+    pub(crate) informational: String,
+}
+
+/// Line prefixes that are never a producer diagnostic. libva writes its own
+/// `libva info:` lines (the VA-API version, the driver it tries to open, the
+/// init function it found, `va_openDriver() returns 0`) straight to stderr,
+/// whatever FFmpeg's `-loglevel` says, once for every VA-API or QSV device a
+/// child opens; a healthy QSV generation therefore always had a "diagnostic".
+/// `libva error:` is not on this list and stays actionable.
+const INFORMATIONAL_DIAGNOSTIC_PREFIXES: &[&str] = &["libva info:"];
+
+/// Whether one stderr line is informational output rather than a diagnostic:
+/// it starts, after leading whitespace, with one of
+/// [`INFORMATIONAL_DIAGNOSTIC_PREFIXES`]. The one rule every ffmpeg stderr
+/// consumer uses, line by line ([`classify_diagnostic`], the rolling
+/// transcode's stderr log, the Live TV readiness error).
+pub(crate) fn is_informational_diagnostic(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    INFORMATIONAL_DIAGNOSTIC_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
+/// Classify a [`drain_diagnostics`] tail line by line. Blank lines are
+/// dropped; a line is informational only when it starts with one of
+/// [`INFORMATIONAL_DIAGNOSTIC_PREFIXES`], so anything unrecognised stays
+/// actionable.
+pub(crate) fn classify_diagnostic(tail: &str) -> ProducerDiagnostic {
+    let mut actionable = Vec::new();
+    let mut informational = Vec::new();
+    for line in tail.lines() {
+        let line = line.trim_end_matches('\r');
+        let trimmed = line.trim_start();
+        if trimmed.trim_end().is_empty() {
+            continue;
+        }
+        if is_informational_diagnostic(trimmed) {
+            informational.push(line);
+        } else {
+            actionable.push(line);
+        }
+    }
+    ProducerDiagnostic {
+        actionable: actionable.join("\n"),
+        informational: informational.join("\n"),
+    }
+}
+
 /// A file-producing child with no captured stdout and one bounded stderr
 /// reader. Cancellation transfers the exact child to a reap owner, never a
 /// detached diagnostic reader. Used by whole-track burn extraction.
@@ -236,13 +291,33 @@ impl BoundedDiagnosticChild {
         })
     }
 
-    pub async fn output(mut self) -> std::io::Result<(std::process::ExitStatus, String)> {
+    pub async fn output(self) -> std::io::Result<(std::process::ExitStatus, String)> {
+        self.output_cancellable(&tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
+    /// Cooperative cancellation joins the child before releasing its caller's
+    /// resource permits. Dropping the entire task still retains the reap owner.
+    pub async fn output_cancellable(
+        mut self,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<(std::process::ExitStatus, String)> {
         let stderr = self
             .stderr
             .take()
             .ok_or_else(|| std::io::Error::other("extractor stderr was not piped"))?;
         let child = self.child.as_mut().expect("owned extraction child");
-        let (status, diagnostics) = tokio::join!(child.wait(), drain_diagnostics(stderr));
+        let wait = async {
+            tokio::select! {
+                biased;
+                _ = cancelled.cancelled() => {
+                    let _ = child.start_kill();
+                    child.wait().await
+                }
+                status = child.wait() => status,
+            }
+        };
+        let (status, diagnostics) = tokio::join!(wait, drain_diagnostics(stderr));
         let status = status?;
         self.child.take(); // Successful wait, including nonzero exit, proves reap.
         self.child_job.take();
@@ -258,9 +333,23 @@ impl BoundedDiagnosticChild {
     /// disk; stderr is drained concurrently and the child is reaped before an
     /// error is returned.
     pub async fn output_to_bounded_file(
+        self,
+        path: &std::path::Path,
+        max_bytes: u64,
+    ) -> std::io::Result<(std::process::ExitStatus, String)> {
+        self.output_to_bounded_file_cancellable(
+            path,
+            max_bytes,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    pub async fn output_to_bounded_file_cancellable(
         mut self,
         path: &std::path::Path,
         max_bytes: u64,
+        cancelled: &tokio_util::sync::CancellationToken,
     ) -> std::io::Result<(std::process::ExitStatus, String)> {
         let mut stdout = self
             .stdout
@@ -281,7 +370,11 @@ impl BoundedDiagnosticChild {
                 let mut total = 0_u64;
                 let mut buffer = [0_u8; 64 * 1024];
                 let exceeded = loop {
-                    let read = stdout.read(&mut buffer).await?;
+                    let read = tokio::select! {
+                        biased;
+                        _ = cancelled.cancelled() => return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "analysis cancelled")),
+                        result = stdout.read(&mut buffer) => result?,
+                    };
                     if read == 0 {
                         break false;
                     }
@@ -356,26 +449,65 @@ impl Drop for BoundedDiagnosticChild {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct EncodedExecutable {
     pub path: std::path::PathBuf,
     pub digest: String,
     object_version: String,
 }
 
+#[derive(Default)]
+struct ExecutableCaptureCache {
+    executable: Option<EncodedExecutable>,
+    #[cfg(test)]
+    hashes: u64,
+}
+
+// One configured encoder, one retained attestation. Concurrent recipe captures
+// share the hash; every reuse still checks the exact object identity that the
+// production launch and publication fences require.
+static EXECUTABLE_CAPTURE_CACHE: std::sync::OnceLock<tokio::sync::Mutex<ExecutableCaptureCache>> =
+    std::sync::OnceLock::new();
+
 impl EncodedExecutable {
+    pub(crate) async fn capture_program(program: &str) -> Result<Self, String> {
+        let path =
+            resolve_executable_path(program).ok_or("cannot resolve the producer executable")?;
+        Self::capture_at(path).await
+    }
     pub async fn capture() -> Result<Self, String> {
         let path = encoder_executable_path().ok_or("cannot resolve the encoder executable")?;
         Self::capture_at(path).await
     }
 
-    async fn capture_at(path: std::path::PathBuf) -> Result<Self, String> {
+    pub(crate) async fn capture_at(path: std::path::PathBuf) -> Result<Self, String> {
+        Self::capture_at_with_cache(path, EXECUTABLE_CAPTURE_CACHE.get_or_init(Default::default))
+            .await
+    }
+
+    async fn capture_at_with_cache(
+        path: std::path::PathBuf,
+        cache: &tokio::sync::Mutex<ExecutableCaptureCache>,
+    ) -> Result<Self, String> {
+        let mut cache = cache.lock().await;
+        if let Some(captured) = cache.executable.as_ref().filter(|value| value.path == path) {
+            let objects = vec![captured.attestation_object()].into();
+            if engine_objects_are_current_batch(None, objects).await.0 {
+                return Ok(captured.clone());
+            }
+        }
         let (digest, object_version) = hash_engine_object(&path).await?;
-        Ok(Self {
+        let captured = Self {
             path,
             digest: hex::encode(digest),
             object_version,
-        })
+        };
+        #[cfg(test)]
+        {
+            cache.hashes += 1;
+        }
+        cache.executable = Some(captured.clone());
+        Ok(captured)
     }
 
     /// The `(path, version)` pair this executable attests.
@@ -842,11 +974,11 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|error| format!("invalid ffprobe JSON: {error}"))?;
     if let Some(document) = value.as_object_mut() {
-        // plurx's own record of a measurement it made from the stored probe's
-        // source revision (`transcode::hevc_census`), grafted after the scan.
-        // A fresh probe never carries it, and its presence says nothing about
-        // whether the bytes changed.
+        // Application-owned measurements are grafted after the scan. A fresh
+        // probe never carries them; their presence says nothing about whether
+        // the source bytes changed. Keep all FFprobe-owned fields comparable.
         document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
+        document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
     }
     if let Some(format) = value
         .get_mut("format")
@@ -1720,6 +1852,7 @@ static DOVI_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::co
 static DOVI_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+static HDR10_PASSTHROUGH_VAAPI: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
 static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -2760,6 +2893,38 @@ async fn read_bounded_with_limit(
     Ok(bytes)
 }
 
+/// Digests of engine objects keyed by path and the cheap object version
+/// (`engine_object_version`: device, inode, size, mtime and ctime). The same
+/// version identity already decides whether a hash raced a replacement, so a
+/// matching version proves the bytes are the ones hashed. A replaced or
+/// touched object has a new version and is hashed again. The key set is the
+/// resolved encoder and its loaded dependencies, so it stays small.
+/// Digest per engine object path, tagged with the object version it was taken at.
+type EngineObjectDigests =
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>)>>;
+static ENGINE_OBJECT_DIGESTS: std::sync::LazyLock<EngineObjectDigests> =
+    std::sync::LazyLock::new(Default::default);
+
+fn cached_engine_digest(path: &std::path::Path, version: &str) -> Option<Vec<u8>> {
+    ENGINE_OBJECT_DIGESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(path)
+        .filter(|(cached, _)| cached == version)
+        .map(|(_, digest)| digest.clone())
+}
+
+fn remember_engine_digest(path: &std::path::Path, version: &str, digest: &[u8]) {
+    ENGINE_OBJECT_DIGESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path.to_owned(), (version.to_owned(), digest.to_vec()));
+}
+
+/// SHA-256 of one engine object plus its object version. Only the first
+/// capture of an object version reads the bytes; every start path captures
+/// the executable several times, and hashing a ~100 MB binary each time cost
+/// seconds of disk read per playback start.
 async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String), String> {
     #[cfg(unix)]
     let metadata = tokio::fs::metadata(path)
@@ -2789,6 +2954,9 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
     let version = engine_object_version(&metadata)?;
     #[cfg(windows)]
     let version = windows_engine_object_version(&source)?;
+    if let Some(digest) = cached_engine_digest(path, &version) {
+        return Ok((digest, version));
+    }
     #[cfg(unix)]
     let mut file = tokio::fs::File::open(path)
         .await
@@ -2826,7 +2994,9 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
             path.display()
         ));
     }
-    Ok((object.finalize().to_vec(), version))
+    let digest = object.finalize().to_vec();
+    remember_engine_digest(path, &version, &digest);
+    Ok((digest, version))
 }
 
 pub(crate) fn engine_path_version(path: &std::path::Path) -> Result<String, String> {
@@ -3411,6 +3581,55 @@ pub async fn has_hdr10_passthrough_qsv() -> bool {
         .await
 }
 
+/// Plain PQ/BT.2020 scale and P010 upload into the VAAPI Main10 encoder.
+/// This proof does not advertise Dolby RPU processing or 4K throughput.
+pub async fn has_hdr10_passthrough_vaapi() -> bool {
+    *HDR10_PASSTHROUGH_VAAPI
+        .get_or_init(|| async {
+            let encoder = Encoder::Vaapi;
+            let Some(filter) = Pipeline::Hdr10Passthrough.filters(Some(1920), 1080, Some("hdr10"))
+            else {
+                return false;
+            };
+            let Some(upload) = encoder.filter_suffix_for(OutputGrade::Hdr10) else {
+                return false;
+            };
+            let mut command = tokio::process::Command::new(ffmpeg_bin());
+            command
+                .kill_on_drop(true)
+                .args(["-hide_banner", "-loglevel", "error", "-filter_threads", "1"])
+                .args(encoder.init_args())
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=size=1920x1080:rate=24:color=black",
+                ])
+                .args(["-frames:v", "24", "-vf"])
+                .arg(format!("{filter},{upload}"))
+                .args(encoder.encode_args_for(
+                    OutputGrade::Hdr10,
+                    20_000,
+                    EffectiveRateControl::Vbr,
+                    false,
+                    None,
+                ))
+                .args(["-bf", "0", "-f", "null", "-"]);
+            tokio::time::timeout(
+                Duration::from_secs(20),
+                crate::process_control::status_job_owned(
+                    &mut command,
+                    crate::process_control::ChildWork::background(
+                        "HDR10 VAAPI passthrough capability probe",
+                    ),
+                ),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok_and(|status| status.success()))
+        })
+        .await
+}
+
 /// Can this node accept the software Dolby renderer's 10-bit frames and run
 /// the measured QSV Main10 encode graph?
 ///
@@ -3708,6 +3927,31 @@ async fn probe_burst() -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
 
+    #[tokio::test]
+    async fn engine_object_digest_is_reused_per_version_and_rehashed_on_change() {
+        use sha2::Digest as _;
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("engine-object");
+        std::fs::write(&path, b"first engine bytes").expect("object");
+        let (first, version) = super::hash_engine_object(&path).await.expect("first hash");
+        assert_eq!(first, sha2::Sha256::digest(b"first engine bytes").to_vec());
+        assert_eq!(
+            super::cached_engine_digest(&path, &version),
+            Some(first.clone()),
+            "a captured version is served without reading the object again"
+        );
+        let (again, same_version) = super::hash_engine_object(&path).await.expect("cached");
+        assert_eq!((again, same_version), (first.clone(), version.clone()));
+        // A replacement changes the cheap object version (size, ctime, inode).
+        std::fs::write(&path, b"replaced engine object bytes").expect("replacement");
+        let (replaced, replaced_version) = super::hash_engine_object(&path).await.expect("rehash");
+        assert_ne!(replaced_version, version);
+        assert_eq!(
+            replaced,
+            sha2::Sha256::digest(b"replaced engine object bytes").to_vec()
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_probe_reaps_child_before_returning() {
@@ -3909,6 +4153,34 @@ mod tests {
                 .expect("compare")
                 .same
         );
+    }
+
+    /// Background content analysis adds application metadata without changing
+    /// media. Same-reporter comparison must ignore that record alone, including
+    /// unavailable/negative reports, while still rejecting actual stream drift.
+    #[test]
+    fn a_content_encoding_report_is_not_a_source_change_for_the_same_reporter() {
+        let held = current_reporter_probe();
+        for outcome in ["measured", "scorer_unavailable", "bounded_failure"] {
+            let mut stored = held.clone();
+            stored[plurx_core::store::CONTENT_ENCODING_PROBE_KEY] = serde_json::json!({
+                "context": {"version": 1, "engine": "fixture", "threads": 2},
+                "outcome": outcome, "source_sha256": "a".repeat(64), "windows": [],
+            });
+            let comparison = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+                .expect("compare unchanged source with content metadata");
+            assert!(comparison.same, "{outcome}: {:?}", comparison.differences);
+            assert!(!comparison.admitted_on_reporter_drift);
+
+            // Use a fact present in both probes. The current reporter omits
+            // `refs`, and optional field omission is not source replacement.
+            stored["streams"][0]["width"] = serde_json::json!(1920);
+            let changed = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+                .expect("compare changed stream with content metadata");
+            assert!(!changed.same, "{outcome}: real stream changes must refuse");
+            assert!(!changed.admitted_on_reporter_drift);
+            assert!(changed.rendered_differences().contains("/streams/0/width"));
+        }
     }
 
     /// The production failure this exists to stop: three refusals on `media1`
@@ -4701,6 +4973,55 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn encoded_executable_capture_shares_hash_and_rechecks_replacement() {
+        let base = crate::test_tempdir().expect("encoder capture cache");
+        let path = base.path().join("encoder");
+        tokio::fs::write(&path, b"encoder-a")
+            .await
+            .expect("encoder");
+        let modified = std::fs::metadata(&path)
+            .expect("encoder metadata")
+            .modified()
+            .expect("encoder mtime");
+        let cache = tokio::sync::Mutex::new(ExecutableCaptureCache::default());
+        let (first, second) = tokio::join!(
+            EncodedExecutable::capture_at_with_cache(path.clone(), &cache),
+            EncodedExecutable::capture_at_with_cache(path.clone(), &cache),
+        );
+        let first = first.expect("first capture");
+        assert_eq!(first.digest, second.expect("concurrent capture").digest);
+        assert_eq!(
+            cache.lock().await.hashes,
+            1,
+            "one actual hash for concurrent recipes"
+        );
+        let replacement = base.path().join("replacement");
+        std::fs::write(&replacement, b"encoder-b").expect("replacement bytes");
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("replacement handle")
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .expect("preserve mtime");
+        std::fs::rename(replacement, &path).expect("replace encoder");
+        let changed = EncodedExecutable::capture_at_with_cache(path.clone(), &cache)
+            .await
+            .expect("replacement capture");
+        assert_ne!(
+            first.digest, changed.digest,
+            "same size and mtime do not reuse old bytes"
+        );
+        assert_eq!(cache.lock().await.hashes, 2);
+        tokio::fs::remove_file(&path).await.expect("remove encoder");
+        assert!(
+            EncodedExecutable::capture_at_with_cache(path, &cache)
+                .await
+                .is_err(),
+            "a missing encoder cannot reuse its cached attestation"
+        );
+    }
+
+    #[tokio::test]
     async fn encoded_executable_refuses_same_size_mtime_replacement() {
         let base = crate::test_tempdir().expect("engine identity");
         let path = base.path().join("encoder");
@@ -5206,12 +5527,88 @@ mod tests {
         }
     }
 
+    /// Owned-lab receipt 2026-10-02, defect 3: every QSV VOD generation logged
+    /// `WARN VOD producer diagnostic ... libva info: VA-API version 1.24.0`.
+    /// libva's start-up lines are informational; FFmpeg's own diagnostics and
+    /// `libva error:` lines stay actionable, in order.
+    #[test]
+    fn libva_info_lines_are_informational_not_producer_diagnostics() {
+        let qsv_start = "libva info: VA-API version 1.24.0\n\
+                         libva info: Trying to open /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so\n\
+                         libva info: Found init function __vaDriverInit_1_24\n\
+                         libva info: va_openDriver() returns 0\n";
+        let healthy = classify_diagnostic(qsv_start);
+        assert_eq!(healthy.actionable, "");
+        assert_eq!(healthy.informational.lines().count(), 4);
+        assert!(healthy
+            .informational
+            .starts_with("libva info: VA-API version 1.24.0"));
+
+        let decoder = "[h264 @ 0x5f5b2ef0c780] number of reference frames (0+5) exceeds max (4; probably corrupt input), discarding one";
+        let driver = "libva error: /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so init failed";
+        let mixed = classify_diagnostic(&format!("{qsv_start}{decoder}\r\n\n{driver}\n"));
+        assert_eq!(mixed.actionable, format!("{decoder}\n{driver}"));
+        assert_eq!(mixed.informational, healthy.informational);
+
+        // A recognised prefix later in a line is not the line's start.
+        assert!(is_informational_diagnostic(
+            "  libva info: VA-API version 1.24.0"
+        ));
+        assert!(!is_informational_diagnostic(driver));
+        let quoted = "[mov @ 0x1] could not open 'libva info: x.mkv'";
+        assert_eq!(classify_diagnostic(quoted).actionable, quoted);
+        assert_eq!(classify_diagnostic(" \n\n"), ProducerDiagnostic::default());
+    }
+
     #[tokio::test]
     async fn producer_diagnostics_drain_but_retain_only_the_bounded_tail() {
         let input = [vec![b'x'; 24 * 1024], b"terminal filter error".to_vec()].concat();
         let tail = drain_diagnostics(input.as_slice()).await;
         assert_eq!(tail.len(), 8 * 1024);
         assert!(tail.ends_with("terminal filter error"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cooperative_sample_cancellation_reaps_before_returning_capacity() {
+        for pipe in [false, true] {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.args(["-c", "exec sleep 60"]);
+            let work =
+                crate::process_control::ChildWork::background("sample cancellation regression");
+            let mut owner = if pipe {
+                BoundedDiagnosticChild::spawn_piped_output(&mut command, work)
+            } else {
+                BoundedDiagnosticChild::spawn(&mut command, work)
+            }
+            .expect("fixture succeeds");
+            let (sent, mut received) = tokio::sync::oneshot::channel();
+            owner.reaped = Some(sent);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            cancel.cancel();
+            let directory = tempfile::tempdir().expect("fixture succeeds");
+            if pipe {
+                assert!(owner
+                    .output_to_bounded_file_cancellable(
+                        &directory.path().join("sample"),
+                        1024,
+                        &cancel
+                    )
+                    .await
+                    .is_err());
+            } else {
+                assert!(!owner
+                    .output_cancellable(&cancel)
+                    .await
+                    .expect("fixture succeeds")
+                    .0
+                    .success());
+            }
+            assert!(
+                received.try_recv().is_ok(),
+                "caller capacity is held until child has reaped"
+            );
+        }
     }
 
     #[cfg(unix)]

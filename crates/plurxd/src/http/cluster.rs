@@ -474,6 +474,7 @@ pub async fn finalize_learner_join(
 
 pub(crate) fn api_error(error: MembershipError) -> ApiError {
     let status = match error {
+        MembershipError::ClockUnbounded(_) => StatusCode::SERVICE_UNAVAILABLE,
         MembershipError::Unavailable => StatusCode::CONFLICT,
         MembershipError::InvalidToken
         | MembershipError::Incompatible

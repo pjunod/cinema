@@ -245,18 +245,17 @@ ssh lab3 'cat /opt/noirr/plurx-agent/.forgejo-registry-token' |
     --username fleet --password-stdin'
 ```
 
-Every successful Forgejo `main` run ends with
-`publish merged image (Forgejo registry)`. The job waits for the post-merge
-validation fan-out, builds once on an X64 runner, verifies the immutable
-registry copy, and only then moves the fleet tag. It publishes
-`sha-<12hex>` for rollback and `main` for the newest qualified merge.
-Versioned releases own `latest`; fleet merges never overwrite that alias.
-**No run currently reaches that job:** `ci.yml` runs on `v*` tags and manual
-dispatch only, and the job's condition is a push to `main`, so no new
-`sha-` image has had an automatic producer since `3cd127e2` (2026-09-10)
-([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
-correction 1, re-verified 2026-09-24; the fix belongs to
-[RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md) §3.1(b)).
+Only a manual Forgejo `ci.yml` dispatch on `main` can reach
+`publish merged image (Forgejo registry)`. A merge starts no runtime sweep
+or image build, as P-01 option (a) requires. The dispatched job waits for
+the full validation fan-out, builds once on an X64 runner, verifies the
+immutable registry copy, and only then moves the fleet tag. It publishes
+`sha-<12hex>` for rollback and `main` for the newest manually qualified
+tree. A dispatch on another branch and a `v*` tag cannot reach this job.
+Versioned releases own `latest`; fleet images never overwrite that alias.
+The 2026-09-29 trigger decision and its first-tag limits are recorded in
+[LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
+correction 1.
 
 **Two identities, two questions.** The `sha-<12hex>` image is the deploy and
 rollback identity: it is what `deploy/.env`'s `PLURX_IMAGE` names and what a
@@ -416,6 +415,14 @@ Both are counted on `/metrics`:
 |---|---|---|
 | `plurx_sqlite_connection_recoveries_total` | `pool` = `writer` \| `read`; `outcome` = `validated` \| `reopened` \| `failed` | A connection taken back after a panic. Anything above zero means a store call panicked; find it in the log (`recovered a sqlite connection poisoned by a panic`). `failed` means the slot is still unusable. |
 | `plurx_sqlite_integrity_checks_total` | `phase` = `boot` \| `background`; `outcome` = `ok` \| `corrupt` \| `deferred` (boot) \| `error` (background) | Integrity checks and their results. `deferred` means the boot check ran out of time and a background check is scheduled. |
+
+**Playback admission cleanup** checks for due preparation, drain and lease
+retirements before preparing their SQLite updates. Compiling these updates
+expands the session trigger graph even when no row qualifies; concurrent
+starts previously paid that cost while sharing the writer connection. The
+checks and original updates run in the same transaction, with the existing
+deadlines, batch limits and orphan cleanup. The replicated backend retains
+its existing idle-maintenance read check.
 
 ### Backing up and restoring an activated cluster
 
@@ -608,7 +615,7 @@ costs:
   entry, and a snapshot taken afterwards carries them, so a learner or a
   restored voter receives them with the snapshot.
 - **The build holds that voter's state-machine writer** for its duration.
-  Measured on the 75,600-item K-05 fixture on nuc3: about 60 ms for all three
+  Measured on the 75,600-item K-05 fixture on lab3: about 60 ms for all three
   (median of five, 63 ms cold and 59 ms warm; the evidence file has the
   per-statement numbers). It grows with the
   item count (a sort of the indexed rows, n log n), so a library ten times
@@ -1564,7 +1571,7 @@ scripts/cluster-page-latency \
   --scenario healthy \
   --target-role follower \
   --voter-count 3 \
-  --hardware-label m6-pro \
+  --hardware-label lab6-pro \
   --storage-label nvme \
   --network-label lan-ethernet
 ```
@@ -1930,13 +1937,32 @@ start at all. Never move two voters concurrently and retain both verified copies
 through a soak period.
 
 `cluster.read_pool_size` is bounded from 1 through 16 and defaults to 4. It
-changes only local read-only SQLite connections. WAL size/sync, the 10,000-log
-snapshot trigger, disaster-recovery log retention, heartbeat, and election
+changes only local read-only SQLite connections. WAL size/sync, the default
+10,000-log snapshot trigger, disaster-recovery log retention, heartbeat, and election
 timers remain unchanged. The setting now reaches the named-host runner's node
 configuration and is repeated in schema-versioned raw and campaign evidence,
 so a 4/8/16 sweep measures and attests three different pools; an earlier runner
 built its own configuration and would have measured the default three times,
 so no deferred artifact from before that change means anything.
+
+`cluster.logs_until_snapshot` accepts 1,000 through 200,000 and defaults to
+10,000. `PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT` overrides the TOML value. The
+threshold is read when the embedded node starts, so a change takes effect on
+the next separately authorized restart and must match on every voter. The
+range is not a tuning recommendation: retain 10,000 until the snapshot
+cadence plan's fleet B/E/S/W/A evidence supports a different value. Retention
+stays `max_in_snapshot_log_to_keep = 1`.
+
+Snapshot builds check `2 × live DB bytes + max(live WAL bytes, 32 MiB) +
+64 MiB` on the state-machine filesystem before requesting the writer cut.
+Insufficient or unknown space defers for ten seconds per recheck, bounded
+by ten minutes; expiry attempts the existing path and cannot claim success
+on a full disk. `plurx_raft_snapshot_deferrals_total{reason="storage"}` counts
+retries; `plurx_raft_snapshot_required_storage_bytes` is the last known local
+floor, not a promise about current free space. Promotion needs the target's
+fresh same-heartbeat floor proof and `max(512 MiB, floor)` headroom. Upgrade a
+legacy target before promotion; its old 512 MiB-only readiness is unknown for
+this proof. No new Developer toggle gates this automatic correctness path.
 
 Run three campaigns from the same clean source/image, changing only
 `read_pool_size` and the new output directory. Validate all three directories,
@@ -2280,7 +2306,18 @@ production TOML. A resolved command-line `--config` path takes precedence over
 and their sources, validates that the chunk budget does not exceed the transfer
 budget, and exits before any Compose replacement unless the health start period
 it is about to apply covers the two sequential stages plus all three named
-startup phases.
+startup phases. Each phase is spent once: vendor startup (including a join's
+snapshot catch-up) and the startup catch-up do not spend the 45-second
+membership admission phase, which begins after the health wait and is shared
+by the committed-member wait, promotion and activation. Vendor startup has its
+own ceiling — one admission (45 s) plus one snapshot catch-up (transfer +
+install + 45 s) — because the vendor's join retries never give up by
+themselves: a joiner whose leader is unreachable, or whose join an enforced
+clock guard keeps refusing, fails startup with "did not finish starting
+(joining the cluster and its snapshot catch-up) within …" instead of hanging.
+That ceiling is a failure bound, not an expected duration; the start period
+above budgets the path a join actually takes, where its one snapshot transfer
+happens once.
 
 If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
 `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS`,
@@ -2315,6 +2352,53 @@ recorded in the benchmark artifact as a go/no-go failure for membership changes,
 failure drills, or performance runs. Bounded-replica freshness uses a local
 monotonic deadline, but clock synchronization remains an operational
 prerequisite for the existing cross-node protocols and comparable evidence.
+
+The measurement release exposes `plurx_cluster_clock_offset_seconds`, its
+uncertainty and per-peer `observation_state` on `/metrics`; numeric gauges
+are absent for Unknown peers. Compare `abs(offset) + uncertainty` with the
+fixed 2,000 ms relative contract, retain the discontinuity and Unknown-round
+counters, and report `plurx_cluster_clock_authority_reads_total` to measure
+inbound probe authorization cost. It does not replace the absolute 250 ms discipline rule; with the clock
+guard enforced it does decide acquisition (see the enforcement plan).
+Learners are probed like any member, but an unobserved learner is counted in
+`plurx_cluster_clock_unobserved_learners` instead of making coverage
+incomplete: with the clock guard enforced, a stopped learner does not refuse
+takeover, the expired-session scan or membership changes, while a stopped
+voter still does. The learner's OWN sessions are the exception: their lease
+expiry was written by its clock, so takeover and the expiry scan skip every
+route an unobserved learner owns (enforced; advisory contests and counts it)
+until it is measured within the bound or removed — removing a dead learner is
+what frees its sessions for takeover. A learner that is measured above the
+bound still refuses, and promoting a learner requires its own bounded
+observation, so measure it before promoting.
+See [the measurement handoff](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md)
+for the identified one-hour idle and sixty-second loaded receipt still owed.
+
+Since 2026-10-04 (#793) the observation feeds a clock guard. Settings →
+Developer → *Cluster clock guard* → *Enforce the cluster clock guard* (the
+replicated setting `cluster.clock_guard_enforced`, default off) decides
+whether it refuses anything; each node re-reads the setting every 10
+seconds, and a node whose read fails keeps its current mode. **Off** (the
+default): every guarded decision is admitted and `/readyz` ignores the
+clock. **On**: session
+takeover, the expired-session scan and membership changes are refused while
+the clock roster is not fully observed or an offset is outside the 2,000 ms
+bound, and `/readyz` answers 503 `clock unbounded` after two consecutive
+violating rounds; startup is never refused. Fenced removal of the member that
+is down still works. Whether this switch stays awaits Paul's ruling; see the
+[enforcement plan](cluster/CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md)'s
+2026-10-04 note. These series say which mode a node is in and what it did:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `plurx_cluster_clock_enforced` | gauge | — | 1 when this node's guard refuses decisions, 0 when it is advisory only. Compare across nodes: the setting is applied per node. |
+| `plurx_cluster_clock_refusals_total` | counter | `decision`, `cause` | Decisions the guard refused while enforcing. |
+| `plurx_cluster_clock_advisory_refusals_total` | counter | `decision`, `cause` | Decisions the guard would have refused while enforcement was off, and admitted anyway. Non-zero means turning the switch on would have refused that work. |
+
+`decision` is `takeover`, `membership_change` or `expiry_scan`; `cause` is
+`offset`, `unknown`, `local_discontinuity` or `generation_changed`. Every
+combination is emitted, at zero when nothing happened, and both counters are
+process-lifetime.
 
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
@@ -3063,6 +3147,7 @@ membership addresses and token-file paths are intentionally file-only:
 | Env var | TOML | Default | What it does |
 |---|---|---|---|
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
+| `PLURX_JELLYFIN_PORT` | `server.jellyfin_port` | `8096` | Port on `PLURX_BIND`'s address where Jellyfin clients reach the compatibility facade at the server root, so a host name alone is enough; `0` = off. Best-effort: a taken port is logged and shown in Settings → Developer, and `/jellyfin` on the main port still works |
 | `PLURX_TRUSTED_PROXIES` | `server.trusted_proxies` | empty | Comma-separated proxy CIDRs whose appended `X-Forwarded-For` hops the login throttle may trust. Keep empty unless those peers overwrite or append the header correctly |
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Bootstrap seed for the human-visible server name. The replicated setting is authoritative after first boot; rename it through the admin API |
 | `PLURX_NODE_HOSTNAME` | — | OS hostname | Short physical-machine name shown in Settings → Cluster. Native installs normally leave this unset; containers set it explicitly so a generated container id is not mistaken for the host |
@@ -3076,6 +3161,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `true` | Initial bounded-read preference; the replicated Developer setting overrides it. Each read proves consistency independently |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
+| `PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT` | `cluster.logs_until_snapshot` | `10000` | Snapshot trigger, bounded 1,000–200,000; next restart, identical on every voter; change from the default only with fleet cadence evidence |
 | `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS` | `cluster.snapshot_chunk_timeout_secs` | `30` | One non-final snapshot chunk RPC in seconds, bounded 5–300; must not exceed the transfer timeout and must match on every voter |
 | `PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS` | `cluster.snapshot_transfer_timeout_secs` | `1200` | Absolute snapshot transfer stage in seconds, bounded 60–14,400; retries, reconnects, and mismatches cannot renew it |
 | `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Final chunk/install RPC cap in seconds, bounded 10–3,600; keep identical on every voter |
@@ -3096,6 +3182,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_TONEMAP` | — | zscale | The **CPU** tone-map operator: `zscale` · `libplacebo` · `off` (no tone-map — plays HDR washed, but a useful test/escape hatch). Which *pipeline* runs — GPU or CPU — is probed at boot, not configured; this only chooses the operator when the CPU chain is the one running |
 | `PLURX_HWDECODE` | — | on | Set `off` to force software decode (still hardware-encodes) — for a GPU that decodes a stream to garbage, e.g. some Dolby Vision |
 | `PLURX_GDM_PORT` | — | `32414` | Host UDP port for GDM discovery (move if Plex owns 32414) |
+| `PLURX_JELLYFIN_HOST_PORT` | — | `8096` | Host TCP port Compose publishes for the Jellyfin standard port (move if a real Jellyfin owns 8096; clients then need that port or `/jellyfin`) |
 | `PLURX_MDNS_ADVERTISE` | — | `true` | Run Bonjour inside the server process; Compose sets this to `false` because its host-network companion advertises instead |
 | `PLURX_DISCOVERY_SERVER_URL` | — | `http://127.0.0.1:32400` | Server URL read by `plurxd advertise`; normally only the Compose companion uses it |
 | `PLURX_LOG` | — | `info` | Log filter (`tracing` EnvFilter syntax, e.g. `plurxd=debug`) |
@@ -3138,6 +3225,33 @@ far passed the unit tests and failed on physical hardware, and one of them
 in production. A green `make check` says the playlist is syntactically what was
 intended; it does not say AVPlayer will accept it. Treat an unobserved rung as
 untested, and turn it back off if the device does not visibly improve.
+
+### SDR `CODECS` on the master (Developer switch)
+
+**Settings → Developer → Master playlist codecs → *Print CODECS on SDR
+variants*** (`playback.sdr_master_codecs`, API field
+`playback_sdr_master_codecs`) is **off by default**. Off serves the pre-S-10
+master: SDR (`avc1`) variants carry no `CODECS`, which is the shape every
+client has played. On, an SDR variant names its exact `avc1.PPCCLL` string (and
+its audio component) whenever the session's frozen facts are complete — the
+same information HDR masters already carry. HDR10 and Dolby Vision variants
+are identical either way.
+
+It is a switch rather than a default because AVPlayer filters variants on
+`CODECS` before it fetches a byte: a string tvOS or iOS dislikes removes the
+rung silently, and no server counter can see a request that was never made.
+The value is fixed when a session is created (taken from the create's own
+planning-snapshot read, so it costs no extra Store read), so a running
+session's master never changes shape; a session rebuilt after an owner
+takeover or VOD resurrection reads the current value. Flip it, then start a
+**new** playback to observe the effect. The Developer row "Apple TV and iPhone
+keep every SDR variant with CODECS printed" is advisory and reads `unknown`
+until the
+device check in
+[HONEST-MASTER-PLAYLIST §5.4](streaming/HONEST-MASTER-PLAYLIST.md#54-m4--re-qualify-the-sdr-ruling-on-the-named-devices-then-print-codecs)
+is recorded; it never refuses the save. If an SDR title stops offering a
+quality or fails at item preparation on Apple hardware with the switch on,
+turn it off and start playback again.
 
 ## Ports
 
@@ -3676,8 +3790,8 @@ they live in that voter's own SQLite sidecar and never pass through Raft.
 | `telemetry.retain_days` | 30 | Days to keep raw playback rows. `0` disables raw row writes and their pruning while preserving the existing client log lines. It does **not** disable network priors — see the note below |
 | `playback.network_priors` | off | Whether to accumulate per-network playback history and let it choose Auto's starting rung |
 
-`playback.network_priors` has no Settings control yet. The only way to change
-it is the API:
+Settings → Developer → **Network priors** turns it on and off (2026-10-04;
+before that it had no control). The API does the same:
 
 ```
 curl -X PUT http://<server>:32400/api/v1/settings \
@@ -3687,12 +3801,20 @@ curl -X PUT http://<server>:32400/api/v1/settings \
 ```
 
 Off is the default and off is exactly today's behavior: nothing is stored, no
-response gains a field, and Auto starts where it always did. On, plurx keeps
+response gains a field, and Auto starts where it always did. Off does not turn
+off display-aware Auto's live link evidence: the per-attachment receipts a
+session's owner issues still prove a fresh transfer for an upgrade and still
+acknowledge a link stall so the client steps down. Those receipts live in the
+owner's memory for at most 30 seconds and are never written anywhere. A session
+placed on a peer node, and any IPv6 client, gets no receipts at all. On, plurx keeps
 one row per `(user, client class, network fingerprint)` holding a sustained
 throughput estimate and the lowest ladder rung at which that network was seen
 to starve, and consults it when Auto picks a starting height. `/decision` and
 session-create then carry an additional `prior_kbps`; the fingerprint itself is
-never returned or logged.
+never returned or logged. Under display-aware Auto, a link stall the server
+acknowledged also records the rung that starved as completed-transfer evidence,
+kept apart from the older inferred verdict, and Auto's first choice on that
+network then starts below that rung for the same 7 days.
 
 What it stores is deliberately coarse and bounded. The client class is a broad
 family (`chrome`, `safari`, `edge`, `firefox`, `apple`, `android`, `other`)
@@ -3706,6 +3828,18 @@ evening does not cap a link permanently.
 Priors are node-local. In a Hiqlite cluster they live in the voter's own
 sidecar and are not replicated, so a client that reaches a different node
 starts cold there. That is accepted, not a defect.
+
+**Priors are also a prerequisite for Fit Auto to display.** Link receipts —
+the server's acknowledgement that a stall was the network's fault, and the
+proof a voluntary upgrade needs — are accepted only while priors are on. With
+the Developer switch for Fit Auto on and priors off, a native client's Auto
+can still step down for producer pressure, decoder failure and link pressure
+it sees before a stall, but it never upgrades, and a link-caused stall
+reopens the same quality until the stall budget runs out. Two cases never get
+link evidence even with priors on: a session whose create was handled by a
+peer node (receipts are registered only where the handling node owns the
+session) and an IPv6 client (no network identity). The Developer card lists
+all three as advisory rows. This is documented, not changed, in this build.
 
 The `/24` is taken from `Forwarded`, `X-Forwarded-For`, or `X-Real-IP` when
 present, and otherwise from the socket peer. plurx does not maintain a
@@ -3748,13 +3882,20 @@ sessions.
 When no mode is stored, the server resolves the selected encoder's code
 default; this is distinct from an operator explicitly choosing `bitrate`.
 Every family default remains Bitrate as of S-06 PR #414. Admin diagnostics
-report the map at `encoders.quality_rc.default_rate_mode`; the settings form
-keeps presenting `bitrate` for an absent legacy pair.
+report the map at `encoders.quality_rc.default_rate_mode`. `GET
+/api/v1/settings` reports an unset mode as `null`, with the selected family's
+default beside it in `transcode_rate_mode_default`; Settings → Playback →
+Advanced server delivery → Encoder rate control offers **Default (per
+encoder)**, which saves the clear. Before 2026-10-02 the settings response
+reported an unset pair as `"bitrate"` and `scripts/bench` restored that value,
+which stored an explicit bitrate on any cluster it measured — every node then
+logged `requested_mode="bitrate"` and a family default flip would not reach it.
+Return such a cluster to the defaults with the clear below.
 
 Read-only census at deployed revision `882862e8` on 2026-09-21 found QSV
-selected on `nynuc`, `nuc4` and `nuc3`, and VA-API selected on `m6`. The fresh
+selected on `media1`, `lab4` and `lab3`, and VA-API selected on `lab6`. The fresh
 process counters were zero for QSV, VA-API, software, NVENC and VideoToolbox
-on every node (m6 had three copy sessions and one VOD session). This does not
+on every node (lab6 had three copy sessions and one VOD session). This does not
 qualify a default: QSV and software still need separate n2 corpus captures;
 VA-API now has a selectable node but needs a non-zero week and its own n2
 comparison; NVENC is unusable on the four Linux daemons; VideoToolbox has no
@@ -3777,11 +3918,20 @@ curl -fsS -X PUT \
   --data '{"transcode_rate_mode":"quality","transcode_quality":22}' \
   http://media1:32400/api/v1/settings
 
-# Return to the byte-for-byte legacy path and clear the override.
+# Pin the byte-for-byte legacy path explicitly and clear the override.
 curl -fsS -X PUT \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   --data '{"transcode_rate_mode":"bitrate","transcode_quality":null}' \
+  http://media1:32400/api/v1/settings
+
+# Return to each encoder family's default (unset): the response's
+# transcode_rate_mode is null and the boot/refresh log reads
+# requested_mode="family_default".
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"transcode_rate_mode":null,"transcode_quality":null}' \
   http://media1:32400/api/v1/settings
 ```
 
@@ -3975,7 +4125,13 @@ as shown without `--quality`.
 
 Omitting `--quality` explicitly sends and verifies
 `transcode_quality: null` for both captures; it does not preserve a preexisting
-override. The original pair is still restored in the final cleanup path.
+override. The original pair is still restored in the final cleanup path,
+exactly as stored: an unset mode goes back as `null` (each family's default),
+never as the default the settings response displays beside it, and an explicit
+choice goes back as that choice. The harness refuses, before any mutation, a
+server whose settings response has no `transcode_rate_mode_default` field —
+such a server reports unset as `"bitrate"`, and restoring that pinned the
+measured cluster to an explicit bitrate until 2026-10-02.
 
 The 2026-08-14 media1 QSV acceptance used deployed build
 `v0.2.7-167-gb6aaed6` and selected default 22. The no-override run passed with
@@ -4549,6 +4705,73 @@ new package generation. Legacy and non-queue cache entries have neither an
 authoritative digest nor a scrub cursor and remain serveable as the explicit
 legacy path.
 
+### Complete-output preparation and rolling retention
+
+Two kinds of work a VOD start can leave behind are Developer switches, both
+off by default (2026-10-04). Before then both ran on any node whose
+`cache.max_gb` row existed, and saving the Pre-transcoding card writes that
+row, so saving the card for any reason turned them on.
+
+| Setting | Values | What it does |
+|---|---|---|
+| `vod.output_preparation` | `off` · `copy` · `copy_and_encoded` | Which complete-output preparation a VOD start may queue (`copy_output_prepare`, `encoded_output_prepare`). It runs on the pre-transcode worker whether or not `cache_produce_mins` is on; the speculative rows and the cachekeep sweep still need that schedule. Rows carry a seven-day deadline |
+| `vod.rolling_retention` | off · on | Hard-link a rolling session's segments into `<cache>/renditions/.retained/<nonce>/` so a verified complete output outlives the session |
+
+Both are bounded by `cache.max_gb`, where no stored row means the 50 GB the
+settings page shows and `0` means off. VOD rendition admission is different:
+no stored row keeps it closed, as it always has.
+
+**Turning a kind off.** Every node, on every pre-transcode loop tick, cancels
+up to 32 queued rows of each disabled kind without claiming them. Each one is
+counted in `plurx_output_preparation_drained_total{kind}` and logged
+(`output preparation disabled; cancelled queued row`) with its job id. A row a
+node claimed in the same moment goes to `cancelling` and is settled by its
+executor's heartbeat, or by store upkeep at lease expiry if that executor is
+gone. Activity shows the rows as cancelled.
+
+**Stop.** A running preparation publishes itself as the producer in Activity.
+Stop there cancels the job on the node that answers the request. It does not
+reach a preparation running on a peer, and the next play of the title may
+queue it again.
+
+**Retention's free-space guard.** Retained links keep segment bytes on disk
+after rolling eviction has returned their scratch credit, so retention checks
+the disk itself. The scratch free-space sampler (every 30 s) computes
+
+    slack = free bytes − (scratch cap − (ledger total − unused grants))
+
+for the filesystem that holds the retained namespace. A capture links only
+while `slack` is at least 1 GiB and the sample is under 60 s old. Evicting a
+segment that still has a retained link subtracts its size from `slack`
+immediately. When the check fails, or a scratch write hits ENOSPC, every
+unpublished collection is abandoned and its links released. A collection is
+refused before it reserves anything when session scratch and the namespace
+are on different filesystems; on Windows retention stays off. The Developer
+card shows the live slack, so the 1 GiB reserve can be judged against a real
+node.
+
+Settings → Activity lists each retained output on this node with its bytes and
+state, and Stop releases it (refused while a session is reading it). The
+collector deletes released and orphaned directories in 250 ms slices each
+tick, across the whole queue.
+
+**Rolling start reads.** A rolling start now reads its settings in one
+snapshot. When the optional retained-output lookup cannot plan, the start goes
+ahead without it and counts
+`plurx_rolling_retained_lookup_skipped_total{reason}`.
+
+**Pre-transcode audio and the rollout rule.** Speculative pre-transcodes are
+now produced with the canonical stereo AAC audio claim, so a current client
+on a stereo route computes the same cache key (see
+[ENCODER-RATE-CONTROL-DEFAULTS.md §7.2](streaming/ENCODER-RATE-CONTROL-DEFAULTS.md)).
+The policy generation moved with it, and a generation mismatch cancels the
+job (`policy_changed`). With nodes on two versions each would cancel the
+other's rows and discovery would re-enqueue them. **Set
+`jobs.cache_produce_mins = 0` before deploying this build and restore it after
+every node runs it.** The existing pre-transcode library is not reachable by
+current clients; it is produced again once, and the budget evicts the old
+generation.
+
 ### Offline package storage and quotas
 
 Phone downloads are prepared beside finished content-addressed transcodes:
@@ -4777,6 +5000,80 @@ finite-HLS control traffic for liveness and Activity; clients must not send
 item-progress calls to keep it visible. **Watch from start** is ordinary VOD
 and therefore resumes ordinary progress and notification behavior.
 
+## Jellyfin client compatibility
+
+A `/jellyfin` facade lets two named Jellyfin clients use Plurx: **Infuse 8.5.6**
+(tvOS) and **Jellyfin for Android TV 0.19.10**, measured against Jellyfin
+Server 10.11.11. Other Jellyfin clients are untested. The facade is off by
+default; the switch is **Settings → Developer → Allow Jellyfin clients**, and
+its readiness checks are advice only. Contract and evidence:
+[JELLYFIN-COMPATIBILITY-BUILD.md](clients/JELLYFIN-COMPATIBILITY-BUILD.md) and
+[JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md).
+
+### Connecting a client
+
+Add a Jellyfin server with the address `http://<voter>:32400/jellyfin` and sign
+in with a Plurx user's name and password. Use a voter: a learner answers 503
+on `/jellyfin`. The bare root (`http://<voter>:32400`) answers the web app, so
+a client pointed there fails without a useful error. The server reports
+itself as Jellyfin Server 10.11.11 (the tested protocol baseline) under the
+Plurx server name; `GET /jellyfin/System/Info` with a login also names the
+Plurx build in `PackageName`.
+
+What works: sign-in and sign-out, movie and TV browsing, search, artwork,
+direct play with Range, native VOD over HLS (copy or encoded, no rolling
+fallback), audio selection, subtitles (embedded where the client reads them
+from the file, otherwise a VTT or SRT sidecar), skip markers, watch progress
+and watched marks. Downloads are refused (`403 download_not_offered`); there
+is no remote control, no Live TV and no music through the facade.
+
+### Watching it
+
+`plurx_jellyfin_requests_total{route,outcome}` counts every facade request by
+its route template. `route="unmatched"` is a path the facade does not
+implement: when a client fails, that line names the missing route. Outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `ok` | Answered |
+| `not_supported` | PlaybackInfo found no delivery for the client's profile (`ErrorCode: NotSupported`) |
+| `unauthorized`, `forbidden` | Login missing, expired or revoked; or another user's ID |
+| `not_found` | Unknown route, unmapped item or source, unsupported subtitle format |
+| `conflict`, `gone` | The play ended, was replaced, or was negotiated before the switch was last saved; a link expired |
+| `refused` | A malformed or unsupported request (400, 422) |
+| `throttled` | The artwork miss budget for that address |
+| `unavailable` | Capacity, or serving authority lost (a leader restart) |
+| `error` | A server failure; look in the log |
+
+Successful requests are not logged. Failures log the route without its query,
+so no `ApiKey` reaches the log.
+
+### Leader restarts
+
+While a node has lost serving authority, `/jellyfin` answers 503 with
+`Retry-After` exactly as native media does, before any store read. A play's HLS
+media is a native session, so it survives an authority loss that recovers
+within the native session grace (5 s); a direct play is plain Range reads and
+resumes when authority returns. Clients retry 503.
+
+### Turning it off
+
+Saving the switch off answers JSON 404 for every new facade request and ends
+every play negotiated under the old setting, even if it is turned back on
+before the client returns. Logins and wire IDs survive, so re-enabling keeps
+client libraries and watch state. Turning it off is also the rollback: nothing
+else needs to be undone.
+
+### Security notes
+
+Mapped posters and backdrops answer without a login while the switch is on,
+and a direct-play link (the source `ETag`) works without a login header for up
+to 24 hours or until Stop or sign-out (both approved for client parity; see
+[SECURITY.md](SECURITY.md)). Media, HLS and subtitle URLs the facade returns
+carry the compatibility login as `ApiKey`, as Jellyfin's do, because Jellyfin
+for Android TV sends no header on those requests. That login authenticates
+only `/jellyfin`; a native, Plex or admin credential is refused there.
+
 ## Live TV (HDHomeRun) — the runbook
 
 Live TV plays over-the-air channels and can record unprotected channels to a
@@ -4803,11 +5100,10 @@ HOST=http://localhost:32400
 curl -s -H "Authorization: Bearer $TOKEN" $HOST/api/v1/settings \
   | python3 -c 'import json,sys; s=json.load(sys.stdin); print({k:v for k,v in s.items() if k.startswith("live_tv")})'
 
-# 2. Configure the device. The owner is a node id from /api/v1/server.
+# 2. Configure the device.
 curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"live_tv_config_generation":0,
        "live_tv_device_ipv4":"10.42.4.20",
-       "live_tv_owner_node_id":"<node id of the machine next to the tuner>",
        "live_tv_max_sessions":2,
        "live_tv_output_height":720}' \
   $HOST/api/v1/settings
@@ -5006,18 +5302,18 @@ the tuner's truth and a relaying node's `relay_bytes` is how much it carried.
 
 ### Moving the owner
 
-The owner is a setting, not an election, and there is no timeout-based takeover.
-That is deliberate: elapsed time cannot prove somebody else's FFmpeg process
-closed a tuner socket, and guessing wrong means two processes fighting over one
-piece of hardware.
-
-- **Owner is alive:** change `live_tv_owner_node_id`. The old owner drains, the
-  drain is signed and confirmed, and the change lands.
-- **Owner is gone for good:** disable Live TV, then re-enable with an explicit
-  attestation — `live_tv_fenced_owner` carrying the original
-  `owner_node_id`, the `drain_before_generation` cutoff, and
-  `stopped_and_restart_prevented: true`. You are signing that the old machine
-  is stopped and cannot come back. If it can, do not send this.
+There is nothing to move. Since #537 the tuner is a cluster resource: there is
+no configured owner node, no owner drain and no fenced-owner attestation. The
+settings fields of the old single-owner model, `live_tv_owner_node_id` and
+`live_tv_fenced_owner`, are still accepted and ignored. Shipped Apple and
+Android clients send `live_tv_owner_node_id` with every tuner-configuration
+save; no shipped client sends `live_tv_fenced_owner` (both define it, nothing
+constructs it), which stays accepted so an older or third-party client that
+does is not refused. Neither value is read: the settings response's
+`live_tv_owner_node_id` is always the answering node, and
+`live_tv_transition_from_owner_node_id` / `live_tv_transition_drain_before` are
+always `""` / `0`. A save that carries only those fields (and the generation)
+still counts as a Live TV save and bumps `live_tv_config_generation`.
 
 Reconfiguration is always possible **while disabled**. Losing the owner ends
 the live session that was in flight; viewers see a named refusal and start
@@ -5148,6 +5444,9 @@ Hiqlite operation.
 
 Playback telemetry writer metrics are also node-local and fixed-cardinality;
 they never label a session, file, user, network, or path.
+Each store instance owns a separate writer registration. Expired store
+registrations are discarded when a new writer is registered, so a replacement
+store cannot inherit an abandoned event queue.
 
 | Metric | How to read it |
 |---|---|
@@ -5487,6 +5786,7 @@ the loading overlay a few seconds longer, then playback).
 | A transcode start returns HTTP 503 with `transcode capacity is temporarily unavailable` | The five-second foreground admission window expired before configured **live** hardware/software capacity became available, or the class cannot run in software and every hardware slot is held | Retry after the named work releases. Background ownership no longer produces this: a live start that waits out the window with only background work in the way is admitted over it (since 2026-09-28, [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA](streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md)), so if the sentence says background encoding did not yield the start was speculative, not a viewer's |
 | `plurx_transcode_background_overrun_total{pool}` is rising | A background worker (pre-transcode producer, subtitle backfill, fragment indexing, probes) held an encoder permit through a phase that never looks at the pool, and a live start was admitted over it after the five-second window | Zero is the design. Each increment has a WARN `background work did not yield within the cooperative window; starting the viewer over it` in `plurxd::transcode` naming the pool; the worker to fix is whatever `plurxd::background_jobs` / `plurxd::state` was doing at that second. The viewer (VOD or Live TV) paid five seconds of delay, not a refusal. The take is bounded by live usage: a pool other viewers have spent is still refused with `spent by live sessions` |
 | `plurx_sharing_receiver_orphan_total{outcome="stranded"}` rises, or Settings → Sharing → This node lists stranded playback routes | A shared-playback route whose receiver owner crashed (or whose retirement stalled) was taken over by this node's recovery owner but cannot be retired. The reason says why: `source_refused` or `budget_exhausted` (the Source never confirmed End), `unopenable_capsule` (this node lacks the key that sealed it), `dispatch_unknown` or `partial_binding` (no authenticatable End and no no-send proof) | The rows are kept on purpose: nothing deletes a Source obligation without a confirmed End. `GET /api/v1/sharing/status` → `receiver_recovery` lists them per node with a WARN in `plurxd::sharing` naming import and incarnation. A transient Source outage clears on a later look once the claimed lease lapses; a key or dispatch reason needs the node that holds the key, or operator review ([SHARED-LIBRARIES-IMPLEMENTATION](features/SHARED-LIBRARIES-IMPLEMENTATION.md), "B orphaned receiver crash recovery") |
+| `plurx_transcode_output_enqueue_dropped_total{reason}` is rising | A started VOD session could not hand its complete-output preparation to the output-enqueue worker: `queue_full` means the worker is behind, `worker_stopped` means it has exited (normally only at shutdown) | Each increment has an INFO `complete output preparation not handed off` in `plurxd::transcode` naming the file and reason. Nothing is lost: the title's next start offers the same deduplicated job again, so a drop delays the complete output rather than refusing anything. A steady `queue_full` rate means queue publication itself is slow; read the worker's `complete output preparation queued` / `not queued` lines for `waited_ms` and `elapsed_ms` |
 | Live TV answers `encoder_capacity` ("the tuner owner's encoder is busy") | The tuners were free but the owner's video encoder pool refused the transcode this route needs. Distinct from `tuner_capacity`, which lists what holds the tuners | `GET /api/v1/system` → `hw_slots_in_use` / `hw_slots_max` on the owner; a copy route on the same channel (a client that decodes MPEG-2 or HEVC itself) starts without this |
 | 4K HDR is slow but plays | The tone-map is running on the CPU. `GET /api/v1/system` → `tone_map` names the graph in use and why each candidate was rejected — no GPU device, a driver that refused the filter, output that didn't match the reference, or a graph that wasn't faster than the CPU chain | A rejection naming a missing device is usually a container passthrough (`--device /dev/dri`) or a missing driver package. HLG and Dolby Vision always use the CPU chain by design |
 | "All hardware transcode slots are in use" | The cap (`transcode.max_hw_sessions`, default 2) is doing its job. A start waits up to 5 s for a slot, then runs in software *only if this server has measured that class of stream above realtime there* — never because the output is small, since the decode and the tone-map happen at source resolution whatever size you ask for | `GET /api/v1/system` → `hw_slots_in_use` / `hw_slots_max`. Refused at 0 of 2 is a bug; refused at 2 of 2 is the design. A 4K HDR source is the shape software cannot carry, so it is refused rather than started to stall |
@@ -5511,6 +5811,19 @@ the loading overlay a few seconds longer, then playback).
 | A start answers `startup_timeout` naming a byte count | The tuner is feeding but the producer published no segment inside the producer-progress budget | A real producer problem rather than a missing signal. Check `Settings → Logs` on the owner; the byte count is there so the two cases are distinguishable |
 | An ATSC 3.0 channel returns no picture and no error from the device itself | The device accepted the connection and sent zero bytes — two channels on one test antenna do this | Reception, not software. Check signal on that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |
 
+**Reading the tone-map speed ratio.** The ratio compares elapsed time for the
+whole short HDR10 probe against the CPU tone-map chain on this node, including
+decode, frame transfers, encode and process startup. It is not the speed of
+the tone-map filter alone or a promise that another GPU's result will match.
+A candidate must produce valid BT.709 output, pass the picture comparison,
+and exceed the reference throughput by 20%.
+
+With a VA-API encoder the probe tries `tonemap_vaapi`, then
+`libplacebo_vaapi` (VA-API decode → Vulkan tone-map → VA-API encode with
+hardware frame mapping), then the existing `libplacebo` path with CPU frame
+transfers, then OpenCL. Unsupported mapping, incorrect output or insufficient
+speed declines only that candidate. Subtitle burns still download the mapped
+SDR frames for composition and upload them to the encoder afterward.
 
 ### Library channel search and classification
 

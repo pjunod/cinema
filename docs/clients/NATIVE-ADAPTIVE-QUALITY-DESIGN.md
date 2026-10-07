@@ -1,7 +1,7 @@
 # Native adaptive quality — one policy, three players, five kinds of evidence
 
-**Status:** open — D1, D2, D4 and D5 are on branch `plan/A-04`; D3's
-shaped-network traces are pending on every platform (§6's prompts)
+**Status:** open — D1, D2, D4 and D5 on `main` since 2026-10-04 (#793);
+D3's shaped-network traces are pending on every platform (§6's prompts)
 · **Executes:** §3.8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -107,12 +107,12 @@ the other — is the single most reusable thing the browser built.
 | `severeEstimateRatio` | 0.7 | below this fraction of source bitrate the link is "bandwidth-limited" |
 | `mildHeadroom` | 1.3 | margin a rung must clear on a mild downgrade |
 | `mildSamples` | 2 | consecutive mild samples before a mild downgrade |
-| `cooldownMs` | 20 000 | minimum gap between voluntary switches; an `emergency` decision is exempt. The browser's voluntary gate is in fact `max(cooldownMs, dwellMs)` (build plan M0.2) |
+| `cooldownMs` | 20 000 | one bound on the voluntary-switch gap; the actual gap is `max(cooldownMs, dwellMs) = 60 000` ms. An `emergency` decision is exempt |
 | `upgradeHeadroom` | 1.8 | estimate margin required to go up |
 | `upgradeHoldMs` | 45 000 | how long that margin must hold |
 | `upgradeSpeedFloor` | 1.15 | predicted post-switch encode pace, x realtime |
 | `stallWindowMs` | 60 000 | window over which stall events are counted |
-| `dwellMs` | 60 000 | the horizon the restart-cost model amortises over |
+| `dwellMs` | 60 000 | the restart-cost amortisation horizon and the second bound on the voluntary-switch gap |
 | `nearEmptyRunwaySeconds` | 1.5 | runway at or under which the player counts as starving (`nearEmpty`, one input to `starvation`). Urgency, not cause: on its own it makes `decideRung` **suppress** (`insufficient-evidence`), never switch, and it never makes a decision `emergency` — only a fresh bandwidth cliff does (§3.4) |
 | `restartCostSeconds` | 2.5 | what a reopen costs the viewer |
 | `causeMaxAgeMs` | 15 000 | cause evidence older than three ticks explains nothing |
@@ -143,10 +143,12 @@ returns exactly one `{kind, ageMs, code?}`, in priority order:
 | `kind` | Source | Meaning |
 |---|---|---|
 | `loader-suspended` | `p.hlsStartup.establishedSuspension` on this attachment | the loader is parked; repair the transport, do not change quality |
+| `control-stall-verdict` | this wait's `hold`/`retry_resource` answer before the 20 s deadline | the producer is paused or restarting; do not infer link pressure |
 | `authority-refused` | HTTP 401/403/410, or a code matching `authority\|owner_(lost\|transition)\|node_removal_fenced\|learner_route_ineligible` | this client no longer owns the session |
 | `producer-failed` | a terminal startup code, or `health.producer_state == "failed"` | the encode died |
 | `delivery-refused` | a code matching `publication\|segment_\|response_` | the server declined to publish |
 | `capacity-shortfall` | `0 < health.recent_speed < 1` with `producer_state` in `{running, held}` | the encoder cannot keep up |
+| `decode-failed` | a fresh typed decode stall recorded for this playback | block this height and step down once; later failure belongs to compatibility recovery |
 | `bandwidth-limited` | a fresh throughput sample below `severeEstimateRatio` x source kb/s | the link is the constraint |
 | `stale` / `unknown` | nothing fresh enough | **not** bandwidth pressure |
 
@@ -319,7 +321,8 @@ The input record, named once:
     recentSpeed:         float|null   // server encode pace, x realtime
     activeSupplyStall:   bool
     supplyStalls:        int          // within stallWindowMs
-    decodeStalls:        int          // within stallWindowMs
+    decodeStalls:        int          // within stallWindowMs, or 1 for a typed media error
+    decodeStepConsumed: bool         // separate from failed auto-open heights
     lastStallAtMs:       int|null
     lastSwitchAtMs:      int|null
     mildSamples:         int
@@ -331,7 +334,7 @@ The input record, named once:
   }
 
   AutoDecision { height|null, reason|null, emergency, action, evidence,
-                 mildSamples, upgradeSinceMs }
+                 blockedHeights, mildSamples, upgradeSinceMs }
 ```
 
 Where each field comes from per platform. **This table is a sketch and §8 is
@@ -366,12 +369,20 @@ endpoint:
 
 | Class | `detail` prefix | Fed by | What the policy does |
 |---|---|---|---|
-| **Constrained delivery** | `link:` | throughput below `severeEstimateRatio` x source, or a `publication`/`segment_`/`response_` refusal | step down by the estimate; this is the only class that may step more than one rung |
+| **Constrained delivery** | `link:` | fresh measured throughput below `severeEstimateRatio` x source | step down by the estimate; this is the only class that may step more than one rung |
 | **Producer capacity** | `encode:` | `0 < recent_speed < 1` with `producer_state` in `{running, held}` | step down one rung; **never** step up, whatever the estimate says |
 | **Decoder failure** | `decode:` | a codec error, a repeated decode stall at an unchanged presentation time with a healthy buffer | add this height to `blockedHeights` and step down **one** rung. That is the quality controller's whole response, and it never changes delivery method (§4). A rung change is not a cure for a codec the device cannot decode, so a second decode failure is **not** answered with a third rung: the controller takes no further decode move, and the item failure belongs to the platform's compatibility owner (Apple's compatibility ladder, Android's compatibility budget, the web's decode rescue), the only thing allowed to change delivery |
-| **Deliberate hold** | `hold:` | `loader-suspended`, or a `hold`/`retry_resource` verdict that answered **this client's own `stalled` ask** (fixture kind `control-stall-verdict`) | **no downward move** while it is in force, bounded by the client's stall deferral (20 s on the web). Repair the transport or wait out the verdict. Upgrades need no rule of their own: the stall that prompted the ask already refuses them through `stallFree`. **Not** fed by the routine advisory hold or by `producer_state == "held"`, which are the healthy paced steady state (below) |
+| **Deliberate hold** | `hold:` | `loader-suspended`, a `hold`/`retry_resource` verdict that answered **this client's own `stalled` ask** (fixture kind `control-stall-verdict`), or a `publication`/`segment_`/`response_` refusal (fixture kind `delivery-refused`) | **no downward move** while the stall verdict is in force, bounded by the client's stall deferral (20 s on the web). A publication refusal suppresses a rung move while that refusal is fresh; repair delivery first. Upgrades after a stall still require `stallFree`. **Not** fed by the routine advisory hold or by `producer_state == "held"`, the healthy paced steady state (below) |
 | **Denied authority** | `authority:` | 401/403/410, `owner_lost`, `owner_transition`, `node_removal_fenced`, `learner_route_ineligible` | **do nothing to quality.** Re-establish ownership; a rung change on a session you no longer own is a second session |
 | *(unknown / stale)* | `unknown:` | nothing fresher than `causeMaxAgeMs` | **do nothing.** Not bandwidth pressure (§2.3) |
+
+On the web, `decodeStepConsumed` records whether the quality controller has
+already taken its one decode step. It is separate from `blockedHeights`:
+that set also contains a target whose automatic session-open failed. Such a
+failure does not spend the decoder response. The typed HTML media error
+(`code === 3`) enters the policy at `wirePlayerMedia` before its terminal
+compatibility handling, so the first genuine decoder failure can request
+one lower Auto rung even when the prior open target was blocked.
 
 Android's existing refusal (§2.5) is exactly the last row, and is preserved
 by construction: a stationary presentation with no fresh cause is
@@ -418,12 +429,11 @@ recorded the stall (`:416` → `recordWaitStall` → `noteAutoStall`, which sets
 in `applyStallVerdict` (`Controller.kt:1849`), reached only from `onStall`
 (`:1945`). The web's deferral is capped at `CONTROL_STALL_DEFER_DEADLINE_MS
 = 20000` (`measurements.js:244`), well inside `stallWindowMs = 60000`, so
-while a web stall verdict is in force `stallFree`
-(`playback-policy.js:507-508`) already refuses every upgrade. What no
-platform does is hand the verdict to `decideRung`, so a fresh slow transfer
-during a held stall — which on a JIT server measures the paused producer,
-not the link — can still take the emergency downswitch. That downward gap
-is the fixture's `control-stall-verdict` case and the build plan's M0.1.
+while a web stall verdict is in force `stallFree` already refuses every
+upgrade. M0.1 now hands that verdict to `decideRung` for the deferral's
+lifetime. A fresh slow transfer during a held stall can measure the paused
+producer rather than the link, so the policy suppresses the emergency
+downswitch. The `control-stall-verdict` fixture pins that answer.
 
 An earlier draft of this section fed `hold:` from `producer_state == "held"`
 and any `hold`/`retry` verdict, told the policy to "do nothing to quality",
@@ -469,9 +479,10 @@ have that seam (`PlaybackIntent.adoptQuality`, `PlaybackIntent.kt:64`).
 
 ### 3.4 Hysteresis, budget, and going back up safely
 
-- **Cooldown.** No voluntary switch within `cooldownMs` of the last one
-  (the browser's gate is in fact `max(cooldownMs, dwellMs)`, build plan
-  M0.2). The one exemption is an `emergency` decision, and only a **fresh
+- **Voluntary gap.** No voluntary switch within
+  `max(cooldownMs, dwellMs) = 60 000` ms of the last one. M0.2 retains the
+  shipped browser's 60 s rule: reducing it to 20 s would change behavior
+  without a shaped trace. The one exemption is an `emergency` decision, and only a **fresh
   bandwidth cliff** makes one: a completed-transfer sample no older than
   `recentSampleMaxAgeMs` below `severeEstimateRatio` x the current rung
   (`freshBandwidthCliff`, `playback-policy.js:361-363`; `severe`, `:402`).
@@ -639,11 +650,11 @@ which changes no behaviour; nothing else under A-04 touches runtime code.
 
 ### 5.1 D1 — the shared policy artifact and its fixtures — DELIVERED
 
-`tests/playback/auto-quality-policy.json`, schema 1, 30 cases and 12
+`tests/playback/auto-quality-policy.json`, schema 1, now 32 cases and 13
 controller-gate rows, driven by `node tests/playback/web-policy.test.js`.
-Five cases (M0's four disagreements plus the unimplemented switch budget)
-and three gate rows carry a `web_current`/`finding` disagreement; they are
-summarised in §8.4 and §7.6.
+M0 settled its four `web_current` cases; the proposed switch budget still
+has one. Two gate rows retain findings for background visibility and HDR
+fidelity, which need their own evidence and implementation.
 
 Deliverable: `tests/playback/auto-quality-policy.json` at schema 1 (§3.6),
 plus `web-policy.test.js` extended to drive `decideRung` from it, so the
@@ -682,7 +693,7 @@ refused because the TV was asleep and the phone locked. Android and HDR runs
 remain owed. Keep these as failed or unavailable observations, not a D3 pass.
 The [dated fleet evidence](../reviews/ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md)
 records device state; the raw reports remain in the observing agent's own
-`/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/` directory.
+`~/code/plurx-agent/codex-a04-evidence-20260925/` directory.
 
 | Platform/profile | Measured result | Missing D3 fields |
 |---|---|---|
@@ -745,12 +756,19 @@ That asymmetry is D3's one build item: either an Android `device-run`, or a
 written manual protocol. Prefer the protocol first — a harness for a
 measurement nobody has taken yet is speculative.
 
+**2026-09-30 Android procedure continuation:** the
+[manual measurement protocol](ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md)
+supplies that written deliverable. It verifies the current proxy CLI/control
+format and Android diagnostics, names the missing continuous clock/intent,
+target-frame and physical output-grade acquisition prerequisites, and keeps
+unknown observations null. It is not a physical trace or D3 acceptance.
+
 The metrics, which are §3.8's list made countable:
 
 | Metric | Definition |
 |---|---|
 | Stalled seconds | wall seconds with the presentation clock stationary while `wantsPlayback` |
-| Switches | automatic rung changes (0 on today's build, by construction) |
+| Switches | observed automatic rung changes, with complete sequence provenance; never assume zero from build identity |
 | First-frame gap | seconds from a switch or reopen to the next presented frame |
 | Quality regained | seconds from the cliff to the first frame at a rung the link can sustain |
 | Unexpected SDR transitions | count of HDR -> SDR grade changes the viewer did not ask for |
@@ -760,6 +778,88 @@ Acceptance: one JSON report per platform per profile, normalized with
 `scripts/playback-lab normalize` so two runs compare, all six metrics
 filled, recorded under a dated heading in this document. The GPT prompt is
 in §6.
+
+**2026-09-30 definition correction:** the former parenthetical asserting zero
+switches by construction was stale: the retained Chrome/Firefox candidates
+above contain actual automatic switches. Their observed counts and original
+failed/unqualifying outcomes stand. Missing sequence coverage is null, not zero.
+
+#### Browser acquisition continuation, 2026-09-30
+
+`scripts/playback-lab run --d3-acquisition` extends the existing browser
+collector, not the acceptance scorer or an ABR adapter. Its additive
+`d3_acquisition` schema 1 survives normalization verbatim, including failed
+outcomes, raw backwards frames, missing reasons and runtime provenance.
+Ordinary runs retain their existing report fields and scoring. This option is
+measurement instrumentation, not a product feature gate.
+
+The collector samples the independent `PLAYER.wantsPlayback` intent and
+visible element/session/attempt, media clock, seeking, ended/error and
+document visibility at 100 ms, plus visible media events. Element replacement
+gets an explicit attachment record; observation termination gets a stop and
+censor record. It retains the first 32,768 browser records and reports overflow
+rather than silently replacing early evidence. Callback `mediaTime`,
+`presentedFrames`, `presentationTime` and `expectedDisplayTime` come from
+`requestVideoFrameCallback`: these are best-effort composition submissions
+and expected display times, **not physical-display acknowledgements**. Skipped
+submission counters, missing clocks and lost capture remain acquisition gaps.
+
+Equal sampled clocks are reported only as `sampled_equal_clock_seconds`;
+missing clock/intent/lifecycle records make that sampled estimate null too.
+They do not prove stationary presentation between samples. The exact D3
+`stalled_seconds` remains null; a complete sampled interval has only the
+conservative bound zero to its whole observation duration, with sample gaps
+and sampled intent-eligible duration recorded separately. Missing capture or
+overflow makes even that bound unavailable. Terminal/no-frame tails are not
+discarded. Automatic-event sequence completeness is separate from the
+automatic rung-change metric. Original from/to labels, heights, reason,
+position, target method and target identities survive capture. Only unequal
+positive numeric heights prove a rung change; a method-only Auto reopen with
+unknown heights does not. `proven_automatic_rung_changes` retains the observed
+subset, but `automatic_switches` is null if the sequence is incomplete or any
+event has ambiguous heights. Absent or overflowed evidence is not zero.
+
+Controller/browser round-trip anchors retain send, browser and receive
+timestamps. Each anchor gives an offset interval; first/last intervals give
+a measured drift interval, not an assumed fixed offset. A composition
+timestamp between anchors gets their conservative monotonic ordering bounds;
+outside coverage or across a discontinuity it has no aligned value. The
+shaper's controller origin and actual transition timestamps remain separate
+so relative cliff times cannot be mistaken for absolute controller times.
+
+Each successful downstream `write` callback has a separate bounded delivery
+ledger, including classified playlists and session attribution. Returning
+`true` from `write` is buffer admission, not its completion. The legacy
+accepted/drained limiter settlement, refunds and carry-over are unchanged;
+the D3 callback timestamps are acquired separately. Up to 32,768 write
+records retain request/callback times, stage identities and pending/failed
+status; failed, absent callbacks or overflow make affected completion totals
+unavailable rather than zero. For each
+post-cliff stage, the final 60 seconds are exactly `(end - 60000, end]`, using
+**socket-completion timestamps**. This is not an application-read
+acknowledgement or client-consumption proof. Admission, refund and carry-over
+series remain distinct and cannot substitute for delivered bytes. Short
+stages or ledger overflow yield null byte measurements; unattributed or
+ambiguous rungs keep the raw socket aggregate but leave the D3 delivered-rate
+field null. Advertised total bitrate requires one composition-observed
+session/height with an unambiguous ladder advertisement; it is not inferred
+from the shaping cap or proof of sustained playback.
+
+**Review correction, 2026-09-30:** sole review 8 on [#635](http://forge.lan:3000/noirr/plurx/pulls/635)
+reproduced premature accepted-write timestamps and method-only events counted
+as rung changes. Both acquisition paths now have pure regressions; the
+original limiter conservation tests still pass. Nine D3 contracts and seven
+adjacent in-memory limiter contracts pass without media or socket traffic.
+The missing-media-clock diagnostic is also explicit null, not a sampled zero.
+
+No acquisition-only run can close D3. Sustainable-rung first-frame latency
+and physical HDR-to-SDR count remain null without their required evidence;
+the presentation integral still needs an adequate continuous presentation
+oracle and intent-boundary coverage. The nine named clients, both profiles,
+and the Dolby Vision pass in §6 still need actual measured, identity-bound
+runs. Synthetic corpus fixtures, pure collector regressions and counters are
+not those measurements. Running-binary SHA/source binding must be supplied
+by the measurement receipt; server version/build metadata alone is not enough.
 
 ### 5.4 D4 — the build plan — DELIVERED
 
@@ -799,6 +899,14 @@ exist. `make unit` is unaffected — no Rust changes in A-04 — except that
 `cargo test -p plurxd metrics_auto_quality`.
 
 **GPT prompt — shaped-network baseline, all platforms (D3):**
+
+For Android, use the [manual acquisition protocol](ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md)
+instead of treating steps 3–4 below as a complete measurement instrument.
+The outline is retained for historical context: the current proxy deletes its
+private control file at exit, native point panels cannot supply all six
+metrics, and auto-advance does not guarantee a second cliff. Preserve sanitized
+control evidence before exit and disclose missing acquisition. The protocol
+requires explicit operator authority for device changes and restoration.
 
 ```text
 With the current plurx build deployed to media1 and the repo checked out on
@@ -965,32 +1073,26 @@ implementer.
 
 ### 7.5 What drives the Android shaped run?
 
-D3 proposes a manual protocol through `device-proxy` rather than an
-Android `device-run`. If the fleet ends up running this trace more than
+D3 uses the [written manual protocol](ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md)
+through `device-proxy` (prepared 2026-09-30), rather than an Android
+`device-run`. Its acquisition preflight is not a feature enablement gate;
+the physical traces remain owed. If the fleet ends up running this trace more than
 twice, the harness is worth building — `adb shell am start` plus the
 existing control-file protocol is most of it. Decide after D3.
 
-### 7.6 Does `link:` really carry a server's refusal to publish? — opened by D1
+### 7.6 A publication refusal is `hold:`, not `link:` — settled by A-05 M0
 
-§3.2's `link:` row is fed by "throughput below `severeEstimateRatio` x source,
-**or** a `publication`/`segment_`/`response_` refusal", and its action is to
-step down by the estimate. `decideRung` disagrees: it puts `delivery-refused`
-in its `namedSuppression` list and retains the rung, on §2.3's argument that a
-server declining to publish is not the link being slow.
+M0.4 settles the publication-refusal classification: `link:` requires fresh
+measured throughput evidence. A `publication`/`segment_`/`response_` refusal
+is `delivery-refused` in the `hold:` class, and `decideRung` retains the rung
+while the refusal is fresh. A server declining to publish does not measure
+the link.
 
-The browser is almost certainly right. `response_owner_transition` and
-`segment_pending` describe a server that is moving or still building, not a
-link that cannot carry the rung, and stepping a rung on one of them would show
-the viewer a quality drop caused by an ownership move. But this document is
-what three adapters will be written from, so the table cannot simply be
-corrected in passing by an executing session. The case is recorded in
-`tests/playback/auto-quality-policy.json` with `expect` reading the design and
-`web_current` reading the code, and it is the build plan's M0 to settle.
-
-The likely settlement, for whoever takes it: `link:` is throughput evidence
-only, and a delivery refusal becomes a sixth class or joins `hold:` — it is a
-"repair the transport, do not change quality" answer. If it joins `hold:`,
-it joins the stall-scoped half (§3.2), never the routine paced hold.
+`response_owner_transition` and `segment_pending` describe server movement
+or unfinished publication. Stepping a rung on either would turn a server
+condition into an unwarranted quality loss. The `delivery-refused` fixture
+now carries plain `expect`; the routine paced hold remains outside the
+suppression class.
 
 ### 7.7 Can Apple see a cliff at all? — opened by D2
 
@@ -1033,10 +1135,11 @@ everything below is `autoControllerTick`'s `sampleMs`, 5 s.
 | `recentSpeed` | `health.recent_speed` from `pollSessionHealth` | × realtime | per tick (the tick awaits the poll) | `null`; `predictedSpeed` returns `null` and the upgrade is **not** blocked |
 | `activeSupplyStall` | `!!p.waitAt && runway < SUPPLY_RUNWAY_SECS` | bool | per tick | false |
 | `supplyStalls` | `p.abr.stallEvents.supply.length`, pruned to `stallWindowMs` | count | per event | 0 |
-| `decodeStalls` | `p.abr.stallEvents.decode` — **collected but not passed to `decideRung`** | count | per event | see §8.4 |
+| `decodeStalls` | `p.abr.stallEvents.decode.length`, passed to `decideRung` | count | per event | 0; only a fresh typed decoder failure yields `decode-failed` |
+| `decodeStepConsumed` | `p.abr.decodeStepConsumed`, set when the policy takes its one decode step | bool | per decode decision | false; failed auto-open heights do not consume it |
 | `lastStallAtMs`, `lastSwitchAtMs`, `mildSamples`, `upgradeSinceMs` | `p.abr.*`, written back from the previous decision | ms / count | per tick | `null`/0 |
 | `playerHeight` | `playerPixelHeight(v)` — CSS height × `devicePixelRatio`, ratio clamped to 4, else the intrinsic decoded height | pixels | per tick | `Infinity`; a ceiling only, which is why it can never strand a downgrade |
-| `blockedHeights` | `p.abr.failedHeights`, written by `maybeDecodeRescue` | set | per decode failure | empty |
+| `blockedHeights` | `p.abr.failedHeights`, extended with the policy's returned `blockedHeights` before a rung switch | set | per decode failure or failed auto-open | empty; it bars upgrades, but does not itself say a decode step was spent |
 | `cause` | `autoCauseEvidence(p, now)` | see §2.3 | per tick | `{kind:"unknown"\|"stale"}` |
 
 Tick location: `autoControllerTick`, `crates/plurxd/src/web/player/stall-diagnosis.js`.
@@ -1187,17 +1290,16 @@ never strand a downgrade from a rung above it (the fixture pins that). The
 cost of `Infinity` is that a 4K rung can be chosen for a small window, not
 that anything breaks. It is therefore the last thing to wire, not the first.
 
-#### 8.4.6 Nobody hands the stall verdict to the policy
+#### 8.4.6 The web now hands its stall verdict to the policy
 
-Every client already consumes a `hold`/`retry_resource` verdict, and only
-where it answers its own `stalled` ask: the web inside `persistentWait`,
-Android inside `applyStallVerdict`. Neither passes it to the quality policy:
-`autoCauseEvidence` has no such kind and `autoControllerTick` reads no
-verdict. Upward this costs nothing, because the stall that prompted the ask
-already refuses upgrades through `stallFree` for `stallWindowMs`, longer than
-any deferral. Downward it does: a fresh slow transfer during a held stall
-takes the emergency branch. The fixture records that as its
-`control-stall-verdict` disagreement, and it is the build plan's M0.1.
+The web's `persistentWait` now retains a `hold`/`retry_resource` answer from
+its own `stalled` ask while that wait's 20 s deferral remains active.
+`autoCauseEvidence` emits `control-stall-verdict` only for the same wait
+identity before the absolute deadline, and `decideRung` suppresses the
+downward move even if a fragment transfer appears slow. `endWait` retires
+the verdict. The stall that prompted the ask already refuses upgrades
+through `stallFree` for `stallWindowMs`. Android's adapter still belongs to
+the later build milestones.
 
 The routine advisory hold the server sends on every exchange while a paced
 producer is ahead, and `producer_state == "held"`, are deliberately **not**
@@ -1229,9 +1331,12 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D1 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | `tests/playback/auto-quality-policy.json` at schema 1 — 29 cases, 11 controller-gate rows, every §3.2 class and every §3.5 row covered, 516 lines. `node tests/playback/web-policy.test.js` green with the new cases; `make validation-lint` governs the new file (2157 → 2158 audited). Proved by reverting five things under test and re-running: `stallFree` out of `decideRung`'s upgrade gate fails "upgrade: a recent stall holds the rung even once the hold has elapsed: height, 1080 !== 720"; `causeMaxAgeMs` 15000 → 14000 fails the defaults-equality test; `!p.started` out of `autoControllerTick` fails "Not yet started: autoControllerTick no longer contains !p.started"; dropping the HDR row from the fixture fails the §3.5 coverage test; shortening a disagreement's `finding` fails the finding requirement. Four disagreements with today's browser recorded in `web_current`, not papered over: no control-verdict gate anywhere, a 60 s rather than 20 s voluntary gap, no decode class inside the policy, and §3.2's `link:` row over-collecting a publication refusal (§7.6). |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D2 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | §8, written by reading the three codebases. Every `AutoSample` field has an API, units, a cadence and a failure mode on all three platforms, or a written statement that it is unavailable and what the policy does. Six fields are not simply available (§8.4) and seven of §3.1's rows were wrong (§8.5). The load-bearing one: Apple has no per-completed-transfer throughput sample, so `decideRung`'s emergency branch is unreachable there as the policy stands (§8.4.1, §7.7). |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_registry_pull_audit_sol61 | D3 browser/shaper acquisition continuation | `codex/a04-d3-browser-acquisition` draft | Additive bounded capture, independent sampled intent/lifecycle, composition submissions, clock uncertainty and exact final-window socket-completion ledger; normalization preserves raw failed/missing evidence. Seven pure D3 contracts pass with `PLAYBACK_LAB_TEST_FILTER='^D3 ' node tests/playback/network-shaping.test.js`. No traffic/device run or D3 acceptance. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_registry_pull_audit_sol61 | Android protocol integration receipt | [#632](http://forge.lan:3000/noirr/plurx/pulls/632) | Protocol merged at `7ede9fc2d142df6c2e38c4c5651cace9b9d42675`, exact head `468f07069106810663550b4bed4a1cee7c85ebbc`; all eight Effort gate jobs green at UI 3620/API 3641. Sole review 5/comment 6457's HDR-baseline finding was fixed. The original dated draft row below remains history; this merge supplies a protocol, not physical D3 acceptance. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/architecture_receipt_reconcile_sol61 | D3 Android manual-protocol continuation | `codex/a04-android-measurement-protocol` draft | [Operational protocol](ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md) prepared against effort `225f3742a`: four named clients × two profiles × baseline/Dolby Vision pass, verified source controls and auth, six-metric acquisition prerequisites, bounded run/restore and null/missing receipt. No device run, traffic, deployment, app instrumentation, feature gate or D3 acceptance. Earlier authors and measurement failures remain the historical record. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D1 | [#458](http://forge.lan:3000/noirr/plurx/pulls/458) | `tests/playback/auto-quality-policy.json` at schema 1 — 29 cases, 11 controller-gate rows, every §3.2 class and every §3.5 row covered, 516 lines. `node tests/playback/web-policy.test.js` green with the new cases; `make validation-lint` governs the new file (2157 → 2158 audited). Proved by reverting five things under test and re-running: `stallFree` out of `decideRung`'s upgrade gate fails "upgrade: a recent stall holds the rung even once the hold has elapsed: height, 1080 !== 720"; `causeMaxAgeMs` 15000 → 14000 fails the defaults-equality test; `!p.started` out of `autoControllerTick` fails "Not yet started: autoControllerTick no longer contains !p.started"; dropping the HDR row from the fixture fails the §3.5 coverage test; shortening a disagreement's `finding` fails the finding requirement. Four disagreements with today's browser recorded in `web_current`, not papered over: no control-verdict gate anywhere, a 60 s rather than 20 s voluntary gap, no decode class inside the policy, and §3.2's `link:` row over-collecting a publication refusal (§7.6). |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D2 | [#458](http://forge.lan:3000/noirr/plurx/pulls/458) | §8, written by reading the three codebases. Every `AutoSample` field has an API, units, a cadence and a failure mode on all three platforms, or a written statement that it is unavailable and what the policy does. Six fields are not simply available (§8.4) and seven of §3.1's rows were wrong (§8.5). The load-bearing one: Apple has no per-completed-transfer throughput sample, so `decideRung`'s emergency branch is unreachable there as the policy stands (§8.4.1, §7.7). |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D3 | — | **needs:** one shaped-network trace per platform per profile, on today's build, with all six §5.3 metrics filled. Nothing has been measured and no number in §5.3 has a value. The prompts are in §6; they need a deployed build, three browsers, two Apple devices and four Android devices. Post-merge evidence under the work board's rule 9, appended here through the evidence-only docs PR. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D4 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | [NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md), board row A-05, `unclaimed`. Sequenced so nothing can be enabled before D3's baseline exists. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D5 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | The decision executed: both `stallReopenIntent` overloads and their four test call sites deleted; `PlayerOpenIntent.stallReopen`, `StallReopenTicket`, `applyOpenIntent`'s ticket branch, `unboundStallRetry`, the floor budget's `.stallReopen` arm and the Android parameters all retained. `ReopenReason` deliberately **not** widened — §7.1 says why, and the build plan's M1 owns it. No behavioural change and no new test, because neither deleted function had a production call site; anchored in `tests/client-fixes.toml`. **The Apple target was not compiled and its suite was not run**: no Swift toolchain was reachable from the executing session. That is the one verification this milestone owes. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review of D1–D5 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | The one adversarial review (comment 4105) found seven things, all taken. **`hold:` was split** (§3.2): the server sends `hold` on every exchange while a paced producer is ahead (`resolve_action`, `playback_control.rs:2027-2087`) and `producer_state` reads `held` whenever it is suspended, so the old row and its fixture case would have stopped Auto upgrading on every paced session. Now only a verdict answering the client's own `stalled` ask is evidence, and it suppresses a downward move; the routine hold is not evidence and a new fixture case pins that it never blocks an upgrade. The "live web defect" premise is withdrawn: while a web stall verdict is in force `stallFree` already refuses upgrades. **`playback_auto_abr` is not in Developer** — it is a Playback-panel toggle with no readiness entry (`settings-panels.js:546`); §3.7 and §4 now say so, and moving it is follow-up F-1 in the build plan, not done here. **Emergency** is defined as the code defines it (§2.2, §3.4): only a fresh bandwidth cliff, never an empty runway. **Decode** has one answer (§3.2, §4): block and step down one rung once, never change delivery; a second failure is the compatibility owner's. **The fixture now pins all eight §8.1 guards**, each on its own side of the awaited poll; deleting `if(p.autoFallbackInFlight) return;` fails "An automatic fallback already claimed: autoControllerTick no longer contains p.autoFallbackInFlight before poll" (proved by revert). **The trace build is named** (§5.4, build plan M3): an unmerged branch build sideloaded onto the lab devices. The Apple watchdog test's doc comment names `.sameDeliveryRepair`. Two citation slips fixed (`PlaybackIntent.kt:64`; §7.1's pointer to the build plan). The D5 row's missing Apple verification is now taken: the target compiles and `make apple-test` on the lab Mac fails the same five iOS cases (`testDetailBadgesCarryTheSourceDynamicRangeAfterTheCodec`, three `LiveTvTests`, one `PlayerResumeTests`) that `main` fails at the same Swift, so the deletion adds none. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D4 | [#458](http://forge.lan:3000/noirr/plurx/pulls/458) | [NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md), board row A-05, `unclaimed`. Sequenced so nothing can be enabled before D3's baseline exists. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D5 | [#458](http://forge.lan:3000/noirr/plurx/pulls/458) | The decision executed: both `stallReopenIntent` overloads and their four test call sites deleted; `PlayerOpenIntent.stallReopen`, `StallReopenTicket`, `applyOpenIntent`'s ticket branch, `unboundStallRetry`, the floor budget's `.stallReopen` arm and the Android parameters all retained. `ReopenReason` deliberately **not** widened — §7.1 says why, and the build plan's M1 owns it. No behavioural change and no new test, because neither deleted function had a production call site; anchored in `tests/client-fixes.toml`. **The Apple target was not compiled and its suite was not run**: no Swift toolchain was reachable from the executing session. That is the one verification this milestone owes. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review of D1–D5 | [#458](http://forge.lan:3000/noirr/plurx/pulls/458) | The one adversarial review (comment 4105) found seven things, all taken. **`hold:` was split** (§3.2): the server sends `hold` on every exchange while a paced producer is ahead (`resolve_action`, `playback_control.rs:2027-2087`) and `producer_state` reads `held` whenever it is suspended, so the old row and its fixture case would have stopped Auto upgrading on every paced session. Now only a verdict answering the client's own `stalled` ask is evidence, and it suppresses a downward move; the routine hold is not evidence and a new fixture case pins that it never blocks an upgrade. The "live web defect" premise is withdrawn: while a web stall verdict is in force `stallFree` already refuses upgrades. **`playback_auto_abr` is not in Developer** — it is a Playback-panel toggle with no readiness entry (`settings-panels.js:546`); §3.7 and §4 now say so, and moving it is follow-up F-1 in the build plan, not done here. **Emergency** is defined as the code defines it (§2.2, §3.4): only a fresh bandwidth cliff, never an empty runway. **Decode** has one answer (§3.2, §4): block and step down one rung once, never change delivery; a second failure is the compatibility owner's. **The fixture now pins all eight §8.1 guards**, each on its own side of the awaited poll; deleting `if(p.autoFallbackInFlight) return;` fails "An automatic fallback already claimed: autoControllerTick no longer contains p.autoFallbackInFlight before poll" (proved by revert). **The trace build is named** (§5.4, build plan M3): an unmerged branch build sideloaded onto the lab devices. The Apple watchdog test's doc comment names `.sameDeliveryRepair`. Two citation slips fixed (`PlaybackIntent.kt:64`; §7.1's pointer to the build plan). The D5 row's missing Apple verification is now taken: the target compiles and `make apple-test` on the lab Mac fails the same five iOS cases (`testDetailBadgesCarryTheSourceDynamicRangeAfterTheCodec`, three `LiveTvTests`, one `PlayerResumeTests`) that `main` fails at the same Swift, so the deletion adds none. |

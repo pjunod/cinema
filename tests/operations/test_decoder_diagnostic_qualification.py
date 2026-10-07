@@ -37,6 +37,8 @@ CONTRACT_FIELDS = (
     "scope",
 )
 EXPECTED_INVENTORY_IDS = {
+    "identity.retained_lookup_hls",
+    "identity.retained_capture_hls",
     "builder.prepublication_retry",
     "builder.resumable_part",
     "builder.live_hls",
@@ -449,7 +451,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         identifiers = [surface["id"] for surface in surfaces]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         self.assertEqual(set(identifiers), EXPECTED_INVENTORY_IDS)
-        self.assertEqual(len(surfaces), 74)
+        self.assertEqual(len(surfaces), 76)
         for surface in surfaces:
             with self.subTest(surface=surface["id"]):
                 source = ROOT / surface["source"]
@@ -465,9 +467,15 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         transcode = module_source("crates/plurxd/src/transcode.rs")
         self.assertEqual(
             transcode.count("transcode::hls_args("),
-            3,
+            5,
             "update the M0 inventory when a shipping HLS builder is added or migrated",
         )
+        # Three shipping producer builders plus two canonical argv identity
+        # projections. The projections never launch another producer.
+        projections = [s for s in self.inventory() if s["kind"] == "hls_identity"]
+        self.assertEqual(len(projections), 2)
+        for projection in projections:
+            self.assertEqual(transcode.count(projection["anchor"]), 1)
         # The shipping region ends where the first test module begins. A
         # `#[cfg(test)]` field or seam inside a production item is not that
         # boundary, so split on the module declaration, not on the attribute.

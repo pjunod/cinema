@@ -20,6 +20,6 @@ admission is held, a warm opener and a joiner share one transport (asserted \
 with Arc::ptr_eq), the opener is stopped while it waits for its encoder slot, \
 the admissions are released, and the joiner must start within 10 s and count \
 as joined. With the early return removed from await_first_consumer the joiner \
-fails after 13.0 s with StartupTimeout (exit 101, run on nuc3). Runs in the \
+fails after 13.0 s with StartupTimeout (exit 101, run on lab3). Runs in the \
 local and hosted Rust gates.
 """

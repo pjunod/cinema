@@ -1,0 +1,347 @@
+{
+  "date": "2026-10-03",
+  "status": "passed",
+  "runtime_source_commit": "1cc9468936e3737a3e6993269cc18e06ace8e534",
+  "base_main_commit": "3197d0c58c079e485667da20e949f7275cb92cb9",
+  "pull_request": "http://forge.lan:3000/noirr/plurx/pulls/766",
+  "workflow_authorization": "Owner replaced per-task tests, effort gates and full promotion qualification; retain pinned compile checks, one merge-ready adversarial review, normal hooks, fast-lane passes and only failed-check retries.",
+  "evidence_interpretation": "Aggregate of retained per-check passes and source-bound repairs. Original failed runs remain failed; this is not a claim that one full CI run was green.",
+  "qualification": {
+    "review": "One final adversarial review; two P1 findings fixed before fast lane.",
+    "compile": "Rust 1.97.1; normal catalog/fmt/workspace all-target Clippy/JavaScript hook passed on final runtime source. Original Linux compile, vendor Clippy and lint passed.",
+    "validation": "249 original passing methods retained; four failed inventory methods repaired and passed individually.",
+    "operations": "604 original passing methods retained; one inventory repair and nine environment-dependent methods passed individually.",
+    "player": "Seven commands covered by retained passes and repaired extracted-harness checks; 22 unchanged native-HLS cases use matching-main evidence.",
+    "web": "Syntax, 13 media/layout cases, jsconfig, repaired type check and previously unrun typedef check passed; no diagnostic baseline increase.",
+    "rust": "4863 original passing tests retained. All eight failures resolved with targeted passes: store inventory, probe fixture, VAAPI fixture, four unchanged scheduler startup tests, and production AAC boundary repair. New Store and AAC contract tests passed. Both previously unrun restart checks passed.",
+    "windows": "Passed job 41591, run 4005 / UI 3984, on exact runtime source 1cc946893. Only Windows retried after job 41558 lost its runner; pinned container/toolchain/command unchanged, online baremetal/high-cpu pool selected."
+  },
+  "limits": [
+    "No manual production deployment or settings/queue changes.",
+    "QSV Q22 failed six quality comparisons; bitrate default retained.",
+    "Neutral HDR-to-SDR calibration does not justify a production policy change or physical-display claim.",
+    "VAAPI continuous neutral PQ signal proof passed; discontinuous hard-edge worst-pixel criterion failed and remains retained. No broad gamut, skin, real-title, physical-client, Dolby, 4K or subtitle-burn qualification.",
+    "Content-aware encoding and software B-frames remain advisory Developer opt-ins pending wider representative-title/client evidence; readiness cannot veto saved choices.",
+    "Scheduler full-suite startup-deadline failures passed unchanged in isolated serial retries; contention is suspected, not established as root cause.",
+    "HLS batching is a structural coordination reduction; no measured p95 latency claim."
+  ],
+  "regression_trailers": [
+    "Regression-Test: crates/plurx-core/src/fmp4.rs::encoded_audio_partition_uses_presentation_time_and_preserves_packets",
+    "Regression-Test: crates/plurx-core/src/fmp4.rs::encoded_presentation_grid_enforces_the_design_oracle_from_parsed_boxes",
+    "Regression-Test: crates/plurx-core/src/fmp4.rs::encoded_presentation_grid_refuses_unrepresentable_end_and_false_wire_claims",
+    "Regression-Test: crates/plurx-core/src/store/sqlite/media.rs::content_encoding_publication_is_source_fenced_and_reprobe_invalidates_it",
+    "Regression-Test: crates/plurx-core/src/transcode/encoder.rs::vaapi_hdr10_uses_p010_main10_without_software_encoder_options",
+    "Regression-Test: crates/plurx-core/src/transcode/vod.rs::encoded_vod_hevc_sample_entry_matches_the_hls_parameter_set_contract",
+    "Regression-Test: crates/plurx-core/tests/store_contract.rs::content_encoding_report_publication_is_source_fenced_on_every_backend",
+    "Regression-Test: crates/plurx-core/tests/store_contract.rs::contract_inventory_matches_every_store_method",
+    "Regression-Test: crates/plurxd/src/decode_facts.rs::fresh_source_document_and_decoder_facts_share_one_stream_probe",
+    "Regression-Test: crates/plurxd/src/decode_facts.rs::prepared_source_document_refuses_changed_source_and_probe_before_refinement",
+    "Regression-Test: crates/plurxd/src/decode_facts.rs::source_verification_keeps_decoder_refinement_failures_separate",
+    "Regression-Test: crates/plurxd/src/ffmpeg.rs::a_content_encoding_report_is_not_a_source_change_for_the_same_reporter",
+    "Regression-Test: crates/plurxd/src/ffmpeg.rs::cooperative_sample_cancellation_reaps_before_returning_capacity",
+    "Regression-Test: crates/plurxd/src/http/hls/tests/chunk_05.rs::a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units",
+    "Regression-Test: crates/plurxd/src/http/hls/tests/chunk_05.rs::storage_batch_drains_without_a_producer_round_trip_per_proof_unit",
+    "Regression-Test: crates/plurxd/src/http/hls/tests/chunk_05.rs::storage_batch_drop_retains_only_the_polled_prefix",
+    "Regression-Test: crates/plurxd/src/http/hls/tests/chunk_05.rs::terminal_failure_discards_the_unpolled_part_of_a_storage_batch",
+    "Regression-Test: crates/plurxd/src/http/mod.rs::content_and_reordered_vod_preferences_save_without_readiness_gate",
+    "Regression-Test: crates/plurxd/src/transcode/content_encoding.rs::completed_cache_lookup_preserves_live_policy_and_uses_producer_thread_recipe",
+    "Regression-Test: crates/plurxd/src/transcode/content_encoding.rs::measured_policy_requires_every_window_and_finite_metrics",
+    "Regression-Test: crates/plurxd/src/transcode/content_encoding.rs::measured_report_is_bound_to_source_engine_geometry_and_recipe",
+    "Regression-Test: crates/plurxd/src/transcode/content_encoding.rs::native_sample_phase_scores_all_windows_and_cleans_scratch",
+    "Regression-Test: crates/plurxd/src/transcode/tests/chunk_01.rs::a_transcode_advertises_the_codec_its_grade_produces",
+    "Regression-Test: crates/plurxd/src/transcode/tests/chunk_01.rs::plain_qsv_hdr_ceiling_does_not_require_a_dolby_renderer",
+    "Regression-Test: crates/plurxd/src/transcode/tests/chunk_01.rs::vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_plans",
+    "Regression-Test: crates/plurxd/src/transcode/tests/chunk_01.rs::vaapi_plain_hdr10_proof_does_not_admit_dolby_burns_or_four_k",
+    "Regression-Test: crates/plurxd/src/vodencode_tests.rs::encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid",
+    "Regression-Test: tests/operations/test_content_aware_encoding.py::test_hard_window_vetoes_better_aggregate_quality",
+    "Regression-Test: tests/operations/test_encoder_calibration_screen.py::test_no_measured_benefit_retains_bitrate",
+    "Regression-Test: tests/operations/test_tone_map_calibration.py::test_metadata_graph_drift_and_failed_execution_cannot_claim_evidence",
+    "Regression-Test: tests/operations/test_vod_bframes_timeline_design.py::test_plan_names_the_executable_oracle_and_keeps_refusal",
+    "Regression-Test: tests/playback/web-control.test.js::prepared HLS buffer readiness follows incumbent clock and releases listener ownership",
+    "Regression-Test: tests/playback/web-policy.test.js::closing the player ends its track choice instead of arming the next play",
+    "Regression-Test: tests/validation/test_decoder_recovery_status.py::test_provenance_is_kept_out_of_the_artifact_name",
+    "Regression-Test: tests/web/media-preparation.test.js::next episode metadata expires without background polling or stale acceptance",
+    "Regression-Test: tests/web/media-preparation.test.js::next episode prewarm aborts on seek and autoplay off and drops late reads",
+    "Regression-Test: tests/web/media-preparation.test.js::next episode prewarm is single flight and publishes no playback state"
+  ],
+  "rust_regression_pass_map": [
+    {
+      "regression": "crates/plurx-core/src/fmp4.rs::encoded_audio_partition_uses_presentation_time_and_preserves_packets",
+      "passing_logs": [
+        "audio-partition-selective.log"
+      ]
+    },
+    {
+      "regression": "crates/plurx-core/src/fmp4.rs::encoded_presentation_grid_enforces_the_design_oracle_from_parsed_boxes",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurx-core/src/fmp4.rs::encoded_presentation_grid_refuses_unrepresentable_end_and_false_wire_claims",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurx-core/src/store/sqlite/media.rs::content_encoding_publication_is_source_fenced_and_reprobe_invalidates_it",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurx-core/src/transcode/encoder.rs::vaapi_hdr10_uses_p010_main10_without_software_encoder_options",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurx-core/src/transcode/vod.rs::encoded_vod_hevc_sample_entry_matches_the_hls_parameter_set_contract",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurx-core/tests/store_contract.rs::content_encoding_report_publication_is_source_fenced_on_every_backend",
+      "passing_logs": [
+        "store-content-report-contract.log"
+      ]
+    },
+    {
+      "regression": "crates/plurx-core/tests/store_contract.rs::contract_inventory_matches_every_store_method",
+      "passing_logs": [
+        "store-inventory-selective.log"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/decode_facts.rs::fresh_source_document_and_decoder_facts_share_one_stream_probe",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/decode_facts.rs::prepared_source_document_refuses_changed_source_and_probe_before_refinement",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/decode_facts.rs::source_verification_keeps_decoder_refinement_failures_separate",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/ffmpeg.rs::a_content_encoding_report_is_not_a_source_change_for_the_same_reporter",
+      "passing_logs": [
+        "probe-report-selective.log"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/ffmpeg.rs::cooperative_sample_cancellation_reaps_before_returning_capacity",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/http/hls/tests/chunk_05.rs::a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/http/hls/tests/chunk_05.rs::storage_batch_drains_without_a_producer_round_trip_per_proof_unit",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/http/hls/tests/chunk_05.rs::storage_batch_drop_retains_only_the_polled_prefix",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/http/hls/tests/chunk_05.rs::terminal_failure_discards_the_unpolled_part_of_a_storage_batch",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/http/mod.rs::content_and_reordered_vod_preferences_save_without_readiness_gate",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/transcode/content_encoding.rs::completed_cache_lookup_preserves_live_policy_and_uses_producer_thread_recipe",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/transcode/content_encoding.rs::measured_policy_requires_every_window_and_finite_metrics",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/transcode/content_encoding.rs::measured_report_is_bound_to_source_engine_geometry_and_recipe",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/transcode/content_encoding.rs::native_sample_phase_scores_all_windows_and_cleans_scratch",
+      "passing_logs": [
+        "native-content-proof-fixed.log"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/transcode/tests/chunk_01.rs::a_transcode_advertises_the_codec_its_grade_produces",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/transcode/tests/chunk_01.rs::plain_qsv_hdr_ceiling_does_not_require_a_dolby_renderer",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/transcode/tests/chunk_01.rs::vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_plans",
+      "passing_logs": [
+        "vaapi-cadence-selective.log"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/transcode/tests/chunk_01.rs::vaapi_plain_hdr10_proof_does_not_admit_dolby_burns_or_four_k",
+      "passing_logs": [
+        "rust-41502.log.gz"
+      ]
+    },
+    {
+      "regression": "crates/plurxd/src/vodencode_tests.rs::encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid",
+      "passing_logs": [
+        "reordered-aac-selective.log",
+        "selective-rust-41557.log.gz"
+      ]
+    }
+  ],
+  "receipts": [
+    {
+      "path": "adversarial-review.json",
+      "sha256": "128242e954123f4c7591f2d1251bd94653c406d591d8f4f1348bd0483fdab251"
+    },
+    {
+      "path": "native-content-proof-fixed.json",
+      "sha256": "4379734ec357e1e897f420078e6c7c8da337374d69a68a34ed6c127c661498a9"
+    },
+    {
+      "path": "scorer/qualification.json",
+      "sha256": "9e3a4dc4fe6465821fcedbaa32a4d4f5abf0f312ab110ceb8f801145f497c4de"
+    },
+    {
+      "path": "vaapi-qualification.json",
+      "sha256": "757c9f76e5ff015b2c40edc467f00dd6246b7ae94d8c2633ff0a93195b6457ba"
+    },
+    {
+      "path": "settings-sections.json",
+      "sha256": "932c19bd40f467d70963e30bbbcb861a535eeedd0dde4532f22721b93a5b5a33"
+    },
+    {
+      "path": "preflight-selective-repair.json",
+      "sha256": "aa81d391e8afb5148d5fcbbf673745ef76e4f688800833da01d25feaa9a04a04"
+    },
+    {
+      "path": "operations-selective-repair.json",
+      "sha256": "62e992e10993f5cf1d79836ab4ed5bc1ae41391916d04b8c274e7edb6f670619"
+    },
+    {
+      "path": "web-preflight-repair.json",
+      "sha256": "bc348f56fcd508a012767d914b7abc479022bcdfada62f795365288f678610e1"
+    },
+    {
+      "path": "native-hls-retained.json",
+      "sha256": "5817bb91cc8f9a04dcae20c8b32a8bd68b7da8e01f35524bf4749695e2af8dfb"
+    },
+    {
+      "path": "continuation-receipt.json",
+      "sha256": "3770b460ff3e5e7dd46daa96b41ece0e779b06ded64001cbb2b5b0da64013ac7"
+    },
+    {
+      "path": "rust-41502-receipt.json",
+      "sha256": "a3cba12280a838c617e0534137878ec8ff778ef753b64d82507b8db09c257fea"
+    },
+    {
+      "path": "store-contract-selective-receipt.json",
+      "sha256": "f4fa3380fb2b59a2decdaf296e9189d24cfd1a167ef5f30f7888c25d5bbe23e9"
+    },
+    {
+      "path": "probe-report-selective-receipt.json",
+      "sha256": "3ed3a6f574d682c5e65a202fdeac77fe85c761bd1885151fd610f4622833d1c0"
+    },
+    {
+      "path": "vaapi-cadence-selective-receipt.json",
+      "sha256": "246b63c6e0ebbbe39a71fd70e997616aacb59e62ef567050f17971f171cc6fbb"
+    },
+    {
+      "path": "reordered-aac-selective-receipt.json",
+      "sha256": "ca4dc9fc448acee908b6c03024933165a7f7e373dd72c633366e041f91f75360"
+    },
+    {
+      "path": "selective-rust-41557-receipt.json",
+      "sha256": "032b60d63358f10417622af1a6fab45717a1ade59691c957d474f73a4de0bc84"
+    },
+    {
+      "path": "wrapper-selective-provenance.json",
+      "sha256": "4abb590b62af19fa852bd2f1950720e91c2bd5d358211af41c784ed62150a5c5"
+    },
+    {
+      "path": "selective-windows-41558-receipt.json",
+      "sha256": "043cb24e546165464d5c7a9445edb88bcfa7b4aac7905fd7385890c43aea68c1"
+    },
+    {
+      "path": "windows-retry-41591-receipt.json",
+      "sha256": "803c14d98b7484571c9a42079a8ec4af3899a697bb08b28c62538a81466af662"
+    },
+    {
+      "path": "wrapper-windows-retry-provenance.json",
+      "sha256": "96f38662f3452e9a919655c5673aca5a0550513251c791c8d008704d2061e026"
+    }
+  ],
+  "delta_after_initial_rust_lane": [
+    {
+      "path": "crates/plurx-core/src/fmp4.rs",
+      "sha256": "026119cbccc110e7551d10e7a801e6bb266c9c1e1df723d61d3ff5c4a1051ee4",
+      "scope": "production AAC ownership with pure and end-to-end regressions"
+    },
+    {
+      "path": "crates/plurx-core/tests/store_contract.rs",
+      "sha256": "cbcfb74164d4a1b09d86057da5548b56dc8fb8d1d1ad660e4bdee613c99b7b95",
+      "scope": "test fixture/coverage only; failed checks passed"
+    },
+    {
+      "path": "crates/plurxd/src/ffmpeg.rs",
+      "sha256": "e2a77ddf24a56b282273cc4a58c09841ff6312137c6d909ea9a9ce502ad58f8b",
+      "scope": "test fixture/coverage only; failed checks passed"
+    },
+    {
+      "path": "crates/plurxd/src/transcode/tests/chunk_01.rs",
+      "sha256": "3116da73a02190a181d6985079e798bce57cdb5a8cd90c3bf4531af116776a77",
+      "scope": "test fixture/coverage only; failed checks passed"
+    },
+    {
+      "path": "crates/plurxd/src/vodgen.rs",
+      "sha256": "bbb4765bb94e6dd4ca0aeed34f63da8c671296a3bc1cba73977bfcf2907ca8aa",
+      "scope": "production AAC ownership with pure and end-to-end regressions"
+    },
+    {
+      "path": "crates/plurxd/src/web/pages/settings-developer.js",
+      "sha256": "eaa837f5c0c59d488ab7fb7b2662ccea9ab1b8e7842bcc6ba0730c823126ac11",
+      "scope": "JSDoc only; failed type check passed"
+    }
+  ],
+  "documentation_followup": "Changes after runtime source 1cc946893 are documentation/evidence only; final normal hook retained. No runtime source changed while awaiting Windows."
+}

@@ -1619,6 +1619,34 @@ personal title. Readiness diagnostics are deliberately absent from this
 decision: they explain likely failures to an administrator but cannot veto an
 explicit enable choice.
 
+## Jellyfin clients — the same media owners, another protocol
+
+The `/jellyfin` facade ([API.md](API.md) §24, off by default) translates a
+Jellyfin `PlaybackInfo` into the native decisions above; it adds no planner,
+encoder, timer or background task.
+
+- **Direct play** is the native direct path: the source file with Range,
+  bound to one play. Android TV builds its own URL from the source `ETag` (a
+  one-title link). Infuse declares no direct-play profiles and asks for HTTP
+  direct play, then streams the file itself; it is negotiated as a direct
+  play, and its request (login and `MediaSourceId`, no play id) resolves that
+  login's newest direct negotiation of exactly that source.
+- **Transcode** is native VOD over HLS, copy or encoded, never the rolling
+  fallback. The master is always multivariant, and TS-declaring clients get
+  fMP4 fragments with the native init prefixed.
+- **Subtitles** follow the client's `SubtitleProfiles` as Jellyfin decides
+  them: a track the client reads from the direct file itself is `Embed`; a
+  text track otherwise becomes a VTT or SRT sidecar (`External`, at
+  `…/Subtitles/{index}/0/Stream.{format}`) or a manifest rendition (`Hls`)
+  when the profile lists that first; a bitmap track is embedded or burned. The
+  sidecar is the native extraction, with Jellyfin's start/end window applied
+  when a start is given. A selected track that can only be burned makes a
+  direct play a transcode.
+- **Times** stay on the source timeline: a resume start is not added to cue or
+  progress times.
+- **Leader restarts** fence `/jellyfin` with the same 503 and `Retry-After` as
+  native media; an HLS play is a native session and keeps the native grace.
+
 ## Non-goals & known limits
 
 - **Live TV has no seek, no resume, and no progress.** A channel is not a

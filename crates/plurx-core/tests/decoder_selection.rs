@@ -75,6 +75,8 @@ fn facts(stream: Value) -> DecodeFacts {
 
 fn options(pipeline: Pipeline) -> TranscodeMediaOptions {
     TranscodeMediaOptions {
+        video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
+        audio: None,
         target_height: 1080,
         video_bitrate_kbps: 8_000,
         effective_rate_control: EffectiveRateControl::Vbr,
@@ -303,6 +305,8 @@ fn execution_file(path: &str) -> MediaFile {
 
 fn execution_options() -> TranscodeOptions {
     TranscodeOptions {
+        video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
+        audio: None,
         auto_quality_rate_profile: None,
         normalized_geometry: false,
         target_height: 1080,
@@ -320,6 +324,64 @@ fn execution_options() -> TranscodeOptions {
         force_idr: false,
         software_threads: None,
     }
+}
+
+#[test]
+fn current_main_geometry_composes_with_independent_audio_and_codec_identity() {
+    use plurx_core::playback::audio::{AudioAction, AudioDelivery};
+    let mut stream = video(
+        0,
+        Some("h264"),
+        Some("High"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "30/1",
+        "30/1",
+        Some("bt709"),
+    );
+    stream["sample_aspect_ratio"] = json!("1:1");
+    stream["side_data_list"] = json!([{"side_data_type":"Display Matrix", "rotation":0,
+        "displaymatrix":"00000000: 65536 0 0\n00000001: 0 65536 0\n00000002: 0 0 1073741824\n"}]);
+    let input = facts(stream);
+    let mut media = options(Pipeline::Cpu);
+    media.target_height = 720;
+    media.audio = Some(AudioDelivery {
+        action: AudioAction::Copy {
+            codec: "ac3".into(),
+            channels: 6,
+        },
+        downmix: None,
+        reason: "retained independent audio".into(),
+    });
+    let caps = software_capabilities("h264", "h264");
+    let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+    let request =
+        TranscodeRequest::new(Encoder::Software, media.clone()).with_normalized_geometry();
+    let copied = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("combined normalized/audio plan");
+    assert_eq!(copied.output_contract().effective_width(), Some(1280));
+    assert_eq!(copied.output_contract().effective_height(), Some(720));
+    assert!(copied.output_contract().normalized_geometry().is_some());
+    assert_eq!(copied.codec_contract().codec.name(), "h264");
+    let contract = serde_json::to_value(copied.output_contract()).expect("contract");
+    assert_eq!(contract["audio"]["action"]["kind"], json!("copy"));
+    media.audio = None;
+    let legacy_audio = resolve_transcode(
+        &TranscodeRequest::new(Encoder::Software, media).with_normalized_geometry(),
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("scalar audio plan");
+    assert_ne!(copied.plan_digest(), legacy_audio.plan_digest());
 }
 
 fn software_capabilities(codec: &str, implementation: &str) -> DecodeCapabilities {
@@ -614,21 +676,26 @@ fn operator_software_requirement_replaces_a_vendor_surface_graph() {
         "24/1",
         Some("smpte2084"),
     ));
-    let plan = resolve(
-        Encoder::Qsv,
-        Pipeline::VppQsv,
-        &input,
-        &capabilities(vec![]),
-        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some("off")),
-    )
-    .expect("CPU renderer preserves the SDR contract");
-    assert_eq!(plan.decode().backend(), DecodeBackend::Software);
-    assert_eq!(
-        plan.decode().reason(),
-        DecodeReason::OperatorSoftwareOverride
-    );
-    assert_eq!(plan.options().pipeline, Pipeline::Cpu);
-    assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+    for (encoder, pipeline) in [
+        (Encoder::Qsv, Pipeline::VppQsv),
+        (Encoder::Vaapi, Pipeline::LibplaceboVaapi),
+    ] {
+        let plan = resolve(
+            encoder,
+            pipeline,
+            &input,
+            &capabilities(vec![]),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some("off")),
+        )
+        .expect("CPU renderer preserves the SDR contract");
+        assert_eq!(plan.decode().backend(), DecodeBackend::Software);
+        assert_eq!(
+            plan.decode().reason(),
+            DecodeReason::OperatorSoftwareOverride
+        );
+        assert_eq!(plan.options().pipeline, Pipeline::Cpu);
+        assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+    }
 }
 
 #[test]
@@ -2035,6 +2102,87 @@ fn surface_contracts_name_vendor_subtitle_vulkan_and_opencl_transitions() {
     assert_eq!(opencl.renderer_domain(), FrameDomain::OpenCl);
     assert_eq!(opencl.renderer_upload_format(), Some("p010le"));
     assert_eq!(opencl.renderer_download_format(), Some("nv12"));
+}
+
+#[test]
+fn vulkan_vaapi_plan_preserves_hardware_frames_and_subtitle_boundaries() {
+    let input = facts(video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2160,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    ));
+    for burn in [None, Some(false), Some(true)] {
+        let mut media = options(Pipeline::LibplaceboVaapi);
+        media.subtitle_burn = burn.map(|bitmap| SubtitleBurn {
+            subtitle_index: 0,
+            bitmap,
+        });
+        let plan = resolve_transcode(
+            &TranscodeRequest::new(Encoder::Vaapi, media),
+            &input,
+            &capabilities(vec![]),
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::none(),
+        )
+        .expect("VA-API Vulkan plan");
+        let mut opts = execution_options();
+        opts.subtitle_burn = plan.options().subtitle_burn.clone();
+        let file = execution_file("/fixture/source.mkv");
+        let execution =
+            TranscodeExecution::from_options(&file, &opts, Pacing::unpaced(), "/fixture/out")
+                .expect("execution");
+        let args = hls_args(&plan, &execution);
+        assert!(args
+            .windows(2)
+            .any(|p| p == ["-hwaccel_output_format", "vaapi"]));
+        let flag = if burn == Some(true) {
+            "-filter_complex"
+        } else {
+            "-vf"
+        };
+        let graph = &args[args.iter().position(|a| a == flag).expect("graph") + 1];
+        assert!(graph.contains("libplacebo="), "{graph}");
+        assert!(
+            graph.contains("hwmap=derive_device=vaapi,format=vaapi"),
+            "{graph}"
+        );
+        assert_eq!(
+            graph.matches("hwdownload").count(),
+            usize::from(burn.is_some()),
+            "{graph}"
+        );
+        assert_eq!(
+            graph.matches("hwupload").count(),
+            usize::from(burn.is_some()),
+            "{graph}"
+        );
+        let surface = DecodeSurfaceContract::for_plan(
+            DecodeBackend::Vaapi,
+            Pipeline::LibplaceboVaapi,
+            &input,
+            Encoder::Vaapi,
+            if burn.is_some() {
+                SubtitleRendering::BitmapBurn
+            } else {
+                SubtitleRendering::None
+            },
+        );
+        assert_eq!(surface.decode_domain(), FrameDomain::Vaapi);
+        assert_eq!(surface.decoder_download_format(), None);
+        assert_eq!(surface.renderer_domain(), FrameDomain::Vulkan);
+        assert_eq!(surface.renderer_upload_format(), None);
+        assert_eq!(surface.renderer_download_format(), burn.map(|_| "nv12"));
+        assert_eq!(
+            surface.encoder_upload_domain(),
+            burn.map(|_| FrameDomain::Vaapi)
+        );
+    }
 }
 
 #[test]

@@ -208,7 +208,7 @@ and calls back on the main actor with a typed event. Its pure policy is
 `nonisolated static` so it is unit-testable without AVFoundation:
 
 ```swift
-enum AudioInterruptionResponse: Equatable { case suspend, resume, stay }
+enum AudioInterruptionResponse: Equatable { case suspend, resume, stay, ignore }
 
 nonisolated static func interruptionResponse(
     type: AVAudioSession.InterruptionType,
@@ -216,7 +216,7 @@ nonisolated static func interruptionResponse(
     wantsPlayback: Bool
 ) -> AudioInterruptionResponse {
     switch type {
-    case .began: return .suspend
+    case .began: return wantsPlayback ? .suspend : .ignore
     case .ended: return options.contains(.shouldResume) && wantsPlayback ? .resume : .stay
     @unknown default: return .stay
     }
@@ -247,6 +247,26 @@ Finite player wiring:
   Live TV and Library Channels set `paused = true`. The viewer's next on-screen
   or remote Play therefore creates one real resume rather than turning the
   retained pre-interruption intent off or no-oping against it.
+- **iOS does not promise an `.ended` for every `.began`** (2026-10-04: an
+  iPad Pro paused for ten minutes got a `.began`, never an `.ended`, and kept
+  "Paused — audio interrupted" over a picture the viewer had resumed for an
+  hour, with the stall monitor off throughout). So a hold has three more
+  ends besides `.ended`:
+  - `.began` while the viewer has already paused is `.ignore`: nobody but
+    the viewer paused anything, and no hold is raised.
+  - The viewer's own transport press (on-screen, remote, lock screen)
+    ends the hold. Under a hold the transport reads Play, so a toggle is a
+    resume. A Play re-activates the session first; if iOS refuses (the call
+    is still live) the hold stays. On the finite player a Play settles the
+    stale intent through `settleSystemHoldAsPause()` — the one writer it
+    shares with `.stay` — so the press goes through the ordinary Play path
+    (paused-retirement latch, bounded resume) with the hold's real length
+    as the pause length.
+  - Film actually playing (`timeControlStatus == .playing`, no pending
+    seek, the presenter's presenting sample) retires it; Library Channels
+    takes the same evidence from the item observer because AVKit's own Play
+    button reaches the player directly. A `.resume` that arrives after the
+    viewer already ended the hold does nothing.
 - Route change `.oldDeviceUnavailable` (headphones pulled, AirPods case
   closed): `setPlaybackRequested(false)` — this **is** a viewer-pause
   semantically, and it is what keeps the film off the speaker. Every
@@ -446,6 +466,60 @@ Rollout: the Apple build goes to TestFlight/the fleet through the normal
 `apple-build-bump`; the contract fixture change deploys with the server.
 Rollback is the previous build number.
 
+### 6.1 Status and remaining physical evidence (2026-10-02)
+
+**Simulator suite, 2026-10-02.** `make apple-test`'s steps (xcodegen, then
+`build-for-testing` and `test-without-building` per platform) ran once on maca,
+the macOS CI runner (Xcode 27.0, iPhone 17 Pro and Apple TV 4K (3rd generation) simulators, iOS and
+tvOS 26.5 runtimes) against a plain source copy of
+`effort/architecture-review-2026-09-20` @ `6f6466ebc`. Both builds succeeded.
+iOS: **742 tests, 735 passed, 7 failed**. tvOS: **726 tests, 719 passed, 7
+failed**. The same seven failed on both platforms and failed again when rerun
+alone, so they are deterministic and pre-existing on the effort branch (the
+run carried no Apple source change). The effort branch landed on `main` as
+#793 on 2026-10-04; no run of this suite on `main` is recorded here:
+
+- `AttemptScopesTests` — `testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid`,
+  `testEveryMigratedFenceRefusesAContinuationAcrossAViewerPause`,
+  `testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle`. `AttemptFence`
+  has grown cases the census table does not list (the `autoBoundary*`,
+  `autoResume*`, decoder- and stall-candidate acknowledgement,
+  `preparedPressure*`, `blackFrameDecoderAcknowledgement` and
+  `seekIntentAfterOptionalBoundary` fences), and two auto-boundary seek fences
+  survive a viewer Pause.
+- `AppleClientTests.testRefusalBodiesAreKeptWithoutDisturbingTheMatchersThatPredateThem`
+  and `AppleClientTests.testTheOwnerStopsThePlayerInExactlyOnePlace`.
+- `AutoQualityPolicyTests.testSharedAutoQualityFixture` (the shared fixture's
+  switch-budget case and key set disagree with the Swift policy).
+- `PausedRetirementTests.testResumeConsumesTheLatchBeforeAnyInPlaceResumePath`
+  (a source pin whose anchor no longer matches).
+
+None of the seven is an A-01 test: the display-criteria decision and all four
+interruption tests (finite, Live TV, library channel, and the
+system-suspension/intent policy) passed on both platforms.
+
+What only a physical device can close — none of it can come from maca, which
+has no paired Apple TV, iPhone or iPad. First ship an Apple build at or above
+the source counter (`CURRENT_PROJECT_VERSION` 204 on this branch), and report
+the installed build with every result:
+
+1. **§5.1 HDMI switch.** Apple TV at 4K SDR with Match Dynamic Range and Match
+   Frame Rate on: run the Apple TV prompt above, recording the TV's own signal
+   readout at first frame, 30 s, after Auto → 1080p and 5 s after Stop, for a
+   24p HDR10 title, a 25p SDR title and a Dolby Vision title. Pass: the
+   readout changes to 24 Hz / 25 Hz and HDR within 2 s of first frame, does
+   not change during the quality switch, and returns to the launcher mode
+   after Stop.
+2. **§5.3 library channels.** The same readout for a library channel inline
+   and fullscreen; write the dated paragraph in APPLE-CLIENT-PARITY.md.
+3. **tvOS Siri interruption (§7 Q4).** Invoke Siri during playback and report
+   whether playback pauses and resumes as the interruption tests expect.
+4. **§5.2 iPhone matrix.** The iPhone prompt above: declined call, 90 s
+   answered call, headphones pulled, Siri, PiP plus a call, reporting the
+   Activity session count at every step (the server must show one session
+   throughout, never a "Playback stopped." screen within a one-minute call,
+   never speaker playback after the headphones are pulled).
+
 ---
 
 ## 7. Open questions
@@ -484,3 +558,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M2 | `b1709dbc` / #406 | One owned observer serves all three player stacks; interruption state remains separate from viewer intent, stall/watchdog sampling is gated, old-route loss revokes intent, and iOS uses `.playback` / `.moviePlayback`. Six focused Swift tests and all 64 shared surface cases pass. The iPhone interruption matrix remains required. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M3 | `3bbe3ea3` / #406 | No second display writer was added beside SwiftUI `VideoPlayer`. APPLE-CLIENT-PARITY records the implementation and explicitly leaves inline/fullscreen HDMI behavior unobserved; needs the §6 Apple TV prompt before this plan can be `done`. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Review fixes | `c5ca81f7`, `42b631d1` / #406 | Addressed all findings from sole adversarial review #3154: explicit-resume reconciliation on all three stacks, attached Live TV route-loss pause, ready/current/serial-fenced Live TV display matching, and truthful source-level retirement documentation. Five selected iOS simulator tests, tvOS simulator compilation, all 64 surface cases, and docs-index validation pass. Physical HDMI and interruption evidence remains pending. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Simulator suite and remaining evidence | `opus/client-evidence` into the architecture effort | `make apple-test` steps on maca (Xcode 27.0) at `6f6466ebc`: iOS 742/735/7, tvOS 726/719/7 (total/passed/failed); every A-01 decision and interruption test passed on both platforms, and the seven failures are pre-existing and outside A-01 (listed in §6.1). Physical HDMI, Siri and iPhone evidence remains, as concrete steps in §6.1. |

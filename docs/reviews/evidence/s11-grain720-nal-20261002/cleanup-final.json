@@ -1,0 +1,110 @@
+{
+  "all_resources_absent": true,
+  "cleanup": [
+    {
+      "absent": true,
+      "container": "963c3a9033df982e6c89b9d9b9bf2d0d6cca8ad8ec484ce52b38e51cd54bade4",
+      "proof": {
+        "absence_inventory": "successful full container listing"
+      }
+    },
+    {
+      "absent": true,
+      "container": "896d7d16e46ad85b8383e001d74bb38136993902253507dbf42d93e1f2946df3",
+      "proof": {
+        "absence_inventory": "successful full container listing"
+      }
+    },
+    {
+      "absent": true,
+      "proof": {
+        "absence_inventory": "successful full volume listing"
+      },
+      "volume": "s11-nal-input-0994cbea10b14af799160329ed387437"
+    },
+    {
+      "absent": true,
+      "proof": {
+        "absence_inventory": "successful full volume listing"
+      },
+      "volume": "s11-nal-results-0994cbea10b14af799160329ed387437"
+    }
+  ],
+  "cleanup_Docker_seconds": 60,
+  "discovered_resources": {
+    "containers": [
+      "963c3a9033df982e6c89b9d9b9bf2d0d6cca8ad8ec484ce52b38e51cd54bade4",
+      "896d7d16e46ad85b8383e001d74bb38136993902253507dbf42d93e1f2946df3"
+    ],
+    "volumes": [
+      "s11-nal-input-0994cbea10b14af799160329ed387437",
+      "s11-nal-results-0994cbea10b14af799160329ed387437"
+    ]
+  },
+  "error": null,
+  "exported_nal_result_identity": {
+    "bytes": 343739,
+    "dev": 16777229,
+    "inode": 249516579,
+    "mode": "0o600",
+    "sha256": "9a286a6cbd781fa3bcf4f5a1180522f23f9321eb44afdb9c46f06b4db0ec995a",
+    "uid": 501
+  },
+  "final_observer_errors": [],
+  "guardian_pid": 41475,
+  "guardian_process_group_absent": true,
+  "guardian_terminal": 0,
+  "host_stage_removed": true,
+  "no_producer_probe_decoder_old_test": true,
+  "nonce": "0994cbea10b14af799160329ed387437",
+  "parser_sha256": "56825d98839fa31757112bbc7ebeba731e8266cf3bc8ea93ec15cb45af689c80",
+  "parser_watcher_pid": 41485,
+  "parser_watcher_process_group_absent": true,
+  "parser_watcher_terminal": 0,
+  "partial_or_complete_exported": true,
+  "postcleanup_inventory": {
+    "containers": [],
+    "volumes": []
+  },
+  "result_bytes_before_final": 394730,
+  "source_preserved": "/private/tmp/codex-s11-census-c9d10b5d892e45bbb004efd5/export/census",
+  "states": [
+    {
+      "container": "896d7d16e46ad85b8383e001d74bb38136993902253507dbf42d93e1f2946df3",
+      "phase": "prepare",
+      "state": {
+        "Dead": false,
+        "Error": "",
+        "ExitCode": 0,
+        "FinishedAt": "2026-10-02T16:42:46.299547042Z",
+        "OOMKilled": false,
+        "Paused": false,
+        "Pid": 0,
+        "Restarting": false,
+        "Running": false,
+        "StartedAt": "2026-10-02T16:42:46.130058542Z",
+        "Status": "exited"
+      }
+    },
+    {
+      "container": "963c3a9033df982e6c89b9d9b9bf2d0d6cca8ad8ec484ce52b38e51cd54bade4",
+      "phase": "parser",
+      "state": {
+        "Dead": false,
+        "Error": "",
+        "ExitCode": 0,
+        "FinishedAt": "2026-10-02T16:42:49.757644127Z",
+        "OOMKilled": false,
+        "Paused": false,
+        "Pid": 0,
+        "Restarting": false,
+        "Running": false,
+        "StartedAt": "2026-10-02T16:42:46.608853959Z",
+        "Status": "exited"
+      }
+    }
+  ],
+  "success": true,
+  "watcher_wait_additional_seconds": 15,
+  "wrapper_sha256": "170546a4e77b318a5d7d7edfa93611bd6280ee2b9c057b26c883258a086a91df"
+}

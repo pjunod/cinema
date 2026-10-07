@@ -36,7 +36,8 @@ impl VodServe {
                     && !rendition.closed.load(Relaxed)
                     && rendition.failure().is_none()
                     && rendition.recipe.encoding.as_ref().is_some_and(|encoding| {
-                        encoding.plan.plan_digest() == plan_digest
+                        encoding.shared_audio.is_none()
+                            && encoding.plan.plan_digest() == plan_digest
                             && source_object_version
                                 .is_none_or(|version| encoding.source_object_version == version)
                             && pipeline.is_none_or(|pipeline| {
@@ -147,6 +148,30 @@ impl VodServe {
         tokio::spawn(async move {
             let _completion = TerminalCleanupGuard(Arc::clone(&cleanup));
             shared.hooks.get().before_terminal_detach().await;
+            let children = {
+                let mut sessions = shared.sessions.lock().await;
+                sessions
+                    .get_mut(&session_id)
+                    .filter(|session| {
+                        session.tombstone.is_some()
+                            && session
+                                .terminal_cleanup
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(current, &cleanup))
+                            && session
+                                .rendition
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+                    })
+                    .map(|session| std::mem::take(&mut session.children))
+                    .unwrap_or_default()
+            };
+            // End drains every child before releasing the parent caption
+            // window. The detached cleanup owns their capacity and reader ids
+            // even when the original HTTP waiter has already disappeared.
+            for child in children {
+                child.detach(&shared.pool).await;
+            }
             rendition.detach_reader(&shared.pool, &session_id).await;
             rendition.kick();
             let serve = VodServe { shared };
@@ -185,6 +210,7 @@ impl VodServe {
                     .is_some_and(|current| Arc::ptr_eq(current, &rendition));
                 if session.tombstone.is_some() && exact_cleanup && exact_rendition {
                     session.rendition = None;
+                    session.retained_output = None;
                 }
             }
             drop(sessions);
@@ -240,6 +266,9 @@ impl VodServe {
                     cause
                 }
             };
+            if let Some(grant) = session.passive_grant.take() {
+                grant.release();
+            }
             // Idempotent, and correct on the refinement branch too: the slot
             // was already aborted when the provisional tombstone was written.
             session.abort_staged_preparation();
@@ -397,6 +426,7 @@ impl VodServe {
             return Err(VodSupersedeError::Deadline);
         }
         let mut work = Vec::new();
+        let mut ended = 0;
         for (id, lifecycle, incarnation) in victims {
             let Some(session) = sessions.get_mut(&id) else {
                 continue;
@@ -408,6 +438,10 @@ impl VodServe {
                 continue;
             }
             session.tombstone = Some(Terminal::Superseded);
+            ended += 1;
+            if let Some(grant) = session.passive_grant.take() {
+                grant.release();
+            }
             session.abort_staged_preparation();
             let cleanup = Arc::new(TerminalCleanup::new());
             session.terminal_cleanup = Some(Arc::clone(&cleanup));
@@ -430,7 +464,6 @@ impl VodServe {
             ));
         }
         drop(sessions);
-        let ended = work.len();
         for (id, cleanup, rendition, file_id, height, kind) in work {
             self.spawn_terminal_cleanup(
                 id,
@@ -487,7 +520,7 @@ impl VodServe {
             .lock()
             .await
             .iter()
-            .filter(|(_, session)| session.tombstone.is_none())
+            .filter(|(_, session)| session.renewable())
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -501,6 +534,9 @@ impl VodServe {
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
                 return None;
+            }
+            if let Some(grant) = session.passive_grant.as_ref() {
+                return grant.frontier();
             }
             session.live_rendition().map(Arc::clone)?
         };

@@ -8,7 +8,24 @@ pub(super) async fn status_local_before(
     status_local_before_with_relay(state, session, request_deadline, true).await
 }
 
+/// Boxed for the same reason as `segment_local_before`: the status answer's
+/// state machine is held on the heap for every caller, as a spawned request is.
 pub(super) async fn status_local_before_with_relay(
+    state: &AppState,
+    session: &str,
+    request_deadline: Instant,
+    relay_new_owner: bool,
+) -> Result<Response, ApiError> {
+    Box::pin(status_local_answer(
+        state,
+        session,
+        request_deadline,
+        relay_new_owner,
+    ))
+    .await
+}
+
+async fn status_local_answer(
     state: &AppState,
     session: &str,
     request_deadline: Instant,

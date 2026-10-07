@@ -1,0 +1,55 @@
+{
+  "pr": 744,
+  "kind": "docs-only fast-lane evidence; not effort-release qualification",
+  "head": "b3ff464b9eb7822b465377ddd9b4292852db9d27",
+  "base": "9a719fcb73da195676a6dea5378871d64547bb8b",
+  "run_url": "http://forge.lan:3000/noirr/plurx/actions/runs/3881",
+  "run_status": "success",
+  "jobs": [
+    {
+      "id": 40804,
+      "name": "fast-lane validation scope",
+      "status": "success"
+    },
+    {
+      "id": 40805,
+      "name": "fast-lane mobile release version",
+      "status": "skipped"
+    },
+    {
+      "id": 40806,
+      "name": "fast policy and contract preflight",
+      "status": "success"
+    },
+    {
+      "id": 40807,
+      "name": "fast Rust gate",
+      "status": "skipped"
+    },
+    {
+      "id": 40808,
+      "name": "fast Windows compile",
+      "status": "skipped"
+    },
+    {
+      "id": 40809,
+      "name": "fast web syntax gate",
+      "status": "skipped"
+    },
+    {
+      "id": 40810,
+      "name": "fast Apple compile",
+      "status": "skipped"
+    },
+    {
+      "id": 40811,
+      "name": "fast Android compile",
+      "status": "skipped"
+    },
+    {
+      "id": 40812,
+      "name": "Main promotion gate",
+      "status": "success"
+    }
+  ]
+}

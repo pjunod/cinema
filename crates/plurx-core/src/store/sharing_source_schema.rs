@@ -6,8 +6,8 @@ use super::{
 
 // Frozen installed Source family layout remains71; custody is an adjunct.
 pub(crate) const SOURCE_LAYOUT_VERSION: i64 = 71;
-pub(crate) const SOURCE_SCHEMA_VERSION: i64 = 73;
-pub(crate) const SOURCE_SCHEMA_PREDECESSOR: i64 = 72;
+pub(crate) const SOURCE_SCHEMA_VERSION: i64 = 82;
+pub(crate) const SOURCE_SCHEMA_PREDECESSOR: i64 = 81;
 pub(crate) const BOOT_INTENTS_SCHEMA: &str = "CREATE TABLE sharing_source_boot_intents (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64),membership_generation INTEGER NOT NULL CHECK(membership_generation>=0)) STRICT";
 pub(crate) const INSTALLATION_SCHEMA: &str = "CREATE TABLE sharing_source_schema_installation (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=71),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64),installed_at_ms INTEGER NOT NULL CHECK(installed_at_ms>0)) STRICT";
 pub(crate) const TRANSACTION_SCHEMA: &str = "CREATE TABLE sharing_source_schema_transaction_guard (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CHECK(passed=1)) STRICT";
@@ -44,7 +44,7 @@ pub(crate) fn boot_authority_guard(parameter: usize) -> String {
     format!("({}) AND json_type(${parameter})='array' AND json_array_length(${parameter}) BETWEEN 1 AND 256 AND (SELECT count(*) FROM cluster_nodes WHERE removed_at IS NULL)=json_array_length(${parameter}) AND NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(${parameter}) expected JOIN sharing_source_boot_intents intent ON intent.node_id=node.node_id AND intent.raft_id=node.raft_id WHERE json_extract(expected.value,'$[0]')=intent.node_id AND json_extract(expected.value,'$[1]')=intent.raft_id AND json_extract(expected.value,'$[2]')=intent.attempt_id AND json_extract(expected.value,'$[3]')=intent.master_fingerprint AND json_extract(expected.value,'$[4]')=intent.membership_generation AND intent.membership_generation=(SELECT generation FROM cluster_sharing_membership_generation WHERE singleton=1) AND EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_source_boot_v1:'||intent.attempt_id)))",boot_shape_guard())
 }
 fn installed_shape_guard_at(version: i64) -> String {
-    format!("({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version=71) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",boot_shape_guard(),exact_object(INSTALLATION_SCHEMA),exact_object(TRANSACTION_SCHEMA),sharing_source_sessions::schema_guard())
+    format!("({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",boot_shape_guard(),exact_object(INSTALLATION_SCHEMA),exact_object(TRANSACTION_SCHEMA),sharing_source_sessions::schema_guard())
 }
 pub(crate) fn installed_shape_guard() -> String {
     format!(
@@ -53,13 +53,9 @@ pub(crate) fn installed_shape_guard() -> String {
         super::sharing_ingress_custody::schema_guard()
     )
 }
-/// The old exact Source installation is an explicit migration predecessor,
-/// not the modern adjunct layout and never an excuse to rebuild the families.
-pub(crate) fn legacy_installed_guard() -> String {
-    format!("({}) AND EXISTS(SELECT 1 FROM sharing_source_schema_transaction_guard WHERE singleton=1 AND passed=1) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE master_fingerprint NOT GLOB '*[^0-9a-f]*') AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sharing_ingress_custody')", installed_shape_guard_at(SOURCE_LAYOUT_VERSION))
-}
 /// Coordination refusal fence only: this does not create a cleanup proof.
 /// Original owners must retire held reservations before upgrading their marker.
+#[cfg(test)]
 pub(crate) fn legacy_source_work_drained_guard() -> &'static str {
     "NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE reservation_state='held') AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE principal_kind='sharing' AND state='starting') AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE principal_kind='sharing' AND state!='ended') AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE principal_kind='sharing')"
 }
@@ -220,7 +216,7 @@ mod tests {
     fn database() -> Connection {
         let conn = Connection::open_in_memory().expect("database");
         SqliteStore::apply_migrations_for_test(&conn, SQLITE_SCHEMA_VERSION).expect("baseline");
-        conn.execute_batch("CREATE TABLE cluster_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER); INSERT INTO cluster_meta VALUES(1,72);").expect("replicated marker fixture");
+        conn.execute_batch("CREATE TABLE cluster_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER); INSERT INTO cluster_meta VALUES(1,81);").expect("replicated marker fixture");
         conn
     }
     fn evaluate(conn: &Connection, guard: &str) -> bool {

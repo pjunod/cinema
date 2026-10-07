@@ -1,57 +1,108 @@
 "use strict";
 // ---- autoplay next episode (per browser, default on) ----------------------
 function autoNextOn(){ try{ return localStorage.getItem("plurx_autonext")!=="0"; }catch(e){ return true; } }
-function setAutoNext(on){ try{ localStorage.setItem("plurx_autonext", on?"1":"0"); }catch(e){}
+function setAutoNext(on){
+  if(!on){cancelNextEpisodePreparation(PLAYER);clearAutoplayNextPreparation();}
+  try{ localStorage.setItem("plurx_autonext", on?"1":"0"); }catch(e){}
   const b=document.getElementById("autonextbtn"); if(b) b.classList.toggle("on", on);
   const c=document.getElementById("autonext"); if(c) c.checked=on;
   // The OS transport's Next exists only while autoplay-next is on.
   syncPlayerNextTrack(); }
 function togglePlayerAutonext(){ setAutoNext(!autoNextOn()); toast(autoNextOn()?"Autoplay next: on":"Autoplay next: off"); }
-// Find and play the episode after the one that just finished — next in the
-// season, else the first episode of the next season. Reuses AUTOPLAY-on-navigate
-// so the page behind the player follows along. Returns true if it started one.
-async function playNextEpisode(){
-  const current=playbackContinuation(PLAYER);
-  // A Shared source_ref is the full Source reference and carries no `kind`
-  // tag; only Local contexts are tagged.
-  if(PLAYER&&playbackFileContextForPlayer(PLAYER).source_ref.kind!=="local")return playNextSharedEpisode(current);
-  if(!PLAYER||playbackFileContextForPlayer(PLAYER).source_ref.kind!=="local")return false;
-  const itemId=ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(PLAYER))]; if(!itemId) return false;
-  const preparation=beginPlaybackPreparation(current);
+// The existing progress tick can prepare one successor inside the last 30 s.
+// This owns only metadata reads: no session, encoder, watched mark or media
+// fetch is started before the actual transition. Playback still asks the
+// server for its current policy and capabilities decision when it opens.
+const NEXT_EPISODE_PREPARE_SEC=30;
+const NEXT_EPISODE_METADATA_MS=60000;
+let AUTOPLAY_NEXT_PREPARED=null;
+function clearAutoplayNextPreparation(){AUTOPLAY_NEXT_PREPARED=null;}
+function cancelNextEpisodePreparation(p){
+  if(!p?.nextEpisodePreparation)return;
+  p.nextEpisodePreparation.owner.cancel();
+  p.nextEpisodePreparation=null;
+}
+function nextEpisodePreparationCurrent(p,state){
+  return p.nextEpisodePreparation===state&&state.current()&&autoNextOn()
+    &&performance.now()-state.began<NEXT_EPISODE_METADATA_MS;
+}
+function takeAutoplayNextPreparation(id){
+  const prepared=AUTOPLAY_NEXT_PREPARED;
+  clearAutoplayNextPreparation();
+  return prepared&&autoNextOn()&&prepared.page.id===String(id)
+    &&performance.now()-prepared.began<NEXT_EPISODE_METADATA_MS?prepared:null;
+}
+async function resolveNextEpisodePage(itemId,preparation){
   const read=path=>preparation.run(signal=>api(path,{signal}));
-  try{
   const cur=await read(`/items/${itemId}`);
-  if(!current()) return false;
-  if(!cur.item || cur.item.kind!=='episode') return false;   // movies don't chain
-  const anc=cur.ancestors||[], season=anc[anc.length-1], show=anc[anc.length-2];
-  if(!season) return false;
-  let next=null;
+  if(cur.item?.kind!=="episode")return null;
+  const anc=cur.ancestors||[],season=anc[anc.length-1],show=anc[anc.length-2];
+  if(!season)return null;
   const sd=await read(`/items/${exactWireId(season)}`);
-  if(!current()) return false;
-  if(sd){
-    const eps=(sd.children||[]).filter(c=>c.kind==='episode');
-    const i=eps.findIndex(e=>exactWireId(e)===itemId);
-    if(i>=0 && eps[i+1]) next=eps[i+1];
-  }
-  if(!next && show){                                         // roll over to next season
+  const eps=(sd?.children||[]).filter(c=>c.kind==="episode");
+  const i=eps.findIndex(e=>exactWireId(e)===itemId);
+  let next=i>=0?eps[i+1]:null;
+  if(!next&&show){
     const shd=await read(`/items/${exactWireId(show)}`);
-    if(!current()) return false;
-    if(shd){
-      const seasons=(shd.children||[]).filter(c=>c.kind==='season');
-      const si=seasons.findIndex(s=>exactWireId(s)===exactWireId(season));
-      if(si>=0 && seasons[si+1]){
-        const nsd=await read(`/items/${exactWireId(seasons[si+1])}`);
-        if(!current()) return false;
-        if(nsd) next=(nsd.children||[]).filter(c=>c.kind==='episode')[0]||null;
-      }
+    const seasons=(shd?.children||[]).filter(c=>c.kind==="season");
+    const si=seasons.findIndex(s=>exactWireId(s)===exactWireId(season));
+    if(si>=0&&seasons[si+1]){
+      const nsd=await read(`/items/${exactWireId(seasons[si+1])}`);
+      next=(nsd?.children||[]).find(c=>c.kind==="episode");
     }
   }
-  if(!next) return false;                                    // end of the series
-  if(WATCH&&watchBrowserMounted())return await watchPlayEpisode(exactWireId(next));
-  AUTOPLAY=exactWireId(next);
-  toast("▶ Up next: "+next.title);
-  location.hash="#/item/"+exactWireId(next);
-  return true;
+  if(!next)return null;
+  const id=exactWireId(next);
+  const data=await read(`/items/${id}`);
+  const libs=await preparation.run(()=>libsCached());
+  return itemPageModel(id,data,libs);
+}
+function prepareNextEpisodeIfNearEnd(p,video){
+  const state=p?.nextEpisodePreparation;
+  if(state&&(!state.current()||!autoNextOn()))cancelNextEpisodePreparation(p);
+  if(!p||playbackFileContextForPlayer(p).source_ref.kind!=="local"||!autoNextOn()||p.libraryChannel||p.bookParts||video.paused||video.seeking
+    ||!playbackOwnsAttachedMedia(p))return;
+  const remaining=pbTotalSec()-pbPosSec();
+  if(!(pbTotalSec()>0&&remaining>0&&remaining<=NEXT_EPISODE_PREPARE_SEC))return;
+  if(p.nextEpisodePreparation)return;
+  const itemId=ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(p))];
+  if(!itemId||p.meta?.kind!=="episode")return;
+  const current=playbackContinuation(p);
+  const next={began:performance.now(),current,owner:null,promise:null,page:null};
+  next.owner=beginPlaybackPreparation(()=>nextEpisodePreparationCurrent(p,next),{background:true});
+  p.nextEpisodePreparation=next;
+  next.promise=resolveNextEpisodePage(itemId,next.owner).then(page=>{
+    if(nextEpisodePreparationCurrent(p,next))next.page=page;
+    return next.page;
+  }).catch(()=>null).finally(()=>next.owner.finish());
+}
+// A cold/manual Next uses the same resolver. A ready or in-flight successor is
+// consumed once; errors in background preparation leave the normal path intact.
+async function playNextEpisode(){
+  const p=PLAYER,continuation=playbackContinuation(p);
+  const current=()=>continuation()&&autoNextOn();
+  if(p&&playbackFileContextForPlayer(p).source_ref.kind!=="local")return playNextSharedEpisode(current);
+  if(!p)return false;
+  const itemId=ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(p))];if(!itemId)return false;
+  const state=p.nextEpisodePreparation;
+  const preparation=beginPlaybackPreparation(current);
+  try{
+    let page=null;
+    if(state&&nextEpisodePreparationCurrent(p,state)){
+      page=await preparation.run(()=>state.promise);
+      if(!nextEpisodePreparationCurrent(p,state))page=null;
+    }
+    if(!current())return false;
+    cancelNextEpisodePreparation(p);
+    if(!page)page=await resolveNextEpisodePage(itemId,preparation);
+    if(!current()||!page)return false;
+    const prepared={page,began:performance.now()};
+    if(WATCH&&watchBrowserMounted())return await watchPlayEpisode(page.id,prepared);
+    AUTOPLAY_NEXT_PREPARED=prepared;
+    AUTOPLAY=page.id;
+    toast("▶ Up next: "+page.item.title);
+    location.hash="#/item/"+page.id;
+    return true;
   }catch(error){
     if(current())toast("Could not load the next episode. Choose it from the library to retry.");
     return false;

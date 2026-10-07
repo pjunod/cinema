@@ -26,11 +26,15 @@ pub(crate) const QUALITY_CANDIDATES_V2_PATH: &str = "/internal/v2/media/quality-
 pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-candidates";
 pub(crate) const QUALITY_CATALOG_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-/// Protocol 8 preserves canonical capability and planning bindings at dispatch,
-/// in addition to pre-filter HEVC proof and source-fenced copy VOD. Exact-version
-/// placement excludes strict older workers. Old ingress and sessions must be
-/// drained on rollout.
-pub(crate) const PROTOCOL_VERSION: i64 = 8;
+/// Protocol 9 adds the resolved audio claim/delivery to `SessionRequest`,
+/// `QualityCatalogRequest` and `RemoteStartResponse`, all strict
+/// (`deny_unknown_fields`) envelopes; protocol 8 preserved canonical capability
+/// and planning bindings at dispatch, in addition to pre-filter HEVC proof and
+/// source-fenced copy VOD. Exact-version placement excludes strict older
+/// workers, so a one-node-at-a-time rollout places locally across the version
+/// line instead of failing mid-start. Old ingress and sessions must be drained
+/// on rollout.
+pub(crate) const PROTOCOL_VERSION: i64 = 9;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
@@ -149,6 +153,8 @@ fn media_io_observation() -> MediaIoObservation {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct MediaNodeSnapshot {
+    #[serde(default)]
+    pub retained_output_receipts: bool,
     pub node_id: String,
     pub observed_at_unix_ms: i64,
     pub build: String,
@@ -180,6 +186,10 @@ pub(crate) struct MediaNodeSnapshot {
 #[serde(deny_unknown_fields)]
 pub(crate) struct QualityCatalogRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_claim: Option<plurx_core::playback::audio::AudioClaim>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_contract: Option<(bool, bool, bool)>,
     pub file_id: i64,
     pub source_size: i64,
@@ -198,6 +208,20 @@ impl QualityCatalogRequest {
             observed,
             limit,
         };
+        if self
+            .audio_claim
+            .as_ref()
+            .is_some_and(|claim| !claim.valid_snapshot())
+        {
+            return Err(failure("audio_claim", 1, 0));
+        }
+        if self
+            .audio_delivery
+            .as_ref()
+            .is_some_and(|audio| !audio.valid_snapshot())
+        {
+            return Err(failure("audio_delivery", 1, 0));
+        }
         if self
             .copy_contract
             .is_some_and(|(_, preserve, convert)| convert && !preserve)
@@ -292,8 +316,13 @@ pub(crate) struct PlanningBinding {
 impl PlanningBinding {
     pub(crate) fn from_snapshot(snapshot: &plurx_core::store::PlaybackPlanningSnapshot) -> Self {
         use sha2::{Digest, Sha256};
-        let encoded = serde_json::to_vec(&(&snapshot.file, &snapshot.probe_json))
-            .expect("source snapshot serializes");
+        let encoded = serde_json::to_vec(&(
+            "plurx:planning-source-reorder:v1",
+            &snapshot.file,
+            &snapshot.probe_json,
+            crate::transcode::TranscodeManager::vod_reorder_from_snapshot(snapshot),
+        ))
+        .expect("source snapshot serializes");
         Self {
             generation: snapshot.generation,
             source_digest: hex::encode(Sha256::digest(encoded)),
@@ -314,6 +343,14 @@ pub(crate) struct CreateStartupBudget {
     pub deadline: tokio::time::Instant,
     calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     binding: std::sync::Arc<std::sync::Mutex<Option<PlanningBinding>>>,
+    /// The ONE advisory-evidence deadline of this create, minted on first use
+    /// and shared by every later advisory read of the same request.
+    advisory: std::sync::Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    /// The create's source link identity, fenced once and reused by every
+    /// pre-start advisory read that derives a candidate binding from it.
+    source_link: std::sync::Arc<
+        std::sync::Mutex<Option<crate::http::hls::link_receipts::SourceLinkIdentity>>,
+    >,
 }
 impl CreateStartupBudget {
     pub(crate) fn new(remaining_ms: u64) -> Self {
@@ -321,6 +358,8 @@ impl CreateStartupBudget {
             deadline: tokio::time::Instant::now() + Duration::from_millis(remaining_ms.min(10_000)),
             calls: Default::default(),
             binding: Default::default(),
+            advisory: Default::default(),
+            source_link: Default::default(),
         }
     }
     pub(crate) fn calls(&self) -> u32 {
@@ -356,6 +395,66 @@ pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {
     CREATE_STARTUP_BUDGET
         .try_with(|budget| deadline.min(budget.deadline - Duration::from_millis(250)))
         .unwrap_or(deadline)
+}
+
+/// The advisory share of a request that must answer by `deadline`: at most
+/// `maximum`, and never more than half of what remains, so the work that has
+/// to finish before the deadline (durable writes, dispatch, the answer)
+/// always keeps the majority of it.
+pub(crate) fn advisory_share(
+    deadline: tokio::time::Instant,
+    maximum: Duration,
+) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now + maximum.min(deadline.saturating_duration_since(now) / 2)
+}
+
+/// The advisory-evidence deadline of the request this task serves.
+///
+/// Inside a create it is minted ONCE, on first use, as [`advisory_share`] of
+/// the remaining startup budget, and every later advisory read of the same
+/// create shares it: advisory reads taken one after another can no longer
+/// each spend a fresh window and add up to the whole startup budget. Outside
+/// a create the caller's request takes one `maximum` window per decision.
+pub(crate) fn create_advisory_deadline(maximum: Duration) -> tokio::time::Instant {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            *budget
+                .advisory
+                .get_or_init(|| advisory_share(budget.deadline, maximum))
+        })
+        .unwrap_or_else(|_| deadline_after(maximum))
+}
+
+/// The source link identity this create already fenced, if `matches` accepts
+/// it. `None` outside a create.
+pub(crate) fn create_source_link(
+    matches: impl FnOnce(&crate::http::hls::link_receipts::SourceLinkIdentity) -> bool,
+) -> Option<crate::http::hls::link_receipts::SourceLinkIdentity> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget
+                .source_link
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .filter(|identity| matches(identity))
+                .cloned()
+        })
+        .ok()
+        .flatten()
+}
+
+/// Remember the create's fenced source link identity; a no-op outside one.
+pub(crate) fn remember_create_source_link(
+    identity: &crate::http::hls::link_receipts::SourceLinkIdentity,
+) {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        *budget
+            .source_link
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity.clone());
+    });
 }
 
 pub(crate) fn capture_create_planning_binding(
@@ -564,6 +663,18 @@ pub(crate) struct MediaPool {
 }
 
 impl MediaPool {
+    pub(crate) async fn retained_output_receiver(&self, node_id: &str) -> bool {
+        let now = tokio::time::Instant::now();
+        self.snapshots
+            .read()
+            .await
+            .get(node_id)
+            .is_some_and(|cached| {
+                now <= cached.expires_at
+                    && cached.snapshot.protocol_version == PROTOCOL_VERSION
+                    && cached.snapshot.retained_output_receipts
+            })
+    }
     pub(crate) fn new(membership: MembershipManager) -> Arc<Self> {
         Arc::new(Self {
             transport: PeerTransport::new(membership.clone()),
@@ -1527,6 +1638,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         capacity_pressure(runtime.scratch_bytes_free, runtime.scratch_target_bytes);
     let workload_pressure = count_pressure(runtime.active_sessions, runtime.session_pressure_limit);
     MediaNodeSnapshot {
+        retained_output_receipts: true,
         node_id: state.node_id.clone(),
         observed_at_unix_ms: unix_ms(),
         build: crate::version::BUILD.to_owned(),
@@ -1616,7 +1728,7 @@ pub(crate) async fn local_quality_catalog(
             Some(PlanningBinding::from_snapshot(&snapshot));
         state
             .transcode
-            .quality_candidates_from_snapshot_progress(
+            .quality_catalog_from_snapshot_progress(
                 &snapshot,
                 &request.caps,
                 request.audio_index,
@@ -1624,6 +1736,8 @@ pub(crate) async fn local_quality_catalog(
                 request.subtitle_burn,
                 request.presentation,
                 request.copy_contract,
+                request.audio_delivery.as_ref(),
+                request.audio_claim.as_ref(),
                 Some(&progress),
                 None,
             )
@@ -2084,8 +2198,52 @@ mod tests {
     use plurx_core::domain::{AudioStream, SubtitleStream};
     use tokio::sync::mpsc;
 
+    #[tokio::test]
+    async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {
+        let pool = MediaPool::new(MembershipManager::unavailable());
+        assert!(!pool.retained_output_receiver("worker").await);
+        let legacy = snapshot("worker", &["h264"], 1080);
+        let mut wire = serde_json::to_value(&legacy).expect("snapshot");
+        wire.as_object_mut()
+            .expect("snapshot object")
+            .remove("retained_output_receipts");
+        let restored: MediaNodeSnapshot = serde_json::from_value(wire).expect("old advertisement");
+        assert!(!restored.retained_output_receipts);
+        let now = tokio::time::Instant::now();
+        pool.snapshots.write().await.insert(
+            "worker".to_owned(),
+            CachedSnapshot {
+                snapshot: restored,
+                expires_at: now + Duration::from_secs(15),
+            },
+        );
+        assert!(!pool.retained_output_receiver("worker").await);
+        pool.snapshots
+            .write()
+            .await
+            .get_mut("worker")
+            .expect("cached peer")
+            .snapshot
+            .retained_output_receipts = true;
+        assert!(pool.retained_output_receiver("worker").await);
+        pool.snapshots
+            .write()
+            .await
+            .get_mut("worker")
+            .expect("cached peer")
+            .expires_at = now - Duration::from_secs(1);
+        assert!(!pool.retained_output_receiver("worker").await);
+        let mut snapshots = pool.snapshots.write().await;
+        let cached = snapshots.get_mut("worker").expect("cached peer");
+        cached.expires_at = now + Duration::from_secs(15);
+        cached.snapshot.protocol_version = PROTOCOL_VERSION - 1;
+        drop(snapshots);
+        assert!(!pool.retained_output_receiver("worker").await);
+    }
+
     fn snapshot(node: &str, decoders: &[&str], max_height: i64) -> MediaNodeSnapshot {
         MediaNodeSnapshot {
+            retained_output_receipts: false,
             node_id: node.to_owned(),
             observed_at_unix_ms: unix_ms(),
             build: "test".to_owned(),
@@ -2118,6 +2276,8 @@ mod tests {
             "v": 2, "video": (0..65).map(|_| serde_json::json!({"codec": "h264", "present": ["sdr"]})).collect::<Vec<_>>()
         })).expect("valid decoder rows");
         let request = QualityCatalogRequest {
+            audio_claim: None,
+            audio_delivery: None,
             copy_contract: None,
             file_id: 1,
             source_size: 10,
@@ -2164,6 +2324,8 @@ mod tests {
     #[test]
     fn quality_catalog_requires_bounded_source_tracks_and_current_caps() {
         let mut request = QualityCatalogRequest {
+            audio_claim: None,
+            audio_delivery: None,
             copy_contract: None,
             file_id: 1,
             source_size: 10,
@@ -2619,6 +2781,7 @@ mod tests {
             "peer".to_owned(),
             CachedSnapshot {
                 snapshot: MediaNodeSnapshot {
+                    retained_output_receipts: false,
                     node_id: "peer".to_owned(),
                     observed_at_unix_ms: 1,
                     build: "test".to_owned(),

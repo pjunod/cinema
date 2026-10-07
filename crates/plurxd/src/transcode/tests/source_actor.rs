@@ -873,6 +873,13 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        continuous_media: None,
+        sdr_master_codecs: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
+        audio_delivery: None,
+        audio_claim: None,
         quality_catalog: None,
         candidate_context: None,
         control_sequence: None,
@@ -2313,7 +2320,7 @@ struct SourceFactoryIngressFixture {
     client: Option<hyper::client::conn::http2::SendRequest<axum::body::Body>>,
     response: Option<hyper::body::Incoming>,
     driver: Option<tokio::task::JoinHandle<Result<(), hyper::Error>>>,
-    server: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    server: Option<tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 impl Drop for SourceFactoryIngressFixture {
@@ -2496,11 +2503,12 @@ impl SourceFactoryIngressFixture {
             let _ = stop.send(());
         }
         if let Some(server) = self.server.take() {
-            tokio::time::timeout(Duration::from_secs(10), server)
+            let drained = tokio::time::timeout(Duration::from_secs(10), server)
                 .await
                 .expect("actual server driver deadline")
                 .expect("actual server driver join")
                 .expect("actual server stopped");
+            assert_eq!(drained, crate::HttpDrain::Complete);
         }
         if let Some(driver) = self.driver.take() {
             let _ = tokio::time::timeout(Duration::from_secs(10), driver)

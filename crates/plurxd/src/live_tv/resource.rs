@@ -202,13 +202,21 @@ impl LiveTvManager {
         &self,
         session: &LiveTvSession,
     ) -> Result<(), LiveTvError> {
+        if !self.serving.running(session.owner_serving_generation) {
+            return Err(fenced());
+        }
+        if !self.serving.is_ready() {
+            // A loss inside the session grace: the session is kept, and this
+            // request is answered with a retryable refusal rather than a 410
+            // that would end the viewer's stream.
+            return Err(LiveTvError::OwnerUnavailable(
+                crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+            ));
+        }
         let snapshot = self
             .resource_snapshot(session.request.user_id, &session.request.request_id)
             .await?;
-        if !snapshot.enabled
-            || snapshot.generation != session.request.config_generation
-            || !self.serving.is_current(session.owner_serving_generation)
-        {
+        if !snapshot.enabled || snapshot.generation != session.request.config_generation {
             return Err(fenced());
         }
         let start = snapshot
@@ -336,7 +344,7 @@ impl LiveTvManager {
                 _ => return Err(fenced()),
             };
             if tokio::time::Instant::now() >= deadline
-                || !self.serving.is_current(transport.owner_serving_generation)
+                || !self.serving.running(transport.owner_serving_generation)
             {
                 return Err(fenced());
             }

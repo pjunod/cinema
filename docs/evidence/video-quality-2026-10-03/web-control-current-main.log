@@ -1,0 +1,16 @@
+(node:36306) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ prepared HLS buffer readiness follows incumbent clock and releases listener ownership (918.447792ms)
+PASS vendored HLS startup, local subtitles, retry ownership and stale-request fences
+PASS measuring the prepared switch: windows, silence gaps and the shipped samplers
+PASS the M5 recovery additions: create retry, hls retry, shared budget
+PASS web HLS startup recovery and final-send ownership
+PASS passive web playback-control reporter
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 44116.597958

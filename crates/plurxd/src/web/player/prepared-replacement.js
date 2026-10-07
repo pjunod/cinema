@@ -342,6 +342,8 @@ function beginPreparedReplacement(p,action,sharedContext=null){
     Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
   const stageAtMs=performance.now();
   const state={actionId:action.action_id,sessionId:action.session_id,
+    fileId:p.fileId,
+    candidateRecipeDigest:(p.qualityCandidates||[]).find(row=>row.id===action.effective_selection?.candidate_id)?.recipe_digest?.slice(),
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
     sharedContext,
     mediaOriginMs:originMs,offeredOriginMs,
@@ -399,10 +401,11 @@ function preparedSelectionText(selection){
   return `${selection.height||0}p${grade} ${delivery}${selection.quality_auto?" auto":""}`;
 }
 function preparedHlsAttach(p,state,spare){
+  observeQualityResourceTimings();
   const tgt=bufferTargets(p&&p.bufSegSecs);
-  const voluntary=!!(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent);
+  const voluntary=!!(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent));
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
-  const hls=new Hls({
+  const hls=new Hls({preferManagedMediaSource:false,
     maxBufferLength:voluntary?Math.min(12,tgt.fwd):tgt.fwd,
     ...(voluntary?{maxMaxBufferLength:12}:{}),
     backBufferLength:voluntary?0:tgt.back,
@@ -531,15 +534,32 @@ function createPreparedHlsLoader(StockLoader,p,state){
 function notePreparedHlsFragmentLoaded(p,state,d){
   if(preparedState(p)===state&&d&&d.frag&&d.frag.type==='main'){
     const stats=d.frag.stats||d.stats||{};
-    const proof=completedQualityTransfer(d.networkDetails,d.frag.url,stats.loading,performance.now());
+    const proof=completedQualityTransfer(d.networkDetails,d.frag.url,stats.loading,performance.now(),stats.loaded);
     if(proof){
-      state.qualityTransfer=proof;
-      const samples=state.qualityTransfers||[];
-      const segmentId=String(d.frag.url||'');
-      state.qualityTransfers=samples.filter(row=>row.segment_id!==segmentId
-        &&proof.atMs-row.atMs<=15000).slice(-7);
-      state.qualityTransfers.push({...proof,segment_id:segmentId,media_duration_ms:d.frag.duration*1000});
-      notePreparedBuffer(p,state);
+      const owned=candidateTransferOriginCurrent(proof)&&proof.receipt&&proof.etag
+        &&new URL(d.frag.url,location.href).pathname.split('/').includes(state.sessionId)
+        &&PlaybackPolicy.qualityTransferBps({...proof,age_ms:performance.now()-proof.atMs})>0;
+      if(owned){
+        state.linkReportedReceipts=state.linkReportedReceipts||new Set();
+        if(state.linkReportedReceipts.size<8&&!state.linkReportedReceipts.has(proof.receipt)){
+          clientLog({event:'candidate_link_sample',message:'Completed staged candidate body',session_id:state.sessionId,
+            link_sample:{receipt:proof.receipt,object_name:proof.object_name,etag:proof.etag,
+              body_bytes:proof.bytes,body_duration_ms:Math.round(proof.elapsed_ms),age_ms:Math.round(performance.now()-proof.atMs),
+              network_load:true,from_cache:false,producer_paced:false,cause:'link',negative:false,
+              media_duration_ms:proof.server_media_duration_ms??null,presenting:false,stalled:false,runway_ms:0}});
+          state.linkReportedReceipts.add(proof.receipt);
+        }
+        const sample={...proof,stage:state,pipeline:state.hls,file_id:state.fileId,session_id:state.sessionId,
+          candidate_id:state.selection?.candidate_id,recipe_digest:state.candidateRecipeDigest?.slice(),
+          segment_id:String(d.frag.url||''),media_duration_ms:proof.server_media_duration_ms,
+          media_start_ms:Number.isFinite(d.frag.start)?d.frag.start*1000:null};
+        state.qualityTransfer=sample;
+        const samples=state.qualityTransfers||[];
+        state.qualityTransfers=samples.filter(row=>row.segment_id!==sample.segment_id
+          &&proof.atMs-row.atMs<=15000).slice(-7);
+        state.qualityTransfers.push(sample);
+        notePreparedBuffer(p,state);
+      }
     }
   }
   if(!attachedPreparedHls(p,state)||!p.abr) return;
@@ -624,14 +644,40 @@ function preparedQualityProofReady(p,state){
   const now=performance.now(), proof=state.qualityTransfer;
   const bps=PlaybackPolicy.qualityTransferBps(proof?{...proof,age_ms:now-proof.atMs}:null);
   if(!candidate) return false;
-  if(candidate.peak_bps>0){
-    if(!(bps>=candidate.peak_bps*1.8)) return false;
-  }else if(candidate.route==="encode"||!PlaybackPolicy.qualityOriginalTrialMargin(
-    (state.qualityTransfers||[]).map(row=>({...row,age_ms:now-row.atMs})))) return false;
+  if(!preparedTransferOwned(p,state,candidate,proof,now)) return false;
+  const output=measuredCandidateOutput(p,candidate);
+  if(!output){
+    if(!unknownStageableOriginal(p,candidate)||now-state.stageAtMs<0||now-state.stageAtMs>15000) return false;
+    const samples=(state.qualityTransfers||[]).filter(row=>preparedTransferOwned(p,state,candidate,row,now)
+      &&Number.isFinite(row.media_start_ms)&&row.media_start_ms>=0
+      &&row.media_duration_ms>0&&row.media_duration_ms===row.server_media_duration_ms
+      &&/^seg[0-9]+\.m4s$/.test(row.object_name));
+    const receipts=new Set(),objects=new Set();
+    const ordered=samples.slice().sort((a,b)=>a.media_start_ms-b.media_start_ms);
+    for(let index=0;index<ordered.length;index++){
+      const row=ordered[index];
+      if(receipts.has(row.receipt)||objects.has(row.object_name)
+        ||index>0&&ordered[index-1].media_start_ms+ordered[index-1].media_duration_ms>row.media_start_ms+1) return false;
+      receipts.add(row.receipt);objects.add(row.object_name);
+    }
+    return PlaybackPolicy.qualityOriginalTrialMargin(ordered.map(row=>({...row,age_ms:now-row.atMs})));
+  }
+  if(!(bps>=output.peak_bps*1.8)) return false;
   return candidate.route!=="encode"||candidate.complete_cache===true
     ||state.qualityHealthAtMs!=null
       &&PlaybackPolicy.qualityEncodeProof(state.qualityHealth,id,now-state.qualityHealthAtMs)
       &&state.qualityHealth.active_encode_milli_realtime>=1150;
+}
+function preparedTransferOwned(p,state,candidate,proof,now){
+  return !!(proof&&PLAYER===p&&preparedState(p)===state&&proof.stage===state
+    &&proof.pipeline===state.hls&&proof.file_id===state.fileId&&state.fileId===p.fileId&&proof.session_id===state.sessionId
+    &&proof.candidate_id===candidate.id&&Array.isArray(proof.recipe_digest)
+    &&proof.recipe_digest.length===32&&proof.recipe_digest.every((byte,index)=>byte===candidate.recipe_digest[index])
+    &&Array.isArray(state.candidateRecipeDigest)&&state.candidateRecipeDigest.length===32
+    &&state.candidateRecipeDigest.every((byte,index)=>byte===candidate.recipe_digest[index])
+    &&candidateTransferOriginCurrent(proof)&&typeof proof.receipt==='string'
+    &&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(proof.receipt)
+    &&proof.etag&&PlaybackPolicy.qualityTransferBps({...proof,age_ms:now-proof.atMs})>0);
 }
 // Reuse the existing health timer only while a voluntary successor is staged.
 // Receipt and exact staging identity fence every response; incumbent health
@@ -659,8 +705,8 @@ async function pollPreparedQualityHealth(p){
 function notePreparedBuffer(p,state){
   const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video")), spare=preparedVideoElement();
   if(!v||!spare) return;
-  if(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent
-    &&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10)){
+  if(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent)
+    &&(p.waitAt||v.seeking||(!v.paused&&bufferRunway(v)<10))){
     failPreparedReplacement(p,state,"incumbent pressure during voluntary trial");
     return;
   }
@@ -798,8 +844,26 @@ function preparedAlignedBuffered(spare){
 // presenting. Require increasing media-time steps after any alignment seek:
 // a queued pre-seek frame can otherwise step the visible picture backward.
 // Keep the incumbent's audio with its visible picture through this proof.
+// Compare the two decoded pictures at one display instant. Frame cadence
+// comes from adjacent callbacks, including dropped callback frame counts.
+function preparedFrameCadence(previous,current){
+  if(!previous||!current) return null;
+  const frames=current.presentedFrames-previous.presentedFrames;
+  const seconds=current.mediaTime-previous.mediaTime;
+  const interval=seconds/frames;
+  return Number.isInteger(frames)&&frames>0&&Number.isFinite(interval)
+    &&interval>0&&interval<=1?interval:null;
+}
+function preparedFramesMeet(incumbent,target,frameSeconds,rate){
+  if(!incumbent||!target||!Number.isFinite(frameSeconds)||frameSeconds<=0
+    ||!Number.isFinite(rate)||rate<=0) return false;
+  const values=[incumbent.filmSeconds,target.filmSeconds,incumbent.displayMs,target.displayMs];
+  if(!values.every(Number.isFinite)) return false;
+  const projected=target.filmSeconds+(incumbent.displayMs-target.displayMs)*rate/1000;
+  return Math.abs(projected-incumbent.filmSeconds)<=frameSeconds+1e-9;
+}
 function exposePreparedReplacementAtFrame(p,state,v,spare){
-  const voluntary=!!(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent);
+  const voluntary=!!(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent));
   if(voluntary&&streamHasVideo(p,spare)&&typeof spare.requestVideoFrameCallback!=="function"){
     failPreparedReplacement(p,state,"no parallel video presentation proof");
     return false;
@@ -810,6 +874,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   // advancing frame proof below is the actual presentation evidence; rejecting
   // the handoff here would reopen an otherwise ready successor at the cliff.
   let settled=false,priorMediaTime=null,advancingSteps=0;
+  let priorFrame=null,targetFrame=null,frameSeconds=null;
   let videoCallbacks=0,badFrames=0,lastFrameAt=null,lastAdvancingFrameAt=null;
   state.overlapPhase="video";
   const live=()=>PLAYER===p&&preparedState(p)===state
@@ -829,7 +894,8 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
       try{ v.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
     state.handoffFrameCallbackId=null;
     if(!live()) return;
-    if(voluntary&&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10||!preparedQualityProofReady(p,state))){
+    if(voluntary&&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10
+      ||(p.directedChange?.autoMove?.retainIncumbent&&!preparedQualityProofReady(p,state)))){
       failPreparedReplacement(p,state,"quality proof expired or incumbent pressure before voluntary commit");
       return;
     }
@@ -873,16 +939,20 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   const requestIncumbentFrame=()=>{
     if(settled) return;
     try{
-      state.handoffFrameCallbackId=v.requestVideoFrameCallback(()=>{
+      state.handoffFrameCallbackId=v.requestVideoFrameCallback((now,meta)=>{
         state.handoffFrameCallbackId=null;
         if(settled) return;
         if(!live()){ finish(false,"stale-owner"); return; }
         if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
           finish(false,"viewer-intent"); return;
         }
-        const wanted=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
-        if(!preparedAlignedBuffered(spare)
-          ||Math.abs((spare.currentTime||0)-wanted)*1000>PREPARED_ALIGN_SLACK_MS){
+        const incumbentFrame={
+          filmSeconds:realMediaPositionMs(Number(meta?.mediaTime)*1000,(p.offset||0)*1000,!!p.vod)/1000,
+          displayMs:Number.isFinite(meta?.expectedDisplayTime)?meta.expectedDisplayTime:now
+        };
+        if(Number(spare.playbackRate)!==Number(v.playbackRate)
+          ||!Number.isFinite(meta?.mediaTime)||!preparedAlignedBuffered(spare)
+          ||!preparedFramesMeet(incumbentFrame,targetFrame,frameSeconds,Number(v.playbackRate))){
           finish(false,"lost-alignment"); return;
         }
         if(lastAdvancingFrameAt==null
@@ -904,9 +974,13 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     // A seek may leave old-position frames queued after `seeked`. Increasing
     // timestamps alone can then prove the wrong position. Keep the incumbent
     // visible until each proof frame is also on its current film second.
-    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
-    if(Number.isFinite(mediaTime)
-       &&Math.abs(mediaTime-target)*1000<=PREPARED_ALIGN_SLACK_MS){
+    const frame={mediaTime,presentedFrames:Number(meta?.presentedFrames),
+      filmSeconds:mediaTime+state.mediaOriginMs/1000,
+      displayMs:Number.isFinite(meta?.expectedDisplayTime)?meta.expectedDisplayTime:now};
+    if(Number.isFinite(mediaTime)&&mediaTime>=0){
+      frameSeconds=preparedFrameCadence(priorFrame,frame);
+      priorFrame=frame;
+      targetFrame=frame;
       if(priorMediaTime!=null&&mediaTime<=priorMediaTime) badFrames++;
       advancingSteps=priorMediaTime!=null&&mediaTime>priorMediaTime
         ?advancingSteps+1:0;
@@ -925,6 +999,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
       }
     }else{
       badFrames++;
+      priorFrame=null;targetFrame=null;frameSeconds=null;
       priorMediaTime=null;
       advancingSteps=0;
       lastAdvancingFrameAt=null;

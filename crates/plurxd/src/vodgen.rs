@@ -103,6 +103,8 @@ pub struct Generation {
     /// Encoded AAC begins before video so its transform/overlap state is
     /// warm at the cut. Its origin is a film-global 1024-sample boundary.
     pub encoded_audio_anchor: Option<u64>,
+    /// Frozen output cadence; copy generations have no encoded grid.
+    pub encoded_frame_ticks: Option<u32>,
     pub identity: InitIdentity,
     /// Rewrite this generation's Dolby Vision RPUs to Profile 8.1 as its
     /// fragments arrive.
@@ -137,6 +139,11 @@ pub struct Generation {
 /// (`RenditionDir::materialize` under its manifest lock); kept as a trait so
 /// this module tests against memory.
 pub trait Sink: Send + Sync {
+    /// Metadata-only notification after a verified trailer and every final
+    /// planned/tail materialization succeeded. A killed pipe never calls it.
+    fn completed_output(&self) -> impl std::future::Future<Output = ()> + Send {
+        std::future::ready(())
+    }
     fn materialize(
         &self,
         entry: u32,
@@ -180,6 +187,7 @@ where
         warned_memory: false,
         encoded_entry,
         encoded_init: None,
+        audio_segmenter: None,
     };
     let mut buf = vec![0u8; READ_CHUNK];
 
@@ -265,6 +273,7 @@ struct GenerationRun<'a, S> {
     warned_memory: bool,
     encoded_entry: u32,
     encoded_init: Option<Init>,
+    audio_segmenter: Option<plurx_core::fmp4::PlannedAudioSegmenter>,
 }
 
 impl<S: Sink> GenerationRun<'_, S> {
@@ -284,6 +293,30 @@ impl<S: Sink> GenerationRun<'_, S> {
                 self.video_id = served.video().map(|video| video.id);
                 if self.generation.index.is_none() {
                     self.encoded_init = Some(served.clone());
+                }
+                if self.generation.index.is_none()
+                    && served.video().is_none()
+                    && !self.generation.plan.entries.is_empty()
+                    && self
+                        .generation
+                        .plan
+                        .entries
+                        .iter()
+                        .all(|entry| entry.kind == PlanEntryKind::AudioTail)
+                {
+                    if self.generation.encoded_audio_anchor.is_none() {
+                        return Err(landing_failed(
+                            "shared AAC generation has no film-clock anchor".into(),
+                        ));
+                    }
+                    self.audio_segmenter = Some(
+                        plurx_core::fmp4::PlannedAudioSegmenter::new(
+                            served.clone(),
+                            self.generation.plan.clone(),
+                            self.generation.start_entry,
+                        )
+                        .map_err(|error| landing_failed(error.to_string()))?,
+                    );
                 }
                 if self.generation.convert_dolby_vision {
                     match crate::dvpipe::Converter::for_init(&served) {
@@ -327,6 +360,32 @@ impl<S: Sink> GenerationRun<'_, S> {
         // stream.
         let mut fragment = fragment;
         self.place_encoded_audio(&mut fragment)?;
+        if let Some(segmenter) = self.audio_segmenter.as_mut() {
+            if fragment.tracks.is_empty() {
+                return Ok(());
+            }
+            // place_encoded_audio uses the same relative origin as muxed VOD;
+            // the independent soundtrack cutter requires absolute film ticks.
+            let origin = self
+                .generation
+                .plan
+                .entry(self.generation.start_entry)
+                .expect("audio plan validated at init")
+                .start_ticks;
+            for track in &mut fragment.tracks {
+                track.base_decode_time = track
+                    .base_decode_time
+                    .checked_add(origin)
+                    .ok_or_else(|| landing_failed("shared AAC film clock overflow".into()))?;
+            }
+            let published = segmenter
+                .push(fragment)
+                .map_err(|error| landing_failed(error.to_string()))?;
+            for segment in published {
+                self.deliver(segment).await?;
+            }
+            return Ok(());
+        }
         if let Some(converter) = self.converter.as_mut() {
             let before = converter.report().source_profile;
             if let Err(refused) = converter.convert(&mut fragment) {
@@ -387,7 +446,7 @@ impl<S: Sink> GenerationRun<'_, S> {
         let Some(init) = &self.encoded_init else {
             return Ok(());
         };
-        let Some(video) = init.video().and_then(|video| fragment.track(video.id)) else {
+        let Some(_) = init.video().and_then(|video| fragment.track(video.id)) else {
             return Ok(());
         };
         let Some(entry) = self.generation.plan.entry(self.encoded_entry) else {
@@ -401,16 +460,23 @@ impl<S: Sink> GenerationRun<'_, S> {
             .entry(self.generation.start_entry)
             .expect("start entry")
             .start_ticks;
-        if !plurx_core::fmp4::classify(fragment, init).is_clean()
-            || video.base_decode_time != entry.start_ticks - origin
-            || video.duration() != entry.duration_ticks
-            || video.samples().any(|sample| sample.cto != 0)
-        {
-            return Err(landing_failed(format!(
-                "encoded entry {} does not match its clean frame grid: dts {}, duration {}, expected {} + {}",
-                entry.index, video.base_decode_time, video.duration(), entry.start_ticks - origin, entry.duration_ticks,
-            )));
-        }
+        let frame_ticks = self
+            .generation
+            .encoded_frame_ticks
+            .ok_or_else(|| landing_failed("encoded recipe has no frozen frame cadence".into()))?;
+        let start = entry
+            .start_ticks
+            .checked_sub(origin)
+            .ok_or_else(|| landing_failed("encoded entry precedes generation origin".into()))?;
+        plurx_core::fmp4::validate_encoded_grid(
+            fragment,
+            init,
+            self.generation.plan.timescale,
+            start,
+            entry.duration_ticks,
+            frame_ticks,
+        )
+        .map_err(|reason| landing_failed(format!("encoded entry {}: {reason}", entry.index)))?;
         self.encoded_entry += 1;
         Ok(())
     }
@@ -544,21 +610,21 @@ impl<S: Sink> GenerationRun<'_, S> {
             .served
             .take()
             .expect("the landing buffer fills only after the init");
-        let segmenter = match Segmenter::following(
-            init,
-            self.generation.policy,
-            u64::from(start_entry),
-            starts,
-        ) {
-            Ok(segmenter) => {
-                segmenter.retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets)
-            }
-            Err(error) => {
-                return Err(Outcome::Failed(Failure::Stream(format!(
-                    "placing the generation against its plan: {error}"
-                ))))
-            }
+        let following = if self.generation.encoded_audio_anchor.is_some() {
+            Segmenter::following_encoded
+        } else {
+            Segmenter::following
         };
+        let segmenter =
+            match following(init, self.generation.policy, u64::from(start_entry), starts) {
+                Ok(segmenter) => segmenter
+                    .retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets),
+                Err(error) => {
+                    return Err(Outcome::Failed(Failure::Stream(format!(
+                        "placing the generation against its plan: {error}"
+                    ))))
+                }
+            };
         self.segmenter = Some(segmenter);
 
         // Drop the first `discards` video-carrying fragments — the index
@@ -636,6 +702,16 @@ impl<S: Sink> GenerationRun<'_, S> {
     /// End of pipe: land whatever is still undecided, then publish the tail
     /// if — and only if — ffmpeg's trailer says the film really ended.
     async fn finish(&mut self, complete: bool) -> Outcome {
+        if let Some(segmenter) = self.audio_segmenter.take() {
+            if complete && !segmenter.complete() {
+                return landing_failed(
+                    "shared AAC ended before its promised sample interval".into(),
+                );
+            }
+            return Outcome::Ran {
+                produced_through: self.produced_through,
+            };
+        }
         if self.served.is_none() && self.segmenter.is_none() {
             return Outcome::Failed(Failure::Stream(
                 "the pipe ended before its moov arrived".into(),
@@ -703,6 +779,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                 )))
             }
         }
+        self.sink.completed_output().await;
         Outcome::Ran {
             produced_through: self.produced_through,
         }
@@ -1099,6 +1176,7 @@ mod tests {
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
             encoded_audio_anchor: None,
+            encoded_frame_ticks: None,
             identity: film.identity.clone(),
             start_entry,
             policy: film.policy,
@@ -1472,6 +1550,65 @@ mod tests {
         assert_eq!(produced_through, Some(1));
     }
 
+    #[tokio::test]
+    async fn completed_output_notification_requires_real_trailer_and_successful_tail_writes() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        #[derive(Default)]
+        struct ObservedSink {
+            inner: MemSink,
+            completed: AtomicU32,
+        }
+        impl Sink for ObservedSink {
+            async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> std::io::Result<()> {
+                self.inner.materialize(entry, bytes).await
+            }
+            async fn completed_output(&self) {
+                self.completed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let film = film().await;
+        let full = ObservedSink::default();
+        assert!(matches!(
+            run(
+                &film.feed[..],
+                generation(&film, 0),
+                &full,
+                "measurement-full"
+            )
+            .await,
+            Outcome::Ran { .. }
+        ));
+        assert_eq!(full.completed.load(Ordering::Relaxed), 1);
+        let truncated = ObservedSink::default();
+        let cut = fragment_boundary_cut(&film.feed, 4);
+        assert!(matches!(
+            run(
+                &film.feed[..cut],
+                generation(&film, 0),
+                &truncated,
+                "measurement-cut"
+            )
+            .await,
+            Outcome::Ran { .. }
+        ));
+        assert_eq!(truncated.completed.load(Ordering::Relaxed), 0);
+        let refused = ObservedSink {
+            inner: MemSink::refusing(1, std::io::ErrorKind::Other),
+            completed: AtomicU32::new(0),
+        };
+        assert!(matches!(
+            run(
+                &film.feed[..],
+                generation(&film, 0),
+                &refused,
+                "measurement-refused"
+            )
+            .await,
+            Outcome::Failed(_)
+        ));
+        assert_eq!(refused.completed.load(Ordering::Relaxed), 0);
+    }
+
     /// The production pipe with its audio outrunning the plan: the fixture's
     /// 12 s of film against 12.3 s of tone, under a plan whose probe said the
     /// tracks are equal — the shape of a tail the plan skipped. The plan
@@ -1525,6 +1662,7 @@ mod tests {
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
             encoded_audio_anchor: None,
+            encoded_frame_ticks: None,
             identity,
             start_entry: 0,
             policy: film.policy,

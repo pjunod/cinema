@@ -1,6 +1,8 @@
 # Android lifecycle, one player builder, and error classification — implementation plan
 
-**Status:** ready for review · **Executes:** D2 / D3 / D4 / D7 /
+**Status:** open — M1–M5 and M7–M9 code on `main` since 2026-10-04 (#793); the
+device matrix and the M6 failover JVM cases open ·
+**Executes:** D2 / D3 / D4 / D7 /
 F-android-3 / F-android-4 / F-android-5 / F-android-9 / F-android-13 /
 F-android-14 / F-android-15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
@@ -343,7 +345,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
 | Role | Load control | Focus + noisy | Decoder fallback | Tunneling | Wake mode | Text disabled by default |
 |---|---|---|---|---|---|---|
 | Finite | Incumbent | yes | yes | TV only | none | yes |
-| Successor | Successor | yes | yes | TV only (inherits — comment at `:3975`) | none | yes |
+| Successor | Successor | **no** — handed over at commit (§5.10) | yes | TV only (inherits — comment at `:3975`) | none | yes |
 | LiveTv | Live | yes | yes | **no** | none | yes |
 | LibraryChannel | Incumbent | yes | yes | no | none | yes |
 | Offline | Incumbent | yes | yes | no | none | yes |
@@ -508,8 +510,9 @@ failover, existing session-gone handling.
 ### 5.7 M7 — `PlurxPlayerBuilder`
 
 The class, the role table, the four sites migrated, the construction-site
-test. Byte-identical behaviour for `Finite`/`Successor`; the three other
-roles gain focus, noisy and decoder fallback and nothing else.
+test. Byte-identical behaviour for `Finite`; the three other roles gain
+focus, noisy and decoder fallback and nothing else. *(2026-10-02: `Successor`
+no longer handles focus or noisy until its commit — §5.10.)*
 
 Acceptance: `make android-test`; `grep -rn "ExoPlayer.Builder(" clients/android/app/src/main`
 returns one line; on the Google TV, Live TV and a library channel pause
@@ -537,6 +540,43 @@ server's request log for `/hls/{session}/status`) shows ~6 polls/min with
 the panel closed and ~30/min with it open.
 
 ---
+
+### 5.10 Device evidence, 2026-10-02 (claude-opus-5-5)
+
+Collected over wireless adb on the Google TV Streamer (Android 14, the fleet's
+only HDMI player; it stands in for the plan's "Shield" and "Lenovo TV", which
+are not in the reachable fleet — the Lenovo TB322FC is a tablet). Installed
+build 142 (`4f25ab713`); 08:04–08:49 UTC. Private receipt with raw logcat,
+`dumpsys` and timestamps: `ANDROID-EVIDENCE-2026-10-02.md` in the agent
+workspace.
+
+- **M1 — owner pause on HOME.** Without picture-in-picture, the session went
+  PAUSED about 1.2 s after HOME. The controller pauses at `ON_STOP`, and the
+  platform's own pause→stop gap measured about 1.1 s, so the app adds
+  ~0.1 s. With picture-in-picture (the television's auto-enter), playback
+  continues by design. The "within 1 s of Home" bar is therefore a platform
+  timing, not an app property, on this device; the controller-side bar is
+  "PAUSED within 0.2 s of `ON_STOP`, PiP keeps playing" (decision recorded
+  for Paul's review). The earlier ~7 s observation did not reproduce.
+- **M7 — audio focus.** Another app taking focus paused the finite player
+  (pass). Live TV and library channels were not testable: every Live TV tune
+  answered "The server did not answer" during the window.
+- **M9, M4** — not collected (no client-side request count; Live TV down).
+- **Found and fixed here — a prepared successor took audio focus from the
+  player on screen.** The successor was built with Media3 focus handling on
+  and set to play silently; its focus request reached the platform 3 ms
+  before the on-screen player lost focus and paused, the picture froze for
+  20.4 s, and the controller then released both and reopened cold. Focus now
+  belongs to the one audible player (§3.5 roles: `handlesAudioFocus(Successor)
+  == false`; the commit hands focus over, release first, and a rollback hands
+  it back). Regression: `AudioFocusOwnershipTest`. The device re-run of a
+  prepared quality change is owed on a build that carries the fix.
+- Known limit of the handover: a commit while the incumbent is ducked by a
+  transient `CAN_DUCK` holder (a navigation prompt) requests full focus, so
+  the ducking app loses it and the successor plays at full volume. A full
+  transient loss suppresses playback, so no commit happens then.
+- Picture-in-picture did not auto-enter once, ~40 s after that cold reopen,
+  and did later in the same session — recorded, unproven, not changed.
 
 ## 6. Verification and rollout
 
@@ -596,9 +636,9 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | (this branch) | Complete. `nodeFailoverEligible(errorCode, responseCode)` added to `PlaybackPolicy.kt` exactly as §3.4 specifies it; `invalidResponse` extracted in `Controller.kt` so the bounded (depth < 4) cause-chain walk `mediaRefusal` already did is shared rather than duplicated, with `httpResponseCode` reading the status off it; the `onPlayerError` gate changed from `isTransportPlaybackError(error.errorCode)` to `nodeFailoverEligible(error.errorCode, httpResponseCode(error))`; `playback_transport_failover` gained `http_status=<n\|none>`. The stale comment on 2004 — D3's "the comment describes code that does not exist" — now describes `nodeFailoverEligible`, which exists. Five JVM cases added to `PlaybackPolicyTest.kt`; **they have never been run** (no Android SDK in this session). What *was* run: three cases in `tests/playback/web-policy.test.js` pinning the predicate's four branches and their order, the call-site shape, the shared bounded walk, the telemetry field, and `PlaybackPolicy.kt`'s freedom from `androidx`. Revert proofs, each restoring a plausible-looking regression: reverting the call site to `isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode` fails "onPlayerError must gate the failover on the predicate AND pass it the status"; flipping `else -> false` to `else -> true` (which restores the old behaviour while still *looking* gated) fails "anything not named above must be terminal, not a failover"; moving the allowlist branch below the status branches fails "the transport allowlist must remain the first question". Device acceptance (stop the ingress node mid-play; `DELETE /hls/{session}` then confirm no failover) is **not** done. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | (this branch) | **Deviation from §3.4, flagged rather than taken silently.** The plan puts `httpResponseCode` in `PlaybackPolicy.kt`. That file's header states its functions "stay free of ExoPlayer and Android so the tables are one screen of code each, unit-testable on the JVM"; `HttpDataSource.InvalidResponseCodeException` and `PlaybackException` would end that. The split is: the decision (`nodeFailoverEligible`, pure, JVM-testable) stays in the policy module, the Media3-typed extraction lives beside the other Media3 code in `Controller.kt`. `web-policy.test.js` now asserts `PlaybackPolicy.kt` contains no `androidx.` reference, so the shortcut cannot be taken later without failing a test that runs. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1, M2, M3, M4, M5, M7, M8, M9 | — | **Not started.** Every one of them is multi-file Kotlin whose blast radius is live playback — M1 alone rewrites the seven sites that set `playWhenReady`, M7 moves all four `ExoPlayer.Builder` call sites, M2 adds a foreground service and manifest entries. This session had no Android SDK and no Gradle toolchain: none of it could be compiled, `make android-test` could not be run, and the source-text pins that make M6 defensible cannot tell a working service or lifecycle from a broken one. Landing unverifiable surgery of that size would have been worse than leaving it, so it is left. M6 was chosen because it is the one milestone that is a real correctness fix, is completable end to end without a toolchain, and is pinnable by tests that do run. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [PR #470](http://192.168.4.7:3000/noirr/plurx/pulls/470) | **Correction to the first M6 row: the Kotlin has now been compiled and run.** The sole adversarial review (PR #470 comment 4098) ran `make android-test` and `lintDebug` on nuc3; after merging main (`99d4abf8c`) it was run again: 737 tests, all 12 `LadderVerdictTest` cases pass including the five M6 cases, and the only 4 failures are the `PlaybackSurfaceReducerTest` cases that fail identically at the merge-base `fad591a46` and are not this branch. The "they have never been run" and "no Android SDK" statements above describe the first session only. The review executed a Kotlin revert proof (`else -> false` flipped to `else -> true` in `PlaybackPolicy.kt` turns `aClientErrorIsTerminalAndNeverWalksTheIngressList` and `a2xxOr3xxStatusIsNotAFailoverEither` red), so the predicate is now proved by execution, not only by source pins. The `onPlayerError` call-site gate is still pinned only by the source assertion in `web-policy.test.js` (no JVM test reaches `Controller.kt`), which the review accepted for a one-line gate. The review's one finding (P2: the M6 block in `web-policy.test.js` had split the async-drain comment from the drain) is fixed. Device acceptance (§5.6) remains post-merge work. |
-| 2026-09-24 | gpt-6-astra | agent:/root/client_recon | M7 | [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) · `78830ec99` | The six-role `PlurxPlayerBuilder` now owns construction at the four existing player sites. Finite and successor keep their source, transfer listener and TV tunneling; Live TV keeps its live load control and media client; the library channel keeps the capability client; offline keeps its cache-only placeholder upstream. Focus, becoming-noisy and decoder fallback follow §3.5's role table. `:app:compileDebugKotlin` passed in the pinned Android build image. The construction-site contract was added but the unit lane and device acceptance wait for the ready PR. M1-M5 and M8-M9 remain open. |
-| 2026-09-24 | gpt-6-astra | agent:/root/client_recon | M5 AudioTrack classification | [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) · `38ece806e` | Audio-sink failures now use a bounded cause-chain policy and route snapshot to distinguish a changed output route from a persistent decoder or transport failure; controller recovery and diagnostics follow that classification. Production and test Kotlin compilation passed in the pinned Android image. Unit tests, the one adversarial review and device acceptance remain for the ready PR. M1 reached the plan's prepared-commit stop-and-flag boundary and is paused pending the narrow lifecycle-intent decision. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [PR #470](http://forge.lan:3000/noirr/plurx/pulls/470) | **Correction to the first M6 row: the Kotlin has now been compiled and run.** The sole adversarial review (PR #470 comment 4098) ran `make android-test` and `lintDebug` on lab3; after merging main (`99d4abf8c`) it was run again: 737 tests, all 12 `LadderVerdictTest` cases pass including the five M6 cases, and the only 4 failures are the `PlaybackSurfaceReducerTest` cases that fail identically at the merge-base `fad591a46` and are not this branch. The "they have never been run" and "no Android SDK" statements above describe the first session only. The review executed a Kotlin revert proof (`else -> false` flipped to `else -> true` in `PlaybackPolicy.kt` turns `aClientErrorIsTerminalAndNeverWalksTheIngressList` and `a2xxOr3xxStatusIsNotAFailoverEither` red), so the predicate is now proved by execution, not only by source pins. The `onPlayerError` call-site gate is still pinned only by the source assertion in `web-policy.test.js` (no JVM test reaches `Controller.kt`), which the review accepted for a one-line gate. The review's one finding (P2: the M6 block in `web-policy.test.js` had split the async-drain comment from the drain) is fixed. Device acceptance (§5.6) remains post-merge work. |
+| 2026-09-24 | gpt-6-astra | agent:/root/client_recon | M7 | [draft PR #506](http://forge.lan:3000/noirr/plurx/pulls/506) · `78830ec99` | The six-role `PlurxPlayerBuilder` now owns construction at the four existing player sites. Finite and successor keep their source, transfer listener and TV tunneling; Live TV keeps its live load control and media client; the library channel keeps the capability client; offline keeps its cache-only placeholder upstream. Focus, becoming-noisy and decoder fallback follow §3.5's role table. `:app:compileDebugKotlin` passed in the pinned Android build image. The construction-site contract was added but the unit lane and device acceptance wait for the ready PR. M1-M5 and M8-M9 remain open. |
+| 2026-09-24 | gpt-6-astra | agent:/root/client_recon | M5 AudioTrack classification | [draft PR #506](http://forge.lan:3000/noirr/plurx/pulls/506) · `38ece806e` | Audio-sink failures now use a bounded cause-chain policy and route snapshot to distinguish a changed output route from a persistent decoder or transport failure; controller recovery and diagnostics follow that classification. Production and test Kotlin compilation passed in the pinned Android image. Unit tests, the one adversarial review and device acceptance remain for the ready PR. M1 reached the plan's prepared-commit stop-and-flag boundary and is paused pending the narrow lifecycle-intent decision. |
 | 2026-09-25 | gpt-6-astra | agent:/root/d02_remaining | M9 | `codex/d02-remaining` · `7bb205aa6` and `13112270e` | The passive HLS status poll now uses 2 s while the panel, quality controls, wait overlay or prepared replacement reads it, and 10 s otherwise. `:app:compileDebugKotlin` passed after the callback-order fix. Request-rate device acceptance and the consolidated fast lane remain owed. |
 | 2026-09-25 | gpt-6-astra | agent:/root/d02_remaining | M3 | `codex/d02-remaining` · `b00b55a95` | The screen-on flag follows video playing or requested buffering and clears on pause or audio-only plans, including after a prepared player swap. Kotlin compilation passed; Lenovo timeout and instrumented acceptance remain owed. |
 | 2026-09-25 | gpt-6-astra | agent:/root/d02_remaining | M4 | `codex/d02-remaining` · `d1c8be43b` | Live TV has a one-use live-edge rewind for error 1002 on the same player, after serial, lease/watchdog and playlist HEAD checks. The four bounded telemetry outcomes are `recovered`, `spent`, `session_gone` and `lease_lost`. Kotlin compilation passed; Shield suspend/resume acceptance remains owed. |
@@ -606,3 +646,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | gpt-6-astra | agent:/root/d02_remaining | M2 | `codex/d02-remaining` · `2b1cee5f4` | Audiobooks use the Audio player role and `WAKE_MODE_NETWORK`; `PlaybackService` owns the existing MediaSession and Media3 notification, with typed foreground permission, runtime notification request and release teardown. The item model's playable kinds are video and audiobook; music has no playable player route yet, so audiobook is the audio-only classification. Prepared commit and rollback already rebind the MediaSession to the active player through `setPlayer`; M2 reuses those existing calls so notification controls follow the active audio player without changing that contract. Manifest processing and Kotlin compilation passed; Pixel five-minute background/lock-screen/service teardown acceptance remains owed. |
 | 2026-09-25 | gpt-6 | agent:/root/restore_a02 | M1 | `codex/d02-m1-20260924` | Video ON_STOP now sets an owner pause without changing viewer intent, and return resumes only when intent still requests play. PiP and audio-only playback keep playing. Seven attach paths, screen lifecycle/PiP delivery, and a notification Play command while stopped respect the owner pause. Production and test Kotlin compilation passed; the JVM test source compiled but unit tests were deferred to the one ready-PR fast lane. Pixel Home/return and notification acceptance remains owed. **Authorized narrow deviation:** the prepared-commit snapshot now uses `effectivePlayWhenReady()` so a successor cannot bypass the background owner pause; the same snapshot restores the predecessor on rollback. The plan had a stop-and-flag boundary there, and the build owner explicitly resolved it for this change. |
 | 2026-09-28 | gpt-6-astra | 01a0d5b2-d294-70c2-a7e9-d884600c68e0 | D02M3 production callback binding | `codex/native-review-completion-0928` | Integrated b5c745c0b: PlayerScreenOn follows owned controller swaps and real PlayerView; buffering/play/pause/resume instrumentation uses actual ExoPlayer callbacks with an in-memory asset. Production/JVM/instrumentation source compilation passes; execution follows the sole batch review. Lenovo timeout remains open. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | §5.6 device evidence + successor focus | Opus D-02 continuation PR | Google TV Streamer, build 142: M1 pause at ON_STOP (~1.2 s after HOME, platform gap ~1.1 s), M7 focus loss pauses (pass); M4/M9 not collected (Live TV unanswered). Root-caused a prepared successor stealing audio focus (20 s freeze then cold reopen) and moved focus to the audible player only (§5.10). |

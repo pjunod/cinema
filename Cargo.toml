@@ -4,6 +4,7 @@ members = [
     "crates/plurx-core",
     "crates/plurx-cluster-check",
     "crates/plurx-compat-plex",
+    "crates/plurx-compat-jellyfin",
     "crates/plurx-pgs",
     "crates/plurxd",
 ]
@@ -123,6 +124,14 @@ opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
 
+# Descriptor-bound decoder planning rehashes the held parser, sealed snapshot
+# and current path even on cache hits. The unoptimized qualification build
+# spent about nine seconds here across a continuous family's five lookups.
+# Keep every verification and bound; optimize its SHA-256 implementation while
+# workspace code retains normal development assertions and debuggability.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # Test executables are replicated in every isolated swarm worker cache. Rust
 # debug info made each plurxd test binary hundreds of megabytes even though the
 # harness never attaches a debugger to them. Keep normal development builds
@@ -143,14 +152,13 @@ overflow-checks = true
 
 [profile.release]
 lto = "thin"
-# Measured 2026-09-25 on nuc3 (docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
-# §5.6): `debug = "line-tables-only"` with `strip = "none"` gives a fully
-# symbolicated backtrace and a 420 MiB binary (5.3x); `strip = "debuginfo"`
-# gives named frames without lines at 109 MiB (+36 %, +11.5 % gzipped);
-# packed split debuginfo gives 230 MiB plus a 177 MiB .dwp. Which one ships
-# is Paul's call (that plan's §7); until then the profile is main's, and
-# `plurxd diagnostic-panic` is there to check whichever lands.
-strip = "symbols"
+# Paul selected profile C on 2026-09-30: retain named file/line backtraces
+# without embedding all debug data in the executable. GNU release packaging
+# verifies and ships the paired .dwp beside each executable; Windows retains
+# its PDB. Preserve thin LTO/default codegen units, unwind and overflow policy.
+debug = "line-tables-only"
+strip = "none"
+split-debuginfo = "packed"
 
 # Patch Hiqlite's sparse-membership, WAL-recovery, and optional-dependency
 # compatibility without advisory ignores. Path packages are

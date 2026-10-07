@@ -142,6 +142,9 @@ impl TranscodeManager {
         session.fail(PlaylistError::SessionFailed(
             CACHED_MEDIA_INTEGRITY_FAILURE.to_owned(),
         ));
+        if let Some(artifact) = &session.rolling_artifact {
+            self.vod.refuse_rolling_output(artifact);
+        }
         if session
             .cache_integrity_cleanup_started
             .compare_exchange(false, true, AcqRel, Acquire)
@@ -198,12 +201,15 @@ impl TranscodeManager {
         file_id: i64,
         plan: &ResolvedTranscode,
         source_object_version: Option<&str>,
+        reorder_frames: bool,
     ) -> bool {
         let (Some(source_object_version), Some(pipeline)) = (source_object_version, self.digest())
         else {
             return false;
         };
-        let Ok(recipe) = self.candidate_recipe_digest(plan, super::Presentation::Vod) else {
+        let Ok(recipe) =
+            self.candidate_recipe_digest(plan, super::Presentation::Vod, reorder_frames)
+        else {
             return false;
         };
         self.vod
@@ -862,11 +868,16 @@ impl TranscodeManager {
         let cached_kind = SessionKind::Transcode {
             height: opts.target_height,
         };
-        let cached_codecs = transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height);
+        let cached_codecs =
+            audio_delivery_hls_codecs(transcoded_hls_codecs_for_plan(plan), opts.audio.as_ref());
         let cached_probe_json = self.store.get_file_probe_json(file.id).await.ok().flatten();
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
+                codec_facts: Some(
+                    FrozenHlsCodecFacts::encoded(plan)
+                        .with_sdr_master_codecs(owner.sdr_master_codecs),
+                ),
                 bandwidth: None,
                 file_id: file.id,
                 start_seconds: 0.0,
@@ -899,6 +910,10 @@ impl TranscodeManager {
             dir,
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
+            rolling_provenance: None,
+            rolling_collection: None,
+            rolling_artifact: None,
+            copy_output_measurement: std::sync::Mutex::new(None),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: false,
             actor_prepublication_producer: Arc::new(AtomicBool::new(false)),
@@ -942,6 +957,7 @@ impl TranscodeManager {
             recovery: None,
             automatic: owner.automatic,
             kind: cached_kind,
+            audio_delivery: opts.audio.clone(),
             // A cache hit only ever answers a transcode request (`serve_cached`
             // is reached from the transcode path alone); the encoder label goes to
             // "cached" here, which is exactly why the method is not read off it.
@@ -1018,6 +1034,8 @@ impl TranscodeManager {
         )
         .await;
         Some(StartInfo {
+            retained_output: None,
+            audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
             duration_ms: file.duration_ms,

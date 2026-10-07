@@ -29,10 +29,16 @@ pub(crate) mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_auth_revocation;
+pub(crate) mod internal_clock;
 pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
 mod items;
+mod jellyfin;
+pub(crate) use jellyfin::{
+    standard_port_app as jellyfin_standard_port_app, StandardPort as JellyfinStandardPort,
+    StandardPortStatus as JellyfinStandardPortStatus,
+};
 mod keys;
 mod libraries;
 pub(crate) mod library_channels;
@@ -43,6 +49,7 @@ pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;
 mod plex;
+pub(crate) mod plex_census;
 pub(crate) mod publication;
 mod reading;
 mod scan;
@@ -264,7 +271,17 @@ fn http_route_group(path: &str) -> usize {
     // inventory test fails if a registered pattern is left unclassified.
     match path {
         // Authentication and identity administration.
-        "/api/v1/me"
+        "/jellyfin"
+        | "/jellyfin/"
+        | "/jellyfin/System/Info/Public"
+        | "/jellyfin/System/Info"
+        | "/jellyfin/Users/Public"
+        | "/jellyfin/Sessions/Capabilities"
+        | "/jellyfin/Sessions/Capabilities/Full"
+        | "/jellyfin/Users/AuthenticateByName"
+        | "/jellyfin/Users/{user_id}"
+        | "/jellyfin/Users/Me"
+        | "/api/v1/me"
         | "/api/v1/setup"
         | "/api/v1/auth/login"
         | "/api/v1/auth/logout"
@@ -345,6 +362,31 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/dvr/reminders"
         | "/api/v1/dvr/reminders/{id}"
         | "/api/v1/dvr/reminders/{id}/ack"
+        | "/jellyfin/Users/{user_id}/Views"
+        | "/jellyfin/UserViews/GroupingOptions"
+        | "/jellyfin/Library/VirtualFolders"
+        | "/jellyfin/DisplayPreferences/{id}"
+        | "/jellyfin/Items/{item_id}/Intros"
+        | "/jellyfin/MediaSegments/{item_id}"
+        | "/jellyfin/Items/{item_id}/LocalTrailers"
+        | "/jellyfin/Items/{item_id}/SpecialFeatures"
+        | "/jellyfin/UserViews"
+        | "/jellyfin/Items/Latest"
+        | "/jellyfin/Items/Resume"
+        | "/jellyfin/UserItems/Resume"
+        | "/jellyfin/Users/{user_id}/Items/Latest"
+        | "/jellyfin/Users/{user_id}/Items/Resume"
+        | "/jellyfin/Shows/Upcoming"
+        | "/jellyfin/Items/{item_id}/Similar"
+        | "/jellyfin/Shows/NextUp"
+        | "/jellyfin/Items"
+        | "/jellyfin/Users/{user_id}/Items"
+        | "/jellyfin/Items/{item_id}/Images/{kind}"
+        | "/jellyfin/Items/{item_id}/Images/{kind}/{index}"
+        | "/jellyfin/Items/{item_id}"
+        | "/jellyfin/Users/{user_id}/Items/{item_id}"
+        | "/jellyfin/Shows/{item_id}/Seasons"
+        | "/jellyfin/Shows/{item_id}/Episodes"
         | "/library/metadata/{key}"
         | "/library/metadata/{key}/children"
         | "/library/metadata/{key}/{kind}"
@@ -355,10 +397,25 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/shared/imports/{import}/files/{locator}/playback" => 3,
 
         // Search only; maintenance of the search index is a settings action.
-        "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
+        "/jellyfin/Search/Hints" | "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
 
         // Playback decisions, control, media bodies and watch state.
-        "/api/v1/items/{id}/progress"
+        "/jellyfin/Items/{item_id}/PlaybackInfo"
+        | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}"
+        | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{start_ticks}/{filename}"
+        | "/jellyfin/Videos/{item_id}/stream"
+        | "/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}"
+        | "/jellyfin/Videos/{item_id}/{filename}"
+        | "/jellyfin/Sessions/Logout"
+        | "/jellyfin/Sessions/Playing"
+        | "/jellyfin/Sessions/Playing/Progress"
+        | "/jellyfin/Sessions/Playing/Stopped"
+        | "/jellyfin/Sessions/Playing/Ping"
+        | "/jellyfin/Videos/ActiveEncodings"
+        | "/jellyfin/UserPlayedItems/{item_id}"
+        | "/jellyfin/Items/{item_id}/Download"
+        | "/jellyfin/Users/{user_id}/PlayedItems/{item_id}"
+        | "/api/v1/items/{id}/progress"
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
@@ -382,6 +439,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/shared/imports/{import}/files/{locator}/stream.mp4"
         | "/api/v1/shared/imports/{import}/files/{locator}/direct"
         | "/api/v1/files/{id}/hls/sessions"
+        | "/api/v1/files/{id}/hls/continuous-sessions"
+        | "/api/v1/files/{id}/hls/continuous-candidates"
         | "/api/v1/files/{id}/hls/start"
         | "/api/v1/offline/packages/{id}"
         | "/api/v1/offline/packages/{id}/lease"
@@ -399,9 +458,14 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/hls/{session}/subs/{index}/index.m3u8"
         | "/api/v1/hls/{session}/subs/{index}/{segment}"
         | "/api/v1/hls/{session}/status"
+        | "/api/v1/hls/{session}/quality-control"
+        | "/api/v1/hls/{session}/quality-schedule"
+        | "/api/v1/hls/{session}/quality-family"
         | "/api/v1/hls/{session}/control"
         | "/api/v1/hls/{session}"
         | "/api/v1/hls/{session}/{segment}"
+        | "/api/v1/hls/{session}/{role}/{rendition}/{kind}/{object}"
+        | "/api/v1/hls/{session}/{role}/{rendition}/index.m3u8"
         | "/api/v1/live-tv/readiness"
         | "/api/v1/live-tv/readiness/refresh"
         | "/api/v1/live-tv/channels"
@@ -438,6 +502,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/activity/sessions/{id}"
         | "/api/v1/activity/offline/{id}"
         | "/api/v1/activity/producer"
+        | "/api/v1/activity/retained/{nonce}"
         | "/api/v1/activity/processes/{pid}"
         | "/api/v1/trakt/status"
         | "/api/v1/trakt/link"
@@ -504,6 +569,7 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/fragment-index/{cache_key}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
+        | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
         | crate::subtitle_ranges::PATH
@@ -521,13 +587,14 @@ fn http_route_group(path: &str) -> usize {
         | crate::live_tv::RETIRE_PATH
         | crate::live_tv::RESUME_PATH
         | crate::live_tv::START_STATE_PATH
-        | crate::live_tv::DRAIN_PATH
         | crate::live_tv::GUIDE_PATH
         | crate::media_sessions::START_PATH
         | crate::media_sessions::ACTIVATE_PATH
         | crate::media_sessions::PREPARE_PATH
         | crate::media_sessions::ABORT_PATH
         | crate::media_sessions::RELAY_PATH
+        | hls::QUALITY_CONTROL_PATH
+        | hls::QUALITY_SCHEDULE_PATH
         | crate::media_sessions::CONTROL_PATH => 7,
         _ => 8,
     }
@@ -651,14 +718,24 @@ const PLEX_OUTCOMES: [&str; 4] = ["ok", "not_found", "unauthorized", "error"];
 /// in the binary that sends façade traffic, on libtest's parallel threads, and
 /// the adversarial review of PR #462 measured that race failing 34 runs in
 /// 400.
+///
+/// `cells` are this process's counts and keep the in-process meaning of
+/// `plurx_plex_requests_total`. `ledger` is the durable census (C-07 §8.5,
+/// [`plex_census`]): restored once at startup from the node's data directory,
+/// it adds what earlier processes counted, so one read of
+/// `plurx_plex_requests_since_census_total` covers every restart since the
+/// census began. A router built without a restore (every test router) has no
+/// ledger and exposes the process counter alone.
 pub(crate) struct PlexCensus {
-    cells: [AtomicU64; PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()],
+    cells: [AtomicU64; plex_census::CELLS],
+    ledger: std::sync::OnceLock<plex_census::CensusLedger>,
 }
 
 impl Default for PlexCensus {
     fn default() -> Self {
         Self {
             cells: std::array::from_fn(|_| AtomicU64::new(0)),
+            ledger: std::sync::OnceLock::new(),
         }
     }
 }
@@ -719,7 +796,60 @@ impl PlexCensus {
                 ));
             }
         }
+        if let Some(ledger) = self.ledger.get() {
+            out.push_str(&ledger.prometheus(&self.cells));
+        }
         out
+    }
+
+    /// Restore the durable census from `data_dir` and write it back at once,
+    /// marked as running, so a crash before the first periodic write still
+    /// leaves a bounded gap. Never fails: an unusable file starts a new census
+    /// with the reason logged. `floor_unix_s` is the earliest clock reading
+    /// trusted (the build's source date); below it, or with no clock, nothing
+    /// is written until a later write sees a trustworthy one. Called once,
+    /// before the listener accepts; the returned start is what was logged.
+    pub(crate) async fn restore_durable(
+        &self,
+        data_dir: &std::path::Path,
+        now_unix_s: Option<u64>,
+        floor_unix_s: u64,
+    ) -> plex_census::CensusStart {
+        let (ledger, start) =
+            plex_census::CensusLedger::restore(data_dir, now_unix_s, floor_unix_s).await;
+        ledger.log_start(&start);
+        if self.ledger.set(ledger).is_err() {
+            tracing::warn!("the Plex façade census was already restored in this process");
+            return start;
+        }
+        if let Err(error) = self.flush_durable(now_unix_s, false).await {
+            tracing::warn!(
+                %error,
+                "could not write the Plex façade census at startup; the periodic write retries"
+            );
+        }
+        start
+    }
+
+    /// Write the durable census; `clean` records a clean stop and is final.
+    /// `Ok(false)` when there is no ledger, the clean stop already landed, or
+    /// the clock is unreadable or below the build's source date.
+    pub(crate) async fn flush_durable(
+        &self,
+        now_unix_s: Option<u64>,
+        clean: bool,
+    ) -> std::io::Result<bool> {
+        match self.ledger.get() {
+            Some(ledger) => ledger.flush(&self.cells, now_unix_s, clean).await,
+            None => Ok(false),
+        }
+    }
+
+    #[cfg(test)]
+    fn since_census(&self) -> Option<[u64; plex_census::CELLS]> {
+        self.ledger
+            .get()
+            .map(|ledger| ledger.since_census(&self.cells))
     }
 }
 
@@ -1392,6 +1522,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(system::stop_producer),
         )
         .route(
+            "/activity/retained/{nonce}",
+            axum::routing::delete(system::stop_retained_output),
+        )
+        .route(
             "/activity/processes/{pid}",
             axum::routing::delete(system::stop_process),
         )
@@ -1734,6 +1868,14 @@ pub fn router(state: AppState) -> Router {
                 // browser holding the full 256 learned limits is about 40 KiB.
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
+        .route(
+            "/files/{id}/hls/continuous-candidates",
+            post(hls::continuous_candidates).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/continuous-sessions",
+            post(hls::create_continuous).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/files/{id}/hls/start", get(hls::start))
         .route(
             "/hls/{session}/master.m3u8",
@@ -1752,16 +1894,34 @@ pub fn router(state: AppState) -> Router {
         // Before the `{segment}` catch-all in intent, though the router
         // prefers the static segment regardless of registration order.
         .route("/hls/{session}/status", get(hls::status))
+        .route("/hls/{session}/quality-family", get(hls::continuous_family))
         .route(
             "/hls/{session}/control",
             post(hls::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_REQUEST_BYTES,
             )),
         )
+        .route(
+            "/hls/{session}/quality-control",
+            post(hls::quality_control).layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
+        )
+        .route(
+            "/hls/{session}/quality-schedule",
+            post(hls::quality_schedule)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
+        )
         // Capability auth (the session id is the credential) so a closing tab
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
+        .route(
+            "/hls/{session}/{role}/{rendition}/{kind}/{object}",
+            get(hls::child_segment),
+        )
+        .route(
+            "/hls/{session}/{role}/{rendition}/index.m3u8",
+            get(hls::child_playlist),
+        )
         .route("/images/{filename}", get(images::serve))
         // Shared Start: the receiver actor owns dispatch, persistence and
         // physical cleanup; the request is deadline-free like a local create.
@@ -1790,6 +1950,22 @@ pub fn router(state: AppState) -> Router {
     // Plex uses literal `:` path segments (`/:/timeline`, `/photo/:/transcode`)
     // which axum 0.8 rejects by default — `without_v07_checks` matches them
     // literally (we still use `{capture}` syntax for real captures).
+    // Every merged root family shares the literal-colon routing policy used
+    // by Plex; merging an ordinary router would turn those checks back on.
+    let jellyfin_json = Router::new()
+        .without_v07_checks()
+        .route("/jellyfin/", axum::routing::any(jellyfin::not_found))
+        .nest("/jellyfin", jellyfin::router())
+        .layer(axum::middleware::from_fn(json_long_deadline))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            jellyfin::enabled_gate,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ))
+        .layer(axum::middleware::from_fn(jellyfin::cache_policy));
     let plex_short = Router::new()
         .without_v07_checks()
         .route("/identity", get(plex::identity))
@@ -1865,6 +2041,7 @@ pub fn router(state: AppState) -> Router {
     let public_media = Router::new()
         .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(internal_clock::PATH, get(internal_clock::snapshot))
         .route(
             cluster_operations::INTERNAL_PATH,
             get(cluster_operations::local),
@@ -1949,12 +2126,6 @@ pub fn router(state: AppState) -> Router {
             post(internal_live_tv::start_state).layer(DefaultBodyLimit::max(1_024)),
         )
         .route(
-            crate::live_tv::DRAIN_PATH,
-            post(internal_live_tv::drain).layer(DefaultBodyLimit::max(
-                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
-            )),
-        )
-        .route(
             crate::live_tv::GUIDE_PATH,
             post(internal_live_tv::guide).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
@@ -2012,6 +2183,16 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            hls::QUALITY_CONTROL_PATH,
+            post(internal_media_sessions::quality_control)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
+        )
+        .route(
+            hls::QUALITY_SCHEDULE_PATH,
+            post(internal_media_sessions::quality_schedule)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
+        )
+        .route(
             crate::media_sessions::CONTROL_PATH,
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
@@ -2023,6 +2204,7 @@ pub fn router(state: AppState) -> Router {
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
         .without_v07_checks()
         .nest("/api/v1", api)
+        .merge(jellyfin_json)
         .merge(plex_routes)
         .merge(public_short)
         .merge(public_media)
@@ -2100,6 +2282,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/media"
                 | "/api/v1/cluster/ingress"
                 | cluster_operations::INTERNAL_PATH
+                | internal_clock::PATH
         )
     {
         return true;
@@ -2131,6 +2314,11 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
+                | hls::QUALITY_CONTROL_PATH
+                // Schedule mutations are control of an existing session: a
+                // node in maintenance keeps streaming it, so it must keep
+                // honouring the viewer's quality changes too.
+                | hls::QUALITY_SCHEDULE_PATH
         | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
@@ -2157,7 +2345,16 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | ["api", "v1", "live-tv", "sessions", _, _]
         ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
     let existing_media_control = (method == Method::POST
-        && matches!(segments.as_slice(), ["api", "v1", "hls", _, "control"]))
+        && matches!(
+            segments.as_slice(),
+            [
+                "api",
+                "v1",
+                "hls",
+                _,
+                "control" | "quality-control" | "quality-schedule"
+            ]
+        ))
         || (method == Method::DELETE
             && matches!(
                 segments.as_slice(),
@@ -2205,6 +2402,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
+                | internal_clock::PATH
         )
     {
         return true;
@@ -2253,6 +2451,10 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
+                    | hls::QUALITY_CONTROL_PATH
+                    // A learner can own a continuous session; every schedule
+                    // relayed to it arrives here.
+                    | hls::QUALITY_SCHEDULE_PATH
                     | crate::live_tv::RESOURCE_PATH
                     | crate::live_tv::STOP_PATH
             ))
@@ -2330,8 +2532,12 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             segments.as_slice(),
             ["api", "v1", "files", _, "hls", "sessions"]
+                // The continuous family create walks the same create path as
+                // `hls/sessions`, and its catalog read is the same kind of
+                // node-local, write-nothing POST as the caps-v2 decision.
+                | ["api", "v1", "files", _, "hls", "continuous-sessions" | "continuous-candidates"]
                 | ["api", "v1", "files", _, "publication"]
-                | ["api", "v1", "hls", _, "control"]
+                | ["api", "v1", "hls", _, "control" | "quality-control" | "quality-schedule"]
                 // The caps-v2 spelling of the decision read. It is a POST only
                 // because its capabilities are a JSON document rather than a
                 // query string — it writes nothing, and a learner that answers
@@ -2400,6 +2606,13 @@ async fn cluster_capacity_gate(
 
 fn safe_trace_target(uri: &Uri) -> String {
     let mut segments = uri.path().split('/').collect::<Vec<_>>();
+    if segments.len() >= 7
+        && segments[1].eq_ignore_ascii_case("jellyfin")
+        && segments[2].eq_ignore_ascii_case("videos")
+        && segments[5].eq_ignore_ascii_case("hls")
+    {
+        segments[4] = "[REDACTED]";
+    }
     for marker in ["media", "hls", "publication", "sessions", "starts"] {
         if let Some(index) = segments.iter().position(|segment| *segment == marker) {
             let is_capability_route = match marker {
@@ -2451,6 +2664,7 @@ pub(crate) enum ReadinessFailure {
     Maintenance,
     QuorumUnavailable,
     StoreUnavailable,
+    ClockUnbounded,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2458,6 +2672,21 @@ pub(crate) struct ReadinessEvaluation {
     pub(crate) ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<ReadinessFailure>,
+}
+
+/// Shared Store-free clock consequence for readiness and operations status.
+///
+/// Only while the operator has turned the clock guard on: otherwise one
+/// skewed node would take every node's `/readyz` down. The measurement stays
+/// visible in the Developer readiness rows and the clock metrics either way.
+fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
+    let guard = state.membership.clock_guard();
+    (guard.is_enforced() && guard.snapshot().readiness.is_unbounded()).then_some(
+        ReadinessEvaluation {
+            ready: false,
+            reason: Some(ReadinessFailure::ClockUnbounded),
+        },
+    )
 }
 
 /// One typed readiness decision shared by `/readyz` and cluster status.
@@ -2476,10 +2705,10 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
     // when an isolated node needs to self-fence promptly.
     if state.serving.is_quorum_managed() {
         return if state.serving.is_ready() {
-            ReadinessEvaluation {
+            clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
                 ready: true,
                 reason: None,
-            }
+            })
         } else {
             ReadinessEvaluation {
                 ready: false,
@@ -2488,10 +2717,10 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
         };
     }
     match state.store.ping().await {
-        Ok(()) => ReadinessEvaluation {
+        Ok(()) => clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
             ready: true,
             reason: None,
-        },
+        }),
         Err(error) => {
             tracing::warn!(%error, "readiness probe failed");
             ReadinessEvaluation {
@@ -2518,6 +2747,10 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             reason: Some(ReadinessFailure::StoreUnavailable),
             ..
         } => (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::ClockUnbounded),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "clock unbounded\n"),
         ReadinessEvaluation {
             ready: false,
             reason: None,
@@ -2592,9 +2825,55 @@ mod tests {
 
     use super::*;
 
+    mod public_copy_wire;
+
     async fn slow_test_handler() -> &'static str {
         tokio::time::sleep(Duration::from_millis(40)).await;
         "ok"
+    }
+
+    #[tokio::test]
+    async fn clock_route_refuses_household_and_forged_proofs_without_timing() {
+        let (app, _) = test_app_with_state();
+        for bearer in [None, Some("household-session")] {
+            let mut request = Request::builder().uri(internal_clock::PATH);
+            if let Some(bearer) = bearer {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).expect("clock request"))
+                .await
+                .expect("clock route");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response
+                .headers()
+                .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("refusal body")
+                .to_bytes();
+            assert!(!String::from_utf8_lossy(&body).contains("received_unix_ms"));
+        }
+        let request = Request::builder()
+            .uri(internal_clock::PATH)
+            .header(peer_transport::NODE_HEADER, "peer")
+            .header(peer_transport::TARGET_HEADER, "test-node")
+            .header(peer_transport::TIMESTAMP_HEADER, "1")
+            .header(
+                peer_transport::NONCE_HEADER,
+                "123e4567-e89b-42d3-a456-426614174000",
+            )
+            .header(peer_transport::SIGNATURE_HEADER, "a".repeat(128))
+            .body(Body::empty())
+            .expect("forged clock request");
+        let response = app.oneshot(request).await.expect("forged clock route");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!response
+            .headers()
+            .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
     }
 
     async fn watch_write_handler(
@@ -3793,6 +4072,7 @@ mod tests {
             "json_short",
             "json_long",
             "media",
+            "jellyfin_json",
             "plex_short",
             "plex_media",
             "public_short",
@@ -3891,6 +4171,7 @@ mod tests {
             ("let json_short", "let json_long", "/api/v1"),
             ("let json_long", "let media", "/api/v1"),
             ("let media", "let api", "/api/v1"),
+            ("let jellyfin_json", "let plex_short", ""),
             ("let plex_short", "let plex_media", ""),
             ("let plex_media", "let plex_routes", ""),
             ("let public_short", "let public_media", ""),
@@ -3914,6 +4195,7 @@ mod tests {
             }
         }
         for (source, prefix) in [
+            (include_str!("jellyfin.rs"), "/jellyfin"),
             (include_str!("dvr.rs"), "/api/v1/dvr"),
             (
                 include_str!("library_channels.rs"),
@@ -3952,6 +4234,7 @@ mod tests {
             "/api/v1/files/8/hls/start",
             "/api/v1/hls/session/index.m3u8",
             crate::media_pool::SNAPSHOT_PATH,
+            internal_clock::PATH,
         ] {
             assert!(learner_route_eligible(&Method::GET, path), "{path}");
         }
@@ -4006,6 +4289,14 @@ mod tests {
             // that have migrated, and nothing else in this matrix would say so.
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::POST, "/api/v1/hls/session-8/control"),
+            (Method::POST, "/api/v1/hls/session-8/quality-control"),
+            // A learner entry node and a learner-owned continuous session
+            // must both accept schedule mutations, and a learner must be
+            // able to start the family it would serve.
+            (Method::POST, "/api/v1/hls/session-8/quality-schedule"),
+            (Method::POST, hls::QUALITY_SCHEDULE_PATH),
+            (Method::POST, "/api/v1/files/8/hls/continuous-sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-candidates"),
             (Method::DELETE, "/api/v1/hls/session-8"),
             (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
             (
@@ -4021,6 +4312,7 @@ mod tests {
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::POST, hls::QUALITY_CONTROL_PATH),
             // The relay was in the matrix and had never been asserted. It is
             // the highest-traffic path a learner ingress originates: every
             // segment of media owned by another node goes through it.
@@ -4087,8 +4379,14 @@ mod tests {
             (Method::GET, "/api/v1/hls/session/index.m3u8"),
             (Method::GET, "/api/v1/publication/session/chapter.xhtml"),
             (Method::DELETE, "/api/v1/hls/session"),
+            (Method::POST, "/api/v1/hls/session/quality-control"),
+            // An existing continuous session keeps streaming in maintenance,
+            // so its schedule (public and owner relay) stays reachable.
+            (Method::POST, "/api/v1/hls/session/quality-schedule"),
+            (Method::POST, hls::QUALITY_SCHEDULE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::POST, hls::QUALITY_CONTROL_PATH),
             (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
             (
                 Method::GET,
@@ -4125,6 +4423,8 @@ mod tests {
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::GET, "/api/v1/files/8/direct"),
             (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-candidates"),
             (Method::POST, crate::media_sessions::START_PATH),
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::GET, "/api/v1/live-tv/readiness"),
@@ -4136,7 +4436,6 @@ mod tests {
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
             (Method::POST, crate::live_tv::START_PATH),
             (Method::POST, crate::live_tv::ACTIVATE_PATH),
-            (Method::POST, crate::live_tv::DRAIN_PATH),
             (Method::POST, crate::live_tv::GUIDE_PATH),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
@@ -4258,6 +4557,77 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn quality_control_routes_bound_bodies_and_require_peer_auth() {
+        let app = test_app();
+        for path in [
+            format!("/api/v1/hls/{}/quality-control", uuid::Uuid::new_v4()),
+            hls::QUALITY_CONTROL_PATH.to_owned(),
+        ] {
+            let oversized = Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; hls::QUALITY_CONTROL_MAX_BYTES + 1]))
+                .expect("quality control test request or response");
+            assert_eq!(
+                app.clone()
+                    .oneshot(oversized)
+                    .await
+                    .expect("quality control test request or response")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        let unsigned = Request::builder()
+            .method("POST")
+            .uri(hls::QUALITY_CONTROL_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("quality control test request or response");
+        assert_eq!(
+            app.oneshot(unsigned)
+                .await
+                .expect("quality control test request or response")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
+        let app = test_app();
+        for path in [
+            format!("/api/v1/hls/{}/quality-schedule", uuid::Uuid::new_v4()),
+            hls::QUALITY_SCHEDULE_PATH.to_owned(),
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; hls::QUALITY_SCHEDULE_MAX_BYTES + 1]))
+                .expect("oversized schedule");
+            assert_eq!(
+                app.clone()
+                    .oneshot(request)
+                    .await
+                    .expect("response")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        let unsigned = Request::builder()
+            .method("POST")
+            .uri(hls::QUALITY_SCHEDULE_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("unsigned schedule");
+        assert_eq!(
+            app.oneshot(unsigned).await.expect("response").status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
     #[test]
     fn trace_targets_omit_queries_and_redact_capability_paths() {
         let ordinary: Uri = "/api/v1/search?q=secret&X-Plex-Token=credential"
@@ -4280,6 +4650,15 @@ mod tests {
             safe_trace_target(&hls),
             "/api/v1/hls/[REDACTED]/seg00001.ts"
         );
+
+        for path in [
+            "/jellyfin/Videos/item/play-secret/hls/seg00001.ts?ApiKey=credential",
+            "/JELLYFIN/VIDEOS/item/play-secret/HLS/seg00001.ts?apikey=credential",
+        ] {
+            let uri: Uri = path.parse().expect("compatibility HLS URI");
+            let target = safe_trace_target(&uri);
+            assert!(!target.contains("play-secret") && !target.contains("credential"));
+        }
 
         let publication: Uri = "/api/v1/publication/session-secret/OEBPS/chapter.xhtml"
             .parse()
@@ -4882,6 +5261,101 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).expect("req")
+    }
+
+    #[tokio::test]
+    async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknown() {
+        use plurx_core::cluster::clock::PeerClockOffset;
+        let (app, state) = test_app_with_state();
+        state.serving.validation_set_ready(true).await;
+        let clock = state.membership.clock_guard();
+        let publish = |offset_us| {
+            let ticket = clock.roster(&["peer".to_owned()]);
+            assert!(clock.publish(
+                ticket,
+                std::collections::BTreeMap::from([(
+                    "peer".to_owned(),
+                    PeerClockOffset::Bounded {
+                        offset_us,
+                        uncertainty_us: 1_000,
+                        observed_at: std::time::Instant::now(),
+                    },
+                )]),
+            ));
+        };
+        assert!(evaluate_readiness(&state).await.ready, "standalone NoPeers");
+        publish(2_500_000);
+        publish(2_500_000);
+        assert!(
+            evaluate_readiness(&state).await.ready
+                && cluster_operations::operations_readiness(&state).ready,
+            "an unbounded clock is advisory while the guard is not enforced"
+        );
+        assert_eq!(
+            call_text(&app, get("/readyz", None)).await.0,
+            StatusCode::OK
+        );
+        clock.set_enforced(true);
+        publish(0);
+        publish(2_500_000);
+        for _ in 0..3 {
+            assert!(
+                evaluate_readiness(&state).await.ready,
+                "reads are not rounds"
+            );
+        }
+        publish(2_500_000);
+        assert_eq!(
+            evaluate_readiness(&state).await.reason,
+            Some(ReadinessFailure::ClockUnbounded)
+        );
+        assert_eq!(
+            cluster_operations::operations_readiness(&state).reason,
+            Some(ReadinessFailure::ClockUnbounded),
+            "the Store-free operations projection uses the same consequence"
+        );
+        assert_eq!(
+            call_text(&app, get("/readyz", None)).await,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "clock unbounded\n".to_owned()
+            )
+        );
+        assert_eq!(
+            call_text(&app, get("/healthz", None)).await.0,
+            StatusCode::OK
+        );
+        state.serving.validation_set_ready(false).await;
+        assert_eq!(
+            evaluate_readiness(&state).await.reason,
+            Some(ReadinessFailure::QuorumUnavailable),
+            "the existing quorum failure keeps precedence"
+        );
+        assert_eq!(
+            cluster_operations::operations_readiness(&state).reason,
+            Some(ReadinessFailure::QuorumUnavailable)
+        );
+        state.serving.validation_set_ready(true).await;
+        clock.roster_failed();
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "Unknown is not positive violation"
+        );
+        publish(2_500_000);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "failed round reset the streak"
+        );
+        publish(0);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "healthy round resets the streak"
+        );
+        clock.roster(&["replacement".to_owned()]);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "new peer remains Unknown"
+        );
     }
 
     #[tokio::test]
@@ -8169,6 +8643,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_tv_legacy_fenced_owner_attestation_is_still_accepted_and_ignored() {
+        // No shipped client constructs `live_tv_fenced_owner` today, but the
+        // Apple and Android settings models still define it and an older
+        // client may send it. #537 removed the attestation's meaning, not the
+        // field: a save carrying it must be accepted, must not stage a
+        // handoff barrier, and must leave placement on the answering node.
+        use plurx_core::store::keys;
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_settings(&[
+                (keys::LIVE_TV_DEVICE_IPV4, "10.42.4.20"),
+                (keys::LIVE_TV_CONFIG_GENERATION, "3"),
+            ])
+            .await
+            .expect("seed Live TV settings");
+        let attestation = json!({
+            "owner_node_id": "lost-owner-a",
+            "drain_before_generation": 3,
+            "stopped_and_restart_prevented": true,
+        });
+        // Beside a real Live TV field, the way the legacy client model sends it.
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_owner_node_id": "replacement-b",
+                    "live_tv_max_sessions": 2,
+                    "live_tv_fenced_owner": attestation.clone(),
+                    "live_tv_config_generation": 3,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["live_tv_max_sessions"], 2);
+        assert_eq!(saved["live_tv_owner_node_id"], state.node_id);
+        assert_eq!(saved["live_tv_transition_from_owner_node_id"], "");
+        assert_eq!(saved["live_tv_transition_drain_before"], 0);
+        assert_eq!(saved["live_tv_config_generation"], 4);
+
+        // Alone, it is still a Live TV save: accepted under the generation
+        // CAS, changing nothing but the generation.
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_fenced_owner": attestation, "live_tv_config_generation": 4}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["live_tv_max_sessions"], 2);
+        assert_eq!(saved["live_tv_owner_node_id"], state.node_id);
+        assert_eq!(saved["live_tv_transition_from_owner_node_id"], "");
+        assert_eq!(saved["live_tv_transition_drain_before"], 0);
+        assert_eq!(saved["live_tv_config_generation"], 5);
+    }
+
+    #[tokio::test]
     async fn live_tv_placement_and_ingest_refuse_household_bearers_before_admission() {
         let (app, state) = test_app_with_state();
         let admin = setup_admin(&app).await;
@@ -8256,6 +8794,54 @@ mod tests {
     /// values; the manager carries the separately validated effective answer
     /// used by sessions.
     #[tokio::test]
+    async fn content_and_reordered_vod_preferences_save_without_readiness_gate() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        for (enabled, frames) in [(true, 2), (false, 0)] {
+            let (status, result) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"content_aware_encoding": enabled, "vod_reorder_frames": frames}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert_eq!(result["content_aware_encoding"], enabled);
+            assert_eq!(result["vod_reorder_frames"], frames);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
+                    .await
+                    .expect("fixture succeeds")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"content_aware_encoding": true, "vod_reorder_frames": 3}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
+                .await
+                .expect("fixture succeeds")
+                .as_deref(),
+            Some("0")
+        );
+    }
+
+    #[tokio::test]
     async fn rate_control_settings_validate_publish_and_restore() {
         use plurx_core::transcode::{EffectiveRateControl, Encoder};
 
@@ -8263,8 +8849,28 @@ mod tests {
         let admin = setup_admin(&app).await;
         let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(initial["transcode_rate_mode"], "bitrate");
+        assert!(
+            initial["transcode_rate_mode"].is_null(),
+            "an unset pair must read back as unset, not as the family default a client \
+             would then write back as an explicit bitrate pin: {initial}"
+        );
         assert!(initial["transcode_quality"].is_null(), "{initial}");
+        let family = state.transcode.encoder_for_preference("");
+        assert_eq!(
+            initial["transcode_rate_mode_default"],
+            family.default_rate_mode().as_str(),
+            "{initial}"
+        );
+        assert_eq!(
+            initial["transcode_rate_mode_default_encoder"],
+            family.family_name(),
+            "{initial}"
+        );
+        assert_eq!(
+            initial["transcode_quality_default"],
+            family.default_quality(),
+            "{initial}"
+        );
 
         let (status, bad) = call(
             &app,
@@ -8337,6 +8943,83 @@ mod tests {
             state.transcode.effective_rate_control(Encoder::Software),
             EffectiveRateControl::Vbr
         );
+        assert_eq!(
+            state
+                .store
+                .get_setting_pair(
+                    plurx_core::store::keys::TRANSCODE_RATE_MODE,
+                    plurx_core::store::keys::TRANSCODE_QUALITY,
+                )
+                .await
+                .expect("settings pair")
+                .0
+                .as_deref(),
+            Some("bitrate"),
+            "an explicit bitrate persists as an explicit choice"
+        );
+
+        // An unrelated Save must not touch the pair.
+        let (status, unrelated) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "stream_readrate": "4" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{unrelated}");
+        assert_eq!(unrelated["transcode_rate_mode"], "bitrate");
+
+        // JSON null is the explicit "return to each family's default".
+        let (status, cleared) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "transcode_rate_mode": null,
+                    "transcode_quality": null
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["transcode_rate_mode"].is_null(), "{cleared}");
+        assert!(cleared["transcode_quality"].is_null(), "{cleared}");
+        let (stored_mode, stored_quality) = state
+            .store
+            .get_setting_pair(
+                plurx_core::store::keys::TRANSCODE_RATE_MODE,
+                plurx_core::store::keys::TRANSCODE_QUALITY,
+            )
+            .await
+            .expect("settings pair");
+        assert_eq!(
+            crate::transcode::normalize_rate_control_request(
+                stored_mode.as_deref(),
+                stored_quality.as_deref(),
+            ),
+            (None, None, false),
+            "the cleared pair must read back as unset, not as an explicit bitrate"
+        );
+        assert_eq!(
+            state.transcode.effective_rate_control(Encoder::Software),
+            EffectiveRateControl::Vbr,
+            "every family default is still Bitrate"
+        );
+
+        // A null mode still travels as one complete pair.
+        let (status, half) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "transcode_rate_mode": null }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{half}");
     }
 
     #[tokio::test]
@@ -8780,6 +9463,199 @@ mod tests {
             Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
         (router(state.clone()), state, fixture)
+    }
+
+    #[tokio::test]
+    async fn shared_token_only_revocation_preserves_other_device_reader_grants() {
+        let (app, state) = test_app_with_state();
+        let reader_token = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let login = auth::login_user(
+            &state,
+            None,
+            &axum::http::HeaderMap::new(),
+            auth::LoginRequest {
+                username: "paul".into(),
+                password: "supersecret".into(),
+                device: Some("compatibility fixture".into()),
+            },
+        )
+        .await
+        .expect("shared login");
+        let reader_hash = plurx_core::auth::hash_token(&reader_token);
+        let compat_hash = plurx_core::auth::hash_token(&login.token);
+        let reader_grant = plurx_core::auth::hash_token("fixture-reader-grant");
+        let compat_grant = plurx_core::auth::hash_token("fixture-compat-grant");
+        for (id, token_hash, source_token_hash) in [
+            ("reader", &reader_grant, &reader_hash),
+            ("compat", &compat_grant, &compat_hash),
+        ] {
+            state
+                .store
+                .create_file_grant(plurx_core::store::NewFileGrant {
+                    id: id.into(),
+                    token_hash: token_hash.clone(),
+                    file_id: seeded.file,
+                    user_id: login.user.id,
+                    source_token_hash: source_token_hash.clone(),
+                    created_at: 1_000,
+                    expires_at: i64::MAX,
+                })
+                .await
+                .expect("file grant");
+        }
+        assert_eq!(
+            extract::authenticate_user_token(&state, &login.token)
+                .await
+                .expect("shared authority")
+                .id,
+            login.user.id
+        );
+        let exclusion =
+            internal_auth_revocation::ClusterCacheRevocation::begin_digest(&state, &compat_hash)
+                .await
+                .expect("exact revocation exclusion");
+        auth::revoke_token_under_exclusion(&state, &compat_hash, exclusion)
+            .await
+            .expect("token-only revoke");
+        assert!(extract::authenticate_user_token(&state, &login.token)
+            .await
+            .is_err());
+        assert_eq!(
+            extract::authenticate_user_token(&state, &reader_token)
+                .await
+                .expect("other device stays signed in")
+                .id,
+            login.user.id
+        );
+        let reader = state
+            .store
+            .file_grant_by_hash(&reader_grant)
+            .await
+            .expect("reader lookup")
+            .expect("reader row");
+        assert!(reader.source_active);
+        assert_eq!(reader.revoked_at, None);
+        let retired = state
+            .store
+            .file_grant_by_hash(&compat_grant)
+            .await
+            .expect("own grant lookup")
+            .expect("own grant row");
+        assert!(!retired.source_active);
+        // Native logout retains its existing broader file-grant revocation.
+        let (status, body) = call(
+            &app,
+            post("/api/v1/auth/logout", Some(&reader_token), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(state
+            .store
+            .file_grant_by_hash(&reader_grant)
+            .await
+            .expect("native scope lookup")
+            .expect("reader row")
+            .revoked_at
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn compatibility_login_replaces_only_its_scope_after_password_verification() {
+        let (app, state) = test_app_with_state();
+        let native = setup_admin(&app).await;
+        let headers = axum::http::HeaderMap::new();
+        let request = || auth::LoginRequest {
+            username: "paul".into(),
+            password: "supersecret".into(),
+            device: Some("living room".into()),
+        };
+        let family = plurx_core::store::JellyfinClientFamily::Infuse;
+        let first =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-one", family)
+                .await
+                .expect("initial compatibility login");
+        let other =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-two", family)
+                .await
+                .expect("other device login");
+        let android = auth::login_jellyfin_user(
+            &state,
+            None,
+            &headers,
+            request(),
+            "device-one",
+            plurx_core::store::JellyfinClientFamily::AndroidTv,
+        )
+        .await
+        .expect("other family login");
+        let mut bad = request();
+        bad.password = "wrong".into();
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, bad, "device-one", family).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        extract::authenticate_compatibility_token(&state, &first.token)
+            .await
+            .expect("failed password preserves old login");
+        // A compatibility login is not a native bearer.
+        assert!(matches!(
+            extract::authenticate_user_token(&state, &first.token).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        assert!(matches!(
+            extract::authenticate_compatibility_token(&state, &native).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        let next =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-one", family)
+                .await
+                .expect("replacement login");
+        assert!(
+            extract::authenticate_compatibility_token(&state, &first.token)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            extract::authenticate_user_token(&state, &native)
+                .await
+                .expect("native token")
+                .id,
+            first.user.id
+        );
+        for token in [&other.token, &android.token, &next.token] {
+            assert_eq!(
+                extract::authenticate_compatibility_token(&state, token)
+                    .await
+                    .expect("unrelated or fresh compatibility token")
+                    .id,
+                first.user.id
+            );
+        }
+        let tokens = state
+            .store
+            .list_tokens_for_user(first.user.id)
+            .await
+            .expect("token inventory");
+        assert_eq!(
+            tokens.len(),
+            4,
+            "replacement creates no orphan native tokens"
+        );
+        let mut oversized = request();
+        oversized.password = "x".repeat(auth::MAX_PASSWORD_BYTES + 1);
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, oversized, "device-one", family)
+                .await,
+            Err(super::error::ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, request(), "", family).await,
+            Err(super::error::ApiError::BadRequest(_))
+        ));
+        extract::authenticate_compatibility_token(&state, &next.token)
+            .await
+            .expect("validation refusals preserve current login");
     }
 
     async fn login_device(app: &Router, device: &str) -> String {
@@ -9666,6 +10542,54 @@ mod tests {
         assert_eq!(users.as_array().expect("array").len(), 1);
     }
 
+    /// One stored content-analysis switch, read one way by Settings, the
+    /// Developer card and the serving path. Missing is off for all three: the
+    /// card used to report it on while creates answered "shared preparation
+    /// is disabled", and Settings reported a hand-written `true` as off while
+    /// the queue and the serving path treated it as on.
+    #[tokio::test]
+    async fn content_analysis_switch_reads_the_same_in_settings_and_developer() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        for (stored, expected) in [
+            (None, false),
+            (Some("true"), true),
+            (Some(" On "), true),
+            (Some("1"), true),
+            (Some("off"), false),
+            (Some("0"), false),
+        ] {
+            if let Some(value) = stored {
+                state
+                    .store
+                    .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, value)
+                    .await
+                    .expect("store the switch");
+            }
+            let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                settings["vod_index_cluster_cache"],
+                json!(expected),
+                "Settings read {stored:?}"
+            );
+            let (status, readiness) =
+                call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK);
+            let card = readiness["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .find(|item| item["id"] == "content_analysis_repair")
+                .expect("content analysis card");
+            assert_eq!(
+                card["enabled"],
+                json!(expected),
+                "Developer read {stored:?}"
+            );
+        }
+    }
+
     /// The Developer section's prerequisite rows, and the rule that they are
     /// reporting rather than deciding.
     ///
@@ -9696,6 +10620,14 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                // Jellyfin compatibility: one advisory row (pinned-client
+                // qualification) that never gates the switch.
+                "jellyfin_compatibility",
+                // The clock guard's enforcement switch. All four rows are
+                // advisory; on this standalone fixture there is no remote
+                // member to observe, so coverage and the consequence row are
+                // `met` and the offset and NTP rows `unobservable`.
+                "cluster_clock",
                 "durable_cluster_work",
                 "bounded_catalogue_reads",
                 "cluster_backup",
@@ -9711,6 +10643,10 @@ mod tests {
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
+                // S-10's SDR master CODECS switch, off by default. Its one
+                // row is `unknown`: the device re-qualification is a
+                // physical result this daemon cannot read.
+                "sdr_master_codecs",
                 "content_analysis_repair",
                 "live_hls_recovery",
                 "pgs_overlay",
@@ -9720,7 +10656,11 @@ mod tests {
                 "subtitle_not_ready_503",
                 "chapter_thumbnails",
                 "dolby_vision_convert",
-                "source_probe_comparison"
+                "source_probe_comparison",
+                "output_preparation",
+                "rolling_retention",
+                "display_aware_auto",
+                "network_priors"
             ],
             "every Developer card with prerequisites needs a row here: {body}"
         );
@@ -9780,6 +10720,8 @@ mod tests {
                         | "local_cache"
                         | "free_space"
                         | "chapter_thumbs_cache_space"
+                        | "output_node_idle"
+                        | "retention_same_filesystem"
                 )
             })
             .collect::<Vec<_>>();
@@ -9826,8 +10768,27 @@ mod tests {
                 // The ffmpeg row is absent here because the fixture never
                 // probed a build.
                 "chapter_thumbs_work",
+                // The clock guard's: no committed remote member, so nothing
+                // is uncovered and current evidence would refuse nothing.
+                "consequence",
+                "coverage",
                 "durable_queue",
                 "durable_role",
+                // Display-aware Auto on a single node owns every session.
+                "local_session_owner",
+                // Output preparation and rolling retention: the budget is the
+                // 50 GB unset default; the job list, mode, Stop and live
+                // bytes are statements of what this node reads.
+                "output_budget",
+                "output_jobs",
+                "output_mode",
+                "output_stop",
+                // Network priors' two rows say what the switch does.
+                "priors_cold_start",
+                "priors_history",
+                "retention_budget",
+                "retention_cleanup_pending",
+                "retention_live_bytes",
                 "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",
@@ -9856,6 +10817,15 @@ mod tests {
                 seen.get(id).map(String::as_str),
                 Some("unobservable"),
                 "{id} claimed to have read something this process cannot reach: {body}"
+            );
+        }
+        // The clock guard has no member offset to bound here, and this process
+        // never reads a node's time-synchronisation daemon.
+        for id in ["upper_bound", "ntp"] {
+            assert_eq!(
+                seen.get(id).map(String::as_str),
+                Some("unobservable"),
+                "{id} claimed a clock fact this standalone node cannot read: {body}"
             );
         }
         // Statements about this build, true whatever the deployment looks
@@ -10797,6 +11767,8 @@ mod tests {
                 // P-02 §3.2); node-local, so not a clustered-only field.
                 "processes",
                 "producing",
+                "retained_output",
+                "retained_output_node",
                 "scans",
                 "sessions",
                 "trakt",
@@ -15111,6 +16083,41 @@ mod tests {
             resuming.contains(&h.video),
             "a partially-watched home video belongs in continue-watching: {hubs}"
         );
+    }
+
+    /// The real start route must keep its authoritative presence check even
+    /// when detail has a newer, bounded observation cache. A poisoned detail
+    /// probe is counted through the router, not an unused cache instance.
+    #[tokio::test]
+    async fn playback_decision_does_not_probe_detail_availability() {
+        let (_, mut state) = test_state();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        state.detail_availability =
+            crate::availability::AvailabilityCache::with_test_probe(move |_| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    false
+                }
+            });
+        let app = router(state.clone());
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let (status, body) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{}/decision?vcodec=h264&acodec=aac&container=mp4&hdr=0",
+                    seeded.file
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["method"], "direct_play");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// A big remux gets told to go through MSE; an ordinary direct play does
@@ -20614,6 +21621,7 @@ mod tests {
                         codec: "truehd".into(),
                         channels: Some(8),
                         sample_rate: Some(48_000),
+                        channel_layout: None,
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -20642,6 +21650,7 @@ mod tests {
                         codec: "aac".into(),
                         channels: Some(2),
                         sample_rate: Some(48_000),
+                        channel_layout: None,
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -20849,6 +21858,7 @@ mod tests {
                         codec: "aac".into(),
                         channels: Some(2),
                         sample_rate: Some(48_000),
+                        channel_layout: None,
                         language: None,
                         title: None,
                         default: true,

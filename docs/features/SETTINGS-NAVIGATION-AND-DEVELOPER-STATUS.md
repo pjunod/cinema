@@ -160,6 +160,16 @@ It sits beside the standing rule that there are no feature gates: Developer
 entries carry advisory readiness and safety information that never gates
 enablement.
 
+**Clarification, Paul, 2026-09-30:** an explicit Developer switch belongs
+only where manual enable/disable has a meaningful purpose. Unfinished
+implementation or acceptance alone is not a reason to add one. Internal
+correctness fixes and automatic infrastructure can show read-only facts and
+remaining evidence; advisory readiness still never disables a real control,
+rejects Save or overrides its saved choice. A finished meaningful control
+graduates to its proper settings section; an automatic feature's advisory
+card leaves Developer when its acceptance is complete. K-06's clock
+measurement retains its accepted no-switch design under this clarification.
+
 | Stage | What happens | Where it is recorded |
 |---|---|---|
 | Enters | A feature that is not fully active or not fully tested gets a Developer card: its explicit switch (or, for automatic behaviour, an explanation), advisory readiness, and one **Leaves Developer when … Then …** line | `devGraduation(waitingOn, then)` in `web/pages/settings-developer.js` |
@@ -184,12 +194,18 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 | Cluster media placement | `cluster_media_pool_enabled`, `cluster_session_takeover_enabled` | [CLUSTER-MEDIA-POOL-PLAN](../cluster/CLUSTER-MEDIA-POOL-PLAN.md) | built P0–P8 | physical-device corpus; ten-second takeover budget (§8.8–§8.9) | (a) stays → Settings → Cluster |
 | Local catalogue reads | `bounded_replica_reads` | K-04 | merged: M0–M3 server; web read-after echo and on-by-default preference shipped in `5ba02212f`, deployed | §5.1 lab readout, rolling-upgrade check | (a) stays → Cluster, or removed (Paul's choice) |
 | Shared storage budgets | storage domains | [DURABLE-WORK-QUEUE-STATUS](../cluster/DURABLE-WORK-QUEUE-STATUS.md) | as durable work: deployed | none | **(b) graduated: moved to Settings → Libraries** beside the roots it names; it is the only editor for the mapping, so it moves rather than goes |
+| CODECS on SDR master playlists (added 2026-10-04) | `playback_sdr_master_codecs` (`playback.sdr_master_codecs`), default off | S-10 ([HONEST-MASTER-PLAYLIST](../streaming/HONEST-MASTER-PLAYLIST.md#the-sdr-codecs-developer-switch)) | SDR `CODECS` implemented; off restores the pre-S-10 master | Apple TV and iPhone device check that every SDR variant is still offered with `CODECS` printed (§5.4) | (a) stays → default on and the switch is removed |
 | Unverified HEVC copy | `hevc_unverified_copy` | [HEVC-COLOR-CORRUPTION-RCA-AND-FIX](../streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md) | proof-before-stripping containment `87ca67c0e` deployed in `55aa430fd` | complete-scan proof for every HEVC title VOD copies | (a) stays → removed, or Playback escape hatch (Paul's choice) |
+| Jellyfin client compatibility | `jellyfin_compatibility_enabled` | [Jellyfin build](../clients/JELLYFIN-COMPATIBILITY-BUILD.md) | J0/J1 integrated; J2 under implementation | frozen-candidate catalog, artwork, playback, tracks, watch and cluster qualification | (a) stays → Settings → Integrations |
 | Live TV deinterlace cadence | `live_tv_deinterlace_output` | S-08 | merged: M1–M4 | M5 media1 QSV/VAAPI qualification | (a) stays → Settings → Live TV |
 | Portable cluster backup | `backup_*` | K-01 | merged: M1–M4; amd64 container smoke passed in run 3205 | M4 arm64 in-lane leg; M5 loss drills, physical restore, RPO/RTO | (a) stays → Settings → Cluster |
 | Seek scratch accounting | none (automatic) | [SEEK-SCRATCH-RESERVATIONS-STATUS](../streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html) | merged and deployed | physical acceptance | (a) stays → card removed |
+| Cluster clock observation (added 2026-09-30) | none (automatic; meaningful-control clarification above) | [K-06 measurement](../cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md) | measurement implementation; release review and gate pending | identified measurement fleet receipt, separate enforcement and its acceptance | (a) stays → read-only diagnostics move to Settings → Cluster |
 | Adaptive Auto quality | `playback_auto_abr` | A-04, A-05 | A-04 blocked: incomplete D3 matrix; A-05 unclaimed | Safari, HDR and Apple/Android physical traces; native controllers | (a) stays → Playback toggle, or removed (Paul's choice) |
-| Fit Auto to display | `playback_display_aware_auto` (`playback.display_aware_auto`) | [Combined Auto plan](../streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | source implementation in progress; qualification open | source-grade worker proofs, display-fit candidates and physical runtime recovery | (a) Playback toggle if permanent choice remains useful, otherwise removed |
+| Fit Auto to display | `playback_display_aware_auto` (`playback.display_aware_auto`) | [Combined Auto plan](../streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | source implementation in progress; qualification open | source-grade worker proofs, display-fit candidates and physical runtime recovery; D6 fixed or accepted (2026-10-04: readiness rows `auto_abr`, `network_priors`, `local_session_owner`, `ipv4_client` name it — Auto moves up only with network priors on, only on the session's owning node, only for IPv4 clients) | (a) Playback toggle if permanent choice remains useful, otherwise removed |
+| Network priors (added 2026-10-04) | `playback_network_priors` (`playback.network_priors`) | [Combined Auto plan](../streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) §5, D6 | server fold and link-receipt paths built; default off; no Settings control existed before this card | Fit Auto to display graduates and D6 is fixed or accepted; a fleet run showing priors improve cold starts without upgrading into stalls | (a) stays → Paul chooses: Settings → Playback beside Auto quality, or removed if priors become how Auto works |
+| Complete-output preparation (added 2026-10-04) | `vod_output_preparation` (`off` / `copy` / `copy_and_encoded`; no readiness `setting` because the switch walk PUTs booleans) | main-merge defects build, 2026-10-04 | built; default off | a qualified fleet run per kind: jobs drain on every node, Stop cancels, the retained registry stays inside its budget | (a) stays → Paul chooses: Settings → Playback beside the cache budget, or removed if preparation becomes how plurx works |
+| Rolling output retention (added 2026-10-04) | `vod_rolling_retention` | main-merge defects build, 2026-10-04 | built; default off | a qualified fleet run: retention stays inside its headroom on every node and released artifacts are deleted within a tick | (a) stays → Paul chooses: Settings → Playback beside the cache budget, or removed |
 | Prepared quality handoff | `prepared_quality_handoff` | [QUALITY-SWITCH-CONTINUITY-BUILD](../playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md) | in execution | M2-Android, M1-web, M3; physical-client fleet receipt | (a) stays → Settings → Playback |
 | Second player in this browser | browser-local | same | same | same | (a) stays → moves with prepared handoff |
 | Refuse a subtitle segment that failed | `subtitle_not_ready_503` | [SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT](../clients/SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) | open | AVPlayer, Media3 and hls.js observations | (a) stays → toggle removed, refusal becomes default |
@@ -235,7 +251,27 @@ carries its line.
   reported. The UI must label them **not observable**, not pass or fail.
 - Static throughput support proves the reporting path exists; it does not
   prove that a particular stream, client, or network has enough throughput.
+- Fit Auto to display's `local_session_owner` and `ipv4_client` rows cannot
+  see where a given session was placed or which clients connect over IPv6:
+  `ipv4_client` always reads **unknown**, and `local_session_owner` reads
+  **unknown** whenever the roster has more than one node (D6, 2026-10-04).
 - Guide readiness describes saved configuration. It must not be presented as
   validation of an unsaved XMLTV draft.
 - The final current-head gate and merge result remain on PR #228; historical
   prototype observations are not evidence for this branch.
+
+### Video-quality additions, 2026-10-03
+
+The [video-quality programme](../performance/VIDEO-QUALITY-PROGRAM.md) adds two
+unfinished-feature cards in PR #766. Both switches save the requested value
+regardless of readiness. Their runtime validation still rejects a stale source,
+invalid fragment or unusable encoder result; that never changes the saved choice.
+
+| Card | Saved key | Advisory readiness | Graduation |
+|---|---|---|---|
+| Measured per-title encoding | `transcode.content_aware_encoding` | Selected encoder, explicit rate override, software quality capability and scorer availability; the current implementation measures bounded SDR software-x264 samples. | Record representative-title quality/cost evidence for supported builds; move to Playback if a permanent choice remains useful. |
+| Reordered VOD frames | `playback.vod_reorder_frames` (0 or 2) | Software x264 support and remaining compression/client presentation evidence. Other families retain their current recipes. | Record the compression and client matrix; remove the switch if this becomes the normal recipe, otherwise move it to Playback. |
+
+Next-episode metadata preparation uses the existing autoplay preference.
+HLS acknowledgement batching is part of normal delivery ownership. The plain
+VAAPI HDR graph publishes its measured capability through system diagnostics.

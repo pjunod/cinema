@@ -149,7 +149,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_frozen_inventory_and_argument_claims_match_retained_artifacts(self) -> None:
         surfaces = self.inventory["surfaces"]
-        self.assertEqual(len(surfaces), 74)
+        # 74 plus the two retained-identity projections S-10 inventoried in
+        # eedac8509; neither launches a producer.
+        self.assertEqual(len(surfaces), 76)
         self.assertIn("bring the inventory to 73", self.status)
 
         names = [case["name"] for case in self.arguments]
@@ -392,7 +394,15 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution)",
             normalized(self.core_transcode),
         )
-        self.assertEqual(self.daemon_transcode.count("transcode::hls_args("), 3)
+        # Three producer builders and two non-launching canonical identity
+        # projections retain the same resolved plan/argument contract.
+        projections = (
+            "transcode::hls_args(&retained_plan, &execution)",
+            "transcode::hls_args(&plan, &canonical_execution)",
+        )
+        for projection in projections:
+            self.assertEqual(self.daemon_transcode.count(projection), 1)
+        self.assertEqual(self.daemon_transcode.count("transcode::hls_args("), 3 + len(projections))
         self.assertNotIn("transcode::hls_args(&file", self.daemon_transcode)
         self.assertIn("plan: &'a ResolvedTranscode", self.daemon_transcode)
         self.assertEqual(
@@ -517,15 +527,35 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertNotIn("selection_provenance", facts_digest)
         self.assertNotIn("source_identity", facts_digest)
 
-        # One selection rule, shared by planning and the quality catalog.
+        # Planning, the quality catalog and the HDR cadence projection all
+        # describe FFmpeg's 0:v:0. The HDR projection is a third consumer of
+        # the same facts rule, not a new selection or provenance identity.
         daemon_facts = (ROOT / "crates/plurxd/src/decode_facts.rs").read_text(
             encoding="utf-8"
         )
         self.assertIn("pub(crate) fn legacy_ordinal_facts(", daemon_facts)
-        self.assertEqual(self.daemon_transcode.count("legacy_ordinal_facts("), 2)
-        for path in ("plan.rs", "candidates.rs"):
+        consumers = {
+            # `planning_facts` is the one selection both the restricted plan and a
+            # rolling start (`resolve_movie_plan_from_probe`) build from.
+            "plan.rs": ("planning_facts", "vaapi_hdr10_source_fits"),
+            "candidates.rs": ("quality_facts_from_probe",),
+        }
+        self.assertEqual(
+            self.daemon_transcode.count("legacy_ordinal_facts("),
+            sum(len(functions) for functions in consumers.values()),
+        )
+        for path, functions in consumers.items():
             source = (ROOT / "crates/plurxd/src/transcode/manager" / path).read_text()
-            self.assertEqual(source.count("crate::decode_facts::legacy_ordinal_facts("), 1)
+            self.assertEqual(
+                source.count("crate::decode_facts::legacy_ordinal_facts("), len(functions)
+            )
+            for function in functions:
+                with self.subTest(selection_consumer=function):
+                    body = source.split(f"fn {function}(", 1)[1].split("\n    pub", 1)[0]
+                    self.assertEqual(body.count("crate::decode_facts::legacy_ordinal_facts("), 1)
+                    self.assertRegex(
+                        body, r"absolute_video_ordinal\(\s*&?probe,\s*0\s*\)"
+                    )
         self.assertNotIn(
             "DecodeFacts::from_ffprobe_json_with_catalog(", self.daemon_transcode
         )
@@ -1013,9 +1043,12 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertEqual(
             sorted(self._manifest_digest_arguments()),
             sorted(
-                ["None"] * 27
+                ["None"] * 28
                 + ["digest", "digest", "manifest_digest", "manifest_digest"]
                 + ['Some("d1")', 'Some("d2")', "written"]
+                # Exact-generation invalidation seeds an unqualified cache
+                # above, then a replacement carrying this explicit digest.
+                + ['Some("replacement-digest")']
             ),
         )
         # The two production writers are the off-queue completion arms, and
@@ -1169,7 +1202,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 encoding="utf-8"
             ),
         )
-        self.assertEqual(replicated.count("TransactionShape::WriteReadBack"), 2)
+        # M5a's two producer-recovery sites, plus continuous quality's
+        # cancellation request and settlement, which write and read back the
+        # winning receipt the same way (and are split the same way on hiqlite).
+        self.assertEqual(replicated.count("TransactionShape::WriteReadBack"), 4)
         # Rust owns the exact transaction census and verifies it against the
         # implementation. This recovery contract requires an explicit audited
         # count, not a second frozen copy that breaks when unrelated adapters

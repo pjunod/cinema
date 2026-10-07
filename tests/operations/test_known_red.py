@@ -61,6 +61,7 @@ class KnownRedContractTest(unittest.TestCase):
         validate_opt_in_fixtures(fixtures, ignored, load_entries())
         fixture_ids = {fixture["test"] for fixture in fixtures}
         self.assertEqual(fixture_ids, {
+            "crates/plurxd/src/http/shared_receiver_forwarding_fixture.rs::http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_direct_range_head_through_b",
@@ -73,7 +74,55 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope",
             "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection",
         })
-        self.assertEqual(len([item for item in ignored if item.identity not in fixture_ids]), 20)
+        # #811 adds three ffmpeg 8 fixture checks of the repeated-HEVC
+        # description collapse (generations, output, copy pipe), each needing
+        # the captured ffmpeg 8 media its ignore reason names.
+        # S11's operator-only capture is not a known-red product regression.
+        # It requires an owned manifest, real browser and an explicit ignored
+        # invocation; its module is feature/Unix-gated, absent in default lists.
+        capture_identity = (
+            "crates/plurxd/src/transcode/tests/rolling_grid_campaign.rs::"
+            "transcode::tests::rolling_grid_campaign::owned_real_rolling_cell"
+        )
+        captures = tuple(item for item in ignored if item.identity == capture_identity)
+        self.assertEqual(len(captures), 1)
+        capture = captures[0]
+        self.assertEqual(capture.reason, "explicit owned rolling campaign only; requires validated manifest and real browser")
+        self.assertEqual(capture.cargo_name, "transcode::tests::rolling_grid_campaign::owned_real_rolling_cell")
+        # S10 is also an explicitly admitted acquisition, not a known-red
+        # product regression. Unlike S11, its source is not feature-gated:
+        # it must resolve once in an ordinary Cargo listing, never be absent.
+        public_wire_identity = (
+            "crates/plurxd/src/http/tests/public_copy_wire.rs::"
+            "http::tests::public_copy_wire::"
+            "public_copy_new_retained_attachment_freezes_measured_master_and_exact_mux_wire"
+        )
+        public_wires = tuple(item for item in ignored if item.identity == public_wire_identity)
+        self.assertEqual(len(public_wires), 1)
+        public_wire = public_wires[0]
+        self.assertEqual(public_wire.reason, "requires explicit frozen-source and externally bounded runtime admission")
+        self.assertEqual(
+            public_wire.cargo_name,
+            "http::tests::public_copy_wire::public_copy_new_retained_attachment_freezes_measured_master_and_exact_mux_wire",
+        )
+        admitted_identities = {capture_identity, public_wire_identity} | fixture_ids
+        # Main's native FFmpeg/libvmaf qualification remains independently
+        # admitted; keep it in addition to effort's two acquisition identities.
+        # #811 adds three operator-run ffmpeg 8 fixture checks (captured
+        # generations, a captured output and a captured copy pipe), each
+        # needing the capture its ignore reason names: 21 -> 24.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 24)
+        validate_listed_tests(public_wires, (public_wire.cargo_name,))
+        with self.assertRaisesRegex(KnownRedError, "absent"):
+            validate_listed_tests(public_wires, ())
+        # Optional absence is exact-identity only, and feature-enabled presence
+        # must still resolve once. A similarly named unknown source refuses.
+        validate_listed_tests(captures, ())
+        validate_listed_tests(captures, (capture.cargo_name,))
+        foreign = IgnoredTest(capture.identity + "_foreign", capture.cargo_name + "_foreign",
+                              capture.reason, capture.path, capture.line)
+        with self.assertRaisesRegex(KnownRedError, "absent"):
+            validate_listed_tests((foreign,), ())
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))

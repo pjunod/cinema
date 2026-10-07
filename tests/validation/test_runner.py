@@ -200,6 +200,37 @@ class CatalogCase(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(scope_for_paths(catalog, (path,))["web_layout"])
 
+    def test_web_unit_inputs_select_the_web_job(self):
+        """`make web-unit-check` runs in the fast lane's web job, so a pull
+        request that edits only a test it runs, or a case table one of those
+        tests reads, must select that job. Native-client and server sources
+        that a few tests also read stay on their own lanes."""
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        for path in (
+            "tests/playback/web-control.test.js",
+            "tests/playback/auto-quality-policy.json",
+            "tests/playback/cases.json",
+            "tests/playback/live-tv-start-cases.json",
+            "tests/web/dvr-visibility.test.js",
+            "tests/web/shell-source.js",
+            "scripts/subtitle-readiness-browser-check",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(scope_for_paths(catalog, (path,))["web_layout"])
+        # The notices select it beside any non-documentation change; alone they
+        # are a docs-only diff, which runs no surface at all.
+        self.assertTrue(
+            scope_for_paths(
+                catalog, ("THIRD-PARTY-NOTICES.md", "crates/plurxd/src/web/hls.min.js")
+            )["web_layout"]
+        )
+        for path in (
+            "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt",
+            "crates/plurxd/src/http/developer.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(scope_for_paths(catalog, (path,))["web_layout"])
+
     def test_ci_scope_keeps_expensive_jobs_on_their_affected_surfaces(self):
         catalog = load_catalog(ROOT / "validation/points.toml")
 
@@ -244,6 +275,8 @@ class CatalogCase(unittest.TestCase):
         for build_only_path in (
             ".github/actions/buildx-cache/action.yml",
             "crates/plurxd/build.rs",
+            "crates/plurxd/build_support/source_date.rs",
+            "scripts/build-static-ffprobe",
             "scripts/ci-buildkit-prune",
             "scripts/ci-execution-mode",
             "vendor/hiqlite/Cargo.toml",

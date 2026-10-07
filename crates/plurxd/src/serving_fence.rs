@@ -78,9 +78,13 @@ impl Drop for RestartAdmission {
 }
 
 /// Monotonic serving authority. `ready` may recover, but a loss generation
-/// never does: a consumer admitted under generation N must retire when it
-/// observes any generation greater than N, even if a fast loss/recovery was
-/// coalesced into one watch notification before that consumer was scheduled.
+/// never does: an admission or commit made under generation N must refuse
+/// itself when it observes any generation greater than N, even if a fast
+/// loss/recovery was coalesced into one watch notification before that
+/// consumer was scheduled. Work that is already running is not an admission:
+/// rolling sessions and progressive remuxes survive a loss that recovers
+/// within [`SERVING_FENCE_SESSION_GRACE`] (see [`SessionGrace`]), because
+/// nothing they hold is published while authority is lost.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ServingState {
     pub(crate) ready: bool,
@@ -155,6 +159,122 @@ impl ServingAuthority {
 impl ServingState {
     pub(crate) fn authority_lost_since(self, admitted_generation: u64) -> bool {
         !self.ready || self.loss_generation != admitted_generation
+    }
+}
+
+/// How long running media work outlives a loss of serving authority, summed
+/// over one outage, before it is ended. Elections and one-second leader
+/// stalls recover well inside it (234 ms and 1.7 s on 2026-10-04). It also
+/// stays inside the window in which a rolling session's twelve-second
+/// replicated lease can still be renewed (a renewal needs four seconds left,
+/// and the last one is at most a tick and a renewal deadline old), so a loss
+/// longer than this would end that session through the lease loop anyway.
+///
+/// One policy for every owner of running work: the rolling-session registry
+/// (`TranscodeManager::serving_fence_loop`) and each progressive remux owner
+/// (`http::stream`) resolve a loss through [`SessionGrace`] against this one
+/// bound. New admissions and commits never get it; they refuse a stale
+/// generation exactly as before.
+#[cfg(not(test))]
+pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration = Duration::from_secs(2);
+
+/// How one loss of serving authority ended for an owner of running work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LossOutcome {
+    /// Authority came back inside what was left of the grace. The owner keeps
+    /// its work and adopts the generation that is current now.
+    Recovered {
+        /// How long this loss lasted.
+        outage: Duration,
+        /// The outage budget spent so far, this loss included.
+        budget_spent: Duration,
+    },
+    /// The grace ran out first. The owner ends its work.
+    Expired,
+    /// The fence is gone (shutdown). The owner ends its work.
+    Closed,
+}
+
+/// One owner's outage budget against [`SERVING_FENCE_SESSION_GRACE`].
+///
+/// The grace is a budget for one outage, not per loss: losses that follow
+/// each other within a grace of the last recovery spend the same budget, so a
+/// quorum that keeps flapping cannot keep work alive forever. A node that has
+/// truly lost authority therefore ends every owner's work within one grace of
+/// the loss.
+///
+/// The owner calls [`SessionGrace::resolve_loss`] from its own loop when it
+/// observes `authority_lost_since(generation)`; the bounded wait runs on that
+/// owner's task, so no separate timer task or watchdog exists for it.
+///
+/// A loss and recovery that reach the owner as one notification (only the
+/// generation moved) spend no budget: authority was held when the owner
+/// looked, and nothing was published in between because every publication
+/// checks the fence itself.
+#[derive(Debug, Default)]
+pub(crate) struct SessionGrace {
+    outage_spent: Duration,
+    last_recovered_at: Option<tokio::time::Instant>,
+}
+
+impl SessionGrace {
+    /// Wait, at most for what is left of this outage's grace, for `serving`
+    /// to report ready again. Returns at once when it already does (a loss and
+    /// recovery that were coalesced into one notification).
+    ///
+    /// Not cancel-safe with respect to the budget: an owner must not race it
+    /// against anything that would drop the wait and then call it again for
+    /// the same loss. Racing it against the owner's own cancellation, which
+    /// ends the owner, is fine.
+    pub(crate) async fn resolve_loss(
+        &mut self,
+        serving: &mut tokio::sync::watch::Receiver<ServingState>,
+    ) -> LossOutcome {
+        if self
+            .last_recovered_at
+            .is_some_and(|recovered| recovered.elapsed() >= SERVING_FENCE_SESSION_GRACE)
+        {
+            self.outage_spent = Duration::ZERO;
+        }
+        let remaining = SERVING_FENCE_SESSION_GRACE.saturating_sub(self.outage_spent);
+        let lost_at = tokio::time::Instant::now();
+        // `Some(true)`: authority came back inside the grace; `Some(false)`:
+        // the grace ran out; `None`: the fence is gone.
+        let recovered = if serving.borrow_and_update().ready {
+            Some(true)
+        } else {
+            tokio::time::timeout(remaining, async {
+                loop {
+                    if serving.changed().await.is_err() {
+                        return None;
+                    }
+                    if serving.borrow_and_update().ready {
+                        return Some(true);
+                    }
+                }
+            })
+            .await
+            .unwrap_or(Some(false))
+        };
+        match recovered {
+            Some(true) => {
+                let outage = lost_at.elapsed();
+                self.outage_spent = self.outage_spent.saturating_add(outage);
+                self.last_recovered_at = Some(tokio::time::Instant::now());
+                LossOutcome::Recovered {
+                    outage,
+                    budget_spent: self.outage_spent,
+                }
+            }
+            Some(false) => {
+                self.outage_spent = Duration::ZERO;
+                self.last_recovered_at = None;
+                LossOutcome::Expired
+            }
+            None => LossOutcome::Closed,
+        }
     }
 }
 
@@ -235,7 +355,8 @@ impl ServingFence {
     }
 
     pub(crate) fn requires_authority(path: &str) -> bool {
-        path.contains("/files/")
+        path.starts_with("/jellyfin")
+            || path.contains("/files/")
             || path.contains("/hls/")
             || path.ends_with("/stream.mp4")
             || path.ends_with("/offline-packages")
@@ -278,6 +399,9 @@ impl ServingFence {
     pub(crate) fn starts_mutable_media(method: &str, path: &str) -> bool {
         (method == "POST"
             && (path.ends_with("/hls/sessions")
+                // The continuous family create spawns the same session work
+                // through the same create path, so it drains the same way.
+                || path.ends_with("/hls/continuous-sessions")
                 || path.ends_with("/offline-packages")
                 || path.ends_with("/publication")
                 || (path.contains("/live-tv/channels/") && path.ends_with("/sessions"))
@@ -687,8 +811,10 @@ struct AuthorityOutcome {
 ///
 /// Rule 4 is the one that keeps this a continuation rather than a second route
 /// to authority. Once a loss is published the generation has bumped and every
-/// admitted session has been torn down, so returning on a retained proof would
-/// resume service on grounds this node had already declared insufficient.
+/// admission made under it refuses itself (existing sessions only survive a
+/// loss that a fresh proof ends within their grace), so returning on a
+/// retained proof would resume service on grounds this node had already
+/// declared insufficient.
 /// Recovery is a fresh proof's job, and only a fresh proof's.
 fn decide_authority(
     unmanaged: bool,
@@ -983,6 +1109,32 @@ mod tests {
         );
         decide_authority(false, false, true, consult);
         assert_eq!(consulted.get(), 1, "and the one case that may use it, does");
+    }
+
+    /// Every create spelling that admits session work counts against
+    /// restart drain; reads and controls of existing sessions do not.
+    #[test]
+    fn continuous_family_creates_count_as_new_media_admissions() {
+        for (method, path) in [
+            ("POST", "/api/v1/files/8/hls/sessions"),
+            ("POST", "/api/v1/files/8/hls/continuous-sessions"),
+        ] {
+            assert!(
+                ServingFence::starts_mutable_media(method, path),
+                "{method} {path}"
+            );
+        }
+        for (method, path) in [
+            ("POST", "/api/v1/files/8/hls/continuous-candidates"),
+            ("POST", "/api/v1/hls/session-8/quality-schedule"),
+            ("POST", "/api/v1/hls/session-8/quality-control"),
+            ("GET", "/api/v1/hls/session-8/quality-family"),
+        ] {
+            assert!(
+                !ServingFence::starts_mutable_media(method, path),
+                "{method} {path}"
+            );
+        }
     }
 
     #[test]

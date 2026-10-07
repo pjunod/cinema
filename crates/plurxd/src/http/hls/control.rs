@@ -96,15 +96,19 @@ pub async fn status(
 pub async fn control(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
+    headers: HeaderMap,
+    super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
     body: Bytes,
 ) -> Response {
+    let deadline = std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE;
     let deadline_unix_ms = crate::media_sessions::unix_ms().saturating_add(
         i64::try_from(crate::playback_control::EXCHANGE_DEADLINE.as_millis()).unwrap_or(i64::MAX),
     );
-    match tokio::time::timeout(
-        crate::playback_control::EXCHANGE_DEADLINE,
-        control_inner(state, session, body, deadline_unix_ms),
-    )
+    match tokio::time::timeout(crate::playback_control::EXCHANGE_DEADLINE, async {
+        let observation =
+            super::prepared_link::authenticate(&state, &headers, remote, deadline).await;
+        control_inner_observed(state, session, body, deadline_unix_ms, observation).await
+    })
     .await
     {
         Ok(response) => response,
@@ -957,6 +961,11 @@ async fn settle_committed_preparation(
         .transcode
         .promote_prepared_session(&successor.session_id)
         .await;
+    // The staged link proof ends with the stage: the committed successor is
+    // an ordinary binding, not a staged one waiting out its deadline.
+    state
+        .link_receipts
+        .settle_committed(&successor, &state.node_id);
     state.media_sessions.cache_route(successor.clone()).await;
     if successor.owner_node_id == state.node_id {
         state.media_sessions.seed_owned_lease(&successor).await;
@@ -1508,11 +1517,22 @@ pub(crate) fn terminal_ack_response(replay: TerminalAckReplay) -> Response {
         .into_response()
 }
 
+#[cfg(test)]
 pub(super) async fn control_inner(
     state: AppState,
     session: String,
     body: Bytes,
     deadline_unix_ms: i64,
+) -> Response {
+    control_inner_observed(state, session, body, deadline_unix_ms, None).await
+}
+
+async fn control_inner_observed(
+    state: AppState,
+    session: String,
+    body: Bytes,
+    deadline_unix_ms: i64,
+    observation: Option<super::prepared_link::HttpObservation>,
 ) -> Response {
     if uuid::Uuid::parse_str(&session).is_err() {
         crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
@@ -1745,14 +1765,14 @@ pub(super) async fn control_inner(
             }
         };
     }
-    control_local(&state, &route, request, deadline_unix_ms).await
+    control_local_observed(&state, &route, request, deadline_unix_ms, observation).await
 }
 
 /// Revalidate a durable following purpose at every normal control exchange.
 /// The session UUID is still the bearer capability, but it cannot keep a
 /// deleted, disabled, or newly-hidden channel alive. Ordinary VOD response
 /// JSON has no `library_channel` member and pays only one object lookup.
-async fn library_channel_control_refusal(
+pub(super) async fn library_channel_control_refusal(
     state: &AppState,
     route: &MediaSessionRoute,
 ) -> Option<Response> {
@@ -1913,6 +1933,8 @@ async fn candidate_snapshot_current(
         .quality_candidates(
             state,
             crate::media_pool::QualityCatalogRequest {
+                audio_claim: recipe.request.audio_claim.clone(),
+                audio_delivery: recipe.request.audio_delivery.clone(),
                 copy_contract: recipe.request.kind.copy_contract(),
                 file_id: file.id,
                 source_size: file.size,
@@ -2154,6 +2176,16 @@ pub(crate) async fn control_local(
     request: crate::playback_control::ControlRequestV1,
     deadline_unix_ms: i64,
 ) -> Response {
+    control_local_observed(state, route, request, deadline_unix_ms, None).await
+}
+
+async fn control_local_observed(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    request: crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
+    observation: Option<super::prepared_link::HttpObservation>,
+) -> Response {
     // Public ingress and the internal relay both own the absolute exchange
     // deadline. Keep admission and every nonterminal mutation in that caller
     // future; only an already-accepted End receives a detached continuation
@@ -2184,7 +2216,15 @@ pub(crate) async fn control_local(
     let releases_drain = route.drain_deadline_ms.is_some()
         && request.acknowledgement.as_ref().map(|ack| ack.state)
             == Some(crate::playback_control::AcknowledgementState::Switched);
-    let response = control_local_inner(state, route, request, deadline_unix_ms).await;
+    let response = control_local_with_observation(
+        state,
+        route,
+        request,
+        deadline_unix_ms,
+        preparation_settlement_slots(),
+        observation,
+    )
+    .await;
     // Only on an accepted exchange. A refused one proves nothing about what
     // reached a screen.
     if releases_drain && response.status().is_success() {
@@ -2205,6 +2245,7 @@ pub(crate) async fn control_local(
     response
 }
 
+#[cfg(test)]
 pub(super) async fn control_local_inner(
     state: &AppState,
     route: &MediaSessionRoute,
@@ -2221,12 +2262,74 @@ pub(super) async fn control_local_inner(
     .await
 }
 
+/// A verified controlled family owns its in-family video intent. Legacy
+/// control still owns transport, other recipe axes and planned relocation.
+pub(super) fn continuous_family_owns_quality(
+    recipe: &RemoteStartRequest,
+    selection: &crate::playback_control::ClientSelection,
+) -> bool {
+    use crate::playback_control::{
+        CodecPolicy, DynamicRangePolicy, QualitySelection, SubtitleMode,
+    };
+    let Some(media) = recipe.request.continuous_media.as_ref() else {
+        return false;
+    };
+    let Some(family) = media.family_descriptor.as_ref() else {
+        return false;
+    };
+    if !media.controlled
+        || media.role != crate::transcode::ContinuousMediaRole::Video
+        || family.mode != "controlled"
+        || !family.valid()
+        || selection.audio_track != recipe.request.audio_index
+        || selection.audio_offset_ms != recipe.request.audio_offset_ms
+        || !matches!(selection.codec, CodecPolicy::Auto | CodecPolicy::H264)
+        || !matches!(
+            selection.dynamic_range,
+            DynamicRangePolicy::Auto | DynamicRangePolicy::Sdr
+        )
+        || (if selection.subtitle.mode == SubtitleMode::Burn {
+            selection.subtitle.track
+        } else {
+            None
+        }) != recipe.request.subtitle_burn
+    {
+        return false;
+    }
+    match selection.quality {
+        QualitySelection::Original => false,
+        QualitySelection::Manual { height } => family
+            .video
+            .iter()
+            .any(|row| i64::from(row.height) == height),
+        QualitySelection::Auto {
+            height,
+            candidate_id,
+        } => family.video.iter().any(|row| {
+            height.is_none_or(|height| i64::from(row.height) == height)
+                && candidate_id.is_none_or(|candidate| row.candidate_id == candidate)
+        }),
+    }
+}
+
+#[cfg(test)]
 pub(super) async fn control_local_with_settlement_capacity(
     state: &AppState,
     route: &MediaSessionRoute,
     request: crate::playback_control::ControlRequestV1,
     deadline_unix_ms: i64,
     slots: Arc<tokio::sync::Semaphore>,
+) -> Response {
+    control_local_with_observation(state, route, request, deadline_unix_ms, slots, None).await
+}
+
+async fn control_local_with_observation(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    request: crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
+    slots: Arc<tokio::sync::Semaphore>,
+    observation: Option<super::prepared_link::HttpObservation>,
 ) -> Response {
     let owner_epoch = match u64::try_from(route.owner_epoch)
         .ok()
@@ -2875,7 +2978,23 @@ pub(super) async fn control_local_with_settlement_capacity(
     // exchange: they must be the same string, or a client would be told
     // `staging` about a candidate for an ask it has already left.
     let desired_digest = request.selection.desired().digest();
-    let preparation_purpose = (!incumbent_waiting)
+    let quality_intent_cancelled = if let Some(intent) = request.intent.as_ref() {
+        state
+            .store
+            .quality_intent_cancelled(
+                &request.generation,
+                &request.client_instance_id,
+                &intent.lifetime_id,
+                i64::try_from(intent.recipe_revision).unwrap_or(i64::MAX),
+            )
+            .await
+            .unwrap_or(true)
+    } else {
+        false
+    };
+    // A cancelled intent is never a fresh preparation because the owner
+    // restarted or its reporter sent another ordinary exchange.
+    let preparation_purpose = (!incumbent_waiting && !quality_intent_cancelled)
         .then(|| {
             planned_relocation
                 .map(PreparationPurpose::PlannedRelocation)
@@ -2884,6 +3003,7 @@ pub(super) async fn control_local_with_settlement_capacity(
                         .selection
                         .dispatch_preparation
                         .then_some(PreparationPurpose::SelectionChange)
+                        .filter(|_| !continuous_family_owns_quality(&recipe, &request.selection))
                 })
         })
         .flatten();
@@ -2924,13 +3044,29 @@ pub(super) async fn control_local_with_settlement_capacity(
         // Claimed before the spawn, not inside it: a task that has not been
         // polled yet is still work this playback is doing, and an exchange
         // that raced in between would otherwise be told `none`.
-        let pending = PendingCandidateGuard::begin(&route.playback_id, &desired_digest);
+        // Owned by this control exchange: the quality intent identity and the
+        // settlement route ride the guard (`begin_control` claims the same
+        // `desired_digest` this exchange answers against).
+        let pending = PendingCandidateGuard::begin_control(state, route, &request);
+        let observation_budget = Duration::from_millis(
+            u64::try_from(deadline_unix_ms.saturating_sub(unix_ms()))
+                .unwrap_or(0)
+                .min(100),
+        );
+        let accepted_observation = tokio::time::timeout(
+            observation_budget,
+            super::prepared_link::capture(state, route, &request, result.disposition, observation),
+        )
+        .await
+        .ok()
+        .flatten();
         // Spawned, never awaited: see the function's own doc. The exchange has
         // spent its deadline by here and the response is already built.
         tokio::spawn(process_preparation_candidate(
             state.clone(),
             pending,
             PreparationCandidateInputs {
+                accepted_observation,
                 session_id: route.session_id.clone(),
                 route: route.clone(),
                 recipe: recipe.clone(),

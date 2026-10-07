@@ -13,6 +13,16 @@ impl TranscodeManager {
             // An idempotent replay of a VOD create: repeat the persisted
             // answer, field for field, from the session record.
             return Some(StartInfo {
+                retained_output: self
+                    .vod
+                    .hls_facts(&recovered.start.session_id)
+                    .await
+                    .and_then(|facts| facts.response_owner.retained_output_facts()),
+                audio_delivery: self
+                    .vod
+                    .hls_facts(&recovered.start.session_id)
+                    .await
+                    .and_then(|facts| facts.audio_delivery),
                 playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
                 session_id: recovered.start.session_id,
                 duration_ms: Some(recovered.start.duration_ms),
@@ -39,6 +49,8 @@ impl TranscodeManager {
             .and_then(|f| f.duration_ms);
         let encoder = *session.encoder_label.lock().await;
         Some(StartInfo {
+            retained_output: None,
+            audio_delivery: session.audio_delivery.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id: session_id.to_owned(),
             duration_ms,
@@ -59,14 +71,42 @@ impl TranscodeManager {
         T: std::str::FromStr + PartialOrd + Default,
     {
         match self.store.get_setting(key).await {
-            Ok(Some(v)) => v
-                .trim()
-                .parse::<T>()
-                .ok()
-                .filter(|n| *n >= T::default())
-                .unwrap_or(default),
-            _ => default,
+            Ok(value) => Self::parse_num_setting(value.as_deref(), default),
+            Err(_) => default,
         }
+    }
+
+    /// A numeric setting's stored value, or `default` when absent,
+    /// unparseable or negative: [`Self::num_setting`]'s rule for a value the
+    /// caller already holds.
+    pub(super) fn parse_num_setting<T>(value: Option<&str>, default: T) -> T
+    where
+        T: std::str::FromStr + PartialOrd + Default,
+    {
+        value
+            .and_then(|v| v.trim().parse::<T>().ok())
+            .filter(|n| *n >= T::default())
+            .unwrap_or(default)
+    }
+
+    /// [`Self::num_setting`] over a settings map read with the rest of a plan.
+    pub(super) fn num_from<T>(
+        settings: &std::collections::BTreeMap<String, String>,
+        key: &str,
+        default: T,
+    ) -> T
+    where
+        T: std::str::FromStr + PartialOrd + Default,
+    {
+        Self::parse_num_setting(settings.get(key).map(String::as_str), default)
+    }
+
+    /// How an HLS session's input should be paced, given the admin settings
+    /// and what this ffmpeg build supports. `for_copy` picks the pre-5.1
+    /// degradation (see [`crate::ffmpeg::PacingCaps::resolve`]). The settings
+    /// come from the caller's one planning snapshot.
+    pub(super) async fn pacing_from(rate: f64, burst: f64, for_copy: bool) -> Pacing {
+        pacing_caps().await.resolve(rate, burst, for_copy)
     }
 
     /// Conservative shape guarantee for a peer whose serving contract may
@@ -93,19 +133,6 @@ impl TranscodeManager {
             .is_some_and(|value| value.trim() == "1")
     }
 
-    /// How an HLS session's input should be paced, given the admin settings
-    /// and what this ffmpeg build supports. `for_copy` picks the pre-5.1
-    /// degradation (see [`crate::ffmpeg::PacingCaps::resolve`]).
-    pub(super) async fn pacing(&self, for_copy: bool) -> Pacing {
-        let rate = self
-            .num_setting(keys::HLS_READRATE, HLS_READRATE_DEFAULT)
-            .await;
-        let burst = self
-            .num_setting(keys::HLS_BURST_SECS, HLS_BURST_SECS_DEFAULT)
-            .await;
-        pacing_caps().await.resolve(rate, burst, for_copy)
-    }
-
     /// Hardware slots in use, and the cap. The pair is the diagnostic: "2"
     /// alone says nothing, and a viewer being refused while the count sits at
     /// zero is a very different bug from one being refused at the cap.
@@ -128,6 +155,12 @@ impl TranscodeManager {
     pub async fn software_budget(&self) -> usize {
         self.num_setting(keys::SW_POOL_THREADS, crate::admission::software_budget())
             .await
+    }
+
+    /// The encoder this node's capabilities resolve `prefer` (the stored
+    /// [`keys::HWACCEL`] value; empty = auto) to, without a store read.
+    pub fn encoder_for_preference(&self, prefer: &str) -> Encoder {
+        self.caps.choose(prefer)
     }
 
     /// Choose the encoder given the admin preference setting (empty = auto).
@@ -394,11 +427,28 @@ impl TranscodeManager {
     pub async fn effective_rate_control_for_new_offline_package(
         &self,
         file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+        subtitle_burn: bool,
     ) -> Result<EffectiveRateControl, String> {
-        Ok(self.effective_rate_control(
-            self.encoder_for_file(file, crate::process_control::ChildClass::Background)
-                .await?,
-        ))
+        let encoder = self
+            .encoder_for_file(file, crate::process_control::ChildClass::Background)
+            .await?;
+        let baseline = self.effective_rate_control(encoder);
+        if subtitle_burn {
+            return Ok(baseline);
+        }
+        let opts = self.speculative_producer_options(
+            self.rate_control_snapshot(),
+            encoder,
+            file,
+            target_height,
+            None,
+            None,
+        );
+        Ok(self
+            .measured_content_rate(file, &opts, encoder)
+            .await
+            .unwrap_or(baseline))
     }
 
     #[cfg(test)]
@@ -702,15 +752,19 @@ impl TranscodeManager {
     /// Validate and durably apply one complete requested setting pair.
     /// Sessions keep the old effective snapshot until every probe and both
     /// writes succeed, then all new sessions see the new one at once.
+    ///
+    /// `mode: None` clears the request: the stored mode becomes empty, which
+    /// [`normalize_rate_control_request`] reads back as "use each encoder
+    /// family's code default", distinct from an explicit `bitrate`.
     pub async fn apply_rate_control_settings(
         &self,
-        mode: RateMode,
+        mode: Option<RateMode>,
         quality: Option<u8>,
     ) -> Result<(), ApplyRateControlError> {
         let _serial = self.rate_control_update.lock().await;
         let snapshot = match self
             .validate_rate_control_snapshot(
-                Some(mode),
+                mode,
                 quality,
                 RateControlProbePolicy::YieldingBackground,
             )
@@ -720,13 +774,14 @@ impl TranscodeManager {
             RateControlValidation::Deferred => return Err(ApplyRateControlError::Busy),
         };
         let stored_quality = quality.map(|value| value.to_string()).unwrap_or_default();
+        let stored_mode = mode.map_or("", RateMode::as_str);
         self.store
             .put_settings(&[
                 (keys::TRANSCODE_QUALITY, stored_quality.as_str()),
-                (keys::TRANSCODE_RATE_MODE, mode.as_str()),
+                (keys::TRANSCODE_RATE_MODE, stored_mode),
             ])
             .await?;
-        if self.requested_rate_control().await? == (Some(mode), quality) {
+        if self.requested_rate_control().await? == (mode, quality) {
             let selected = self.encoder().await;
             self.publish_rate_control(snapshot, selected);
         } else {
@@ -857,27 +912,32 @@ impl TranscodeManager {
         file: Option<&plurx_core::domain::MediaFile>,
         hdr10_requested: bool,
     ) -> i64 {
-        // The exact Profile-5 → HDR10 → QSV chain was measured above realtime
-        // at both 1080p and 2160p. This branch is intentionally narrower than
-        // generic "hardware HDR": it requires the selected QSV family and the
-        // boot proof of its Main10 upload/encode graph.
-        let hdr10_renderer_proved = match file.and_then(plurx_core::playback::hdr_route) {
-            Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough,
-            Some(plurx_core::playback::HdrRoute::Passthrough) => {
-                self.hdr10_passthrough && self.hdr10_passthrough_qsv
-            }
-            None => false,
-        };
-        if hdr10_requested
-            && hdr10_renderer_proved
-            && self.dovi_passthrough_qsv
-            && self.encoder().await == Encoder::Qsv
-        {
+        let preferred = self.encoder().await;
+        let hdr10_renderer_proved =
+            match (file.and_then(plurx_core::playback::hdr_route), preferred) {
+                (Some(plurx_core::playback::HdrRoute::DolbyVisionRpu), Encoder::Qsv) => {
+                    self.dovi_passthrough && self.dovi_passthrough_qsv
+                }
+                (Some(plurx_core::playback::HdrRoute::Passthrough), Encoder::Qsv) => {
+                    self.hdr10_passthrough && self.hdr10_passthrough_qsv
+                }
+                (Some(plurx_core::playback::HdrRoute::Passthrough), Encoder::Vaapi) => {
+                    self.hdr10_passthrough_vaapi
+                        && self
+                            .vaapi_hdr10_source_fits(
+                                file.expect("the matched route has a file"),
+                                HDR10_HEIGHT,
+                            )
+                            .await
+                }
+                _ => false,
+            };
+        if hdr10_requested && hdr10_renderer_proved {
             if let Some(file) = file {
-                if hdr10_rung_fits(file, HDR10_4K_HEIGHT, Encoder::Qsv) {
+                if hdr10_rung_fits(file, HDR10_4K_HEIGHT, preferred) {
                     return HDR10_4K_HEIGHT;
                 }
-                if hdr10_rung_fits(file, HDR10_HEIGHT, Encoder::Qsv) {
+                if hdr10_rung_fits(file, HDR10_HEIGHT, preferred) {
                     return HDR10_HEIGHT;
                 }
             }
@@ -904,11 +964,18 @@ impl TranscodeManager {
     pub(super) async fn try_lang_prefs(
         &self,
     ) -> Result<plurx_core::tracks::LangPrefs, plurx_core::error::StoreError> {
-        let mut prefs = plurx_core::tracks::LangPrefs::default();
         let settings = self
             .store
             .get_settings(&[keys::AUDIO_LANG, keys::SUB_LANG, keys::SUB_MODE])
             .await?;
+        Ok(Self::lang_prefs_from(&settings))
+    }
+
+    /// The server-wide language preferences from settings a caller holds.
+    pub(super) fn lang_prefs_from(
+        settings: &std::collections::BTreeMap<String, String>,
+    ) -> plurx_core::tracks::LangPrefs {
+        let mut prefs = plurx_core::tracks::LangPrefs::default();
         if let Some(v) = settings.get(keys::AUDIO_LANG) {
             if !v.trim().is_empty() {
                 prefs.audio_lang = v.trim().to_owned();
@@ -922,7 +989,7 @@ impl TranscodeManager {
         if let Some(v) = settings.get(keys::SUB_MODE) {
             prefs.sub_mode = plurx_core::tracks::SubMode::parse(v.trim());
         }
-        Ok(prefs)
+        prefs
     }
 
     /// Kill any session belonging to the same player instance.

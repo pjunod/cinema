@@ -149,10 +149,13 @@ class PlaybackFileContextTest {
         assertEquals("/api/v1/files/9007199254740993/subs/2/overlay.json", requests.last().url.encodedPath)
         api.pgsOverlayObject(id, 2, revision, revision)
         assertEquals("/api/v1/files/9007199254740993/subs/2/overlay/$revision/objects/$revision.png", requests.last().url.encodedPath)
-        runCatching { api.createHlsSession(id, CreateSessionReq(playback_id = "44444444-4444-4444-8444-444444444444")) }
+        val receipt = "55555555-5555-4555-8555-555555555555"
+        runCatching { api.createHlsSession(id, CreateSessionReq(playback_id = "44444444-4444-4444-8444-444444444444"), receipt) }
+        assertEquals(receipt, requests.last().header("X-Plurx-Link-Receipt"))
         assertEquals("/api/v1/files/9007199254740993/hls/sessions", requests.last().url.encodedPath)
         val count = requests.size
         assertNotNull(runCatching { api.decisionForContext(shared, emptyMap()) }.exceptionOrNull())
+        assertNotNull(runCatching { api.createHlsSessionForContext(shared, CreateSessionReq(playback_id = "44444444-4444-4444-8444-444444444444"), receipt) }.exceptionOrNull())
         assertNotNull(runCatching { api.pgsOverlayManifestForContext(shared, 2) }.exceptionOrNull())
         assertEquals(count, requests.size)
     }

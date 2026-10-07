@@ -57,16 +57,46 @@ impl FrozenHlsPresentation {
     }
 
     pub(super) fn from_contract(
+        file: plurx_core::domain::MediaFile,
+        context: HlsContext,
+        kind: &SessionKind,
+        contract: Option<&plurx_core::transcode::PresentationContract>,
+    ) -> Self {
+        Self::from_contract_and_rolling(file, context, kind, contract, None)
+    }
+
+    pub(super) fn from_rolling_artifact(
+        file: plurx_core::domain::MediaFile,
+        context: HlsContext,
+        kind: &SessionKind,
+        contract: Option<&plurx_core::transcode::PresentationContract>,
+        artifact: &crate::vodserve::retained::RollingArtifact,
+    ) -> Self {
+        Self::from_contract_and_rolling(file, context, kind, contract, Some(artifact))
+    }
+
+    fn from_contract_and_rolling(
         mut file: plurx_core::domain::MediaFile,
         mut context: HlsContext,
         kind: &SessionKind,
         contract: Option<&plurx_core::transcode::PresentationContract>,
+        artifact: Option<&crate::vodserve::retained::RollingArtifact>,
     ) -> Self {
         let normalized = contract.filter(|contract| contract.normalized_geometry().is_some());
         if let Some(contract) = normalized {
-            context.bandwidth = contract.output_bandwidth();
+            context.bandwidth = context
+                .codec_facts
+                .as_ref()
+                .and_then(FrozenHlsCodecFacts::retained_bandwidth)
+                .or_else(|| contract.output_bandwidth());
             if let Some(codecs) = contract.hls_codecs() {
-                context.codecs = codecs;
+                // The normalized contract owns video identity. The producer's
+                // frozen context already owns the actual delivered audio.
+                let video = codecs.split(',').next().unwrap_or(&codecs);
+                context.codecs = match context.codecs.split_once(',') {
+                    Some((_, audio)) => format!("{video},{audio}"),
+                    None => video.to_owned(),
+                };
             }
         }
         if let SessionKind::Transcode { height } = kind {
@@ -81,6 +111,12 @@ impl FrozenHlsPresentation {
             file.width = geometry.map(|(width, _)| width);
             file.height = geometry.map(|(_, height)| height);
         }
+        if let Some(artifact) = artifact {
+            // Preserve qualified geometry/video/audio shaping; only the
+            // privately acquired complete full-mux cost replaces prediction,
+            // before fingerprint/hash sealing. No received rate grants this.
+            context.bandwidth = artifact.bandwidth();
+        }
         let mut identity = serde_json::json!({
             "version": 2,
             "file": &file,
@@ -91,6 +127,10 @@ impl FrozenHlsPresentation {
             "supplemental_codecs": &context.supplemental_codecs,
             "frame_rate": context.frame_rate,
         });
+        // Preserve the exact legacy shape when component evidence is absent.
+        if let Some(facts) = &context.codec_facts {
+            identity["codec_facts"] = serde_json::json!(facts);
+        }
         if let Some(bandwidth) = context.bandwidth {
             identity["output_bandwidth"] = serde_json::json!(bandwidth);
         }

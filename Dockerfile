@@ -16,6 +16,13 @@ ARG PLURX_BUILD_REF=""
 ENV PLURX_BUILD_REF=${PLURX_BUILD_REF}
 ARG PLURX_BUILD_SHA=""
 ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}
+# The commit's committer time, so two builds of one commit stamp the same
+# `built_at` into plurxd (crates/plurxd/build_support/source_date.rs) and
+# BuildKit writes the same image timestamps. Every caller derives it:
+#   docker build --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+# Left unset, build.rs falls back to the compile clock, because this context
+# has no `.git` to read the commit time from.
+ARG SOURCE_DATE_EPOCH
 ARG TARGETARCH
 WORKDIR /src
 COPY . .
@@ -34,8 +41,10 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
         | grep -q 'cluster-read-cost-validation' \
     && CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release -p plurxd \
     && cp target-plurxd/release/plurxd /plurxd \
+    && cp target-plurxd/release/plurxd.dwp /plurxd.dwp \
     && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
-    && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check
+    && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check \
+    && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp
 
 # Pinned by digest for the same reason, and with more at stake: this layer
 # is the shipped image's entire userland, and `bookworm-slim` moves under
@@ -50,6 +59,7 @@ ARG JELLYFIN_FFMPEG_VERSION=8.1.3-1-bookworm
 # ffprobe cannot be its trusted input. Build a separate static local-file
 # probe; keep the ordinary Jellyfin probe and hardware encoder intact.
 COPY scripts/build-static-ffprobe /usr/local/libexec/build-static-ffprobe
+COPY scripts/build-static-vmaf-scorer /usr/local/libexec/build-static-vmaf-scorer
 # plurxd shells out to ffmpeg/ffprobe for scanning, remux, and transcode; TLS
 # roots are for TMDB/AniList.
 #
@@ -82,6 +92,21 @@ COPY scripts/build-static-ffprobe /usr/local/libexec/build-static-ffprobe
 # somebody's television. Debian packages come from one immutable snapshot;
 # Jellyfin's separately published deb is verified against its repository's
 # SHA-256 metadata for each architecture before apt resolves its dependencies.
+#
+# The layer is reproducible: two cold builds of one commit on 2026-10-02
+# differed only in build-time state, so the end of this RUN removes it. Apt,
+# dpkg and alternatives logs are timestamped; ldconfig's aux-cache records
+# inode times; fontconfig's caches embed the font directories' build-time
+# mtimes. Removing those caches costs nothing measurable: the image carries six
+# fonts, which rescan instantly, and each child regenerates its cache under its
+# XDG_CACHE_HOME on the writable data volume. (Only an export that rewrites
+# file timestamps also makes the baked caches stale; a plain `docker build`
+# would have kept them valid.) `useradd` stamps the account's last-change day from
+# SOURCE_DATE_EPOCH or the clock, so it is given the Debian snapshot's date,
+# which is already this layer's input; the commit's own time is not, because
+# declaring it here would rebuild this whole layer on every commit.
+# docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md §5.6 has the
+# comparison.
 RUN sed -i \
         -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
         -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
@@ -90,14 +115,16 @@ RUN sed -i \
     && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential pkg-config nasm curl ca-certificates xz-utils \
+        build-essential pkg-config nasm curl ca-certificates xz-utils meson ninja-build xxd \
         zlib1g-dev libbz2-dev liblzma-dev \
     && sh /usr/local/libexec/build-static-ffprobe \
         /usr/local/lib/plurx/ffprobe /usr/share/doc/plurx/ffprobe \
-    && apt-get purge -y build-essential pkg-config nasm xz-utils \
+    && sh /usr/local/libexec/build-static-vmaf-scorer \
+        /usr/local/lib/plurx/vmaf-ffmpeg /usr/share/doc/plurx/vmaf-scorer \
+    && apt-get purge -y build-essential pkg-config nasm xz-utils meson ninja-build xxd \
         zlib1g-dev libbz2-dev liblzma-dev \
     && apt-get autoremove -y \
-    && rm /usr/local/libexec/build-static-ffprobe \
+    && rm /usr/local/libexec/build-static-ffprobe /usr/local/libexec/build-static-vmaf-scorer \
     && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates mesa-va-drivers curl \
         "mkvtoolnix=${MKVTOOLNIX_VERSION}" \
@@ -158,10 +185,55 @@ RUN sed -i \
     && mkdir -p /usr/share/doc/plurx \
     && dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort \
         > /usr/share/doc/plurx/media-runtime-packages.txt \
+    && rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache \
+        /var/cache/fontconfig/*.cache-* \
     && groupadd -r plurx \
-    && useradd -r -g plurx -d /var/lib/plurx plurx \
+    && snapshot_day=$(printf '%s' "$DEBIAN_SNAPSHOT" | cut -c1-8) \
+    && SOURCE_DATE_EPOCH=$(date -u -d "$snapshot_day" +%s) \
+        useradd -r -g plurx -d /var/lib/plurx plurx \
     && mkdir -p /var/lib/plurx \
     && chown plurx:plurx /var/lib/plurx
+
+# M5's CI image uses the shipped runtime's media assets, not a second ffmpeg
+# install on a persistent runner. These two tool images are pinned by index
+# digest just like the release bases; neither builds the release binaries.
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS ci-rust-toolchain
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS ci-node-toolchain
+
+FROM runtime-assets AS ci
+ARG PLURX_CI_SOURCE_SHA=""
+LABEL org.opencontainers.image.revision="${PLURX_CI_SOURCE_SHA}"
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
+    PATH=/usr/local/cargo/bin:/opt/playwright-venv/bin:${PATH} \
+    PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
+    PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe
+# Copy the pinned rustup launcher, not the source image's default compiler;
+# only the repository-pinned 1.97.1 toolchain belongs in this CI layer.
+COPY --from=ci-rust-toolchain /usr/local/cargo/bin /usr/local/cargo/bin
+COPY --from=ci-node-toolchain /usr/local/bin/node /usr/local/bin/node
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/
+COPY licenses/ /usr/share/doc/plurx/licenses/
+# Keep both the daemon's explicit path and shell-invoked fixture generation on
+# jellyfin-ffmpeg 8. Debian bookworm's /usr/bin/ffmpeg remains the release
+# fallback, but must never answer an M5 CI job's bare `ffmpeg` invocation.
+RUN ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
+    && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
+    && apt-get -o Acquire::Retries=3 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        build-essential clang cmake curl git jq lld llvm make nasm ninja-build \
+        pkg-config python3 python3-venv \
+    && python3 -m venv /opt/playwright-venv \
+    && /opt/playwright-venv/bin/pip install --no-cache-dir 'playwright==1.62.0' \
+    && /opt/playwright-venv/bin/python3 -m playwright install --with-deps chromium \
+    && rustup toolchain install 1.97.1 --profile minimal \
+        --component rustfmt --component clippy --component llvm-tools-preview \
+    && rustc +1.97.1 --version | grep -F 'rustc 1.97.1' \
+    && node --version | grep -E '^v22\.' \
+    && ffmpeg -version | grep -E '^ffmpeg version n?8' \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Keep the expensive, architecture-specific runtime asset assertions available
 # as their own CI target. The native release-build matrix already proves both
@@ -193,10 +265,12 @@ LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"
 COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/
 COPY licenses/ /usr/share/doc/plurx/licenses/
 COPY --from=build /plurxd /usr/local/bin/plurxd
+COPY --from=build /plurxd.dwp /usr/local/bin/plurxd.dwp
 # Stopped-node recovery and cluster validation tooling. The WAL inspector is
 # read-only, refuses a live lock, and lets an operator diagnose the same image
 # that produced the on-disk state without installing Rust on the host.
 COPY --from=build /plurx-cluster-check /usr/local/bin/plurx-cluster-check
+COPY --from=build /plurx-cluster-check.dwp /usr/local/bin/plurx-cluster-check.dwp
 
 # Default to jellyfin-ffmpeg (recent GPUs need its driver stack); override
 # either var to point elsewhere. It's a superset of system ffmpeg, so this is

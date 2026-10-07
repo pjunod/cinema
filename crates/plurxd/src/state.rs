@@ -149,6 +149,8 @@ pub struct SystemInfo {
     /// `hevc_qsv` Main10. Separate from `dovi_passthrough_qsv`, which is
     /// gated behind a Dolby Vision filter this route does not use.
     pub hdr10_passthrough_qsv: bool,
+    /// Independent plain-HDR10 P010/Main10 VAAPI graph proof (1080p).
+    pub hdr10_passthrough_vaapi: bool,
     /// Whether this build converts Dolby Vision Profile 7 to Profile 8.1 on
     /// the way through a copy (PLAYBACK-CAPS-V2-PLAN §4.8).
     ///
@@ -699,6 +701,7 @@ impl StoreMetricsCache {
 pub struct AppState {
     pub store: Arc<dyn Store>,
     pub(crate) sharing: Arc<crate::sharing::SharingManager>,
+    pub(crate) link_receipts: Arc<crate::http::hls::link_receipts::LinkReceipts>,
     /// Fixed-lifetime, digest-only admin proofs for cluster recovery reads.
     /// Ordinary authentication populates it; cache-only routes never reach
     /// Store on a miss.
@@ -714,6 +717,9 @@ pub struct AppState {
     /// C-07's façade census. Per state rather than process-global so each
     /// router counts only its own requests (see `http::PlexCensus`).
     pub(crate) plex_census: Arc<crate::http::PlexCensus>,
+    /// What became of this process's Jellyfin standard-port listener.
+    /// Advisory; Settings -> Developer reports it.
+    pub(crate) jellyfin_standard_port: Arc<crate::http::JellyfinStandardPortStatus>,
     /// Node-local network boundary for security-sensitive forwarding headers.
     pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
@@ -724,6 +730,9 @@ pub struct AppState {
     pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// Shared complete observation owner. Pending startup hands this exact
+    /// handle to normal HTTP; a second loop cannot claim its receiver.
+    pub(crate) clock_observer: crate::clock_offset::ClockObserver,
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
     pub peer_activity: crate::http::internal_activity::PeerActivityClient,
@@ -801,6 +810,9 @@ pub struct AppState {
     /// Keeps the click path off the NAS, and announces a start once playback
     /// is real rather than once a decision has been made.
     pub availability: Arc<crate::playstart::AvailabilityCache>,
+    /// Advisory, bounded file observations for item detail only. Playback
+    /// never consults this cache when deciding whether a source opens.
+    pub detail_availability: Arc<crate::availability::AvailabilityCache>,
     pub starts: Arc<crate::playstart::StartNotifier>,
     /// Finite-playback start attempts and how each ended (C-08 M5 row 4).
     pub start_attempts: Arc<crate::playstart::StartAttempts>,
@@ -833,6 +845,25 @@ pub struct AppState {
     pub(crate) hls_route_hooks:
         Arc<crate::seam_hooks::HookSlot<dyn crate::http::hls::HlsRouteHooks>>,
     pub started_at: Instant,
+}
+
+/// What one page of the first-frame luminance backfill did with its rows.
+#[derive(Debug, Default)]
+struct FrameBackfillTally {
+    observed: usize,
+    absent: usize,
+    refused: usize,
+    fenced: usize,
+    changed: usize,
+    gone: usize,
+    ineligible: usize,
+}
+
+impl FrameBackfillTally {
+    /// Reads ffprobe completed, whatever the frame carried.
+    fn read(&self) -> usize {
+        self.observed + self.absent + self.fenced
+    }
 }
 
 fn stored_luminance(probe_json: &str) -> plurx_core::domain::ProbeResult {
@@ -1103,6 +1134,7 @@ impl AppState {
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
             .with_hdr10_passthrough(system.hdr10_passthrough)
             .with_hdr10_passthrough_qsv(system.hdr10_passthrough_qsv)
+            .with_hdr10_passthrough_vaapi(system.hdr10_passthrough_vaapi)
             .with_cache_layout(
                 cache_dir.clone(),
                 runtime_cache.clone(),
@@ -1152,10 +1184,12 @@ impl AppState {
         AppState {
             store,
             sharing,
+            link_receipts: Default::default(),
             cache_only_admin_proofs,
             login_throttle: Default::default(),
             password_capacity: Default::default(),
             plex_census: Default::default(),
+            jellyfin_standard_port: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             replication,
@@ -1165,6 +1199,7 @@ impl AppState {
             peer_status_cache: Default::default(),
             membership_status_cache: Default::default(),
             serving,
+            clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
             membership,
             media_pool,
             media_sessions,
@@ -1194,6 +1229,7 @@ impl AppState {
             progress,
             storage: Arc::new(tokio::sync::RwLock::new(Default::default())),
             availability: Arc::new(crate::playstart::AvailabilityCache::new()),
+            detail_availability: crate::availability::AvailabilityCache::new(),
             starts: Arc::new(crate::playstart::StartNotifier::new()),
             start_attempts: Arc::new(crate::playstart::StartAttempts::new()),
             streams: crate::progressive::Streams::new(),
@@ -1651,6 +1687,40 @@ pub struct AnalysisProgress {
     pub eta_ms: Option<i64>,
     #[serde(skip)]
     registry_epoch: u64,
+    /// The first byte count this attempt reported, and when. A resumed
+    /// whole-file attestation reports its resume offset first. An earlier
+    /// attempt read those bytes, so this attempt's rate is measured from here.
+    #[serde(skip)]
+    rate_origin: Option<(u64, i64)>,
+}
+
+/// This attempt's read rate and the time left at that rate. The rate counts
+/// only bytes read since `origin`. Before the first report, `origin` is
+/// `(0, started_at_ms)`.
+fn analysis_rate(
+    bytes_read: u64,
+    total_bytes: u64,
+    origin: (u64, i64),
+    now_ms: i64,
+) -> (u64, Option<i64>) {
+    let (origin_bytes, origin_ms) = origin;
+    let rate_ms = u64::try_from(now_ms.saturating_sub(origin_ms)).unwrap_or(0);
+    let throughput_bps = if rate_ms > 0 {
+        bytes_read
+            .saturating_sub(origin_bytes)
+            .saturating_mul(1_000)
+            .saturating_div(rate_ms)
+    } else {
+        0
+    };
+    let eta_ms = (bytes_read > 0 && total_bytes > bytes_read && throughput_bps > 0).then(|| {
+        total_bytes
+            .saturating_sub(bytes_read)
+            .saturating_mul(1_000)
+            .saturating_div(throughput_bps)
+            .min(i64::MAX as u64) as i64
+    });
+    (throughput_bps, eta_ms)
 }
 
 #[cfg(test)]
@@ -1679,7 +1749,35 @@ impl AnalysisProgress {
             throughput_bps: 1,
             eta_ms: Some(1),
             registry_epoch: 0,
+            rate_origin: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod analysis_rate_tests {
+    /// A resumed attestation reports 60 GB in its first second. Those bytes
+    /// were read by earlier attempts. Counting them as this attempt's rate
+    /// would show an ETA of seconds for minutes of real work.
+    #[test]
+    fn a_resumed_attempt_is_timed_from_its_resume_point() {
+        let gb = 1_000_000_000_u64;
+        let started = 1_000_i64;
+        // Resumed at 60 GB at t=1 s, then read 1 GB in the next 10 s.
+        let (rate, eta) =
+            super::analysis_rate(61 * gb, 80 * gb, (60 * gb, started), started + 10_000);
+        assert_eq!(rate, 100_000_000, "1 GB in 10 s, not 61 GB in 10 s");
+        assert_eq!(eta, Some(190_000), "19 GB left at 100 MB/s");
+    }
+
+    #[test]
+    fn without_a_report_the_rate_is_measured_from_the_start() {
+        let (rate, eta) = super::analysis_rate(0, 100, (0, 5_000), 6_000);
+        assert_eq!((rate, eta), (0, None));
+        let (rate, eta) = super::analysis_rate(50, 100, (0, 5_000), 6_000);
+        assert_eq!((rate, eta), (50, Some(1_000)));
+        let (rate, _) = super::analysis_rate(50, 100, (50, 6_000), 6_000);
+        assert_eq!(rate, 0, "no time since the origin is no measurement");
     }
 }
 
@@ -2107,12 +2205,7 @@ fn ordered_cluster_index_paths(
 }
 
 fn setting_enabled(value: Option<String>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    plurx_core::store::stored_switch(value.as_deref(), false)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2237,6 +2330,27 @@ enum AnalysisResolutionError {
         charge_attempt: bool,
     },
     Terminal(&'static str),
+}
+
+/// Remember contention throughout a source read, even if playback ends before
+/// its deadline. A busy-viewer timeout must not exhaust the durable retry budget.
+#[derive(Default)]
+struct AnalysisAttestationBudget(std::sync::atomic::AtomicBool);
+
+impl AnalysisAttestationBudget {
+    fn observe_busy(&self, busy: bool) {
+        if busy {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn deadline_failure(&self, busy_now: bool) -> AnalysisResolutionError {
+        self.observe_busy(busy_now);
+        AnalysisResolutionError::Retry {
+            code: "source_attestation_timeout",
+            charge_attempt: !self.0.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3155,7 +3269,7 @@ impl JobManager {
     }
 
     #[cfg(test)]
-    fn new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Self {
+    pub(crate) fn new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Self {
         Self::new_with_scan_prune_percent(
             store,
             artwork_dir,
@@ -4588,6 +4702,7 @@ impl JobManager {
                 throughput_bps: 0,
                 eta_ms: None,
                 registry_epoch,
+                rate_origin: None,
             },
         );
         if let Some(value) = replaced {
@@ -4633,6 +4748,13 @@ impl JobManager {
         };
         value.fragments_indexed = fragments_indexed;
         value.updated_at_ms = now;
+        // A later stage that counts from zero again starts a new origin.
+        if value
+            .rate_origin
+            .is_none_or(|(origin_bytes, _)| value.bytes_read < origin_bytes)
+        {
+            value.rate_origin = Some((value.bytes_read, now));
+        }
     }
 
     /// The progress callback both index paths hand a pass — the queue worker
@@ -4757,29 +4879,12 @@ impl JobManager {
             .collect::<Vec<_>>();
         for value in &mut values {
             value.elapsed_ms = now.saturating_sub(value.started_at_ms).max(0);
-            value.throughput_bps = if value.elapsed_ms > 0 {
-                value
-                    .bytes_read
-                    .saturating_mul(1_000)
-                    .saturating_div(u64::try_from(value.elapsed_ms).unwrap_or(u64::MAX))
-            } else {
-                0
-            };
-            value.eta_ms = if value.bytes_read > 0
-                && value.total_bytes > value.bytes_read
-                && value.throughput_bps > 0
-            {
-                Some(
-                    value
-                        .total_bytes
-                        .saturating_sub(value.bytes_read)
-                        .saturating_mul(1_000)
-                        .saturating_div(value.throughput_bps)
-                        .min(i64::MAX as u64) as i64,
-                )
-            } else {
-                None
-            };
+            (value.throughput_bps, value.eta_ms) = analysis_rate(
+                value.bytes_read,
+                value.total_bytes,
+                value.rate_origin.unwrap_or((0, value.started_at_ms)),
+                now,
+            );
         }
         values.sort_by(|left, right| {
             right
@@ -5757,17 +5862,33 @@ impl JobManager {
         use plurx_core::store::background_jobs::JobKind;
         let preparation = async {
             let mut pacing = crate::background_jobs::IdlePoll::new();
+            // Draining lists queued rows, a replicated read; once a minute is
+            // prompt enough for a switch an operator just turned off.
+            let mut last_drain: Option<std::time::Instant> = None;
             loop {
-                let kinds = [JobKind::TranscodePrepare];
+                let kinds = [
+                    JobKind::TranscodePrepare,
+                    JobKind::CopyOutputPrepare,
+                    JobKind::EncodedOutputPrepare,
+                ];
                 let before = crate::background_jobs::accepted_claims(&kinds);
-                if self
-                    .job_authority
-                    .may_execute_job(JobKind::TranscodePrepare)
-                    .await
-                    && self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0
+                // Each lane opens on its own setting: speculative work on the
+                // discovery schedule, viewer-demand output preparation on its
+                // Developer switch. The disabled output kinds are drained on
+                // every node whether or not anything here can execute them.
+                // An unreadable switch closes the output lane for this tick
+                // and skips the drain: an error is not the operator saying off.
+                let (lanes, output_read) = self.read_preparation_lanes().await;
+                if output_read
+                    && last_drain.is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
                 {
+                    last_drain = Some(std::time::Instant::now());
+                    self.drain_disabled_output_preparation(lanes.output).await;
+                }
+                let lanes = self.executable_lanes(lanes).await;
+                if !lanes.is_empty() {
                     Arc::clone(&self)
-                        .work_pretranscode_queue(Arc::clone(&transcode))
+                        .work_pretranscode_queue(Arc::clone(&transcode), lanes)
                         .await;
                 }
                 let progressed = crate::background_jobs::accepted_claims(&kinds) != before;
@@ -6005,7 +6126,18 @@ impl JobManager {
         if global.cache_produce_mins > 0 {
             let state = Arc::clone(self);
             let transcode = Arc::clone(transcode);
-            tokio::spawn(async move { state.work_pretranscode_queue(transcode).await });
+            tokio::spawn(async move {
+                // Not narrowed by job authority, as before the lanes existed:
+                // this pass also runs the node's local cachekeep sweep, which
+                // a node owes its own cache whatever rows it may execute.
+                // `claim_pretranscode` still checks authority per kind.
+                let lanes = state.preparation_lanes().await;
+                if !lanes.is_empty() {
+                    Arc::clone(&state)
+                        .work_pretranscode_queue(transcode, lanes)
+                        .await;
+                }
+            });
         }
 
         // Discovery stays on the configured library cadence, but execution is
@@ -6062,6 +6194,10 @@ impl JobManager {
         {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.backfill_luminance_facts().await });
+        }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_frame_luminance().await });
         }
         Ok(())
     }
@@ -6757,21 +6893,6 @@ impl JobManager {
         );
     }
 
-    /// Recover the selected playable video's field-order token from retained
-    /// probe JSON without reopening any media.
-    ///
-    /// Rows whose old probe did not report the key receive the explicit
-    /// `unknown` value. That distinguishes a completed backfill from work not
-    /// yet reached and preserves the normal scan as the only path that can
-    /// improve the fact later.
-    fn field_order_from_stored_probe(probe_json: &str) -> String {
-        serde_json::from_str::<serde_json::Value>(probe_json)
-            .ok()
-            .map(|value| plurx_core::scan::probe::parse_probe_json(&value))
-            .and_then(|probe| probe.field_order)
-            .unwrap_or_else(|| "unknown".to_owned())
-    }
-
     async fn backfill_field_order(self: Arc<Self>) {
         const BACKFILL_PER_TICK: i64 = 256;
 
@@ -6805,74 +6926,49 @@ impl JobManager {
             .flatten()
             .and_then(|value| value.trim().parse::<i64>().ok())
             .unwrap_or(0);
-        let pending = match self
-            .store
-            .files_missing_field_order(cursor, BACKFILL_PER_TICK)
-            .await
+        let page = match plurx_core::store::field_order_backfill_page(
+            self.store.as_ref(),
+            cursor,
+            BACKFILL_PER_TICK,
+        )
+        .await
         {
-            Ok(pending) => pending,
+            Ok(page) => page,
             Err(error) => {
-                tracing::warn!(%error, "listing files for the field-order backfill");
+                tracing::warn!(%error, "field-order backfill page failed");
                 return;
             }
         };
-        if pending.is_empty() {
-            if let Err(error) = self
-                .store
-                .put_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE, "1")
-                .await
-            {
-                tracing::warn!(%error, "stamping the field-order backfill as complete");
-            } else {
-                tracing::info!("field-order backfill: complete");
-            }
+        if page.complete {
+            tracing::info!("field-order backfill: complete");
             return;
         }
-
-        let mut updated = 0usize;
-        let mut fenced = 0usize;
-        let mut walked = cursor;
-        for candidate in pending {
-            walked = walked.max(candidate.id);
-            let recovered = Self::field_order_from_stored_probe(&candidate.probe_json);
-            match self
-                .store
-                .set_file_field_order(&candidate, &recovered)
-                .await
-            {
-                Ok(true) => updated += 1,
-                Ok(false) => fenced += 1,
-                Err(error) => {
-                    tracing::warn!(
-                        file_id = candidate.id,
-                        %error,
-                        "writing a backfilled field order"
-                    );
-                    walked = walked.min(candidate.id.saturating_sub(1));
-                    break;
-                }
-            }
+        if let Some((file_id, error)) = &page.write_error {
+            tracing::warn!(file_id, %error, "writing a backfilled field order");
         }
-        if walked > cursor {
+        if page.cursor > cursor {
             if let Err(error) = self
                 .store
-                .put_setting(&cursor_key, &walked.to_string())
+                .put_setting(&cursor_key, &page.cursor.to_string())
                 .await
             {
                 tracing::warn!(%error, "advancing the field-order backfill cursor");
             }
         }
         tracing::info!(
-            updated,
-            fenced,
-            cursor = walked,
+            updated = page.updated,
+            fenced = page.fenced,
+            cursor = page.cursor,
             "field-order backfill: considered stored probe rows"
         );
     }
 
     /// Classify existing HDR rows from their retained stream document. This
-    /// never opens media: SEI-only rows are stamped `none` and the next normal
-    /// scan/decode probe may upgrade them from a bounded first-frame read.
+    /// never opens media: rows whose document carries no luminance record —
+    /// HEVC that keeps MDCV/CLL only as SEI, the common case — are stamped
+    /// `none`. An unchanged file is never rescanned, so nothing else would
+    /// revisit them; [`Self::backfill_frame_luminance`] reads their first
+    /// frame once this walk is complete.
     async fn backfill_luminance_facts(self: Arc<Self>) {
         const BACKFILL_PER_TICK: i64 = 256;
         if !matches!(
@@ -6965,6 +7061,278 @@ impl JobManager {
             fenced,
             cursor = walked,
             "luminance backfill: considered stored probe rows"
+        );
+    }
+
+    /// Read the first frame of every HDR row the stored-document walk left
+    /// `none`, with the scanner's own bounded probe.
+    ///
+    /// Without this, a title mastered at 4,000 nits whose metadata lives only
+    /// in frame side data tone-maps against the 1,000-nit policy default for
+    /// as long as its file is unchanged: the scanner runs this read only when
+    /// it probes a file, and it probes only new or changed files.
+    ///
+    /// What it does not cover: a row the scanner writes `none` *after* this
+    /// walk has passed its id. The scanner writes `none` only once it has
+    /// already attempted this same frame read on that file, at scan time, so
+    /// such a row is not one that never had the read — it is one whose read
+    /// found nothing or failed then, and it waits for the file's next change
+    /// like every other scan-time probe fact. This walk exists for the rows
+    /// that never had a frame read at all: those the stored-document walk
+    /// classified from a retained stream document.
+    async fn backfill_frame_luminance(self: Arc<Self>) {
+        self.backfill_frame_luminance_with(|path| async move {
+            plurx_core::scan::probe::first_frame_luminance(&path, "catalogue luminance backfill")
+                .await
+        })
+        .await;
+    }
+
+    /// [`Self::backfill_frame_luminance`] with the frame read supplied, so
+    /// the walk's state transitions are testable without media.
+    ///
+    /// One small page per tick, because each candidate opens and decodes
+    /// media. The cursor only moves past a row on evidence about that row;
+    /// anything that says "this node cannot read right now" stops the page
+    /// where it is, so an unavailable library or a broken ffprobe is retried
+    /// rather than walked to `done` having read nothing. Per candidate:
+    ///
+    /// - stored document not PQ/HLG without a stream luminance record (the
+    ///   scanner's own eligibility for this read; the stored-document walk
+    ///   stamps every unclassified HDR row, including a Dolby Vision stream
+    ///   whose base layer is neither): skipped;
+    /// - file on disk is not the catalogued size/mtime: skipped, because the
+    ///   rescan that change triggers runs this same read;
+    /// - file cannot be stat'ed: its library root is checked with the
+    ///   scanner's root-availability read. Root available → the file is gone
+    ///   or a dangling link, a stale row the next scan reconciles: skipped.
+    ///   Root unavailable (share unmounted, media not on this node) → stop;
+    /// - frame carries luminance: written as `frame`, fenced to the exact row
+    ///   snapshot and to the row still being `none`;
+    /// - frame carries none: stays `none`, cursor moves on;
+    /// - ffprobe refused the file (a [`plurx_core::error::ProbeError::is_file_verdict`]): stays
+    ///   `none`, cursor moves on — a new probe document is what earns it
+    ///   another read (open question 2 of the tone-map plan). But a page in
+    ///   which more than one read was attempted and every one was refused
+    ///   stops without advancing: one refusal is a statement about one file,
+    ///   several with no successful read beside them are a statement about
+    ///   the reader;
+    /// - ffprobe could not run or did not finish (not a verdict): stop;
+    /// - the store write fails: stop.
+    ///
+    /// The `done` stamp therefore follows a walk in which every row passed
+    /// was skipped on its own facts, read, or refused by a reader that read
+    /// other files successfully — the rows it leaves `none` are the ones a
+    /// frame read cannot improve until their file changes.
+    async fn backfill_frame_luminance_with<F, Fut>(&self, read_frame: F)
+    where
+        F: Fn(PathBuf) -> Fut,
+        Fut: std::future::Future<
+            Output = Result<
+                Option<plurx_core::scan::probe::FrameLuminance>,
+                plurx_core::error::ProbeError,
+            >,
+        >,
+    {
+        const FRAME_READS_PER_TICK: i64 = 16;
+        // Rows become `none` through the stored-document walk; starting
+        // before it finishes would let this cursor pass ids it later stamps.
+        if !matches!(
+            self.store
+                .get_setting(keys::JOB_LUMINANCE_BACKFILL_DONE)
+                .await,
+            Ok(Some(_))
+        ) {
+            return;
+        }
+        match self
+            .store
+            .get_setting(keys::JOB_LUMINANCE_FRAME_BACKFILL_DONE)
+            .await
+        {
+            Ok(None) => {}
+            Ok(Some(_)) => return,
+            Err(error) => {
+                tracing::warn!(%error, "reading the luminance frame backfill stamp");
+                return;
+            }
+        }
+        let lease = match self
+            .acquire_job("catalogue:luminance-frame".to_owned())
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "luminance frame backfill lease failed");
+                return;
+            }
+        };
+        let lost = lease.loss_token();
+        let cursor_key = self.local_job_key(keys::JOB_LUMINANCE_FRAME_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let page = match self
+            .store
+            .files_without_luminance_facts(cursor, FRAME_READS_PER_TICK)
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the luminance frame backfill");
+                let _ = lease.release().await;
+                return;
+            }
+        };
+        if page.is_empty() {
+            match self
+                .store
+                .put_setting(keys::JOB_LUMINANCE_FRAME_BACKFILL_DONE, "1")
+                .await
+            {
+                Ok(()) => tracing::info!("luminance frame backfill: complete"),
+                Err(error) => {
+                    tracing::warn!(%error, "stamping the luminance frame backfill complete");
+                }
+            }
+            let _ = lease.release().await;
+            return;
+        }
+        let roots: Vec<PathBuf> = match self.store.list_libraries().await {
+            Ok(libraries) => libraries
+                .into_iter()
+                .flat_map(|library| library.paths)
+                .collect(),
+            Err(error) => {
+                tracing::warn!(%error, "listing library roots for the luminance frame backfill");
+                let _ = lease.release().await;
+                return;
+            }
+        };
+
+        let mut walked = cursor;
+        let mut tally = FrameBackfillTally::default();
+        for candidate in page {
+            if lost.is_cancelled() {
+                break;
+            }
+            if stored_luminance(&candidate.probe_json)
+                .luminance_source
+                .as_deref()
+                != Some("none")
+            {
+                tally.ineligible += 1;
+                walked = candidate.id;
+                continue;
+            }
+            let path = PathBuf::from(&candidate.path);
+            match scan::file_stat(&path).await {
+                Ok(identity) if identity == (candidate.size, candidate.mtime) => {}
+                Ok(_) => {
+                    tally.changed += 1;
+                    walked = candidate.id;
+                    continue;
+                }
+                Err(error) => {
+                    let root = roots
+                        .iter()
+                        .filter(|root| path.starts_with(root))
+                        .max_by_key(|root| root.as_os_str().len());
+                    // A row under no configured root belongs to no library
+                    // the scanner walks; there is no mount to wait for.
+                    let root_available = match root {
+                        Some(root) => scan::library_root_available(root).await,
+                        None => true,
+                    };
+                    if root_available {
+                        tally.gone += 1;
+                        walked = candidate.id;
+                        continue;
+                    }
+                    tracing::info!(
+                        file_id = candidate.id,
+                        %error,
+                        "luminance frame backfill: library root unavailable here; retrying next tick"
+                    );
+                    break;
+                }
+            }
+            match read_frame(path).await {
+                Ok(Some(frame)) => match self
+                    .store
+                    .set_file_frame_luminance(
+                        &candidate,
+                        frame.max_cll,
+                        frame.max_fall,
+                        frame.mastering_max_luminance,
+                    )
+                    .await
+                {
+                    Ok(true) => tally.observed += 1,
+                    Ok(false) => tally.fenced += 1,
+                    Err(error) => {
+                        tracing::warn!(
+                            file_id = candidate.id,
+                            %error,
+                            "writing first-frame luminance facts"
+                        );
+                        break;
+                    }
+                },
+                Ok(None) => tally.absent += 1,
+                Err(error) if error.is_file_verdict() => {
+                    tally.refused += 1;
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "ffprobe refused the first frame; the row stays none"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "luminance frame backfill: ffprobe could not read here; retrying next tick"
+                    );
+                    break;
+                }
+            }
+            walked = candidate.id;
+        }
+        if tally.refused > 1 && tally.read() == 0 {
+            tracing::warn!(
+                refused = tally.refused,
+                "luminance frame backfill: every frame read in this page was refused; \
+                 not advancing until a read succeeds"
+            );
+            walked = cursor;
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the luminance frame backfill cursor");
+            }
+        }
+        let _ = lease.release().await;
+        tracing::info!(
+            observed = tally.observed,
+            absent = tally.absent,
+            refused = tally.refused,
+            fenced = tally.fenced,
+            changed = tally.changed,
+            gone = tally.gone,
+            ineligible = tally.ineligible,
+            cursor = walked,
+            "luminance frame backfill: read first frames"
         );
     }
 
@@ -7959,7 +8327,7 @@ impl JobManager {
         /// budget and remain unverified, with bounded charged retries.
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-        if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle() {
+        if !self.cluster_fragment_index_enabled().await {
             return;
         }
         let node_id = self.coordinator.node_id().to_owned();
@@ -7967,18 +8335,18 @@ impl JobManager {
         let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
         let have_dovi = transcode.dv_strippable();
         for _ in 0..MAX_REQUESTS_PER_PASS {
-            if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle()
-            {
+            if !self.cluster_fragment_index_enabled().await {
                 break;
             }
             let now = clock_ms();
             let request = match self
                 .store
-                .claim_analysis_request_compatible(
+                .claim_analysis_request_for_capacity(
                     &node_id,
                     Some(&engine_sha256),
                     now,
                     now.saturating_add(retry_policy.lease_ms),
+                    !transcode.pretranscode_worker_idle(),
                 )
                 .await
             {
@@ -8815,6 +9183,8 @@ impl JobManager {
                 0,
             );
         };
+        let attestation_budget = AnalysisAttestationBudget::default();
+        attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
         let attested = tokio::select! {
             result = crate::fragment_index_cluster::attest_copy_source(
                 node_id,
@@ -8827,7 +9197,7 @@ impl JobManager {
                     charge_attempt: true,
                 })?
             }
-            () = self.wait_for_cluster_fragment_index_stop(transcode, lost) => {
+            () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &attestation_budget) => {
                 if lost.is_cancelled() {
                     return Err(AnalysisResolutionError::ClaimLost);
                 }
@@ -8837,18 +9207,19 @@ impl JobManager {
                 });
             }
             () = wait_analysis_deadline(attest_timeout) => {
-                // Charge timeout attempts so large/slow or unavailable sources
-                // back off and eventually stop instead of retrying forever.
-                return Err(AnalysisResolutionError::Retry {
-                    code: "source_attestation_timeout",
-                    charge_attempt: true,
-                });
+                // Playback contention must not turn a formerly deferred request
+                // into terminal attempt_limit. Idle-only reads retain the cap.
+                return Err(attestation_budget.deadline_failure(!transcode.pretranscode_worker_idle()));
             }
         };
         if lost.is_cancelled() {
             return Err(AnalysisResolutionError::ClaimLost);
         }
-        if !transcode.pretranscode_worker_idle() || !self.cluster_fragment_index_enabled().await {
+        if !self
+            .analysis_source_may_continue(transcode, Some(request))
+            .await
+            || !self.cluster_fragment_index_enabled().await
+        {
             return Err(AnalysisResolutionError::Retry {
                 code: "foreground_preempted",
                 charge_attempt: false,
@@ -9064,14 +9435,42 @@ impl JobManager {
         AnalysisRetryPolicy::from_settings(&settings)
     }
 
+    async fn analysis_source_may_continue(
+        &self,
+        transcode: &TranscodeManager,
+        request: Option<&AnalysisRequest>,
+    ) -> bool {
+        if transcode.pretranscode_worker_idle() {
+            return true;
+        }
+        let Some(request) = request else {
+            return false;
+        };
+        // Source attestation holds the Store's bounded source-I/O reservation,
+        // not an encoder slot. Any live playback waiter on this request permits
+        // the read while this node is busy. Expired/departed viewers and failed
+        // reads fail closed.
+        self.store
+            .analysis_preparation_observation(&request.request_id, clock_ms())
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|state| state.has_live_viewer)
+    }
+
     async fn wait_for_cluster_fragment_index_stop(
         &self,
         transcode: &TranscodeManager,
+        request: Option<&AnalysisRequest>,
         permit_lost: &tokio_util::sync::CancellationToken,
+        attestation_budget: &AnalysisAttestationBudget,
     ) {
         let mut ticks = 0_u8;
         loop {
-            if permit_lost.is_cancelled() || !transcode.pretranscode_worker_idle() {
+            attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
+            if permit_lost.is_cancelled()
+                || !self.analysis_source_may_continue(transcode, request).await
+            {
                 return;
             }
             if ticks == 0 && !self.cluster_fragment_index_enabled().await {
@@ -9858,7 +10257,182 @@ impl JobManager {
         completed
     }
 
-    async fn work_pretranscode_queue(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+    /// The preparation lanes the settings open: the speculative discovery
+    /// schedule and the `vod.output_preparation` Developer switch.
+    pub(crate) async fn preparation_lanes(&self) -> crate::background_jobs::PreparationLanes {
+        self.read_preparation_lanes().await.0
+    }
+
+    /// [`Self::preparation_lanes`], and whether the output switch was actually
+    /// read. A store error is not "off": the output lane stays closed for this
+    /// tick (nothing is claimed under a switch nobody read) and the caller
+    /// must not drain on it, because draining cancels queued work the
+    /// operator may well have switched on.
+    async fn read_preparation_lanes(&self) -> (crate::background_jobs::PreparationLanes, bool) {
+        /// One warning per run of failures, debug for the rest of the run.
+        static OUTPUT_SWITCH_UNREADABLE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let speculative = self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0;
+        let (output, read) = match self.store.get_setting(keys::VOD_OUTPUT_PREPARATION).await {
+            Ok(value) => {
+                OUTPUT_SWITCH_UNREADABLE.store(false, Ordering::Relaxed);
+                (
+                    crate::vodserve::OutputPreparation::parse(value.as_deref()),
+                    true,
+                )
+            }
+            Err(error) => {
+                if OUTPUT_SWITCH_UNREADABLE.swap(true, Ordering::Relaxed) {
+                    tracing::debug!(%error, "output preparation switch still unreadable; lane and drain skipped");
+                } else {
+                    tracing::warn!(%error, "could not read the output preparation switch; its lane and drain are skipped until it reads");
+                }
+                (crate::vodserve::OutputPreparation::Off, false)
+            }
+        };
+        (
+            crate::background_jobs::PreparationLanes {
+                speculative,
+                output,
+            },
+            read,
+        )
+    }
+
+    /// `lanes` narrowed to what this node's job authority lets it execute.
+    async fn executable_lanes(
+        &self,
+        lanes: crate::background_jobs::PreparationLanes,
+    ) -> crate::background_jobs::PreparationLanes {
+        use plurx_core::store::background_jobs::JobKind;
+        let speculative = lanes.speculative
+            && self
+                .job_authority
+                .may_execute_job(JobKind::TranscodePrepare)
+                .await;
+        let output = match lanes.output {
+            crate::vodserve::OutputPreparation::Off => crate::vodserve::OutputPreparation::Off,
+            mode => {
+                let copy = self
+                    .job_authority
+                    .may_execute_job(JobKind::CopyOutputPrepare)
+                    .await;
+                let encoded = mode == crate::vodserve::OutputPreparation::CopyAndEncoded
+                    && self
+                        .job_authority
+                        .may_execute_job(JobKind::EncodedOutputPrepare)
+                        .await;
+                match (copy, encoded) {
+                    (true, true) => crate::vodserve::OutputPreparation::CopyAndEncoded,
+                    (true, false) => crate::vodserve::OutputPreparation::Copy,
+                    // An encoded-only authority is not a mode the switch has;
+                    // claim nothing rather than invent one.
+                    _ => crate::vodserve::OutputPreparation::Off,
+                }
+            }
+        };
+        crate::background_jobs::PreparationLanes {
+            speculative,
+            output,
+        }
+    }
+
+    /// Cancel queued output-preparation rows the switch no longer admits.
+    ///
+    /// By cancelling, never by claiming: a claim needs target-node
+    /// eligibility, scratch, and an admission permit, and a row the operator
+    /// disabled may never satisfy them. `cancel_job` is one guarded update that
+    /// takes a `queued` row straight to `cancelled`, so this runs on every
+    /// node whatever the row's target, with nothing reserved. A row claimed
+    /// concurrently goes to `cancelling` instead; its executor's heartbeat
+    /// settles it with the cancel disposition, and if that executor is gone,
+    /// store upkeep settles it at lease expiry. Bounded: 32 rows per kind per
+    /// tick.
+    pub(crate) async fn drain_disabled_output_preparation(
+        &self,
+        mode: crate::vodserve::OutputPreparation,
+    ) -> usize {
+        self.drain_disabled_output_preparation_with(mode, |_| std::future::ready(()))
+            .await
+    }
+
+    /// [`Self::drain_disabled_output_preparation`] with a hook that runs
+    /// between listing a queued row and cancelling it, so a test can claim
+    /// the row in exactly that window. Production passes a no-op.
+    pub(crate) async fn drain_disabled_output_preparation_with<F, Fut>(
+        &self,
+        mode: crate::vodserve::OutputPreparation,
+        before_cancel: F,
+    ) -> usize
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        use plurx_core::store::background_jobs::{CancelJob, JobKind, JobQuery, JobState};
+        const DRAIN_PER_KIND: usize = 32;
+        let mut drained = 0;
+        for kind in [JobKind::CopyOutputPrepare, JobKind::EncodedOutputPrepare] {
+            if mode.job_kinds().contains(&kind) {
+                continue;
+            }
+            let page = match self
+                .store
+                .list_jobs(JobQuery {
+                    node_id: None,
+                    state: Some(JobState::Queued),
+                    kind: Some(kind),
+                    after_id: None,
+                    limit: DRAIN_PER_KIND,
+                })
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::debug!(%error, ?kind, "could not list disabled output preparation");
+                    continue;
+                }
+            };
+            for job in page.jobs {
+                before_cancel(job.id.clone()).await;
+                match self
+                    .store
+                    .cancel_job(CancelJob {
+                        job_id: job.id.clone(),
+                        now_ms: clock_ms(),
+                    })
+                    .await
+                {
+                    Ok(Some(cancelled)) => {
+                        drained += 1;
+                        crate::telemetry::record_output_preparation_drained(kind);
+                        // `cancelled` when it was still queued; `cancelling`
+                        // when a node claimed it after the list, in which case
+                        // its executor (or store upkeep at lease expiry)
+                        // settles it.
+                        tracing::info!(
+                            job = %job.id,
+                            ?kind,
+                            state = ?cancelled.state,
+                            reason = "output_preparation_disabled",
+                            "cancelled queued output preparation the Developer switch no longer admits"
+                        );
+                    }
+                    // Another node cancelled it first, or it settled.
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!(job = %job.id, %error, "output preparation drain failed")
+                    }
+                }
+            }
+        }
+        drained
+    }
+
+    async fn work_pretranscode_queue(
+        self: Arc<Self>,
+        transcode: Arc<TranscodeManager>,
+        lanes: crate::background_jobs::PreparationLanes,
+    ) {
         let Some((root, node)) = transcode.cache_location() else {
             return;
         };
@@ -9866,12 +10440,17 @@ impl JobManager {
             return;
         }
         let _running = ProducingGuard(Arc::clone(&self));
+        let mut lanes = lanes;
         const LOCAL_SWEEP_INTERVAL_MS: i64 = 15 * 60 * 1_000;
         let sweep_now = clock_ms();
         let previous = self
             .last_pretranscode_cache_sweep_ms
             .load(Ordering::Acquire);
-        if sweep_now.saturating_sub(previous) >= LOCAL_SWEEP_INTERVAL_MS
+        // The pre-transcode cache's own upkeep belongs to the speculative
+        // lane: a node running only output preparation has no business
+        // sweeping that cache.
+        if lanes.speculative
+            && sweep_now.saturating_sub(previous) >= LOCAL_SWEEP_INTERVAL_MS
             && self
                 .last_pretranscode_cache_sweep_ms
                 .compare_exchange(previous, sweep_now, Ordering::AcqRel, Ordering::Acquire)
@@ -9896,14 +10475,21 @@ impl JobManager {
                 "pretranscode cachekeep sweep finished"
             );
         }
-        let cache_ceiling = match crate::cachekeep::budget_bytes_fallible(&self.store).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return,
+        // One read: the speculative lane's ceiling and the output lanes'
+        // retained budget are the same key under the same unset rule.
+        let stored_budget = match self.store.get_setting(keys::CACHE_MAX_GB).await {
+            Ok(value) => value,
             Err(error) => {
-                tracing::warn!(%error, "speculative queue cannot read its cache budget");
+                tracing::warn!(%error, "preparation queue cannot read its cache budget");
                 return;
             }
         };
+        let budget = crate::cachekeep::cache_budget(stored_budget.as_deref());
+        let cache_ceiling = budget.map_or(0, |bytes| i64::try_from(bytes).unwrap_or(i64::MAX));
+        let output_budget = budget.unwrap_or(0);
+        if budget.is_none() {
+            return;
+        }
 
         let deadline = std::time::Instant::now() + PRODUCE_WINDOW;
         let mut produced = 0_u64;
@@ -9926,31 +10512,42 @@ impl JobManager {
             // cache reconciliation stays on the cleanup schedule: doing its
             // database inventory and filesystem walk here would make an empty
             // queue tax every media-serving node once per scheduler tick.
-            let used_bytes = match self.store.cache_bytes(node).await {
-                Ok(bytes) => bytes.max(0),
-                Err(error) => {
-                    tracing::warn!(%error, "could not read durable cache usage before queue claim");
-                    *reasons.entry("cache_usage_unavailable").or_default() += 1;
-                    break;
-                }
+            let remaining_budget = if lanes.speculative {
+                let used_bytes = match self.store.cache_bytes(node).await {
+                    Ok(bytes) => bytes.max(0),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not read durable cache usage before queue claim");
+                        *reasons.entry("cache_usage_unavailable").or_default() += 1;
+                        break;
+                    }
+                };
+                cache_ceiling.saturating_sub(used_bytes)
+            } else {
+                0
             };
-            let remaining_budget = cache_ceiling.saturating_sub(used_bytes);
-            if remaining_budget <= 0 {
+            if lanes.speculative && remaining_budget <= 0 {
                 tracing::info!(
-                    used_bytes,
+                    remaining_budget,
                     cache_ceiling,
                     "speculative worker stopped at cache budget"
                 );
                 *reasons.entry("cache_budget_full").or_default() += 1;
-                break;
+                // The output lanes publish into the retained registry, which
+                // this budget does not bound; they continue on their own.
+                lanes.speculative = false;
+                if lanes.is_empty() {
+                    break;
+                }
             }
-            let mut capabilities = transcode.pretranscode_capabilities();
+            let output_remaining =
+                i64::try_from(transcode.retained_output_remaining(output_budget))
+                    .unwrap_or(i64::MAX);
+            let capabilities = transcode.pretranscode_capabilities();
             // Requirements carry the estimated complete artifact plus 64 MiB
-            // generation headroom. Advertising only the lesser of physical
-            // scratch and durable budget remainder prevents a claim whose
-            // expected publication is already known not to fit.
-            capabilities.scratch_bytes = capabilities.scratch_bytes.min(remaining_budget);
-            if !capabilities.validate() || capabilities.scratch_bytes == 0 {
+            // generation headroom. Each lane advertises only the lesser of
+            // physical scratch and its own durable remainder, so a claim whose
+            // expected publication is already known not to fit never starts.
+            if capabilities.scratch_bytes == 0 {
                 tracing::warn!(
                     decoders = ?capabilities.decoders,
                     scratch_bytes = capabilities.scratch_bytes,
@@ -9969,12 +10566,16 @@ impl JobManager {
                     .cloned()
                     .collect::<Vec<_>>()
             };
-            let (job, active, fence) = match crate::background_jobs::claim_pretranscode(
+            let allowed = lanes.kinds();
+            let claim = match crate::background_jobs::claim_pretranscode(
                 Arc::clone(&self.store),
                 Arc::clone(&self.job_authority),
                 &transcode,
                 node,
+                &allowed,
                 &capabilities,
+                remaining_budget,
+                output_remaining,
                 &excluded_job_ids,
             )
             .await
@@ -9985,6 +10586,207 @@ impl JobManager {
                     tracing::warn!(%error, "could not claim speculative-transcode work");
                     *reasons.entry("claim_failed").or_default() += 1;
                     break;
+                }
+            };
+            let (job, active, fence) = match claim {
+                crate::background_jobs::PreparationClaim::Encoded(job, active, _admission) => {
+                    let fence = active.fence();
+                    let observation = transcode.copy_preparation_attachment_observation();
+                    let result = {
+                        let operation = async {
+                            let plurx_core::store::background_jobs::JobPayload::EncodedOutputPrepare {
+                                file_id, source_size, source_mtime, reason, ..
+                            } = job.supported_payload().map_err(|_| {
+                                crate::background_jobs::PreparationError::Fail(
+                                    "encoded_payload_unsupported",
+                                )
+                            })?
+                            else {
+                                return Err(crate::background_jobs::PreparationError::Fail(
+                                    "encoded_payload_unsupported",
+                                ));
+                            };
+                            let Some(file) =
+                                crate::transcode::TranscodeManager::claimed_preparation_file(
+                                    self.store.as_ref(),
+                                    file_id,
+                                    source_size,
+                                    source_mtime,
+                                    &fence,
+                                )
+                                .await?
+                            else {
+                                return Ok(false);
+                            };
+                            let item = self
+                                .store
+                                .get_item(file.item_id)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            self.publish_preparation(&file, item.as_ref(), &reason, index)
+                                .await;
+                            let roots = match item {
+                                Some(item) => self
+                                    .store
+                                    .get_library(item.library_id)
+                                    .await
+                                    .map_err(|error| error.to_string())?
+                                    .map(|library| library.paths)
+                                    .unwrap_or_default(),
+                                None => Vec::new(),
+                            };
+                            crate::transcode::pretranscode_source_snapshot(&file, &roots)
+                                .await
+                                .ok_or("encoded source unavailable on owner")?;
+                            transcode
+                                .produce_encoded_output_job(
+                                    &file,
+                                    &job,
+                                    fence.clone(),
+                                    deadline,
+                                    observation,
+                                )
+                                .await
+                        };
+                        // Activity's Stop reaches a running preparation here:
+                        // the watcher polls this every PRODUCER_POLL and
+                        // abandons the operation, and the settle below
+                        // cancels the job instead of yielding it.
+                        crate::background_jobs::watch_copy_preparation(
+                            &fence,
+                            deadline.into(),
+                            || {
+                                !self.stop_producing.load(Ordering::Relaxed)
+                                    && transcode.encoded_preparation_still_idle(observation)
+                            },
+                            operation,
+                        )
+                        .await
+                    };
+                    let reason = self
+                        .settle_output_preparation(
+                            &job,
+                            &fence,
+                            "encoded_output",
+                            result,
+                            fence.loss_token().is_cancelled()
+                                || std::time::Instant::now() >= deadline
+                                || !transcode.encoded_preparation_still_idle(observation),
+                            self.stop_producing.load(Ordering::Relaxed),
+                        )
+                        .await;
+                    match reason {
+                        None => produced += 1,
+                        Some(reason) => {
+                            skipped += 1;
+                            *reasons.entry(reason).or_default() += 1;
+                        }
+                    }
+                    active.finish().await;
+                    continue;
+                }
+                crate::background_jobs::PreparationClaim::Transcode(job, active, fence) => {
+                    (job, active, fence)
+                }
+                crate::background_jobs::PreparationClaim::Copy(job, active, admission) => {
+                    let fence = active.fence();
+                    let observation = transcode.copy_preparation_attachment_observation();
+                    let result = {
+                        let operation = async {
+                            let payload = job.supported_payload().map_err(|_| {
+                                crate::background_jobs::PreparationError::Fail(
+                                    "copy_payload_unsupported",
+                                )
+                            })?;
+                            let plurx_core::store::background_jobs::JobPayload::CopyOutputPrepare {
+                                file_id,
+                                source_size,
+                                source_mtime,
+                                reason,
+                                ..
+                            } = payload
+                            else {
+                                return Err(crate::background_jobs::PreparationError::Fail(
+                                    "copy_payload_unsupported",
+                                ));
+                            };
+                            let Some(file) =
+                                crate::transcode::TranscodeManager::claimed_preparation_file(
+                                    self.store.as_ref(),
+                                    file_id,
+                                    source_size,
+                                    source_mtime,
+                                    &fence,
+                                )
+                                .await?
+                            else {
+                                return Ok(false);
+                            };
+                            let item = self
+                                .store
+                                .get_item(file.item_id)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            self.publish_preparation(&file, item.as_ref(), &reason, index)
+                                .await;
+                            let roots = match item {
+                                Some(item) => self
+                                    .store
+                                    .get_library(item.library_id)
+                                    .await
+                                    .map_err(|error| error.to_string())?
+                                    .map(|library| library.paths)
+                                    .unwrap_or_default(),
+                                None => Vec::new(),
+                            };
+                            // Preserve the existing worker's configured-library
+                            // boundary before the independently held source open.
+                            crate::transcode::pretranscode_source_snapshot(&file, &roots)
+                                .await
+                                .ok_or("copy source unavailable on owner")?;
+                            transcode
+                                .produce_copy_output_job(
+                                    &file,
+                                    &job,
+                                    fence.clone(),
+                                    &admission,
+                                    deadline,
+                                )
+                                .await
+                        };
+                        crate::background_jobs::watch_copy_preparation(
+                            &fence,
+                            deadline.into(),
+                            || {
+                                !self.stop_producing.load(Ordering::Relaxed)
+                                    && transcode
+                                        .copy_preparation_still_idle(&admission, observation)
+                            },
+                            operation,
+                        )
+                        .await
+                    };
+                    let reason = self
+                        .settle_output_preparation(
+                            &job,
+                            &fence,
+                            "copy_output",
+                            result,
+                            fence.loss_token().is_cancelled()
+                                || std::time::Instant::now() >= deadline
+                                || !transcode.copy_preparation_still_idle(&admission, observation),
+                            self.stop_producing.load(Ordering::Relaxed),
+                        )
+                        .await;
+                    match reason {
+                        None => produced += 1,
+                        Some(reason) => {
+                            skipped += 1;
+                            *reasons.entry(reason).or_default() += 1;
+                        }
+                    }
+                    active.finish().await;
+                    continue;
                 }
             };
             let lost = active.fence().loss_token();
@@ -10217,6 +11019,91 @@ impl JobManager {
             self.set_producing(None).await;
         }
         self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
+    }
+
+    /// Settle one copy/encoded output preparation by outcome class. Returns
+    /// `None` when the output was published, else the pass-telemetry reason.
+    /// `Ok(false)` means the callee either settled the row itself (a stop the
+    /// fence then refuses to overwrite) or the staged body lost its exposure
+    /// race; a yield is correct for the latter and harmless for the former.
+    async fn settle_output_preparation(
+        &self,
+        job: &plurx_core::store::background_jobs::BackgroundJob,
+        fence: &crate::background_jobs::JobFence,
+        kind: &'static str,
+        result: Result<bool, crate::background_jobs::PreparationError>,
+        preempted: bool,
+        operator_stopped: bool,
+    ) -> Option<&'static str> {
+        let error = match result {
+            Ok(true) => return None,
+            Ok(false) => crate::background_jobs::PreparationError::Yield("output_not_published"),
+            Err(error) => error,
+        };
+        if operator_stopped {
+            // Activity's Stop on a preparation cancels it (ruling 3 of the
+            // main-merge defects build): this node only, and the title's next
+            // play may queue it again.
+            tracing::info!(job = %job.id, kind, %error, "output preparation stopped by an operator");
+            if let Err(store_error) = fence
+                .settle(plurx_core::store::background_jobs::JobSettlement::Cancel)
+                .await
+            {
+                tracing::warn!(job = %job.id, kind, %store_error, "output preparation cancel failed");
+            }
+            return Some("operator_stopped");
+        }
+        let retry_code = if kind == "encoded_output" {
+            "encoded_output_failed"
+        } else {
+            "copy_output_failed"
+        };
+        let (settlement, reason) = error.settlement(job, retry_code, preempted, clock_ms());
+        let disposition = match &settlement {
+            plurx_core::store::background_jobs::JobSettlement::Yield { .. } => "yield",
+            plurx_core::store::background_jobs::JobSettlement::Retry { .. } => "retry",
+            plurx_core::store::background_jobs::JobSettlement::Fail { .. } => "fail",
+            plurx_core::store::background_jobs::JobSettlement::Stop { .. } => "stop",
+            plurx_core::store::background_jobs::JobSettlement::Cancel => "cancel",
+        };
+        if disposition == "yield" {
+            tracing::debug!(job = %job.id, kind, %error, disposition, "output preparation settled");
+        } else {
+            tracing::warn!(
+                job = %job.id,
+                kind,
+                %error,
+                disposition,
+                failed_attempts = job.failed_attempts,
+                attempt_limit = job.attempt_limit,
+                "output preparation did not publish"
+            );
+        }
+        if let Err(store_error) = fence.settle(settlement).await {
+            tracing::warn!(job = %job.id, kind, %store_error, "output preparation settlement failed");
+        }
+        Some(reason)
+    }
+
+    /// Publish the output preparation this pass is running, so Activity's
+    /// producer banner and its Stop cover it like a speculative title.
+    async fn publish_preparation(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        item: Option<&plurx_core::domain::Item>,
+        reason: &str,
+        index: usize,
+    ) {
+        self.set_producing(Some(ProducingNow {
+            title: item.map_or_else(
+                || file.path.display().to_string(),
+                |item| item.title.clone(),
+            ),
+            reason: reason.to_owned(),
+            index: index + 1,
+            total: PRODUCE_MAX_PER_PASS,
+        }))
+        .await;
     }
 
     fn emit_producer_pass(&self, produced: u64, skipped: u64, reasons: serde_json::Value) {
@@ -10539,27 +11426,6 @@ mod tests {
     }
 
     #[test]
-    fn field_order_backfill_recovers_selected_video_and_marks_missing_or_invalid_unknown() {
-        let stored = r#"{
-            "streams": [
-                {"codec_type":"video","codec_name":"mjpeg","field_order":"progressive","disposition":{"attached_pic":1}},
-                {"codec_type":"video","codec_name":"mpeg2video","field_order":"tt"}
-            ]
-        }"#;
-        assert_eq!(JobManager::field_order_from_stored_probe(stored), "tt");
-        assert_eq!(
-            JobManager::field_order_from_stored_probe(
-                r#"{"streams":[{"codec_type":"video","codec_name":"h264"}]}"#
-            ),
-            "unknown"
-        );
-        assert_eq!(
-            JobManager::field_order_from_stored_probe("not-json"),
-            "unknown"
-        );
-    }
-
-    #[test]
     fn luminance_backfill_reads_stream_facts_without_opening_media() {
         let recovered = stored_luminance(
             r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084","side_data_list":[{"side_data_type":"Content light level metadata","max_content":4000,"max_average":1000},{"side_data_type":"Mastering display metadata","max_luminance":"40000000/10000"}]}]}"#,
@@ -10569,6 +11435,446 @@ mod tests {
         assert_eq!(recovered.mastering_max_luminance, Some(4000));
         assert_eq!(recovered.luminance_source.as_deref(), Some("stream"));
         assert_eq!(stored_luminance("not json").luminance_source, None);
+    }
+
+    /// A file-backed catalogue with one library root and one movie item, for
+    /// driving the first-frame luminance backfill with a stubbed frame read.
+    struct LuminanceFixture {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        database: PathBuf,
+        store: Arc<SqliteStore>,
+        item: i64,
+        jobs: Arc<JobManager>,
+    }
+
+    impl LuminanceFixture {
+        async fn new() -> Self {
+            let dir = tempfile::tempdir().expect("fixture");
+            let root = dir.path().join("library");
+            std::fs::create_dir(&root).expect("library root");
+            let database = dir.path().join("catalogue.sqlite");
+            let store = Arc::new(SqliteStore::open(&database).expect("store"));
+            let library = store
+                .create_library(&NewLibrary {
+                    name: "HDR".to_owned(),
+                    kind: LibraryKind::Movies,
+                    paths: vec![root.clone()],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: "Fixture".to_owned(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let artwork = dir.path().join("artwork");
+            std::fs::create_dir(&artwork).expect("artwork");
+            let store_handle: Arc<dyn Store> = store.clone();
+            let jobs = Arc::new(JobManager::new(store_handle, artwork));
+            Self {
+                _dir: dir,
+                root,
+                database,
+                store,
+                item,
+                jobs,
+            }
+        }
+
+        async fn document_walk_done(&self) {
+            self.store
+                .put_setting(keys::JOB_LUMINANCE_BACKFILL_DONE, "1")
+                .await
+                .expect("document walk done");
+        }
+
+        /// Seed one catalogued file whose on-disk identity matches its row.
+        async fn row(
+            &self,
+            name: &str,
+            hdr: Option<&str>,
+            luminance_source: Option<&str>,
+            transfer: &str,
+        ) -> (i64, PathBuf) {
+            let path = self.root.join(name);
+            std::fs::write(&path, path.to_string_lossy().as_bytes()).expect("media stand-in");
+            let (size, mtime) = scan::file_stat(&path).await.expect("stat");
+            let id = self
+                .store
+                .upsert_file(
+                    self.item,
+                    path.to_str().expect("utf8 path"),
+                    size,
+                    mtime,
+                    &ProbeResult {
+                        hdr: hdr.map(str::to_owned),
+                        luminance_source: luminance_source.map(str::to_owned),
+                        raw_json: Some(format!(
+                            r#"{{"streams":[{{"codec_type":"video","color_transfer":"{transfer}"}}],"path":"{}"}}"#,
+                            path.display()
+                        )),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("file");
+            (id, path)
+        }
+
+        async fn run<F, Fut>(&self, read_frame: F)
+        where
+            F: Fn(PathBuf) -> Fut,
+            Fut: std::future::Future<
+                Output = Result<
+                    Option<plurx_core::scan::probe::FrameLuminance>,
+                    plurx_core::error::ProbeError,
+                >,
+            >,
+        {
+            self.jobs.backfill_frame_luminance_with(read_frame).await;
+        }
+
+        async fn cursor(&self) -> Option<String> {
+            let key = self
+                .jobs
+                .local_job_key(keys::JOB_LUMINANCE_FRAME_BACKFILL_CURSOR);
+            self.store.get_setting(&key).await.expect("cursor")
+        }
+
+        async fn done(&self) -> bool {
+            self.store
+                .get_setting(keys::JOB_LUMINANCE_FRAME_BACKFILL_DONE)
+                .await
+                .expect("stamp")
+                .is_some()
+        }
+
+        async fn file(&self, id: i64) -> MediaFile {
+            self.store.get_file(id).await.expect("read").expect("row")
+        }
+    }
+
+    fn frame(max_cll: i64) -> plurx_core::scan::probe::FrameLuminance {
+        plurx_core::scan::probe::FrameLuminance {
+            max_cll: Some(max_cll),
+            max_fall: Some(612),
+            mastering_max_luminance: Some(4000),
+        }
+    }
+
+    fn refusal(path: &Path) -> plurx_core::error::ProbeError {
+        plurx_core::error::ProbeError::Failed {
+            path: path.display().to_string(),
+            code: Some(1),
+            reason: "Invalid data found when processing input".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_luminance_backfill_reads_none_rows_once_and_stamps_done() {
+        let fixture = LuminanceFixture::new().await;
+        let (sei_id, sei) = fixture
+            .row("sei.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (bare_id, bare) = fixture
+            .row("bare.mkv", Some("hlg"), Some("none"), "arib-std-b67")
+            .await;
+        let (broken_id, broken) = fixture
+            .row("broken.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        // The stored-document walk stamps every unclassified HDR row `none`,
+        // including Dolby Vision whose base layer is neither PQ nor HLG; the
+        // scanner never frame-reads such a stream, so this walk does not.
+        let (dv_id, _) = fixture
+            .row("dv.mkv", Some("dolby_vision"), Some("none"), "bt709")
+            .await;
+        let (stream_id, _) = fixture
+            .row("stream.mkv", Some("hdr10"), Some("stream"), "smpte2084")
+            .await;
+        let (sdr_id, _) = fixture.row("sdr.mkv", None, None, "bt709").await;
+
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let read_frame = {
+            let reads = Arc::clone(&reads);
+            let (sei, broken) = (sei.clone(), broken.clone());
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path.clone());
+                let answer = if path == sei {
+                    Ok(Some(frame(2008)))
+                } else if path == broken {
+                    Err(refusal(&path))
+                } else {
+                    Ok(None)
+                };
+                async move { answer }
+            }
+        };
+
+        // Nothing runs until the stored-document walk has finished: rows it
+        // has not yet classified would otherwise fall behind this cursor.
+        fixture.run(&read_frame).await;
+        assert!(reads.lock().expect("reads").is_empty());
+        fixture.document_walk_done().await;
+
+        fixture.run(&read_frame).await;
+        assert_eq!(
+            *reads.lock().expect("reads"),
+            vec![sei.clone(), bare.clone(), broken.clone()],
+            "only PQ/HLG rows the document left none are read, in id order"
+        );
+        let read = fixture.file(sei_id).await;
+        assert_eq!(
+            (
+                read.max_cll,
+                read.max_fall,
+                read.mastering_max_luminance,
+                read.luminance_source.as_deref()
+            ),
+            (Some(2008), Some(612), Some(4000), Some("frame"))
+        );
+        for id in [bare_id, broken_id, dv_id] {
+            let row = fixture.file(id).await;
+            assert_eq!(row.luminance_source.as_deref(), Some("none"));
+            assert_eq!(row.max_cll, None);
+        }
+        assert_eq!(
+            fixture.file(stream_id).await.luminance_source.as_deref(),
+            Some("stream")
+        );
+        assert_eq!(fixture.file(sdr_id).await.luminance_source, None);
+        assert_eq!(
+            fixture.cursor().await,
+            Some(dv_id.to_string()),
+            "a frame with nothing, a refusal beside successful reads and an \
+             ineligible row all advance the cursor"
+        );
+        assert!(!fixture.done().await);
+
+        // The next tick finds nothing after the cursor and stamps the walk
+        // done; a stamped walk never reads again.
+        fixture.run(&read_frame).await;
+        assert!(fixture.done().await);
+        let key = fixture
+            .jobs
+            .local_job_key(keys::JOB_LUMINANCE_FRAME_BACKFILL_CURSOR);
+        fixture.store.put_setting(&key, "0").await.expect("rewind");
+        fixture.run(&read_frame).await;
+        assert_eq!(reads.lock().expect("reads").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn frame_luminance_backfill_skips_stale_rows_but_waits_for_an_unavailable_root() {
+        let fixture = LuminanceFixture::new().await;
+        fixture.document_walk_done().await;
+        let (changed_id, changed) = fixture
+            .row("changed.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (gone_id, gone) = fixture
+            .row("gone.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (dangling_id, dangling) = fixture
+            .row("dangling.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (kept_id, kept) = fixture
+            .row("kept.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        std::fs::write(&changed, b"a different, longer body than the catalogue saw")
+            .expect("change on disk");
+        std::fs::remove_file(&gone).expect("delete");
+        std::fs::remove_file(&dangling).expect("replace with a link");
+        // A dangling link where the platform has them; elsewhere the row is
+        // simply another deleted file, with the same expected outcome.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(fixture.root.join("missing-target.mkv"), &dangling)
+            .expect("dangling link");
+
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let read_frame = {
+            let reads = Arc::clone(&reads);
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path);
+                async { Ok(None) }
+            }
+        };
+
+        // Unmounted share: the root is an empty directory (a mountpoint with
+        // nothing on it). Nothing is read, nothing is skipped, the cursor
+        // does not move.
+        let parked = fixture.root.with_extension("parked");
+        std::fs::rename(&fixture.root, &parked).expect("unmount");
+        std::fs::create_dir(&fixture.root).expect("empty mountpoint");
+        fixture.run(&read_frame).await;
+        assert_eq!(
+            fixture.cursor().await,
+            None,
+            "an empty mountpoint holds the cursor"
+        );
+        // Missing root entirely: the same.
+        std::fs::remove_dir(&fixture.root).expect("remove mountpoint");
+        fixture.run(&read_frame).await;
+        assert_eq!(
+            fixture.cursor().await,
+            None,
+            "a missing root holds the cursor"
+        );
+        assert!(reads.lock().expect("reads").is_empty());
+
+        // Root back: a changed file is the rescan's, a deleted file and a
+        // dangling link are stale rows the next scan reconciles; all three
+        // advance without a read, and the intact file is read.
+        std::fs::rename(&parked, &fixture.root).expect("remount");
+        fixture.run(&read_frame).await;
+        assert_eq!(*reads.lock().expect("reads"), vec![kept.clone()]);
+        assert_eq!(fixture.cursor().await, Some(kept_id.to_string()));
+        for id in [changed_id, gone_id, dangling_id, kept_id] {
+            assert_eq!(
+                fixture.file(id).await.luminance_source.as_deref(),
+                Some("none")
+            );
+        }
+        fixture.run(&read_frame).await;
+        assert!(fixture.done().await);
+    }
+
+    #[tokio::test]
+    async fn frame_luminance_backfill_does_not_advance_when_the_reader_cannot_read() {
+        use plurx_core::error::ProbeError;
+        let fixture = LuminanceFixture::new().await;
+        fixture.document_walk_done().await;
+        let (first_id, _) = fixture
+            .row("first.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (second_id, _) = fixture
+            .row("second.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+
+        // ffprobe could not run (missing, not executable, exit 126/127) and
+        // ffprobe did not finish (timeout, signal) are not verdicts on a file.
+        let spawn = |_path: PathBuf| async {
+            Err(ProbeError::Spawn("No such file or directory".to_owned()))
+        };
+        fixture.run(spawn).await;
+        assert_eq!(fixture.cursor().await, None, "Spawn stops the page");
+        let transient = |path: PathBuf| async move {
+            Err(ProbeError::Transient {
+                path: path.display().to_string(),
+                reason: "ffprobe exceeded 30 s".to_owned(),
+            })
+        };
+        fixture.run(transient).await;
+        assert_eq!(fixture.cursor().await, None, "Transient stops the page");
+
+        // Every read in a page refused, with more than one attempted, is a
+        // statement about the reader, not about those files.
+        let refuse_all = |path: PathBuf| async move { Err(refusal(&path)) };
+        fixture.run(refuse_all).await;
+        assert_eq!(fixture.cursor().await, None, "an all-refused page holds");
+        assert!(!fixture.done().await);
+
+        // One refusal beside a successful read is a statement about one file.
+        let first = fixture.file(first_id).await.path;
+        let refuse_first = move |path: PathBuf| {
+            let answer = if path == first {
+                Err(refusal(&path))
+            } else {
+                Ok(None)
+            };
+            async move { answer }
+        };
+        fixture.run(&refuse_first).await;
+        assert_eq!(fixture.cursor().await, Some(second_id.to_string()));
+        fixture.run(&refuse_first).await;
+        assert!(fixture.done().await);
+    }
+
+    #[tokio::test]
+    async fn frame_luminance_backfill_stops_on_a_store_error_and_survives_a_fenced_write() {
+        let fixture = LuminanceFixture::new().await;
+        fixture.document_walk_done().await;
+        let (raced_id, raced) = fixture
+            .row("raced.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (refused_id, _) = fixture
+            .row("refused.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        // A store write that fails stops the page where it is.
+        rusqlite::Connection::open(&fixture.database)
+            .expect("trigger connection")
+            .execute_batch(
+                "CREATE TRIGGER refuse_frame BEFORE UPDATE OF luminance_source ON files
+                   WHEN NEW.luminance_source = 'frame'
+                 BEGIN SELECT RAISE(ABORT, 'refused by the fixture'); END;",
+            )
+            .expect("refusing trigger");
+
+        // The first row is rescanned between the listing and the write (its
+        // probe document changes), so its write matches no row: fenced, not
+        // an error, and the trigger never fires for it.
+        let read_frame = {
+            let store = Arc::clone(&fixture.store);
+            let item = fixture.item;
+            let raced = raced.clone();
+            move |path: PathBuf| {
+                let store = Arc::clone(&store);
+                let raced = raced.clone();
+                async move {
+                    if path == raced {
+                        let (size, mtime) = scan::file_stat(&path).await.expect("stat");
+                        store
+                            .upsert_file(
+                                item,
+                                path.to_str().expect("utf8"),
+                                size,
+                                mtime,
+                                &ProbeResult {
+                                    hdr: Some("hdr10".to_owned()),
+                                    luminance_source: Some("none".to_owned()),
+                                    raw_json: Some(
+                                        r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084"}],"rescanned":true}"#
+                                            .to_owned(),
+                                    ),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .expect("concurrent rescan");
+                    }
+                    Ok(Some(frame(1000)))
+                }
+            }
+        };
+        fixture.run(&read_frame).await;
+        let raced_row = fixture.file(raced_id).await;
+        assert_eq!(raced_row.luminance_source.as_deref(), Some("none"));
+        assert_eq!(raced_row.max_cll, None, "the fenced write changed nothing");
+        assert_eq!(
+            fixture.file(refused_id).await.luminance_source.as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            fixture.cursor().await,
+            Some(raced_id.to_string()),
+            "the fenced row advances; the failed write holds the cursor before it"
+        );
+
+        rusqlite::Connection::open(&fixture.database)
+            .expect("trigger connection")
+            .execute_batch("DROP TRIGGER refuse_frame;")
+            .expect("drop trigger");
+        fixture.run(&read_frame).await;
+        let refused_row = fixture.file(refused_id).await;
+        assert_eq!(refused_row.luminance_source.as_deref(), Some("frame"));
+        assert_eq!(refused_row.max_cll, Some(1000));
+        assert_eq!(fixture.cursor().await, Some(refused_id.to_string()));
     }
 
     #[tokio::test]
@@ -10724,6 +12030,173 @@ mod tests {
                 .as_deref(),
             Some("0")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() {
+        use plurx_core::store::{
+            BackgroundJobStore as _, ClusterFragmentIndexStore as _, UserStore as _,
+        };
+        use plurx_core::transcode::CopyVideoOptions;
+
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("shared indexing on");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Viewer demand".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let id = store
+            .upsert_file(
+                item,
+                "/absent/viewer-demand.mkv",
+                100,
+                1,
+                &ProbeResult {
+                    video_codec: Some("h264".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("read file").expect("file");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _playback = transcode.test_mark_live_waiting();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let consumer = tokio::spawn(
+            Arc::clone(&jobs)
+                .background_work_loop_with_ready(Arc::clone(&transcode), Some(ready_tx)),
+        );
+        // Measure the wake path from a subscribed worker.
+        ready_rx.await.expect("analysis worker subscribed");
+        let request = enqueue_copy_preparation(
+            store.as_ref(),
+            "test-node",
+            &file,
+            CopyVideoOptions::new(false, false),
+        )
+        .await
+        .expect("enqueue");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            store
+                .analysis_request(&request.request_id)
+                .await
+                .expect("read")
+                .expect("row")
+                .attempts,
+            0,
+            "busy playback must leave maintenance unclaimed"
+        );
+        let user = store
+            .create_user("busy-source-viewer", "hash", false)
+            .await
+            .expect("viewer");
+        enqueue_copy_preparation_for_object_with_viewer(
+            store.as_ref(),
+            "test-node",
+            &file,
+            CopyVideoOptions::new(false, false),
+            None,
+            Some(&PlaybackViewerDemand {
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: user.id,
+                },
+                playback_id: "busy-source-playback".into(),
+            }),
+        )
+        .await
+        .expect("join requesting viewer");
+        assert!(
+            jobs.analysis_source_may_continue(&transcode, Some(&request))
+                .await,
+            "any live request waiter permits the source read on a busy node"
+        );
+        assert!(
+            !jobs.analysis_source_may_continue(&transcode, None).await,
+            "ordinary maintenance still yields"
+        );
+        let admitted = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current = store
+                    .analysis_request(&request.request_id)
+                    .await
+                    .expect("request read")
+                    .expect("request kept");
+                if current.fence > 0 {
+                    break current;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        consumer.abort();
+        let _ = consumer.await;
+        assert!(
+            admitted.is_ok(),
+            "a busy worker must admit a source read with any live request waiter: {:?}",
+            store.analysis_request(&request.request_id).await
+        );
+        let interest = plurx_core::store::AnalysisViewerInterest {
+            analysis_request_id: request.request_id.clone(),
+            requested_generation: request.requested_generation.clone(),
+            pipeline_version: request.pipeline_version.clone(),
+            video_identity: request.video_identity.clone(),
+            target_node_id: request.target_node_id.clone(),
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
+            playback_id: "busy-source-playback".into(),
+            now_ms: clock_ms(),
+        };
+        store
+            .cancel_waiter(plurx_core::store::background_jobs::CancelWaiter {
+                scope: "playback-analysis".into(),
+                request_id: interest.consumer_id(),
+                now_ms: clock_ms(),
+            })
+            .await
+            .expect("retire viewer");
+        let lost = tokio_util::sync::CancellationToken::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            jobs.wait_for_cluster_fragment_index_stop(
+                &transcode,
+                Some(&request),
+                &lost,
+                &AnalysisAttestationBudget::default(),
+            ),
+        )
+        .await
+        .expect("departed viewer stops source attestation");
+        assert!(!lost.is_cancelled(), "viewer departure is not claim loss");
     }
 
     #[tokio::test(start_paused = true)]
@@ -11063,6 +12536,38 @@ mod tests {
         assert!(rendered.contains("plurx_analysis_lease_total{event=\"renewed\"} 1"));
         assert!(rendered.contains("plurx_analysis_lease_total{event=\"outcome_write_lost\"} 1"));
         assert!(rendered.contains("plurx_analysis_lease_total{event=\"lost\"} 0"));
+    }
+
+    #[test]
+    fn playback_contention_timeouts_do_not_exhaust_analysis_attempts() {
+        let budget = AnalysisAttestationBudget::default();
+        assert_eq!(
+            budget.deadline_failure(false),
+            AnalysisResolutionError::Retry {
+                code: "source_attestation_timeout",
+                charge_attempt: true,
+            }
+        );
+        budget.observe_busy(true);
+        budget.observe_busy(false);
+        for _ in 0..10 {
+            assert_eq!(
+                budget.deadline_failure(false),
+                AnalysisResolutionError::Retry {
+                    code: "source_attestation_timeout",
+                    charge_attempt: false,
+                },
+                "contention remains uncharged even after the viewer stops"
+            );
+        }
+        assert_eq!(
+            AnalysisAttestationBudget::default().deadline_failure(true),
+            AnalysisResolutionError::Retry {
+                code: "source_attestation_timeout",
+                charge_attempt: false,
+            },
+            "a newly busy node at the deadline also stays uncharged"
+        );
     }
 
     #[test]
@@ -12009,7 +13514,7 @@ mod tests {
         a_tick.expect("tick a");
         b_tick.expect("tick b");
         c_tick.expect("tick c");
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(PROVIDER_LIVENESS, entered.notified())
             .await
             .expect("winning provider pass started");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -12019,7 +13524,7 @@ mod tests {
             "three real scheduler ticks must dispatch one provider pass"
         );
         release.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(PROVIDER_LIVENESS, async {
             while a.retrying_artwork.load(Ordering::Relaxed)
                 || b.retrying_artwork.load(Ordering::Relaxed)
                 || c.retrying_artwork.load(Ordering::Relaxed)
@@ -12149,11 +13654,162 @@ mod tests {
             .with_cache(cache_root, "test-ffmpeg".to_owned(), "test-node".to_owned()),
         );
 
-        Arc::clone(&jobs).work_pretranscode_queue(transcode).await;
+        Arc::clone(&jobs)
+            .work_pretranscode_queue(transcode, crate::background_jobs::PreparationLanes::ALL)
+            .await;
         assert!(
             !orphan.exists(),
             "a producer-enabled node did not maintain its local cache on an empty queue"
         );
+    }
+
+    // ---- D2 (main-merge defects 2026-10-04): preparation lanes ----------
+
+    async fn d2_lanes(settings: &[(&str, &str)]) -> crate::background_jobs::PreparationLanes {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        for (key, value) in settings {
+            store.put_setting(key, value).await.expect("setting");
+        }
+        let artwork = crate::test_tempdir().expect("artwork");
+        let jobs = manager(store, artwork.path());
+        let lanes = jobs.preparation_lanes().await;
+        jobs.executable_lanes(lanes).await
+    }
+
+    #[tokio::test]
+    async fn output_preparation_runs_with_schedule_off_when_enabled() {
+        use plurx_core::store::background_jobs::JobKind;
+        let lanes = d2_lanes(&[(keys::VOD_OUTPUT_PREPARATION, "copy")]).await;
+        assert!(!lanes.speculative, "discovery stays at its default, never");
+        assert_eq!(
+            lanes.kinds(),
+            vec![JobKind::CopyOutputPrepare],
+            "viewer-demand preparation has an executor with the schedule off"
+        );
+        let both = d2_lanes(&[(keys::VOD_OUTPUT_PREPARATION, "copy_and_encoded")]).await;
+        assert_eq!(
+            both.kinds(),
+            vec![JobKind::CopyOutputPrepare, JobKind::EncodedOutputPrepare]
+        );
+    }
+
+    #[tokio::test]
+    async fn viewer_demand_kinds_never_claim_transcode_prepare_with_schedule_off() {
+        use plurx_core::store::background_jobs::JobKind;
+        let lanes = d2_lanes(&[(keys::VOD_OUTPUT_PREPARATION, "copy_and_encoded")]).await;
+        assert!(
+            !lanes.kinds().contains(&JobKind::TranscodePrepare),
+            "opening the output lanes must not open the speculative one"
+        );
+        let claim = include_str!("background_jobs.rs");
+        let transcode_branch = claim
+            .split("let JobPayload::TranscodePrepare {")
+            .nth(1)
+            .expect("the speculative branch");
+        assert!(
+            transcode_branch.contains("if !kinds.contains(&JobKind::TranscodePrepare)"),
+            "the claim filter refuses speculative rows when their lane is closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_preparation_off_neither_enqueues_nor_claims() {
+        use plurx_core::store::background_jobs::JobKind;
+        let lanes = d2_lanes(&[(keys::JOB_CACHE_PRODUCE_MINS, "60")]).await;
+        assert!(lanes.speculative, "the schedule is on");
+        assert_eq!(
+            lanes.kinds(),
+            vec![JobKind::TranscodePrepare],
+            "with the switch absent, no output kind is claimed even with the schedule on"
+        );
+        let off = crate::vodserve::OutputPreparation::parse(None);
+        assert_eq!(off, crate::vodserve::OutputPreparation::Off);
+        assert!(
+            !off.admits(false) && !off.admits(true),
+            "and a VOD start enqueues nothing"
+        );
+        let copy = crate::vodserve::OutputPreparation::parse(Some("copy"));
+        assert!(copy.admits(false) && !copy.admits(true));
+        assert_eq!(
+            crate::vodserve::OutputPreparation::parse(Some("bogus")),
+            off
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_and_encoded_preparation_publish_producing_now() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = crate::test_tempdir().expect("artwork");
+        let jobs = manager(store, artwork.path());
+        let source = artwork.path().join("Heat.mkv");
+        std::fs::write(&source, b"heat").expect("source");
+        let file = crate::subtitle_ride_along::synthetic_media_file(&source, 1_000).expect("file");
+        jobs.publish_preparation(&file, None, "recent_demand", 0)
+            .await;
+        let now = jobs.producing_now().await.expect("published");
+        let title = source.display().to_string();
+        assert_eq!(
+            (now.title.as_str(), now.reason.as_str(), now.index),
+            (title.as_str(), "recent_demand", 1)
+        );
+        // Both branches publish, so the banner and its Stop cover them.
+        let source = include_str!("state.rs");
+        // Formatting may split the call from its await; both production paths
+        // must still publish through this owner.
+        let call = concat!(
+            "self.publish_preparation(",
+            "&file, item.as_ref(), &reason, index)"
+        );
+        assert_eq!(source.matches(call).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn cachekeep_sweep_runs_only_with_the_schedule_on() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("empty queue store"));
+        store
+            .put_setting(keys::CACHE_MAX_GB, "50")
+            .await
+            .expect("enable cache");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let cache = crate::test_tempdir().expect("cache");
+        let cache_root = cache.path().join("transcode");
+        let recipe = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let orphan = cache_root
+            .join("ee")
+            .join(format!("{recipe}-j00000000-0000-4000-8000-000000000304-f1"));
+        tokio::fs::create_dir_all(&orphan).await.expect("orphan");
+        tokio::fs::write(orphan.join("index.m3u8"), b"unbound")
+            .await
+            .expect("orphan bytes");
+        let shared: Arc<dyn Store> = store;
+        let jobs = manager(Arc::clone(&shared), artwork.path());
+        let transcode = Arc::new(
+            TranscodeManager::new(
+                shared,
+                cache.path().join("work"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_decoders(vec!["h264".to_owned()])
+            .with_cache(cache_root, "test-ffmpeg".to_owned(), "test-node".to_owned()),
+        );
+        Arc::clone(&jobs)
+            .work_pretranscode_queue(
+                Arc::clone(&transcode),
+                crate::background_jobs::PreparationLanes {
+                    speculative: false,
+                    output: crate::vodserve::OutputPreparation::CopyAndEncoded,
+                },
+            )
+            .await;
+        assert!(
+            orphan.exists(),
+            "output preparation alone does not sweep the pre-transcode cache"
+        );
+        Arc::clone(&jobs)
+            .work_pretranscode_queue(transcode, crate::background_jobs::PreparationLanes::ALL)
+            .await;
+        assert!(!orphan.exists(), "the speculative lane maintains its cache");
     }
 
     fn targeted_show_tmdb(
@@ -12233,6 +13889,14 @@ mod tests {
             }),
         )
     }
+
+    /// How long the blocking-provider tests wait for something that must
+    /// happen. Each wait is either liveness (the pass reached the provider,
+    /// the owner let go) or proves the other side was not held by a provider
+    /// that never answers until the test releases it, so a longer bound
+    /// proves the same thing. Two seconds failed on loaded CI runners, where
+    /// the whole suite took 900 s, while the same tests pass locally in 0.3 s.
+    const PROVIDER_LIVENESS: std::time::Duration = std::time::Duration::from_secs(30);
 
     fn blocking_season_tmdb(
         season_hits: Arc<AtomicUsize>,
@@ -13874,8 +15538,13 @@ mod tests {
             let transcode = Arc::clone(&transcode);
             let lost = lost.clone();
             tokio::spawn(async move {
-                jobs.wait_for_cluster_fragment_index_stop(&transcode, &lost)
-                    .await;
+                jobs.wait_for_cluster_fragment_index_stop(
+                    &transcode,
+                    None,
+                    &lost,
+                    &AnalysisAttestationBudget::default(),
+                )
+                .await;
                 lost.is_cancelled()
             })
         };
@@ -15148,15 +16817,12 @@ mod tests {
         let jobs = manager_with_tmdb(store, artwork.path(), &base);
 
         let first = tokio::spawn(Arc::clone(&jobs).artwork_retry_pass());
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(PROVIDER_LIVENESS, entered.notified())
             .await
             .expect("first pass reached provider");
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            Arc::clone(&jobs).artwork_retry_pass(),
-        )
-        .await
-        .expect("second pass returned");
+        tokio::time::timeout(PROVIDER_LIVENESS, Arc::clone(&jobs).artwork_retry_pass())
+            .await
+            .expect("second pass returned");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         release.notify_waiters();
         first.await.expect("first pass task");
@@ -15193,14 +16859,11 @@ mod tests {
             Pipeline::Cpu,
         ));
 
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            jobs.run_due_jobs(&transcode),
-        )
-        .await
-        .expect("scheduler returned while artwork was blocked")
-        .expect("scheduler tick");
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(PROVIDER_LIVENESS, jobs.run_due_jobs(&transcode))
+            .await
+            .expect("scheduler returned while artwork was blocked")
+            .expect("scheduler tick");
+        tokio::time::timeout(PROVIDER_LIVENESS, entered.notified())
             .await
             .expect("artwork reached provider");
         let cleanup_key = jobs.local_job_key(keys::JOB_LAST_TRANSCODE_CLEANUP);
@@ -15236,7 +16899,7 @@ mod tests {
         assert!(other.job_stamp(&other_key).await.is_some());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         release.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(PROVIDER_LIVENESS, async {
             while jobs.retrying_artwork.load(Ordering::Relaxed) {
                 tokio::task::yield_now().await;
             }

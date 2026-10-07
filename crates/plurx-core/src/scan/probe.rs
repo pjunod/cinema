@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::domain::{AudioStream, DolbyVisionFacts, ProbeResult, SubtitleStream};
+use crate::domain::{
+    normalize_source_channel_layout, AudioStream, DolbyVisionFacts, ProbeResult, SubtitleStream,
+};
 use crate::error::ProbeError;
 
 /// The ffprobe binary name; overridable via `PLURX_FFPROBE` for jellyfin-ffmpeg
@@ -329,7 +331,12 @@ async fn probe_with_threads(
     // HLG base layer; `detect_hdr` intentionally labels that stream DOVI first,
     // but that label must not suppress the bounded frame observation.
     if result.luminance_source.as_deref() == Some("none") {
-        if let Some(frame) = probe_first_frame_luminance(path, threads).await {
+        // A failed frame read leaves the stream observation (`none`) in place:
+        // the scan's job is the stream document, and a later probe document
+        // is what earns the file another look.
+        if let Ok(frame) =
+            probe_first_frame_luminance(path, threads, "library scan luminance probe").await
+        {
             apply_frame_luminance(&mut result, &frame);
         }
     }
@@ -343,7 +350,45 @@ async fn probe_with_threads(
     Ok(result)
 }
 
-async fn probe_first_frame_luminance(path: &Path, threads: Option<usize>) -> Option<Value> {
+/// Peak luminance read from the first decoded frame's side data — the only
+/// place an HEVC stream that carries MDCV/CLL as SEI exposes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameLuminance {
+    pub max_cll: Option<i64>,
+    pub max_fall: Option<i64>,
+    pub mastering_max_luminance: Option<i64>,
+}
+
+/// The scanner's bounded first-frame luminance read, for a file already in
+/// the catalog: one frame of the first playable video, one thread, the same
+/// 30 s / 256 KiB bounds and the background child class.
+///
+/// `Ok(None)` is an observation — the frame carries no luminance record.
+/// `Err` means the read did not happen (the file could not be opened or
+/// decoded, or the child did not finish), which is not the same claim.
+pub async fn first_frame_luminance(
+    path: &Path,
+    purpose: &'static str,
+) -> Result<Option<FrameLuminance>, ProbeError> {
+    let document = probe_first_frame_luminance(path, Some(1), purpose).await?;
+    Ok(frame_luminance_from(&document))
+}
+
+fn frame_luminance_from(document: &Value) -> Option<FrameLuminance> {
+    let mut observed = ProbeResult::default();
+    apply_frame_luminance(&mut observed, document);
+    (observed.luminance_source.as_deref() == Some("frame")).then_some(FrameLuminance {
+        max_cll: observed.max_cll,
+        max_fall: observed.max_fall,
+        mastering_max_luminance: observed.mastering_max_luminance,
+    })
+}
+
+async fn probe_first_frame_luminance(
+    path: &Path,
+    threads: Option<usize>,
+    purpose: &'static str,
+) -> Result<Value, ProbeError> {
     let output = crate::process::bounded::output(
         ffprobe_bin(),
         &[
@@ -366,14 +411,57 @@ async fn probe_first_frame_luminance(path: &Path, threads: Option<usize>) -> Opt
         ],
         FRAME_LUMINANCE_PROBE_TIMEOUT,
         FRAME_LUMINANCE_PROBE_MAX_BYTES,
-        crate::process::ChildWork::background("library scan luminance probe"),
+        crate::process::ChildWork::background(purpose),
     )
     .await
-    .ok()?;
+    .map_err(|error| frame_read_io_failure(path, &error))?;
     if !output.status.success() {
-        return None;
+        return Err(frame_read_exit_failure(
+            path,
+            output.status.code(),
+            &output.stderr,
+        ));
     }
-    serde_json::from_slice(&output.stdout).ok()
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| ProbeError::Parse(format!("ffprobe frame json: {error}")))
+}
+
+/// The bounded launcher's own error: it either never started the child or
+/// stopped it. A wall-time or cancellation stop is `Transient`; anything
+/// else came from starting it (not found, permission, exec format) and is
+/// `Spawn`. Neither is a verdict on the file.
+fn frame_read_io_failure(path: &Path, error: &std::io::Error) -> ProbeError {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted => ProbeError::Transient {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        },
+        _ => ProbeError::Spawn(error.to_string()),
+    }
+}
+
+/// A non-zero exit. 126 and 127 are the exec convention for "found but not
+/// executable" and "not found" — what a wrapper or launcher in front of
+/// ffprobe reports when ffprobe itself never ran — so they are `Spawn`, the
+/// missing-binary root cause. No exit code means a signal ended the child
+/// (the OOM killer, an operator), which is `Transient`. Any other code is
+/// ffprobe's refusal of this input: `Failed`.
+fn frame_read_exit_failure(path: &Path, code: Option<i32>, stderr: &[u8]) -> ProbeError {
+    let reason = probe_failure_reason(stderr);
+    match code {
+        Some(code @ (126 | 127)) => ProbeError::Spawn(format!(
+            "ffprobe could not be executed (exit {code}): {reason}"
+        )),
+        None => ProbeError::Transient {
+            path: path.display().to_string(),
+            reason: format!("ffprobe was killed by a signal: {reason}"),
+        },
+        code => ProbeError::Failed {
+            path: path.display().to_string(),
+            code,
+            reason,
+        },
+    }
 }
 
 /// Pure parser over ffprobe JSON — unit-testable without spawning anything.
@@ -430,6 +518,10 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
                     index: audio_i,
                     codec: str_field(stream, "codec_name").unwrap_or_default(),
                     channels: int_field(stream, "channels"),
+                    channel_layout: stream
+                        .get("channel_layout")
+                        .and_then(Value::as_str)
+                        .and_then(normalize_source_channel_layout),
                     sample_rate: str_field(stream, "sample_rate")
                         .and_then(|rate| rate.parse::<i64>().ok())
                         .filter(|rate| *rate > 0),
@@ -454,7 +546,33 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
             _ => {}
         }
     }
+    // A parsed probe always answers the field-order question. FFprobe omits
+    // the key when its decoder did not set one (typical for HEVC, and every
+    // audio-only file has no video stream to ask), and that absence is a
+    // probed fact, not missing work: it is spelled `unknown` here, once, so
+    // the SQLite and Hiqlite upserts and the background-job facts document
+    // all store the token the stored-probe backfill writes for the same
+    // bytes. `NULL` in `files.field_order` is then reserved for a row whose
+    // probe has never been parsed.
+    if result.field_order.is_none() {
+        result.field_order = Some(crate::domain::FIELD_ORDER_UNKNOWN.to_owned());
+    }
     result
+}
+
+/// The field-order token the scanner would store for a retained probe
+/// document, recovered without reopening any media.
+///
+/// [`parse_probe_json`] owns the "probed, no field order" spelling, so a
+/// stored-probe backfill and a fresh scan agree by construction. A retained
+/// document that no longer parses was still a probed row and receives the
+/// same [`crate::domain::FIELD_ORDER_UNKNOWN`]; the normal scan remains the
+/// only path that can improve the fact.
+pub fn field_order_from_stored_probe(probe_json: &str) -> String {
+    serde_json::from_str::<Value>(probe_json)
+        .ok()
+        .and_then(|value| parse_probe_json(&value).field_order)
+        .unwrap_or_else(|| crate::domain::FIELD_ORDER_UNKNOWN.to_owned())
 }
 
 fn apply_stream_luminance(result: &mut ProbeResult, stream: &Value) {
@@ -1022,6 +1140,57 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn source_channel_layout_is_bounded_opaque_and_never_inferred() {
+        let cases = [
+            (json!(" 5.1 "), Some("5.1")),
+            (json!("5.1(side)"), Some("5.1(side)")),
+            (json!("future-layout"), Some("future-layout")),
+            (json!(""), None),
+            (json!(" UNKNOWN "), None),
+            (json!("n/A"), None),
+            (json!("5.1\n"), None),
+            (json!("x".repeat(257)), None),
+            (json!(6), None),
+            (json!(["FL", "FR"]), None),
+            (json!({"name": "5.1"}), None),
+            (json!(null), None),
+        ];
+        for (layout, expected) in cases {
+            let document = json!({"streams": [{
+                "codec_type": "audio", "codec_name": "aac", "channels": 6,
+                "channel_layout": layout,
+            }]});
+            let result = parse_probe_json(&document);
+            assert_eq!(result.audio_streams[0].channel_layout.as_deref(), expected);
+            assert_eq!(result.audio_streams[0].channels, Some(6));
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    result.raw_json.as_deref().expect("retained raw probe")
+                )
+                .expect("raw probe JSON"),
+                document
+            );
+            let stored = json!({"index": 0, "codec": "aac", "channels": 6,
+                "channel_layout": document["streams"][0]["channel_layout"],
+                "language": null, "title": null, "default": false});
+            let restored: AudioStream = serde_json::from_value(stored).expect("stored audio fact");
+            assert_eq!(restored.channel_layout.as_deref(), expected);
+        }
+        let legacy = json!({"index": 0, "codec": "aac", "channels": 6,
+            "language": null, "title": null, "default": false});
+        let restored: AudioStream = serde_json::from_value(legacy).expect("legacy audio fact");
+        assert_eq!(restored.channel_layout, None);
+        assert!(serde_json::to_value(restored)
+            .expect("serialize legacy audio fact")
+            .get("channel_layout")
+            .is_none());
+        let result = parse_probe_json(&json!({"streams": [{
+            "codec_type": "audio", "channels": 6,
+        }]}));
+        assert_eq!(result.audio_streams[0].channel_layout, None);
+    }
+
+    #[test]
     fn parses_hdr10_movie() {
         let j = json!({
             "format": { "duration": "7200.5", "bit_rate": "25000000" },
@@ -1091,6 +1260,72 @@ pub(crate) mod tests {
         assert_eq!(result.max_cll, Some(1000));
         assert_eq!(result.max_fall, Some(400));
         assert_eq!(result.luminance_source.as_deref(), Some("frame"));
+    }
+
+    #[test]
+    fn a_frame_read_failure_is_a_file_verdict_only_when_ffprobe_ran() {
+        let path = Path::new("/media/title.mkv");
+        let refused = frame_read_exit_failure(path, Some(1), b"Invalid data found");
+        assert!(matches!(refused, ProbeError::Failed { code: Some(1), .. }));
+        assert!(refused.is_file_verdict());
+        for code in [126, 127] {
+            let unrunnable = frame_read_exit_failure(path, Some(code), b"");
+            assert!(matches!(unrunnable, ProbeError::Spawn(_)), "exit {code}");
+            assert!(!unrunnable.is_file_verdict());
+        }
+        let killed = frame_read_exit_failure(path, None, b"");
+        assert!(matches!(killed, ProbeError::Transient { .. }));
+        assert!(!killed.is_file_verdict());
+
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+        ] {
+            let error = frame_read_io_failure(path, &Error::new(kind, "spawn"));
+            assert!(matches!(error, ProbeError::Spawn(_)), "{kind:?}");
+            assert!(!error.is_file_verdict());
+        }
+        for kind in [ErrorKind::TimedOut, ErrorKind::Interrupted] {
+            let error = frame_read_io_failure(path, &Error::new(kind, "stopped"));
+            assert!(matches!(error, ProbeError::Transient { .. }), "{kind:?}");
+            assert!(!error.is_file_verdict());
+        }
+        assert!(ProbeError::Parse("truncated".into()).is_file_verdict());
+    }
+
+    #[test]
+    fn a_catalogued_file_frame_read_reports_only_what_the_frame_carries() {
+        assert_eq!(
+            frame_luminance_from(&json!({"frames": [{"side_data_list": [
+                {"side_data_type": "Mastering display metadata",
+                 "max_luminance": "40000000/10000"},
+                {"side_data_type": "Content light level metadata",
+                 "max_content": 2008, "max_average": 612}
+            ]}]})),
+            Some(FrameLuminance {
+                max_cll: Some(2008),
+                max_fall: Some(612),
+                mastering_max_luminance: Some(4000),
+            })
+        );
+        // A frame with only unrelated side data, a zero CLL (which the
+        // scanner ignores) or no frame at all is an observation of nothing.
+        assert_eq!(
+            frame_luminance_from(&json!({"frames": [{"side_data_list": [
+                {"side_data_type": "H.26[45] User Data Unregistered SEI message"}
+            ]}]})),
+            None
+        );
+        assert_eq!(
+            frame_luminance_from(&json!({"frames": [{"side_data_list": [
+                {"side_data_type": "Content light level metadata",
+                 "max_content": 0, "max_average": 0}
+            ]}]})),
+            None
+        );
+        assert_eq!(frame_luminance_from(&json!({"frames": []})), None);
     }
 
     #[test]
@@ -1446,6 +1681,80 @@ pub(crate) mod tests {
             crate::domain::ScanType::from_field_order(probe.field_order.as_deref()),
             crate::domain::ScanType::Interlaced(crate::domain::FieldOrder::Tff)
         );
+    }
+
+    #[test]
+    fn a_parsed_probe_without_a_field_order_reports_unknown_not_absent() {
+        // HEVC: FFprobe omits `field_order` when the decoder left it unset.
+        let hevc = json!({
+            "streams": [
+                { "codec_type": "video", "codec_name": "hevc", "width": 3840, "height": 2160 },
+                { "codec_type": "audio", "codec_name": "eac3", "channels": 6 }
+            ]
+        });
+        assert_eq!(
+            parse_probe_json(&hevc).field_order.as_deref(),
+            Some("unknown")
+        );
+        // Audio-only: no video stream to ask, still a probed row. This is the
+        // token the stored-probe backfill has always written for these rows.
+        let audio_only = json!({
+            "streams": [ { "codec_type": "audio", "codec_name": "flac", "channels": 2 } ]
+        });
+        assert_eq!(
+            parse_probe_json(&audio_only).field_order.as_deref(),
+            Some("unknown")
+        );
+        // Cover art alone is not a playable video and does not lend its token.
+        let cover_only = json!({
+            "streams": [
+                { "codec_type": "video", "codec_name": "mjpeg", "field_order": "progressive",
+                  "disposition": { "attached_pic": 1 } }
+            ]
+        });
+        assert_eq!(
+            parse_probe_json(&cover_only).field_order.as_deref(),
+            Some("unknown")
+        );
+        // An empty token is no token.
+        let empty = json!({
+            "streams": [ { "codec_type": "video", "codec_name": "h264", "field_order": "" } ]
+        });
+        assert_eq!(
+            parse_probe_json(&empty).field_order.as_deref(),
+            Some("unknown")
+        );
+        // And the decision reader is unchanged by the spelling.
+        assert_eq!(
+            crate::domain::ScanType::from_field_order(
+                parse_probe_json(&hevc).field_order.as_deref()
+            ),
+            crate::domain::ScanType::from_field_order(None)
+        );
+    }
+
+    #[test]
+    fn stored_probe_recovery_agrees_with_the_scanner_token() {
+        let stored = r#"{
+            "streams": [
+                {"codec_type":"video","codec_name":"mjpeg","field_order":"progressive","disposition":{"attached_pic":1}},
+                {"codec_type":"video","codec_name":"mpeg2video","field_order":"tt"}
+            ]
+        }"#;
+        assert_eq!(field_order_from_stored_probe(stored), "tt");
+        for document in [
+            r#"{"streams":[{"codec_type":"video","codec_name":"hevc"}]}"#,
+            r#"{"streams":[{"codec_type":"audio","codec_name":"flac"}]}"#,
+            r#"{"streams":[{"codec_type":"video","codec_name":"h264","field_order":"progressive"}]}"#,
+        ] {
+            let scanned = parse_probe_json(&serde_json::from_str(document).expect("json"));
+            assert_eq!(
+                Some(field_order_from_stored_probe(document)),
+                scanned.field_order,
+                "{document}"
+            );
+        }
+        assert_eq!(field_order_from_stored_probe("not-json"), "unknown");
     }
 
     #[test]

@@ -22,7 +22,7 @@ test refuses any reference in the repo to a `docs/` path that does not exist.
 ## Where the web app is
 
 `crates/plurxd/src/web/index.html` is a 97-line shell of markup and tags. The
-app itself is the seventy-one files
+app itself is the seventy-three files
 [docs/clients/WEB-SHELL-LAYOUT.md](docs/clients/WEB-SHELL-LAYOUT.md) maps —
 open that before grepping the shell for a function that is not in it. Adding a
 file means the file, a row in `WEB_ASSETS`, a tag in the shell and a row in
@@ -30,17 +30,35 @@ that table, all in one commit; three tests fail otherwise. They are plain
 scripts in one global scope, so served order is load order, and `export` /
 `import` / `module.exports` do not belong in any of them.
 
+## The public mirror names no real infrastructure
+
+The repository is pushed to a public mirror, so hosts, LAN addresses, home
+directories and SSH users are written with neutral names: `media1`,
+`lab1`–`lab6`, `maca`/`macb`, `nas`, `jump1`, `10.42.x.y`, `forge.lan:3000`,
+`~` and `operator@`. `scripts/scrub-infra-names` holds the mapping and its context
+rules; `--write` rewrites the tree, `--check` lists what is left, and
+`tests/operations/test_infra_names.py` runs the check in
+`make operations-check`. A literal that truly must stay goes in
+`scripts/scrub-infra-names.allow.toml` with its reason. Tools that need the
+real lab take it from a git-ignored `scripts/*.fleet.json` (or a path given
+on the command line) shaped like the committed `*.fleet.example.json`.
+
 ## Optional features and the Developer tab
 
-There are no feature gates: an optional or unfinished feature gets an
-explicit switch in Settings → Developer with advisory readiness that never
-disables the switch, rejects its Save, or overrides the saved choice.
+There are no feature gates. An optional or unfinished feature gets an
+explicit switch in Settings → Developer **only where manual enable/disable
+has a meaningful purpose** (Paul clarified 2026-09-30). Advisory readiness
+never disables the switch, rejects its Save, or overrides the saved choice.
+Internal correctness fixes and automatic infrastructure do not acquire
+gratuitous toggles merely because implementation or acceptance is unfinished;
+their Developer entries can explain read-only facts and remaining evidence.
 Developer is where a feature waits while it is not fully active or not fully
 tested, and each card says what it is waiting on (`devGraduation` in
 `web/pages/settings-developer.js`; `tests/web/settings-sections.test.js`
 enforces it). When the feature is done it leaves Developer — to its proper
-settings section if a permanent on/off makes sense, otherwise the toggle is
-removed and the feature is simply on. The rule and the current audit are in
+settings section if a permanent on/off makes sense, otherwise the advisory
+card (and any temporary toggle) is removed and the feature is simply on.
+The rule and the current audit are in
 [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
 
 ## Rust compile loop
@@ -68,9 +86,13 @@ test failures, or denied lints.
 - Integrate a multi-task project on one temporary `effort/<project>` branch.
 - Base each reviewable task branch on the current effort and open its pull
   request back into that effort.
-- Treat `Effort development gate` as blocking. It proves policy, formatting,
-  static web contracts, and affected Rust/Apple/Android compilation; it does
-  not make the branch releasable.
+- Dispatch `Effort development gate` by hand before merging a task into the
+  effort, and do not merge on a red run. `.github/workflows/effort-ci.yml`
+  runs only on `workflow_dispatch`: nothing fires it on a task pull request,
+  so it gates a merge only when someone runs it first. It proves policy,
+  formatting, static web contracts, and affected Rust/Apple/Android
+  compilation; it does not run the Rust, Apple or Android unit suites and
+  does not make the branch releasable.
 - Run the smallest focused regression for changed behavior locally and record
   that command in the task pull request. The effort workflow deliberately
   defers the full suites.

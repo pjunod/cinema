@@ -472,6 +472,7 @@ mod tests {
             },
         };
         DecisionResponse {
+            measured_candidate_outputs: None,
             display_aware_auto_protocol: Some("route-v1".into()),
             quality_candidate_id: Some(plurx_core::playback::candidate::CandidateId([4; 16])),
             quality_candidates: Some(vec![]),
@@ -487,7 +488,7 @@ mod tests {
                         channels: 2,
                     },
                     downmix: None,
-                    reason: "fixture",
+                    reason: "fixture".into(),
                 },
                 preserve_dolby_vision: true,
                 convert_dolby_vision: true,

@@ -12,6 +12,7 @@
 //! graphs that keeps frames on the GPU. Which a node uses is decided by probe,
 //! not by version (PERF-PLAN §5).
 
+mod avc_qualification;
 mod decode;
 pub mod decoder_inventory;
 pub mod dvconvert;
@@ -24,6 +25,7 @@ pub mod progress;
 mod recipe;
 mod vod;
 
+pub use avc_qualification::QualifiedSdrAvc;
 pub use decode::{
     plan_can_name_decoder, resolve_transcode, ArtifactQualification, AttemptRestrictions,
     AutoQualityRateProfile, CapabilityStatus, DecodeBackend, DecodeCacheIdentity,
@@ -33,19 +35,23 @@ pub use decode::{
     FrameRate, FrameRateProvenance, InterlaceVerdict, NormalizedGeometry, OutputBandwidth,
     OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract, Rational, ResolvedDecode,
     ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering,
-    ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
+    ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest, VideoSampleEnvelope,
     HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{
     detect_encoders, detect_video_decoders, validate_quality_rate_control,
     validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
-    OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
+    OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
+    VideoCodec,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
-    vod_audio_anchor, vod_pipe_args, VodFrameGrid, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
+    vod_audio_anchor, vod_pipe_args, vod_pipe_args_with_reorder, vod_shared_audio_args,
+    vod_shared_audio_plan, VodFrameGrid, VodPresentationFamily, VodRenditionBandwidth,
+    VodSharedAudioRecipe, VodSharedAudioRendition, VodVideoFamily, VodVideoRung,
+    VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
 };
 
 use crate::domain::MediaFile;
@@ -799,6 +805,8 @@ pub struct SubtitleBurn {
 /// Everything needed to build a transcode command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscodeOptions {
+    /// Explicit immutable video sample recipe; ordinary encodes preserve defaults.
+    pub video_sample_envelope: VideoSampleEnvelope,
     /// Conditional candidate semantics; absent preserves the legacy recipe.
     pub auto_quality_rate_profile: Option<AutoQualityRateProfile>,
     pub normalized_geometry: bool,
@@ -811,6 +819,9 @@ pub struct TranscodeOptions {
     /// Audio: output channel count (2 = stereo downmix) and bitrate.
     pub audio_channels: u32,
     pub audio_bitrate_kbps: u32,
+    /// Server-resolved route delivery. Absent retains the legacy scalar
+    /// builder during the add-before-remove migration of those fields.
+    pub audio: Option<crate::playback::audio::AudioDelivery>,
     /// 0-based index among the file's audio streams (default track otherwise).
     pub audio_index: Option<i64>,
     /// Start offset in seconds (resume / session start).
@@ -987,6 +998,7 @@ pub const AUDIO_BITRATE_KBPS_DEFAULT: u32 = 160;
 impl Default for TranscodeOptions {
     fn default() -> Self {
         TranscodeOptions {
+            video_sample_envelope: VideoSampleEnvelope::EncoderDefault,
             auto_quality_rate_profile: None,
             normalized_geometry: false,
             target_height: 1080,
@@ -994,6 +1006,7 @@ impl Default for TranscodeOptions {
             effective_rate_control: EffectiveRateControl::Vbr,
             audio_channels: 2,
             audio_bitrate_kbps: AUDIO_BITRATE_KBPS_DEFAULT,
+            audio: None,
             audio_index: None,
             start_seconds: 0.0,
             start_number: 0,
@@ -1004,6 +1017,35 @@ impl Default for TranscodeOptions {
             force_idr: false,
             software_threads: None,
         }
+    }
+}
+
+impl TranscodeOptions {
+    pub fn audio_budget_kbps(&self) -> u32 {
+        self.audio
+            .as_ref()
+            .map_or(self.audio_bitrate_kbps, |audio| audio.budget_kbps())
+    }
+
+    /// Keep the transitional scalar readers in step with the one typed
+    /// decision; no second caller chooses channels or bitrate independently.
+    pub fn set_audio_delivery(&mut self, audio: crate::playback::audio::AudioDelivery) {
+        match audio.action {
+            crate::playback::audio::AudioAction::Encode {
+                channels,
+                bitrate_kbps,
+                ..
+            } => {
+                self.audio_channels = u32::from(channels);
+                self.audio_bitrate_kbps = bitrate_kbps;
+            }
+            crate::playback::audio::AudioAction::Copy { channels, .. } => {
+                self.audio_channels = u32::from(channels);
+                self.audio_bitrate_kbps = audio.budget_kbps();
+            }
+            crate::playback::audio::AudioAction::None => {}
+        }
+        self.audio = Some(audio);
     }
 }
 
@@ -1157,10 +1199,8 @@ fn video_filters_for_contract(
             }
             gpu.push_str(",setsar=1");
         }
-        if (bitmap_burn || text_burn)
-            && matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi)
-        {
-            // These two end in vendor surfaces (their encoders read them
+        if (bitmap_burn || text_burn) && opts.pipeline.keeps_frames_off_the_cpu() {
+            // These graphs end in vendor surfaces (their encoders read them
             // directly); the composite cannot. Libplacebo and OpenCL already
             // finish with their own download, so they need nothing here.
             chain.push(format!("{gpu},hwdownload,format=nv12"));
@@ -1210,13 +1250,7 @@ fn video_filters_for_contract(
                 } else {
                     "smpte2084"
                 };
-                chain.push(format!(
-                    "zscale=tin={tin}:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,\
-                     zscale=p=bt709,\
-                     tonemap=tonemap=hable:desat=0:peak={peak},\
-                     zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p",
-                    peak = tone_map_peak.0 as f64 / 100.0,
-                ));
+                chain.push(zscale_tone_map_filter(tin, tone_map_peak.0));
             }
         }
     } else {
@@ -1259,6 +1293,33 @@ fn with_subtitles(mut chain: Vec<String>, opts: &TranscodeOptions, source_path: 
 /// The 8-bit pixel formats this crate's filter chains ever name. Listed
 /// rather than inferred so a new spelling has to be added deliberately.
 const EIGHT_BIT_FORMATS: &[&str] = &["yuv420p", "yuvj420p", "nv12", "yuv422p", "yuv444p"];
+
+/// The CPU HDR→SDR tone map: linearise, convert BT.2020 → BT.709 primaries,
+/// apply the Hable curve against an explicit peak, return to 8-bit BT.709
+/// limited range with error-diffusion dither.
+///
+/// `transfer_in` is the source transfer (`smpte2084` or `arib-std-b67`) and
+/// `peak_nits` the stated or policy peak; `tonemap` takes it in hundreds of
+/// nits. This is the one spelling of the chain: the boot probe measures
+/// every GPU graph against exactly this string, so it must not be copied.
+///
+/// The gamut conversion rides on the linearising `zscale` (`p=bt709`) rather
+/// than on a separate pass ahead of `tonemap`. zimg converts primaries in
+/// linear light either way, still before the curve, so the output is
+/// bit-identical to a standalone `zscale=p=bt709` — and one float32 pass
+/// cheaper. Naming the output primaries there matters on its own too: with
+/// `pin=` but no `p=`, zimg takes the *output* primaries from the frame, so a
+/// decoded frame that arrives without a primaries tag fails the graph with
+/// "no path between colorspaces" and produces nothing.
+pub fn zscale_tone_map_filter(transfer_in: &str, peak_nits: u32) -> String {
+    format!(
+        "zscale=tin={transfer_in}:min=bt2020nc:pin=bt2020:t=linear:p=bt709:npl=100,\
+         format=gbrpf32le,\
+         tonemap=tonemap=hable:desat=0:peak={peak},\
+         zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p",
+        peak = f64::from(peak_nits) / 100.0,
+    )
+}
 
 /// Refuse to hand ffmpeg a filter that asks for a PQ **output** transfer at an
 /// 8-bit output depth.
@@ -1486,6 +1547,22 @@ pub fn audio_offset_filter(offset_ms: i64) -> Option<String> {
     }
 }
 
+/// The one audio `-af` an encode carries: the delivery's measured downmix,
+/// then the per-file A/V correction. ffmpeg keeps only the last `-af` it is
+/// given, so the two must travel as one chain or the second silently erases
+/// the first.
+pub fn audio_filter_chain(
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    offset: Option<String>,
+) -> Option<String> {
+    let chain: Vec<String> = audio
+        .and_then(|audio| audio.downmix_filter())
+        .into_iter()
+        .chain(offset)
+        .collect();
+    (!chain.is_empty()).then(|| chain.join(","))
+}
+
 /// Build the full ffmpeg argument vector to transcode `source` into HLS in
 /// `out_dir` (which must exist). Produces `index.m3u8` + `seg%05d.ts`.
 #[cfg(test)]
@@ -1497,6 +1574,14 @@ fn hls_args(
     out_dir: &str,
 ) -> Vec<String> {
     hls_args_with_compatibility(source, encoder, opts, pacing, out_dir, false)
+}
+
+/// Retained HLS keyframe policy, shared by producers and their sample scorer.
+pub fn hls_keyframe_args() -> Vec<String> {
+    vec![
+        "-force_key_frames".into(),
+        format!("expr:gte(t,n_forced*{SEGMENT_SECONDS})"),
+    ]
 }
 
 /// Build a movie HLS command exclusively from one validated semantic plan and
@@ -1511,6 +1596,7 @@ pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec
 pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
     let media = plan.options();
     let options = TranscodeOptions {
+        video_sample_envelope: media.video_sample_envelope,
         auto_quality_rate_profile: None,
         normalized_geometry: false,
         target_height: media.target_height,
@@ -1518,6 +1604,7 @@ pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecutio
         effective_rate_control: media.effective_rate_control,
         audio_channels: media.audio_channels,
         audio_bitrate_kbps: media.audio_bitrate_kbps,
+        audio: media.audio.clone(),
         audio_index: media.audio_index,
         start_seconds: execution.start_seconds,
         start_number: execution.start_number,
@@ -1585,8 +1672,7 @@ fn hls_args_inner(
     // Hardware device init (VAAPI/QSV) must precede the input, and so must a
     // filter device the pipeline brings of its own (Vulkan for libplacebo,
     // OpenCL for tonemap_opencl).
-    args.extend(encoder.init_args());
-    args.extend(opts.pipeline.init_args());
+    args.extend(opts.pipeline.device_args(encoder));
 
     // Fast input seek for resume/session start.
     if opts.start_seconds > 0.0 {
@@ -1704,10 +1790,10 @@ fn hls_args_inner(
     // vendor pipeline is the exception both ways: `video_filters` appended a
     // download for libass/overlay, so the encoder's upload IS owed again.
     let subtitle_burn = opts.subtitle_burn.is_some();
-    let vendor_gpu =
-        matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi) && !subtitle_burn;
-    let suffix = encoder
-        .filter_suffix_for(opts.pipeline.output_grade())
+    let vendor_gpu = opts.pipeline.keeps_frames_off_the_cpu() && !subtitle_burn;
+    let suffix = opts
+        .pipeline
+        .encoder_upload(encoder)
         .filter(|_| !vendor_gpu);
     let mut vf = String::new();
     if let Some(prefix) = &hwdownload {
@@ -1774,10 +1860,15 @@ fn hls_args_inner(
         Some(_) => BURNED_VIDEO_LABEL.to_owned(),
         None => selected_video.clone(),
     });
-    args.push("-map".into());
-    match opts.audio_index {
-        Some(i) => args.push(format!("0:a:{i}?")),
-        None => args.push("0:a:0?".to_owned()),
+    let encode_audio = plan.is_none_or(|plan| plan.options().input_has_audio);
+    if encode_audio {
+        args.push("-map".into());
+        match opts.audio_index {
+            Some(i) => args.push(format!("0:a:{i}?")),
+            None => args.push("0:a:0?".to_owned()),
+        }
+    } else {
+        args.push("-an".into());
     }
 
     match overlay {
@@ -1832,11 +1923,17 @@ fn hls_args_inner(
         opts.force_idr,
         opts.software_threads,
     ));
+    if let Some(proof) = plan.and_then(|plan| plan.output_contract().sdr_avc()) {
+        args.extend(proof.flags());
+    }
 
     if plan
         .and_then(|plan| plan.output_contract().normalized_geometry())
         .and_then(|geometry| geometry.rate_profile)
         .is_some()
+        || plan.is_some_and(|plan| {
+            plan.options().video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50
+        })
     {
         // The class explicitly promises H.264 High level5.0, not a profile
         // inferred from the requested height or encoder default.
@@ -1849,23 +1946,28 @@ fn hls_args_inner(
     }
 
     // Segment-aligned keyframes so each segment is independently decodable.
-    args.push("-force_key_frames".into());
-    args.push(format!("expr:gte(t,n_forced*{SEGMENT_SECONDS})"));
+    args.extend(hls_keyframe_args());
 
     // Audio: downmix + AAC (browser-universal), with the A/V correction as
     // a filter on the same input rather than a second read of the source.
-    if let Some(af) = audio_offset {
-        args.push("-af".into());
-        args.push(af);
+    if encode_audio {
+        if let Some(af) = audio_filter_chain(opts.audio.as_ref(), audio_offset) {
+            args.push("-af".into());
+            args.push(af);
+        }
+        if let Some(audio) = &opts.audio {
+            push_audio_delivery_args(&mut args, audio, false);
+        } else {
+            args.push("-c:a".into());
+            args.push("aac".into());
+            args.push("-ac".into());
+            args.push(opts.audio_channels.to_string());
+            args.push("-b:a".into());
+            args.push(format!("{}k", opts.audio_bitrate_kbps));
+            args.push("-ar".into());
+            args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
+        }
     }
-    args.push("-c:a".into());
-    args.push("aac".into());
-    args.push("-ac".into());
-    args.push(opts.audio_channels.to_string());
-    args.push("-b:a".into());
-    args.push(format!("{}k", opts.audio_bitrate_kbps));
-    args.push("-ar".into());
-    args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
 
     // Start the MPEG-TS timeline at zero.
     //
@@ -2206,6 +2308,48 @@ fn copy_audio_channels(source: &MediaFile, audio_index: Option<i64>) -> Option<i
     .and_then(|stream| stream.channels)
 }
 
+/// One typed delivery builds the same audio tokens on encoded and copy-video
+/// paths. The historical copy-video AAC conversion omits `-ac` and places
+/// its explicit 5.1 layout after the bitrate; retain that exact shape.
+pub fn push_audio_delivery_args(
+    args: &mut Vec<String>,
+    audio: &crate::playback::audio::AudioDelivery,
+    legacy_copy_conversion: bool,
+) {
+    use crate::playback::audio::AudioAction;
+    match &audio.action {
+        AudioAction::None => args.push("-an".into()),
+        AudioAction::Copy { .. } => args.extend(["-c:a".into(), "copy".into()]),
+        AudioAction::Encode {
+            codec,
+            channels,
+            layout,
+            bitrate_kbps,
+            sample_rate,
+        } => {
+            args.extend(["-c:a".into(), codec.clone()]);
+            if !legacy_copy_conversion {
+                args.extend(["-ac".into(), channels.to_string()]);
+                if let Some(layout) = layout {
+                    args.extend(["-channel_layout:a".into(), layout.clone()]);
+                }
+            }
+            args.extend(["-b:a".into(), format!("{bitrate_kbps}k")]);
+            if legacy_copy_conversion {
+                if let Some(layout) = layout {
+                    args.extend(["-channel_layout:a".into(), layout.clone()]);
+                }
+            }
+            args.extend(["-ar".into(), sample_rate.to_string()]);
+            // A measured downmix is a filter, emitted by the caller's single
+            // `-af` (see `audio_filter_chain`); `-ac` above is then a no-op
+            // confirmation of the stereo the chain already produced. The
+            // incumbent `RequiresLayoutMeasurement` fold has no filter and
+            // is performed by `-ac` alone, exactly as before.
+        }
+    }
+}
+
 fn copy_input_args(
     source: &MediaFile,
     start_seconds: f64,
@@ -2213,7 +2357,9 @@ fn copy_input_args(
     transcode_audio: bool,
     pacing: Pacing,
     video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
 ) -> Vec<String> {
+    let transcode_audio = audio.map_or(transcode_audio, |audio| audio.transcodes());
     let source_path = source.path.to_string_lossy().into_owned();
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
 
@@ -2282,7 +2428,37 @@ fn copy_input_args(
 
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
 
-    if transcode_audio {
+    if let Some(audio) = audio {
+        let offset = if has_offset && transcode_audio {
+            audio_offset_filter(source.audio_offset_ms)
+        } else {
+            None
+        };
+        if let Some(af) = audio_filter_chain(Some(audio), offset) {
+            args.extend(["-af".into(), af]);
+        }
+        // Preserve the incumbent copy conversion's exact spelling when its
+        // byte semantics match. Explanatory reason text must never select
+        // argv, because it is deliberately excluded from recipe identity.
+        let legacy_conversion = match &audio.action {
+            crate::playback::audio::AudioAction::Encode {
+                codec,
+                channels,
+                layout,
+                bitrate_kbps,
+                sample_rate,
+            } => {
+                codec == "aac"
+                    && copy_audio_channels(source, audio_index) == Some(i64::from(*channels))
+                    && *bitrate_kbps == if *channels == 6 { 320 } else { 256 }
+                    && layout.as_deref() == if *channels == 6 { Some("5.1") } else { None }
+                    && *sample_rate == 48_000
+                    && audio.downmix.is_none()
+            }
+            _ => false,
+        };
+        push_audio_delivery_args(&mut args, audio, legacy_conversion);
+    } else if transcode_audio {
         // The correction rides the encode as a filter — same input, no
         // second read.
         if has_offset {
@@ -2433,6 +2609,27 @@ pub fn copy_pipe_args_with_dolby_vision(
     pacing: Pacing,
     video: CopyVideoOptions,
 ) -> Vec<String> {
+    copy_pipe_args_with_audio_delivery(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn copy_pipe_args_with_audio_delivery(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+) -> Vec<String> {
     let mut args = copy_input_args(
         source,
         start_seconds,
@@ -2440,6 +2637,7 @@ pub fn copy_pipe_args_with_dolby_vision(
         transcode_audio,
         pacing,
         video,
+        audio,
     );
     args.extend(
         [
@@ -2534,6 +2732,33 @@ pub fn hls_copy_args_with_sequence(
     init_filename: &str,
     out_dir: &str,
 ) -> Vec<String> {
+    hls_copy_args_with_audio_delivery(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        dolby_vision,
+        start_number,
+        init_filename,
+        out_dir,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn hls_copy_args_with_audio_delivery(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    dolby_vision: DolbyVisionCopyOptions,
+    start_number: i64,
+    init_filename: &str,
+    out_dir: &str,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+) -> Vec<String> {
     let mut args = copy_input_args(
         source,
         start_seconds,
@@ -2541,6 +2766,7 @@ pub fn hls_copy_args_with_sequence(
         transcode_audio,
         pacing,
         dolby_vision,
+        audio,
     );
 
     // fMP4 HLS. Segments split at existing keyframes (copy can't force them), so
@@ -2594,7 +2820,7 @@ mod tests {
     use super::*;
     use crate::domain::MediaFile;
 
-    fn file(hdr: Option<&str>) -> MediaFile {
+    pub(super) fn file(hdr: Option<&str>) -> MediaFile {
         MediaFile {
             downloaded_subtitles: Vec::new(),
             id: 1,
@@ -2628,6 +2854,112 @@ mod tests {
     }
 
     #[test]
+    fn vulkan_playback_returns_frames_to_the_vaapi_encoder() {
+        let source = file(Some("hdr10"));
+        let options = TranscodeOptions {
+            pipeline: Pipeline::Libplacebo,
+            target_height: 1080,
+            ..Default::default()
+        };
+        let args = hls_args(
+            &source,
+            Encoder::Vaapi,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/s",
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-init_hw_device vaapi=hw:"), "{joined}");
+        assert!(joined.contains("-init_hw_device vulkan=vk@hw"), "{joined}");
+        assert!(joined.contains("-filter_hw_device vk"), "{joined}");
+        let vf = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("video filter graph")
+            + 1];
+        assert!(vf.contains("hwupload,libplacebo="), "{vf}");
+        assert!(vf.ends_with("hwupload=derive_device=vaapi"), "{vf}");
+        assert!(joined.contains("h264_vaapi"), "{joined}");
+
+        // The encoder upload must stay after a software subtitle composite.
+        let options = TranscodeOptions {
+            subtitle_burn: Some(SubtitleBurn {
+                subtitle_index: 0,
+                bitmap: true,
+            }),
+            ..options
+        };
+        let args = hls_args(
+            &source,
+            Encoder::Vaapi,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/s",
+        );
+        let graph = &args[args
+            .iter()
+            .position(|arg| arg == "-filter_complex")
+            .expect("subtitle composite graph")
+            + 1];
+        assert!(
+            graph.ends_with(
+                "overlay=eof_action=pass,format=nv12,hwupload=derive_device=vaapi[vout]"
+            ),
+            "{graph}"
+        );
+    }
+
+    #[test]
+    fn vulkan_vaapi_playback_transfers_only_for_subtitle_burns() {
+        let source = file(Some("hdr10"));
+        for burn in [None, Some(false), Some(true)] {
+            let options = TranscodeOptions {
+                pipeline: Pipeline::LibplaceboVaapi,
+                target_height: 1080,
+                subtitle_burn: burn.map(|bitmap| SubtitleBurn {
+                    subtitle_index: 0,
+                    bitmap,
+                }),
+                ..Default::default()
+            };
+            let args = hls_args(
+                &source,
+                Encoder::Vaapi,
+                &options,
+                Pacing::unpaced(),
+                "/tmp/s",
+            );
+            assert!(args
+                .windows(2)
+                .any(|p| p == ["-hwaccel_output_format", "vaapi"]));
+            let flag = if burn == Some(true) {
+                "-filter_complex"
+            } else {
+                "-vf"
+            };
+            let graph = &args[args.iter().position(|a| a == flag).expect("video graph") + 1];
+            assert!(
+                graph.contains("hwmap=derive_device=vaapi,format=vaapi"),
+                "{graph}"
+            );
+            assert_eq!(
+                graph.matches("hwdownload").count(),
+                usize::from(burn.is_some()),
+                "{graph}"
+            );
+            assert_eq!(
+                graph.matches("hwupload").count(),
+                usize::from(burn.is_some()),
+                "{graph}"
+            );
+            if burn.is_some() {
+                assert!(graph.contains("hwupload=derive_device=vaapi"), "{graph}");
+                assert!(graph.find("hwmap=") < graph.find("hwdownload"), "{graph}");
+            }
+        }
+    }
+
+    #[test]
     fn the_cpu_tone_map_names_peak_provenance_in_its_recipe() {
         let options = TranscodeOptions {
             auto_quality_rate_profile: None,
@@ -2652,7 +2984,13 @@ mod tests {
         mdcv.luminance_source = Some("frame".to_owned());
         let mdcv_filter = video_filters(&mdcv, &options, "/media/movie.mkv");
         assert!(mdcv_filter.contains("peak=20"), "{mdcv_filter}");
-        assert!(mdcv_filter.contains("zscale=p=bt709,tonemap="));
+        // Gamut conversion rides on the linearising zscale, ahead of the
+        // curve; there is no separate primaries-only pass.
+        assert!(
+            mdcv_filter.contains(":t=linear:p=bt709:npl=100,format=gbrpf32le,tonemap="),
+            "{mdcv_filter}"
+        );
+        assert!(!mdcv_filter.contains("zscale=p=bt709,"), "{mdcv_filter}");
         assert!(mdcv_filter.contains("dither=error_diffusion"));
 
         let default_media = TranscodeMediaOptions::from_options(&file(Some("hdr10")), &options);
@@ -2704,6 +3042,10 @@ mod tests {
     /// the way back to 8-bit. Every other token in every case is unchanged,
     /// including S-08's field-order routing, whose sources here are
     /// progressive and therefore name no deinterlace filter.
+    ///
+    /// Then once more for S-07's M2 cost correction: the standalone
+    /// `zscale=p=bt709` pass folded into the linearising zscale as `p=bt709`.
+    /// The output is bit-identical (measured); only the spelling moved.
     #[test]
     fn decoder_selection_m0_argument_baseline_is_stable() {
         let mut light_h264 = file(None);
@@ -3495,8 +3837,8 @@ mod tests {
         // The SDR tone-map declares PQ as its INPUT and outputs 8-bit BT.709.
         // That is correct, and a naive substring guard condemns it.
         assert_no_pq_at_8_bit(
-            "zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,\
-             format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak=10,\
+            "zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:p=bt709:npl=100,\
+             format=gbrpf32le,tonemap=tonemap=hable:desat=0:peak=10,\
              zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p",
         );
         // A 10-bit PQ map followed by an unrelated 8-bit convert in a later
@@ -3920,6 +4262,186 @@ mod tests {
         .join(" ");
         assert!(stereo.contains("-c:a aac -b:a 256k"));
         assert!(!stereo.contains("-channel_layout:a"));
+    }
+
+    #[test]
+    fn typed_audio_argv_preserves_legacy_six_and_propagates_explicit_surround() {
+        use crate::playback::{
+            audio::{resolve_audio, AudioAction, AudioDelivery, AudioRoute},
+            default_profile,
+        };
+        let mut media = file(None);
+        media.audio_streams = vec![crate::domain::AudioStream {
+            codec: "dts".into(),
+            channels: Some(6),
+            index: 1,
+            ..Default::default()
+        }];
+        let mut audio = resolve_audio(
+            media.audio_streams.first(),
+            default_profile(),
+            AudioRoute::Progressive,
+            0,
+        );
+        let video = CopyVideoOptions::new(false, false);
+        assert_eq!(
+            copy_pipe_args_with_audio_delivery(
+                &media,
+                0.0,
+                Some(1),
+                true,
+                Pacing::unpaced(),
+                video,
+                Some(&audio)
+            ),
+            copy_pipe_args_with_dolby_vision(&media, 0.0, Some(1), true, Pacing::unpaced(), video)
+        );
+        audio.reason = "a refreshed explanation".into();
+        assert_eq!(
+            copy_pipe_args_with_audio_delivery(
+                &media,
+                0.0,
+                Some(1),
+                true,
+                Pacing::unpaced(),
+                video,
+                Some(&audio)
+            ),
+            copy_pipe_args_with_dolby_vision(&media, 0.0, Some(1), true, Pacing::unpaced(), video)
+        );
+        let explicit = AudioDelivery {
+            action: AudioAction::Encode {
+                codec: "eac3".into(),
+                channels: 6,
+                layout: Some("5.1".into()),
+                bitrate_kbps: 640,
+                sample_rate: 48_000,
+            },
+            downmix: None,
+            reason: "explicit route".into(),
+        };
+        let mut options = TranscodeOptions::default();
+        options.set_audio_delivery(explicit);
+        let args = hls_args(
+            &media,
+            Encoder::Software,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/typed",
+        )
+        .join(" ");
+        assert!(
+            args.contains("-c:a eac3 -ac 6 -channel_layout:a 5.1 -b:a 640k -ar 48000"),
+            "{args}"
+        );
+        assert!(!args.contains("pan=") && !args.contains("alimiter="));
+    }
+
+    /// ffmpeg keeps only the last `-af`. The measured fold and the per-file
+    /// A/V correction therefore travel as one chain — fold first — on the
+    /// rolling transcode and on the copy-video conversion alike.
+    #[test]
+    fn a_stereo_fold_and_the_offset_share_one_audio_filter_chain() {
+        use crate::playback::audio::{resolve_audio, AudioRoute, DownmixMatrix};
+        let mut media = file(None);
+        media.audio_offset_ms = 250;
+        media.audio_streams = vec![crate::domain::AudioStream {
+            codec: "dts".into(),
+            channels: Some(6),
+            channel_layout: Some("5.1(side)".into()),
+            sample_rate: Some(48_000),
+            index: 1,
+            ..Default::default()
+        }];
+        let fold = DownmixMatrix::LoRo51.filter().expect("measured fold");
+        let filters = |args: &[String]| -> Vec<String> {
+            args.windows(2)
+                .filter(|pair| pair[0] == "-af")
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+
+        let mut options = TranscodeOptions::default();
+        options.set_audio_delivery(resolve_audio(
+            media.audio_streams.first(),
+            crate::playback::default_profile(),
+            AudioRoute::RollingHls,
+            media.audio_offset_ms,
+        ));
+        let args = hls_args(
+            &media,
+            Encoder::Software,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/f",
+        );
+        assert_eq!(filters(&args), vec![format!("{fold},adelay=250:all=1")]);
+        assert!(args
+            .join(" ")
+            .contains("-c:a aac -ac 2 -b:a 160k -ar 48000"));
+
+        // The copy-video path converting to stereo for a stereo sink.
+        let mut stereo = crate::playback::default_profile().clone();
+        stereo.audio_codecs = vec!["aac".into()];
+        stereo.max_audio_channels = [("aac".to_owned(), 2)].into_iter().collect();
+        stereo.claimed_audio_decoders = ["aac".to_owned()].into_iter().collect();
+        stereo.audio_sink_claims = [(
+            "aac".to_owned(),
+            crate::playback::audio::AudioSink {
+                codec: "aac".into(),
+                max_channels: 2,
+                passthrough: false,
+                sample_rates_hz: vec![48_000],
+            },
+        )]
+        .into_iter()
+        .collect();
+        let audio = resolve_audio(
+            media.audio_streams.first(),
+            &stereo,
+            AudioRoute::Progressive,
+            media.audio_offset_ms,
+        );
+        assert_eq!(audio.downmix, Some(DownmixMatrix::LoRo51));
+        let args = copy_pipe_args_with_audio_delivery(
+            &media,
+            0.0,
+            Some(1),
+            true,
+            Pacing::unpaced(),
+            CopyVideoOptions::new(false, false),
+            Some(&audio),
+        );
+        assert_eq!(filters(&args), vec![format!("{fold},adelay=250:all=1")]);
+
+        // Without an offset the chain is the fold alone; a stereo source
+        // carries no filter at all.
+        media.audio_offset_ms = 0;
+        let args = hls_args(
+            &media,
+            Encoder::Software,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/f",
+        );
+        assert_eq!(filters(&args), vec![fold]);
+        media.audio_streams[0].channels = Some(2);
+        media.audio_streams[0].channel_layout = Some("stereo".into());
+        let mut plain = TranscodeOptions::default();
+        plain.set_audio_delivery(resolve_audio(
+            media.audio_streams.first(),
+            crate::playback::default_profile(),
+            AudioRoute::RollingHls,
+            0,
+        ));
+        let args = hls_args(
+            &media,
+            Encoder::Software,
+            &plain,
+            Pacing::unpaced(),
+            "/tmp/f",
+        );
+        assert!(filters(&args).is_empty());
     }
 
     /// The `hvc1` tag promises no in-band parameter sets, and a

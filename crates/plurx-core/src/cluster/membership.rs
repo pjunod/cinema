@@ -13,7 +13,7 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -32,6 +32,10 @@ use crate::store::{
     AUTH_PROTOCOL_MIN, AUTH_SCHEMA_VERSION,
 };
 
+use super::clock::{
+    ClockAcquisitionTicket, ClockDecision, ClockMembershipIdentity, ClockMembershipSource,
+    ClockRefusal, ClockRemovalCapture, ClusterClockGuard, OwnedClockAcquisitionTicket,
+};
 use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
@@ -48,6 +52,9 @@ pub const UNKNOWN_HOSTNAME: &str = "unknown-host";
 const JOIN_TOKEN_PREFIX: &str = "plxjoin:v1";
 const JOIN_TOKEN_AAD: &[u8] = b"plurx-cluster-join-v1";
 const JOIN_TOKEN_VERSION: u32 = 1;
+const FINALIZE_JOIN_TOKEN_SQL: &str =
+    "UPDATE cluster_join_tokens SET state = 'redeemed', redeemed_at = $1 \
+     WHERE token_hash = $2 AND state = 'redeeming' AND node_id = $3";
 /// Learner admission is a *different* protocol, not a flag on the voter one.
 /// The prefix, the AEAD associated data, and the version constant are all
 /// distinct, so a build that only knows v1 refuses a v2 token at the prefix,
@@ -191,6 +198,22 @@ impl SharingMemberFloor {
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
 /// replacement database even when every disposable cache is full.
 const MIN_VOTER_STORAGE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
+const SNAPSHOT_STORAGE_FLOOR_CAPABILITY: &str = "snapshot_storage_floor_v1";
+const PROMOTION_TARGET_SQL: &str = "SELECT node.raft_id, node.role, node.last_seen_at, \
+        EXISTS (SELECT 1 FROM cluster_node_removals removal \
+          WHERE removal.node_id = node.node_id) AS removal_pending, \
+        progress.last_applied_index, progress.apply_lag_entries, \
+        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
+        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
+        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
+        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
+        (SELECT capability.last_seen_at FROM cluster_node_capabilities capability \
+          WHERE capability.node_id = node.node_id \
+            AND capability.capability = 'snapshot_storage_floor_v1') AS snapshot_floor_observed_at, \
+        progress.observed_at \
+     FROM cluster_nodes node \
+     LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
+     WHERE node.node_id = $1 AND ($2 OR node.removed_at IS NULL)";
 /// A promotion barrier waits for the target's own heartbeat to prove that its
 /// local state machine applied through the quorum-confirmed barrier index.
 const PROMOTION_BARRIER_WAIT: Duration = Duration::from_secs(20);
@@ -1043,6 +1066,21 @@ const CACHE_ADMIN_REVOCATION_PEERS_SQL: &str =
      WHERE node.node_id != $1 AND node.removed_at IS NULL \
        AND node.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each($2)) \
      ORDER BY node.raft_id";
+// The directory and sender fence come from one consistent SQLite snapshot.
+// Pending removals remain in full-roster coverage, but cannot sign requests.
+const AUTHENTICATED_CLOCK_PEERS_SQL: &str =
+    "WITH args AS (SELECT $1 AS local_node, $2 AS members, $3 AS sender) \
+     SELECT node.node_id, node.raft_id, node.last_seen_at, http.public_http_url, \
+       EXISTS (SELECT 1 FROM cluster_nodes sender \
+         WHERE sender.node_id = args.sender AND sender.removed_at IS NULL \
+           AND sender.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each(args.members)) \
+           AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+             WHERE removal.node_id = sender.node_id)) AS request_authorized \
+     FROM cluster_nodes node CROSS JOIN args \
+     LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
+     WHERE node.node_id != args.local_node AND node.removed_at IS NULL \
+       AND node.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each(args.members)) \
+     ORDER BY node.raft_id";
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
 // Exact-request proofs are accepted on the public listener. Bound the work
@@ -1089,6 +1127,8 @@ const CLUSTER_OPERATION_LEASE_EXPIRY_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
+    #[error("cluster clock cannot authorize new membership authority: {0:?}")]
+    ClockUnbounded(ClockRefusal),
     #[error("cluster membership is unavailable while this node uses SQLite recovery")]
     Unavailable,
     #[error("join token is invalid")]
@@ -1278,6 +1318,7 @@ impl MembershipError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
+            Self::ClockUnbounded(_) => "cluster_clock_unbounded",
             Self::Unavailable => "membership_unavailable",
             Self::InvalidToken => "join_token_invalid",
             Self::ExpiredToken => "join_token_expired",
@@ -2408,6 +2449,288 @@ impl PassiveMembershipMetrics {
 #[derive(Clone)]
 pub struct MembershipManager {
     inner: Option<Arc<ReplicatedMembership>>,
+    clock: Arc<super::clock::ClusterClockGuard>,
+}
+
+pub struct ClockPeerRoster {
+    pub membership: Option<ClockMembershipIdentity>,
+    pub peers: Vec<ActivityPeer>,
+}
+
+/// Exact local applied membership and current leadership for a causal clock
+/// observation. Desired startup roles and replicated heartbeat rows are not
+/// authority for this identity. Reading it performs no IO or await.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClockLeadershipIdentity {
+    pub membership: ClockMembershipIdentity,
+    pub current_term: u64,
+    pub current_leader: Option<u64>,
+}
+
+/// Startup-only pre-submission admission. A clock proof's age limit cannot
+/// replenish the original phased startup budget. Already submitted writes
+/// retain their own completion/reconciliation; this guards the NEXT boundary.
+pub struct StartupActivationAdmission {
+    clock: OwnedClockAcquisitionTicket,
+    deadline: tokio::time::Instant,
+    #[cfg(test)]
+    settlement_pause: Option<StartupSettlementPause>,
+}
+
+#[cfg(test)]
+type StartupSettlementSignals = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+struct StartupSettlementPause {
+    once: std::sync::Mutex<Option<StartupSettlementSignals>>,
+}
+
+#[cfg(test)]
+impl StartupSettlementPause {
+    async fn after_durable_transaction(&self) {
+        let once = self.once.lock().expect("instance settlement pause").take();
+        if let Some((entered, release)) = once {
+            let _ = entered.send(());
+            release.await.expect("owned settlement release");
+        }
+    }
+}
+
+impl StartupActivationAdmission {
+    pub fn revalidate(&self) -> Result<(), MembershipError> {
+        if tokio::time::Instant::now() >= self.deadline {
+            return Err(MembershipError::Internal(
+                "startup activation exceeded original deadline".into(),
+            ));
+        }
+        self.clock
+            .revalidate()
+            .map_err(MembershipError::ClockUnbounded)?;
+        // The clock guard may wait for a serialized publisher. Do not let
+        // that contention carry an otherwise fresh proof past this phase.
+        if tokio::time::Instant::now() >= self.deadline {
+            return Err(MembershipError::Internal(
+                "startup activation exceeded original deadline".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ClockMembershipSource for hiqlite::LocalDbRaftMetrics {
+    fn current(&self) -> Option<ClockMembershipIdentity> {
+        let snapshot = self.membership_snapshot();
+        if !snapshot.running || !snapshot.committed || !snapshot.members.contains(&snapshot.node_id)
+        {
+            return None;
+        }
+        Some(ClockMembershipIdentity {
+            local_node: snapshot.node_id,
+            log: snapshot.membership_log?,
+            members: snapshot.members,
+            voters: snapshot.voters,
+        })
+    }
+}
+
+/// The node-local guard exists before Hiqlite listeners. Its source remains
+/// Unknown until the actual local watch is bound exactly once by startup.
+pub struct StartupMembershipAdmission {
+    source: Arc<StartupClockMembershipSource>,
+    clock: Arc<ClusterClockGuard>,
+    /// The admission/promotion/activation phase deadline. Installed exactly
+    /// once, after vendor startup, the health wait and snapshot catch-up have
+    /// returned, so none of those consume it; never replaced afterwards.
+    startup_deadline: OnceLock<tokio::time::Instant>,
+    /// Bound exactly once after construction; never retains the manager/client
+    /// cycle or borrows another installed node's removal authority.
+    removal_owner: OnceLock<Weak<ReplicatedMembership>>,
+    #[cfg(test)]
+    activation_capture_pause: StartupSettlementPause,
+    #[cfg(test)]
+    activation_metadata_submissions: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Default)]
+struct StartupClockMembershipSource(OnceLock<hiqlite::LocalDbRaftMetrics>);
+
+impl ClockMembershipSource for StartupClockMembershipSource {
+    fn current(&self) -> Option<ClockMembershipIdentity> {
+        self.0.get()?.current()
+    }
+}
+
+impl Default for StartupMembershipAdmission {
+    fn default() -> Self {
+        let source = Arc::new(StartupClockMembershipSource::default());
+        Self {
+            clock: Arc::new(ClusterClockGuard::with_membership_source(source.clone())),
+            source,
+            startup_deadline: OnceLock::new(),
+            removal_owner: OnceLock::new(),
+            #[cfg(test)]
+            activation_capture_pause: StartupSettlementPause {
+                once: std::sync::Mutex::new(None),
+            },
+            #[cfg(test)]
+            activation_metadata_submissions: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl StartupMembershipAdmission {
+    /// Install the original phase deadline. It is set exactly once: a second
+    /// install is refused rather than replenishing an expired phase.
+    pub fn install_startup_deadline(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), MembershipError> {
+        self.startup_deadline.set(deadline).map_err(|_| {
+            MembershipError::Internal("startup phase deadline was already installed".into())
+        })
+    }
+
+    #[must_use]
+    pub fn startup_deadline(&self) -> Option<tokio::time::Instant> {
+        self.startup_deadline.get().copied()
+    }
+
+    #[must_use]
+    pub fn clock_guard(&self) -> Arc<ClusterClockGuard> {
+        Arc::clone(&self.clock)
+    }
+}
+
+struct PreparedStartupMembershipAdmission<'guard> {
+    clock: &'guard ClusterClockGuard,
+    original: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
+    /// A promotion makes this learner a voter, so its own clock must be
+    /// bounded; coverage excuses only learners that stay learners.
+    promote_target: Option<u64>,
+}
+
+struct PreparedReductionAdmission<'guard> {
+    policy: &'guard StartupMembershipAdmission,
+    reference: hiqlite::ReductionFenceReference,
+    original: Result<ClockRemovalCapture<'guard>, ClockRefusal>,
+    proof: Option<AppliedRemovalFence>,
+}
+
+impl hiqlite::membership_admission::PreparedMembershipAdmission for PreparedReductionAdmission<'_> {
+    fn prepare_proof(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), hiqlite::Error>> + Send + '_>> {
+        Box::pin(async move {
+            if !self.reference.has_valid_shape() {
+                return Err(hiqlite::Error::Error(
+                    "invalid exact reduction reference".into(),
+                ));
+            }
+            let captured = self.original.as_ref().map_err(|error| {
+                hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+            })?;
+            let inner = self
+                .policy
+                .removal_owner
+                .get()
+                .and_then(Weak::upgrade)
+                .ok_or_else(|| {
+                    hiqlite::Error::Error("installed removal owner is unavailable".into())
+                })?;
+            let manager = MembershipManager {
+                inner: Some(inner),
+                clock: Arc::clone(&self.policy.clock),
+            };
+            // No new capture, clock query or deadline is created after await.
+            self.proof = Some(
+                manager
+                    .wait_for_reduction_reference(&self.reference, captured)
+                    .await
+                    .map_err(|error| hiqlite::Error::Error(error.to_string().into()))?,
+            );
+            Ok(())
+        })
+    }
+
+    fn redeem(&self) -> Result<(), hiqlite::Error> {
+        let captured = self.original.as_ref().map_err(|error| {
+            hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+        })?;
+        let proof = self.proof.as_ref().ok_or_else(|| {
+            hiqlite::Error::Error("exact reduction proof was not prepared".into())
+        })?;
+        self.policy
+            .clock
+            .admit_fenced_removal(captured, proof)
+            .map_err(|error| {
+                hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+            })
+    }
+}
+
+impl hiqlite::membership_admission::PreparedMembershipAdmission
+    for PreparedStartupMembershipAdmission<'_>
+{
+    fn redeem(&self) -> Result<(), hiqlite::Error> {
+        match self.promote_target {
+            Some(target) => self.clock.admit_promotion_for(target, self.original),
+            None => self
+                .clock
+                .admit_for(ClockDecision::MembershipChange, self.original),
+        }
+        .map(|_| ())
+        .map_err(|error| hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into()))
+    }
+}
+
+impl hiqlite::membership_admission::MembershipAdmission for StartupMembershipAdmission {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn prepare(
+        &self,
+        operation: hiqlite::membership_admission::MembershipAcquisition,
+    ) -> Box<dyn hiqlite::membership_admission::PreparedMembershipAdmission + '_> {
+        if let hiqlite::membership_admission::MembershipAcquisition::Reduction {
+            reference,
+            retain_as_learner,
+        } = operation
+        {
+            // Retained learners are survivors, so this exception cannot excuse
+            // their clock. This closed removal transport always removes target.
+            let original = if retain_as_learner || !reference.has_valid_shape() {
+                Err(ClockRefusal::Unknown)
+            } else {
+                self.clock.capture_removal_raft(reference.target_raft_id)
+            };
+            return Box::new(PreparedReductionAdmission {
+                policy: self,
+                reference,
+                original,
+                proof: None,
+            });
+        }
+        let promote_target = match operation {
+            hiqlite::membership_admission::MembershipAcquisition::Promote { node_id } => {
+                Some(node_id)
+            }
+            _ => None,
+        };
+        Box::new(PreparedStartupMembershipAdmission {
+            clock: &self.clock,
+            original: self.clock.acquire(),
+            promote_target,
+        })
+    }
+
+    fn bind_membership(&self, metrics: hiqlite::LocalDbRaftMetrics) -> Result<(), hiqlite::Error> {
+        self.source.0.set(metrics).map_err(|_| {
+            hiqlite::Error::Error("startup clock membership watch was already bound".into())
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2635,10 +2958,51 @@ const NODE_MAINTENANCE_COUNT_SQL: &str =
 const NODE_PROMOTION_COUNT_SQL: &str =
     "SELECT COUNT(*) AS count FROM cluster_node_promotions WHERE node_id = $1";
 
-/// The attempt a resumed removal adopts: the least attempt reference, or none.
-/// The first attempt of `lifecycle::Removal::InProgress` is its projection.
+/// Historical lifecycle agreement fixture: least reference projection. New
+/// production invocations own a distinct exact reference instead of borrowing.
+#[cfg(test)]
 const EXISTING_REMOVAL_ATTEMPT_SQL: &str = "SELECT attempt_id FROM cluster_node_removal_attempts \
                  WHERE node_id = $1 ORDER BY attempt_id LIMIT 1";
+
+const MAX_FROZEN_REDUCTION_REFERENCES: i64 = 256;
+
+const FREEZE_REDUCTION_REFERENCE_SQL: &str = "INSERT INTO settings (key, value, updated_at) \
+    SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM cluster_node_removals AS fence \
+      JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = fence.node_id \
+      JOIN cluster_nodes AS node ON node.node_id = fence.node_id \
+      WHERE fence.node_id = $4 AND attempt.attempt_id = $5 \
+        AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $6 AND owner.value = '1') \
+        AND node.raft_id = $7 AND node.removed_at IS NULL AND $8 > 0) \
+    AND ((SELECT COUNT(*) FROM settings WHERE key LIKE 'internal.cluster_reduction.v1.%') < $9 \
+      OR EXISTS (SELECT 1 FROM settings WHERE key = $1)) \
+    ON CONFLICT(key) DO NOTHING";
+
+const EXACT_REDUCTION_FENCE_SQL: &str = "SELECT COUNT(*) AS count \
+    FROM cluster_nodes AS node \
+    JOIN cluster_node_removals AS fence ON fence.node_id = node.node_id \
+    JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = node.node_id \
+    WHERE node.node_id = $1 AND node.raft_id = $2 \
+      AND attempt.attempt_id = $3 AND node.removed_at IS NULL \
+      AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $4 AND owner.value = '1')";
+
+const READ_REDUCTION_REFERENCE_SQL: &str = "SELECT frozen.value AS reference_json, \
+    node.raft_id, node.last_seen_at, node.last_applied_index \
+    FROM settings AS frozen JOIN cluster_nodes AS node ON frozen.key = $1 AND node.node_id = $2 \
+    JOIN cluster_node_removals AS fence ON fence.node_id = node.node_id \
+    JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = node.node_id \
+    WHERE attempt.attempt_id = $3 AND node.removed_at IS NULL \
+    AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $4 AND owner.value = '1')";
+
+const RETIRE_OWNED_REDUCTION_REFERENCE_SQL: &str = "DELETE FROM settings \
+    WHERE key = $1 AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts \
+      WHERE node_id = $2 AND attempt_id = $3)";
+
+fn reduction_reference_key(reference: &hiqlite::ReductionFenceReference) -> String {
+    format!(
+        "internal.cluster_reduction.v1.{}.{}",
+        reference.target_node_id, reference.attempt_id
+    )
+}
 
 /// The committed voter ids `MembershipManager::local_node_is_committed_voter`
 /// decides on, read from a Raft metrics `membership_config`
@@ -4023,6 +4387,36 @@ fn reachable_after(now: i64) -> i64 {
     now.saturating_sub(NODE_REACHABLE_WINDOW_MS)
 }
 
+fn snapshot_floor_heartbeat_matches(
+    capability: Option<i64>,
+    progress: Option<i64>,
+    node: i64,
+) -> bool {
+    capability.is_some_and(|observed| Some(observed) == progress && observed == node)
+}
+
+fn voter_snapshot_storage_ready(
+    durable: bool,
+    fresh: bool,
+    required: Option<u64>,
+    available: Option<u64>,
+) -> bool {
+    durable
+        && fresh
+        && required
+            .zip(available)
+            .is_some_and(|(required, available)| {
+                available >= required.max(MIN_VOTER_STORAGE_HEADROOM_BYTES)
+            })
+}
+
+fn snapshot_database_path(storage_root: &Path) -> PathBuf {
+    storage_root
+        .join(super::migration::HIQLITE_ACTIVE_DIRNAME)
+        .join("state_machine/db")
+        .join(super::migration::HIQLITE_DATABASE_FILENAME)
+}
+
 fn node_is_reachable(now: i64, last_seen_at: i64) -> bool {
     now.saturating_sub(last_seen_at) <= NODE_REACHABLE_WINDOW_MS
 }
@@ -4303,7 +4697,68 @@ impl std::fmt::Debug for JoinSecretPayload {
 impl MembershipManager {
     #[must_use]
     pub fn unavailable() -> Self {
-        Self { inner: None }
+        Self {
+            inner: None,
+            clock: Arc::new(super::clock::ClusterClockGuard::new(false)),
+        }
+    }
+
+    #[must_use]
+    pub fn clock_guard(&self) -> Arc<super::clock::ClusterClockGuard> {
+        Arc::clone(&self.clock)
+    }
+
+    #[must_use]
+    pub fn clock_leadership_identity(&self) -> Option<ClockLeadershipIdentity> {
+        let inner = self.inner.as_deref()?;
+        let membership = inner.local_metrics.current()?;
+        let leadership = inner.local_metrics.snapshot();
+        if !leadership.running
+            || leadership.node_id != inner.identity.raft_id
+            || membership.local_node != inner.identity.raft_id
+            || inner.local_metrics.current().as_ref() != Some(&membership)
+        {
+            return None;
+        }
+        let after = inner.local_metrics.snapshot();
+        if !after.running
+            || after.node_id != leadership.node_id
+            || after.current_term != leadership.current_term
+            || after.current_leader != leadership.current_leader
+        {
+            return None;
+        }
+        Some(ClockLeadershipIdentity {
+            membership,
+            current_term: leadership.current_term,
+            current_leader: leadership.current_leader,
+        })
+    }
+
+    /// Recheck the original authenticated clock request after an awaited
+    /// observation. This does not verify a signature or consume its nonce a
+    /// second time; callers must have completed ordinary authorization first.
+    pub fn authenticated_clock_request_still_fresh(
+        &self,
+        auth: &InternalPeerAuth,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        Ok(auth.target_node_id == inner.identity.node_id
+            && unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64)
+    }
+
+    /// The initial exact request authorization already consumed the nonce.
+    /// Recheck its applied identity/removal fence after a demanded round,
+    /// without a second replay admission or inbound-authority metric event.
+    pub async fn revalidate_authenticated_clock_request(
+        &self,
+        auth: &InternalPeerAuth,
+    ) -> Result<bool, MembershipError> {
+        Ok(self.authenticated_clock_request_still_fresh(auth)?
+            && self
+                .verify_committed_clock_peer_authority(&auth.node_id, false)
+                .await?
+            && self.authenticated_clock_request_still_fresh(auth)?)
     }
 
     #[must_use]
@@ -4334,11 +4789,246 @@ impl MembershipManager {
         role: ClusterRole,
         storage_root: PathBuf,
     ) -> Result<Self, MembershipError> {
+        let manager = Self::construct_replicated(
+            client,
+            replication,
+            store,
+            identity,
+            local,
+            bootstrap_http,
+            artwork_http,
+            secrets,
+            activity_signing_key,
+            activation_marker,
+            role,
+            storage_root,
+        )
+        .await?;
+        manager.initialize().await?;
+        Ok(manager)
+    }
+
+    /// Authenticated observation only: no serving capability publication,
+    /// normal heartbeat, jobs or activation marker. Existing committed plural
+    /// membership must supply its schema; only an actual applied singleton
+    /// vote may establish its initial observation directory/schema.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn clock_observation(
+        client: Client,
+        replication: ReplicationMonitor,
+        store: Arc<dyn Store>,
+        identity: ClusterIdentity,
+        local: ClusterPeer,
+        bootstrap_http: String,
+        artwork_http: String,
+        secrets: JoinSecrets,
+        activity_signing_key: ActivitySigningKey,
+        activation_marker: ActivationMarker,
+        desired_role: ClusterRole,
+        storage_root: PathBuf,
+    ) -> Result<Self, MembershipError> {
+        let manager = Self::construct_replicated(
+            client,
+            replication,
+            store,
+            identity,
+            local,
+            bootstrap_http,
+            artwork_http,
+            secrets,
+            activity_signing_key,
+            activation_marker,
+            desired_role,
+            storage_root,
+        )
+        .await?;
+        let inner = manager.replicated_inner()?;
+        let applied = inner.local_metrics.current().ok_or_else(|| {
+            MembershipError::Internal("clock observation lacks applied membership".into())
+        })?;
+        if applied.members.len() == 1
+            && applied.voters.len() == 1
+            && applied.local_node == inner.identity.raft_id
+            && applied.voters.contains(&inner.identity.raft_id)
+        {
+            // The shipped pristine initialization has already committed this
+            // exact singleton vote. Only establish the observation directory;
+            // timestamp zero is not a normal heartbeat or serving capability.
+            manager.install_membership_schema_only().await?;
+            inner
+                .client
+                .execute(
+                    "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, \
+                  last_seen_at, removed_at, role) VALUES ($1,$2,$3,$4,0,NULL,'voter') \
+                  ON CONFLICT(node_id) DO NOTHING",
+                    params!(
+                        inner.identity.node_id.as_str(),
+                        inner.identity.raft_id as i64,
+                        inner.local.raft_address.as_str(),
+                        inner.local.api_address.as_str()
+                    ),
+                )
+                .await?;
+            if inner.local_metrics.current().as_ref() != Some(&applied) {
+                return Err(MembershipError::ClockUnbounded(
+                    ClockRefusal::GenerationChanged,
+                ));
+            }
+        } else {
+            manager.require_membership_schema().await?;
+        }
+        manager.require_clock_observation_identity().await?;
+        manager.publish_activity_signing_key().await?;
+        manager.refresh_activity_public_keys().await?;
+        manager.publish_http_url().await?;
+        Ok(manager)
+    }
+
+    /// Verify only the already admitted UUID/Raft identity. Never update
+    /// last_seen_at here: its existing triggers expire operation/cache leases,
+    /// which is authority that pending observation must not exercise.
+    pub async fn require_clock_observation_identity(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let applied = inner.local_metrics.current().ok_or_else(|| {
+            MembershipError::Internal("clock observation lacks applied membership".into())
+        })?;
+        if applied.local_node != inner.identity.raft_id {
+            return Err(MembershipError::Internal(
+                "clock observation has foreign membership".into(),
+            ));
+        }
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_nodes WHERE node_id=$1 AND raft_id=$2 \
+             AND removed_at IS NULL AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+               WHERE removal.node_id=cluster_nodes.node_id)",
+                params!(
+                    inner.identity.node_id.as_str(),
+                    inner.identity.raft_id as i64
+                ),
+            )
+            .await?;
+        if !rows.first().is_some_and(|row| row.count == 1)
+            || inner.local_metrics.current().as_ref() != Some(&applied)
+        {
+            return Err(MembershipError::Internal(
+                "clock observation identity changed or is fenced".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Transition the same auth/replay context only after actual applied
+    /// voter membership. Desired role alone never authorizes this boundary.
+    pub async fn finish_clock_observation(
+        self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(Self, StartupActivationAdmission), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let installed = inner.client.local_membership_admission()?;
+        let original_deadline = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+            .and_then(StartupMembershipAdmission::startup_deadline);
+        if original_deadline != Some(deadline) {
+            return Err(MembershipError::Internal(
+                "startup activation cannot replace original deadline".into(),
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MembershipError::Internal(
+                "startup activation original phase expired".into(),
+            ));
+        }
+        let applied = inner.local_metrics.current().ok_or_else(|| {
+            MembershipError::Internal("activation lacks applied membership".into())
+        })?;
+        if inner.role == ClusterRole::Voter && !applied.voters.contains(&inner.identity.raft_id) {
+            return Err(MembershipError::Internal(
+                "desired voter is not an applied voter".into(),
+            ));
+        }
+        let clock = self
+            .clock
+            .acquire_owned_for(ClockDecision::MembershipChange);
+        #[cfg(test)]
+        if let Some(policy) = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+        {
+            policy
+                .activation_capture_pause
+                .after_durable_transaction()
+                .await;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MembershipError::Internal(
+                "startup activation original phase expired".into(),
+            ));
+        }
+        let original = StartupActivationAdmission {
+            clock: clock.map_err(MembershipError::ClockUnbounded)?,
+            deadline,
+            #[cfg(test)]
+            settlement_pause: None,
+        };
+        original.revalidate()?;
+        self.initialize_startup(&original).await?;
+        original.revalidate()?;
+        Ok((self, original))
+    }
+
+    async fn initialize_startup(
+        &self,
+        original: &StartupActivationAdmission,
+    ) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        if inner.role.is_learner() {
+            self.require_membership_schema().await?;
+        } else {
+            self.install_membership_schema_only_admitted(Some(original))
+                .await?;
+            // Re-establish only already-durable removal fences. This is
+            // idempotent reconciliation, not a new acquisition to regate.
+            self.backfill_removed_job_owner_fences().await?;
+        }
+        self.commit_heartbeat_admitted(inner, Some(original))
+            .await?;
+        // These immutable metadata publications already established clock
+        // observation, but retain the same original activation proof anyway.
+        original.revalidate()?;
+        self.publish_activity_signing_key_admitted(Some(original))
+            .await?;
+        self.refresh_activity_public_keys().await?;
+        original.revalidate()?;
+        self.publish_http_url_admitted(Some(original)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn construct_replicated(
+        client: Client,
+        replication: ReplicationMonitor,
+        store: Arc<dyn Store>,
+        identity: ClusterIdentity,
+        local: ClusterPeer,
+        bootstrap_http: String,
+        artwork_http: String,
+        secrets: JoinSecrets,
+        activity_signing_key: ActivitySigningKey,
+        activation_marker: ActivationMarker,
+        role: ClusterRole,
+        storage_root: PathBuf,
+    ) -> Result<Self, MembershipError> {
         let local_metrics = client
             .local_db_raft_metrics()
             .map_err(MembershipError::from)?;
         let voter_storage_probe = StorageDurabilityObservation {
-            successful: voter_storage_durability_probe(&storage_root),
+            successful: voter_storage_durability_probe(
+                snapshot_database_path(&storage_root)
+                    .parent()
+                    .expect("database has a parent"),
+            ),
             observed_at: unix_ms()?,
             checked_at: tokio::time::Instant::now(),
         };
@@ -4348,6 +5038,16 @@ impl MembershipManager {
         );
         let membership_metrics = PassiveMembershipMetrics::replicated();
         let manager = Self {
+            clock: client
+                .local_membership_admission()?
+                .as_any()
+                .downcast_ref::<StartupMembershipAdmission>()
+                .ok_or_else(|| {
+                    MembershipError::Internal(
+                        "local Hiqlite startup did not install the node clock admission".into(),
+                    )
+                })?
+                .clock_guard(),
             inner: Some(Arc::new(ReplicatedMembership {
                 client,
                 local_metrics,
@@ -4393,7 +5093,20 @@ impl MembershipManager {
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
             })),
         };
-        manager.initialize().await?;
+        // Both normal construction and pending observation share this exact
+        // Arc. finish_clock_observation keeps it; no second guard or binding.
+        let inner = manager.inner.as_ref().ok_or(MembershipError::Unavailable)?;
+        let installed = inner.client.local_membership_admission()?;
+        let policy = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+            .ok_or_else(|| MembershipError::Internal("installed removal policy changed".into()))?;
+        policy
+            .removal_owner
+            .set(Arc::downgrade(inner))
+            .map_err(|_| {
+                MembershipError::Internal("installed removal owner was already bound".into())
+            })?;
         Ok(manager)
     }
 
@@ -4482,7 +5195,10 @@ impl MembershipManager {
     /// "already there" is the steady state on every boot after the first. The
     /// probe can be raced, so the transaction still tolerates the duplicate
     /// and the loop re-reads instead of assuming.
-    async fn apply_additive_membership_columns(&self) -> Result<(), MembershipError> {
+    async fn apply_additive_membership_columns_admitted(
+        &self,
+        original: Option<&StartupActivationAdmission>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         for _ in 0..3 {
             let mut pending = Vec::new();
@@ -4493,6 +5209,9 @@ impl MembershipManager {
             }
             if pending.is_empty() {
                 return Ok(());
+            }
+            if let Some(original) = original {
+                original.revalidate()?;
             }
             match inner.client.txn(pending).await {
                 Ok(results) => {
@@ -4522,16 +5241,30 @@ impl MembershipManager {
         )))
     }
 
-    async fn install_membership_schema(&self) -> Result<(), MembershipError> {
+    async fn install_membership_schema_only(&self) -> Result<(), MembershipError> {
+        self.install_membership_schema_only_admitted(None).await
+    }
+
+    async fn install_membership_schema_only_admitted(
+        &self,
+        original: Option<&StartupActivationAdmission>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         for statement in MEMBERSHIP_SCHEMA {
+            if let Some(original) = original {
+                original.revalidate()?;
+            }
             inner.client.execute(*statement, params!()).await?;
         }
-        self.apply_additive_membership_columns().await?;
+        self.apply_additive_membership_columns_admitted(original)
+            .await?;
         // One replicated SQLite transaction closes both upgrade directions:
         // fences written before this schema gain a durable legacy reference,
         // and the trigger rejects every later old-coordinator insert. No Raft
         // write can interleave between the backfill and trigger installation.
+        if let Some(original) = original {
+            original.revalidate()?;
+        }
         inner
             .client
             .txn(vec![
@@ -4603,6 +5336,27 @@ impl MembershipManager {
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
+        // Test-only delay AFTER the actual durable result, never a writer
+        // hold or fabricated acknowledgement. Production admission is unchanged.
+        #[cfg(test)]
+        if let Some(pause) = original.and_then(|original| original.settlement_pause.as_ref()) {
+            pause.after_durable_transaction().await;
+        }
+        if let Some(original) = original {
+            original.revalidate()?;
+        }
+        #[cfg(test)]
+        if original.is_some() {
+            let installed = inner.client.local_membership_admission()?;
+            if let Some(policy) = installed
+                .as_any()
+                .downcast_ref::<StartupMembershipAdmission>()
+            {
+                policy
+                    .activation_metadata_submissions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         let current = inner
             .client
             .execute(
@@ -4624,6 +5378,11 @@ impl MembershipManager {
                 return Err(MembershipError::Incompatible);
             }
         }
+        Ok(())
+    }
+
+    async fn install_membership_schema(&self) -> Result<(), MembershipError> {
+        self.install_membership_schema_only().await?;
         self.backfill_removed_job_owner_fences().await?;
         self.heartbeat().await?;
         if let Err(error) = self.refresh_membership_metrics().await {
@@ -4786,6 +5545,10 @@ impl MembershipManager {
         expected_role: ClusterRole,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        let clock = self.clock_guard();
+        // Capture before the first Store await, without counting a refusal
+        // for exact already-published repair. Only new publication consumes it.
+        let prepared_admission = clock.acquire();
         if request.schema_version != AUTH_SCHEMA_VERSION {
             return Err(MembershipError::Incompatible);
         }
@@ -4839,7 +5602,12 @@ impl MembershipManager {
             );
             return Err(MembershipError::Incompatible);
         }
-        let now = unix_ms()?;
+        let now = match &prepared_admission {
+            Ok(ticket) => ticket.now_ms(),
+            // This value classifies token/repair state only. A failed capture
+            // cannot reach a new publication, irrespective of later recovery.
+            Err(_) => unix_ms()?,
+        };
         if role.is_learner() && !(cluster_min..=cluster_max).contains(&AUTH_LEARNER_PROTOCOL) {
             tracing::warn!(
                 cluster_min,
@@ -4850,44 +5618,47 @@ impl MembershipManager {
             );
             return Err(MembershipError::LearnerProtocolInactive);
         }
-        let resume_legacy_partial = match record.state.as_str() {
-            "redeemed" => return Err(MembershipError::ReusedToken),
-            "redeeming" if record.node_id.as_deref() != Some(&request.node_id) => {
-                return Err(MembershipError::ReservedToken)
-            }
-            // Redemption reserves the credential to one generated node id.
-            // That same staged node may resume after the original TTL; expiry
-            // still refuses an unused token below, and a different node id is
-            // refused above, so this does not restore bearer authority.
-            "redeeming" => {
-                match self.redeeming_node_matches(request).await? {
-                    Some(false) => return Err(MembershipError::NodeIdentityInUse),
-                    Some(true) => {
-                        if let Some(http_base) = http_base.as_deref() {
-                            self.claim_redeeming_http_origin(request, http_base).await?;
-                        }
-                        self.upsert_hostname(
-                            &request.node_id,
-                            &membership_hostname(&request.hostname, &request.api_address),
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                    // The previous rolling version reserved the token before
-                    // its node-publication transaction. Repair that crash
-                    // shape below under the exact reservation.
-                    None if role.is_learner() => {
-                        return Err(MembershipError::Internal(
-                            "learner token reservation has no staged node".to_owned(),
-                        ));
-                    }
-                    None => true,
+        use lifecycle::{JoinEffect, JoinTransition};
+        let mut transition = JoinTransition::reservation(
+            &request.token_digest,
+            &request.node_id,
+            request.raft_id,
+            role,
+            &record.state,
+            record.node_id.as_deref(),
+            record.expires_at <= now,
+        )?;
+        // Redemption reserves the credential to one generated node id.
+        // That same staged node may resume after the original TTL; expiry
+        // still refuses an unused token below, and a different node id is
+        // refused above, so this does not restore bearer authority.
+        if transition.effect == JoinEffect::InspectStagedIdentity {
+            transition = transition.staged_identity(self.redeeming_node_matches(request).await?)?;
+        }
+        let resume_legacy_partial = match transition.effect {
+            JoinEffect::RepairPublishedNode => {
+                if let Some(http_base) = http_base.as_deref() {
+                    self.claim_redeeming_http_origin(request, http_base).await?;
                 }
+                self.upsert_hostname(
+                    &request.node_id,
+                    &membership_hostname(&request.hostname, &request.api_address),
+                )
+                .await?;
+                return Ok(());
             }
-            "issued" if record.expires_at <= now => return Err(MembershipError::ExpiredToken),
-            "issued" => false,
-            _ => return Err(MembershipError::InvalidToken),
+            JoinEffect::PublishStagedNode {
+                resume_legacy_partial,
+            } => resume_legacy_partial,
+            _ => {
+                return Err(MembershipError::Internal(
+                    "invalid join reservation transition".to_owned(),
+                ));
+            }
         };
+        let admission = clock
+            .admit_for(ClockDecision::MembershipChange, prepared_admission)
+            .map_err(MembershipError::ClockUnbounded)?;
 
         // Claiming the origin, reserving the token, installing the rolling-
         // upgrade guards, and publishing the staged node are one Raft
@@ -5128,6 +5899,11 @@ impl MembershipManager {
                 params!(request.token_digest.as_str()),
             ));
         }
+        clock
+            .revalidate_for(ClockDecision::MembershipChange, &admission)
+            .map_err(MembershipError::ClockUnbounded)?;
+        // Once submitted, the existing ambiguous-result/identity repair path
+        // below remains available. A later clock refusal is not cancellation.
         let transaction = inner.client.txn(statements).await;
         match transaction {
             Ok(results) => {
@@ -5245,6 +6021,8 @@ impl MembershipManager {
         expected_role: ClusterRole,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        let clock = self.clock_guard();
+        let prepared_admission = clock.acquire();
         if !is_join_token_digest(&request.token_digest) {
             return Err(MembershipError::InvalidToken);
         }
@@ -5257,42 +6035,44 @@ impl MembershipManager {
         {
             return Err(MembershipError::ReservedToken);
         }
-        if record.state == "redeemed" {
-            return Ok(());
-        }
+        let transition = lifecycle::JoinTransition::finalization(
+            &request.token_digest,
+            &request.node_id,
+            request.raft_id,
+            expected_role,
+            record.state == "redeemed",
+        );
         // What "admitted" means depends on what the token admits. A voter has
         // to have committed a *vote*; a learner has to be a committed member
         // and must not have acquired one, because a learner that appears in
         // the voter set was not admitted by this protocol at all.
-        let metrics = inner.client.metrics_db().await?;
-        let is_voter = metrics
-            .membership_config
-            .voter_ids()
-            .any(|id| id == request.raft_id);
-        let is_member = metrics
-            .membership_config
-            .nodes()
-            .any(|(id, _)| *id == request.raft_id);
-        let admitted = role_is_admitted(record.role()?, is_member, is_voter);
-        if !admitted {
-            return Err(MembershipError::Internal(format!(
-                "joining node has not committed {} membership",
-                record.role()?.as_str()
-            )));
-        }
-        let now = unix_ms()?;
-        let changed = inner
-            .client
-            .execute(
-                "UPDATE cluster_join_tokens SET state = 'redeemed', redeemed_at = $1 \
-                 WHERE token_hash = $2 AND state = 'redeeming' AND node_id = $3",
-                params!(now, request.token_digest.as_str(), request.node_id.as_str()),
-            )
-            .await?;
-        if changed != 1 {
-            return Err(MembershipError::ReusedToken);
-        }
-        Ok(())
+        dispatch_clocked_join_finalization(
+            &clock,
+            prepared_admission,
+            transition,
+            || async {
+                let metrics = inner.client.metrics_db().await?;
+                let is_voter = metrics
+                    .membership_config
+                    .voter_ids()
+                    .any(|id| id == request.raft_id);
+                let is_member = metrics
+                    .membership_config
+                    .nodes()
+                    .any(|(id, _)| *id == request.raft_id);
+                Ok((is_member, is_voter))
+            },
+            |transition, now| async move {
+                Ok(inner
+                    .client
+                    .execute(
+                        FINALIZE_JOIN_TOKEN_SQL,
+                        params!(now, transition.token_digest, transition.node_id),
+                    )
+                    .await?)
+            },
+        )
+        .await
     }
 
     async fn token_record(&self, token_hash: &str) -> Result<JoinTokenRow, MembershipError> {
@@ -5447,6 +6227,14 @@ impl MembershipManager {
     }
 
     async fn commit_heartbeat(&self, inner: &ReplicatedMembership) -> Result<(), MembershipError> {
+        self.commit_heartbeat_admitted(inner, None).await
+    }
+
+    async fn commit_heartbeat_admitted(
+        &self,
+        inner: &ReplicatedMembership,
+        original: Option<&StartupActivationAdmission>,
+    ) -> Result<(), MembershipError> {
         // Observe maintenance before publishing any acknowledgement. From this
         // point onward request admission and singleton jobs are fenced even if
         // the transaction below is delayed or the response is lost.
@@ -5470,16 +6258,35 @@ impl MembershipManager {
             && passive.watermark_valid
             && passive.watermark_local_reads_supported
             && watermark.is_some_and(|sample| sample.apply_lag_entries == Some(0));
-        let storage_headroom = available_storage_headroom_bytes(&inner.storage_root);
+        let snapshot_database = snapshot_database_path(&inner.storage_root);
+        let storage_headroom = available_storage_headroom_bytes(
+            snapshot_database.parent().expect("database has a parent"),
+        );
+        let required_storage =
+            hiqlite::snapshot_admission::snapshot_storage_requirement(&snapshot_database).ok();
         let storage_probe = self.refresh_voter_storage_probe(inner).await?;
         let storage_probe_fresh =
             now.saturating_sub(storage_probe.observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS;
-        let voter_storage_ready = storage_probe.successful
-            && storage_probe_fresh
-            && storage_headroom.is_some_and(|bytes| bytes >= MIN_VOTER_STORAGE_HEADROOM_BYTES);
+        let voter_storage_ready = voter_snapshot_storage_ready(
+            storage_probe.successful,
+            storage_probe_fresh,
+            required_storage,
+            storage_headroom,
+        );
         let voter_role_persisted = inner.local_voter_role_persisted.load(Ordering::Acquire);
         let to_sql = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         let mut statements = vec![
+            (
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 VALUES ($1, $2, $3) ON CONFLICT(node_id, capability) DO UPDATE SET \
+                 last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    SNAPSHOT_STORAGE_FLOOR_CAPABILITY,
+                    now
+                ),
+            ),
             (
                 "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
@@ -5692,6 +6499,9 @@ impl MembershipManager {
                 .to_owned(),
             params!(inner.identity.node_id.as_str(), now),
         ));
+        if let Some(original) = original {
+            original.revalidate()?;
+        }
         inner
             .client
             .txn(statements)
@@ -5796,7 +6606,10 @@ impl MembershipManager {
     ) -> Result<StorageDurabilityObservation, MembershipError> {
         let mut observation = inner.voter_storage_probe.lock().await;
         if observation.checked_at.elapsed() >= STORAGE_DURABILITY_PROBE_INTERVAL {
-            let root = inner.storage_root.clone();
+            let root = snapshot_database_path(&inner.storage_root)
+                .parent()
+                .expect("database has a parent")
+                .to_owned();
             let successful =
                 tokio::task::spawn_blocking(move || voter_storage_durability_probe(&root))
                     .await
@@ -5837,8 +6650,18 @@ impl MembershipManager {
     /// authority; operators must recover the data directory or rejoin with a
     /// new node identity.
     async fn publish_activity_signing_key(&self) -> Result<(), MembershipError> {
+        self.publish_activity_signing_key_admitted(None).await
+    }
+
+    async fn publish_activity_signing_key_admitted(
+        &self,
+        original: Option<&StartupActivationAdmission>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         let public_key = inner.activity_signing_key.public_key_hex();
+        if let Some(original) = original {
+            original.revalidate()?;
+        }
         let changed = inner
             .client
             .execute(
@@ -5930,6 +6753,13 @@ impl MembershipManager {
     /// every ten-second liveness beat would double steady Raft traffic while
     /// carrying no new information.
     async fn publish_http_url(&self) -> Result<(), MembershipError> {
+        self.publish_http_url_admitted(None).await
+    }
+
+    async fn publish_http_url_admitted(
+        &self,
+        original: Option<&StartupActivationAdmission>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         // The ownership check belongs in the serialized Raft statement rather
         // than a UNIQUE table constraint. Existing M3 clusters already have
@@ -5939,6 +6769,9 @@ impl MembershipManager {
         // currently published by another node. A still-redeeming token freezes
         // the durable origin chosen during redemption; after finalization the
         // active node identity may atomically publish an operator readdress.
+        if let Some(original) = original {
+            original.revalidate()?;
+        }
         let transaction = inner
             .client
             .txn(vec![
@@ -5994,6 +6827,9 @@ impl MembershipManager {
                 )));
             }
             Err(error) => return Err(error.into()),
+        }
+        if let Some(original) = original {
+            original.revalidate()?;
         }
         self.upsert_hostname(&inner.identity.node_id, &inner.local_hostname)
             .await
@@ -7288,6 +8124,93 @@ impl MembershipManager {
         Ok(Self::operations_peer_directory(now, &members, rows))
     }
 
+    /// Exact bounded clock roster, including stale and pending-removal members.
+    /// Missing identity or endpoint invalidates the whole round; reachability
+    /// never shortens clock coverage. No credential-guard mutation is involved.
+    pub async fn clock_peers(&self) -> Result<ClockPeerRoster, MembershipError> {
+        self.clock_peers_for_request(None).await
+    }
+
+    /// Last awaited response check after ordinary exact-request authorization.
+    /// Does not consume a nonce again. Directory and sender removal fence must
+    /// be from the same consistent read, not two snapshots separated by await.
+    pub async fn clock_peers_after_authenticated_request(
+        &self,
+        auth: &InternalPeerAuth,
+    ) -> Result<ClockPeerRoster, MembershipError> {
+        if !self.authenticated_clock_request_still_fresh(auth)? {
+            return Err(MembershipError::Internal("clock request expired".into()));
+        }
+        let roster = self.clock_peers_for_request(Some(&auth.node_id)).await?;
+        if !self.authenticated_clock_request_still_fresh(auth)? {
+            return Err(MembershipError::Internal("clock request expired".into()));
+        }
+        Ok(roster)
+    }
+
+    async fn clock_peers_for_request(
+        &self,
+        sender: Option<&str>,
+    ) -> Result<ClockPeerRoster, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(ClockPeerRoster {
+                membership: None,
+                peers: Vec::new(),
+            });
+        };
+        // Effective Raft membership may be unapplied. Never turn that state
+        // (or an absent local node) into a proved empty remote directory.
+        let membership = inner.local_metrics.current().ok_or_else(|| {
+            MembershipError::Internal("local applied clock membership is unavailable".into())
+        })?;
+        if membership.local_node != inner.identity.raft_id {
+            return Err(MembershipError::Internal(
+                "local clock watch belongs to a different Raft identity".into(),
+            ));
+        }
+        let members_json = bounded_committed_raft_ids_json(&membership.members)?;
+        let rows = if let Some(sender) = sender {
+            let rows = inner
+                .client
+                .query_consistent_map::<AuthenticatedClockPeerRow, _>(
+                    AUTHENTICATED_CLOCK_PEERS_SQL,
+                    params!(inner.identity.node_id.as_str(), members_json, sender),
+                )
+                .await?;
+            if !rows.first().is_some_and(|row| row.request_authorized)
+                || rows.iter().any(|row| !row.request_authorized)
+            {
+                return Err(MembershipError::Internal(
+                    "clock sender is removed or fenced".into(),
+                ));
+            }
+            rows.into_iter().map(|row| row.peer).collect()
+        } else {
+            inner
+                .client
+                .query_consistent_map::<ActivityPeerRow, _>(
+                    CACHE_ADMIN_REVOCATION_PEERS_SQL,
+                    params!(inner.identity.node_id.as_str(), members_json),
+                )
+                .await?
+        };
+        if inner.local_metrics.current().as_ref() != Some(&membership) {
+            return Err(MembershipError::ClockUnbounded(
+                ClockRefusal::GenerationChanged,
+            ));
+        }
+        let peers = Self::cache_admin_revocation_peer_directory(
+            unix_ms()?,
+            &membership.members,
+            inner.identity.raft_id,
+            rows,
+        )?;
+        Ok(ClockPeerRoster {
+            membership: Some(membership),
+            peers,
+        })
+    }
+
     /// Resolve every exact committed remote member for cache-admin revocation.
     /// A pending removal is still a serving authority until Raft membership no
     /// longer contains it, so omission, missing identity, or missing endpoint
@@ -7602,8 +8525,18 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(&auth.node_id, now, PeerAuthorityRole::CommittedMember)
-            .await
+        let clock_request = path == "/_internal/v1/clock";
+        let authorized = self
+            .verify_live_peer_authority_counted(
+                &auth.node_id,
+                now,
+                PeerAuthorityRole::CommittedMember,
+                clock_request,
+            )
+            .await?;
+        Ok(authorized
+            && (!clock_request
+                || unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64))
     }
 
     /// Authenticate an exact internal mutation whose caller and receiver must
@@ -7741,8 +8674,17 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(source_node_id, unix_ms()?, role)
-            .await
+        if role == PeerAuthorityRole::CommittedMember && path == "/_internal/v1/clock" {
+            // Pending learners cannot publish ordinary heartbeats yet. Their
+            // signed clock replies use the same exact applied-member proof
+            // as incoming clock requests, without inventing liveness or
+            // counting this response as an inbound authority read.
+            self.verify_committed_clock_peer_authority(source_node_id, false)
+                .await
+        } else {
+            self.verify_live_peer_authority(source_node_id, unix_ms()?, role)
+                .await
+        }
     }
 
     /// Authenticate an idempotent read-only relay. Signature verification is
@@ -8065,6 +9007,28 @@ impl MembershipManager {
         now: i64,
         role: PeerAuthorityRole,
     ) -> Result<bool, MembershipError> {
+        self.verify_live_peer_authority_counted(node_id, now, role, false)
+            .await
+    }
+
+    async fn verify_live_peer_authority_counted(
+        &self,
+        node_id: &str,
+        now: i64,
+        role: PeerAuthorityRole,
+        clock_request: bool,
+    ) -> Result<bool, MembershipError> {
+        if clock_request {
+            // Clock observation is not serving authority. An admitted peer
+            // may have no fresh normal heartbeat until its promotion finishes;
+            // requiring one here would deadlock authenticated observation.
+            // Keep the existing signature/nonce/rate checks above, and bind
+            // this exact UUID to the same authoritative applied roster across
+            // the consistent read. Never refresh liveness or expire leases.
+            return self
+                .verify_committed_clock_peer_authority(node_id, true)
+                .await;
+        }
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         let admits = |raft_id| {
@@ -8095,6 +9059,40 @@ impl MembershipManager {
         Ok(rows.len() == 1
             && rows[0].last_seen_at >= verified_reachable_after
             && admits(rows[0].raft_id))
+    }
+
+    /// Clock exchanges prove applied membership, not normal serving liveness.
+    /// Only the exact clock route uses this proof; every other response keeps
+    /// the role-specific live-peer proof above. The consistent read preserves
+    /// removal fences and is bracketed by the same local applied membership.
+    async fn verify_committed_clock_peer_authority(
+        &self,
+        node_id: &str,
+        inbound_request: bool,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let Some(applied) = inner.local_metrics.current() else {
+            return Ok(false);
+        };
+        if applied.local_node != inner.identity.raft_id {
+            return Ok(false);
+        }
+        if inbound_request {
+            self.clock.record_authority_read();
+        }
+        let rows = inner
+            .client
+            .query_consistent_map::<ActivityAuthNodeRow, _>(
+                "SELECT node.raft_id, node.last_seen_at FROM cluster_nodes node \
+                 WHERE node.node_id = $1 AND node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id)",
+                params!(node_id),
+            )
+            .await?;
+        Ok(rows.len() == 1
+            && applied.members.contains(&rows[0].raft_id)
+            && inner.local_metrics.current().as_ref() == Some(&applied))
     }
 
     async fn refresh_membership_metrics(&self) -> Result<(), MembershipError> {
@@ -8538,6 +9536,8 @@ impl MembershipManager {
     ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
         require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
+        let clock = self.clock_guard();
+        let prepared_admission = clock.acquire();
         self.require_learner_lifecycle_capability().await?;
         if self.maintenance_operation_pending().await? {
             return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
@@ -8610,11 +9610,19 @@ impl MembershipManager {
                 MembershipChangeOutcome::Indeterminate => {}
             }
         }
+        // Committed promotion and ambiguous-result reconciliation above are
+        // ungated. Issuing a new proposal, even for a pending audit row, is not.
+        let mut admission = clock
+            .admit_promotion_for(target_raft_id, prepared_admission)
+            .map_err(MembershipError::ClockUnbounded)?;
         let (attempt_id, new_attempt) = if let Some(existing) = existing {
             (existing.attempt_id, false)
         } else {
             let attempt_id = uuid::Uuid::new_v4().to_string();
-            let started_at = unix_ms()?;
+            let started_at = admission.now_ms();
+            clock
+                .revalidate_promotion_for(target_raft_id, &mut admission)
+                .map_err(MembershipError::ClockUnbounded)?;
             let inserted = inner
                 .client
                 .execute(
@@ -8690,6 +9698,12 @@ impl MembershipManager {
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
         require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
+        if let Err(cause) = clock.revalidate_promotion_for(target_raft_id, &mut admission) {
+            if new_attempt {
+                self.clear_learner_promotion(node_id, &attempt_id).await;
+            }
+            return Err(MembershipError::ClockUnbounded(cause));
+        }
         match request_learner_promotion(&leader.addr_api, &inner.secrets.api, &target_node).await {
             Ok(()) => {}
             Err(MembershipChangeFailure::Rejected(error)) => {
@@ -8730,19 +9744,8 @@ impl MembershipManager {
         inner
             .client
             .query_consistent_map::<PromotionTargetRow, _>(
-                "SELECT node.raft_id, node.role, node.last_seen_at, \
-                        EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                          WHERE removal.node_id = node.node_id) AS removal_pending, \
-                        progress.last_applied_index, progress.apply_lag_entries, \
-                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
-                        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
-                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
-                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
-                        progress.observed_at \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
-                 WHERE node.node_id = $1 AND node.removed_at IS NULL",
-                params!(node_id),
+                PROMOTION_TARGET_SQL,
+                params!(node_id, false),
             )
             .await?
             .into_iter()
@@ -8764,7 +9767,11 @@ impl MembershipManager {
         {
             return Err(MembershipError::LearnerNotReady(node_id.to_owned()));
         }
-        if !target.voter_storage_ready
+        if !snapshot_floor_heartbeat_matches(
+            target.snapshot_floor_observed_at,
+            target.observed_at,
+            target.last_seen_at,
+        ) || !target.voter_storage_ready
             || !target.storage_probe_observed_at.is_some_and(|observed_at| {
                 now.saturating_sub(observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS
             })
@@ -8875,23 +9882,13 @@ impl MembershipManager {
         if node_id == inner.identity.node_id {
             return Err(MembershipError::SelfRemovalRequiresLeave);
         }
+        let captured = self.clock.capture_removal_node(node_id);
         let metrics = inner.client.metrics_db().await?;
         let target = inner
             .client
             .query_consistent_map::<PromotionTargetRow, _>(
-                "SELECT node.raft_id, node.role, node.last_seen_at, \
-                        EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                          WHERE removal.node_id = node.node_id) AS removal_pending, \
-                        progress.last_applied_index, progress.apply_lag_entries, \
-                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
-                        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
-                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
-                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
-                        progress.observed_at \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
-                 WHERE node.node_id = $1",
-                params!(node_id),
+                PROMOTION_TARGET_SQL,
+                params!(node_id, true),
             )
             .await?
             .into_iter()
@@ -8903,14 +9900,14 @@ impl MembershipManager {
             .voter_ids()
             .any(|raft_id| raft_id == target_raft_id)
         {
-            self.remove_voter(node_id).await
+            self.remove_voter_captured(node_id, captured).await
         } else if metrics
             .membership_config
             .nodes()
             .any(|(raft_id, _)| *raft_id == target_raft_id)
             && ClusterRole::from_stored(target.admitted_role.as_deref())? == ClusterRole::Learner
         {
-            self.remove_learner_impl(node_id).await?;
+            self.remove_learner_captured(node_id, captured).await?;
             self.status().await
         } else if self.node_is_tombstoned(node_id).await? {
             self.fence_removed_job_owner(node_id).await?;
@@ -8921,7 +9918,11 @@ impl MembershipManager {
         }
     }
 
-    async fn remove_learner_impl(&self, node_id: &str) -> Result<(), MembershipError> {
+    async fn remove_learner_captured(
+        &self,
+        node_id: &str,
+        captured: Result<ClockRemovalCapture<'_>, ClockRefusal>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         self.require_learner_lifecycle_capability().await?;
         self.require_removal_capability().await?;
@@ -8966,57 +9967,53 @@ impl MembershipManager {
         // Learner removal is the draining variant: the reference-counted
         // fence first ejects placement, supersedes active media ownership,
         // expires job ownership, and blocks every later route admission.
-        let (removal_attempt, new_attempt) = if target.removal_pending {
-            (self.existing_removal_attempt(node_id).await?, false)
-        } else {
-            (self.begin_node_removal(node_id, true).await?, true)
+        let captured = captured.map_err(MembershipError::ClockUnbounded)?;
+        // Every invocation owns its own ref; a pending prior invocation is not
+        // borrowed and cannot be rolled back by this one.
+        let removal_attempt = self.begin_node_removal(node_id, true).await?;
+        let (reference, proof) = match self
+            .prepare_reduction_reference(node_id, target_raft_id, &removal_attempt, &captured)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(self
+                    .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                    .await)
+            }
         };
-        let fence_barrier = inner.client.db_quorum_watermark().await?.committed_index;
-        self.wait_for_removal_fence(node_id, fence_barrier).await?;
         match self.settle_offline_work(node_id).await {
             Ok(report) => {
                 resolved.requeued += report.requeued;
                 resolved.failed += report.failed;
             }
             Err(error) => {
-                if new_attempt {
-                    return Err(self
-                        .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
-                        .await);
-                }
-                return Err(MembershipError::RemovalPending(error.to_string()));
+                return Err(self
+                    .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                    .await);
             }
         }
-        match request_learner_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await {
-            Ok(()) => {}
-            Err(MembershipChangeFailure::Rejected(error)) => {
-                if new_attempt {
-                    return Err(self
-                        .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
-                        .await);
-                }
-                return Err(MembershipError::RemovalPending(error.to_string()));
-            }
-            Err(MembershipChangeFailure::Ambiguous(error)) => {
-                match reconcile_member_removal(
-                    &inner.secrets.api,
-                    target_raft_id,
-                    &membership_nodes,
+        if let Err(cause) = self.clock.admit_fenced_removal(&captured, &proof) {
+            return Err(self
+                .rollback_node_removal_after_failure(
+                    node_id,
+                    &removal_attempt,
+                    MembershipError::ClockUnbounded(cause),
                 )
-                .await
-                {
-                    MembershipChangeOutcome::Removed => {
-                        tracing::warn!(%error, %node_id, "learner removal committed after an ambiguous HTTP result");
-                    }
-                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
-                        return Err(MembershipError::RemovalPending(format!(
-                            "learner removal outcome is indeterminate after {error}"
-                        )));
-                    }
-                }
-            }
+                .await);
         }
-        self.finalize_node_removal(node_id).await;
+        dispatch_removal_outcome(
+            RemovalPath::Learner,
+            node_id,
+            &removal_attempt,
+            request_learner_removal(&leader.addr_api, &inner.secrets.api, &reference).await,
+            |rollback_node, rollback_attempt, error| {
+                self.rollback_node_removal_after_failure(rollback_node, rollback_attempt, error)
+            },
+            || reconcile_member_removal(&inner.secrets.api, target_raft_id, &membership_nodes),
+            |finalize_node| self.finalize_node_removal(finalize_node),
+        )
+        .await?;
         tracing::info!(
             %node_id,
             requeued = resolved.requeued,
@@ -9026,53 +10023,270 @@ impl MembershipManager {
         Ok(())
     }
 
-    async fn existing_removal_attempt(&self, node_id: &str) -> Result<String, MembershipError> {
-        let inner = self.replicated_inner()?;
-        inner
-            .client
-            .query_consistent_map::<RemovalAttemptRow, _>(
-                EXISTING_REMOVAL_ATTEMPT_SQL,
-                params!(node_id),
-            )
-            .await?
-            .into_iter()
-            .next()
-            .map(|row| row.attempt_id)
-            .ok_or_else(|| {
-                MembershipError::RemovalPending(format!(
-                    "{node_id} has a removal fence without an attempt reference"
-                ))
-            })
-    }
-
-    async fn wait_for_removal_fence(
+    /// Freeze the first actual post-fence quorum barrier for this exact owned
+    /// attempt. This record transports no clock time or admission authority.
+    async fn freeze_reduction_reference(
         &self,
         node_id: &str,
-        barrier: u64,
-    ) -> Result<(), MembershipError> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        raft_id: u64,
+        attempt_id: &str,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<hiqlite::ReductionFenceReference, MembershipError> {
+        self.clock
+            .revalidate_removal_capture(captured)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let inner = self.replicated_inner()?;
+        let stored_raft_id = i64::try_from(raft_id).map_err(|_| {
+            MembershipError::RemovalPending(
+                "target Raft identity is outside durable representation".into(),
+            )
+        })?;
+        // Establish that this exact committed fence precedes the quorum read.
+        // The barrier is obtained from Raft commit authority, never the request.
+        let fences = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                EXACT_REDUCTION_FENCE_SQL,
+                params!(
+                    node_id,
+                    stored_raft_id,
+                    attempt_id,
+                    removed_job_owner_key(node_id)
+                ),
+            )
+            .await?;
+        if !fences.first().is_some_and(|row| row.count == 1) {
+            return Err(MembershipError::RemovalPending(
+                "exact owned reduction fence is absent".into(),
+            ));
+        }
+        let reference = hiqlite::ReductionFenceReference {
+            version: 1,
+            target_node_id: node_id.to_owned(),
+            target_raft_id: raft_id,
+            attempt_id: attempt_id.to_owned(),
+            barrier_index: inner.client.db_quorum_watermark().await?.committed_index,
+        };
+        if !reference.has_valid_shape() {
+            return Err(MembershipError::RemovalPending(
+                "invalid exact reduction reference".into(),
+            ));
+        }
+        let stored_barrier = i64::try_from(reference.barrier_index).map_err(|_| {
+            MembershipError::RemovalPending(
+                "quorum barrier is outside durable representation".into(),
+            )
+        })?;
+        let key = reduction_reference_key(&reference);
+        let value = serde_json::to_string(&reference)
+            .map_err(|error| MembershipError::Internal(error.to_string()))?;
+        inner
+            .client
+            .execute(
+                FREEZE_REDUCTION_REFERENCE_SQL,
+                params!(
+                    key.as_str(),
+                    value,
+                    captured.now_ms() / 1_000,
+                    node_id,
+                    attempt_id,
+                    removed_job_owner_key(node_id),
+                    stored_raft_id,
+                    stored_barrier,
+                    MAX_FROZEN_REDUCTION_REFERENCES
+                ),
+            )
+            .await?;
+        let rows = inner
+            .client
+            .query_consistent_map::<ReductionReferenceRow, _>(
+                READ_REDUCTION_REFERENCE_SQL,
+                params!(key, node_id, attempt_id, removed_job_owner_key(node_id)),
+            )
+            .await?;
+        let row = rows.into_iter().next().ok_or_else(|| {
+            MembershipError::RemovalPending("durable reduction fence is absent".into())
+        })?;
+        let frozen: hiqlite::ReductionFenceReference = serde_json::from_str(&row.reference_json)
+            .map_err(|_| {
+                MembershipError::RemovalPending("invalid frozen reduction reference".into())
+            })?;
+        // A replay uses the immutable original barrier, never today's value.
+        if !frozen.has_valid_shape()
+            || frozen.target_node_id != node_id
+            || frozen.target_raft_id != raft_id
+            || frozen.attempt_id != attempt_id
+            || u64::try_from(row.raft_id).ok() != Some(raft_id)
+        {
+            return Err(MembershipError::RemovalPending(
+                "reduction reference identity changed".into(),
+            ));
+        }
+        self.clock
+            .revalidate_removal_capture(captured)
+            .map_err(MembershipError::ClockUnbounded)?;
+        Ok(frozen)
+    }
+
+    /// Authenticate the reference through actual current rows. Missing clock
+    /// observations never count as target reachability evidence.
+    pub(super) async fn prove_reduction_reference(
+        &self,
+        reference: &hiqlite::ReductionFenceReference,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<ReductionProofPoll, MembershipError> {
+        if !reference.has_valid_shape() {
+            return Err(MembershipError::RemovalPending(
+                "invalid reduction reference".into(),
+            ));
+        }
+        self.clock
+            .revalidate_removal_capture(captured)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<ReductionReferenceRow, _>(
+                READ_REDUCTION_REFERENCE_SQL,
+                params!(
+                    reduction_reference_key(reference),
+                    reference.target_node_id.as_str(),
+                    reference.attempt_id.as_str(),
+                    removed_job_owner_key(&reference.target_node_id)
+                ),
+            )
+            .await?;
+        self.clock
+            .revalidate_removal_capture(captured)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let row = rows.into_iter().next().ok_or_else(|| {
+            MembershipError::RemovalPending("durable reduction reference was released".into())
+        })?;
+        let frozen: hiqlite::ReductionFenceReference = serde_json::from_str(&row.reference_json)
+            .map_err(|_| {
+                MembershipError::RemovalPending("invalid frozen reduction reference".into())
+            })?;
+        if !exact_reduction_binding_matches(&row, reference) {
+            return Err(MembershipError::RemovalPending(
+                "stale or foreign reduction reference".into(),
+            ));
+        }
+        // Re-read the complete actual directory after the durable await. The
+        // receiver's original capture, not this lookup, supplies clock time.
+        let roster = self.clock_peers().await?;
+        self.clock
+            .revalidate_removal_directory(
+                captured,
+                &roster,
+                &reference.target_node_id,
+                reference.target_raft_id,
+                &inner.identity.node_id,
+            )
+            .map_err(MembershipError::ClockUnbounded)?;
+        let applied = row
+            .last_applied_index
+            .and_then(|index| u64::try_from(index).ok())
+            .is_some_and(|index| index >= reference.barrier_index);
+        Ok(
+            match reduction_fence_evidence(
+                &self.clock,
+                captured,
+                applied,
+                node_is_reachable(captured.now_ms(), row.last_seen_at),
+            ) {
+                ReductionEvidence::Proved(evidence) => {
+                    ReductionProofPoll::Proved(AppliedRemovalFence {
+                        reference: frozen,
+                        evidence,
+                    })
+                }
+                ReductionEvidence::Pending { clock_blocked } => {
+                    ReductionProofPoll::Pending { clock_blocked }
+                }
+            },
+        )
+    }
+
+    async fn wait_for_reduction_reference(
+        &self,
+        reference: &hiqlite::ReductionFenceReference,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<AppliedRemovalFence, MembershipError> {
+        // Whether the last poll found the target stale by wall age but could
+        // not use it (post-step stabilization, enforced). Waiting continues,
+        // because a live target can still prove TargetApplied; if the budget
+        // ends first, that is a typed clock refusal, not a bare timeout.
+        let mut clock_blocked = false;
         loop {
-            let target = self.promotion_target(node_id).await?;
-            if !node_is_reachable(unix_ms()?, target.last_seen_at) {
-                return Ok(());
-            }
-            if target
-                .last_applied_index
-                .and_then(|index| u64::try_from(index).ok())
-                .is_some_and(|index| index >= barrier)
+            let Some(remaining) = captured.remaining_removal_budget() else {
+                return Err(self.removal_budget_expired(captured, clock_blocked));
+            };
+            match tokio::time::timeout(
+                remaining,
+                self.prove_reduction_reference(reference, captured),
+            )
+            .await
             {
-                return Ok(());
+                Ok(Ok(ReductionProofPoll::Proved(proof))) => return Ok(proof),
+                Ok(Ok(ReductionProofPoll::Pending {
+                    clock_blocked: blocked,
+                })) => {
+                    clock_blocked = blocked;
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Err(self.removal_budget_expired(captured, clock_blocked)),
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(MembershipError::RemovalPending(format!(
-                    "{node_id} has not applied its durable route fence"
-                )));
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            let Some(remaining) = captured.remaining_removal_budget() else {
+                return Err(self.removal_budget_expired(captured, clock_blocked));
+            };
+            tokio::time::sleep(remaining.min(Duration::from_millis(250))).await;
         }
     }
 
+    fn removal_budget_expired(
+        &self,
+        captured: &ClockRemovalCapture<'_>,
+        clock_blocked: bool,
+    ) -> MembershipError {
+        removal_budget_expired_error(&self.clock, captured, clock_blocked)
+    }
+
+    async fn prepare_reduction_reference(
+        &self,
+        node_id: &str,
+        raft_id: u64,
+        attempt_id: &str,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<(hiqlite::ReductionFenceReference, AppliedRemovalFence), MembershipError> {
+        let remaining = captured.remaining_removal_budget().ok_or_else(|| {
+            MembershipError::RemovalPending("original removal proof deadline expired".into())
+        })?;
+        // Both halves spend the same original budget. The wait bounds itself
+        // against it, so its expiry can still name a typed clock refusal.
+        let reference = tokio::time::timeout(
+            remaining,
+            self.freeze_reduction_reference(node_id, raft_id, attempt_id, captured),
+        )
+        .await
+        .map_err(|_| {
+            MembershipError::RemovalPending("original removal proof deadline expired".into())
+        })??;
+        let proof = self
+            .wait_for_reduction_reference(&reference, captured)
+            .await?;
+        Ok((reference, proof))
+    }
+
     pub async fn remove_voter(&self, node_id: &str) -> Result<MembershipStatus, MembershipError> {
+        let captured = self.clock.capture_removal_node(node_id);
+        self.remove_voter_captured(node_id, captured).await
+    }
+
+    async fn remove_voter_captured(
+        &self,
+        node_id: &str,
+        captured: Result<ClockRemovalCapture<'_>, ClockRefusal>,
+    ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
         if node_id == inner.identity.node_id {
             return Err(MembershipError::SelfRemovalRequiresLeave);
@@ -9141,6 +10355,7 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
+        let captured = captured.map_err(MembershipError::ClockUnbounded)?;
         let removal_attempt = self.begin_node_removal(node_id, false).await?;
         // Close the final admission race only after the durable removal fence
         // exists. Package creation checks that fence atomically, so this is the
@@ -9159,33 +10374,38 @@ impl MembershipManager {
                     .await);
             }
         }
-        match request_voter_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await {
-            Ok(()) => {}
-            Err(MembershipChangeFailure::Rejected(removal_error)) => {
+        let (reference, proof) = match self
+            .prepare_reduction_reference(node_id, target_raft_id, &removal_attempt, &captured)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
                 return Err(self
-                    .rollback_node_removal_after_failure(node_id, &removal_attempt, removal_error)
-                    .await);
+                    .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                    .await)
             }
-            Err(MembershipChangeFailure::Ambiguous(removal_error)) => {
-                match reconcile_membership_change(
-                    &inner.secrets.api,
-                    target_raft_id,
-                    &membership_nodes,
+        };
+        if let Err(cause) = self.clock.admit_fenced_removal(&captured, &proof) {
+            return Err(self
+                .rollback_node_removal_after_failure(
+                    node_id,
+                    &removal_attempt,
+                    MembershipError::ClockUnbounded(cause),
                 )
-                .await
-                {
-                    MembershipChangeOutcome::Removed => {
-                        tracing::warn!(%removal_error, %node_id, "voter removal committed after an ambiguous HTTP result");
-                    }
-                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
-                        return Err(MembershipError::Internal(format!(
-                        "voter removal outcome is indeterminate after {removal_error}; the target remains fenced"
-                    )));
-                    }
-                }
-            }
+                .await);
         }
-        self.finalize_node_removal(node_id).await;
+        dispatch_removal_outcome(
+            RemovalPath::Voter,
+            node_id,
+            &removal_attempt,
+            request_voter_removal(&leader.addr_api, &inner.secrets.api, &reference).await,
+            |rollback_node, rollback_attempt, error| {
+                self.rollback_node_removal_after_failure(rollback_node, rollback_attempt, error)
+            },
+            || reconcile_membership_change(&inner.secrets.api, target_raft_id, &membership_nodes),
+            |finalize_node| self.finalize_node_removal(finalize_node),
+        )
+        .await?;
         if resolved.requeued + resolved.failed > 0 {
             tracing::info!(
                 requeued = resolved.requeued,
@@ -9200,19 +10420,21 @@ impl MembershipManager {
     /// committed role. A learner leave never changes quorum arithmetic.
     pub async fn leave_node(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        let captured = self.clock.capture_removal_node(&inner.identity.node_id);
         let metrics = inner.client.metrics_db().await?;
         if metrics
             .membership_config
             .voter_ids()
             .any(|raft_id| raft_id == inner.identity.raft_id)
         {
-            self.leave_voter().await
+            self.leave_voter_captured(captured).await
         } else if metrics
             .membership_config
             .nodes()
             .any(|(raft_id, _)| *raft_id == inner.identity.raft_id)
         {
-            self.remove_learner_impl(&inner.identity.node_id).await
+            self.remove_learner_captured(&inner.identity.node_id, captured)
+                .await
         } else if self.node_is_tombstoned(&inner.identity.node_id).await? {
             self.finalize_node_removal(&inner.identity.node_id).await;
             Ok(())
@@ -9230,6 +10452,15 @@ impl MembershipManager {
     /// leader before committing; an even voter set commits directly so the new
     /// odd quorum can elect after OpenRaft steps this leader down.
     pub async fn leave_voter(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let captured = self.clock.capture_removal_node(&inner.identity.node_id);
+        self.leave_voter_captured(captured).await
+    }
+
+    async fn leave_voter_captured(
+        &self,
+        captured: Result<ClockRemovalCapture<'_>, ClockRefusal>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         let node_id = inner.identity.node_id.clone();
         let metrics = inner.client.metrics_db().await?;
@@ -9327,6 +10558,7 @@ impl MembershipManager {
         // Fence while this voter is still inside the old quorum. The separate
         // pending row survives a crash and keeps the operation retryable while
         // OpenRaft is in a joint or otherwise indeterminate configuration.
+        let captured = captured.map_err(MembershipError::ClockUnbounded)?;
         let removal_attempt = self.begin_node_removal(&node_id, false).await?;
         // The fence prevents any later local ownership admission. Settle work
         // that raced with the earlier pass before proposing removal, preserving
@@ -9344,50 +10576,54 @@ impl MembershipManager {
                     .await);
             }
         }
-        match request_voter_removal(
-            &commit_leader_api,
-            &inner.secrets.api,
-            inner.identity.raft_id,
-        )
-        .await
+        let (reference, proof) = match self
+            .prepare_reduction_reference(
+                &node_id,
+                inner.identity.raft_id,
+                &removal_attempt,
+                &captured,
+            )
+            .await
         {
-            Ok(()) => {}
-            Err(MembershipChangeFailure::Rejected(removal_error)) => {
+            Ok(prepared) => prepared,
+            Err(error) => {
                 return Err(self
-                    .rollback_node_removal_after_failure(&node_id, &removal_attempt, removal_error)
-                    .await);
+                    .rollback_node_removal_after_failure(&node_id, &removal_attempt, error)
+                    .await)
             }
-            Err(MembershipChangeFailure::Ambiguous(removal_error)) => {
-                match reconcile_membership_change(
+        };
+        if let Err(cause) = self.clock.admit_fenced_removal(&captured, &proof) {
+            return Err(self
+                .rollback_node_removal_after_failure(
+                    &node_id,
+                    &removal_attempt,
+                    MembershipError::ClockUnbounded(cause),
+                )
+                .await);
+        }
+        dispatch_removal_outcome(
+            RemovalPath::SelfLeave,
+            &node_id,
+            &removal_attempt,
+            request_voter_removal(&commit_leader_api, &inner.secrets.api, &reference).await,
+            |rollback_node, rollback_attempt, error| {
+                self.rollback_node_removal_after_failure(rollback_node, rollback_attempt, error)
+            },
+            || {
+                reconcile_membership_change(
                     &inner.secrets.api,
                     inner.identity.raft_id,
                     &membership_nodes,
                 )
-                .await
-                {
-                    MembershipChangeOutcome::Removed => {
-                        tracing::warn!(%removal_error, %node_id, "self-removal committed after an ambiguous HTTP result");
-                    }
-                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
-                        return Err(MembershipError::Internal(format!(
-                        "self-removal outcome is indeterminate after {removal_error}; this voter remains fenced"
-                    )));
-                    }
-                }
-            }
-        }
-        if tokio::time::timeout(FINAL_TOMBSTONE_WAIT, self.finalize_node_removal(&node_id))
-            .await
-            .is_err()
-        {
-            // The pending-removal row is already the authoritative durable
-            // fence. Do not keep a committed nonmember serving while a final
-            // convenience tombstone write waits on the surviving quorum.
-            tracing::warn!(
-                %node_id,
-                "committed self-removal is draining before final tombstone materialization"
-            );
-        }
+            },
+            |finalize_node| {
+                finalize_self_leave_bounded(
+                    finalize_node,
+                    self.finalize_node_removal(finalize_node),
+                )
+            },
+        )
+        .await?;
         tracing::info!(
             %node_id,
             requeued = resolved.requeued,
@@ -10016,6 +11252,8 @@ impl MembershipManager {
     ///    built on.
     pub async fn activate_learner_protocol(&self) -> Result<ProtocolChange, MembershipError> {
         let inner = self.replicated_inner()?;
+        let clock = self.clock_guard();
+        let prepared_admission = clock.acquire();
         self.require_elected_leader().await?;
         let (active_min, active_max) = self.active_protocol_range().await?;
         if (active_min, active_max) == (AUTH_LEARNER_PROTOCOL, AUTH_LEARNER_PROTOCOL) {
@@ -10031,8 +11269,16 @@ impl MembershipManager {
                  {AUTH_LEARNER_PROTOCOL}..={AUTH_LEARNER_PROTOCOL}; refusing to narrow it"
             )));
         }
-        let absence_cutoff = unix_ms()?.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+        let admission = clock
+            .admit_for(ClockDecision::MembershipChange, prepared_admission)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let absence_cutoff = admission
+            .now_ms()
+            .saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
         self.refuse_unactivatable_cluster(absence_cutoff).await?;
+        clock
+            .revalidate_for(ClockDecision::MembershipChange, &admission)
+            .map_err(MembershipError::ClockUnbounded)?;
         let changed = inner
             .client
             .execute(
@@ -10301,6 +11547,14 @@ impl MembershipManager {
                     params!(owner_fence_key, node_id),
                 ),
                 (ROLLBACK_REMOVAL_FENCE_SQL.to_owned(), params!(node_id)),
+                (
+                    RETIRE_OWNED_REDUCTION_REFERENCE_SQL.to_owned(),
+                    params!(
+                        format!("internal.cluster_reduction.v1.{node_id}.{attempt_id}"),
+                        node_id,
+                        attempt_id
+                    ),
+                ),
             ])
             .await?
             .into_iter()
@@ -10340,12 +11594,25 @@ impl MembershipManager {
         inner.internal_read_authority.lock().await.remove(node_id);
         if let Err(error) = inner
             .client
-            .execute(
-                "UPDATE cluster_nodes SET removed_at = COALESCE(removed_at, $1) \
-                 WHERE node_id = $2",
-                params!(unix_ms().unwrap_or(i64::MAX), node_id),
-            )
+            .txn(vec![
+                (
+                    "UPDATE cluster_nodes SET removed_at = COALESCE(removed_at, $1) \
+                     WHERE node_id = $2"
+                        .to_owned(),
+                    params!(unix_ms().unwrap_or(i64::MAX), node_id),
+                ),
+                (
+                    "DELETE FROM settings WHERE key IN \
+                     (SELECT 'internal.cluster_reduction.v1.' || node_id || '.' || attempt_id \
+                       FROM cluster_node_removal_attempts WHERE node_id = $1) \
+                     AND EXISTS (SELECT 1 FROM cluster_nodes \
+                       WHERE node_id = $1 AND removed_at IS NOT NULL)"
+                        .to_owned(),
+                    params!(node_id),
+                ),
+            ])
             .await
+            .and_then(|results| results.into_iter().collect::<Result<Vec<_>, _>>())
         {
             // The pending-removal row remains the authoritative durable fence.
             tracing::error!(%error, %node_id, "could not materialize final node tombstone");
@@ -10850,6 +12117,195 @@ enum MembershipChangeFailure {
     Ambiguous(MembershipError),
 }
 
+/// Manager-owned authoritative reads and writes are polled in their original
+/// order. An idempotent completion does no I/O; neither a failed membership
+/// proof nor an error may poll the token CAS.
+async fn dispatch_join_finalization<'a, O, OF, R, RF>(
+    transition: lifecycle::JoinTransition<'a>,
+    observe: O,
+    redeem: R,
+) -> Result<(), MembershipError>
+where
+    O: FnOnce() -> OF,
+    OF: Future<Output = Result<(bool, bool), MembershipError>>,
+    R: FnOnce(lifecycle::JoinTransition<'a>) -> RF,
+    RF: Future<Output = Result<usize, MembershipError>>,
+{
+    use lifecycle::JoinEffect;
+    if transition.effect == JoinEffect::Complete {
+        return Ok(());
+    }
+    let (member, voter) = observe().await?;
+    let transition = transition.committed_role(member, voter)?;
+    let changed = redeem(transition).await?;
+    transition.redeemed(changed)?;
+    Ok(())
+}
+
+/// Finalization is new lifecycle publication only while the token is still
+/// redeeming. Capture precedes the manager's awaited token/role reads; consume
+/// that exact proof after committed-role validation and immediately before
+/// submitting the CAS. An already-completed retry neither consumes nor counts
+/// the capture, and no admission check interprets a submitted CAS's outcome.
+async fn dispatch_clocked_join_finalization<'guard, 'a, O, OF, R, RF>(
+    clock: &'guard ClusterClockGuard,
+    prepared: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
+    transition: lifecycle::JoinTransition<'a>,
+    observe: O,
+    redeem: R,
+) -> Result<(), MembershipError>
+where
+    O: FnOnce() -> OF,
+    OF: Future<Output = Result<(bool, bool), MembershipError>>,
+    R: FnOnce(lifecycle::JoinTransition<'a>, i64) -> RF,
+    RF: Future<Output = Result<usize, MembershipError>>,
+{
+    dispatch_join_finalization(transition, observe, |transition| async move {
+        let admission = clock
+            .admit_for(ClockDecision::MembershipChange, prepared)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let now = admission.now_ms();
+        clock
+            .revalidate_for(ClockDecision::MembershipChange, &admission)
+            .map_err(MembershipError::ClockUnbounded)?;
+        redeem(transition, now).await
+    })
+    .await
+}
+
+/// Which removal consumes the shared [`lifecycle::RemovalTransition`]. The
+/// three paths share the state machine (rollback a rejected proposal, finalize
+/// an accepted one, reconcile survivors on an ambiguous one and finalize only
+/// on their proof) and differ only in what an unproven outcome means to the
+/// caller, which each path has always answered differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemovalPath {
+    /// `remove_voter`: an operator removes another voter.
+    Voter,
+    /// `remove_learner`: the draining removal of a non-voting learner.
+    Learner,
+    /// `leave_node` on a voter: this process removes itself.
+    SelfLeave,
+}
+
+impl RemovalPath {
+    /// The caller-visible result when survivors cannot prove the removal.
+    /// A learner removal answers `RemovalPending` (HTTP 409
+    /// `membership_removal_pending`); the voter paths answer `Internal`.
+    fn indeterminate(self, error: &MembershipError) -> MembershipError {
+        match self {
+            Self::Voter => MembershipError::Internal(format!(
+                "voter removal outcome is indeterminate after {error}; the target remains fenced"
+            )),
+            Self::Learner => MembershipError::RemovalPending(format!(
+                "learner removal outcome is indeterminate after {error}"
+            )),
+            Self::SelfLeave => MembershipError::Internal(format!(
+                "self-removal outcome is indeterminate after {error}; this voter remains fenced"
+            )),
+        }
+    }
+
+    fn committed_after_ambiguous(self, error: &MembershipError, node_id: &str) {
+        match self {
+            Self::Voter => {
+                tracing::warn!(removal_error = %error, %node_id, "voter removal committed after an ambiguous HTTP result")
+            }
+            Self::Learner => {
+                tracing::warn!(%error, %node_id, "learner removal committed after an ambiguous HTTP result")
+            }
+            Self::SelfLeave => {
+                tracing::warn!(removal_error = %error, %node_id, "self-removal committed after an ambiguous HTTP result")
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Voter => "voter",
+            Self::Learner => "learner",
+            Self::SelfLeave => "self",
+        }
+    }
+}
+
+/// A committed self-leave does not keep serving as a nonmember while the final
+/// convenience tombstone waits on the surviving quorum: the pending-removal
+/// row is already the authoritative durable fence, so the write is bounded by
+/// [`FINAL_TOMBSTONE_WAIT`] and the leave still succeeds when it runs out.
+async fn finalize_self_leave_bounded(node_id: &str, finalize: impl Future<Output = ()>) {
+    if tokio::time::timeout(FINAL_TOMBSTONE_WAIT, finalize)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            %node_id,
+            "committed self-removal is draining before final tombstone materialization"
+        );
+    }
+}
+
+/// The production outcome consumer for every removal path. Effects remain
+/// manager-owned operations; the pure step cannot inspect fresh rows, clear
+/// another attempt, or interpret an ambiguous send as a definite failure. The
+/// wrapper adds no I/O, task or suspension beyond polling those same
+/// manager-owned effect futures. `reconcile` and `finalize` are the path's
+/// own survivor proof and tombstone write; `path` maps an unproven outcome.
+async fn dispatch_removal_outcome<'a, R, RF, C, CF, F, FF>(
+    path: RemovalPath,
+    node_id: &'a str,
+    attempt_id: &'a str,
+    proposal: Result<(), MembershipChangeFailure>,
+    rollback: R,
+    reconcile: C,
+    finalize: F,
+) -> Result<(), MembershipError>
+where
+    R: FnOnce(&'a str, &'a str, MembershipError) -> RF,
+    RF: Future<Output = MembershipError>,
+    C: FnOnce() -> CF,
+    CF: Future<Output = MembershipChangeOutcome>,
+    F: FnOnce(&'a str) -> FF,
+    FF: Future<Output = ()>,
+{
+    use lifecycle::{RemovalEffect, RemovalProposalOutcome, RemovalTransition};
+    let (outcome, error) = match proposal {
+        Ok(()) => (RemovalProposalOutcome::Accepted, None),
+        Err(MembershipChangeFailure::Rejected(error)) => {
+            (RemovalProposalOutcome::Rejected, Some(error))
+        }
+        Err(MembershipChangeFailure::Ambiguous(error)) => {
+            (RemovalProposalOutcome::Ambiguous, Some(error))
+        }
+    };
+    let transition = RemovalTransition::proposal(node_id, attempt_id, outcome);
+    match (transition.effect, error) {
+        (RemovalEffect::FinalizeTombstone, None) => {
+            finalize(transition.node_id).await;
+            Ok(())
+        }
+        (RemovalEffect::RollbackExactAttempt, Some(error)) => {
+            Err(rollback(transition.node_id, transition.attempt_id, error).await)
+        }
+        (RemovalEffect::ReconcileSurvivors, Some(error)) => {
+            let outcome = reconcile().await;
+            let next = transition.survivors(outcome == MembershipChangeOutcome::Removed);
+            if next.is_some_and(|next| next.effect == RemovalEffect::FinalizeTombstone) {
+                path.committed_after_ambiguous(&error, node_id);
+                finalize(transition.node_id).await;
+                Ok(())
+            } else {
+                Err(path.indeterminate(&error))
+            }
+        }
+        _ => Err(MembershipError::Internal(format!(
+            "invalid {} removal transition",
+            path.label()
+        ))),
+    }
+}
+
+#[cfg(test)]
 #[derive(Serialize)]
 struct RemoveVoterRequest {
     remove_voter: u64,
@@ -10863,9 +12319,13 @@ struct PromoteLearnerRequest<'a> {
 }
 
 #[derive(Serialize)]
-struct RemoveLearnerRequest {
-    node_id: u64,
-    stay_as_learner: bool,
+struct FencedVoterRemovalRequest<'a> {
+    fenced_remove_voter: &'a hiqlite::ReductionFenceReference,
+}
+
+#[derive(Serialize)]
+struct FencedLearnerRemovalRequest<'a> {
+    fenced_leave: &'a hiqlite::ReductionFenceReference,
 }
 
 /// Resolve an ambiguous membership HTTP result from independent survivor
@@ -11082,7 +12542,7 @@ fn quorum_confirms_member_removal(removed: u64, observations: &[MemberSetObserva
 async fn request_voter_removal(
     leader_api: &str,
     api_secret: &str,
-    remove_voter: u64,
+    reference: &hiqlite::ReductionFenceReference,
 ) -> Result<(), MembershipChangeFailure> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -11096,7 +12556,9 @@ async fn request_voter_removal(
         .post(format!("https://{leader_api}/cluster/membership/sqlite"))
         .header("X-API-SECRET", api_secret)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&RemoveVoterRequest { remove_voter })
+        .json(&FencedVoterRemovalRequest {
+            fenced_remove_voter: reference,
+        })
         .send()
         .await
         .map_err(|error| {
@@ -11144,7 +12606,7 @@ async fn request_learner_promotion(
 async fn request_learner_removal(
     leader_api: &str,
     api_secret: &str,
-    node_id: u64,
+    reference: &hiqlite::ReductionFenceReference,
 ) -> Result<(), MembershipChangeFailure> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -11158,9 +12620,8 @@ async fn request_learner_removal(
         .delete(format!("https://{leader_api}/cluster/membership/sqlite"))
         .header("X-API-SECRET", api_secret)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&RemoveLearnerRequest {
-            node_id,
-            stay_as_learner: false,
+        .json(&FencedLearnerRemovalRequest {
+            fenced_leave: reference,
         })
         .send()
         .await
@@ -11232,7 +12693,7 @@ fn unix_seconds() -> Result<i64, MembershipError> {
     i64::try_from(seconds).map_err(|_| MembershipError::Internal("clock overflow".to_owned()))
 }
 
-/// Prove that the authoritative root can durably publish and remove a file.
+/// Prove that the state-machine filesystem can durably publish and remove a file.
 /// A learner may replicate on storage that is merely writable; promotion is
 /// the point where that machine becomes part of the quorum's durability
 /// promise, so the proof is retained separately from current free space.
@@ -11388,6 +12849,7 @@ struct TargetNodeRow {
 }
 
 struct PromotionTargetRow {
+    snapshot_floor_observed_at: Option<i64>,
     raft_id: i64,
     admitted_role: Option<String>,
     last_seen_at: i64,
@@ -11402,8 +12864,104 @@ struct PromotionTargetRow {
     observed_at: Option<i64>,
 }
 
-struct RemovalAttemptRow {
-    attempt_id: String,
+struct ReductionReferenceRow {
+    reference_json: String,
+    raft_id: i64,
+    last_seen_at: i64,
+    last_applied_index: Option<i64>,
+}
+
+fn exact_reduction_binding_matches(
+    row: &ReductionReferenceRow,
+    expected: &hiqlite::ReductionFenceReference,
+) -> bool {
+    expected.has_valid_shape()
+        && u64::try_from(row.raft_id).ok() == Some(expected.target_raft_id)
+        && serde_json::from_str::<hiqlite::ReductionFenceReference>(&row.reference_json)
+            .is_ok_and(|stored| &stored == expected)
+}
+
+/// Only this module's actual durable-row consumer constructs a target fence.
+/// Transport references and scalar target flags cannot construct this proof.
+pub(super) struct AppliedRemovalFence {
+    reference: hiqlite::ReductionFenceReference,
+    evidence: RemovalFenceEvidence,
+}
+
+enum RemovalFenceEvidence {
+    TargetApplied,
+    AuthoritativeUnreachable,
+}
+
+/// One poll of an exact durable reduction reference.
+pub(super) enum ReductionProofPoll {
+    Proved(AppliedRemovalFence),
+    Pending { clock_blocked: bool },
+}
+
+enum ReductionEvidence {
+    Proved(RemovalFenceEvidence),
+    /// `clock_blocked`: the target is stale by wall age, but the original
+    /// post-step capture may not use that comparison and enforcement is on.
+    Pending {
+        clock_blocked: bool,
+    },
+}
+
+/// The original removal budget ended. When the only evidence that could have
+/// proved the target was a wall-age comparison the post-step capture may not
+/// use, enforcement reports (and counts) the typed clock refusal; otherwise,
+/// or with enforcement off, it is the plain deadline, counted nowhere.
+fn removal_budget_expired_error(
+    clock: &ClusterClockGuard,
+    captured: &ClockRemovalCapture<'_>,
+    clock_blocked: bool,
+) -> MembershipError {
+    if clock_blocked {
+        if let Err(cause) = clock.refuse_unstable_wall_reachability(captured) {
+            return MembershipError::ClockUnbounded(cause);
+        }
+    }
+    MembershipError::RemovalPending("original removal proof deadline expired".into())
+}
+
+/// Classify one poll. Wall-age unreachability is consulted through the clock
+/// guard's decision API (never the raw capture flag), so enforcement off
+/// admits it exactly like every other guarded decision and the counted
+/// boundary, `admit_fenced_removal`, records the advisory refusal once.
+fn reduction_fence_evidence(
+    clock: &ClusterClockGuard,
+    captured: &ClockRemovalCapture<'_>,
+    target_applied: bool,
+    wall_reachable: bool,
+) -> ReductionEvidence {
+    if target_applied {
+        return ReductionEvidence::Proved(RemovalFenceEvidence::TargetApplied);
+    }
+    if wall_reachable {
+        return ReductionEvidence::Pending {
+            clock_blocked: false,
+        };
+    }
+    match clock.admit_wall_reachability(captured) {
+        Ok(()) => ReductionEvidence::Proved(RemovalFenceEvidence::AuthoritativeUnreachable),
+        Err(_) => ReductionEvidence::Pending {
+            clock_blocked: true,
+        },
+    }
+}
+
+impl AppliedRemovalFence {
+    pub(super) fn reference(&self) -> &hiqlite::ReductionFenceReference {
+        &self.reference
+    }
+
+    pub(super) fn relies_on_wall_reachability(&self) -> bool {
+        matches!(
+            self.evidence,
+            RemovalFenceEvidence::AuthoritativeUnreachable
+        )
+    }
 }
 
 struct PromotionAttemptRow {
@@ -11442,6 +13000,20 @@ struct ActivityPeerRow {
     raft_id: u64,
     last_seen_at: i64,
     http_base: Option<String>,
+}
+
+struct AuthenticatedClockPeerRow {
+    peer: ActivityPeerRow,
+    request_authorized: bool,
+}
+
+impl From<&mut Row<'_>> for AuthenticatedClockPeerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            peer: ActivityPeerRow::from(&mut *row),
+            request_authorized: row.get("request_authorized"),
+        }
+    }
 }
 
 struct NodeHostnameRow {
@@ -11824,6 +13396,7 @@ impl From<&mut Row<'_>> for TargetNodeRow {
 impl From<&mut Row<'_>> for PromotionTargetRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
+            snapshot_floor_observed_at: row.get("snapshot_floor_observed_at"),
             raft_id: row.get("raft_id"),
             admitted_role: row.get("role"),
             last_seen_at: row.get("last_seen_at"),
@@ -11840,10 +13413,13 @@ impl From<&mut Row<'_>> for PromotionTargetRow {
     }
 }
 
-impl From<&mut Row<'_>> for RemovalAttemptRow {
+impl From<&mut Row<'_>> for ReductionReferenceRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
-            attempt_id: row.get("attempt_id"),
+            reference_json: row.get("reference_json"),
+            raft_id: row.get("raft_id"),
+            last_seen_at: row.get("last_seen_at"),
+            last_applied_index: row.get("last_applied_index"),
         }
     }
 }
@@ -12154,6 +13730,791 @@ mod tests {
             .contains("sharing_purpose_master_v1:"));
     }
 
+    use super::{
+        reduction_fence_evidence, ActivityPeer, AppliedRemovalFence, ClockMembershipIdentity,
+        ClockMembershipSource, ClockPeerRoster, ClockRefusal, ClusterClockGuard, ReductionEvidence,
+        RemovalFenceEvidence,
+    };
+    use crate::cluster::clock::PeerClockOffset;
+
+    struct FixedClockMembership(ClockMembershipIdentity);
+
+    impl ClockMembershipSource for FixedClockMembership {
+        fn current(&self) -> Option<ClockMembershipIdentity> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn clock_node(raft_id: u64) -> String {
+        format!("00000000-0000-0000-0000-{raft_id:012}")
+    }
+
+    /// Local node 1; `voters` vote, every other member is a learner. The
+    /// returned roster is the exact directory of every remote member.
+    fn clock_fixture(
+        members: &[u64],
+        voters: &[u64],
+        enforced: bool,
+    ) -> (ClusterClockGuard, ClockPeerRoster) {
+        let identity = ClockMembershipIdentity {
+            local_node: 1,
+            log: (2, 1, 7),
+            members: members.iter().copied().collect(),
+            voters: voters.iter().copied().collect(),
+        };
+        let guard = ClusterClockGuard::with_membership_source(std::sync::Arc::new(
+            FixedClockMembership(identity.clone()),
+        ));
+        guard.set_enforced(enforced);
+        let roster = ClockPeerRoster {
+            membership: Some(identity),
+            peers: members
+                .iter()
+                .filter(|raft_id| **raft_id != 1)
+                .map(|raft_id| ActivityPeer {
+                    node_id: clock_node(*raft_id),
+                    raft_id: *raft_id,
+                    http_base: Some(format!("https://node{raft_id}:443")),
+                    reachable: true,
+                })
+                .collect(),
+        };
+        (guard, roster)
+    }
+
+    fn publish_clock_round(guard: &ClusterClockGuard, roster: &ClockPeerRoster, bounded: &[u64]) {
+        let round = guard
+            .roster_for_peer_directory(roster)
+            .expect("exact directory");
+        let observations = roster
+            .peers
+            .iter()
+            .map(|peer| {
+                let observation = if bounded.contains(&peer.raft_id) {
+                    PeerClockOffset::Bounded {
+                        offset_us: 0,
+                        uncertainty_us: 1_000,
+                        observed_at: std::time::Instant::now(),
+                    }
+                } else {
+                    PeerClockOffset::Unknown
+                };
+                (peer.node_id.clone(), observation)
+            })
+            .collect();
+        assert!(guard.publish(round, observations));
+    }
+
+    fn removal_fence(target: u64, evidence: RemovalFenceEvidence) -> AppliedRemovalFence {
+        AppliedRemovalFence {
+            reference: hiqlite::ReductionFenceReference {
+                version: 1,
+                target_node_id: clock_node(target),
+                target_raft_id: target,
+                attempt_id: "00000000-0000-0000-0000-000000000099".into(),
+                barrier_index: 7,
+            },
+            evidence,
+        }
+    }
+
+    fn counter(guard: &ClusterClockGuard, family: &str, cause: &str) -> String {
+        let prefix = format!("{family}{{decision=\"membership_change\",cause=\"{cause}\"}} ");
+        guard
+            .prometheus()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+            .expect("closed metric vocabulary")
+    }
+
+    /// Fenced removal of a voter with a stopped learner elsewhere in the
+    /// cluster: the unobserved surviving learner is excused (it holds no
+    /// vote), an unobserved surviving VOTER still refuses.
+    #[test]
+    fn k06_fenced_removal_excuses_an_unobserved_surviving_learner_only() {
+        let (guard, roster) = clock_fixture(&[1, 2, 3, 4], &[1, 2, 3], true);
+        publish_clock_round(&guard, &roster, &[3]);
+        let captured = guard.capture_removal_raft(2).expect("exact capture");
+        assert_eq!(
+            guard.admit_fenced_removal(
+                &captured,
+                &removal_fence(2, RemovalFenceEvidence::TargetApplied)
+            ),
+            Ok(()),
+            "target 2 excluded, voter 3 bounded, learner 4 unobserved"
+        );
+        drop(captured);
+        publish_clock_round(&guard, &roster, &[4]);
+        let captured = guard.capture_removal_raft(2).expect("exact capture");
+        assert_eq!(
+            guard.admit_fenced_removal(
+                &captured,
+                &removal_fence(2, RemovalFenceEvidence::TargetApplied)
+            ),
+            Err(ClockRefusal::Unknown),
+            "an unobserved surviving voter is never excused"
+        );
+    }
+
+    /// K-06 finding 2. After a local wall step the original capture may not
+    /// use a wall-age `last_seen_at` comparison. That decision goes through
+    /// the guard: advisory mode admits the authoritative-unreachable proof
+    /// (counting ONE advisory refusal at the counted boundary), enforced mode
+    /// keeps waiting for TargetApplied and, if the budget ends, reports the
+    /// typed counted refusal instead of a bare deadline.
+    #[test]
+    fn k06_post_step_wall_reachability_is_decided_by_the_guard() {
+        for enforced in [false, true] {
+            let (guard, roster) = clock_fixture(&[1, 2, 3], &[1, 2, 3], enforced);
+            publish_clock_round(&guard, &roster, &[2, 3]);
+            guard.simulate_wall_step_for_test(15_000);
+            // The step invalidates evidence; a later complete round restores
+            // coverage, but the 30 s stabilization window still holds.
+            publish_clock_round(&guard, &roster, &[2, 3]);
+            let captured = guard.capture_removal_raft(2).expect("bounded capture");
+            assert!(!captured.permits_wall_reachability());
+            let advisory = "plurx_cluster_clock_advisory_refusals_total";
+            let refusals = "plurx_cluster_clock_refusals_total";
+
+            // A live target is still provable either way; a wall-reachable
+            // target is simply not yet proved, never clock-blocked.
+            assert!(matches!(
+                reduction_fence_evidence(&guard, &captured, true, false),
+                ReductionEvidence::Proved(RemovalFenceEvidence::TargetApplied)
+            ));
+            assert!(matches!(
+                reduction_fence_evidence(&guard, &captured, false, true),
+                ReductionEvidence::Pending {
+                    clock_blocked: false
+                }
+            ));
+
+            let stale = reduction_fence_evidence(&guard, &captured, false, false);
+            assert_eq!(counter(&guard, advisory, "local_discontinuity"), "0");
+            assert_eq!(counter(&guard, refusals, "local_discontinuity"), "0");
+            if enforced {
+                assert!(matches!(
+                    stale,
+                    ReductionEvidence::Pending {
+                        clock_blocked: true
+                    }
+                ));
+                // The budget ends while the poll was clock-blocked: the
+                // caller sees the counted typed refusal, not a bare deadline.
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, true),
+                    MembershipError::ClockUnbounded(ClockRefusal::LocalDiscontinuity)
+                ));
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
+                // An unblocked budget end is the plain deadline, uncounted.
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, false),
+                    MembershipError::RemovalPending(_)
+                ));
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
+                // Enforcement turned off before the budget ended: the plain
+                // deadline, and no advisory refusal for a decision that was
+                // never admitted (review P3a).
+                guard.set_enforced(false);
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, true),
+                    MembershipError::RemovalPending(_)
+                ));
+                assert_eq!(counter(&guard, advisory, "local_discontinuity"), "0");
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
+            } else {
+                assert!(
+                    matches!(
+                        stale,
+                        ReductionEvidence::Proved(RemovalFenceEvidence::AuthoritativeUnreachable)
+                    ),
+                    "advisory mode must not strand the removal until its budget expires"
+                );
+                assert_eq!(
+                    guard.admit_fenced_removal(
+                        &captured,
+                        &removal_fence(2, RemovalFenceEvidence::AuthoritativeUnreachable)
+                    ),
+                    Ok(())
+                );
+                assert_eq!(counter(&guard, advisory, "local_discontinuity"), "1");
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "0");
+                assert!(matches!(
+                    removal_budget_expired_error(&guard, &captured, true),
+                    MembershipError::RemovalPending(_)
+                ));
+                assert_eq!(counter(&guard, advisory, "local_discontinuity"), "1");
+            }
+        }
+
+        // The wait carries the poll's verdict to EVERY budget-expiry exit;
+        // dropping it would turn the typed refusal back into a bare deadline.
+        // The waiting loop needs a live Raft client, so its wiring is pinned
+        // from source while the decision itself is exercised above.
+        let source = include_str!("membership.rs");
+        let wait = method_body(source, "async fn wait_for_reduction_reference(");
+        assert!(wait.contains("let mut clock_blocked = false;"));
+        assert!(
+            wait.contains("clock_blocked: blocked,") && wait.contains("clock_blocked = blocked;")
+        );
+        assert_eq!(
+            wait.matches("self.removal_budget_expired(").count(),
+            wait.matches("self.removal_budget_expired(captured, clock_blocked)")
+                .count()
+        );
+        assert_eq!(
+            wait.matches("self.removal_budget_expired(captured, clock_blocked)")
+                .count(),
+            3,
+            "both budget checks and the poll timeout report the verdict"
+        );
+        assert!(!wait.contains("RemovalPending("), "no exit bypasses it");
+        let expired = method_body(source, "fn removal_budget_expired(");
+        assert!(
+            expired.contains("removal_budget_expired_error(&self.clock, captured, clock_blocked)")
+        );
+        let poll = method_body(source, "async fn prove_reduction_reference(");
+        assert!(poll.contains("ReductionEvidence::Pending { clock_blocked }"));
+        assert!(poll.contains("ReductionProofPoll::Pending { clock_blocked }"));
+    }
+
+    #[test]
+    fn k06_startup_deadline_is_installed_once_and_never_replenished() {
+        let admission = super::StartupMembershipAdmission::default();
+        assert_eq!(admission.startup_deadline(), None);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(45);
+        admission
+            .install_startup_deadline(deadline)
+            .expect("first install");
+        assert!(admission
+            .install_startup_deadline(deadline + std::time::Duration::from_secs(45))
+            .is_err());
+        assert_eq!(admission.startup_deadline(), Some(deadline));
+    }
+
+    #[test]
+    fn k06_reduction_binding_refuses_zero_stale_and_foreign_identity_without_borrowing() {
+        use super::{
+            exact_reduction_binding_matches, reduction_reference_key, removed_job_owner_key,
+            ReductionReferenceRow, FREEZE_REDUCTION_REFERENCE_SQL, MAX_FROZEN_REDUCTION_REFERENCES,
+            READ_REDUCTION_REFERENCE_SQL, RETIRE_OWNED_REDUCTION_REFERENCE_SQL,
+        };
+        let node = "00000000-0000-0000-0000-000000000002";
+        let attempt = "00000000-0000-0000-0000-000000000010";
+        let other = "00000000-0000-0000-0000-000000000011";
+        let db = rusqlite::Connection::open_in_memory().expect("sqlite");
+        db.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);
+            CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, last_seen_at INTEGER,
+                last_applied_index INTEGER, removed_at INTEGER);
+            CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY);
+            CREATE TABLE cluster_node_removal_attempts (node_id TEXT, attempt_id TEXT,
+                PRIMARY KEY(node_id, attempt_id));").expect("fixture tables");
+        db.execute(
+            "INSERT INTO cluster_nodes VALUES (?1, 2, 100, 42, NULL)",
+            [node],
+        )
+        .expect("target");
+        db.execute("INSERT INTO cluster_node_removals VALUES (?1)", [node])
+            .expect("route fence");
+        db.execute(
+            "INSERT INTO settings VALUES (?1, '1', 100)",
+            [removed_job_owner_key(node)],
+        )
+        .expect("owner fence");
+        for id in [attempt, other] {
+            db.execute(
+                "INSERT INTO cluster_node_removal_attempts VALUES (?1, ?2)",
+                rusqlite::params![node, id],
+            )
+            .expect("owned refs");
+        }
+        let reference = |id: &str, barrier| hiqlite::ReductionFenceReference {
+            version: 1,
+            target_node_id: node.into(),
+            target_raft_id: 2,
+            attempt_id: id.into(),
+            barrier_index: barrier,
+        };
+        let freeze = |value: &hiqlite::ReductionFenceReference| {
+            db.execute(
+                FREEZE_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![
+                    reduction_reference_key(value),
+                    serde_json::to_string(value).expect("json"),
+                    100,
+                    node,
+                    value.attempt_id,
+                    removed_job_owner_key(node),
+                    i64::try_from(value.target_raft_id).expect("fixture Raft identity"),
+                    i64::try_from(value.barrier_index).expect("fixture barrier"),
+                    MAX_FROZEN_REDUCTION_REFERENCES
+                ],
+            )
+            .expect("actual guarded insert")
+        };
+        let original = reference(attempt, 42);
+        assert_eq!(
+            freeze(&reference(attempt, 0)),
+            0,
+            "zero cannot create a binding"
+        );
+        assert_eq!(freeze(&original), 1);
+        assert_eq!(
+            freeze(&reference(attempt, 99)),
+            0,
+            "replay cannot refresh the original barrier"
+        );
+        let read = |value: &hiqlite::ReductionFenceReference| {
+            use rusqlite::OptionalExtension;
+            db.query_row(
+                READ_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![
+                    reduction_reference_key(value),
+                    node,
+                    value.attempt_id,
+                    removed_job_owner_key(node)
+                ],
+                |row| {
+                    Ok(ReductionReferenceRow {
+                        reference_json: row.get("reference_json")?,
+                        raft_id: row.get("raft_id")?,
+                        last_seen_at: row.get("last_seen_at")?,
+                        last_applied_index: row.get("last_applied_index")?,
+                    })
+                },
+            )
+            .optional()
+            .expect("actual bound read")
+        };
+        assert!(exact_reduction_binding_matches(
+            &read(&original).expect("bound original"),
+            &original
+        ));
+        assert!(
+            !exact_reduction_binding_matches(
+                &read(&original).expect("unchanged original"),
+                &reference(attempt, 99)
+            ),
+            "a different barrier cannot borrow the frozen original"
+        );
+        let concurrent = reference(other, 43);
+        assert_eq!(freeze(&concurrent), 1);
+        db.execute(
+            "UPDATE cluster_nodes SET raft_id = 3 WHERE node_id = ?1",
+            [node],
+        )
+        .expect("replace Raft identity");
+        assert_eq!(
+            freeze(&reference(attempt, 44)),
+            0,
+            "changed identity cannot mint"
+        );
+        assert!(
+            !exact_reduction_binding_matches(
+                &read(&original).expect("stored foreign identity"),
+                &original
+            ),
+            "actual receiver binding check rejects changed Raft identity"
+        );
+        db.execute(
+            "UPDATE cluster_nodes SET raft_id = 2 WHERE node_id = ?1",
+            [node],
+        )
+        .expect("restore fixture identity");
+        assert_eq!(
+            db.execute(
+                RETIRE_OWNED_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![reduction_reference_key(&original), node, attempt]
+            )
+            .expect("live retirement refusal"),
+            0
+        );
+        db.execute(
+            "DELETE FROM cluster_node_removal_attempts WHERE node_id = ?1 AND attempt_id = ?2",
+            rusqlite::params![node, attempt],
+        )
+        .expect("release only owned ref");
+        assert!(
+            read(&original).is_none(),
+            "rolled-back ref cannot borrow the surviving attempt"
+        );
+        assert_eq!(
+            db.execute(
+                RETIRE_OWNED_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![reduction_reference_key(&original), node, attempt]
+            )
+            .expect("owned cleanup"),
+            1
+        );
+        assert!(
+            read(&concurrent).is_some(),
+            "another invocation stays fenced and bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalization_preserves_clock_ticket_and_completed_retry() {
+        use std::cell::Cell;
+        use std::time::Instant;
+
+        use crate::cluster::clock::{ClockRefusal, ClusterClockGuard, PeerClockOffset};
+
+        use super::lifecycle::JoinTransition;
+        use super::{ClusterRole, MembershipError, FINALIZE_JOIN_TOKEN_SQL};
+
+        let publish = |guard: &ClusterClockGuard| {
+            let round = guard.roster(&["peer".into()]);
+            assert!(guard.publish(
+                round,
+                std::collections::BTreeMap::from([(
+                    "peer".into(),
+                    PeerClockOffset::Bounded {
+                        offset_us: 0,
+                        uncertainty_us: 1_000,
+                        observed_at: Instant::now(),
+                    },
+                )])
+            ));
+        };
+        for role in [ClusterRole::Voter, ClusterRole::Learner] {
+            for schedule in [
+                "completed retry",
+                "unknown entry recovers",
+                "evidence changes during role read",
+                "role not committed",
+                "same original proof",
+                "token owner changed",
+            ] {
+                let database = rusqlite::Connection::open_in_memory().expect("token CAS fixture");
+                database
+                    .execute_batch(
+                        "CREATE TABLE cluster_join_tokens (token_hash TEXT PRIMARY KEY, \
+                         state TEXT, node_id TEXT, redeemed_at INTEGER);",
+                    )
+                    .expect("create token table");
+                let completed = schedule == "completed retry";
+                database
+                    .execute(
+                        "INSERT INTO cluster_join_tokens VALUES ('digest', ?1, ?2, 77)",
+                        rusqlite::params![
+                            if completed { "redeemed" } else { "redeeming" },
+                            if schedule == "token owner changed" {
+                                "other"
+                            } else {
+                                "node"
+                            }
+                        ],
+                    )
+                    .expect("seed token lifecycle");
+                let guard = ClusterClockGuard::new(true);
+                guard.set_enforced(true);
+                if !matches!(schedule, "completed retry" | "unknown entry recovers") {
+                    publish(&guard);
+                }
+                let prepared = guard.acquire();
+                let original_now = prepared.as_ref().ok().map(|ticket| ticket.now_ms());
+                let observations = Cell::new(0);
+                let writes = Cell::new(0);
+                let database = &database;
+                let writes = &writes;
+                let transition =
+                    JoinTransition::finalization("digest", "node", 41, role, completed);
+                let outcome = super::dispatch_clocked_join_finalization(
+                    &guard,
+                    prepared,
+                    transition,
+                    || async {
+                        observations.set(observations.get() + 1);
+                        tokio::task::yield_now().await;
+                        if schedule == "unknown entry recovers" {
+                            publish(&guard);
+                        } else if schedule == "evidence changes during role read" {
+                            guard.roster_failed();
+                            publish(&guard);
+                        }
+                        Ok((
+                            schedule != "role not committed",
+                            schedule != "role not committed" && role == ClusterRole::Voter,
+                        ))
+                    },
+                    |step, now| async move {
+                        writes.set(writes.get() + 1);
+                        assert_eq!(Some(now), original_now, "{role:?}: {schedule}");
+                        Ok(database
+                            .execute(
+                                FINALIZE_JOIN_TOKEN_SQL,
+                                rusqlite::params![now, step.token_digest, step.node_id],
+                            )
+                            .expect("production token CAS SQL"))
+                    },
+                )
+                .await;
+                let (state, redeemed_at): (String, i64) = database
+                    .query_row(
+                        "SELECT state, redeemed_at FROM cluster_join_tokens WHERE token_hash='digest'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("inspect actual CAS outcome");
+                match schedule {
+                    "completed retry" => {
+                        assert!(outcome.is_ok());
+                        assert_eq!((observations.get(), writes.get()), (0, 0));
+                        assert_eq!((state.as_str(), redeemed_at), ("redeemed", 77));
+                        assert!(guard
+                            .prometheus()
+                            .contains("decision=\"membership_change\",cause=\"unknown\"} 0\n"));
+                    }
+                    "same original proof" => {
+                        assert!(outcome.is_ok());
+                        assert_eq!((observations.get(), writes.get()), (1, 1));
+                        assert_eq!(state, "redeemed");
+                        assert_eq!(Some(redeemed_at), original_now);
+                    }
+                    "token owner changed" => {
+                        assert!(matches!(outcome, Err(MembershipError::ReusedToken)));
+                        assert_eq!(writes.get(), 1);
+                        assert_eq!((state.as_str(), redeemed_at), ("redeeming", 77));
+                    }
+                    "unknown entry recovers" | "evidence changes during role read" => {
+                        let cause = if schedule == "unknown entry recovers" {
+                            ClockRefusal::Unknown
+                        } else {
+                            ClockRefusal::GenerationChanged
+                        };
+                        assert!(
+                            matches!(outcome, Err(MembershipError::ClockUnbounded(actual)) if actual == cause)
+                        );
+                        assert_eq!(writes.get(), 0);
+                        assert_eq!((state.as_str(), redeemed_at), ("redeeming", 77));
+                    }
+                    "role not committed" => {
+                        assert!(matches!(outcome, Err(MembershipError::Internal(_))));
+                        assert_eq!(writes.get(), 0);
+                        assert_eq!((state.as_str(), redeemed_at), ("redeeming", 77));
+                    }
+                    _ => unreachable!("closed schedules"),
+                }
+            }
+        }
+        let source = include_str!("membership.rs");
+        let finalization = super::tests::method_body(source, "async fn finalize_for_role(");
+        assert!(
+            finalization
+                .find("let prepared_admission = clock.acquire();")
+                .expect("entry")
+                < finalization.find(".await").expect("token read")
+        );
+        assert!(finalization.contains("dispatch_clocked_join_finalization("));
+        assert!(!finalization.contains("let now = unix_ms()?"));
+    }
+
+    #[tokio::test]
+    async fn join_finalization_consumer_preserves_failure_and_effect_order() {
+        use super::lifecycle::{JoinEffect, JoinTransition};
+        for (redeemed, observation, changed, expected_events, succeeds) in [
+            (true, Some((false, false)), Some(0), vec![], true),
+            (false, Some((true, false)), Some(1), vec!["observe"], false),
+            (false, None, Some(1), vec!["observe"], false),
+            (
+                false,
+                Some((true, true)),
+                None,
+                vec!["observe", "redeem"],
+                false,
+            ),
+            (
+                false,
+                Some((true, true)),
+                Some(0),
+                vec!["observe", "redeem"],
+                false,
+            ),
+            (
+                false,
+                Some((true, true)),
+                Some(1),
+                vec!["observe", "redeem"],
+                true,
+            ),
+        ] {
+            let events = std::sync::Mutex::new(Vec::new());
+            let events = &events;
+            let transition = JoinTransition::finalization(
+                "digest",
+                "node",
+                41,
+                super::ClusterRole::Voter,
+                redeemed,
+            );
+            let outcome = super::dispatch_join_finalization(
+                transition,
+                || async {
+                    events.lock().expect("record observation").push("observe");
+                    observation.ok_or_else(|| {
+                        super::MembershipError::Internal("metrics failed".to_owned())
+                    })
+                },
+                |step| async move {
+                    assert_eq!(step.effect, JoinEffect::RedeemToken);
+                    assert_eq!(
+                        (step.token_digest, step.node_id, step.raft_id, step.role),
+                        ("digest", "node", 41, super::ClusterRole::Voter)
+                    );
+                    events.lock().expect("record redemption").push("redeem");
+                    changed.ok_or_else(|| super::MembershipError::Internal("CAS failed".to_owned()))
+                },
+            )
+            .await;
+            assert_eq!(outcome.is_ok(), succeeds);
+            assert_eq!(
+                *events.lock().expect("read ordered effects"),
+                expected_events
+            );
+            if !redeemed && observation.is_none() {
+                assert!(
+                    matches!(outcome, Err(super::MembershipError::Internal(message)) if message == "metrics failed")
+                );
+            } else if !redeemed && observation == Some((true, true)) && changed.is_none() {
+                assert!(
+                    matches!(outcome, Err(super::MembershipError::Internal(message)) if message == "CAS failed")
+                );
+            } else if !redeemed && observation == Some((true, true)) && changed == Some(0) {
+                assert!(matches!(outcome, Err(super::MembershipError::ReusedToken)));
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_floor_requires_current_process_heartbeat_proof() {
+        let database = rusqlite::Connection::open_in_memory().expect("floor SQL fixture");
+        database.execute_batch(
+            "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, role TEXT, last_seen_at INTEGER, removed_at INTEGER); \
+             CREATE TABLE cluster_node_removals (node_id TEXT); \
+             CREATE TABLE cluster_node_capabilities (node_id TEXT, capability TEXT, last_seen_at INTEGER, PRIMARY KEY(node_id,capability)); \
+             CREATE TABLE cluster_node_progress (node_id TEXT, last_applied_index INTEGER, apply_lag_entries INTEGER, bounded_read_ready INTEGER, voter_storage_ready INTEGER, storage_headroom_bytes INTEGER, storage_probe_observed_at INTEGER, voter_role_persisted INTEGER, observed_at INTEGER); \
+             INSERT INTO cluster_nodes VALUES ('target',1,'learner',50,NULL); \
+             INSERT INTO cluster_node_progress VALUES ('target',10,0,1,1,536870912,50,0,50);"
+        ).expect("seed legacy readiness rows");
+        let proven = || {
+            database
+                .query_row(
+                    super::PROMOTION_TARGET_SQL,
+                    rusqlite::params!["target", false],
+                    |row| {
+                        Ok(super::snapshot_floor_heartbeat_matches(
+                            row.get("snapshot_floor_observed_at")?,
+                            row.get("observed_at")?,
+                            row.get("last_seen_at")?,
+                        ))
+                    },
+                )
+                .expect("production promotion target projection")
+        };
+        assert!(
+            !proven(),
+            "legacy 512MiB readiness is not the new floor proof"
+        );
+        database
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ('target',?1,49)",
+                [super::SNAPSHOT_STORAGE_FLOOR_CAPABILITY],
+            )
+            .expect("insert stale capability");
+        assert!(!proven(), "stale capability must fail closed");
+        database
+            .execute("UPDATE cluster_node_capabilities SET last_seen_at=50", [])
+            .expect("publish current capability");
+        assert!(
+            proven(),
+            "same heartbeat must prove the target's new semantics"
+        );
+        database
+            .execute("UPDATE cluster_node_progress SET observed_at=51", [])
+            .expect("advance legacy progress");
+        assert!(
+            !proven(),
+            "a later legacy progress row invalidates the retained marker"
+        );
+        database
+            .execute("UPDATE cluster_nodes SET last_seen_at=51", [])
+            .expect("advance node heartbeat");
+        assert!(!proven());
+        database
+            .execute("UPDATE cluster_node_capabilities SET last_seen_at=51", [])
+            .expect("publish new same-heartbeat capability");
+        assert!(proven());
+        database
+            .execute("UPDATE cluster_nodes SET removed_at=52", [])
+            .expect("mark node removed");
+        assert!(database
+            .query_row(
+                super::PROMOTION_TARGET_SQL,
+                rusqlite::params!["target", false],
+                |_| Ok(())
+            )
+            .is_err());
+        assert!(database
+            .query_row(
+                super::PROMOTION_TARGET_SQL,
+                rusqlite::params!["target", true],
+                |_| Ok(())
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn voter_snapshot_storage_floor_is_target_local_known_fresh_and_at_least_512_mib() {
+        let minimum = super::MIN_VOTER_STORAGE_HEADROOM_BYTES;
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(1),
+            Some(minimum - 1)
+        ));
+        assert!(super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(1),
+            Some(minimum)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(2 * minimum),
+            Some(minimum)
+        ));
+        assert!(super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(2 * minimum),
+            Some(2 * minimum)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            None,
+            Some(u64::MAX)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(1),
+            None
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            false,
+            true,
+            Some(1),
+            Some(u64::MAX)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            false,
+            Some(1),
+            Some(u64::MAX)
+        ));
+    }
     use super::*;
 
     fn sharing_principal_floor_fixture() -> rusqlite::Connection {
@@ -12754,6 +15115,603 @@ mod tests {
     }
 
     #[test]
+    fn k06_final_clock_directory_reads_sender_fence_in_same_snapshot() {
+        let db = rusqlite::Connection::open_in_memory().expect("owned sqlite");
+        db.execute_batch(
+            "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, \
+               last_seen_at INTEGER, removed_at INTEGER); \
+             CREATE TABLE cluster_node_http (node_id TEXT PRIMARY KEY, public_http_url TEXT); \
+             CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+             INSERT INTO cluster_nodes VALUES ('local',1,0,NULL),('learner',2,0,NULL); \
+             INSERT INTO cluster_node_http VALUES ('learner','http://learner:32400');",
+        )
+        .expect("fixture schema");
+        let read = |sender: &str| {
+            db.prepare(AUTHENTICATED_CLOCK_PEERS_SQL)
+                .expect("production query")
+                .query_map(rusqlite::params!["local", "[1,2]", sender], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, bool>(4)?))
+                })
+                .expect("consistent statement")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("whole directory")
+        };
+        assert_eq!(read("learner"), vec![("learner".into(), true)]);
+        assert_eq!(read("foreign"), vec![("learner".into(), false)]);
+        db.execute("INSERT INTO cluster_node_removals VALUES ('learner')", [])
+            .expect("actual durable sender fence");
+        // Full coverage still includes the peer; authority in that SAME read
+        // is false, not borrowed from a preceding unfenced response check.
+        assert_eq!(read("learner"), vec![("learner".into(), false)]);
+        db.execute(
+            "UPDATE cluster_nodes SET removed_at=1 WHERE node_id='learner'",
+            [],
+        )
+        .expect("actual durable removal");
+        assert!(read("learner").is_empty());
+    }
+
+    #[tokio::test]
+    async fn k06_startup_activation_retains_deadline_without_reclassifying_clock() {
+        // An actual standalone guard supplies no invented remote membership
+        // or clock samples. This isolates phase budget from valid clock age.
+        let guard = Arc::new(ClusterClockGuard::new(false));
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+        let admission = StartupActivationAdmission {
+            clock: guard
+                .acquire_owned_for(ClockDecision::MembershipChange)
+                .expect("NoPeers"),
+            deadline,
+            settlement_pause: None,
+        };
+        admission
+            .revalidate()
+            .expect("before original phase deadline");
+        tokio::time::sleep_until(deadline).await;
+        assert!(matches!(
+            admission.revalidate(),
+            Err(MembershipError::Internal(_))
+        ));
+        admission
+            .clock
+            .revalidate()
+            .expect("clock proof remains valid");
+        assert_eq!(admission.deadline, deadline, "no replenished phase budget");
+    }
+
+    #[test]
+    fn k06_durable_activation_settlement_keeps_original_phase_and_refuses_next_submission() {
+        let worker = std::thread::Builder::new()
+            .name("k06-delayed-settlement".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("owned settlement runtime")
+                    .block_on(Box::pin(delayed_activation_settlement_fixture(false)));
+            })
+            .expect("owned settlement thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn k06_direct_activation_phase_precedes_clock_refusal_before_and_after_capture() {
+        let worker = std::thread::Builder::new()
+            .name("k06-direct-phase".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("owned phase runtime")
+                    .block_on(Box::pin(delayed_activation_settlement_fixture(true)));
+            })
+            .expect("owned phase thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn delayed_activation_settlement_fixture(direct_phase: bool) {
+        use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
+        use crate::config::Config;
+
+        struct SingletonObserver;
+        impl StartupClockObserver for SingletonObserver {
+            fn start(
+                &self,
+                manager: MembershipManager,
+                node: String,
+            ) -> std::pin::Pin<
+                Box<dyn Future<Output = Result<(), crate::error::StoreError>> + Send + '_>,
+            > {
+                Box::pin(async move {
+                    let roster = manager
+                        .clock_peers()
+                        .await
+                        .map_err(|error| crate::error::StoreError::Database(error.to_string()))?;
+                    let applied = roster.membership.as_ref().expect("actual singleton watch");
+                    assert_eq!(applied.members, BTreeSet::from([applied.local_node]));
+                    assert_eq!(applied.voters, applied.members);
+                    assert!(roster.peers.is_empty());
+                    let nonce = uuid::Uuid::now_v7().to_string();
+                    let body = b"signed singleton route control, not a remote clock sample";
+                    let path = "/_internal/v1/clock";
+                    let signature = manager
+                        .sign_internal_peer_response(&node, &nonce, path, body)
+                        .expect("actual signing manager");
+                    let message = internal_peer_response_message(&node, &node, &nonce, path, body)
+                        .expect("exact signed message");
+                    let decoded = hex::decode(&signature).expect("actual signature bytes");
+                    assert!(manager
+                        .activity_signature_is_valid(&node, &message, &decoded)
+                        .await
+                        .expect("actual durable signing-key verification"));
+                    let changed =
+                        internal_peer_response_message(&node, &node, &nonce, path, b"changed")
+                            .expect("changed signed message");
+                    assert!(!manager
+                        .activity_signature_is_valid(&node, &changed, &decoded)
+                        .await
+                        .expect("changed body refuses signature"));
+                    // A singleton has no peer HTTP exchange. Never relabel
+                    // self-signing as an authorized learner/peer route.
+                    assert!(!manager
+                        .authorize_internal_peer_member_response(
+                            &node, &node, &nonce, path, body, &signature,
+                        )
+                        .await
+                        .expect("self-relay authorization refuses"));
+                    let guard = manager.clock_guard();
+                    let round = guard
+                        .roster_for_peer_directory(&roster)
+                        .expect("proved actual singleton roster");
+                    assert!(guard.publish(round, BTreeMap::new()));
+                    Ok(())
+                })
+            }
+        }
+
+        let root = tempfile::tempdir().expect("owned activation directory");
+        let held: Vec<_> = (0..3)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned fixture port"))
+            .collect();
+        let addresses: Vec<_> = held
+            .iter()
+            .map(|listener| listener.local_addr().expect("address"))
+            .collect();
+        let mut config = Config::default();
+        config.storage.data_dir = root.path().into();
+        config.server.bind = addresses[0];
+        config.cluster.raft_bind = addresses[1];
+        config.cluster.api_bind = addresses[2];
+        config.cluster.advertise_host = "localhost".into();
+        config.cluster.join_url = format!("http://{}", addresses[0]);
+        config.cluster.artwork_url = config.cluster.join_url.clone();
+        drop(held);
+        drop(
+            crate::store::SqliteStore::open(&root.path().join("plurx.db")).expect("source schema"),
+        );
+        let selected = Box::pin(select_daemon_store_observing(
+            &config,
+            Some(&SingletonObserver),
+        ))
+        .await
+        .expect("actual singleton activation and lock owner");
+        let client = selected.local_client().expect("actual Client");
+        let installed = client
+            .local_membership_admission()
+            .expect("installed policy");
+        let original_deadline = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+            .expect("same installed phase policy")
+            .startup_deadline()
+            .expect("original 45-second deadline");
+        let manager = selected.membership_manager();
+        if direct_phase {
+            let policy = installed
+                .as_any()
+                .downcast_ref::<StartupMembershipAdmission>()
+                .expect("exact installed policy");
+            let (entered, captured) = tokio::sync::oneshot::channel();
+            let (release, resumed) = tokio::sync::oneshot::channel();
+            *policy
+                .activation_capture_pause
+                .once
+                .lock()
+                .expect("instance pause") = Some((entered, resumed));
+            let pending_manager = manager.clone();
+            let pending = tokio::spawn(async move {
+                pending_manager
+                    .finish_clock_observation(original_deadline)
+                    .await
+            });
+            captured.await.expect("actual clock capture reached");
+            assert!(!pending.is_finished());
+            tokio::time::sleep_until(original_deadline).await;
+            release.send(()).expect("release original capture");
+            assert!(matches!(
+                pending.await.expect("capture consumer completed"),
+                Err(MembershipError::Internal(_))
+            ));
+            assert!(matches!(
+                manager.finish_clock_observation(original_deadline).await,
+                Err(MembershipError::Internal(_))
+            ));
+            assert_eq!(policy.startup_deadline(), Some(original_deadline));
+            selected
+                .shutdown()
+                .await
+                .expect("actual phase Client drain");
+            return;
+        }
+        let (manager, mut admission) = manager
+            .finish_clock_observation(original_deadline)
+            .await
+            .expect("actual activation proof, no reconstructed owner");
+        assert_eq!(admission.deadline, original_deadline);
+        client
+            .execute("DROP TRIGGER cluster_node_removal_insert_guard", params!())
+            .await
+            .expect("make actual transaction effect observable");
+        let (entered, durable) = tokio::sync::oneshot::channel();
+        let (release, resumed) = tokio::sync::oneshot::channel();
+        admission.settlement_pause = Some(StartupSettlementPause {
+            once: std::sync::Mutex::new(Some((entered, resumed))),
+        });
+        let admission = Arc::new(admission);
+        let pending_manager = manager.clone();
+        let pending_admission = Arc::clone(&admission);
+        let pending = tokio::spawn(async move {
+            pending_manager
+                .install_membership_schema_only_admitted(Some(&pending_admission))
+                .await
+        });
+        durable
+            .await
+            .expect("actual transaction settled durably before pause");
+        let rows = client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM sqlite_master \
+                 WHERE type='trigger' AND name='cluster_node_removal_insert_guard'",
+                params!(),
+            )
+            .await
+            .expect("actual durable trigger readback");
+        assert_eq!(rows.first().map(|row| row.count), Some(1));
+        assert!(!pending.is_finished(), "caller has not observed settlement");
+        tokio::time::sleep_until(original_deadline).await;
+        assert!(matches!(
+            admission.revalidate(),
+            Err(MembershipError::Internal(_))
+        ));
+        assert_eq!(admission.deadline, original_deadline);
+        release
+            .send(())
+            .expect("release settlement, not cancel accepted work");
+        assert!(matches!(
+            pending.await.expect("retained consumer completion"),
+            Err(MembershipError::Internal(_))
+        ));
+        assert!(matches!(
+            manager
+                .install_membership_schema_only_admitted(Some(&admission))
+                .await,
+            Err(MembershipError::Internal(_))
+        ));
+        // Do not reacquire a clock ticket here: that separate API can refuse
+        // expired clock evidence before evaluating the phase. This control
+        // proves the original admission's post-settlement/next-write fence.
+        assert_eq!(
+            admission.deadline, original_deadline,
+            "no renewed phase budget"
+        );
+        selected
+            .shutdown()
+            .await
+            .expect("actual Client and directory owner drain");
+    }
+
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[test]
+    fn k06_actual_activation_transaction_commits_after_phase_expiry_without_next_submission() {
+        let hold = Arc::new(std::sync::Mutex::new(None));
+        let worker_hold = Arc::clone(&hold);
+        let (completed, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("k06-precommit-owner".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let root = tempfile::tempdir().expect("actual precommit fixture");
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("actual precommit fixture");
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(Box::pin(actual_precommit_activation_fixture(
+                        Arc::clone(&worker_hold),
+                        root.path(),
+                    )));
+                }));
+                if result.is_err() {
+                    // Failure is not terminal-drain evidence. Release the injection,
+                    // but retain the runtime owning accepted tasks/Client/lock.
+                    drop(worker_hold.lock().expect("owned writer hold").take());
+                    std::mem::forget(root);
+                    std::mem::forget(runtime);
+                } else {
+                    drop(runtime);
+                    drop(root);
+                }
+                let _ = completed.send(result);
+            })
+            .expect("actual precommit fixture");
+        let result = completion.recv_timeout(Duration::from_secs(110));
+        drop(hold.lock().expect("owned writer hold").take());
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(error) => panic!("precommit worker did not complete; ownership retained: {error}"),
+        }
+        let finished_by = std::time::Instant::now() + Duration::from_secs(1);
+        while !worker.is_finished() && std::time::Instant::now() < finished_by {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            worker.is_finished(),
+            "precommit worker terminal return missing"
+        );
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[cfg(feature = "cluster-read-cost-validation")]
+    async fn actual_precommit_activation_fixture(
+        hold: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+        root: &std::path::Path,
+    ) {
+        use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
+        use crate::error::StoreError;
+        struct CapturedWriter {
+            entered: tokio::sync::oneshot::Receiver<()>,
+            release: std::sync::mpsc::Sender<()>,
+            deadline: tokio::time::Instant,
+            manager: MembershipManager,
+            baseline_submissions: usize,
+        }
+        struct Observer(std::sync::Mutex<Option<tokio::sync::oneshot::Sender<CapturedWriter>>>);
+        impl StartupClockObserver for Observer {
+            fn start<'a>(
+                &'a self,
+                manager: MembershipManager,
+                node: String,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<(), StoreError>> + Send + 'a>,
+            > {
+                Box::pin(async move {
+                    let roster = manager
+                        .clock_peers()
+                        .await
+                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                    let applied = roster.membership.as_ref().expect("actual applied roster");
+                    assert_eq!(applied.members, BTreeSet::from([applied.local_node]));
+                    assert_eq!(applied.members, applied.voters);
+                    assert!(roster.peers.is_empty());
+                    let nonce = uuid::Uuid::now_v7().to_string();
+                    let body = b"actual singleton ownership, not a learner HTTP exchange";
+                    let signature = manager
+                        .sign_internal_peer_response(&node, &nonce, "/_internal/v1/clock", body)
+                        .expect("actual precommit fixture");
+                    let message = internal_peer_response_message(
+                        &node,
+                        &node,
+                        &nonce,
+                        "/_internal/v1/clock",
+                        body,
+                    )
+                    .expect("actual precommit fixture");
+                    assert!(manager
+                        .activity_signature_is_valid(
+                            &node,
+                            &message,
+                            &hex::decode(signature).expect("actual precommit fixture")
+                        )
+                        .await
+                        .expect("actual precommit fixture"));
+                    let guard = manager.clock_guard();
+                    assert!(guard.publish(
+                        guard
+                            .roster_for_peer_directory(&roster)
+                            .expect("actual precommit fixture"),
+                        BTreeMap::new()
+                    ));
+                    let inner = manager
+                        .replicated_inner()
+                        .expect("actual precommit fixture");
+                    let installed = inner
+                        .client
+                        .local_membership_admission()
+                        .expect("actual precommit fixture");
+                    let policy = installed
+                        .as_any()
+                        .downcast_ref::<StartupMembershipAdmission>()
+                        .expect("actual precommit fixture");
+                    let deadline = policy.startup_deadline().expect("actual precommit fixture");
+                    inner
+                        .client
+                        .execute(
+                            "DROP TRIGGER IF EXISTS cluster_node_removal_insert_guard",
+                            params!(),
+                        )
+                        .await
+                        .expect("actual precommit fixture");
+                    let (entered, release) = inner
+                        .client
+                        .validation_hold_transaction_before_commit(
+                            REQUIRE_REMOVAL_INTENT_SQL.to_owned(),
+                            deadline.into_std() + Duration::from_secs(5),
+                        )
+                        .await
+                        .expect("actual precommit fixture");
+                    let baseline_submissions = policy
+                        .activation_metadata_submissions
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    self.0
+                        .lock()
+                        .expect("actual precommit fixture")
+                        .take()
+                        .expect("actual precommit fixture")
+                        .send(CapturedWriter {
+                            entered,
+                            release,
+                            deadline,
+                            manager,
+                            baseline_submissions,
+                        })
+                        .map_err(|_| StoreError::Database("fixture observer disappeared".into()))?;
+                    Ok(())
+                })
+            }
+        }
+        fn trigger_count(path: &std::path::Path) -> i64 {
+            let connection = rusqlite::Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("actual precommit fixture");
+            connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='cluster_node_removal_insert_guard'", [], |row| row.get(0)).expect("actual precommit fixture")
+        }
+        let held: Vec<_> = (0..3)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("actual precommit fixture"))
+            .collect();
+        let addresses: Vec<_> = held
+            .iter()
+            .map(|listener| listener.local_addr().expect("actual precommit fixture"))
+            .collect();
+        let mut config = crate::config::Config::default();
+        config.storage.data_dir = root.into();
+        config.server.bind = addresses[0];
+        config.cluster.raft_bind = addresses[1];
+        config.cluster.api_bind = addresses[2];
+        config.cluster.advertise_host = "localhost".into();
+        config.cluster.join_url = format!("http://{}", addresses[0]);
+        config.cluster.artwork_url = config.cluster.join_url.clone();
+        drop(held);
+        drop(
+            crate::store::SqliteStore::open(&root.join("plurx.db"))
+                .expect("actual precommit fixture"),
+        );
+        let (capture, captured) = tokio::sync::oneshot::channel();
+        let mut pending = tokio::spawn(async move {
+            let observer = Observer(std::sync::Mutex::new(Some(capture)));
+            Box::pin(select_daemon_store_observing(&config, Some(&observer))).await
+        });
+        let CapturedWriter {
+            entered,
+            release,
+            deadline,
+            manager,
+            baseline_submissions,
+        } = tokio::time::timeout(Duration::from_secs(15), captured)
+            .await
+            .expect("bounded actual observer capture")
+            .expect("actual precommit fixture");
+        *hold.lock().expect("owned writer hold") = Some(release);
+        tokio::time::timeout(Duration::from_secs(10), entered)
+            .await
+            .expect("bounded actual precommit entry")
+            .expect("actual transaction statements completed before commit");
+        let database = root.join("hiqlite/state_machine/db/plurx.db");
+        assert_eq!(
+            trigger_count(&database),
+            0,
+            "independent reader cannot see uncommitted trigger"
+        );
+        assert!(!pending.is_finished());
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join(".plurxd.lock"))
+            .expect("actual precommit fixture");
+        assert!(matches!(
+            lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        tokio::time::sleep_until(deadline).await;
+        assert!(
+            !pending.is_finished(),
+            "accepted SQL not cancelled at phase expiry"
+        );
+        assert!(matches!(
+            lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        let release = hold.lock().expect("owned writer hold").take();
+        release
+            .expect("actual writer release owner")
+            .send(())
+            .expect("release actual uncommitted writer");
+        let error = match tokio::time::timeout(Duration::from_secs(15), &mut pending)
+            .await
+            .expect("bounded post-release activation completion; no cancellation proof")
+            .expect("actual precommit fixture")
+        {
+            Ok(_) => panic!("expired activation succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("original deadline"), "{error}");
+        let installed = manager
+            .replicated_inner()
+            .expect("actual precommit fixture")
+            .client
+            .local_membership_admission()
+            .expect("actual precommit fixture");
+        let policy = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+            .expect("actual precommit fixture");
+        assert_eq!(policy.startup_deadline(), Some(deadline));
+        assert_eq!(
+            policy
+                .activation_metadata_submissions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            baseline_submissions,
+            "no next metadata submission after expired transaction"
+        );
+        assert_eq!(
+            trigger_count(&database),
+            1,
+            "actual transaction committed after expiry"
+        );
+        let cleanup_limit = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock)
+                    if tokio::time::Instant::now() < cleanup_limit =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                other => panic!("actual terminal cleanup did not release lock: {other:?}"),
+            }
+        }
+        lock.unlock().expect("actual precommit fixture");
+        assert!(std::net::TcpListener::bind(addresses[1]).is_ok());
+        assert!(std::net::TcpListener::bind(addresses[2]).is_ok());
+    }
+
+    #[test]
     fn cache_admin_revocation_roster_includes_pending_removals_and_fails_on_omission() {
         let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
         connection
@@ -12931,6 +15889,309 @@ mod tests {
         assert!(committed_unready.contains("params!(members_json)"));
     }
 
+    /// Actual Hiqlite learner + actual signed response, not a clock sample or
+    /// a manufactured applied-membership watch. This is route authorization.
+    #[test]
+    fn k06_aged_committed_learner_clock_response_keeps_other_routes_live_only() {
+        // The full import/real learner futures exceed default libtest stack.
+        // Own a finite stack explicitly; ordinary suites need no global env.
+        let worker = std::thread::Builder::new()
+            .name("k06-aged-clock-response".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("owned fixture runtime")
+                    .block_on(Box::pin(aged_committed_learner_clock_response_fixture()));
+            })
+            .expect("owned fixture thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn aged_committed_learner_clock_response_fixture() {
+        use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
+        use crate::config::Config;
+        use std::borrow::Cow;
+
+        struct SingletonObserver;
+        impl StartupClockObserver for SingletonObserver {
+            fn start(
+                &self,
+                manager: MembershipManager,
+                _node: String,
+            ) -> std::pin::Pin<
+                Box<dyn Future<Output = Result<(), crate::error::StoreError>> + Send + '_>,
+            > {
+                Box::pin(async move {
+                    let roster = manager
+                        .clock_peers()
+                        .await
+                        .map_err(|error| crate::error::StoreError::Database(error.to_string()))?;
+                    let applied = roster.membership.as_ref().expect("actual singleton watch");
+                    assert_eq!(applied.members, BTreeSet::from([applied.local_node]));
+                    assert!(roster.peers.is_empty());
+                    let guard = manager.clock_guard();
+                    let round = guard
+                        .roster_for_peer_directory(&roster)
+                        .expect("proved singleton");
+                    assert!(
+                        guard.publish(round, BTreeMap::new()),
+                        "no remote samples exist"
+                    );
+                    Ok(())
+                })
+            }
+        }
+        fn addresses() -> Vec<std::net::SocketAddr> {
+            let held: Vec<_> = (0..3)
+                .map(|_| {
+                    std::net::TcpListener::bind("127.0.0.1:0").expect("reserve owned fixture port")
+                })
+                .collect();
+            held.iter()
+                .map(|listener| listener.local_addr().expect("owned port"))
+                .collect()
+        }
+        let root = tempfile::tempdir().expect("leader root");
+        let ports = addresses();
+        let mut config = Config::default();
+        config.storage.data_dir = root.path().into();
+        config.server.bind = ports[0];
+        config.cluster.raft_bind = ports[1];
+        config.cluster.api_bind = ports[2];
+        config.cluster.advertise_host = "localhost".into();
+        config.cluster.join_url = format!("http://{}", ports[0]);
+        config.cluster.artwork_url = config.cluster.join_url.clone();
+        drop(
+            crate::store::SqliteStore::open(&root.path().join("plurx.db")).expect("source schema"),
+        );
+        let selected = Box::pin(select_daemon_store_observing(
+            &config,
+            Some(&SingletonObserver),
+        ))
+        .await
+        .expect("actual singleton activation");
+        let manager = selected.membership_manager();
+        let token = manager
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("owned join token");
+        let learner_root = tempfile::tempdir().expect("learner root");
+        let learner_ports = addresses();
+        let learner_id = uuid::Uuid::new_v4().to_string();
+        let (protocol_min, protocol_max) =
+            manager.active_protocol_range().await.expect("actual range");
+        manager
+            .redeem(&RedeemJoinRequest {
+                token_digest: join_token_digest(&token.token),
+                raft_id: token.raft_id,
+                node_id: learner_id.clone(),
+                hostname: "clock-fixture".into(),
+                raft_address: learner_ports[1].to_string(),
+                api_address: learner_ports[2].to_string(),
+                http_base: format!("http://{}", learner_ports[0]),
+                schema_version: AUTH_SCHEMA_VERSION,
+                protocol_version: protocol_min,
+                protocol_min,
+                protocol_max,
+                live_tv_v1: true,
+                sharing: SharingJoinCapabilities::for_current_binary(),
+            })
+            .await
+            .expect("actual token-authorized staged identity");
+        let leader = manager.replicated_inner().expect("actual leader");
+        let local = ClusterPeer {
+            raft_id: token.raft_id,
+            raft_address: learner_ports[1].to_string(),
+            api_address: learner_ports[2].to_string(),
+        };
+        let policy = Arc::new(StartupMembershipAdmission::default());
+        let learner_client = Box::pin(tokio::time::timeout(
+            Duration::from_secs(45),
+            Box::pin(hiqlite::start_node_for_clock_observation(
+                hiqlite::NodeConfig {
+                    node_id: token.raft_id,
+                    nodes: vec![Node::from(&leader.local), Node::from(&local)],
+                    listen_addr_api: Cow::Borrowed("127.0.0.1"),
+                    listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+                    data_dir: Cow::Owned(learner_root.path().to_string_lossy().into_owned()),
+                    filename_db: Cow::Borrowed("clock-test.db"),
+                    secret_raft: leader.secrets.raft.clone(),
+                    secret_api: leader.secrets.api.clone(),
+                    tls_raft: Some(hiqlite::tls::ServerTlsConfig::TlsAutoCertificates),
+                    tls_api: Some(hiqlite::tls::ServerTlsConfig::TlsAutoCertificates),
+                    learner_only: true,
+                    health_check_delay_secs: 0,
+                    ..crate::cluster::migration::production_hiqlite_defaults_with_read_pool(1)
+                },
+                policy,
+            )),
+        ))
+        .await
+        .expect("bounded learner startup")
+        .expect("actual learner");
+        let mut identity = selected.identity.clone();
+        identity.node_id.clone_from(&learner_id);
+        identity.raft_id = token.raft_id;
+        let learner = Box::pin(MembershipManager::clock_observation(
+            learner_client.clone(),
+            selected.replication_monitor(),
+            Arc::clone(&selected.store),
+            identity,
+            local,
+            config.cluster.join_url.clone(),
+            format!("http://{}", learner_ports[0]),
+            JoinSecrets {
+                raft: leader.secrets.raft.clone(),
+                api: leader.secrets.api.clone(),
+                credential_key: leader.secrets.credential_key.clone(),
+            },
+            ActivitySigningKey::from_seed_hex(&"12".repeat(32)).expect("fixture durable key"),
+            leader.activation_marker.clone(),
+            ClusterRole::Voter,
+            learner_root.path().into(),
+        ))
+        .await
+        .expect("actual committed learner observation manager");
+        let applied = learner_client
+            .local_db_raft_metrics()
+            .expect("actual local watch")
+            .membership_snapshot();
+        assert!(applied.committed && applied.members.contains(&token.raft_id));
+        assert!(
+            !applied.voters.contains(&token.raft_id),
+            "no promotion/fabricated admission"
+        );
+        let aged = unix_ms().expect("now") - NODE_REACHABLE_WINDOW_MS - 1_000;
+        assert_eq!(
+            leader
+                .client
+                .execute(
+                    "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id=$2",
+                    params!(aged, learner_id.as_str())
+                )
+                .await
+                .expect("age actual committed identity"),
+            1
+        );
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let body = b"actual signed fixture response, not a measured clock sample";
+        let clock_path = "/_internal/v1/clock";
+        let target = selected.identity.node_id.as_str();
+        let signature = learner
+            .sign_internal_peer_response(target, &nonce, clock_path, body)
+            .expect("signed clock response");
+        assert!(manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                clock_path,
+                body,
+                &signature
+            )
+            .await
+            .expect("clock authorization"));
+        assert!(!manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                "wrong-target",
+                &nonce,
+                clock_path,
+                body,
+                &signature
+            )
+            .await
+            .expect("wrong-target refusal"));
+        assert!(!manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                clock_path,
+                b"forged body",
+                &signature
+            )
+            .await
+            .expect("forged response refusal"));
+        let ordinary_path = "/api/v1/internal/auth/cache-revocation";
+        let ordinary_signature = learner
+            .sign_internal_peer_response(target, &nonce, ordinary_path, body)
+            .expect("signed ordinary response");
+        assert!(!manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                ordinary_path,
+                body,
+                &ordinary_signature
+            )
+            .await
+            .expect("ordinary aged member refusal"));
+        leader
+            .client
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id=$2",
+                params!(unix_ms().expect("current heartbeat"), learner_id.as_str()),
+            )
+            .await
+            .expect("fresh actual identity");
+        assert!(manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                ordinary_path,
+                body,
+                &ordinary_signature
+            )
+            .await
+            .expect("ordinary live member acceptance"));
+        leader
+            .client
+            .execute(
+                "UPDATE cluster_nodes SET removed_at=$1 WHERE node_id=$2",
+                params!(unix_ms().expect("actual removal time"), learner_id.as_str()),
+            )
+            .await
+            .expect("actual durable removal");
+        assert!(!manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                clock_path,
+                body,
+                &signature
+            )
+            .await
+            .expect("removed peer refusal"));
+        // Existing Hiqlite TLS shutdown assertion occurs only after writer drain.
+        let stopped = tokio::spawn(async move { learner_client.shutdown().await }).await;
+        match stopped {
+            Ok(result) => result.expect("learner drain"),
+            Err(error) if error.is_panic() => {
+                let payload = error.into_panic();
+                let text = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied());
+                assert_eq!(
+                    text,
+                    Some("The global Hiqlite shutdown handler to always listen: SendError { .. }")
+                );
+            }
+            Err(error) => panic!("learner shutdown task: {error}"),
+        }
+        selected.shutdown().await.expect("leader drain");
+    }
+
     #[test]
     fn committed_roster_bound_fails_closed_instead_of_truncating() {
         let members = (0_u64..=MAX_COMMITTED_ROSTER_MEMBERS as u64).collect::<BTreeSet<_>>();
@@ -12940,11 +16201,11 @@ mod tests {
     }
 
     #[test]
-    fn live_tv_drain_response_signature_binds_each_exchange_field_and_domain() {
+    fn internal_peer_response_signature_binds_each_exchange_field_and_domain() {
         let key = ActivitySigningKey::from_seed_hex(&"42".repeat(32)).expect("fixture signing key");
         let nonce = uuid::Uuid::new_v4().to_string();
         let other_nonce = uuid::Uuid::new_v4().to_string();
-        let path = "/_internal/v1/live-tv/drain";
+        let path = "/_internal/v1/live-tv/start-state";
         let payload = br#"["owner","controller","nonce",7,2]"#;
         let message = internal_peer_response_message("owner", "controller", &nonce, path, payload)
             .expect("message");
@@ -12957,13 +16218,7 @@ mod tests {
             internal_peer_response_message("owner", "other-controller", &nonce, path, payload),
             internal_peer_response_message("owner", "controller", &other_nonce, path, payload),
             internal_peer_response_message("owner", "controller", &nonce, "/other", payload),
-            internal_peer_response_message(
-                "owner",
-                "controller",
-                &nonce,
-                path,
-                b"changed cutoff or count",
-            ),
+            internal_peer_response_message("owner", "controller", &nonce, path, b"changed payload"),
             internal_peer_auth_message("owner", "controller", 1, &nonce, "POST", path, payload),
         ] {
             assert!(verifier
@@ -14188,9 +17443,9 @@ mod tests {
             "cluster_cache_admin_revocation_lease_intents",
             "cluster_credential_mutation_intents",
         ] {
-            assert!(MEMBERSHIP_SCHEMA.iter().any(
-                |statement| statement.contains(&format!("CREATE TABLE IF NOT EXISTS {table}"))
-            ));
+            assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
+                statement.contains(&format!("CREATE TABLE IF NOT EXISTS {table}"))
+            }));
         }
         for trigger in [
             "cluster_cache_admin_lease_heartbeat_expiry",
@@ -14236,10 +17491,12 @@ mod tests {
             statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
                 && statement.contains("CHECK (operation IN ('restart', 'maintenance'))")
         }));
-        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| statement
-            .contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_releases")));
-        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| statement
-            .contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_intents")));
+        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
+            statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_releases")
+        }));
+        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
+            statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_intents")
+        }));
         for trigger in [
             REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL,
             REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL,
@@ -15670,6 +18927,212 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn removal_transition_preserves_proposal_outcomes() {
+        use lifecycle::{RemovalEffect, RemovalProposalOutcome, RemovalTransition};
+        for path in [
+            RemovalPath::Voter,
+            RemovalPath::Learner,
+            RemovalPath::SelfLeave,
+        ] {
+            for (proposal_kind, survivor, expected) in [
+                (
+                    RemovalProposalOutcome::Rejected,
+                    MembershipChangeOutcome::Indeterminate,
+                    vec!["rollback:node-a:attempt-a"],
+                ),
+                (
+                    RemovalProposalOutcome::Accepted,
+                    MembershipChangeOutcome::Indeterminate,
+                    vec!["finalize:node-a"],
+                ),
+                (
+                    RemovalProposalOutcome::Ambiguous,
+                    MembershipChangeOutcome::Removed,
+                    vec!["reconcile", "finalize:node-a"],
+                ),
+                (
+                    RemovalProposalOutcome::Ambiguous,
+                    MembershipChangeOutcome::Indeterminate,
+                    vec!["reconcile"],
+                ),
+                (
+                    RemovalProposalOutcome::Ambiguous,
+                    MembershipChangeOutcome::Promoted,
+                    vec!["reconcile"],
+                ),
+            ] {
+                let events = Mutex::new(Vec::<String>::new());
+                let events = &events;
+                let error = MembershipError::Internal("original proposal error".to_owned());
+                let proposal = match proposal_kind {
+                    RemovalProposalOutcome::Accepted => Ok(()),
+                    RemovalProposalOutcome::Rejected => {
+                        Err(MembershipChangeFailure::Rejected(error))
+                    }
+                    RemovalProposalOutcome::Ambiguous => {
+                        Err(MembershipChangeFailure::Ambiguous(error))
+                    }
+                };
+                let result = dispatch_removal_outcome(
+                    path,
+                    "node-a",
+                    "attempt-a",
+                    proposal,
+                    |node, attempt, error| async move {
+                        events
+                            .lock()
+                            .expect("events")
+                            .push(format!("rollback:{node}:{attempt}"));
+                        error
+                    },
+                    || async move {
+                        events.lock().expect("events").push("reconcile".to_owned());
+                        survivor
+                    },
+                    |node| async move {
+                        events
+                            .lock()
+                            .expect("events")
+                            .push(format!("finalize:{node}"));
+                    },
+                )
+                .await;
+                assert_eq!(*events.lock().expect("events"), expected);
+                match proposal_kind {
+                    RemovalProposalOutcome::Accepted => assert!(result.is_ok()),
+                    RemovalProposalOutcome::Rejected => assert!(
+                        matches!(result, Err(MembershipError::Internal(ref message)) if message == "original proposal error")
+                    ),
+                    RemovalProposalOutcome::Ambiguous
+                        if survivor == MembershipChangeOutcome::Removed =>
+                    {
+                        assert!(result.is_ok())
+                    }
+                    // Each path keeps the answer it gave before the paths shared
+                    // the transition: a learner removal is 409 pending, a voter
+                    // removal and a self-leave are internal errors.
+                    RemovalProposalOutcome::Ambiguous => match path {
+                        RemovalPath::Voter => assert!(
+                            matches!(result, Err(MembershipError::Internal(ref message)) if message == "voter removal outcome is indeterminate after cluster membership operation failed: original proposal error; the target remains fenced")
+                        ),
+                        RemovalPath::Learner => assert!(
+                            matches!(result, Err(MembershipError::RemovalPending(ref message)) if message == "learner removal outcome is indeterminate after cluster membership operation failed: original proposal error")
+                        ),
+                        RemovalPath::SelfLeave => assert!(
+                            matches!(result, Err(MembershipError::Internal(ref message)) if message == "self-removal outcome is indeterminate after cluster membership operation failed: original proposal error; this voter remains fenced")
+                        ),
+                    },
+                }
+                let transition = RemovalTransition::proposal("node-a", "attempt-a", proposal_kind);
+                assert_eq!(
+                    (transition.node_id, transition.attempt_id),
+                    ("node-a", "attempt-a")
+                );
+                if proposal_kind == RemovalProposalOutcome::Ambiguous {
+                    assert_eq!(transition.effect, RemovalEffect::ReconcileSurvivors);
+                    assert_eq!(
+                        transition.survivors(false).expect("proof pending").effect,
+                        RemovalEffect::RetainFence
+                    );
+                } else {
+                    assert!(transition.survivors(true).is_none());
+                }
+            }
+        }
+    }
+
+    /// S-14: each real removal binds the shared transition with its own path
+    /// and survivor proof. A learner removal reconciles member removal (the
+    /// learner leaves the member set); the voter paths reconcile the voter
+    /// change; only the self-leave bounds its final tombstone. Swapping any of
+    /// these would type-check, so the wiring is pinned from source.
+    #[test]
+    fn removal_call_sites_bind_their_own_path_and_reconcile() {
+        let source = include_str!("membership.rs");
+        for (signature, path, reconcile, finalize) in [
+            (
+                "async fn remove_learner_captured(",
+                "RemovalPath::Learner",
+                "|| reconcile_member_removal(&inner.secrets.api, target_raft_id, &membership_nodes)",
+                "|finalize_node| self.finalize_node_removal(finalize_node)",
+            ),
+            (
+                "async fn remove_voter_captured(",
+                "RemovalPath::Voter",
+                "|| reconcile_membership_change(&inner.secrets.api, target_raft_id, &membership_nodes)",
+                "|finalize_node| self.finalize_node_removal(finalize_node)",
+            ),
+            (
+                "async fn leave_voter_captured(",
+                "RemovalPath::SelfLeave",
+                "reconcile_membership_change(",
+                "finalize_self_leave_bounded(",
+            ),
+        ] {
+            let body = method_body(source, signature);
+            let dispatch = body
+                .split_once("dispatch_removal_outcome(")
+                .unwrap_or_else(|| panic!("{signature} dispatches its outcome"))
+                .1;
+            assert_eq!(
+                body.matches("dispatch_removal_outcome(").count(),
+                1,
+                "{signature}"
+            );
+            assert!(
+                dispatch.trim_start().starts_with(&format!("{path},")),
+                "{signature} binds {path}"
+            );
+            assert!(dispatch.contains(reconcile), "{signature} reconciles via {reconcile}");
+            assert!(dispatch.contains(finalize), "{signature} finalizes via {finalize}");
+            for other in [
+                "RemovalPath::Learner",
+                "RemovalPath::Voter",
+                "RemovalPath::SelfLeave",
+            ] {
+                assert_eq!(body.contains(other), other == path, "{signature}: {other}");
+            }
+        }
+        let learner = method_body(source, "async fn remove_learner_captured(");
+        assert!(!learner.contains("reconcile_membership_change("));
+        assert!(!learner.contains("finalize_self_leave_bounded("));
+        let voter = method_body(source, "async fn remove_voter_captured(");
+        assert!(!voter.contains("reconcile_member_removal("));
+        assert!(!voter.contains("finalize_self_leave_bounded("));
+        let leave = method_body(source, "async fn leave_voter_captured(");
+        assert!(!leave.contains("reconcile_member_removal("));
+        assert!(leave.contains("inner.identity.raft_id,"));
+    }
+
+    /// A self-leave whose final tombstone write never completes still
+    /// succeeds once `FINAL_TOMBSTONE_WAIT` elapses; one that completes is
+    /// awaited. The pending-removal row, not the tombstone, is the fence.
+    #[tokio::test(start_paused = true)]
+    async fn self_leave_finalize_is_bounded_and_succeeds_on_timeout() {
+        let started = tokio::time::Instant::now();
+        let result = dispatch_removal_outcome(
+            RemovalPath::SelfLeave,
+            "node-a",
+            "attempt-a",
+            Ok(()),
+            |_, _, error| async move { error },
+            || async { MembershipChangeOutcome::Indeterminate },
+            |node| finalize_self_leave_bounded(node, std::future::pending::<()>()),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(started.elapsed(), FINAL_TOMBSTONE_WAIT);
+
+        let finalized = AtomicBool::new(false);
+        let finalized = &finalized;
+        finalize_self_leave_bounded("node-a", async move {
+            finalized.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(finalized.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn removal_wire_request_is_a_node_delta() {
         assert_eq!(
@@ -15934,6 +19397,145 @@ mod tests {
 
     /// The committing statement — not just the preflight — carries the
     /// capability precondition, and it is idempotent in both directions.
+    #[test]
+    fn change_refuses_unbounded_clock() {
+        use crate::cluster::clock::{ClusterClockGuard, PeerClockOffset};
+
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        let guard = ClusterClockGuard::new(true);
+        // The operator-enabled guard; advisory mode never refuses this SQL.
+        guard.set_enforced(true);
+        let publish = |guard: &ClusterClockGuard| {
+            let roster = guard.roster(&["node-b".to_owned(), "node-c".to_owned()]);
+            assert!(guard.publish(
+                roster,
+                ["node-b", "node-c"]
+                    .into_iter()
+                    .map(|peer| (
+                        peer.to_owned(),
+                        PeerClockOffset::Bounded {
+                            offset_us: 0,
+                            uncertainty_us: 1_000,
+                            observed_at: Instant::now(),
+                        }
+                    ))
+                    .collect()
+            ));
+        };
+        let submit = |prepared| -> Result<usize, MembershipError> {
+            let admission = guard
+                .admit_for(ClockDecision::MembershipChange, prepared)
+                .map_err(MembershipError::ClockUnbounded)?;
+            guard
+                .revalidate_for(ClockDecision::MembershipChange, &admission)
+                .map_err(MembershipError::ClockUnbounded)?;
+            Ok(connection
+                .execute(
+                    &narrow_protocol_range_sql(Some(activation_guard_predicate())),
+                    rusqlite::params![
+                        AUTH_LEARNER_PROTOCOL,
+                        AUTH_PROTOCOL_MIN,
+                        admission
+                            .now_ms()
+                            .saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS)
+                    ],
+                )
+                .expect("actual guarded protocol SQL"))
+        };
+        let unknown = submit(guard.acquire()).expect_err("unknown capture refuses SQL");
+        assert_eq!(unknown.code(), "cluster_clock_unbounded");
+        assert_eq!(active_range(&connection), (4, 4));
+        publish(&guard);
+        let before_read = guard.acquire();
+        guard.roster_failed();
+        publish(&guard);
+        assert!(matches!(
+            submit(before_read),
+            Err(MembershipError::ClockUnbounded(
+                ClockRefusal::GenerationChanged
+            ))
+        ));
+        assert_eq!(active_range(&connection), (4, 4));
+        let original = guard.acquire().expect("current bound");
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = $1",
+                [original.now_ms()],
+            )
+            .expect("fresh fixture nodes");
+        connection
+            .execute(
+                "UPDATE cluster_node_capabilities SET last_seen_at = $1",
+                [original.now_ms()],
+            )
+            .expect("fresh fixture capabilities");
+        assert_eq!(
+            submit(Ok(original)).expect("same proof and actual statement"),
+            1
+        );
+        assert_eq!(active_range(&connection), (5, 5));
+
+        // These are call-site wiring checks, not a claim of real Raft/fleet
+        // acceptance. The preceding section executes the actual SQL primitive.
+        let source = include_str!("membership.rs");
+        for signature in [
+            "async fn redeem_for_role(",
+            "pub async fn promote_learner(",
+            "pub async fn activate_learner_protocol(",
+        ] {
+            let body = method_body(source, signature);
+            assert!(
+                body.find("let prepared_admission = clock.acquire();")
+                    .expect("entry capture")
+                    < body.find(".await").expect("awaited preparation")
+            );
+            if signature == "pub async fn promote_learner(" {
+                // Coverage excuses an unobserved learner only while it holds
+                // no vote; promoting one requires its own bounded clock.
+                assert!(body.contains(".admit_promotion_for(target_raft_id, prepared_admission)"));
+                assert!(body.contains(".revalidate_promotion_for(target_raft_id, &mut admission)"));
+                assert!(!body.contains(".admit_for(") && !body.contains(".revalidate_for("));
+                continue;
+            }
+            assert!(
+                body.contains(".admit_for(ClockDecision::MembershipChange, prepared_admission)")
+            );
+            assert!(body.contains(".revalidate_for(ClockDecision::MembershipChange, &admission)"));
+        }
+        let redeem = method_body(source, "async fn redeem_for_role(");
+        let repair = redeem
+            .split_once("JoinEffect::RepairPublishedNode =>")
+            .expect("repair")
+            .1
+            .split_once("JoinEffect::PublishStagedNode")
+            .expect("new publication")
+            .0;
+        assert!(repair.contains("return Ok(())") && !repair.contains("admit_for"));
+        assert!(
+            redeem.find(".revalidate_for(").expect("fence")
+                < redeem
+                    .find("inner.client.txn(statements).await")
+                    .expect("submission")
+        );
+        let promotion = method_body(source, "pub async fn promote_learner(");
+        assert!(
+            promotion
+                .find("reconcile_promotion_change(")
+                .expect("reconcile")
+                < promotion
+                    .find(".admit_promotion_for(")
+                    .expect("new authority")
+        );
+        assert!(promotion.contains("let started_at = admission.now_ms();"));
+        let activation = method_body(source, "pub async fn activate_learner_protocol(");
+        assert!(
+            activation
+                .find("return Ok(ProtocolChange")
+                .expect("already active")
+                < activation.find(".admit_for(").expect("new activation")
+        );
+    }
+
     #[test]
     fn activation_commits_once_and_only_with_every_voter_proven() {
         let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);

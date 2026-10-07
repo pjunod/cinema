@@ -81,25 +81,99 @@ const HDR10_4K_MAX_LUMA_SAMPLES: i64 = 8_912_896;
 /// collapses a High-tier HDR master to its media rendition for AVPlayer, and
 /// this rung inherits that unchanged.
 const HDR10_HLS_CODEC: &str = "hvc1.2.4.H120.90";
+/// VAAPI's non-packed constraint is set as well: measured from the production
+/// Jellyfin 8.1.3 graph on lab6, rather than inherited from the QSV/x265 point.
+const HDR10_VAAPI_HLS_CODEC: &str = "hvc1.2.4.H120.B0";
 /// Measured from the 2160p QSV output's hvcC: Main10, compatibility 4, High
 /// tier, level 150, constraint byte 0x90.
 const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 
 /// The RFC 6381 `CODECS` value for a *re-encoded* HLS session.
 ///
-/// A transcode's output is described by the argument list that produced it,
-/// not by a probe: unlike the copy path there is no source sample entry to
-/// read, and unlike an fMP4 session there is no `init.mp4` for
-/// `http::hls::exact_hls_context` to open (this muxer writes MPEG-TS). So the
-/// string is the grade's, and the grade is the pipeline's.
-pub(super) fn transcoded_hls_codecs(grade: OutputGrade, target_height: i64) -> String {
+/// Without a qualified frozen plan, SDR knows its codec family but not its
+/// profile/compatibility/level triplet, so this SDR value is never printed.
+/// An SDR master prints `CODECS` only from complete `FrozenHlsCodecFacts`
+/// (qualified encoder output, or the actual fMP4 init) and only for a
+/// session created with Settings → Developer `playback.sdr_master_codecs`
+/// on; off, the default, is the pre-S-10 master with no SDR `CODECS`.
+/// HDR fallback follows the measured encoder-specific graph, including
+/// VAAPI's distinct constraint byte; it does not infer a source sample entry.
+pub(super) fn transcoded_hls_codecs(
+    grade: OutputGrade,
+    target_height: i64,
+    encoder: Encoder,
+) -> String {
     match grade {
-        OutputGrade::Sdr => "avc1.640034,mp4a.40.2".to_owned(),
+        OutputGrade::Sdr => "avc1,mp4a.40.2".to_owned(),
         OutputGrade::Hdr10 if target_height > HDR10_HEIGHT => {
             format!("{HDR10_4K_HLS_CODEC},mp4a.40.2")
         }
+        OutputGrade::Hdr10 if encoder == Encoder::Vaapi => {
+            format!("{HDR10_VAAPI_HLS_CODEC},mp4a.40.2")
+        }
         OutputGrade::Hdr10 => format!("{HDR10_HLS_CODEC},mp4a.40.2"),
     }
+}
+
+pub(super) fn transcoded_hls_codecs_for_plan(plan: &ResolvedTranscode) -> String {
+    match plan.output_contract().sdr_avc() {
+        Some(proof) => format!("{},mp4a.40.2", proof.codec()),
+        None => transcoded_hls_codecs(
+            plan.codec_contract().grade,
+            plan.options().target_height,
+            plan.encoder(),
+        ),
+    }
+}
+
+/// The audio sample type follows the producer's immutable audio decision.
+pub(super) fn audio_delivery_hls_codecs(
+    mut codecs: String,
+    audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+) -> String {
+    let Some(audio) = audio else {
+        return codecs;
+    };
+    codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
+    let audio_codec = audio_sample_type(audio.codec());
+    if let Some(audio_codec) = audio_codec {
+        codecs.push(',');
+        codecs.push_str(audio_codec);
+    }
+    codecs
+}
+
+pub(super) fn audio_sample_type(codec: Option<&str>) -> Option<&'static str> {
+    match codec {
+        Some("aac") => Some("mp4a.40.2"),
+        Some("ac3" | "ac-3") => Some("ac-3"),
+        Some("eac3" | "eac-3" | "ec-3") => Some("ec-3"),
+        Some("mp3") => Some("mp4a.40.34"),
+        Some("alac") => Some("alac"),
+        Some("flac") => Some("fLaC"),
+        _ => None,
+    }
+}
+
+pub fn advertised_ladder_with_audio(
+    source_height: Option<i64>,
+    ceiling: i64,
+    audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+) -> Vec<Rung> {
+    let mut rungs = advertised_ladder(source_height, ceiling);
+    if let Some(rate) = audio.map(|audio| audio.budget_kbps()) {
+        for rung in &mut rungs {
+            rung.total_kbps = rung
+                .total_kbps
+                .saturating_sub(plurx_core::transcode::AUDIO_BITRATE_KBPS_DEFAULT)
+                .saturating_add(rate);
+            rung.peak_kbps = rung
+                .peak_kbps
+                .saturating_sub(plurx_core::transcode::AUDIO_BITRATE_KBPS_DEFAULT)
+                .saturating_add(rate);
+        }
+    }
+    rungs
 }
 
 /// Does this source/encoder pair fit one of the measured HDR10 points?
@@ -109,7 +183,7 @@ pub(super) fn hdr10_rung_fits(
     encoder: Encoder,
 ) -> bool {
     let max_samples = match (target_height, encoder) {
-        (HDR10_HEIGHT, Encoder::Software | Encoder::Qsv) => HDR10_MAX_LUMA_SAMPLES,
+        (HDR10_HEIGHT, Encoder::Software | Encoder::Qsv | Encoder::Vaapi) => HDR10_MAX_LUMA_SAMPLES,
         (HDR10_4K_HEIGHT, Encoder::Qsv) => HDR10_4K_MAX_LUMA_SAMPLES,
         _ => return false,
     };

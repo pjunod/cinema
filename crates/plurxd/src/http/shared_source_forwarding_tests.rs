@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 struct FixtureServer {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    task: tokio::task::JoinHandle<anyhow::Result<crate::HttpDrain>>,
 }
 impl FixtureServer {
     fn spawn(listener: tokio::net::TcpListener, router: axum::Router) -> Self {
@@ -27,11 +27,12 @@ impl FixtureServer {
     }
     async fn finish(mut self) {
         let _ = self.stop.take().expect("owned accept stop").send(());
-        tokio::time::timeout(Duration::from_secs(10), &mut self.task)
+        let drained = tokio::time::timeout(Duration::from_secs(10), &mut self.task)
             .await
             .expect("actual accept/driver owners drain")
             .expect("server join")
             .expect("server result");
+        assert_eq!(drained, crate::HttpDrain::Complete);
     }
 }
 impl Drop for FixtureServer {

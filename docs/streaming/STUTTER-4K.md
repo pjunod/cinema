@@ -374,8 +374,9 @@ has yet tested *ffmpeg's fMP4 fragment timing on a reordered HEVC stream*
 against a browser that can decode it, because no such browser was available.
 
 **Test:** serve the copy path as `-hls_segment_type mpegts` instead of
-`fmp4`, changing nothing else. The bundled hls.js 1.6.16 **does** demux
-HEVC-in-TS — confirmed in the minified source: `case 36` (the HEVC TS
+`fmp4`, changing nothing else. The bundled hls.js 1.6.19 **does** demux
+HEVC-in-TS — confirmed in the minified source (first against 1.6.16, and
+the same code is in 1.6.19): `case 36` (the HEVC TS
 stream type) sets `segmentVideoCodec="hevc"` and logs "HEVC in M2TS found",
 and there is an `hvc1()` box builder fed by a parsed VPS. Two constraints
 before building it: Apple requires fMP4 for HEVC in HLS, so a global flip

@@ -584,6 +584,18 @@ function liveTvOverlayTechnical(channel,status){
     .map((value,index)=>Number.isFinite(value)?`${["strength","quality","symbol"][index]} ${value}%`:null).filter(Boolean).join(" · "):"";
   return [source,rf].filter(Boolean).join(" · ");
 }
+function liveTvStationLogoUrl(channel){
+  // The rule is the shared guide contract's, not this page's: every client
+  // answers it from tests/playback/live-tv-guide-cases.json `station_logo`.
+  return PlurxLiveTv.stationLogoUrl(LIVE_TV.guide,channel?.id);
+}
+function liveTvStationLogo(channel){
+  const url=liveTvStationLogoUrl(channel);
+  // Keep the callsign visible until decoding succeeds, including offline or
+  // broken artwork. The adjacent station name supplies the accessible label.
+  return `<span class="lt-chip" aria-hidden="true"><span class="lt-chip-fallback">${esc(channel.guide_name)}</span>${url?
+    `<img src="${esc(url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onload="this.parentElement.classList.add('has-logo')" onerror="this.remove()">`:""}</span>`;
+}
 function liveTvRowMarkup(channel,selectedId){
   const view=PlurxLiveTv.channelView(channel);
   const at=liveTvProgramme(channel.id);
@@ -598,7 +610,7 @@ function liveTvRowMarkup(channel,selectedId){
     :'<span class="prog muted">No programme information</span>';
   return `<button type="button" class="${classes.join(" ")}" role="option" aria-selected="${channel.id===selectedId}"
       data-channel="${esc(channel.id)}" onclick="liveTvSelect('${esc(channel.id)}')"${view.disabled?' disabled':''}>
-    <span class="lt-chip">${esc(channel.guide_name.slice(0,5))}</span>
+    ${liveTvStationLogo(channel)}
     <span><b>${esc(channel.guide_number)} · ${esc(channel.guide_name)}</b>${liveTvFormatBadges(channel)}${line}</span>
     <span>${channel.favorite?'<span class="lt-star" title="Favorite">★</span>':""}${view.disabled?" 🔒":""}${liveTvMarks(channel.id,at.now,true)}</span>
   </button>`;
@@ -665,7 +677,7 @@ function liveTvShowInfo(channel){
   return `<aside class="lt-showinfo" aria-label="Current programme details">
     <span class="eyebrow">On now</span>
     <h2>${row?esc(row.title):esc(channel.guide_name)}</h2>
-    <div class="meta">${esc(channel.guide_number)} · ${esc(channel.guide_name)} · ${time}${episode?"<br>"+esc(episode):""}</div>
+    <div class="lt-station-meta">${liveTvStationLogo(channel)}<div class="meta">${esc(channel.guide_number)} · ${esc(channel.guide_name)}<br>${time}${episode?"<br>"+esc(episode):""}</div></div>
     <div data-dvr-live-context>${liveTvRecordingContext(channel,row)}</div>
     <p class="synopsis">${row&&row.synopsis?esc(row.synopsis):"No programme description is available."}</p>
     <div data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
@@ -774,12 +786,12 @@ function liveTvGridMarkup(visible,selected){
     }).join("");
     const marker=ends===null?"":`<div class="lt-cell ends" style="left:${((ends-window.start)/slot)*px}px;width:150px">Guide data ends ${esc(liveTvClock(ends))}</div>`;
     return `<div class="lt-grow">
-      <div class="lt-gname"><span class="lt-chip">${esc(row.channel.guide_name.slice(0,5))}</span>
-        <span class="lt-gmeta"><span>${esc(row.channel.guide_number)}${row.channel.favorite?' <span class="lt-star">★</span>':""}</span>${liveTvFormatBadges(row.channel)}</span></div>
+      <div class="lt-gname">${liveTvStationLogo(row.channel)}
+        <span class="lt-gmeta"><span>${esc(row.channel.guide_number)}${row.channel.favorite?' <span class="lt-star">★</span>':""}</span><span class="lt-gcallsign" title="${esc(row.channel.guide_name)}">${esc(row.channel.guide_name)}</span>${liveTvFormatBadges(row.channel)}</span></div>
       <div class="lt-gcells" style="width:${layout.totalWidth}px">${cells}${marker}</div>
     </div>`;
   }).join("");
-  const nowLine=layout.nowX===null?"":`<div class="lt-now" style="left:${180+layout.nowX}px"></div>`;
+  const nowLine=layout.nowX===null?"":`<div class="lt-now" style="left:calc(var(--lt-channel-width) + ${layout.nowX}px)"></div>`;
   return `<div class="lt-split">
     ${liveTvStageMarkup(selected,false)}
     <div>

@@ -38,6 +38,10 @@ pub(super) fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> Strin
         u8::from(recipe.video.promotes_parameter_sets()),
     ]);
     hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
+    if let Some(audio) = &recipe.audio_delivery {
+        hasher.update(b"audio-delivery-v1\0");
+        hasher.update(audio.byte_identity().as_bytes());
+    }
     match recipe.cluster_cache_key.as_deref() {
         Some(cache_key) => {
             hasher.update(b"cluster-v2\0");
@@ -113,6 +117,13 @@ pub(super) fn ticks_to_ms(ticks: u64, timescale: u32) -> i64 {
 /// is copied — `MediaFile` carries no per-stream audio rate, and `est_bytes`
 /// feeds admission, never a refusal.
 fn audio_rate(recipe: &Recipe) -> u32 {
+    if let Some(rate) = recipe
+        .audio_delivery
+        .as_ref()
+        .and_then(|audio| audio.bitrate_kbps())
+    {
+        return rate.saturating_mul(1000);
+    }
     if recipe.aac {
         let channels = match recipe.audio_index {
             Some(index) => recipe
@@ -141,6 +152,18 @@ pub(super) fn planned_index(name: &str) -> Option<u32> {
         return None;
     }
     digits.parse().ok()
+}
+
+/// Parent film coordinates project independently onto video and AAC clocks.
+/// Integer cross-products preserve exact boundary ownership and clamp EOS.
+pub(super) fn media_entry_containing_ms(plan: &SegmentPlan, position_ms: i64) -> u32 {
+    let tick_product = u128::from(position_ms.max(0) as u64) * u128::from(plan.timescale);
+    let after = plan
+        .entries
+        .partition_point(|entry| u128::from(entry.start_ticks) * 1_000 <= tick_product);
+    plan.entries
+        .get(after.saturating_sub(1))
+        .map_or(0, |entry| entry.index)
 }
 
 /// The plan entry containing `start_seconds` — where the session's first
@@ -280,6 +303,17 @@ pub(super) async fn stored_marker_destinations(
 /// seek to the end of an affected film. The tail entries are produced by this
 /// generation's own `finish`.
 pub(super) fn video_entry_at_or_before(plan: &SegmentPlan, at: u32) -> u32 {
+    // A shared soundtrack has no video prefix or muxed tail. Each AAC entry
+    // is a valid restart boundary; replaying from zero on a far seek would
+    // defeat its bounded window and delay the selected film interval.
+    if !plan.entries.is_empty()
+        && plan
+            .entries
+            .iter()
+            .all(|entry| entry.kind == PlanEntryKind::AudioTail)
+    {
+        return plan.entry(at).map_or(0, |entry| entry.index);
+    }
     let mut best = 0u32;
     for entry in &plan.entries {
         if entry.index > at {
@@ -329,11 +363,25 @@ pub(super) async fn open_ready(
     let file = tokio::fs::File::open(path).await?;
     let len = file.metadata().await?.len();
     Ok(SegmentReady {
+        observed_media_duration_ms: None,
         file,
         len,
         etag: format!("{etag_stem}-{len}"),
         delivery: Arc::clone(delivery),
+        retained_lease: None,
     })
+}
+
+pub(super) fn plan_media_duration_ms(rendition: &Rendition, index: u32) -> Option<u32> {
+    let timescale = u64::from(rendition.timescale);
+    if timescale == 0 {
+        return None;
+    }
+    let ticks = rendition.plan.entry(index)?.duration_ticks;
+    let milliseconds = ticks.checked_mul(1000)?.checked_add(timescale - 1)? / timescale;
+    u32::try_from(milliseconds)
+        .ok()
+        .filter(|duration| *duration > 0)
 }
 
 pub(super) fn now_ms() -> i64 {

@@ -25,7 +25,7 @@ a reader to discover.
 | Field | Value |
 |---|---|
 | Compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)`, the pinned toolchain, verified rather than inferred from the default `cargo` |
-| Build host | `nuc3`, Ubuntu, 16 cores. The session container is two cores and seven gigabytes; one `cargo test` link of `plurxd` there took over half an hour and swapped, so the loop was moved. |
+| Build host | `lab3`, Ubuntu, 16 cores. The session container is two cores and seven gigabytes; one `cargo test` link of `plurxd` there took over half an hour and swapped, so the loop was moved. |
 | Node | v22 for the web suites |
 | Writer paths exercised | Native copy (`copyseg`) and direct/transcoded FFmpeg, in accounting; see the limitations below for what that does and does not prove |
 

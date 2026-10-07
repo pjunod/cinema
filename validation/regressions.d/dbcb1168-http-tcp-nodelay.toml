@@ -39,7 +39,7 @@ still passes and keeps the accept loop's error path covered. Both are \
 `rust-gate-ci`.
 
 Not covered by these checks: the latency effect itself, which depends on \
-the peer's ACK timing and is a measurement (loopback on nuc3), not a unit \
+the peer's ACK timing and is a measurement (loopback on lab3), not a unit \
 test. Whether the same p50 shift existed on a real client link, and how much \
 this changes it there, is not measured. Nor is the packet cost: the HLS \
 pump flushes each 4 KiB acknowledgement piece as its own write, and with \

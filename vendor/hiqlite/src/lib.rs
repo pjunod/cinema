@@ -16,6 +16,8 @@ compile_error!("features `cast_ints` and `cast_ints_unchecked` are mutually excl
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 pub use hiqlite_wal::LogSync;
+pub use reduction::ReductionFenceReference;
+mod reduction;
 #[cfg(feature = "sqlite")]
 pub use hiqlite_wal::{
     BoundedWalError, WalRecoveryObservation, WalRuntimeState, WalStatusHandle, WalStatusSnapshot,
@@ -53,8 +55,8 @@ pub const LEADER_RETRY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(14);
 
 #[cfg(feature = "sqlite")]
 pub use crate::client::{
-    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
-    WriteAck,
+    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbMembershipSnapshot,
+    LocalDbRaftMetrics, LocalDbRaftSnapshot, WriteAck,
 };
 #[cfg(feature = "validation-test-helpers")]
 pub use crate::network::raft_client::validation_set_raft_partitioned;
@@ -110,10 +112,12 @@ mod error;
 mod helpers;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod init;
+pub mod membership_admission;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod network;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod start;
+mod startup_cleanup;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod store;
 
@@ -125,6 +129,8 @@ mod dashboard;
 mod migration;
 #[cfg(feature = "sqlite")]
 mod query;
+#[cfg(feature = "sqlite")]
+pub mod snapshot_admission;
 #[cfg(feature = "sqlite")]
 mod snapshot_metrics;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
@@ -209,7 +215,44 @@ mod empty {
 /// If an incorrect `node_config` was given.
 #[cfg(feature = "sqlite")]
 pub async fn start_node(node_config: NodeConfig) -> Result<Client, Error> {
-    start::start_node_inner::<empty::Empty>(Box::new(node_config)).await
+    start::start_node_inner::<empty::Empty>(
+        Box::new(node_config),
+        None,
+        start::StartupPhase::Normal,
+    )
+    .await
+}
+
+/// Install caller-owned membership admission before management listeners or
+/// startup joining run. This is not a configuration flag or a policy default.
+#[cfg(feature = "sqlite")]
+pub async fn start_node_with_membership_admission(
+    node_config: NodeConfig,
+    admission: std::sync::Arc<dyn membership_admission::MembershipAdmission>,
+) -> Result<Client, Error> {
+    start::start_node_inner::<empty::Empty>(
+        Box::new(node_config),
+        Some(admission),
+        start::StartupPhase::Normal,
+    )
+    .await
+}
+
+/// Reach committed learner state without auto-promotion or activation jobs.
+/// The caller retains desired role and owns authenticated observation before
+/// separately requesting promotion. Pristine singleton initialization is
+/// unchanged and may already produce an actual voter.
+#[cfg(feature = "sqlite")]
+pub async fn start_node_for_clock_observation(
+    node_config: NodeConfig,
+    admission: std::sync::Arc<dyn membership_admission::MembershipAdmission>,
+) -> Result<Client, Error> {
+    start::start_node_inner::<empty::Empty>(
+        Box::new(node_config),
+        Some(admission),
+        start::StartupPhase::ClockObservation,
+    )
+    .await
 }
 
 /// The main entry function to start a Raft / Hiqlite node.
@@ -222,5 +265,5 @@ pub async fn start_node_with_cache<C>(node_config: NodeConfig) -> Result<Client,
 where
     C: Debug + CacheVariants,
 {
-    start::start_node_inner::<C>(Box::new(node_config)).await
+    start::start_node_inner::<C>(Box::new(node_config), None, start::StartupPhase::Normal).await
 }

@@ -1,0 +1,27 @@
+{
+  "cgroup": {
+    "cpu.max": "200000 100000\n",
+    "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+    "memory.max": "1073741824\n",
+    "memory.peak": "33263616\n",
+    "memory.swap.max": "0\n",
+    "pids.max": "64\n"
+  },
+  "elapsed_seconds": 3.082841626,
+  "error": null,
+  "held_parser_inode": 8519847,
+  "parser_pid": 7,
+  "parser_process_group_absent": true,
+  "parser_sha256": "56825d98839fa31757112bbc7ebeba731e8266cf3bc8ea93ec15cb45af689c80",
+  "result_exists": true,
+  "result_identity": {
+    "bytes": 343739,
+    "dev": 65025,
+    "inode": 8519892,
+    "mode": "0o600",
+    "sha256": "9a286a6cbd781fa3bcf4f5a1180522f23f9321eb44afdb9c46f06b4db0ec995a",
+    "uid": 501
+  },
+  "result_observer_error": null,
+  "returncode": 0
+}

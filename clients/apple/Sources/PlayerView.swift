@@ -718,6 +718,8 @@ struct PlayerView: View {
 
             PlayerSurface(
                 player: controller.player,
+                stagedPlayer: controller.stagedSurfacePlayer,
+                surfaceChanged: { surface, attached in controller.attachPlaybackSurface(surface, attached: attached) },
                 pictureInPicture: pictureInPicture,
                 pgsOverlay: controller.pgsOverlayWindow,
                 allowsPictureInPicture: PlayerSurface.shouldAllowPictureInPicture(
@@ -2695,6 +2697,11 @@ struct PlayerView: View {
 
     @ViewBuilder
     private var qualityChoices: some View {
+        if controller.qualityChangeRetained {
+            Text("The requested quality did not arrive. Current playback continues.")
+            Button("Retry requested quality") { controller.retryRetainedQuality(); revealControls() }
+            Button("Apply requested quality with restart") { controller.applyRetainedQualityWithRestart(); revealControls() }
+        }
         Button {
             controller.selectQuality(nil)
             #if os(iOS)

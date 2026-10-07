@@ -1,6 +1,12 @@
 # Native adaptive quality — the build plan
 
-**Status:** ready for review · **Executes:**
+**Status:** open — superseded by the 2026-09-30 display-aware override; M0
+(#618), the M2 pure runners (#634) and the typed recovery consumers on `main`
+since 2026-10-04 (#793); the runners have no production caller and are
+deleted in the 2026-10-04 close-out PR; native recovery runs only while the
+Developer switches `playback.display_aware_auto` and `playback.auto_abr` are
+both on (both default off); physical qualification open (see the 2026-10-04
+relevance pass §2.5) · **Executes:**
 [NATIVE-ADAPTIVE-QUALITY-DESIGN.md](NATIVE-ADAPTIVE-QUALITY-DESIGN.md)'s D4
 · **Written:** 2026-09-23 against `main` @ `8839cc72`
 
@@ -37,7 +43,7 @@ requested before M3.
 
 - `tests/playback/auto-quality-policy.json` — the shared policy fixture at
   schema 1, driven today by `node tests/playback/web-policy.test.js`.
-  30 cases, 12 controller-gate rows; the gate rows pin all eight of the
+  32 cases, 13 controller-gate rows; the gate rows pin all eight of the
   design §8.1 tick guards.
 - The design's §8 — the per-platform adapter specification, with the six
   fields that are not simply available and the seven corrections it made to
@@ -53,10 +59,9 @@ requested before M3.
 
 ## 2. What is missing, and it is not mostly code
 
-Four disagreements between the design and the shipped browser, each pinned in
-the fixture with a written finding (design §8.4, §7.6), and **no shaped-network
-measurement on any platform**. M0 and the D3 baseline are therefore the whole
-critical path; the adapters are the easy part and must not start first.
+M0 settles the four design/browser disagreements once pinned in the fixture.
+The D3 shaped-network baseline remains incomplete across platforms; it is
+the gate before native adapters begin.
 
 ## 3. Milestones
 
@@ -88,13 +93,10 @@ that no longer needs a `web_current` is a disagreement that has been settled.
    records, not an observed field defect; no trace has shown it. It stays
    first because it is the smallest item and the one the adapters' `hold:`
    classifier copies.
-2. **The voluntary-switch gap is named once and correctly.** `voluntaryAllowed`
-   is `cooldownMs && dwellMs`, so the real minimum is 60 s while §3.4's rule
-   is written around 20 s (it now notes the gap rather than settling it). Either correct the document to `max(cooldownMs, dwellMs)` or return
-   `dwellMs` to being only the restart-cost horizon its own §2.2 row says it
-   governs. Changing the number is a behaviour change and needs a trace behind
-   it; correcting the document does not. Prefer the document unless D3 says
-   otherwise.
+2. **The voluntary-switch gap is named once and correctly.** M0 keeps the
+   shipped `voluntaryAllowed = cooldownMs && dwellMs` rule, a 60 s minimum,
+   and corrects design §2.2 and §3.4 to `max(cooldownMs, dwellMs)`. A 20 s
+   gap would change behavior without the shaped trace needed to justify it.
 3. **A decode class inside the policy.** `decideRung` gains a `decodeStalls`
    input and a `decode` cause, and its decision gains the height to block, so
    the blocking stops happening outside the policy where two platforms cannot
@@ -106,9 +108,10 @@ that no longer needs a `web_current` is a disagreement that has been settled.
    step down one rung, once; never change delivery method. A second decode
    failure takes no further rung and is left to the platform's compatibility
    owner.
-4. **Decide whether `link:` carries a publication refusal** (design §7.6).
-   The likely answer is that it does not and the refusal belongs with the
-   stall-scoped half of `hold:`, never with the routine paced hold. Whichever way it goes, §3.2's table and the fixture move together.
+4. **Classify a publication refusal.** M0 decides that `link:` needs measured
+   throughput; a fresh `delivery-refused` belongs in `hold:` and suppresses a
+   rung move while delivery is repaired. The routine paced hold remains
+   outside that class. Design §3.2, §7.6 and the fixture record the decision.
 
 **Acceptance:** all four fixture cases carry `expect` alone, with no
 `web_current`; `node tests/playback/web-policy.test.js` and `make web-check`
@@ -142,6 +145,18 @@ A Swift test in `clients/apple/Tests/` and a JVM test under `make
 android-test`, both reading `tests/playback/auto-quality-policy.json` and both
 driving a port of `decideRung`. One JSON, three runners.
 
+**Removed 2026-10-04.** The ports, both runners and the Rust reducer
+`decide_auto_transition` were deleted because no player ever called them
+([Remove native policy runners](../apple-builds/634-remove-native-policy-runners.md)).
+The fixture and its web runner remain; an adapter that ports the policy again
+brings its runner back with it.
+
+Design §3.6 explicitly allows this pure fixture/runner milestone before D3;
+§5.4's baseline dependency still applies to the adapters, not these runners.
+The current browser's `web_current` expectations remain authoritative where
+the fixture records an unresolved proposal: M2 does not implement the proposed
+switch budget, controller gates or measured native bandwidth acquisition.
+
 This is where §7.2's question gets its first cheap answer: if a constant has
 to differ per platform it becomes per-platform **data in the fixture**, never
 a branch in three codebases.
@@ -160,6 +175,46 @@ the age of its status sample, and its stall-scoped verdict — the
 
 The adapter is §8.3's table, the tick location and guards named there, and
 nothing else. It sends the typed cause from M1.
+
+**Historical candidate — superseded on 2026-10-01:**
+The description in the next three paragraphs records PR #670 at `8947db6`;
+that implementation was removed, not shipped. It is not the reduced PR's
+current behavior. The newer combined route-v1 design in PR #669 owns the
+native controller; retaining this height-only adapter would duplicate it.
+
+That candidate carried the Android adapter and the first M1 sender together.
+It read the existing `playback_auto_abr` answer
+from native ServerInfo, packages the shared policy artifact for defaults,
+owns a Media3 bandwidth meter per pipeline, and runs a separate five-second
+tick. Auto's requested height remains Auto in create and prepared-selection
+claims. Pause/foreground and action ownership fences reset measurement
+eligibility without forgetting a playback's decode evidence. The incumbent,
+prepared successor and rollback retain their own meter and delivered height;
+the existing prepared switch and same-delivery repair budget remain owners.
+Only transcode SDR adapts: copy, HDR and an unknown grade are refused until
+there is per-rung delivery/grade evidence, not guessed safe.
+
+The server validates typed causes against the durable active playback route,
+not a process-local registry. Its defaulted private recipe field retains legal,
+sorted decode-blocked rungs across placement, replay and takeover. Public create
+cannot supply that evidence. A later unbound Auto for the same user/playback/file
+inherits it; another file does not. Stale/foreign ownership is refused. Decode
+blocks its delivered rung and steps once; a second decode belongs to compatibility
+recovery, and a copy cannot become a transcode through this cause. Link/encode
+alone contribute predecessor-rung pressure to the existing credential-bound
+NetworkPrior. Hold/authority retain the rung and contribute no network pressure.
+The original public intent fingerprint remains the replay identity; only a
+private normalized recipe with nonempty evidence receives additive attribution.
+
+That historical candidate had no device deployment, D3 baseline or shaped-network
+trace. Its local proofs do not establish physical acceptance or milestone closure.
+
+**Reduced PR #670 scope (2026-10-01):** only the typed cause enum and Link-only
+NetworkPrior filtering remain. Encode pressure does not update network prior.
+There is no new Android adapter, sender, numeric decode-block field or height
+clamp in this PR. Authenticated candidate-identity evidence is a separate
+continuation, not a prerequisite for merging these narrow changes. The original
+M3 trace acceptance below and the overall A05 physical acceptance remain open.
 
 **Acceptance:** the platform's shaped-network trace shows stalled seconds down
 and unexpected SDR transitions at zero against its own D3 baseline. Not a
@@ -246,6 +301,20 @@ see a cliff at all). §7.6 is M0's; §7.7 is M4's; the rest are D3's to inform.
 
 ## Execution log
 
+**2026-10-01 ownership reconciliation:** the newer combined display-aware Auto
+implementation in #669 supersedes #670's legacy Android height-only M3 candidate.
+#670 removes that duplicate tick/controller/meter, Auto-height wire extension and
+server numeric decode clamping; it does not introduce a second controller or
+gate. Android source remains the current effort's implementation. The retained
+server continuation is typed authenticated cause evidence and Link-only network
+prior ingestion: CPU Encode pressure is not network pressure. Durable decoder
+exclusions must bind the server-owned candidate ID and full32-byte recipe digest,
+restored with retained candidate context, not a height that can desynchronize the
+new catalog. This portion is developed against the verified #669 dependency;
+unmerged #669 feature code is not published through #670. Original D3 physical
+acceptance remains open. The original candidate row below is historical evidence,
+not a claim that its removed regressions or implementation remain current.
+
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
@@ -254,4 +323,8 @@ claim protocol). **Model** is the runtime's exact model identifier;
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-10-01 | gpt-6.1-sol | agent:/root/a05_unknown_original_trial_sol61 | Combined A-05 server/web unknown-original continuation | pending coordinated PR | Current effort `aa0d6382b`; compatible stageable source-copy exposure and private unknown trial authority remain separate from full-output recommendation. Web empirical commit uses exact stage/item/pipeline/session/digest and own nonce/ETag/server-duration bodies, two distinct nonoverlapping segments and 1.8 observed margin; no whole-title peak is fabricated. New browser table passes once and fails old source; captured item/digest and both new Rust catalog/authenticated-stage IDs each pass once. Pinned baseline passed before Rust edits and changed-source all-target checking passes. Final committed-tree checks, native coauthor composition, sole formal review and effort gate remain pending. No native controller rewrite, device run, D3 or physical closure. |
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M1 / M3 Android implementation candidate | [#670](http://forge.lan:3000/noirr/plurx/pulls/670), draft | Existing native setting, shared runtime defaults, per-pipeline meter and separate tick; Auto intent remains distinct from its selected height. Durable active playback recipes carry defaulted private decode blocks through unbound Auto, prepared selection and actual takeover; legacy absence preserves fingerprints. Five cause-owner regressions failed old claim-only normalization then passed once; prior ingestion failed with refusal removed, then passed once. Additional ownership/serialization/worker/sender/prepared and six JVM units each have one pass; no passed unit rerun on metadata or base refresh. Android142 is the coordinator's source reservation, not a release. No devices, D3 baseline or shaped trace: M3 remains unmerged pending the original physical acceptance, and M4 is not started. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_registry_pull_audit_sol61 | M2 integration receipt | [#634](http://forge.lan:3000/noirr/plurx/pulls/634), merged | Effort landing `59fe637c65702743e36061dcc974e5167082c257` matches the qualified exact head `2e777de61` at tree `597a4a369`. All eight Effort gate jobs passed (API 3642/UI 3621); sole review 7/comment 6497's source-counter identity finding was corrected on the same PR. Pure runners only: D3 and M1/M3–M4 remain open, no native adapter or physical acceptance. The original draft row below remains history. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/architecture_receipt_reconcile_sol61 | M2 pure policy ports and runners | [#634](http://forge.lan:3000/noirr/plurx/pulls/634), draft `codex/a05-native-policy-runners` | Swift and JVM ports of current `PlaybackPolicy.decideRung` read the same `tests/playback/auto-quality-policy.json` through their native test resources; no copied fixture or private parameter values. The remaining switch-budget proposal stays `web_current`, and controller-gate rows are metadata coverage only. Focused iOS/tvOS XCTest, JVM JUnit and the existing web-policy runner passed the shared cases. Adding one deliberately wrong case to that same JSON failed all three languages at the named height assertion (actual 360, expected 480); the Swift failure assertion was retained before terminating its hung result cleanup. The fixture was restored byte-identically and all three languages passed again. Apple 202 / Android 140 are reserved by the coordinator above effort's 201 / 139 for changed app-source inputs; marketing/workspace semantic versions are unchanged. These are source/test build counters, not released or installed products. No Controller/PlayerController, timer, meter, setting or native measurement adapter is wired; no D3 baseline, physical acceptance, enablement or plan closure is claimed. Exact commands and outcomes belong in the continuation PR. |
+| 2026-09-29 | gpt-6-sol | agent:/root/a05_m0_builder | M0 | [#618](http://forge.lan:3000/noirr/plurx/pulls/618) | Four M0 cases now use plain `expect`: bounded stall verdict, 60 s voluntary gap, typed decode, and publication refusal. `node tests/playback/web-policy.test.js`, `node tests/playback/web-control.test.js`, and `make web-check` pass. Reverting verdict suppression, decode policy, or stalled-ask publication fails the focused regression. The sole adversarial review found the absent live media-error seam and conflated blocked heights; both are corrected with a shipped error-listener regression and a separate `decodeStepConsumed` state. `transport.js` changes only at that error-listener seam. No native adapter or M1 wire change. |

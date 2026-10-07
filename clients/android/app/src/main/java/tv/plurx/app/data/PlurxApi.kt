@@ -5,6 +5,7 @@ import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Path
@@ -149,22 +150,22 @@ interface PlurxApi {
     /** Legacy signatures retain precise Local IDs. Shared admission needs its own DTO adapter. */
     suspend fun decision(id: Long, caps: Map<String, String>): Decision =
         decisionForContext(PlaybackFileContext.local(id), caps)
-    suspend fun decisionV2(id: Long, request: Map<String, String>, body: DecisionCapsReq): Decision =
-        decisionV2ForContext(PlaybackFileContext.local(id), request, body)
+    suspend fun decisionV2(id: Long, request: Map<String, String>, body: DecisionCapsReq, linkReceipt: String? = null): Decision =
+        decisionV2ForContext(PlaybackFileContext.local(id), request, body, linkReceipt)
     suspend fun pgsOverlayManifest(id: Long, track: Long): Response<ResponseBody> =
         pgsOverlayManifestForContext(PlaybackFileContext.local(id), track)
     suspend fun pgsOverlayObject(id: Long, track: Long, generation: String, hash: String): Response<ResponseBody> =
         pgsOverlayObjectForContext(PlaybackFileContext.local(id), track, generation, hash)
-    suspend fun createHlsSession(id: Long, body: CreateSessionReq): HlsStart =
-        createHlsSessionForContext(PlaybackFileContext.local(id), body)
+    suspend fun createHlsSession(id: Long, body: CreateSessionReq, linkReceipt: String? = null): HlsStart =
+        createHlsSessionForContext(PlaybackFileContext.local(id), body, linkReceipt)
 
     suspend fun decisionForContext(context: PlaybackFileContext, caps: Map<String, String>): Decision {
         context.localId() // Never decode a Shared answer into the Local numeric-ID model.
         return decisionPath(context.apiPath("decision"), caps)
     }
-    suspend fun decisionV2ForContext(context: PlaybackFileContext, request: Map<String, String>, body: DecisionCapsReq): Decision {
+    suspend fun decisionV2ForContext(context: PlaybackFileContext, request: Map<String, String>, body: DecisionCapsReq, linkReceipt: String? = null): Decision {
         context.localId()
-        return decisionV2Path(context.apiPath("decision"), request, body)
+        return decisionV2Path(context.apiPath("decision"), request, body, linkReceipt)
     }
     suspend fun pgsOverlayManifestForContext(context: PlaybackFileContext, track: Long): Response<ResponseBody> {
         context.localId()
@@ -174,20 +175,20 @@ interface PlurxApi {
         context.localId()
         return pgsOverlayObjectPath(context.apiPath("subs/$track/overlay/$generation/objects/$hash.png"))
     }
-    suspend fun createHlsSessionForContext(context: PlaybackFileContext, body: CreateSessionReq): HlsStart {
+    suspend fun createHlsSessionForContext(context: PlaybackFileContext, body: CreateSessionReq, linkReceipt: String? = null): HlsStart {
         context.localId()
-        return createHlsSessionPath(context.apiPath("hls/sessions"), body)
+        return createHlsSessionPath(context.apiPath("hls/sessions"), body, linkReceipt)
     }
     @GET
     suspend fun decisionPath(@Url path: String, @QueryMap caps: Map<String, String>): Decision
     @POST
-    suspend fun decisionV2Path(@Url path: String, @QueryMap request: Map<String, String>, @Body body: DecisionCapsReq): Decision
+    suspend fun decisionV2Path(@Url path: String, @QueryMap request: Map<String, String>, @Body body: DecisionCapsReq, @Header("X-Plurx-Link-Receipt") linkReceipt: String? = null): Decision
     @GET
     suspend fun pgsOverlayManifestPath(@Url path: String): Response<ResponseBody>
     @GET
     suspend fun pgsOverlayObjectPath(@Url path: String): Response<ResponseBody>
     @POST
-    suspend fun createHlsSessionPath(@Url path: String, @Body body: CreateSessionReq): HlsStart
+    suspend fun createHlsSessionPath(@Url path: String, @Body body: CreateSessionReq, @Header("X-Plurx-Link-Receipt") linkReceipt: String? = null): HlsStart
 
     @GET("hls/{session}/status")
     suspend fun hlsSessionStatus(@Path("session") session: String): PlaybackSessionStatus

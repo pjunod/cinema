@@ -7,6 +7,10 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::background_jobs_copy_output::PUBLISH_COPY_OUTPUT_SQL;
+pub use super::background_jobs_copy_output::{
+    CopyOutputJobOutput, PublishCopyOutputJob, PublishEncodedOutputJob,
+};
 pub use super::background_jobs_delivery::{
     hydration_identity, DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
 };
@@ -74,6 +78,13 @@ pub(crate) const RECEIPT_PRESSURE_SCHEMA: &str =
     include_str!("background_jobs_receipt_pressure.sql");
 /// Replicated v65 / SQLite v87: exact viewer interest and source reservations.
 pub(crate) const VIEWER_ANALYSIS_SCHEMA: &str = include_str!("background_jobs_viewer_analysis.sql");
+/// Replicated v71 / SQLite v95: source cancellation for full copy preparation.
+pub(crate) const COPY_OUTPUT_SCHEMA: &str = include_str!("background_jobs_copy_output.sql");
+/// Replicated v73 / SQLite v97, following candidate-recovery v72/v96.
+pub(crate) const ENCODED_OUTPUT_SCHEMA: &str = include_str!("background_jobs_encoded_output.sql");
+/// The SQLite schema [`ENCODED_OUTPUT_SCHEMA`] lands at; `sqlite::MIGRATIONS`
+/// asserts at compile time that this entry is exactly that schema.
+pub(crate) const ENCODED_OUTPUT_SQLITE_SCHEMA: i64 = 97;
 
 // Scheduled full-library ticks reuse an equivalent pending request inside this
 // same admission statement. Reads on individual schedulers cannot deduplicate
@@ -438,8 +449,11 @@ WHERE id = json_extract($1, '$.job_id')
   AND fence < 9223372036854775807 AND revision < 9223372036854775807
   AND NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
   AND (SELECT COUNT(*) FROM background_job_attempts) < 40000
+  -- The outer CAS already fixes id to this request. Bind resource lookup to
+  -- that same value so SQLite pushes the identity into every UNION branch
+  -- of the resource view instead of scanning all jobs under the Raft writer.
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = background_jobs.id AND ((SELECT COUNT(*) FROM background_job_reservations held
+    WHERE required.job_id = json_extract($1, '$.job_id') AND ((SELECT COUNT(*) FROM background_job_reservations held
       WHERE held.resource_key = required.resource_key AND held.expires_at_ms > json_extract($1, '$.now_ms')
         AND held.job_id != json_extract($1, '$.job_id'))
       + (SELECT COUNT(*) FROM analysis_source_reservations held
@@ -449,7 +463,7 @@ WHERE id = json_extract($1, '$.job_id')
   -- A second source reader is reserved for live demand. Classification uses
   -- durable consumer ownership, never the job's caller-supplied priority.
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = background_jobs.id
+    WHERE required.job_id = json_extract($1, '$.job_id')
       AND required.resource_key LIKE 'source_io%'
       AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
           WHERE interest.job_id = background_jobs.id
@@ -579,6 +593,8 @@ WHERE id = json_extract($1, '$.token.job_id')
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     TranscodePrepare,
+    CopyOutputPrepare,
+    EncodedOutputPrepare,
     FragmentIndexBuild,
     ArtifactHydrate,
     SubtitleExtract,
@@ -596,6 +612,8 @@ impl JobKind {
     pub const fn permits_artifact_execution(self) -> bool {
         match self {
             Self::TranscodePrepare
+            | Self::CopyOutputPrepare
+            | Self::EncodedOutputPrepare
             | Self::FragmentIndexBuild
             | Self::ArtifactHydrate
             | Self::SubtitleExtract
@@ -608,10 +626,156 @@ impl JobKind {
     }
 }
 
+/// Bounded logical copy inputs, never a SessionRequest or execution authority.
+/// The worker re-resolves these against its held physical source before work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyOutputProfile {
+    H264Sdr1440P30V1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopyOutputIntent {
+    pub target_node_id: String,
+    pub audio_index: Option<i64>,
+    pub audio_offset_ms: i64,
+    pub audio_claim: Option<crate::playback::audio::AudioClaim>,
+    pub audio_delivery: crate::playback::audio::AudioDelivery,
+    pub aac: bool,
+    pub preserve_dolby_vision: bool,
+    pub convert_dolby_vision: bool,
+    pub hdr10_requested: bool,
+    pub grade: crate::transcode::OutputGrade,
+    pub normalized_geometry: bool,
+    pub profile: Option<CopyOutputProfile>,
+    pub width: u32,
+    pub height: u32,
+    pub video_identity: String,
+    pub pipeline_identity: String,
+}
+
+impl CopyOutputIntent {
+    pub fn valid(&self) -> bool {
+        identifier(&self.target_node_id)
+            && self.audio_index.is_none_or(|index| index >= 0)
+            && (-15_000..=15_000).contains(&self.audio_offset_ms)
+            && self
+                .audio_claim
+                .as_ref()
+                .is_none_or(|claim| claim.valid_snapshot())
+            && self.audio_delivery.valid_snapshot()
+            && (!self.convert_dolby_vision || self.preserve_dolby_vision)
+            && (1..=16_384).contains(&self.width)
+            && (1..=16_384).contains(&self.height)
+            // segplan::argv_fingerprint is a 16-hex FNV identity, not SHA256.
+            // Keep the original 64-hex accepted shape for v1 callers; neither
+            // is authority: the worker recomputes the actual video identity.
+            && (digest(&self.video_identity)
+                || (self.video_identity.len() == 16
+                    && self.video_identity.bytes().all(|byte| {
+                        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                    })))
+            && digest(&self.pipeline_identity)
+    }
+}
+
+/// Exact selected encoded delivery inputs. Digests are equality constraints,
+/// not producer, filesystem or retained-output authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncodedOutputIntent {
+    pub target_node_id: String,
+    pub target_height: u32,
+    pub requested_height: Option<u32>,
+    pub copy_for_burn: Option<(bool, bool, bool)>,
+    pub audio_index: Option<i64>,
+    pub audio_offset_ms: i64,
+    pub audio_claim: crate::playback::audio::AudioClaim,
+    pub audio_delivery: crate::playback::audio::AudioDelivery,
+    pub subtitle_burn: Option<i64>,
+    pub subtitle_digest: Option<String>,
+    pub hdr10_requested: bool,
+    pub grade: crate::transcode::OutputGrade,
+    pub normalized_geometry: bool,
+    pub profile: Option<CopyOutputProfile>,
+    pub width: u32,
+    pub height: u32,
+    pub plan_digest: String,
+    pub executable_digest: String,
+    pub engine_digest: String,
+    pub candidate_id: Option<crate::playback::candidate::CandidateId>,
+    pub candidate_digest: Option<[u8; 32]>,
+}
+
+impl EncodedOutputIntent {
+    pub fn valid(&self) -> bool {
+        identifier(&self.target_node_id)
+            && (2..=8_640).contains(&self.target_height)
+            && match (self.requested_height, self.copy_for_burn) {
+                (Some(height), None) => (1..=8_640).contains(&height),
+                (None, Some((_, preserve, convert))) => {
+                    self.subtitle_burn.is_some() && (!convert || preserve)
+                }
+                _ => false,
+            }
+            && self.audio_index.is_none_or(|index| index >= 0)
+            && (-15_000..=15_000).contains(&self.audio_offset_ms)
+            && self.audio_claim.valid_snapshot()
+            && self.audio_delivery.valid_snapshot()
+            && self.subtitle_burn.is_none_or(|index| index >= 0)
+            && self.subtitle_burn.is_some() == self.subtitle_digest.is_some()
+            && self
+                .subtitle_digest
+                .as_ref()
+                .is_none_or(|value| digest(value))
+            && (1..=16_384).contains(&self.width)
+            && (1..=16_384).contains(&self.height)
+            && digest(&self.plan_digest)
+            && digest(&self.executable_digest)
+            && digest(&self.engine_digest)
+            && match (self.candidate_id, self.candidate_digest) {
+                (None, None) => !self.normalized_geometry && self.profile.is_none(),
+                (Some(id), Some(value)) => {
+                    id == crate::playback::candidate::CandidateId::for_recipe_digest(value)
+                }
+                _ => false,
+            }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 /// Closed payloads contain identifiers, never executable text or caller-selected paths.
 pub enum JobPayload {
+    EncodedOutputPrepare {
+        encoded_output_version: u16,
+        file_id: i64,
+        source_generation: String,
+        source_size: i64,
+        source_mtime: i64,
+        source_object_version: String,
+        policy_generation: String,
+        intent: EncodedOutputIntent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_catalog: Option<serde_json::Value>,
+        scratch_bytes: i64,
+        reason: String,
+    },
+    CopyOutputPrepare {
+        copy_output_version: u16,
+        file_id: i64,
+        source_generation: String,
+        source_size: i64,
+        source_mtime: i64,
+        source_object_version: String,
+        policy_generation: String,
+        intent: CopyOutputIntent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_catalog: Option<serde_json::Value>,
+        scratch_bytes: i64,
+        reason: String,
+    },
     TranscodePrepare {
         file_id: i64,
         source_generation: String,
@@ -677,6 +841,8 @@ pub enum JobPayload {
 impl JobPayload {
     pub const fn kind(&self) -> JobKind {
         match self {
+            Self::EncodedOutputPrepare { .. } => JobKind::EncodedOutputPrepare,
+            Self::CopyOutputPrepare { .. } => JobKind::CopyOutputPrepare,
             Self::TranscodePrepare { .. } => JobKind::TranscodePrepare,
             Self::FragmentIndexBuild { .. } => JobKind::FragmentIndexBuild,
             Self::ArtifactHydrate { .. } => JobKind::ArtifactHydrate,
@@ -692,6 +858,8 @@ impl JobPayload {
 
     pub fn target_node_id(&self) -> Option<&str> {
         match self {
+            Self::EncodedOutputPrepare { intent, .. } => Some(&intent.target_node_id),
+            Self::CopyOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::ArtifactHydrate { target_node_id, .. }
             | Self::ArtifactVerify { target_node_id, .. } => Some(target_node_id),
             _ => None,
@@ -707,6 +875,67 @@ impl JobPayload {
 
     pub fn validate(&self) -> Result<(), StoreError> {
         let valid = match self {
+            Self::EncodedOutputPrepare {
+                encoded_output_version,
+                file_id,
+                source_generation,
+                source_size,
+                source_object_version,
+                policy_generation,
+                intent,
+                candidate_catalog,
+                scratch_bytes,
+                reason,
+                ..
+            } => {
+                *encoded_output_version == 1
+                    && *file_id > 0
+                    && *source_size > 0
+                    && identifier(source_generation)
+                    && identifier(source_object_version)
+                    && identifier(policy_generation)
+                    && intent.valid()
+                    && candidate_catalog
+                        .as_ref()
+                        .is_none_or(serde_json::Value::is_object)
+                    && *scratch_bytes > 0
+                    && matches!(
+                        reason.as_str(),
+                        "recent_demand" | "next_up" | "recent" | "channel_next"
+                    )
+            }
+            Self::CopyOutputPrepare {
+                copy_output_version,
+                file_id,
+                source_generation,
+                source_size,
+                source_mtime: _,
+                source_object_version,
+                policy_generation,
+                intent,
+                candidate_catalog,
+                scratch_bytes,
+                reason,
+            } => {
+                ((*copy_output_version == 1 && intent.normalized_geometry)
+                    || (*copy_output_version == 2
+                        && !intent.normalized_geometry
+                        && intent.profile.is_none()))
+                    && *file_id > 0
+                    && *source_size > 0
+                    && identifier(source_generation)
+                    && identifier(source_object_version)
+                    && identifier(policy_generation)
+                    && *scratch_bytes > 0
+                    && intent.valid()
+                    && candidate_catalog
+                        .as_ref()
+                        .is_none_or(serde_json::Value::is_object)
+                    && matches!(
+                        reason.as_str(),
+                        "recent_demand" | "next_up" | "recent" | "channel_next"
+                    )
+            }
             Self::TranscodePrepare {
                 file_id,
                 source_generation,
@@ -1212,6 +1441,7 @@ pub struct ArtifactViewerInterest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisPreparationObservation {
+    pub has_live_viewer: bool,
     pub shared_io_eligible: bool,
     pub artifact_job_id: Option<String>,
     pub artifact_state: Option<String>,
@@ -1518,6 +1748,14 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: PublishTranscodeJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    async fn publish_copy_output_job(
+        &self,
+        request: PublishCopyOutputJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn publish_encoded_output_job(
+        &self,
+        request: PublishEncodedOutputJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
     async fn publish_fragment_job(
         &self,
         request: PublishFragmentJob,
@@ -1543,7 +1781,7 @@ pub(super) trait QueueSql: Send + Sync {
 // verdict from one authoritative snapshot, not two independently timed reads.
 const CLAIM_RESOURCE_SNAPSHOT: &str = r#"NOT EXISTS (
     SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = background_jobs.id AND NOT EXISTS (
+    WHERE required.job_id = json_extract($1, '$.job_id') AND NOT EXISTS (
         SELECT 1 FROM background_job_reservations held
         WHERE held.job_id = background_jobs.id AND held.fence = background_jobs.fence
             AND held.resource_key = required.resource_key
@@ -1682,9 +1920,13 @@ impl<T: QueueSql> BackgroundJobStore for T {
         let capacity = super::fragment_index_cluster::analysis_source_capacity_clause(
             "json_extract($1, '$.now_ms')",
         );
+        let viewer = super::fragment_index_cluster::analysis_live_viewer_clause(
+            "json_extract($1, '$.now_ms')",
+        );
         let statement = format!(
             r#"
 SELECT json_object(
+  'has_live_viewer', CASE WHEN {viewer} THEN json('true') ELSE json('false') END,
   'shared_io_eligible', CASE WHEN {capacity} THEN json('true') ELSE json('false') END,
   'artifact_job_id', (SELECT waiter.job_id FROM background_job_waiters waiter
       WHERE waiter.request_scope = 'analysis' AND waiter.request_id = analysis_requests.request_id),
@@ -2182,10 +2424,89 @@ LIMIT 1
         )
     }
 
+    async fn publish_copy_output_job(
+        &self,
+        request: PublishCopyOutputJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        request.token.validate()?;
+        if request.now_ms < 0
+            || !request.intent.valid()
+            || uuid::Uuid::parse_str(&request.output.artifact_id).is_err()
+            || !digest(&request.output.output_identity)
+            || !identifier(&request.output.source_object_version)
+            || request.output.wire_bytes <= 0
+            || request.output.duration_micros <= 0
+            || request.output.average_bps == 0
+            || (request.output.wire_bytes > 0
+                && request.output.duration_micros > 0
+                && u128::from(request.output.average_bps)
+                    != (request.output.wire_bytes as u128 * 8_000_000)
+                        .div_ceil(request.output.duration_micros as u128))
+            || request.output.peak_bps < request.output.average_bps
+            || request.output.peak_bps > i64::MAX as u64
+        {
+            return Err(invalid("invalid completed copy publication"));
+        }
+        // Match the canonical Value encoding used by enqueue; field order is
+        // not a second identity scheme for the closed logical tuple.
+        let body = serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+        let rows = self
+            .queue_sql(
+                PUBLISH_COPY_OUTPUT_SQL.to_owned(),
+                encode(&body)?,
+                true,
+                true,
+            )
+            .await?;
+        decode(
+            rows.first()
+                .ok_or_else(|| invalid("copy publication returned no verdict"))?,
+        )
+    }
+
+    async fn publish_encoded_output_job(
+        &self,
+        request: PublishEncodedOutputJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        request.token.validate()?;
+        let output = &request.output;
+        if request.now_ms < 0
+            || !request.intent.valid()
+            || uuid::Uuid::parse_str(&output.artifact_id).is_err()
+            || !digest(&output.output_identity)
+            || !identifier(&output.source_object_version)
+            || output.wire_bytes <= 0
+            || output.duration_micros <= 0
+            || output.average_bps == 0
+            || output.peak_bps < output.average_bps
+            || output.peak_bps > i64::MAX as u64
+            || (output.wire_bytes > 0
+                && output.duration_micros > 0
+                && u128::from(output.average_bps)
+                    != (output.wire_bytes as u128 * 8_000_000)
+                        .div_ceil(output.duration_micros as u128))
+        {
+            return Err(invalid("invalid completed encoded publication"));
+        }
+        let body = serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+        let rows = self
+            .queue_sql(
+                super::background_jobs_copy_output::encoded_publication_sql(),
+                encode(&body)?,
+                true,
+                true,
+            )
+            .await?;
+        decode(
+            rows.first()
+                .ok_or_else(|| invalid("encoded publication returned no verdict"))?,
+        )
+    }
+
     async fn job_candidates(&self, query: CandidateQuery) -> Result<CandidatePage, StoreError> {
         if !identifier(&query.node_id)
             || query.kinds.is_empty()
-            || query.kinds.len() > 10
+            || query.kinds.len() > JOB_METRIC_KINDS.len()
             || query.now_ms < 0
             || query.limit == 0
             || query.limit > MAX_PAGE_SIZE

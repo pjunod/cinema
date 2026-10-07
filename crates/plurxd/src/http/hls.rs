@@ -134,6 +134,10 @@ mod control;
 pub use control::*;
 // split: end hls-control
 
+#[path = "hls/quality_control.rs"]
+mod quality_control;
+pub(crate) use quality_control::*;
+
 // split: begin hls-preparation
 #[path = "hls/preparation.rs"]
 mod preparation;
@@ -147,9 +151,14 @@ use status::*;
 // split: end hls-status
 
 // split: begin hls-response
+#[path = "hls/candidate_recovery.rs"]
+pub(crate) mod candidate_recovery;
+#[path = "hls/link_receipts.rs"]
+pub(crate) mod link_receipts;
+mod prepared_link;
 #[path = "hls/response.rs"]
 mod response;
-use response::*;
+pub(in crate::http) use response::*;
 // split: end hls-response
 
 // split: begin hls-playlist
@@ -196,3 +205,7 @@ pub use segment::*;
 #[path = "hls/tests.rs"]
 mod tests;
 // split: end hls-tests
+
+#[path = "hls/quality_schedule.rs"]
+mod quality_schedule;
+pub(crate) use quality_schedule::*;

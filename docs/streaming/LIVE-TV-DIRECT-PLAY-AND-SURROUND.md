@@ -11,7 +11,7 @@ this record extends rather than replaces.
 Paul reported on 2026-09-24 that Live TV "seems to transcode no matter what",
 that audio is "unnecessarily downmixed to stereo — the 12-channel AC-4 is the
 only thing that should need downmixing", and that every channel plays in the
-same aspect ratio. The lineup on the FLEX 4K at `192.168.5.191` is 59 ATSC 1.0
+same aspect ratio. The lineup on the FLEX 4K at `10.42.5.191` is 59 ATSC 1.0
 channels (MPEG-2, AC-3, mostly 480i and 1080i) and 10 ATSC 3.0 channels (HEVC
 Main 10 1080p60, AC-4 — and, measured on 157.1, an **AC-3 5.1 simulcast in the
 same programme**, plus a Spanish and a described-video mono track).
@@ -20,7 +20,7 @@ same programme**, plus a Spanish and a described-video mono track).
 |---|---|---|
 | Transcodes no matter what | Every client sent `interlaced: false` on every video limit ([web](../../crates/plurxd/src/web/pages/live-tv.js), [Apple](../../clients/apple/Sources/LiveTv.swift), [Android](../../clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvApi.kt)) and Android never claimed `mpeg2video`, so `unsupported_interlacing` or the missing codec claim sent every ATSC 1.0 channel through a video encode. On ATSC 3.0 the picture was already copied when the client claimed HEVC Main 10; only the audio was converted, and it was converted from the fragile AC-4 track. | Android TV claims a hardware MPEG-2 decoder and `interlaced: true` (television UI mode only); the owner selects the audio track a player can copy; Android claims HEVC in MPEG-TS as well as fMP4 so copied AC-3 need not be converted for the init-file race. Apple and the web cannot decode MPEG-2 in HLS, so the ATSC 1.0 picture is still encoded for them — that is the one "absolutely necessary" case. |
 | Downmixed to stereo | All three clients claimed `aac: max_channels 2`, so every encode was `-ac 2`; and an AC-4 track whose layout the probe had not seen was folded to stereo before a frame existed (`source_channels.unwrap_or(2)`). | The AAC claim is the sink's real channel count (Apple `maximumOutputNumberOfChannels`, Media3 `AudioCapabilities.maxChannelCount`, web `AudioContext.destination.maxChannelCount`), floored at stereo and capped at 5.1. The encode negotiates its layout with `aformat=channel_layouts=` under that ceiling instead of `-ac N`: 7.1.4 → 5.1, 5.1 → 5.1, stereo → stereo, unknown → whatever the first frame says. `-ac` no longer appears on a live command. |
-| Same aspect ratio for every source | **Not reproduced on the server.** Real captures of 6.2 (704×480, SAR 40:33, DAR 16:9, 480i) were run through the exact producer chains on nynuc — `h264_qsv` with `bwdif,format=nv12,hwupload`, `h264_vaapi`, and `libx264` — and every published segment carries SAR 40:33 / DAR 16:9. `scripts/live-tv-hardware` now records the segment's SAR/DAR so a run against the daemon proves it end to end. | Open: the squish is downstream of the segment — a client display path or the television — and needs the client named. See "Still open". |
+| Same aspect ratio for every source | **Not reproduced on the server.** Real captures of 6.2 (704×480, SAR 40:33, DAR 16:9, 480i) were run through the exact producer chains on media1 — `h264_qsv` with `bwdif,format=nv12,hwupload`, `h264_vaapi`, and `libx264` — and every published segment carries SAR 40:33 / DAR 16:9. `scripts/live-tv-hardware` now records the segment's SAR/DAR so a run against the daemon proves it end to end. | Open: the squish is downstream of the segment — a client display path or the television — and needs the client named. See "Still open". |
 
 ## Audio track selection — direct play before conversion
 
@@ -105,18 +105,18 @@ That is the intended default.
 ## Verification
 
 - Rust: `cargo test -p plurxd --bin plurxd -- atsc_ live_tv_delivery:: live_tv_`
-  — 53 passed on nuc3 (1.97.1); `cargo clippy -p plurxd --all-targets -- -D warnings`
+  — 53 passed on lab3 (1.97.1); `cargo clippy -p plurxd --all-targets -- -D warnings`
   clean; `cargo fmt --check` clean.
-- Apple: `make apple-test` on `mba` — 1330 cases passed, including
+- Apple: `make apple-test` on `maca` — 1330 cases passed, including
   `testLiveEnvelopeClaimsTheRouteChannelsForAac`.
-- Android: `:app:testDebugUnitTest` in the pinned image on nuc3 — 745 tests,
+- Android: `:app:testDebugUnitTest` in the pinned image on lab3 — 745 tests,
   0 failures, including `liveEnvelopeCarriesTheSinkFactsAndBothHevcContainers`,
   `mpeg2IsClaimedOnlyFromAHardwareDecoder` and
   `hdmiPcmChannelsTakeTheWidestSinkAndFallBackToStereo`.
 - Web: `node tests/web/live-tv.test.js` (incl. the AAC ceiling case),
   `asset-load`, `page-read-budget`.
-- Hardware, this branch's `plurxd` on nuc3 against the real tuner
-  (`scripts/live-tv-hardware --self-host --device 192.168.5.191 --server-bin
+- Hardware, this branch's `plurxd` on lab3 against the real tuner
+  (`scripts/live-tv-hardware --self-host --device 10.42.5.191 --server-bin
   target/debug/plurxd`):
   - **6.2**, bodiless envelope → encode/encode; the published segment is
     `h264 704×480 SAR 40:33 DAR 16:9`, AAC stereo (the broadcast is stereo);

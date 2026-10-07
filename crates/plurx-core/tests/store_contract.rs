@@ -20,6 +20,14 @@ use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/jellyfin_catalog.rs"]
+mod jellyfin_catalog;
+#[path = "store_contract/jellyfin_identity.rs"]
+mod jellyfin_identity;
+#[path = "store_contract/jellyfin_login.rs"]
+mod jellyfin_login;
+#[path = "store_contract/jellyfin_play.rs"]
+mod jellyfin_play;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/session_principals.rs"]
 mod session_principals;
@@ -66,7 +74,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hiqlite::tls::ServerTlsConfig;
 #[cfg(feature = "hiqlite-contract-tests")]
 use hiqlite::{Client, Node, NodeConfig, Row};
+#[cfg(feature = "hiqlite-contract-tests")]
+use plurx_core as observer_core;
 use plurx_core::cluster::coordination::{Lease, LeaseClaim};
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "fixtures/startup_observer.rs"]
+pub mod startup_observer;
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::cluster::migration::{
     connect_activated_store, prepare_sqlite_import, select_daemon_store, ActivationMarker,
@@ -308,6 +321,7 @@ const USER_METHODS: &[&str] = &[
     "create_token",
     "create_token_if_password_matches",
     "authenticate_token",
+    "authenticate_token_for",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -444,12 +458,15 @@ const MEDIA_METHODS: &[&str] = &[
     "set_file_field_order",
     "files_missing_luminance",
     "set_file_luminance",
+    "files_without_luminance_facts",
+    "set_file_frame_luminance",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "playback_planning_snapshot",
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
     "merge_file_probe_hevc_parameter_sets",
+    "merge_file_probe_content_encoding",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -460,6 +477,9 @@ const MEDIA_METHODS: &[&str] = &[
     "prune_empty_items",
 ];
 const WATCH_METHODS: &[&str] = &[
+    "jellyfin_progress_is_current",
+    "put_jellyfin_progress",
+    "set_watched_tree_with_origin",
     "watch_state",
     "watch_map",
     "put_progress",
@@ -541,6 +561,8 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "publish_copy_output_job",
+    "publish_encoded_output_job",
     "media_preparation_history",
     "join_analysis_viewer",
     "join_artifact_viewer",
@@ -658,6 +680,7 @@ const TELEMETRY_METHODS: &[&str] = &[
     "playback_events",
 ];
 const FRAGMENT_INDEX_METHODS: &[&str] = &[
+    "fragment_index_status",
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
@@ -698,6 +721,8 @@ const TIMELINE_ANNOTATION_METHODS: &[&str] = &[
     "discard_manual_timeline_annotation",
 ];
 const NETWORK_PRIOR_METHODS: &[&str] = &[
+    "observe_candidate_link",
+    "candidate_link_prior",
     "observe_network_prior",
     "network_prior",
     "prune_network_priors",
@@ -709,6 +734,8 @@ const COORDINATION_METHODS: &[&str] = &[
     "lease_expiry_hint",
 ];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    "observe_candidate_recovery",
+    "candidate_recovery_memory",
     "record_desired_selection",
     "desired_selection",
     // Test-only in intent, declared on the trait because the fence it proves
@@ -747,6 +774,20 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "settle_producer_recovery",
     "producer_recovery_for_epoch",
     "validation_corrupt_recovery_restriction",
+    // Continuous quality: the parent-fenced ledger, its reservations, the
+    // verified family binding and exact cancellation receipts. Covered by
+    // continuous_quality_ledger_cas_and_takeover_preserve_appended_dependencies,
+    // quality_cancellation_is_durable_exact_and_does_not_end_the_incumbent and
+    // quality_cancellations_outlast_128_changes_and_settle_after_takeover.
+    "bind_continuous_family",
+    "quality_ledger",
+    "write_quality_ledger",
+    "write_terminal_quality_transition",
+    "quality_reserved_intervals",
+    "request_quality_cancellation",
+    "quality_cancellation_receipt",
+    "settle_quality_cancellation",
+    "quality_intent_cancelled",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "add_downloaded_subtitle_fenced",
@@ -821,6 +862,96 @@ where
             .await
             .expect("reset replicated contract state");
         contract(Arc::new(store), "hiqlite-3-voter").await;
+    }
+}
+
+/// A raw handle onto a backend's `files` table, for writing the `NULL` field
+/// order a pre-`unknown` binary left on probed rows. Every write path of this
+/// binary refuses to produce that state, which is the point; the backfill that
+/// repairs it still has to be proved against it.
+enum StrandedFieldOrder {
+    Sqlite(PathBuf),
+    #[cfg(feature = "hiqlite-contract-tests")]
+    Hiqlite(Client),
+}
+
+impl StrandedFieldOrder {
+    async fn strand(&self, file_id: i64) {
+        match self {
+            Self::Sqlite(path) => {
+                let connection = rusqlite::Connection::open(path).expect("open raw SQLite handle");
+                connection
+                    .busy_timeout(Duration::from_secs(5))
+                    .expect("raw SQLite busy timeout");
+                assert_eq!(
+                    connection
+                        .execute(
+                            "UPDATE files SET field_order = NULL WHERE id = ?1",
+                            rusqlite::params![file_id],
+                        )
+                        .expect("strand SQLite field order"),
+                    1
+                );
+            }
+            #[cfg(feature = "hiqlite-contract-tests")]
+            Self::Hiqlite(client) => {
+                assert_eq!(
+                    client
+                        .execute(
+                            "UPDATE files SET field_order = NULL WHERE id = $1",
+                            hiqlite::params!(file_id),
+                        )
+                        .await
+                        .expect("strand replicated field order"),
+                    1
+                );
+            }
+        }
+    }
+}
+
+/// [`for_each_backend`] for the backends a raw handle can reach: the
+/// file-backed SQLite store and, with the feature, the three-voter cluster.
+async fn for_each_strandable_backend<F, Fut>(mut contract: F)
+where
+    F: FnMut(Arc<dyn Store>, &'static str, Arc<StrandedFieldOrder>) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let directory = tempfile::tempdir().expect("strandable SQLite directory");
+    let path = directory.path().join("plurx.db");
+    let store = SqliteStore::open(&path).expect("strandable SQLite store");
+    contract(
+        Arc::new(store),
+        "file",
+        Arc::new(StrandedFieldOrder::Sqlite(path)),
+    )
+    .await;
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    {
+        let _case = HIQLITE_CASE.lock().await;
+        let cluster = ContractCluster::start().await;
+        let store = open_contract_hiqlite_store(&cluster).await;
+        store
+            .validation_reset_contract_state()
+            .await
+            .expect("reset replicated contract state");
+        let raw = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            true,
+            None,
+        )
+        .await
+        .expect("connect raw replicated client");
+        contract(
+            Arc::new(store),
+            "hiqlite-3-voter",
+            Arc::new(StrandedFieldOrder::Hiqlite(raw)),
+        )
+        .await;
     }
 }
 
@@ -1263,6 +1394,153 @@ fn analysis_queue_slot(component: &str, state: &str, priority: &str, trigger: &s
         + priority)
         * ANALYSIS_METRIC_TRIGGERS.len()
         + trigger
+}
+
+#[tokio::test]
+async fn a05_candidate_decode_memory_is_exact_lifetime_and_replay_cannot_rearm() {
+    use plurx_core::store::{
+        CandidateRecoveryCause, CandidateRecoveryObservation, CandidateRecoveryScope,
+    };
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "a05-candidate-memory").await;
+        let activation = MediaSessionActivation {
+            expected_desired_revision: None,
+            recovery_epoch: "b3000000-1111-4111-8111-111111111111".into(),
+            incarnation_id: "b1000000-1111-4111-8111-111111111111".into(),
+            session_id: "b2000000-1111-4111-8111-111111111111".into(),
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+            playback_id: "a05-exact-player".into(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "local-owner".into(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1_000,
+            lease_expires_at_ms: 900_000,
+        };
+        store
+            .activate_media_session(&activation)
+            .await
+            .expect("activate")
+            .expect("actual active route");
+        let route = confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
+        let scope = CandidateRecoveryScope {
+            user_id,
+            playback_id: route.playback_id.clone(),
+            recovery_epoch: route.recovery_epoch.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_object_version: "actual-fixture-object-v1".into(),
+            credential_generation: "c".repeat(64),
+            client_class: "android".into(),
+        };
+        let observation = CandidateRecoveryObservation {
+            scope: scope.clone(),
+            route: route.clone(),
+            recipe_digest: [3; 32],
+            event_id: "bounded-public-request-id".into(),
+            cause: CandidateRecoveryCause::Decode,
+            quality_step: true,
+        };
+        assert!(
+            scope.valid(),
+            "{backend}: scope epoch {:?}",
+            scope.recovery_epoch
+        );
+        let actual_file = store
+            .get_file(file_id)
+            .await
+            .expect("fixture file")
+            .expect("fixture file");
+        assert_eq!(
+            (actual_file.size, actual_file.mtime),
+            (scope.source_size, scope.source_mtime)
+        );
+        assert_eq!(route.state, "active");
+        assert_eq!(route.publication_ready_at_ms, 0);
+        let first = store
+            .observe_candidate_recovery(&observation, 2_000)
+            .await
+            .expect("fold")
+            .unwrap_or_else(|| panic!("{backend}: actual route must qualify"));
+        assert_eq!(first.decode_step_recipe, Some([3; 32]));
+        assert!(store
+            .observe_candidate_recovery(&observation, 3_000)
+            .await
+            .expect("replay")
+            .is_none());
+        assert_eq!(
+            store
+                .candidate_recovery_memory(&scope)
+                .await
+                .expect("memory"),
+            first
+        );
+        let mut other = scope.clone();
+        other.credential_generation = "d".repeat(64);
+        assert!(store
+            .candidate_recovery_memory(&other)
+            .await
+            .expect("other credential")
+            .rejected_recipes
+            .is_empty());
+        other = scope.clone();
+        other.source_object_version = "replacement-object".into();
+        assert!(store
+            .candidate_recovery_memory(&other)
+            .await
+            .expect("other physical source")
+            .rejected_recipes
+            .is_empty());
+        other = scope.clone();
+        other.playback_id = "other-player".into();
+        assert!(store
+            .candidate_recovery_memory(&other)
+            .await
+            .expect("other player")
+            .rejected_recipes
+            .is_empty());
+        let mut stale = observation.clone();
+        stale.route.owner_epoch += 1;
+        stale.recipe_digest = [4; 32];
+        assert!(store
+            .observe_candidate_recovery(&stale, 4_000)
+            .await
+            .expect("foreign owner")
+            .is_none());
+        stale = observation.clone();
+        stale.scope.source_mtime += 1;
+        stale.recipe_digest = [4; 32];
+        assert!(store
+            .observe_candidate_recovery(&stale, 4_000)
+            .await
+            .expect("changed source")
+            .is_none());
+        let mut hold = observation.clone();
+        hold.cause = CandidateRecoveryCause::Hold;
+        hold.quality_step = false;
+        hold.recipe_digest = [5; 32];
+        assert_eq!(
+            store
+                .observe_candidate_recovery(&hold, 5_000)
+                .await
+                .expect("hold"),
+            Some(first.clone())
+        );
+        assert_eq!(
+            store
+                .candidate_recovery_memory(&scope)
+                .await
+                .expect("decode stays spent"),
+            first
+        );
+    })
+    .await;
 }
 
 fn analysis_lifecycle_slot(event: &str, reason: &str) -> usize {
@@ -2048,6 +2326,7 @@ fn staged_preparation(
     predecessor: &str,
 ) -> plurx_core::domain::MediaSessionPreparation {
     plurx_core::domain::MediaSessionPreparation {
+        quality_cancellation_key: None,
         expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
@@ -5112,7 +5391,11 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                     &activation.playback_id,
                     incarnation_id,
                     100,
-                    200,
+                    // Production admits creates for 60s but activates with a 12s
+                    // lease. Equal deadlines hid the prepare -> confirm race:
+                    // inventory admitted prepare, then the confirmation trigger
+                    // shortened the claim and renewal fenced that same worker.
+                    60_100,
                 )
                 .await
                 .unwrap_or_else(|error| panic!(
@@ -5189,6 +5472,24 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             .unwrap_or_else(|error| panic!("{backend}: claim blocked takeover: {error}"))
             .is_none());
 
+        // The request may outlive the owner's activation lease. That does
+        // not turn this unconfirmed start into a recoverable handoff.
+        assert!(store
+            .arm_media_session_handoff(incarnation_id, &activation.owner_node_id, 1, 400_000, 150,)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: arm an in-flight activation: {error}"))
+            .is_none());
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(incarnation_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read refused handoff: {error}"))
+                .expect("in-flight activation survives")
+                .publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}: lease recovery cannot steal confirmation"
+        );
+
         let confirmed = confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
         assert_eq!(confirmed.publication_ready_at_ms, 0, "{backend}");
         assert!(matches!(
@@ -5263,6 +5564,25 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                 .len(),
             1,
             "{backend}: published route enters owned inventory"
+        );
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    &activation.owner_node_id,
+                    &[MediaSessionRenewal {
+                        incarnation_id: incarnation_id.to_owned(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: 10,
+                        fetched_through_ms: 10,
+                        media_sequence: 1,
+                    }],
+                    152,
+                    240,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew published route: {error}")),
+            vec![incarnation_id.to_owned()],
+            "{backend}: publication hands the worker to renewal"
         );
         let taken = store
             .claim_media_session_takeover(&MediaSessionTakeover {
@@ -5802,6 +6122,85 @@ async fn prometheus_store_snapshot_is_one_backend_neutral_aggregate() {
         assert_eq!(snapshot.offline.ready, 0, "{backend}");
         assert_eq!(snapshot.offline.failed, 0, "{backend}");
         assert_eq!(snapshot.watched_outbox, (1, 0, 0), "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn source_audio_layout_facts_round_trip_without_inventing_legacy_layout() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Source audio layout {backend}"),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("create source-layout library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Source layouts".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("create source-layout item");
+        let legacy = serde_json::json!({"index": 2, "codec": "aac", "channels": 6,
+            "language": null, "title": null, "default": false});
+        let legacy: plurx_core::domain::AudioStream =
+            serde_json::from_value(legacy).expect("legacy audio JSON");
+        let streams = vec![
+            plurx_core::domain::AudioStream {
+                index: 0,
+                channels: Some(6),
+                channel_layout: Some("5.1".to_owned()),
+                ..Default::default()
+            },
+            plurx_core::domain::AudioStream {
+                index: 1,
+                channels: Some(6),
+                channel_layout: Some("5.1(side)".to_owned()),
+                ..Default::default()
+            },
+            legacy,
+            plurx_core::domain::AudioStream {
+                index: 3,
+                channel_layout: Some("future-layout".to_owned()),
+                ..Default::default()
+            },
+        ];
+        let file_id = store
+            .upsert_file(
+                item,
+                &format!("/{backend}/layouts.mkv"),
+                1_024,
+                1,
+                &ProbeResult {
+                    audio_streams: streams.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("store source-layout facts");
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("read source-layout facts")
+            .expect("source-layout file");
+        assert_eq!(file.audio_streams, streams, "{backend}");
+        assert_eq!(file.audio_streams[2].channel_layout, None, "{backend}");
+        assert!(
+            serde_json::to_value(&file.audio_streams[2])
+                .expect("serialize legacy source-layout fact")
+                .get("channel_layout")
+                .is_none(),
+            "{backend}"
+        );
     })
     .await;
 }
@@ -8151,6 +8550,38 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: baseline fenced file: {error}"));
         current = replacement;
+        // A fenced publication of probed facts without a field order (an
+        // older probe worker's shape) stores `unknown`; the unprobed baseline
+        // above keeps `NULL`.
+        let replacement = publication_successor(&current);
+        let probed_file = store
+            .upsert_file_fenced(
+                baseline_book,
+                "/contract/fenced/probed.epub",
+                43,
+                8,
+                &ProbeResult {
+                    raw_json: Some("{}".into()),
+                    ..Default::default()
+                },
+                &current,
+                &replacement,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: probed fenced file: {error}"));
+        current = replacement;
+        for (file_id, expected) in [(baseline_file, None), (probed_file, Some("unknown"))] {
+            assert_eq!(
+                store
+                    .get_file(file_id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: fenced file read: {error}"))
+                    .and_then(|file| file.field_order)
+                    .as_deref(),
+                expected,
+                "{backend}: fenced field-order write boundary"
+            );
+        }
         let replacement = publication_successor(&current);
         assert_eq!(
             store
@@ -12516,6 +12947,21 @@ async fn assert_migrated_fragment_prune_budget(client: &Client) {
     );
 }
 
+/// A fixture rewound to a pre-v92 marker must not keep the composed v92/v93
+/// shapes a fresh chain created (`offline_packages.audio_recipe` and the two
+/// Link columns on `network_priors`), nor v101's watch revision columns:
+/// `ADD COLUMN` replays are not idempotent, and a real database at that marker
+/// never had them.
+fn drop_composed_v92_v93_columns(conn: &rusqlite::Connection) {
+    queue_fixture::remove_jellyfin_compatibility_schema(conn);
+    conn.execute_batch(
+        "ALTER TABLE offline_packages DROP COLUMN audio_recipe;
+         ALTER TABLE network_priors DROP COLUMN link_worst_rung_height;
+         ALTER TABLE network_priors DROP COLUMN link_starved_at_ms;",
+    )
+    .expect("remove composed v92/v93 columns before rewinding");
+}
+
 #[test]
 fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
     let directory = tempfile::tempdir().expect("upgrade fixture");
@@ -12530,6 +12976,7 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
         );
         conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
             .expect("populated upgrade workload");
+        drop_composed_v92_v93_columns(&conn);
         conn.execute_batch(
             "DROP INDEX analysis_requests_result_target_force;
              ALTER TABLE dv_conversions DROP COLUMN requested_manually;
@@ -15951,22 +16398,22 @@ impl ContractCluster {
                         Ok(0) => {
                             break Err(ContractStartError::Failed(format!(
                                 "contract voter {node_id} exited before ready"
-                            )))
+                            )));
                         }
                         Ok(_) if line.trim() == format!("PLURX_CONTRACT_NODE_READY {node_id}") => {
-                            break Ok(())
+                            break Ok(());
                         }
                         Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_PORT_COLLISION ") => {
-                            break Err(ContractStartError::PortCollision)
+                            break Err(ContractStartError::PortCollision);
                         }
                         Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_START_FAILED ") => {
-                            break Err(ContractStartError::Failed(line.trim().to_owned()))
+                            break Err(ContractStartError::Failed(line.trim().to_owned()));
                         }
                         Ok(_) => {}
                         Err(error) => {
                             break Err(ContractStartError::Failed(format!(
                                 "read contract voter {node_id} startup: {error}"
-                            )))
+                            )));
                         }
                     }
                 };
@@ -16518,6 +16965,7 @@ fn make_trakt_fixture_row_cleartext(path: &std::path::Path) {
 fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
+    queue_fixture::remove_jellyfin_compatibility_schema(&connection);
     queue_fixture::remove_common_queue_schema(&connection);
     connection
         .execute_batch(
@@ -16528,6 +16976,14 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ",
         )
         .expect("remove v91 planning generation");
+    connection
+        .execute_batch(
+            "DROP TABLE IF EXISTS continuous_quality_ledgers;
+             DROP TABLE IF EXISTS quality_preparation_owners;
+             DROP TABLE IF EXISTS quality_cancellation_receipts;
+             ",
+        )
+        .expect("remove v102 cancellation and v103 continuous dependencies");
     // Recreate the exact post-v14 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now
@@ -16588,6 +17044,14 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE IF EXISTS library_channel_generations;
              DROP TABLE IF EXISTS library_channels;
              ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
+             -- v96's candidate failures and v94's node-local Link samples.
+             -- Both are CREATE TABLE IF NOT EXISTS, so leaving them would be
+             -- silent: a v14 fixture that still held them.
+             DROP TABLE IF EXISTS candidate_recovery;
+             DROP TABLE IF EXISTS candidate_link_priors;
+             -- v92 adds this column; leaving it on a stamped-v14 fixture
+             -- makes the actual ordinary upgrade repeat ADD COLUMN.
+             ALTER TABLE offline_packages DROP COLUMN audio_recipe;
              ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;
              ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state;
              ALTER TABLE offline_packages DROP COLUMN claim_generation;
@@ -16731,15 +17195,21 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 70 with the current durable tables, including the Library channel
+    // 74 with the current durable tables, including the Library channel
     // entities, media classifications, channel subject jobs and decisions,
-    // the three DVR tables, and the scoped book file grants (SQLite v68). A
+    // the three DVR tables, the scoped book file grants (SQLite v68), the
+    // replicated candidate-recovery memory (SQLite v96), and the three
+    // continuous-quality tables that travel with media sessions. A
     // v14 source has no rows for newer tables — each one's `minimum_schema` is
     // later — but every table is still reported, because the digest inventory
     // is over what the import *plans*, not over what the source happened to
     // hold. The subtitle-source ledgers are node-held facts about local files
     // and are deliberately not imported, so they are not counted here.
-    assert_eq!(report.tables.len(), 70);
+    // 77: main's replicated candidate recovery, plus Jellyfin compatibility's
+    // wire identities, compatibility logins and bounded negotiations
+    // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
+    // v102–v103).
+    assert_eq!(report.tables.len(), 77);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -17966,8 +18436,16 @@ async fn populated_v14_and_current_sources_activate_once_and_reopen_replicated()
 /// key-resolution refusal leaves no incoming target, then the same directory
 /// activates and its replicated envelope still opens under the node-local key.
 #[cfg(feature = "hiqlite-contract-tests")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
+#[test]
+fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
+    startup_observer::run_full_hiqlite_fixture(
+        "k06-r1-legacy-sealing",
+        legacy_sealing_observation_fixture,
+    );
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn legacy_sealing_observation_fixture() {
     let _case = HIQLITE_CASE.lock().await;
     install_contract_crypto_provider();
 
@@ -18001,7 +18479,7 @@ async fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
     );
     std::fs::remove_dir(&key_path).expect("unblock credential-key loading");
 
-    let selected = select_daemon_store(&config)
+    let selected = startup_observer::select_applied_singleton(&config)
         .await
         .expect("direct legacy upgrade must activate after key recovery");
     assert_eq!(selected.backend, SelectedBackend::Replicated);
@@ -18266,15 +18744,23 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
 #[ignore = "spawned by the one-voter activation contract"]
-async fn hiqlite_activation_node_process() {
+fn hiqlite_activation_node_process() {
+    startup_observer::run_full_hiqlite_fixture(
+        "k06-r1-contract-node",
+        activation_node_observation_fixture,
+    );
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn activation_node_observation_fixture() {
     install_contract_crypto_provider();
     let launch: ActivationNodeLaunch = serde_json::from_str(
         &std::env::var("PLURX_ACTIVATION_NODE_LAUNCH").expect("activation launch"),
     )
     .expect("decode activation launch");
-    let selected = select_daemon_store(&launch.config())
+    let selected = startup_observer::select_applied_singleton(&launch.config())
         .await
         .expect("select one-voter store");
     assert_eq!(selected.backend, SelectedBackend::Replicated);
@@ -18551,14 +19037,156 @@ fn contract_inventory_matches_every_store_method() {
     // E2 removes two unfenced legacy scrub methods.
     // Safari seek adds viewer joins and two source-I/O observations.
     // DVR physical cleanup adds the atomic linked-catalog purge.
+    // 450 -> 452 for S-07's first-frame luminance backfill on `MediaStore`:
+    // `files_without_luminance_facts` lists HDR rows the stored-document walk
+    // classified `none`, and `set_file_frame_luminance` records what the first
+    // frame carried, fenced to that snapshot and to the row still being
+    // `none`. Both are named in `MEDIA_METHODS` above and covered on both
+    // backends by `frame_luminance_candidates_and_writes_are_exactly_fenced`.
+    // No new trait or supertrait of `Store`.
     // Media info adds the source-aware preparation history projection.
     // +1: coherent playback file/probe/settings/generation snapshot, covered
     // by playback_planning_snapshot_retains_one_source_and_settings_revision.
-    assert_eq!(declared.len(), 452, "review the Store method count");
+    // +1: source-fenced content encoding report publication, covered by
+    // content_encoding_report_publication_is_source_fenced_on_every_backend.
+    // The architecture-review effort declares 459 methods; these three main
+    // additions are distinct from its luminance and cluster-observation
+    // operations (453 -> 462 on main).
+    // Merged with main (462): +4 for Jellyfin compatibility: audience-scoped token authentication
+    // (jellyfin_login_token_audience_separates_native_and_compatibility), and
+    // the origin-stamped watch tree plus the fenced compatibility progress
+    // write and its currency check (store_contract/jellyfin_play.rs).
+    // +9 -> 475: continuous quality's ledger, reservation, family-binding and
+    // cancellation-receipt methods on `MediaSessionStore`, listed in
+    // `MEDIA_SESSION_METHODS` with the scenarios that cover them.
+    assert_eq!(declared.len(), 475, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+#[tokio::test]
+async fn content_encoding_report_publication_is_source_fenced_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "content-report").await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("fixture file")
+            .expect("fixture exists");
+        let report = r#"{"outcome":"measured","context":{"version":1}}"#;
+        assert!(
+            !store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("unprobed publication"),
+            "{backend}: never invent probe facts"
+        );
+        assert!(store
+            .get_file_probe_json(file_id)
+            .await
+            .expect("unprobed row")
+            .is_none());
+
+        let original = serde_json::json!({"streams":[{"codec_name":"h264"}],"chapters":[]});
+        let probe = ProbeResult {
+            raw_json: Some(original.to_string()),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("UTF-8 fixture path"),
+                file.size,
+                file.mtime,
+                &probe,
+            )
+            .await
+            .expect("probed fixture");
+        for (id, size, mtime) in [
+            (file_id, file.size + 1, file.mtime),
+            (file_id, file.size, file.mtime + 1),
+            (i64::MAX, file.size, file.mtime),
+        ] {
+            assert!(
+                !store
+                    .merge_file_probe_content_encoding(id, size, mtime, report)
+                    .await
+                    .expect("fenced publication"),
+                "{backend}: reject stale or absent source"
+            );
+        }
+        let unchanged: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("probe row")
+                .expect("probe exists"),
+        )
+        .expect("probe JSON");
+        assert_eq!(
+            unchanged, original,
+            "{backend}: refused writes leave probe untouched"
+        );
+        assert!(
+            store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("current publication"),
+            "{backend}"
+        );
+        let grafted: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("grafted probe row")
+                .expect("grafted probe exists"),
+        )
+        .expect("grafted JSON");
+        let mut expected = original.clone();
+        expected[plurx_core::store::CONTENT_ENCODING_PROBE_KEY] =
+            serde_json::from_str(report).expect("report JSON");
+        assert_eq!(grafted, expected, "{backend}: only the app report changes");
+
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("UTF-8 fixture path"),
+                file.size + 1,
+                file.mtime + 1,
+                &probe,
+            )
+            .await
+            .expect("source reprobe");
+        let refreshed: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("refreshed probe row")
+                .expect("refreshed probe exists"),
+        )
+        .expect("refreshed JSON");
+        assert_eq!(
+            refreshed, original,
+            "{backend}: reprobe discards old evidence"
+        );
+        assert!(
+            !store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("late publication"),
+            "{backend}: old source cannot restore evidence"
+        );
+        assert!(
+            store
+                .merge_file_probe_content_encoding(file_id, file.size + 1, file.mtime + 1, report)
+                .await
+                .expect("new source publication"),
+            "{backend}"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -19058,7 +19686,7 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
 
 #[tokio::test]
 async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
-    for_each_backend(|store, backend| async move {
+    for_each_strandable_backend(|store, backend, stranded| async move {
         let library = store
             .create_library(&NewLibrary {
                 name: "Field order".into(),
@@ -19122,6 +19750,9 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: legacy file: {error}"));
+        // This binary stores `unknown` for a probed row; the first-pass
+        // backfill existed for rows written before the column did.
+        stranded.strand(legacy).await;
         let pending = store
             .files_missing_field_order(0, 1)
             .await
@@ -19156,6 +19787,7 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: replacement seed: {error}"));
+        stranded.strand(replacement).await;
         let stale = store
             .files_missing_field_order(legacy, 1)
             .await
@@ -19193,6 +19825,236 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
                 .and_then(|file| file.field_order),
             Some("progressive".into()),
             "{backend}: stale snapshot cannot overwrite a newer scan"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn probed_rows_without_a_field_order_store_unknown_at_the_write_boundary() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Field order boundary".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/field-order-boundary".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Write boundary".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        for (path, probe, expected) in [
+            // An older probe worker's facts: a document, no token.
+            (
+                "/field-order-boundary/older-worker.mkv",
+                ProbeResult {
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","codec_name":"hevc"}]}"#.into(),
+                    ),
+                    ..Default::default()
+                },
+                Some("unknown"),
+            ),
+            // A reporter token is stored verbatim.
+            (
+                "/field-order-boundary/interlaced.ts",
+                ProbeResult {
+                    field_order: Some("tt".into()),
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","field_order":"tt"}]}"#.into(),
+                    ),
+                    ..Default::default()
+                },
+                Some("tt"),
+            ),
+            // No document: never probed (or a failed probe) stays NULL.
+            (
+                "/field-order-boundary/unprobed.mkv",
+                ProbeResult::default(),
+                None,
+            ),
+        ] {
+            let file = store
+                .upsert_file(item, path, 1, 1, &probe)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: upsert {path}: {error}"));
+            assert_eq!(
+                store
+                    .get_file(file)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {path}: {error}"))
+                    .and_then(|file| file.field_order)
+                    .as_deref(),
+                expected,
+                "{backend}: {path}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rearmed_field_order_backfill_converges_null_rows_left_by_the_first_pass() {
+    for_each_strandable_backend(|store, backend, stranded| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Field order re-arm".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/field-order-rearm".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Re-armed backfill".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        // FFprobe omits `field_order` for this HEVC stream.
+        let hevc = r#"{"streams":[{"codec_type":"video","codec_name":"hevc","width":3840,"height":2160}]}"#;
+        let hevc_value: serde_json::Value = serde_json::from_str(hevc).expect("hevc json");
+
+        // The current scanner's write for that document.
+        let scanned = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/scanned.mkv",
+                10,
+                100,
+                &plurx_core::scan::probe::parse_probe_json(&hevc_value),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: scanned file: {error}"));
+        // The pre-fix scanner's write for the same document: probed, NULL.
+        // This binary's write boundary stores `unknown` even for a result
+        // that lacks the token, so the stranded state is written raw.
+        let stranded_file = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/stranded.mkv",
+                20,
+                200,
+                &ProbeResult {
+                    raw_json: Some(hevc.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stranded file: {error}"));
+        assert_eq!(
+            store
+                .get_file(stranded_file)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: boundary read: {error}"))
+                .and_then(|file| file.field_order)
+                .as_deref(),
+            Some("unknown"),
+            "{backend}: the write boundary does not strand a probed row"
+        );
+        stranded.strand(stranded_file).await;
+        // A probed row with a reporter token, which the pass must not touch.
+        let progressive = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/progressive.mkv",
+                30,
+                300,
+                &plurx_core::scan::probe::parse_probe_json(&serde_json::json!({
+                    "streams": [{"codec_type":"video","codec_name":"h264","field_order":"progressive"}]
+                })),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: progressive file: {error}"));
+        // A row never probed stays NULL: there is no document to answer from.
+        let unprobed = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/unprobed.mkv",
+                40,
+                400,
+                &ProbeResult::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unprobed file: {error}"));
+
+        // The first pass already stamped itself done; that stamp must not stop
+        // the second pass, and the second pass leaves it where it is.
+        store
+            .put_setting("jobs.field_order_backfilled", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed first-pass stamp: {error}"));
+
+        let field_order = |id: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .get_file(id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {id}: {error}"))
+                    .and_then(|file| file.field_order)
+            }
+        };
+        assert_eq!(field_order(scanned).await.as_deref(), Some("unknown"), "{backend}");
+        assert_eq!(field_order(stranded_file).await, None, "{backend}");
+
+        let first = plurx_core::store::field_order_backfill_page(store.as_ref(), 0, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first page: {error}"));
+        assert!(!first.complete, "{backend}");
+        assert!(first.write_error.is_none(), "{backend}");
+        assert_eq!((first.updated, first.fenced), (1, 0), "{backend}");
+        assert_eq!(first.cursor, stranded_file, "{backend}");
+        assert_eq!(
+            field_order(stranded_file).await,
+            field_order(scanned).await,
+            "{backend}: identical media now stores one token whichever path wrote it"
+        );
+        assert_eq!(field_order(progressive).await.as_deref(), Some("progressive"), "{backend}");
+        assert_eq!(field_order(unprobed).await, None, "{backend}");
+        assert_eq!(
+            store
+                .get_setting(plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_DONE)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stamp read: {error}")),
+            None,
+            "{backend}: a page that wrote rows is not the completing page"
+        );
+
+        let last = plurx_core::store::field_order_backfill_page(store.as_ref(), first.cursor, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: completing page: {error}"));
+        assert!(last.complete, "{backend}");
+        let settings = store
+            .settings_snapshot()
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: snapshot: {error}"));
+        assert_eq!(
+            settings.get(plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_DONE).map(String::as_str),
+            Some("1"),
+            "{backend}"
+        );
+        assert_eq!(
+            settings.get("jobs.field_order_backfilled").map(String::as_str),
+            Some("1"),
+            "{backend}: the first pass's stamp is left in place, like every superseded backfill's"
         );
     })
     .await;
@@ -19269,6 +20131,153 @@ async fn luminance_round_trips_and_backfill_updates_are_exactly_fenced() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale write: {error}")),
             "{backend}: a classified row refuses a repeated stale update"
+        );
+    })
+    .await;
+}
+
+/// The first-frame backfill sees only HDR rows the stored-document walk left
+/// `none`, walks them by id, and its write lands only on the exact snapshot it
+/// listed while that row is still `none`.
+#[tokio::test]
+async fn frame_luminance_candidates_and_writes_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HDR frame luminance".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/hdr-frame".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HDR frame fixture".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        let seed = |path: &'static str, hdr: Option<&'static str>, source: Option<&'static str>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .upsert_file(
+                        item,
+                        path,
+                        10,
+                        20,
+                        &ProbeResult {
+                            hdr: hdr.map(str::to_owned),
+                            luminance_source: source.map(str::to_owned),
+                            raw_json: Some(format!(r#"{{"streams":[],"p":"{path}"}}"#)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: file {path}: {error}"))
+            }
+        };
+        let first = seed("/hdr-frame/a.mkv", Some("hdr10"), Some("none")).await;
+        seed("/hdr-frame/b.mkv", Some("hdr10"), Some("stream")).await;
+        seed("/hdr-frame/c.mkv", Some("hdr10"), None).await;
+        seed("/hdr-frame/d.mkv", None, Some("none")).await;
+        let second = seed("/hdr-frame/e.mkv", Some("hlg"), Some("none")).await;
+
+        let page = store
+            .files_without_luminance_facts(0, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first page: {error}"));
+        assert_eq!(
+            page.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![first],
+            "{backend}: bounded, ascending"
+        );
+        let after = store
+            .files_without_luminance_facts(first, 16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: next page: {error}"));
+        assert_eq!(
+            after.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: only HDR rows classified none, strictly after the cursor"
+        );
+
+        let candidate = page.into_iter().next().expect("candidate");
+        // Each identity field fences the write on its own.
+        let mut stale_mtime = candidate.clone();
+        stale_mtime.mtime += 1;
+        let mut stale_size = candidate.clone();
+        stale_size.size += 1;
+        let mut stale_path = candidate.clone();
+        stale_path.path = "/hdr-frame/elsewhere.mkv".into();
+        let mut stale_probe = candidate.clone();
+        stale_probe.probe_json = r#"{"streams":[],"p":"rescanned"}"#.into();
+        for (field, stale) in [
+            ("mtime", stale_mtime),
+            ("size", stale_size),
+            ("path", stale_path),
+            ("probe_json", stale_probe),
+        ] {
+            assert!(
+                !store
+                    .set_file_frame_luminance(&stale, Some(1), None, None)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: stale {field}: {error}")),
+                "{backend}: a snapshot differing only in {field} is refused"
+            );
+            assert_eq!(
+                store
+                    .get_file(first)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                    .expect("stored file")
+                    .luminance_source
+                    .as_deref(),
+                Some("none"),
+                "{backend}: a refused {field} write left the row alone"
+            );
+        }
+        assert!(store
+            .set_file_frame_luminance(&candidate, Some(2008), Some(612), Some(4000))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: write: {error}")));
+        let stored = store
+            .get_file(first)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .expect("stored file");
+        assert_eq!(
+            (
+                stored.max_cll,
+                stored.max_fall,
+                stored.mastering_max_luminance,
+                stored.luminance_source.as_deref()
+            ),
+            (Some(2008), Some(612), Some(4000), Some("frame"))
+        );
+        assert!(
+            !store
+                .set_file_frame_luminance(&candidate, None, None, None)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: repeated write: {error}")),
+            "{backend}: a row no longer none refuses a repeated write"
+        );
+        assert_eq!(
+            store
+                .files_without_luminance_facts(0, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: final page: {error}"))
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: an observed row leaves the candidate set"
         );
     })
     .await;
@@ -21497,6 +22506,145 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
         assert_eq!(
             attempts[0].terminal_code, "source_deleted",
             "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintenance_attempts() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "busy-analysis-viewer").await;
+        let user = store
+            .create_user("busy-analysis-viewer", "hash", false)
+            .await
+            .expect("user");
+        let request = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "busy-analysis-request".into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "busy-engine".into(),
+                video_identity: String::new(),
+                requested_generation: "busy-generation".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "busy-node".into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("request");
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    11,
+                    1011,
+                    true
+                )
+                .await
+                .expect("busy claim")
+                .is_none(),
+            "{backend}: no maintenance while busy"
+        );
+        assert_eq!(
+            store
+                .analysis_request(&request.request_id)
+                .await
+                .expect("read")
+                .expect("row")
+                .attempts,
+            0
+        );
+        store
+            .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
+                analysis_request_id: request.request_id.clone(),
+                requested_generation: request.requested_generation.clone(),
+                pipeline_version: request.pipeline_version.clone(),
+                video_identity: request.video_identity.clone(),
+                target_node_id: request.target_node_id.clone(),
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: user.id,
+                },
+                playback_id: "busy-viewer".into(),
+                now_ms: 12,
+            })
+            .await
+            .expect("viewer");
+        assert!(
+            store
+                .analysis_preparation_observation(&request.request_id, 13)
+                .await
+                .expect("observation")
+                .expect("row")
+                .has_live_viewer,
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("other-engine"),
+                    13,
+                    1013,
+                    true
+                )
+                .await
+                .expect("wrong engine")
+                .is_none(),
+            "{backend}"
+        );
+        let claimed = store
+            .claim_analysis_request_for_capacity("busy-node", Some("busy-engine"), 14, 1014, true)
+            .await
+            .expect("viewer claim")
+            .expect("viewer source read admitted");
+        assert_eq!(claimed.request_id, request.request_id, "{backend}");
+        assert!(store
+            .retry_analysis_request(&claimed, "foreground_preempted", 15, 1015, false)
+            .await
+            .expect("return claim"));
+        assert!(
+            !store
+                .analysis_preparation_observation(&request.request_id, 120013)
+                .await
+                .expect("observation")
+                .expect("row")
+                .has_live_viewer,
+            "{backend}: expired viewers do not admit work"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    120013,
+                    121013,
+                    true
+                )
+                .await
+                .expect("expired viewer claim")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    120014,
+                    121014,
+                    false
+                )
+                .await
+                .expect("idle maintenance claim")
+                .is_some(),
+            "{backend}: idle maintenance still runs"
         );
     })
     .await;
@@ -24737,6 +25885,7 @@ async fn playback_telemetry_contract_runs_through_dyn_store() {
             throughput_kbps: Some(6_000),
             starved_rung_height: None,
             observed_at_ms: 1_700_000_100_000,
+            measured_link: None,
         }];
         assert_eq!(
             store
@@ -24837,6 +25986,7 @@ async fn network_prior_contract_runs_through_dyn_store() {
                 throughput_kbps: Some(8_000),
                 starved_rung_height: Some(1080),
                 observed_at_ms: 1_700_000_000_000,
+                measured_link: None,
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: observe prior: {error}"));
@@ -30892,6 +32042,7 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
 
 fn offline_request(id: &str, request_id: &str, user_id: i64, file_id: i64) -> NewOfflinePackage {
     NewOfflinePackage {
+        audio_recipe: None,
         id: id.into(),
         request_id: request_id.into(),
         user_id,
@@ -30913,6 +32064,107 @@ fn offline_request(id: &str, request_id: &str, user_id: i64, file_id: i64) -> Ne
         reserved_bytes: 5_000,
         expires_at: 10_000,
     }
+}
+
+#[tokio::test]
+async fn offline_audio_snapshot_survives_claim_and_server_policy_retry() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "offline-audio-snapshot").await;
+        let audio = plurx_core::playback::audio::AudioDelivery {
+            action: plurx_core::playback::audio::AudioAction::Encode { codec: "aac".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 320, sample_rate: 48_000 },
+            downmix: None, reason: "accepted audio route".into(),
+        };
+        let mut first = offline_request("audio-package", "audio-request", user_id, file_id);
+        first.audio_recipe = Some(serde_json::to_string(&audio).expect("offline audio contract operation"));
+        let OfflineCreateOutcome::Created(created) = store.create_offline_package(&first, 10, 100_000, 100_000).await.expect("offline audio contract operation") else { panic!("{backend}: create"); };
+        assert_eq!(created.audio_recipe, first.audio_recipe);
+        let mut retried = first.clone();
+        retried.audio_recipe = None;
+        let OfflineCreateOutcome::Existing(existing) = store.create_offline_package(&retried, 10, 100_000, 100_000).await.expect("offline audio contract operation") else { panic!("{backend}: retry changed server snapshot"); };
+        assert_eq!(existing.audio_recipe, first.audio_recipe);
+        let claimed = store.claim_next_offline_package("offline-node").await.expect("offline audio contract operation").expect("claim");
+        assert_eq!(claimed.audio_recipe, first.audio_recipe);
+        let mut invalid = offline_request("bad-audio-package", "bad-audio-request", user_id, file_id);
+        invalid.audio_recipe = Some("{\"action\":{\"kind\":\"encode\",\"codec\":\"eac3\",\"channels\":6,\"bitrate_kbps\":640,\"sample_rate\":48000},\"reason\":\"not the AAC lattice\"}".into());
+        assert!(store.create_offline_package(&invalid, 10, 100_000, 100_000).await.is_err(), "{backend}: invalid VOD audio accepted");
+    }).await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixture() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let current: Arc<dyn Store> = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let (user_id, file_id) = seed_file(&current, "offline-audio-v65").await;
+    let legacy = offline_request("legacy-audio", "legacy-audio-request", user_id, file_id);
+    current
+        .create_offline_package(&legacy, 10, 100_000, 100_000)
+        .await
+        .expect("offline audio contract operation");
+    drop(current);
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("offline audio contract operation");
+    // Marker 65 replays every step to the head, and the 67→68 step adds
+    // `dv_conversions.requested_manually` unconditionally: rewind that shape
+    // too, or the replay fails before it reaches the audio step (69→70).
+    downgrade_dv_request_provenance(&client).await;
+    client
+        .txn([
+            (
+                "ALTER TABLE offline_packages DROP COLUMN audio_recipe",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(65_i64),
+            ),
+        ])
+        .await
+        .expect("offline audio contract operation")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("offline audio contract operation");
+    let telemetry = cluster._root.path().join("offline-audio-v65-telemetry.db");
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("offline audio contract operation");
+    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    let stored = migrated
+        .offline_package_for_user(&legacy.id, user_id)
+        .await
+        .expect("offline audio contract operation")
+        .expect("offline audio contract operation");
+    assert_eq!(stored.audio_recipe, None);
+    assert_eq!(stored.source_path, legacy.source_path);
+    assert_eq!(stored.effective_rate_control, legacy.effective_rate_control);
+    drop(migrated);
+    // The second rewind leaves `audio_recipe` in place: the audio step must
+    // tolerate its own column on replay. Provenance is rewound again because
+    // its step is not replay-tolerant and is not what this test is about.
+    downgrade_dv_request_provenance(&client).await;
+    client
+        .txn([(
+            "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+            hiqlite::params!(65_i64),
+        )])
+        .await
+        .expect("offline audio contract operation")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("offline audio contract operation");
+    HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("additive column replay");
+    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
 }
 
 #[tokio::test]
@@ -35377,6 +36629,7 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         conn.execute_batch(&format!("DROP INDEX {index};"))
             .expect("remove v70-only shape");
     }
+    drop_composed_v92_v93_columns(&conn);
     conn.pragma_update(None, "user_version", 69)
         .expect("mark the v69 predecessor");
     drop(conn);
@@ -35621,6 +36874,7 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
         .expect("restore v68 attempt table");
     // A literal, not `SQLITE_SCHEMA_VERSION - 1`: the fixture is the v68
     // shape, and later migrations (v70's indexes) must replay after v69.
+    drop_composed_v92_v93_columns(&conn);
     conn.pragma_update(None, "user_version", 68)
         .expect("mark true v68 predecessor");
     drop(conn);
@@ -36688,4 +37942,1119 @@ async fn an_idle_classification_schedule_proposes_nothing_on_three_voters() {
         1,
         "the contest it replaces is a proposal even when it loses"
     );
+}
+
+#[tokio::test]
+async fn quality_cancellation_is_durable_exact_and_does_not_end_the_incumbent() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000fc01";
+        let session = "00000000-0000-4000-8000-00000000fc02";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "quality-cancel",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let mut receipt = plurx_core::store::QualityCancellationReceipt {
+            receipt_key: "c".repeat(64),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 2,
+            client_instance_id: "00000000-0000-4000-8000-00000000fc03".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: 1,
+            accepted_sequence: 3,
+            state: "requested".into(),
+            created_at_ms: 1500,
+            updated_at_ms: 1500,
+        };
+        assert!(
+            store
+                .request_quality_cancellation(&receipt)
+                .await
+                .expect("wrong owner cancellation")
+                .is_none(),
+            "{backend}"
+        );
+        receipt.owner_epoch = 1;
+        let first = store
+            .request_quality_cancellation(&receipt)
+            .await
+            .expect("cancel")
+            .expect("durable receipt");
+        receipt.created_at_ms = 1600;
+        receipt.updated_at_ms = 1600;
+        assert_eq!(
+            store
+                .request_quality_cancellation(&receipt)
+                .await
+                .expect("replay"),
+            Some(first.clone()),
+            "{backend}"
+        );
+        assert!(store
+            .quality_intent_cancelled(generation, &receipt.client_instance_id, "movie", 1)
+            .await
+            .expect("cancelled intent"));
+        assert!(!store
+            .quality_intent_cancelled(generation, &receipt.client_instance_id, "movie", 2)
+            .await
+            .expect("newer intent"));
+        assert!(!store
+            .settle_quality_cancellation(&receipt.receipt_key, "wrong-owner", 1, 2000)
+            .await
+            .expect("wrong cleanup owner"));
+        assert!(store
+            .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2000)
+            .await
+            .expect("cleanup"));
+        assert!(store
+            .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2100)
+            .await
+            .expect("cleanup replay"));
+        let settled = store
+            .quality_cancellation_receipt(&receipt.receipt_key)
+            .await
+            .expect("read receipt")
+            .expect("receipt");
+        assert_eq!(settled.state, "settled");
+        assert_eq!(settled.updated_at_ms, 2000);
+        let current = store
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                "quality-cancel",
+            )
+            .await
+            .expect("current")
+            .expect("incumbent");
+        assert_eq!(current.incarnation_id, generation);
+        assert_eq!(current.state, "active");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn quality_cancellations_outlast_128_changes_and_settle_after_takeover() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-long-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000f901";
+        let session = "00000000-0000-4000-8000-00000000f902";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "quality-cancel-long",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let receipt = |revision: i64, at: i64| plurx_core::store::QualityCancellationReceipt {
+            receipt_key: format!("{revision:064x}"),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000f903".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: revision,
+            accepted_sequence: revision,
+            state: "requested".into(),
+            created_at_ms: at,
+            updated_at_ms: at,
+        };
+        // A long session cancels far more than 128 optional targets; each
+        // settled, older intent of the same lifetime stops counting.
+        for revision in 1..=200_i64 {
+            let at = 1_500 + revision;
+            let cancel = receipt(revision, at);
+            store
+                .request_quality_cancellation(&cancel)
+                .await
+                .expect("cancel")
+                .unwrap_or_else(|| panic!("{backend}: cancellation {revision} refused"));
+            assert!(
+                store
+                    .settle_quality_cancellation(&cancel.receipt_key, "staged-node", 1, at)
+                    .await
+                    .expect("settle"),
+                "{backend}: cancellation {revision} never settled"
+            );
+        }
+        assert!(store
+            .quality_intent_cancelled(generation, &receipt(1, 1).client_instance_id, "movie", 200)
+            .await
+            .expect("newest cancelled intent still fences"));
+        // Unsettled cleanup is never pruned by a newer cancellation.
+        let pending = receipt(201, 1_800);
+        store
+            .request_quality_cancellation(&pending)
+            .await
+            .expect("cancel")
+            .expect("pending receipt");
+        store
+            .request_quality_cancellation(&receipt(202, 1_801))
+            .await
+            .expect("cancel")
+            .expect("newer receipt");
+        assert_eq!(
+            store
+                .quality_cancellation_receipt(&pending.receipt_key)
+                .await
+                .expect("read pending")
+                .expect("pending receipt kept")
+                .state,
+            "requested",
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .request_quality_cancellation(&pending)
+                .await
+                .expect("replay"),
+            store
+                .quality_cancellation_receipt(&pending.receipt_key)
+                .await
+                .expect("read"),
+            "{backend}: exact replay of a kept receipt"
+        );
+        // After takeover only the parent's current owner (or the receipt's
+        // own owner) can record the cleanup; the receipt identity is kept.
+        let parent = store
+            .media_session_route(session)
+            .await
+            .expect("parent")
+            .expect("route");
+        let takeover_at = parent.lease_expires_at_ms + 1;
+        store
+            .claim_media_session_takeover(&plurx_core::domain::MediaSessionTakeover {
+                incarnation_id: generation.into(),
+                expected_owner_node_id: "staged-node".into(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "replacement-node".into(),
+                now_ms: takeover_at,
+                lease_expires_at_ms: takeover_at + 900_000,
+            })
+            .await
+            .expect("takeover")
+            .expect("new owner");
+        assert!(
+            !store
+                .settle_quality_cancellation(
+                    &pending.receipt_key,
+                    "wrong-owner",
+                    2,
+                    takeover_at + 1
+                )
+                .await
+                .expect("foreign settlement"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .settle_quality_cancellation(
+                    &pending.receipt_key,
+                    "replacement-node",
+                    2,
+                    takeover_at + 1
+                )
+                .await
+                .expect("current owner settlement"),
+            "{backend}: a requested receipt could not settle after takeover"
+        );
+        let settled = store
+            .quality_cancellation_receipt(&pending.receipt_key)
+            .await
+            .expect("read settled")
+            .expect("receipt");
+        assert_eq!(settled.state, "settled", "{backend}");
+        assert_eq!(settled.owner_node_id, "staged-node", "{backend}");
+        assert_eq!(settled.owner_epoch, 1, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_durable_quality_cancel_fences_late_preparation_admission() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-admission-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000fb01";
+        let session = "00000000-0000-4000-8000-00000000fb02";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "quality-cancel-admission",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let receipt = plurx_core::store::QualityCancellationReceipt {
+            receipt_key: "b".repeat(64),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000fb03".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: 1,
+            accepted_sequence: 3,
+            state: "requested".into(),
+            created_at_ms: 1500,
+            updated_at_ms: 1500,
+        };
+        store
+            .request_quality_cancellation(&receipt)
+            .await
+            .expect("cancel")
+            .expect("durable cancellation");
+        let mut target = staged_preparation(
+            user.id,
+            "quality-cancel-admission",
+            "00000000-0000-4000-8000-00000000fb04",
+            "00000000-0000-4000-8000-00000000fb05",
+            generation,
+        );
+        target.quality_cancellation_key = Some(receipt.receipt_key);
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("late prepare")
+                .is_none(),
+            "{backend}: cancelled target admitted"
+        );
+        assert!(store
+            .media_session_route(&target.session_id)
+            .await
+            .expect("target")
+            .is_none());
+        target.quality_cancellation_key = Some("d".repeat(64));
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("new intent prepare")
+                .is_some(),
+            "{backend}: unrelated new intent refused"
+        );
+        let current = store
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                "quality-cancel-admission",
+            )
+            .await
+            .expect("current")
+            .expect("incumbent");
+        assert_eq!(current.incarnation_id, generation);
+        assert_eq!(current.state, "active");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn quality_cancellation_after_staging_fences_commit_and_requires_cleanup() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-commit-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000fa01";
+        let session = "00000000-0000-4000-8000-00000000fa02";
+        let playback = "quality-cancel-commit";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let mut target = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000fa04",
+            "00000000-0000-4000-8000-00000000fa05",
+            generation,
+        );
+        target.quality_cancellation_key = Some("e".repeat(64));
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("prepare")
+                .is_some(),
+            "{backend}"
+        );
+        let mut changed = target.clone();
+        changed.quality_cancellation_key = Some("f".repeat(64));
+        assert!(
+            store
+                .prepare_media_session(&changed)
+                .await
+                .expect("changed replay")
+                .is_none(),
+            "{backend}: replay changed ownership"
+        );
+        assert!(
+            store
+                .rejoin_media_session_preparation("00000000-0000-4000-8000-00000000fa06", &changed)
+                .await
+                .expect("changed rejoin replay")
+                .is_none(),
+            "{backend}: rejoin changed ownership"
+        );
+        let receipt = plurx_core::store::QualityCancellationReceipt {
+            receipt_key: "e".repeat(64),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000fa03".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: 1,
+            accepted_sequence: 3,
+            state: "requested".into(),
+            created_at_ms: 2500,
+            updated_at_ms: 2500,
+        };
+        store
+            .request_quality_cancellation(&receipt)
+            .await
+            .expect("cancel")
+            .expect("receipt");
+        assert!(
+            !store
+                .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2600)
+                .await
+                .expect("premature settlement"),
+            "{backend}: active child acknowledged cleanup"
+        );
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("cancelled replay")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .rejoin_media_session_preparation("00000000-0000-4000-8000-00000000fa06", &target)
+                .await
+                .expect("cancelled rejoin replay")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .commit_media_session_preparation(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback,
+                    &preparation_commit_request(&target.incarnation_id, 2700, 900_000)
+                )
+                .await
+                .expect("cancelled commit")
+                .is_none(),
+            "{backend}: cancelled target committed"
+        );
+        assert!(
+            store
+                .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2800)
+                .await
+                .expect("settled after retirement"),
+            "{backend}"
+        );
+        let current = store
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
+            .await
+            .expect("current")
+            .expect("incumbent");
+        assert_eq!(current.incarnation_id, generation, "{backend}");
+        assert_eq!(current.state, "active", "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn verified_continuous_family_binding_is_owner_fenced_and_immutable() {
+    use plurx_core::store::ContinuousFamilyDescription;
+    for_each_backend(|store, backend| async move {
+        let user = store.create_user("verified-family-user", "hash", false).await.expect("user");
+        let generation = "00000000-0000-4000-8000-00000000df01";
+        let session = "00000000-0000-4000-8000-00000000df02";
+        let primary = "1".repeat(32); let companion = "2".repeat(32);
+        let description: ContinuousFamilyDescription = serde_json::from_value(serde_json::json!({
+            "version": 1, "family_id": "f".repeat(64), "mode": "autonomous_reserved", "master": "master.m3u8",
+            "video": [
+                { "candidate_id": primary, "rendition_id": "a".repeat(64), "init_id": "b".repeat(64),
+                    "width": 1280, "height": 720, "codec": "avc1.640032", "timescale": 24000,
+                    "frame_ticks": 1001, "segment_ticks": 48048, "peak_bps": 5000000,
+                    "playlist": format!("video/{}/index.m3u8", "a".repeat(64)) },
+                { "candidate_id": companion, "rendition_id": "c".repeat(64), "init_id": "d".repeat(64),
+                    "width": 1920, "height": 1080, "codec": "avc1.640032", "timescale": 24000,
+                    "frame_ticks": 1001, "segment_ticks": 48048, "peak_bps": 8000000,
+                    "playlist": format!("video/{}/index.m3u8", "c".repeat(64)) }
+            ], "audio": null
+        })).expect("verified family");
+        let recipe = serde_json::json!({"candidate_id": primary, "source_object": "retained-source",
+            "request": {"preserved_intent": {"audio_offset_ms": 50}, "continuous_media": {
+                "version": 1, "role": "video", "family_generation": generation, "autonomous_companion": companion
+            }} });
+        let activation = MediaSessionActivation {
+            recovery_epoch: String::new(), expected_desired_revision: None,
+            incarnation_id: generation.into(), session_id: session.into(), principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+            playback_id: "verified-family".into(), expected_predecessor_incarnation_id: None,
+            fence_predecessor: false, request_id: None, request_fingerprint: "a".repeat(64),
+            owner_node_id: "staged-node".into(), recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+            response_json: r#"{"session":"current"}"#.into(), publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0, now_ms: 1000, lease_expires_at_ms: 900000,
+        };
+        store.activate_media_session(&activation).await.expect("activate").expect("route");
+        store.settle_media_session_activation(&activation, MediaSessionActivationSettlement::Confirm { publication_ready_at_ms: 0 }, 1000).await.expect("confirm").expect("published route");
+        assert!(!store.bind_continuous_family(generation, "wrong-owner", 1, &description, 1500).await.expect("wrong owner"), "{backend}");
+        assert!(!store.bind_continuous_family(generation, "staged-node", 2, &description, 1500).await.expect("wrong epoch"), "{backend}");
+        assert!(store.bind_continuous_family(generation, "staged-node", 1, &description, 1500).await.expect("bind"), "{backend}");
+        assert!(store.bind_continuous_family(generation, "staged-node", 1, &description, 1600).await.expect("exact replay"), "{backend}");
+        let mut changed = description.clone(); changed.video[0].init_id = "e".repeat(64);
+        assert!(!store.bind_continuous_family(generation, "staged-node", 1, &changed, 1700).await.expect("changed init refused"), "{backend}");
+        changed = description.clone(); changed.video[0].candidate_id = plurx_core::playback::candidate::CandidateId([9; 16]);
+        assert!(!store.bind_continuous_family(generation, "staged-node", 1, &changed, 1700).await.expect("changed catalog refused"), "{backend}");
+        let route = store.media_session_route(session).await.expect("read proof").expect("route");
+        let mut durable: serde_json::Value = serde_json::from_str(&route.recipe_json).expect("durable recipe");
+        assert_eq!(serde_json::from_value::<ContinuousFamilyDescription>(durable["request"]["continuous_media"]["family_descriptor"].take()).expect("restored proof"), description, "{backend}");
+        durable["request"]["continuous_media"].as_object_mut().expect("media").remove("family_descriptor");
+        assert_eq!(durable, recipe, "{backend}: binding changed source or intent");
+        assert_eq!(route.lease_expires_at_ms, 900000, "{backend}: proof renewed playback lease");
+        store.end_media_session(session, "deleted", 1800).await.expect("End");
+        assert!(!store.bind_continuous_family(generation, "staged-node", 1, &description, 1900).await.expect("terminal proof refused"), "{backend}");
+    }).await;
+}
+
+#[tokio::test]
+async fn shared_continuous_artifacts_remain_reserved_until_each_consumer_disposes() {
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityInterval, QualityLedger, QualityOperation,
+        QualityTransitionRequest,
+    };
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("shared-quality-consumers", "hash", false)
+            .await
+            .expect("user");
+        let video = QualityInterval {
+            artifact_id: "c".repeat(64),
+            rendition_id: "b".repeat(64),
+            timescale: 24000,
+            from_tick: 0,
+            through_tick: 48048,
+            byte_length: 500000,
+        };
+        let audio = QualityInterval {
+            artifact_id: "d".repeat(64),
+            rendition_id: "e".repeat(64),
+            timescale: 48000,
+            from_tick: 0,
+            through_tick: 96256,
+            byte_length: 40000,
+        };
+        let transaction = "00000000-0000-4000-8000-00000000cf05";
+        let mut consumers = Vec::new();
+        for index in 0..2 {
+            let generation = format!("00000000-0000-4000-8000-00000000cf{:02}", index + 10);
+            let session = format!("00000000-0000-4000-8000-00000000cf{:02}", index + 20);
+            let playback = format!("shared-quality-{index}");
+            current_media_session(
+                store.as_ref(),
+                user.id,
+                &playback,
+                &generation,
+                &session,
+                backend,
+            )
+            .await;
+            let mut ledger = QualityLedger::new(
+                generation,
+                1,
+                QualityAttachment {
+                    client_instance_id: "00000000-0000-4000-8000-00000000cf03".into(),
+                    lifetime_id: playback,
+                    attachment_id: "00000000-0000-4000-8000-00000000cf04".into(),
+                    family_id: "a".repeat(64),
+                },
+            )
+            .expect("independent consumer");
+            let request = |ledger: &QualityLedger, sequence, operation| QualityTransitionRequest {
+                version: 1,
+                generation: ledger.generation.clone(),
+                control_epoch: 1,
+                sequence,
+                attachment: ledger.attachment.clone(),
+                transaction_id: transaction.into(),
+                operation,
+            };
+            ledger
+                .apply(
+                    &request(
+                        &ledger,
+                        1,
+                        QualityOperation::Prepare {
+                            intent_revision: 1,
+                            target_rendition_id: video.rendition_id.clone(),
+                        },
+                    ),
+                    1500,
+                )
+                .expect("prepare");
+            ledger
+                .ready(transaction, vec![video.clone()])
+                .expect("ready");
+            ledger
+                .reserve_shared_audio(std::slice::from_ref(&audio))
+                .expect("AAC");
+            ledger
+                .apply(
+                    &request(
+                        &ledger,
+                        2,
+                        QualityOperation::Scheduled {
+                            intervals: vec![video.clone()],
+                        },
+                    ),
+                    1600,
+                )
+                .expect("scheduled");
+            assert!(
+                store
+                    .write_quality_ledger(&ledger, "staged-node", 0, 1700)
+                    .await
+                    .expect("publish consumer"),
+                "{backend}"
+            );
+            consumers.push(ledger);
+        }
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&video.rendition_id)
+                .await
+                .expect("one physical video"),
+            vec![video.clone()],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("one physical AAC"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        for (index, ledger) in consumers.iter_mut().enumerate() {
+            let disposed = QualityTransitionRequest {
+                version: 1,
+                generation: ledger.generation.clone(),
+                control_epoch: 1,
+                sequence: 3,
+                attachment: ledger.attachment.clone(),
+                transaction_id: transaction.into(),
+                operation: QualityOperation::Disposed {
+                    artifacts: vec![video.artifact_id.clone(), audio.artifact_id.clone()],
+                },
+            };
+            ledger
+                .apply(&disposed, 1800 + index as i64)
+                .expect("this consumer removed media");
+            assert!(
+                store
+                    .write_quality_ledger(ledger, "staged-node", 1, 1900 + index as i64)
+                    .await
+                    .expect("dispose consumer"),
+                "{backend}"
+            );
+            let expected_video = if index == 0 {
+                vec![video.clone()]
+            } else {
+                vec![]
+            };
+            let expected_audio = if index == 0 {
+                vec![audio.clone()]
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                store
+                    .quality_reserved_intervals(&video.rendition_id)
+                    .await
+                    .expect("remaining video consumer"),
+                expected_video,
+                "{backend}"
+            );
+            assert_eq!(
+                store
+                    .quality_reserved_intervals(&audio.rendition_id)
+                    .await
+                    .expect("remaining AAC consumer"),
+                expected_audio,
+                "{backend}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependencies() {
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityInterval, QualityLedger, QualityOperation,
+        QualityTransitionRequest,
+    };
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("continuous-ledger-user", "hash", false)
+            .await
+            .expect("user");
+        let generation = "00000000-0000-4000-8000-00000000ce01";
+        let session = "00000000-0000-4000-8000-00000000ce02";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "continuous-ledger",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let mut ledger = QualityLedger::new(
+            generation.into(),
+            1,
+            QualityAttachment {
+                client_instance_id: "00000000-0000-4000-8000-00000000ce03".into(),
+                lifetime_id: "movie".into(),
+                attachment_id: "00000000-0000-4000-8000-00000000ce04".into(),
+                family_id: "a".repeat(64),
+            },
+        )
+        .expect("ledger");
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "staged-node", 7, 1500)
+                .await
+                .expect("missing CAS"),
+            "{backend}: missing revision accepted"
+        );
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "wrong-owner", 0, 1500)
+                .await
+                .expect("wrong owner"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "staged-node", 0, 1500)
+                .await
+                .expect("create"),
+            "{backend}"
+        );
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "staged-node", 0, 1600)
+                .await
+                .expect("stale create"),
+            "{backend}"
+        );
+        let transaction = "00000000-0000-4000-8000-00000000ce05";
+        let request = |ledger: &QualityLedger, sequence, operation| QualityTransitionRequest {
+            version: 1,
+            generation: generation.into(),
+            control_epoch: ledger.control_epoch,
+            sequence,
+            attachment: ledger.attachment.clone(),
+            transaction_id: transaction.into(),
+            operation,
+        };
+        let prepare = request(
+            &ledger,
+            1,
+            QualityOperation::Prepare {
+                intent_revision: 1,
+                target_rendition_id: "b".repeat(64),
+            },
+        );
+        ledger.apply(&prepare, 1700).expect("prepare");
+        let interval = QualityInterval {
+            artifact_id: "c".repeat(64),
+            rendition_id: "b".repeat(64),
+            timescale: 24000,
+            from_tick: 240240,
+            through_tick: 288288,
+            byte_length: 500000,
+        };
+        ledger
+            .ready(transaction, vec![interval.clone()])
+            .expect("verified ready");
+        let schedule = request(
+            &ledger,
+            2,
+            QualityOperation::Scheduled {
+                intervals: vec![interval.clone()],
+            },
+        );
+        ledger.apply(&schedule, 1800).expect("scheduled");
+        let append = request(
+            &ledger,
+            3,
+            QualityOperation::Appended {
+                intervals: vec![interval.clone()],
+            },
+        );
+        let receipt = ledger.apply(&append, 1900).expect("append");
+        let audio = QualityInterval {
+            artifact_id: "d".repeat(64),
+            rendition_id: "e".repeat(64),
+            timescale: 48_000,
+            from_tick: 0,
+            through_tick: 96_256,
+            byte_length: 40_000,
+        };
+        ledger
+            .reserve_shared_audio(std::slice::from_ref(&audio))
+            .expect("verified AAC dependency");
+
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "staged-node", 1, 2000)
+                .await
+                .expect("persist append"),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&interval.rendition_id)
+                .await
+                .expect("reserved media projection"),
+            vec![interval.clone()],
+            "{backend}"
+        );
+        assert!(
+            store
+                .quality_reserved_intervals(&"f".repeat(64))
+                .await
+                .expect("unrelated rendition")
+                .is_empty(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("shared AAC projection"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        let persisted = store
+            .quality_ledger(generation)
+            .await
+            .expect("read")
+            .expect("snapshot");
+        assert_eq!(persisted.revision, 2, "{backend}");
+        assert_eq!(persisted.ledger, ledger, "{backend}");
+        assert_eq!(
+            persisted
+                .ledger
+                .clone()
+                .apply(&append, 2100)
+                .expect("ack loss replay"),
+            receipt,
+            "{backend}"
+        );
+        let mut changed_attachment = ledger.clone();
+        changed_attachment.attachment.attachment_id = "00000000-0000-4000-8000-00000000ce06".into();
+        // A changed attachment is an ordinary CAS refusal (Ok(false)), like a
+        // stale revision or owner: writers re-read and observe the change.
+        assert!(
+            !store
+                .write_quality_ledger(&changed_attachment, "staged-node", 2, 2100)
+                .await
+                .expect("attachment CAS"),
+            "{backend}: inconsistent receipt attachment accepted"
+        );
+        assert_eq!(
+            store
+                .quality_ledger(generation)
+                .await
+                .expect("read after refused attachment")
+                .expect("snapshot"),
+            persisted,
+            "{backend}: refused attachment write changed the ledger"
+        );
+        let parent = store
+            .media_session_route(session)
+            .await
+            .expect("parent")
+            .expect("route");
+        let takeover_at = parent.lease_expires_at_ms + 1;
+        let next = store
+            .claim_media_session_takeover(&plurx_core::domain::MediaSessionTakeover {
+                incarnation_id: generation.into(),
+                expected_owner_node_id: "staged-node".into(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "replacement-node".into(),
+                now_ms: takeover_at,
+                lease_expires_at_ms: takeover_at + 900000,
+            })
+            .await
+            .expect("takeover")
+            .expect("new owner");
+        assert_eq!(next.owner_epoch, 2, "{backend}");
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "staged-node", 2, takeover_at + 1)
+                .await
+                .expect("old owner"),
+            "{backend}"
+        );
+        ledger.adopt_epoch(2).expect("adopt exact facts");
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "replacement-node", 2, takeover_at + 1)
+                .await
+                .expect("new owner projection"),
+            "{backend}"
+        );
+        let adopted = store
+            .quality_ledger(generation)
+            .await
+            .expect("read adopted")
+            .expect("snapshot");
+        assert_eq!(adopted.owner_node_id, "replacement-node", "{backend}");
+        assert_eq!(
+            adopted.ledger.transactions[0].reserved,
+            vec![interval.clone()],
+            "{backend}"
+        );
+        assert!(adopted.ledger.transactions[0].ever_appended, "{backend}");
+        assert_eq!(
+            adopted.ledger.shared_audio_reserved(),
+            std::slice::from_ref(&audio),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("takeover retains AAC"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&interval.rendition_id)
+                .await
+                .expect("takeover retains physical dependency facts"),
+            vec![interval.clone()],
+            "{backend}"
+        );
+        let dispose = request(
+            &ledger,
+            1,
+            QualityOperation::Disposed {
+                artifacts: vec![interval.artifact_id.clone()],
+            },
+        );
+        ledger
+            .apply(&dispose, takeover_at + 2)
+            .expect("exact disposal");
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "replacement-node", 3, takeover_at + 2)
+                .await
+                .expect("persist disposal"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .quality_reserved_intervals(&interval.rendition_id)
+                .await
+                .expect("disposed dependencies released")
+                .is_empty(),
+            "{backend}"
+        );
+
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("video disposal retains shared AAC"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        let terminal_snapshot = store
+            .quality_ledger(generation)
+            .await
+            .expect("terminal baseline")
+            .expect("ledger");
+        store
+            .end_media_session(session, "deleted", takeover_at + 3)
+            .await
+            .expect("End before disposal acknowledgement");
+        let illegal = request(
+            &ledger,
+            2,
+            QualityOperation::Prepare {
+                intent_revision: 2,
+                target_rendition_id: "f".repeat(64),
+            },
+        );
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &terminal_snapshot,
+                    &illegal,
+                    "replacement-node",
+                    takeover_at + 3
+                )
+                .await
+                .is_err(),
+            "{backend}: End cannot restart preparation"
+        );
+        let dispose_audio = request(
+            &ledger,
+            2,
+            QualityOperation::Disposed {
+                artifacts: vec![audio.artifact_id.clone()],
+            },
+        );
+        ledger
+            .apply(&dispose_audio, takeover_at + 3)
+            .expect("named AAC disposal");
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "replacement-node", 4, takeover_at + 3)
+                .await
+                .expect("active writer after End"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &terminal_snapshot,
+                    &dispose_audio,
+                    "wrong-owner",
+                    takeover_at + 3
+                )
+                .await
+                .expect("wrong terminal owner")
+                .is_none(),
+            "{backend}"
+        );
+        let mut forged = terminal_snapshot.clone();
+        forged
+            .ledger
+            .reserve_shared_audio(
+                &[plurx_core::playback::continuous_quality::QualityInterval {
+                    artifact_id: "e".repeat(64),
+                    rendition_id: audio.rendition_id.clone(),
+                    timescale: 48000,
+                    from_tick: 1,
+                    through_tick: 2,
+                    byte_length: 1,
+                }],
+            )
+            .expect("forged snapshot remains structurally valid");
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &forged,
+                    &dispose_audio,
+                    "replacement-node",
+                    takeover_at + 3
+                )
+                .await
+                .expect("compare exact old JSON")
+                .is_none(),
+            "{backend}"
+        );
+        let terminal_receipt = store
+            .write_terminal_quality_transition(
+                &terminal_snapshot,
+                &dispose_audio,
+                "replacement-node",
+                takeover_at + 3,
+            )
+            .await
+            .expect("late terminal disposal")
+            .expect("terminal CAS");
+        let settled = store
+            .quality_ledger(generation)
+            .await
+            .expect("terminal ledger")
+            .expect("persisted");
+        assert_eq!(
+            terminal_receipt,
+            store
+                .write_terminal_quality_transition(
+                    &settled,
+                    &dispose_audio,
+                    "replacement-node",
+                    takeover_at + 4
+                )
+                .await
+                .expect("terminal replay")
+                .expect("same receipt"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &terminal_snapshot,
+                    &dispose_audio,
+                    "replacement-node",
+                    takeover_at + 4
+                )
+                .await
+                .expect("stale terminal revision")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("disposed AAC released")
+                .is_empty(),
+            "{backend}"
+        );
+
+        assert_eq!(
+            store
+                .media_session_route(session)
+                .await
+                .expect("terminal route")
+                .expect("retained receipt owner")
+                .state,
+            "ended",
+            "{backend}"
+        );
+    })
+    .await;
 }

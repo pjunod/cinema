@@ -6266,6 +6266,7 @@ mod tests {
                 codec: "truehd".to_owned(),
                 channels: Some(8),
                 sample_rate: Some(48_000),
+                channel_layout: None,
                 language: Some("eng".to_owned()),
                 title: None,
                 default: true,

@@ -187,9 +187,15 @@ pub(crate) async fn start(
         .ok_or(StatusCode::NOT_FOUND)?;
     state
         .transcode
-        .restore_candidate_context(&mut request)
+        .restore_candidate_context_with_deadline(&mut request, start_deadline)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .map_err(|error| {
+            if error.is_incompatible() {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        })?;
     let negotiated_ownership = remote_start_ownership_v1(&headers);
     // The worker publication and its activation-confirmation watcher are one
     // owned operation. If the peer disconnects after ffmpeg starts, dropping
@@ -199,8 +205,12 @@ pub(crate) async fn start(
         let _restart_admission = restart_admission;
         let started = start_state
             .transcode
-            .create_cluster_session(
-                &request.request,
+            .create_cluster_session_for_receiver(
+                (
+                    &request.request,
+                    request.retained_output_receiver,
+                    request.retained_output.as_ref(),
+                ),
                 // A relayed worker start carries no epoch: `RemoteStartRequest`
                 // is the recipe the owning node sends, and the epoch is not on
                 // it. Adding one is a change to a relayed type and therefore a
@@ -744,7 +754,10 @@ pub(crate) async fn relay(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let authorization = if matches!(&request.resource, RelayResource::Delete) {
+    let authorization = if matches!(
+        &request.resource,
+        RelayResource::Delete | RelayResource::PassivePresence { .. }
+    ) {
         authorize(&state, &headers, RELAY_PATH, &body).await
     } else {
         authorize_read(&state, &headers, RELAY_PATH, &body).await
@@ -764,7 +777,7 @@ pub(crate) async fn relay(
     let request_deadline = now + budget;
     let media_resource = !matches!(
         &request.resource,
-        RelayResource::Status | RelayResource::Delete
+        RelayResource::Status | RelayResource::Delete | RelayResource::PassivePresence { .. }
     );
     let resolution = if media_resource {
         state
@@ -834,6 +847,46 @@ fn post_classification_route_rejection(
     // classification is still a takeover/settlement transition, never a
     // durable terminal fact. 409 makes ingress reclassify.
     (route.lease_expires_at_ms <= now_unix_ms).then_some(StatusCode::CONFLICT)
+}
+
+/// Cancellation discovery and mutation use the same exact-write peer auth as
+/// ordinary control, in a separate envelope unknown to legacy parsers.
+pub(crate) async fn quality_control(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, super::hls::QUALITY_CONTROL_PATH, &body).await
+    {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<super::hls::QualityControlRelayRequest>(&body)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !request.request.valid() || request.expected_owner_node_id != state.node_id {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(budget) =
+        crate::playback_control::inherited_exchange_budget(request.deadline_unix_ms, unix_ms())
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match tokio::time::timeout(
+        budget,
+        super::hls::quality_control_routed(
+            &state,
+            &request.session_id,
+            request.request,
+            Some(&request.expected_owner_node_id),
+            request.deadline_unix_ms,
+        ),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 /// Exact-write-authenticated control relay. The envelope repeats the durable
@@ -1046,6 +1099,32 @@ pub(crate) async fn control_authorized(
     super::hls::control_local(&state, &route, request.control, request.deadline_unix_ms).await
 }
 
+pub(crate) async fn quality_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, super::hls::QUALITY_SCHEDULE_PATH, &body).await
+    {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<super::hls::QualityScheduleRelayRequest>(&body)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !request.request.valid() || request.expected_owner_node_id != state.node_id {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    super::hls::quality_schedule_admitted(
+        state,
+        request.session_id,
+        request.request,
+        Some(request.expected_owner_node_id),
+        request.deadline_unix_ms,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1124,10 +1203,12 @@ mod tests {
 
     fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
         serde_json::to_string(&crate::http::hls::StartResponse {
+            delivered_audio: None,
             quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: session_id.to_owned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -1341,6 +1422,7 @@ mod tests {
         state
             .store
             .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                quality_cancellation_key: None,
                 expected_desired_revision: None,
                 incarnation_id: successor_incarnation.clone(),
                 session_id: successor_session.clone(),

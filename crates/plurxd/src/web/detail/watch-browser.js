@@ -175,13 +175,13 @@ function watchToggleEpisodeRows(){
   document.getElementById("watch-episodes").classList.toggle("watch-rows",WATCH.rows);
   const button=document.getElementById("watch-row-toggle");button.textContent=WATCH.rows?"Cards":"Rows";button.setAttribute("aria-pressed",String(WATCH.rows));
 }
-async function watchPlayEpisode(id){
+async function watchPlayEpisode(id,prepared=null){
   const w=WATCH;if(!w||w.accepted===String(id))return false;
   const load=++w.load;
   const attempt=PLAY_OPEN_GATE.begin("episode");
   const current=()=>WATCH===w&&w.load===load&&PLAY_OPEN_GATE.current(attempt);
   try{
-    const page=await loadItem(id,current);
+    const page=await loadItem(id,current,prepared?.page);
     if(!current()||!page)return false;
     const pf=page.playable;
     if(!pf){toast("This episode has no available file.");return false;}

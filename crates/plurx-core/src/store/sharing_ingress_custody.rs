@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn sharing_ingress_custody_migration_preserves_unresolved_debt_without_route_cascade() {
         let connection = rusqlite::Connection::open_in_memory().expect("database");
-        SqliteStore::apply_migrations_for_test(&connection, 92)
+        SqliteStore::apply_migrations_for_test(&connection, 104)
             .expect("actual previous SQLite migration set");
         assert_eq!(
             connection

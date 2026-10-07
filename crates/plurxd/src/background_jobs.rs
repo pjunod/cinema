@@ -2,6 +2,7 @@
 //! its admission guard until its child has joined; this module owns only the
 //! durable token, monotonic deadline and cancellation notification.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +31,145 @@ use metrics::Event;
 pub(crate) use metrics::{accepted_claims, prometheus};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
+
+/// Why one claimed copy/encoded output preparation ended without publishing.
+/// The class, not the message, decides the durable settlement: a preparation
+/// that is refused for a reason that will hold on every rerun must consume
+/// its attempt budget instead of re-running a full remux/encode forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreparationError {
+    /// Preemption by a viewer, a lost lease, the pass deadline or a busy
+    /// owner. No attempt is consumed; the row is queued again.
+    Yield(&'static str),
+    /// A store, I/O or process failure. Consumes one attempt through the
+    /// shared retry backoff, so the attempt limit bounds a persistent fault.
+    Retry(String),
+    /// The same payload against the same facts refuses identically on every
+    /// run (unsupported payload, changed policy, identity or delivery).
+    Fail(&'static str),
+    /// The source the job names is gone or changed incarnation.
+    Stop(&'static str),
+}
+
+impl std::fmt::Display for PreparationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Yield(code) => write!(f, "yield: {code}"),
+            Self::Retry(detail) => write!(f, "retry: {detail}"),
+            Self::Fail(code) => write!(f, "fail: {code}"),
+            Self::Stop(code) => write!(f, "stop: {code}"),
+        }
+    }
+}
+
+/// Unclassified failures from store, filesystem and process layers are
+/// transient by default; deterministic refusals are named explicitly.
+impl From<String> for PreparationError {
+    fn from(detail: String) -> Self {
+        Self::Retry(detail)
+    }
+}
+
+impl From<&str> for PreparationError {
+    fn from(detail: &str) -> Self {
+        Self::Retry(detail.to_owned())
+    }
+}
+
+impl PreparationError {
+    /// Durable settlement plus the bounded pass-telemetry reason. `preempted`
+    /// is the caller's re-observation of lease loss, owner preemption or the
+    /// pass deadline: a transient-looking error raised while a viewer was
+    /// taking the owner is that preemption, not a consumed attempt.
+    pub(crate) fn settlement(
+        &self,
+        job: &BackgroundJob,
+        retry_code: &'static str,
+        preempted: bool,
+        now_ms: i64,
+    ) -> (JobSettlement, &'static str) {
+        match self {
+            Self::Yield(code) => (
+                JobSettlement::Yield {
+                    error_code: Some((*code).to_owned()),
+                    checkpoint: None,
+                    not_before_ms: now_ms.saturating_add(5_000),
+                },
+                "yielded",
+            ),
+            Self::Retry(_) if preempted => (
+                JobSettlement::Yield {
+                    error_code: Some("preempted".to_owned()),
+                    checkpoint: None,
+                    not_before_ms: now_ms.saturating_add(5_000),
+                },
+                "yielded",
+            ),
+            Self::Retry(_) => (
+                JobSettlement::Retry {
+                    error_code: retry_code.to_owned(),
+                    not_before_ms: now_ms
+                        .saturating_add(retry_delay_ms(&job.id, job.failed_attempts)),
+                },
+                "retry",
+            ),
+            Self::Fail(code) => (
+                JobSettlement::Fail {
+                    error_code: (*code).to_owned(),
+                },
+                "failed",
+            ),
+            Self::Stop(code) => (
+                JobSettlement::Stop {
+                    error_code: (*code).to_owned(),
+                },
+                "stopped",
+            ),
+        }
+    }
+}
+
+/// One finite Copy watchdog covers resolution through historical settlement.
+/// Returning drops the owned operation before its caller settles or retires;
+/// cancellation does not assert that an already-dispatched SQL write rolled back.
+pub(crate) async fn watch_copy_preparation(
+    fence: &JobFence,
+    deadline: Instant,
+    still_idle: impl Fn() -> bool,
+    operation: impl std::future::Future<Output = Result<bool, PreparationError>>,
+) -> Result<bool, PreparationError> {
+    let lost = fence.loss_token();
+    if lost.is_cancelled() && !fence.copy_output_completed() {
+        return Err(PreparationError::Yield("lease_lost"));
+    }
+    if Instant::now() >= deadline {
+        return Err(PreparationError::Yield("pass_deadline"));
+    }
+    if !still_idle() {
+        return Err(PreparationError::Yield("preempted"));
+    }
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut operation => return result,
+            _ = tokio::time::sleep_until(deadline) =>
+                return Err(PreparationError::Yield("pass_deadline")),
+            _ = lost.cancelled(), if !fence.copy_output_completed() => {
+                if !fence.copy_output_completed() {
+                    // Settlement may be historical; the caller's settle is
+                    // refused by the fence either way.
+                    return Err(PreparationError::Yield("lease_lost"));
+                }
+            },
+            _ = tokio::time::sleep(crate::transcode::PRODUCER_POLL) => {
+                if !still_idle() {
+                    return Err(PreparationError::Yield("preempted"));
+                }
+            },
+        }
+    }
+}
 
 /// Disposable per-loop pacing. Empty polls never need a durable timestamp.
 pub(crate) struct IdlePoll {
@@ -116,6 +256,8 @@ struct Inner {
     state: Mutex<ClaimState>,
     deadline: watch::Sender<Instant>,
     lost: CancellationToken,
+    /// Historical acknowledged completion only; never artifact authority.
+    copy_output_completed: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -269,6 +411,7 @@ impl ActiveBackgroundJob {
             }),
             deadline,
             lost: CancellationToken::new(),
+            copy_output_completed: AtomicBool::new(false),
         }));
         let stop = CancellationToken::new();
         let heartbeat_stop = stop.clone();
@@ -353,6 +496,9 @@ impl Drop for ActiveBackgroundJob {
 }
 
 impl JobFence {
+    pub(crate) fn copy_output_completed(&self) -> bool {
+        self.0.copy_output_completed.load(Ordering::Acquire)
+    }
     pub(crate) fn loss_token(&self) -> CancellationToken {
         self.0.lost.clone()
     }
@@ -560,6 +706,114 @@ impl JobFence {
                     .await
             }
         }
+    }
+
+    pub(crate) async fn publish_copy_output(
+        &self,
+        intent: plurx_core::store::background_jobs::CopyOutputIntent,
+        output: plurx_core::store::background_jobs::CopyOutputJobOutput,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if self.0.kind != plurx_core::store::background_jobs::JobKind::CopyOutputPrepare
+            || !self.0.authority.may_execute_job(self.0.kind).await
+            || !self.may_publish()
+        {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = plurx_core::store::background_jobs::PublishCopyOutputJob {
+            token,
+            intent,
+            output,
+            now_ms: unix_ms()?,
+        };
+        let result = match self.0.store.publish_copy_output_job(request.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_copy_output_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        if published {
+            self.0.copy_output_completed.store(true, Ordering::Release);
+        }
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
+    pub(crate) async fn publish_encoded_output(
+        &self,
+        intent: plurx_core::store::background_jobs::EncodedOutputIntent,
+        output: plurx_core::store::background_jobs::CopyOutputJobOutput,
+    ) -> Result<bool, StoreError> {
+        use plurx_core::store::background_jobs::{JobKind, PublishEncodedOutputJob};
+        let mut state = self.0.state.lock().await;
+        if self.0.kind != JobKind::EncodedOutputPrepare
+            || !self.0.authority.may_execute_job(self.0.kind).await
+            || !self.may_publish()
+        {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = PublishEncodedOutputJob {
+            token,
+            intent,
+            output,
+            now_ms: unix_ms()?,
+        };
+        let result = match self
+            .0
+            .store
+            .publish_encoded_output_job(request.clone())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_encoded_output_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        if published {
+            self.0.copy_output_completed.store(true, Ordering::Release);
+            state.token = None;
+        }
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        Ok(published)
     }
 
     pub(crate) async fn publish_transcode(
@@ -1040,27 +1294,92 @@ impl JobFence {
 /// Find a compatible candidate without letting an unreadable high-priority
 /// item hide every lower item. Keyset pages bound each read; the active-row
 /// cap bounds a complete pass. Admission is held through ambiguous claims.
+pub(crate) enum PreparationClaim {
+    Encoded(
+        plurx_core::store::background_jobs::BackgroundJob,
+        ActiveBackgroundJob,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
+    Transcode(
+        plurx_core::domain::PretranscodeJob,
+        ActiveBackgroundJob,
+        crate::transcode::PretranscodeFence,
+    ),
+    Copy(
+        plurx_core::store::background_jobs::BackgroundJob,
+        ActiveBackgroundJob,
+        crate::transcode::FragmentAdmission,
+    ),
+}
+
+/// Which preparation kinds one pass may claim, and what each may occupy.
+///
+/// The speculative lane is the discovery schedule's (`jobs.cache_produce_mins`)
+/// and occupies the pre-transcode cache; the output lanes are the
+/// `vod.output_preparation` switch's and occupy the retained registry. One
+/// loop runs both, but neither may open the other: until 2026-10-04 the loop
+/// ran only when the schedule was on, so viewer-demand rows had no executor
+/// on any node that left discovery at "never".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparationLanes {
+    pub(crate) speculative: bool,
+    pub(crate) output: crate::vodserve::OutputPreparation,
+}
+
+impl PreparationLanes {
+    #[cfg(test)]
+    pub(crate) const ALL: Self = Self {
+        speculative: true,
+        output: crate::vodserve::OutputPreparation::CopyAndEncoded,
+    };
+
+    pub(crate) fn kinds(self) -> Vec<plurx_core::store::background_jobs::JobKind> {
+        let mut kinds = Vec::with_capacity(3);
+        if self.speculative {
+            kinds.push(plurx_core::store::background_jobs::JobKind::TranscodePrepare);
+        }
+        kinds.extend_from_slice(self.output.job_kinds());
+        kinds
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self.kinds().is_empty()
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // one claim's complete admission inputs
 pub(crate) async fn claim_pretranscode(
     store: Arc<dyn Store>,
     authority: Arc<dyn ClusterJobAuthority>,
     transcode: &crate::transcode::TranscodeManager,
     node: &str,
+    allowed: &[plurx_core::store::background_jobs::JobKind],
     capabilities: &plurx_core::domain::PretranscodeWorkerCapabilities,
+    speculative_capacity: i64,
+    output_capacity: i64,
     excluded: &[String],
-) -> Result<
-    Option<(
-        plurx_core::domain::PretranscodeJob,
-        ActiveBackgroundJob,
-        crate::transcode::PretranscodeFence,
-    )>,
-    StoreError,
-> {
+) -> Result<Option<PreparationClaim>, StoreError> {
+    // Each lane is bounded by the store it publishes into: speculative
+    // generations by the pre-transcode cache, output preparations by the
+    // retained registry. Physical scratch bounds both.
+    let mut speculative_capabilities = capabilities.clone();
+    speculative_capabilities.scratch_bytes = capabilities.scratch_bytes.min(speculative_capacity);
     use plurx_core::store::background_jobs::{
         CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
-    if !authority.may_execute_job(JobKind::TranscodePrepare).await {
+    let mut kinds = Vec::new();
+    for kind in [
+        JobKind::TranscodePrepare,
+        JobKind::CopyOutputPrepare,
+        JobKind::EncodedOutputPrepare,
+    ] {
+        if allowed.contains(&kind) && authority.may_execute_job(kind).await {
+            kinds.push(kind);
+        }
+    }
+    if kinds.is_empty() {
         return Ok(None);
     }
     let mut cursor = None;
@@ -1068,7 +1387,7 @@ pub(crate) async fn claim_pretranscode(
         let page = store
             .job_candidates(CandidateQuery {
                 node_id: node.into(),
-                kinds: vec![JobKind::TranscodePrepare],
+                kinds: kinds.clone(),
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
@@ -1092,6 +1411,103 @@ pub(crate) async fn claim_pretranscode(
             let Ok(payload) = candidate.supported_payload() else {
                 continue;
             };
+            if let JobPayload::EncodedOutputPrepare {
+                intent,
+                scratch_bytes,
+                ..
+            } = &payload
+            {
+                // An output row is bounded by the retained registry it
+                // publishes into, not by the pre-transcode cache budget.
+                if !kinds.contains(&JobKind::EncodedOutputPrepare)
+                    || intent.target_node_id != node
+                    || *scratch_bytes > capabilities.scratch_bytes.min(output_capacity)
+                {
+                    continue;
+                }
+                let Some(admission) = transcode.admit_encoded_preparation() else {
+                    return Ok(None);
+                };
+                if !authority
+                    .may_execute_job(JobKind::EncodedOutputPrepare)
+                    .await
+                {
+                    continue;
+                }
+                let now_ms = unix_ms()?;
+                let request = ClaimJob {
+                    job_id: candidate.id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: node.into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::EncodedOutputPrepare,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                };
+                let Some((job, deadline)) =
+                    claim_with_resolution(store.as_ref(), &candidate, request).await?
+                else {
+                    continue;
+                };
+                let active = ActiveBackgroundJob::start(
+                    Arc::clone(&store),
+                    Arc::clone(&authority),
+                    job.token.clone().ok_or_else(|| {
+                        StoreError::Task("claimed encoded job has no ownership token".into())
+                    })?,
+                    deadline,
+                    JobKind::EncodedOutputPrepare,
+                )?;
+                return Ok(Some(PreparationClaim::Encoded(job, active, admission)));
+            }
+            if let JobPayload::CopyOutputPrepare {
+                intent,
+                scratch_bytes,
+                ..
+            } = &payload
+            {
+                if !kinds.contains(&JobKind::CopyOutputPrepare)
+                    || intent.target_node_id != node
+                    || *scratch_bytes > capabilities.scratch_bytes.min(output_capacity)
+                {
+                    continue;
+                }
+                let Some(admission) = transcode.admit_fragment().await else {
+                    return Ok(None);
+                };
+                if !authority.may_execute_job(JobKind::CopyOutputPrepare).await {
+                    continue;
+                }
+                let now_ms = unix_ms()?;
+                let request = ClaimJob {
+                    job_id: candidate.id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: node.into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::CopyOutputPrepare,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                };
+                let Some((job, deadline)) =
+                    claim_with_resolution(store.as_ref(), &candidate, request).await?
+                else {
+                    continue;
+                };
+                let active = ActiveBackgroundJob::start(
+                    Arc::clone(&store),
+                    Arc::clone(&authority),
+                    job.token.clone().ok_or_else(|| {
+                        StoreError::Task("claimed copy job has no ownership token".into())
+                    })?,
+                    deadline,
+                    JobKind::CopyOutputPrepare,
+                )?;
+                return Ok(Some(PreparationClaim::Copy(job, active, admission)));
+            }
             let JobPayload::TranscodePrepare {
                 requirements,
                 target_height,
@@ -1101,8 +1517,13 @@ pub(crate) async fn claim_pretranscode(
             else {
                 continue;
             };
-            if !requirements.compatible_with(capabilities)
-                || i64::from(*target_height) > capabilities.max_target_height
+            if !kinds.contains(&JobKind::TranscodePrepare) {
+                continue;
+            }
+            if speculative_capabilities.scratch_bytes <= 0
+                || !speculative_capabilities.validate()
+                || !requirements.compatible_with(&speculative_capabilities)
+                || i64::from(*target_height) > speculative_capabilities.max_target_height
             {
                 continue;
             }
@@ -1154,7 +1575,7 @@ pub(crate) async fn claim_pretranscode(
                 active.fence(),
                 admission,
             );
-            return Ok(Some((projection, active, fence)));
+            return Ok(Some(PreparationClaim::Transcode(projection, active, fence)));
         }
         cursor = page.next;
         if cursor.is_none() {
@@ -1586,6 +2007,135 @@ mod tests {
         CancelJob, EnqueueJob, JobKind, JobPayload, JobRequest, JobState,
     };
     use plurx_core::store::SqliteStore;
+
+    #[tokio::test]
+    async fn preparation_refusals_settle_by_class_not_as_unbounded_yields() {
+        let (store, id, active) = active().await;
+        let job = store.background_job(&id).await.expect("job").expect("row");
+        let now = 1_000_000_i64;
+        let (settlement, reason) = PreparationError::Fail("encoded_policy_changed").settlement(
+            &job,
+            "copy_output_failed",
+            false,
+            now,
+        );
+        assert!(matches!(settlement, JobSettlement::Fail { ref error_code }
+            if error_code == "encoded_policy_changed"));
+        assert_eq!(reason, "failed");
+        let (settlement, reason) = PreparationError::from("store unavailable").settlement(
+            &job,
+            "copy_output_failed",
+            false,
+            now,
+        );
+        let expected = now + retry_delay_ms(&job.id, job.failed_attempts);
+        assert!(
+            matches!(settlement, JobSettlement::Retry { ref error_code, not_before_ms }
+            if error_code == "copy_output_failed" && not_before_ms == expected),
+            "a transient fault consumes an attempt through the shared backoff"
+        );
+        assert_eq!(reason, "retry");
+        let (settlement, _) = PreparationError::from("io while a viewer attached").settlement(
+            &job,
+            "copy_output_failed",
+            true,
+            now,
+        );
+        assert!(
+            matches!(settlement, JobSettlement::Yield { .. }),
+            "observed preemption never charges an attempt"
+        );
+        let (settlement, _) = PreparationError::Stop("source_changed").settlement(
+            &job,
+            "copy_output_failed",
+            true,
+            now,
+        );
+        assert!(
+            matches!(settlement, JobSettlement::Stop { .. }),
+            "a deterministic refusal is not softened by concurrent preemption"
+        );
+        active.finish().await;
+    }
+
+    #[tokio::test]
+    async fn copy_watchdog_bounds_pending_operation_and_distinguishes_historical_completion() {
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let (_store, _id, active) = active().await;
+        let fence = active.fence();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        let pending = async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+            Ok(true)
+        };
+        assert!(watch_copy_preparation(
+            &fence,
+            Instant::now() + Duration::from_millis(20),
+            || true,
+            pending
+        )
+        .await
+        .is_err());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "deadline drops private operation before caller settlement"
+        );
+
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        assert!(watch_copy_preparation(
+            &fence,
+            Instant::now() + Duration::from_secs(1),
+            || checks.fetch_add(1, Ordering::Relaxed) == 0,
+            async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+                Ok(true)
+            }
+        )
+        .await
+        .is_err());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "changed observational predicate drops unfinished body"
+        );
+
+        fence.0.lost.cancel();
+        assert!(
+            watch_copy_preparation(
+                &fence,
+                Instant::now() + Duration::from_secs(1),
+                || true,
+                async { Ok(true) }
+            )
+            .await
+            .is_err(),
+            "unacknowledged loss must refuse"
+        );
+        // Model only the watchdog's phase signal, not SQL success or artifact
+        // authority. The real publication consumer independently covers those.
+        fence.0.copy_output_completed.store(true, Ordering::Release);
+        assert!(watch_copy_preparation(
+            &fence,
+            Instant::now() + Duration::from_secs(1),
+            || true,
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(true)
+            }
+        )
+        .await
+        .expect("historical completion is not own-lease loss"));
+        active.finish().await;
+    }
 
     async fn active() -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         active_with_deadline(None).await

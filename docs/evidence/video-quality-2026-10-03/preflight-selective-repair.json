@@ -1,0 +1,12 @@
+{
+  "ci_run": "http://192.168.4.7:3000/noirr/plurx/actions/runs/3969",
+  "ci_head": "35c226caef6940242a7a6c357da867732fef4d72",
+  "validation_methods_run": 253,
+  "passing_methods_retained": 249,
+  "failed_methods": 4,
+  "failed_subtests": 9,
+  "focused_retries_passed": 4,
+  "runtime_source_changed_by_repair": false,
+  "remaining_preflight_steps": "operations and shared player input checks were skipped; execute once separately",
+  "reason": "Preserve owner-authorized per-check results instead of rerunning the complete successful suite."
+}

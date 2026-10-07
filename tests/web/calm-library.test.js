@@ -89,7 +89,7 @@ function libraryHarness(pages, state) {
   const parse = (html) => [...html.matchAll(/<i:([^>]+)>/g)].map((m) => ({ id: m[1] }));
   const makeNode = (id) => {
     const node = {
-      id, children: [], grid: null,
+      id, children: [], grid: null, classList:{remove(){}},
       set innerHTML(html) {
         this.children = [];
         this.grid = html.includes('<div class="grid">')
@@ -105,18 +105,21 @@ function libraryHarness(pages, state) {
         assert.equal(selector, ".grid");
         return this.grid;
       },
-      // The browse tools are mounted before #libbody and are not this test's
+      // The browse tools are mounted after the toolbar and are not this test's
       // subject; only their landing place has to exist.
-      insertAdjacentHTML(where) { assert.equal(where, "beforebegin"); },
+      insertAdjacentHTML(where) { assert.equal(where, "afterend"); },
+      scrollIntoView() {},
     };
     nodes[id] = node;
     return node;
   };
-  ["main", "libbody", "libpager", "librail", "libcount"].forEach(makeNode);
+  ["main", "libbar", "libbody", "libpager", "librail", "libcount"].forEach(makeNode);
   const api = new Function(
     "assert", "document", "state", "pages", "nodes",
     [
-      "let LIB_LOAD=0,LIB_PAGE_AT=0,LIB_VIEW=null,PHOTO_SET=null;",
+      "let LIB_LOAD=0,LIB_PAGE_AT=0,LIB_VIEW=null,PHOTO_SET=null,LIB_GROUP='',LIB_PRESENTATION='grid';",
+      "const location={hash:'#/library/1'};",
+      "function libraryGroups(){return [];} function libraryPaintControls(){}",
       "const LIB_PER_PAGE=200;",
       // The three filter globals and the page size are the state a case sets.
       "let LIB_SCOPE=state.scope||'',LIB_FIND=state.find||'',LIB_FILTER=state.filter||'all',LIB_PER=state.per||'all';",
@@ -148,7 +151,8 @@ function libraryHarness(pages, state) {
       "return {libraryView, libGoPage, redraw(){LIB_VIEW.draw(LIB_VIEW.done);},"
         + "narrow(n){if('find' in n)LIB_FIND=n.find;if('filter' in n)LIB_FILTER=n.filter;if('scope' in n)LIB_SCOPE=n.scope;}};",
     ].join("\n"),
-  )(assert, { getElementById: (id) => nodes[id] || null, querySelector: () => null }, state, pages, nodes);
+  )(assert, { getElementById: (id) => nodes[id] || null,
+    querySelector: (selector) => { assert.equal(selector, "#main .libbar"); return nodes.libbar; } }, state, pages, nodes);
   return { run: api.libraryView, api, nodes };
 }
 // Titles, libraries and watched state exist so the find, scope and filter

@@ -171,12 +171,12 @@ function finishPlaybackSeekTelemetry(p,pending,event){
     const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
     const elementMs=Number(video&&video.currentTime);
     report.seek_trace=JSON.stringify(Object.assign({},measurement.trace,{
-      landing_ms:event==="seek_resumed"&&Number.isFinite(elementMs)
+      landing_ms:["seek_resumed","seek_positioned"].includes(event)&&Number.isFinite(elementMs)
         ?Math.round(((Number(p.offset)||0)+elementMs)*1000):null,
       outcome:event,
     }));
   }
-  if(event==="seek_resumed"){
+  if(event==="seek_resumed"||event==="seek_positioned"){
     report.ms=Math.max(0,Math.round(performance.now()-measurement.startedAt));
     report.method=["direct_play","remux","transcode"].includes(p.method)?p.method:null;
     // A full reopen may mint a startup clock, but this picture ends the
@@ -196,23 +196,21 @@ function watchPlaybackSeekTelemetry(p,pending,v){
   let seeked=!p.started&&!v.seeking;
   const current=()=>PLAYER===p&&p.controlSeek===pending&&p.mediaAttachment===attachment
     &&document.getElementById("video")===v&&playbackOwnsAttachedMedia(p);
-  const onSeeked=()=>{if(current()) seeked=true;};
+  const onSeeked=()=>{if(current()){seeked=true;settlePlaybackControlSeek(v,p);}};
   const onTimeupdate=()=>{
     if(!current()||p.controlHasFrameCallbacks||!seeked||v.seeking||v.readyState<3) return;
-    const position=Math.round(((p.offset||0)+(v.currentTime||0))*1000);
-    const played=samplePlaybackPresentationClock(v,p);
-    if(position>=pending.targetMs-250&&position<=pending.targetMs+played+250)
-      finishPlaybackSeekTelemetry(p,pending,"seek_resumed");
+    settlePlaybackControlSeek(v,p);
   };
   const cleanup=()=>{v.removeEventListener("seeked",onSeeked);v.removeEventListener("timeupdate",onTimeupdate);};
   measurement.cleanup=cleanup;
   v.addEventListener("seeked",onSeeked);
   v.addEventListener("timeupdate",onTimeupdate);
 }
-function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry=null){
+function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry=null,
+  {preserveContinuousManualQuality=false}={}){
   if(!p) return null;
   const intentGeneration=supersedeIntent
-    ? supersedePlaybackControlIntent(p) : (p.controlIntentGeneration||0);
+    ? supersedePlaybackControlIntent(p,{preserveContinuousManualQuality}) : (p.controlIntentGeneration||0);
   const sequence=(p.controlSeekSequence||0)+1;
   // The destination this replaces is superseded, which is the one thing that
   // retires a fault about a pending destination (contract §3.4).
@@ -233,6 +231,7 @@ function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry
   p.controlSeek={sequence,intentGeneration,
     targetMs:Math.max(0,Math.round(targetSec*1000)),
     executed:false,frameFloor,audioPositionMs:null,seekTelemetry};
+  if(preserveContinuousManualQuality)p.continuousQuality?.noteSeek?.(targetSec);
   const reporter=p.controlReporter;
   const predicted=reporter&&!reporter.stopped?(Number(reporter.sequence)||0)+1:null;
   const reported=notifyPlaybackControl();
@@ -252,6 +251,9 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   playbackSurfaceStep({intent_settled:pending.sequence});
   pending.executed=true;
   pending.executedAt=performance.now();
+  pending.attachment=p.mediaAttachment;
+  pending.targetFrame=null;
+  p.progressWatch=null;
   p.controlPresentationEpoch=(p.controlPresentationEpoch||0)+1;
   pending.frameFloor=Number(p.controlPresentedFrames)||pending.frameFloor||0;
   pending.audioPositionMs=null;
@@ -260,8 +262,12 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   pending.activeSampleMs=0;
   pending.playedSampleMs=0;
   if(!v) try{v=document.getElementById("video");}catch(e){}
+  pending.element=v;
   watchPlaybackSeekTelemetry(p,pending,v);
   samplePlaybackPresentationClock(v,p);
+  // Cancel and renew before currentTime assignment; a paused seek may emit
+  // its only frame before seeked. Already queued deliveries stay fenced.
+  p.controlFrameRearm?.();
   if(!p.controlHasFrameCallbacks) try{
     const q=v?.getVideoPlaybackQuality?.();
     if(Number.isFinite(q?.totalVideoFrames)) pending.frameFloor=q.totalVideoFrames;
@@ -356,22 +362,9 @@ function playbackProgressTick(v,p){
   if(moved){
     watch.clock=clock; watch.frames=frames; watch.at=now;
     p.presentationAdvancedAt=now;
-    // The progress watch has already established clock advancement and,
-    // where available, a newly presented frame. Keep that proof on this
-    // intent even if the stricter control-settlement path is still waiting
-    // for `seeking` to clear or has no usable frame sequence.
-    if(p.controlSeek===pending&&pending?.localVodSeek){
-      const positionMs=Math.round(((p.offset||0)+clock)*1000);
-      const playedMs=Math.max(0,Number(pending.playedSampleMs)||0);
-      if(positionMs>=pending.targetMs-250
-         &&positionMs<=pending.targetMs+playedMs+250){
-        pending.localVodPresented=true;
-        if(!v.seeking&&v.readyState>=3&&frames!=null&&frames>pending.frameFloor)
-          finishPlaybackSeekTelemetry(p,pending,"seek_resumed");
-        pending.localVodSeekCleanup?.();
-      }
-    }
-    if(pending) settlePlaybackControlSeek(v,p,clock,frames);
+    // The assigned element clock and cumulative callback count cannot prove
+    // a target frame. Only the timestamped observer may supply that evidence.
+    if(pending) settlePlaybackControlSeek(v,p);
     completeHlsStartup(p);
     if(!p.controlSeek||(p.controlSeek===pending&&pending?.localVodPresented)){
       watch.fired=false;
@@ -412,47 +405,77 @@ function playbackProgressTick(v,p){
   p.waitReported=false; p.waitReportedMs=null; p.waitReportedDetail=null;
   persistentWait(v,p,p.waitAt,p._seekToken||0,p.controlIntentGeneration||0).catch(()=>{});
 }
-function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence){
+function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence,observation){
   if(!playbackOwnsAttachedMedia(p))return false;
   const pending=p&&p.controlSeek;
   const playedMs=samplePlaybackPresentationClock(v,p);
-  if(!pending||!pending.executed||!v||!p.started||v.seeking) return false;
+  if(!pending||!pending.executed||!v) return false;
+  if(pending.element&&pending.element!==v) return false;
+  if(pending.attachment!=null&&pending.attachment!==p.mediaAttachment) return false;
   const hasVideo=!!(p.source&&p.source.video_codec);
   const inLandingWindow=position=>position>=pending.targetMs-250
     &&position<=pending.targetMs+playedMs+250;
-  let positionMs=null, frameSequence=null;
+  let positionMs=null, frameSequence=null, provenance="presented_frame";
   if(presentedMediaTime!=null&&Number.isFinite(Number(presentedMediaTime))){
+    if(hasVideo&&p.controlHasFrameCallbacks&&!observation) return false;
+    if(observation&&(observation.epoch!==(p.controlPresentationEpoch||0)
+      ||observation.attachment!==p.mediaAttachment||observation.intent!==pending.sequence)) return false;
     positionMs=Math.max(0,Math.round(((p.offset||0)+Number(presentedMediaTime))*1000));
     frameSequence=Number(presentedFrameSequence);
-  }else if(!p.controlHasFrameCallbacks&&hasVideo){
+    if(!Number.isFinite(frameSequence)||frameSequence<=pending.frameFloor||!inLandingWindow(positionMs)) return false;
+    pending.targetFrame={positionMs,frameSequence,epoch:p.controlPresentationEpoch||0,
+      attachment:p.mediaAttachment,sequence:pending.sequence};
+  }
+  if(v.seeking) return false;
+  const frame=pending.targetFrame;
+  if(hasVideo&&p.controlHasFrameCallbacks){
+    if(!frame||frame.epoch!==(p.controlPresentationEpoch||0)||frame.attachment!==p.mediaAttachment
+      ||frame.sequence!==pending.sequence) return false;
+    positionMs=frame.positionMs;frameSequence=frame.frameSequence;
+  }else if(v.paused){
+    // Positioning is a weaker, explicit outcome. It neither credits a frame
+    // nor marks recovery healthy; Resume needs fresh presentation evidence.
+    positionMs=Math.max(0,Math.round(((p.offset||0)+(v.currentTime||0))*1000));
+    if(!playbackSeekBufferCovers(v,p,pending.targetMs)||!inLandingWindow(positionMs)) return false;
+    provenance="positioned";
+  }else if(!hasVideo){
+    positionMs=Math.max(0,Math.round(((p.offset||0)+(v.currentTime||0))*1000));
+    const previous=pending.audioPositionMs;
+    if(previous==null){
+      if(!inLandingWindow(positionMs)) return false;
+      pending.audioPositionMs=positionMs;return false;
+    }
+    if(positionMs<=previous) return false;
+    frameSequence=pending.frameFloor+1;provenance="audio_clock";
+  }else if(presentedMediaTime==null){
     try{
       const q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
       if(q&&Number.isFinite(q.totalVideoFrames)) frameSequence=q.totalVideoFrames;
     }catch(e){}
     positionMs=Math.max(0,Math.round(((p.offset||0)+(v.currentTime||0))*1000));
-  }else if(!hasVideo && !v.paused){
-    positionMs=Math.max(0,Math.round(((p.offset||0)+(v.currentTime||0))*1000));
-    const previous=pending.audioPositionMs;
-    if(previous==null){
-      if(!inLandingWindow(positionMs)) return false;
-      pending.audioPositionMs=positionMs;
-      return false;
-    }
-    if(positionMs<=previous) return false;
-    frameSequence=pending.frameFloor+1;
-  }else return false;
-  if(!Number.isFinite(frameSequence)||frameSequence<=pending.frameFloor) return false;
+    if(!playbackSeekBufferCovers(v,p,pending.targetMs)) return false;
+    if(pending.fallbackClockMs==null){pending.fallbackClockMs=positionMs;return false;}
+    if(positionMs<=pending.fallbackClockMs) return false;
+    provenance="decoded_clock";
+  }
+  if(provenance!=="positioned"&&(!Number.isFinite(frameSequence)||frameSequence<=pending.frameFloor)) return false;
   if(!inLandingWindow(positionMs)) return false;
-  finishPlaybackSeekTelemetry(p,pending,"seek_resumed");
+  pending.presentationProvenance=provenance;
+  if(pending.seekTelemetry?.trace) pending.seekTelemetry.trace.proof=provenance;
+  pending.localVodPresented=provenance!=="positioned";
+  pending.localVodSeekCleanup?.();
+  finishPlaybackSeekTelemetry(p,pending,provenance==="positioned"?"seek_positioned":"seek_resumed");
   p.controlSeek=null;
   notifyPlaybackControl();
   return true;
 }
+
 function pbTick(){
   watchMarkChapter();
   if(!PLAYER) return;
   const v=document.getElementById("video");
   const tot=pbTotalSec();
+  prepareNextEpisodeIfNearEnd(PLAYER,v);
   // Desired first, then the drag preview, then the picture. A destination
   // the viewer committed and no attachment has executed is where they asked
   // to be; letting the thumb snap back to the incumbent's clock would make
@@ -508,6 +531,25 @@ function playerWantsPlayback(v){
   if(PLAYER&&typeof PLAYER.wantsPlayback==="boolean") return PLAYER.wantsPlayback;
   return !v.paused;
 }
+// A pause of a minute or more is a natural quality boundary, but only a
+// different route is worth touching the media. Ask first, while playback
+// resumes untouched: a retained route must not seek, because the answer takes
+// about a second and a seek to the position Play was pressed at would pull the
+// picture back by that much. Only a picked route becomes a media change, aimed
+// at the position playback has reached when the answer arrives. Playback runs
+// during the ask, so the Auto controller is not held off by a pending seek:
+// a change it started meanwhile owns the media and the boundary stands down.
+async function resumeQualityBoundary(p){
+  if(!p||qualityForce()!=='auto') return false;
+  const intent=p.controlSeek, attachment=p.mediaAttachment;
+  const candidate=await naturalBoundaryQualityCandidate(p,intent);
+  if(!candidate||PLAYER!==p||p.controlSeek!==intent||p.mediaAttachment!==attachment
+    ||p.wantsPlayback===false||qualityForce()!=='auto'||hasPendingPlaybackOpen(p)
+    ||p.pendingMediaChange||p.autoFallbackInFlight||(p.abr&&p.abr.switching)
+    ||(p.directedChange&&!p.directedChange.settled)) return false;
+  await seekTo(pbPosSec(),false,null,false,null,true,candidate);
+  return true;
+}
 function togglePlay(origin="viewer_control"){
   const v=document.getElementById("video"); if(!v) return;
   if(PLAYER&&PLAYER.libraryChannel&&v.paused
@@ -516,7 +558,7 @@ function togglePlay(origin="viewer_control"){
   }
   queuePlaybackTransportCommand(v,PLAYER,playerWantsPlayback(v)?"pause":"play",origin,"explicit_transport");
   endWait(false);
-  supersedePlaybackControlIntent(PLAYER);
+  supersedePlaybackControlIntent(PLAYER,{preserveContinuousManualQuality:true});
   const pending=typeof play==='function'&&play.pendingIntent;
   if(pending&&PLAY_OPEN_GATE.current(pending.attempt)){
     pending.wantsPlayback=!pending.wantsPlayback;
@@ -545,7 +587,7 @@ function togglePlay(origin="viewer_control"){
       if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
       else pauseHlsStartup(PLAYER);
       applyPlaybackTransportIntent(v,PLAYER);
-      if(qualityBoundary) seekTo(pbPosSec(),false,null,false,null,true);
+      if(qualityBoundary) resumeQualityBoundary(PLAYER).catch(()=>{});
     }
   }
   if(PLAYER)playerActivity();
@@ -836,6 +878,7 @@ function wirePlayerMedia(v){
       showStallRecoveryFailure(msg||"The browser reported video error "+code+".");
       return;
     }
+    if(code===3&&autoDecodeMediaError(PLAYER,v)) return;
     // `playbackIsReal()` and not `PLAYER.started`: the guard means "we already
     // got real playback going, don't churn", and audio alone used to satisfy
     // it — which disabled this rescue in precisely the black-picture-with-
@@ -883,6 +926,7 @@ function wirePlayerMedia(v){
     toast("Playback failed — "+(names[code]||("error "+code)));
   });
   v.addEventListener("timeupdate",()=>{ settlePlaybackControlSeek(v,PLAYER); checkMarkers(); });
+  v.addEventListener("seeked",()=>{ settlePlaybackControlSeek(v,PLAYER); });
   // Click the picture to play/pause and double-click for fullscreen — the
   // behaviour the native controls used to give us, gone now that we draw our
   // own transport. (Two clicks toggle play twice, so a double-click only
@@ -1030,8 +1074,10 @@ function playbackSeekBufferCovers(v,p,targetMs){
 // Seek that works for every method: direct/VOD and safe rolling/progressive
 // destinations seek the attached element; everything else reopens at film time.
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
-  recoveryEpisode=null,qualityBoundary=false){
-  const v=document.getElementById("video"); if(!v||!PLAYER) return;
+  recoveryEpisode=null,qualityBoundary=false,boundaryCandidate=null){
+  // The element at the press. Only the synchronous routes below use it; the
+  // media route re-reads #video once the awaits are behind it.
+  const pressed=document.getElementById("video"); if(!pressed||!PLAYER) return;
   if(viewerInitiated&&PLAYER.abr) PLAYER.abr.switchBudgetTimes=[];
   targetSec=Math.max(0,targetSec);
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
@@ -1059,7 +1105,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       const m=Object.assign({},PLAYER.meta||{},{part_offset_ms:part.part_offset_ms||0});
       const pending=beginPlaybackControlSeek(PLAYER,local,viewerInitiated,
         viewerInitiated&&!forceReopen?{startedAt:null,outcome:null,context:null,cleanup:null}:null);
-      recordPlaybackSeekRoute(PLAYER,pending,v,{route:"reopen"},null,null,null,"part_change");
+      recordPlaybackSeekRoute(PLAYER,pending,pressed,{route:"reopen"},null,null,null,"part_change");
       dispatchPlaybackSeekTelemetry(Object.assign({},PLAYER,{fileId:part.id}),pending);
       PENDING_ATTEMPT_REASON="seek";
       return play(part.id,PLAYER.title,Math.round(local*1000),part.duration_ms||0,m,undefined,
@@ -1097,10 +1143,12 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   const seekTelemetry=forceReopen&&prior?.targetMs===Math.round(targetSec*1000)
     &&!prior.seekTelemetry?.outcome ? prior.seekTelemetry
     : viewerInitiated&&!forceReopen ? {startedAt:null,outcome:null,context:null,cleanup:null} : null;
-  const seekIntent=beginPlaybackControlSeek(PLAYER,targetSec,viewerInitiated,seekTelemetry);
+  const seekIntent=beginPlaybackControlSeek(PLAYER,targetSec,viewerInitiated,seekTelemetry,
+    {preserveContinuousManualQuality:!forceReopen&&!!PLAYER.vod
+      &&!!PLAYER.continuousQuality&&!PLAYER.pendingMediaChange});
   endWait(false);
   if(restartPendingPlaybackOpen(PLAYER,forceReopen?"stall-restart":"seek")){
-    recordPlaybackSeekRoute(PLAYER,seekIntent,v,{route:"reopen"},null,null,null,"pending_open");
+    recordPlaybackSeekRoute(PLAYER,seekIntent,pressed,{route:"reopen"},null,null,null,"pending_open");
     dispatchPlaybackSeekTelemetry(PLAYER,seekIntent);
     return;
   }
@@ -1111,7 +1159,8 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   if(!PLAYER||PLAYER.controlSeek!==seekIntent||hasPendingPlaybackOpen(PLAYER)) return;
   const me=PLAYER;
   if((viewerInitiated&&!forceReopen||qualityBoundary)&&qualityForce()==='auto'){
-    const candidate=await naturalBoundaryQualityCandidate(me,seekIntent);
+    // A resume boundary already asked, and only calls with the route it picked.
+    const candidate=boundaryCandidate||await naturalBoundaryQualityCandidate(me,seekIntent);
     if(PLAYER!==me||me.controlSeek!==seekIntent||hasPendingPlaybackOpen(me)) return;
     if(candidate){
       const previousId=me.abr.requestedCandidateId||me.qualityCandidateId;
@@ -1126,8 +1175,22 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       // on the retained route instead of leaving a failed quality request.
       me.pendingMediaChange=null;
       me.abr.requestedCandidateId=previousId||null;
+      if(boundaryCandidate){
+        // A resume boundary has no viewer seek to fulfil. The retained route
+        // is already playing: retire the intent and leave the media alone.
+        me.controlSeek=null;
+        notifyPlaybackControl();
+        return;
+      }
     }
   }
+  // Re-read after the awaits, never the element captured at the press. A
+  // prepared replacement swaps the #video ids during the 100 ms coalesce or
+  // the Auto candidate wait (`exposePreparedReplacement`), and a local seek
+  // written to the captured element moved the hidden predecessor while the
+  // successor the viewer is watching played on: rolling sessions recovered
+  // through `landed_elsewhere`, a VOD-to-VOD handoff lost the seek silently.
+  const v=document.getElementById("video"); if(!v) return;
   const bufferedMs=playbackSeekBufferedRangesMs(v,me);
   const published=playbackSeekPublishedRangeMs(me);
   const seekableMs=playbackSeekSeekableRangesMs(v,me);
@@ -1185,8 +1248,10 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       seekIntent.localVodSeekCleanup=cleanup;
     }
     dispatchPlaybackSeekTelemetry(me,seekIntent);
+    me.continuousQuality?.noteSeek?.(targetSec);
+    markPlaybackControlSeekExecuted(me,targetSec,v);
     try{ v.currentTime=Math.max(0,atMs/1000-(me.offset||0)); }catch(e){}
-    markPlaybackControlSeekExecuted(me,targetSec);
+    notifyPlaybackControl();
     clientLog({level:'info',event:'seek_local',
       detail:`${me.copyHls?'copy_hls':me.method||'unknown'}:${route.basis}`,
       message:'seek stayed on the attached media'});

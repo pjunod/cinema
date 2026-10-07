@@ -3,7 +3,7 @@
 **Status:** ready for implementation after one adversarial agent review and
 author corrections, 2026-09-14; implementation not started.
 **Written:** 2026-09-14. **Executes:** the Child's Play startup diagnosis on
-nynuc from 2026-09-14. This document delivers an implementation contract;
+media1 from 2026-09-14. This document delivers an implementation contract;
 it does not claim a product fix or authorize a production deployment.
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (delivery behavior),
@@ -20,7 +20,7 @@ a different retry budget, record and resolve that design change here first.
 
 The incident ran build `v0.3.0-2411-gfd70676b`, commit
 `fd70676bfbcdf18ecdc487a0438f900d02fbc111`, with vendored hls.js **1.6.16**.
-The source was read from nynuc's deployment checkout using `git archive`.
+The source was read from media1's deployment checkout using `git archive`.
 The documentation workspace's HEAD was
 `10f2afe60b3d177866fdcc5741acd9f494525d73`; its web player predates the
 deployed retry and surface code and also contains unrelated local edits.
@@ -76,7 +76,7 @@ the controller `STOPPED`. `loadSource(url)` is the operation that emits
 `MANIFEST_LOADING`. A synthetic 503 loader against the exact deployed library
 confirmed `manifestLoadError`, one request before and after `startLoad(0)`,
 and controller state `STOPPED`. This isolates the library behavior; it is
-not a browser playback test or a reproduction of the QNAP delay.
+not a browser playback test or a reproduction of the NAS delay.
 
 The watchdog later fetched the playlist successfully. For `method=remux`,
 the deployed `probePlaybackSource` did not inspect a sample segment at all;
@@ -85,7 +85,7 @@ It stopped the player with `decoder_failed`, despite no decoder rejection.
 The loaded-playback `persistentWait` path requires prior playback progress
 and does not reliably rescue this never-started state.
 
-The media file is on QNAP over NFS. A cold read, disk wake-up or temporary
+The media file is on NAS over NFS. A cold read, disk wake-up or temporary
 storage delay is plausible, not proved. No relevant kernel error was retained;
 ten-minute statistics showed no NFS retransmissions or sustained CPU pressure.
 Those coarse samples cannot exclude a short stall. Do not claim an NFS
@@ -107,7 +107,7 @@ budget with an accurate explanation and working Try again/Close actions.
 | Publication-phase diagnostics and typed readiness | Separate waiting for bytes from losing control authority |
 | Deployed-library, application and browser regressions | A mocked `startLoad` call count would miss the defect |
 
-**Non-goals:** changing QNAP mounts or waking disks, rebuilding all fragment
+**Non-goals:** changing NAS mounts or waking disks, rebuilding all fragment
 indexes, changing source files, increasing buffers, changing encoder/quality
 policy, adding a recovery controller, altering native-client policy, changing
 the strict playback-control wire contract, or repairing post-retirement
@@ -549,7 +549,7 @@ Use fake monotonic time for episode/boundary tests and real vendored-library
 behavior for loader tests. A browser case must run the shipped page with a
 small playable fixture and a controlled delayed-manifest endpoint, proving
 first-frame/film-position behavior rather than merely `MANIFEST_PARSED`.
-Keep the production QNAP path out of deterministic tests. Do not flush caches
+Keep the production NAS path out of deterministic tests. Do not flush caches
 or disturb someone else's stream to simulate a cold disk.
 
 Suggested commands below name existing runners. Any new test file must be
@@ -593,7 +593,7 @@ change, plus the docs index in the same commit as any added document.
 
 After authorized deployment, verify one normal warm start and one controlled
 delayed start on the stamped candidate, then a real Child's Play resume on
-nynuc when it will not interrupt a viewer. Record actual rolling/VOD and
+media1 when it will not interrupt a viewer. Record actual rolling/VOD and
 first-frame position. Deterministic replay establishes the software repair;
 a warm production success alone does not prove cold-start recovery.
 
