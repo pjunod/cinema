@@ -5,6 +5,117 @@
 Companion to [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md): this
 policy changes repeated Python unit execution, not current-source compilation.
 
+## Main preflight — authenticated legacy outcomes and declared inputs
+
+The main fast lane executes Python through
+[`main_unit_receipts.py`](../../validation/main_unit_receipts.py). Its prepare
+step calls
+[`main_preflight_adoption.py`](../../validation/main_preflight_adoption.py)
+to authenticate the legacy bridge and prepare the separate Node journal.
+PR #845 also applies the reviewed
+[`main-preflight-inputs.json`](../../validation/main-preflight-inputs.json).
+Each Python ID binds its method/local-fixture AST and declared production
+inputs to every retained Python success, including successes first recorded
+by the generic runner. The manifest records actual read closures, including filename
+inventories, absent paths, executable modes and narrowly declared Git-history
+consumers. Unknown witnesses refuse before execution; changing one sibling
+method does not invalidate unchanged methods through a whole test-file hash.
+
+PR #845 has one bounded legacy importer: run4275/job43709/attempt1, source
+`0c5ab4890316da40d44806eba9125ac2e1fead0e`. It authenticates the original
+same-repository ready PR event, API job success, original executable workflow,
+checkout identity and the 208075-byte raw log with SHA-256
+`272d7509dc94961593f77ad3961f98ee2be097a167baff07e8e1eb0cd0eadd0b`.
+It reconstructs exactly 293 validation and 735 operations IDs from immutable
+source and requires one ordered progress event per ID: 1026 successes and
+two skips. Summary totals alone cannot import a pass. The two skipped IDs
+retain their history and remain pending current controls. Linux x86_64,
+Python 3.12 and Node 22.23.2 are the proven legacy environment; the Node
+setup is pinned to that version. No unobserved Python patch is claimed.
+
+The preflight installs one job-local Python 3.12.15 Linux x86_64 runtime from
+the immutable October 3 public release. HTTPS download, 34,285,590-byte bound
+and SHA-256 `731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91`
+are checked before extraction. The job verifies the Python family/platform,
+adds only that runtime to its PATH and removes its exact owned temporary
+directory in an always step. This preserves the proven Python 3.12 family
+without claiming original patch, SQLite or OpenSSL equivalence or changing
+shared host packages. Node remains pinned to 22.23.2.
+
+Future journals bind their exact schema, repository/PR, source, producer and
+manifest blobs, actual terminal job and attempt1. Own outcomes require an
+original executable outcome event; inherited records preserve the original
+run/job/attempt/source/outcome/environment chain. The declared input digest
+is independently verified against the producing journal's reviewed manifest.
+Both start and final artifact publications must exist. A missing final
+journal after an attempted preflight stops reuse before any positive ID can
+replay. Authenticated all-skipped draft runs contain no unit execution and
+need no journal. Live PR head, base, open state and readiness are checked
+before prepare and each phase so queued stale events cannot execute units.
+
+Forgejo's `synchronized` event action and the `synchronize` action both retain
+the same repository, PR, source, base and readiness checks. Run4294/job43864/
+attempt1 failed at that action check on source
+`289c9c5f3d6c5bdd48ff937c0c76476c95e9b7b2`, before any unit or journal.
+Its one bounded recovery verifies the actual terminal run and complete nine-job
+inventory, original ready PR event/base, immutable workflow/producer/input/helper
+hashes, and original 139814-byte log SHA-256
+`2db26ec8a677447202a8fa03e3895db12e840c4c931d186e242b7a6a6083fd95`.
+That log must contain the exact early refusal followed by skipped start and
+final publication steps, with no unit outcomes, suite summaries or successful
+uploads; run, start and final artifacts must all be absent. This recovery
+imports zero successes and creates no journal. It admits no other failed
+attempt or changed evidence. The two new fake-API controls remain reserved
+for their first actual candidate-lane execution.
+
+Run4299/job43909/attempt1 on `ef65129def6f8286976f8ff2a18394c0c0183704`
+failed the legacy environment check before units or journals. Its separate
+bounded recovery authenticates the complete nine-job terminal inventory,
+same ready event/base, original source hashes and 141038-byte raw log SHA-256
+`758d98b2e40c73432f8ca328fda7c5cf8aa1eedf4cf88f2a0e5e7af47f323e2c`.
+The exact environment refusal, absent unit outcomes and absent start/final/run
+artifacts establish zero execution; no outcome is imported.
+
+The bridge returns full authenticated original provenance before filtering
+current applicability, so changed inputs invalidate a method without losing
+its historical attribution. Only adapter-era runs authenticated by the bridge
+are omitted from generic bootstrap; unknown attempted runs still refuse.
+Generic start/final journals keep the original Python run/commit attribution,
+and PR #845 adds runtime and immutable producer-blob provenance. Both journals
+must match the authenticated original workflow and current runtime. Tracked
+worktree changes refuse execution before discovery. The adapter retains the
+seven Node script identities and executes only pending scripts; it does not
+execute Python alongside the generic runner. Both start and final artifact
+pairs are published independently, including after failures.
+
+Fixture, import, discovery and runner-abort errors remain in the durable
+journal even when earlier methods passed. They block later reuse until
+attributable evidence is recovered; retained method successes cannot hide a
+failed class or module teardown. A phase-in-progress marker is persisted
+before Python discovery/fixtures and before each pending Node script; a
+timeout or hard cancellation retains it. Normal completion removes the
+marker atomically while preserving explicit fixture errors and individual
+successes. Failed Python methods remain individually pending. Existing
+history, catalog, static contracts,
+compiler checks and promotion requirements still apply to current source.
+
+**How to read output:** `adopted` counts applicable historical success IDs;
+`pending` counts current methods still needing execution. `Changed declared
+inputs/local fixture` identifies a specific invalidated ID, not a new blanket
+suite run. An evidence refusal requires inspection of the named original
+run/job/log/journal; deleting evidence does not create a first attempt.
+
+**Granularity limits:** the seven Node receipts identify successful scripts,
+not individual TAP cases. A failed or aborted Node script may contain passed
+cases; its original log is preserved and its journal blocks automatic replay
+until that partial evidence is recovered. Rust retries are not covered by
+this Python/Node adapter. No Rust test success is inferred from run4275, and
+these receipts cannot authorize repeating successful Rust cases. Compiler
+parallelism is bounded with `CARGO_BUILD_JOBS=1`; Windows compilation waits
+for the Rust gate to finish because their code generation exhausted a shared
+14 GiB guest. Main's Rust fast lane compiles all targets and runs Clippy;
+full Rust unit suites remain in manual full CI.
+
 Both preflights discover the validation and operations suites on every
 candidate. Each discovered test ID must have passed once for this repository
 and PR. Applicable successful methods are not executed again after a head or
@@ -49,7 +160,9 @@ errors, skips and ambiguous outcomes refuse migration. A failed subtest
 invalidates its whole named method. A terminal validation failure establishes
 only validation successes: operations have not run. When both suites have
 terminal results, each inventory is checked separately against its own log.
-There are no PR IDs, run IDs, counts or imported pass lists in the adapter.
+This generic migration has no run-specific pass lists. PR #845's older
+skip-bearing baseline uses the independently authenticated bridge above;
+generic dot-log migration remains strict for other PRs.
 
 The latest authenticated legacy job may be a retry: its exact source and
 exhaustive terminal log still bind the import. Receipt-era retries remain

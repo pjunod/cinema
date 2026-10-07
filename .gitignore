@@ -1,4 +1,5 @@
 /target
+/.main-preflight-receipts/
 /vendor/hiqlite/target
 /vendor/hiqlite-wal/target
 /fuzz/artifacts

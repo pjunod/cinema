@@ -89,6 +89,27 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Install the job-local Python receipt runtime
+        id: python-runtime
+        run: |
+          set -euo pipefail
+          test -d "$RUNNER_TEMP" && test ! -L "$RUNNER_TEMP"
+          plurx_python_dir="$(mktemp -d "$RUNNER_TEMP/plurx-python312.XXXXXXXX")"
+          printf 'directory=%s\n' "$plurx_python_dir" >> "$GITHUB_OUTPUT"
+          curl -q --fail --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 20 --max-time 180 --max-filesize 34285590 \
+            --output "$plurx_python_dir/runtime.tgz" \
+            'https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.12.15%2B20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+          test "$(wc -c < "$plurx_python_dir/runtime.tgz")" -eq 34285590
+          printf '%s  %s\n' '731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91' \
+            "$plurx_python_dir/runtime.tgz" | sha256sum --check --status
+          tar -xzf "$plurx_python_dir/runtime.tgz" -C "$plurx_python_dir"
+          "$plurx_python_dir/python/bin/python3" -c \
+            'import platform, sys; assert sys.version_info[:2] == (3, 12) and sys.platform == "linux" and platform.machine() == "x86_64"'
+          printf '%s\n' "$plurx_python_dir/python/bin" >> "$GITHUB_PATH"
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.23.2"
       - name: Restore attributable main Python successes
         id: receipts
         env:
@@ -100,6 +121,13 @@ jobs:
         with:
           name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}
           path: .main-python-unit-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish preflight attempt-start journal
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.adoption_receipt_key }}-start-${{ github.run_id }}
+          path: .main-preflight-receipts/receipt.json
           if-no-files-found: error
           retention-days: 90
       - name: Audit corrective-history evidence
@@ -125,9 +153,6 @@ jobs:
       - name: Check validation catalog and static contracts
         run: |
           make validation-lint
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
       - name: Check CI, deploy, and shipping contracts
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -142,14 +167,29 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Check the shared player input contract
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.main_preflight_adoption node
+      - name: Preserve per-ID preflight journal even on failure
+        if: always() && steps.receipts.outcome == 'success'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.adoption_receipt_key }}
+          path: .main-preflight-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Remove the exact job-local Python receipt runtime
+        if: always()
+        env:
+          PLURX_PYTHON_DIRECTORY: ${{ steps.python-runtime.outputs.directory }}
         run: |
-          node tests/playback/player-input-contract.test.js
-          node tests/playback/web-policy.test.js
-          node tests/playback/web-control.test.js
-          node --test tests/web/seek-telemetry.test.js
-          node tests/web/player-dom.test.js
-          node tests/web/read-after.test.js
-          node tests/web/live-tv.test.js
+          set -euo pipefail
+          if [ -n "$PLURX_PYTHON_DIRECTORY" ]; then
+            test "$(dirname "$PLURX_PYTHON_DIRECTORY")" = "$RUNNER_TEMP"
+            case "$(basename "$PLURX_PYTHON_DIRECTORY")" in plurx-python312.????????) ;; *) exit 1 ;; esac
+            test ! -L "$PLURX_PYTHON_DIRECTORY"
+            rm -rf -- "$PLURX_PYTHON_DIRECTORY"
+          fi
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; compiler surfaces are skipped."
@@ -170,6 +210,9 @@ jobs:
     # that setup plus all-target checking and both Clippy stages; no tests
     # are added by this ceiling.
     timeout-minutes: 60
+    env:
+      # Keep compilation within the shared guest's memory budget.
+      CARGO_BUILD_JOBS: "1"
     steps:
       - name: Install Rust gate prerequisites
         run: |
@@ -218,8 +261,10 @@ jobs:
           chown -R "$owner" "$GITHUB_WORKSPACE"
   windows_compile:
     name: fast Windows compile
-    needs: [scope, preflight]
-    if: needs.scope.outputs.rust == 'true'
+    # Both code-generation lanes share a bounded guest. Windows must not
+    # compete with the Rust gate's daemon/test targets for that memory.
+    needs: [scope, preflight, rust_compile]
+    if: needs.scope.outputs.rust == 'true' && needs.rust_compile.result == 'success'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container: ubuntu:26.04
     # Cold prerequisites/driver setup took 12 minutes before the intentionally

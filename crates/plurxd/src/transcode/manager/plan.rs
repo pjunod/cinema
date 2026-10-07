@@ -1276,9 +1276,9 @@ impl TranscodeManager {
             },
             // The node proved a graph; this session may still not be entitled
             // to it (HLG, non-compatible Dolby Vision, a light source, an
-            // encoder it cannot feed). Deciding once, here,
-            // is what keeps the log line honest — `pipeline=` is what actually
-            // ran, not what the box is capable of. Routed by `routing_hdr`
+            // encoder it cannot feed). This chooses the candidate; resolution
+            // owns its final scan-dependent graph, which later execution and
+            // diagnostics retain. Routed by `routing_hdr`
             // rather than the raw column: a DV base layer that is
             // HDR10-compatible is an hdr10 stream to a tone-map, and a bitmap
             // subtitle burn keeps the GPU graph (it downloads once for
@@ -1305,13 +1305,15 @@ impl TranscodeManager {
             } else if dovi_reshape {
                 Pipeline::DoviTonemapx
             } else {
-                Pipeline::for_session_with_scan(
+                // This is a candidate graph. Descriptor-bound decode facts
+                // decide deinterlace in resolve_transcode; a catalog flag can
+                // be overruled by idet and must not discard the graph here.
+                Pipeline::for_session(
                     self.pipeline,
                     encoder,
                     transcode::routing_hdr(file),
                     transcode::heavy_source(file),
                     subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
-                    plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
                 )
             },
             subtitle_burn,

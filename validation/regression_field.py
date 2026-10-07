@@ -112,6 +112,26 @@ def executed_suites(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     text = "\n".join(commands)
     files = sorted({match.group("path") for match in _NODE_SUITE_RE.finditer(text)})
     directories = sorted({match.group("path") for match in _DISCOVER_RE.finditer(text)})
+    from validation.main_preflight_adoption import run_commands
+
+    literal_runs = run_commands(lane)
+    if any(command.startswith("python3 -m validation.main_preflight_adoption ")
+           for command in literal_runs):
+        # The receipt adapter preserves the concrete inventories; inspect its
+        # literal command list without executing it or using comments as proof.
+        import ast
+
+        adapter = ast.parse((root / "validation/main_preflight_adoption.py").read_text())
+        node_lists = [node for node in adapter.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "NODE"
+                              for target in node.targets)]
+        if len(node_lists) != 1:
+            raise LookupError("receipt adapter Node inventory is ambiguous")
+        if "python3 -m validation.main_preflight_adoption node" in literal_runs:
+            files = sorted(set(files) | set(ast.literal_eval(node_lists[0].value)))
+        for suite in ("validation", "operations"):
+            if "python3 -m validation.main_preflight_adoption " + suite in literal_runs:
+                directories.append("tests/" + suite)
     declared = {path for match in _RECEIPT_RUN_RE.finditer(text)
                 for path in _RECEIPT_SUITE_RE.findall(match.group('suites'))}
     return tuple(files), tuple(sorted(set(directories) | declared))

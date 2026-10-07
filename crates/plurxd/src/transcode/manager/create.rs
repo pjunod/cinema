@@ -1444,6 +1444,9 @@ impl TranscodeManager {
                 .await?
         };
         note_phase("execution_decoder_plan", phase_started);
+        // Encoding retains these execution options for publication and
+        // diagnostics. Its graph must agree with the immutable plan.
+        options.pipeline = plan.options().pipeline;
         if let Some(frame_rate) = plan
             .output_contract()
             .normalized_geometry()
