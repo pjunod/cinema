@@ -7302,3 +7302,51 @@ player: first frame 3.172s, clock 0.999x, zero hitches/stalls, video gaps
 `firefox-9023815cb-focus{1,2}*`. This is a headless browser probe, not an
 independent optical or physical output pass. One full default-CPU campaign
 is running; it does not replace the missing whole-window optical measurement.
+
+### 10.241 Current-main Firefox full browser campaign (2026-10-07)
+
+Exact main `9023815cb`, Firefox 153.4.0esr, default shared host CPUs, one
+owned headless browser/player: **PASS** — fifteen manual changes and five
+actual Auto changes, one parent session/player, 84.14ms mixed video-gap p95
+and 84.16ms callback-gap p95, first frame 2.677s, reported clock 1.004x, zero
+hitches and stalls. The manual-phase metrics record two dropped frames over
+21,178 frames; these are not erased or described as a zero-drop pass. A
+separate lightweight Android lab overlapped part of the campaign; no CPU
+affinity or pool override was applied. Receipt:
+`firefox-9023815cb-full20-default1.{json,xml,log}` in ignored reports.
+
+End producer census was zero at 0/1/3/5 seconds. The exact owned-runtime guard
+confirmed daemon retirement by the harness. This closes the current-source
+headless browser campaign only. No whole-window independent optical capture
+or physical display/audio pass is claimed; those rows remain open.
+
+The first default-off Android start presented manual 720p in 4.136s and
+emitted the continuous attachment's expected-presentation event. Its bounded
+backend later expired before the ledger/switch measurement completed; retain
+it as initial-playback evidence only. A replacement default-off lab now has a
+read-only ledger monitor and a sufficient deadline. Its first emulator also
+retired at the fixed deadline; the owned AVD is restarted for the remaining
+manual-switch check, without changing user AVDs or physical devices.
+
+### 10.242 Re-login restores the negotiated capability bootstrap (2026-10-07)
+
+The monitored Android repeat reproduced `continuous enrollment declined:
+no_intent`, with zero continuous ledger rows despite saved manual 720p. The
+first connection carried intent; the cold re-login did not. The saved bearer
+was invalid for the fresh lab, so launch went directly to NeedLogin without
+`connect`. Login restored the bearer and Home but never reloaded `/server`;
+`Session.displayAwareAutoProtocol` remained its process-default null.
+
+Login now refreshes the capability bootstrap after first paint. The existing
+backfill path applies its response only if the captured origin, bearer and
+authorization generation still match. Its asynchronous identity write also
+compares the persisted origin, so an old response cannot overwrite a newly
+selected server. Rediscovery's intentional origin update keeps its previous
+semantics. Bootstrap failure leaves the authenticated shell available.
+
+Authored `AppViewModelTest.kt` regressions cover rehydrating route-v1 with Auto
+still off, ignoring a response after origin/credential replacement, and keeping
+the authenticated profile on a bootstrap transport failure. Production/test
+sources and debug APK compile in 23s; no units executed. The combined runtime
+verification uses a fresh monitored default-off lab; earlier receipts remain
+failed or explicitly partial.

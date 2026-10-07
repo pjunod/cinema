@@ -334,6 +334,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 username = resp.user.username
                 settings.saveSession(origin, resp.token, resp.user.username, resp.user.id)
                 _phase.value = Phase.Ready
+                // An expired saved login did not pass through connect, so its
+                // capability bootstrap is empty. Refresh after first paint;
+                // an unavailable server must not hold Home on the login screen.
+                viewModelScope.launch { backfillServerIdentity() }
                 // Now, not at connect: the ingress list is signed-in only.
                 refreshClusterIngress()
                 loadHome()
@@ -1055,17 +1059,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun backfillServerIdentity() {
-        val info = catchingUnlessCancelled { api().server() }.getOrNull() ?: return
-        serverName = info.name
-        if (serverInstanceId != info.instance_id) invalidateLibraryPager()
-        serverInstanceId = info.instance_id
-        Session.displayModeMatch = info.display_mode_match
-        Session.displayAwareAuto = info.playback_display_aware_auto
-        Session.autoAbr = info.playback_auto_abr
-        Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
-        Session.decoderCompactionContract = info.decoder_compaction_contract
-        settings.saveServerIdentity(origin, info.instance_id)
-        refreshClusterIngress()
+        val expectedOrigin = origin
+        refreshAuthenticatedServerInfo(
+            authorization = Session::playbackAuthorization,
+            fetch = { api().server() },
+            apply = { info ->
+                serverName = info.name
+                if (serverInstanceId != info.instance_id) invalidateLibraryPager()
+                serverInstanceId = info.instance_id
+                Session.displayModeMatch = info.display_mode_match
+                Session.displayAwareAuto = info.playback_display_aware_auto
+                Session.autoAbr = info.playback_auto_abr
+                Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
+                Session.decoderCompactionContract = info.decoder_compaction_contract
+                settings.saveServerIdentity(expectedOrigin, info.instance_id, expectedOrigin = expectedOrigin)
+                refreshClusterIngress()
+            },
+        )
     }
 
     /**
@@ -1093,6 +1103,20 @@ internal fun acceptHlsSessionPresentation(started: HlsStart): HlsStart = started
 private const val LAUNCH_VALIDATION_TIMEOUT_MS = 12_000L
 
 private data class RecoveredServer(val origin: String, val info: Server)
+
+/** Apply a capability response only to the authenticated profile that fetched it. */
+internal suspend fun refreshAuthenticatedServerInfo(
+    authorization: () -> Session.PlaybackAuthorization,
+    fetch: suspend () -> Server,
+    apply: suspend (Server) -> Unit,
+): Boolean {
+    val owner = authorization()
+    if (owner.token == null) return false
+    val info = catchingUnlessCancelled { fetch() }.getOrNull() ?: return false
+    if (authorization() != owner) return false
+    apply(info)
+    return true
+}
 
 internal sealed interface SavedSessionValidation<out T> {
     data class Authenticated<T>(val user: T) : SavedSessionValidation<T>
