@@ -23,7 +23,7 @@ blocking startup or other encoders.
 | Focused regression | passed | 14 hardware tests and three rollout contracts; only the failed temporary-path case was rerun |
 | Real Docker hardware smoke | passed | On rog, generated groups 44/992, preserved the override and group 1000, and completed CUDA decode plus NVENC encode as UID 1000 |
 | Catalog lint | fixed | Registered the helper in the existing operations point after preflight reported the missing path |
-| Fast lane | qualifying refreshed candidate | Main now includes the reviewed four-call sharing inventory correction and passing Python evidence reuse; the PR checks and description carry the live qualification result. |
+| Fast lane | qualifying refreshed candidate | Main includes the four-call sharing inventory correction. Qualification exposed a legacy attempt-2 import refusal in its new evidence adapter; the correction now admits authenticated legacy retries, keeps receipt-era retries strict (including skipped jobs), and recognizes a source-bound prepare refusal before units. Adversarial review addressed; three focused CI regressions passed. The PR checks and description carry the live result. |
 | Merge and cleanup | tracked in PR | Merge only after required checks pass; carry regression lines into the landing message |
 
 The earlier diagnostic on rog confirmed its RTX 4080 Laptop GPU can perform a

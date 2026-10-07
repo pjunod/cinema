@@ -27,6 +27,37 @@ LEGACY_RUNNER_HASHES = {
 }
 
 
+# This admitted implementation emits a start snapshot immediately after prepare
+# and before any unit invocation. Its workflow stops on a failed prepare.
+PREPARE_BOUNDARY_HASHES = {
+    'validation/main_unit_receipts.py': '5e86c38c2b2f97e0eb0341d5e95b50b33f0c2e170a6f0c37c7008400ef8ef3a8',
+    '.github/workflows/' + WORKFLOW: 'bf4b542a127ead30fd4239d38d75d3771258b0d7978e55afd8ebdc813aedfc0a',
+}
+
+
+def refused_prepare(api, prior, job):
+    """Prove a known prepare boundary stopped before units; import no passes."""
+    if job['status'] != 'failure':
+        return False
+    commit = receipts.sha(prior['commit_sha'])
+    lines = log_lines(api.bytes(f"/actions/jobs/{receipts.positive(job['id'])}/logs"))
+    if not any(line.startswith('Main Python receipt refused: ') for line in lines):
+        return False
+    for path, digest in PREPARE_BOUNDARY_HASHES.items():
+        raw = source(commit, path)
+        require(hashlib.sha256(raw).hexdigest() == digest
+                and raw == api.bytes('/raw/' + path, {'ref': commit}),
+                'Unadmitted failed-prepare boundary')
+    require(sum(commit in line for line in lines) >= 2
+            and any('triggered by event: pull_request' in line for line in lines),
+            'Failed prepare lacks exact-source checkout evidence')
+    require(not any('MAIN-UNIT-' in line or re.search(r'Ran \d+ tests? in ', line)
+                    or re.match(r'(validation|operations): discovered=', line)
+                    for line in lines), 'Failed prepare log contains unit execution evidence')
+    print(f"Recovered refused prepare run {prior['id']}: no units executed, no passes imported")
+    return True
+
+
 def identity(api, pr, commit):
     repository = receipts.positive(api.get('')['id'])
     pull = api.get(f'/pulls/{receipts.positive(pr)}')
@@ -341,6 +372,9 @@ def verbose_passes(lines, inventories, inherited):
 
 def recover_log(api, scope, prior, job, older):
     rid, commit = receipts.positive(prior['id']), receipts.sha(prior['commit_sha'])
+    if refused_prepare(api, prior, job):
+        return {'version': receipts.VERSION, 'scope': scope, 'run': rid, 'commit': commit,
+                'complete': False, 'passes': {}, 'fixture_errors': []}
     require(job['status'] == 'success', 'Missing artifact needs completed successful preflight')
     lines = log_lines(api.bytes(f"/actions/jobs/{receipts.positive(job['id'])}/logs"))
     require(sum(commit in line for line in lines) >= 2
@@ -423,14 +457,18 @@ def restore(api, scope, current_run, applicability):
         require(len(matches) == 1, 'Ambiguous main preflight job')
         job = matches[0]
         require(job['repo_id'] == scope['repository'] and job['run_id'] == rid
-                and job['attempt'] == 1, 'Historical job repository/run/attempt mismatch')
+                and type(job['attempt']) is int and job['attempt'] > 0,
+                'Historical job repository/run/attempt mismatch')
+        commit = receipts.sha(prior['commit_sha'])
+        workflow = api.bytes('/raw/.github/workflows/' + WORKFLOW, {'ref': commit})
+        receipt_workflow = b'validation.main_unit_receipts' in workflow
+        if receipt_workflow or rid in indexed:
+            require(job['attempt'] == 1, 'Receipt job retry has ambiguous artifact identity')
         if job['status'] == 'skipped':
             require(rid not in indexed, 'Skipped job has final journal')
             continue
-        commit = receipts.sha(prior['commit_sha'])
         if rid not in indexed:
-            workflow = api.bytes('/raw/.github/workflows/' + WORKFLOW, {'ref': commit})
-            if b'validation.main_unit_receipts' in workflow:
+            if receipt_workflow:
                 missing.append((prior, job))
                 continue
             # One exhaustive legacy baseline is the migration boundary. Older

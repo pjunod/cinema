@@ -51,6 +51,14 @@ only validation successes: operations have not run. When both suites have
 terminal results, each inventory is checked separately against its own log.
 There are no PR IDs, run IDs, counts or imported pass lists in the adapter.
 
+The latest job attempt may be greater than one for a pre-receipt run: the
+authenticated job identity, source and exhaustive terminal log still bind the
+import. Receipt-era retries remain refused, including skipped jobs, because
+the artifact identity does not distinguish attempts. A failed prepare may be
+recognized as having executed no units only for an admitted runner/workflow
+implementation, with exact checkout evidence and no start snapshot or unit
+output; this imports no successes.
+
 Older pre-receipt attempts are outside that migration baseline. Their missing
 logs or journals are not converted into passes or assertions of zero
 execution. After the source workflow adopts receipts, every executed attempt
