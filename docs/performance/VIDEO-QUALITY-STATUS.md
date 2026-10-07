@@ -123,13 +123,21 @@ criteria or an encoder-cause verdict.
 The [wrapper](../evidence/video-quality-2026-10-03/run-vaapi.sh) accepts an
 optional recipe path (default: its adjacent recipe) and allocates a new
 mode-0700 private `/var/tmp/plurx-vaapi-qualification.*` directory. The exit
-trap always stops its watcher and exact owned container ID. Success still
+trap attempts bounded watcher termination (3 seconds TERM, then 2 seconds
+KILL) and removes only its validated exact owned container ID (5 seconds,
+then a 1-second forced timeout). A valid regular nonsymlink private cidfile
+recovers the identity if Docker stdout is empty or invalid. Success still
 removes all four media files; failure retains only that invocation's
 synthetic media if the entire bundle is at most 512 MiB. `retention.json`
 names the exact private path, four cleanup files and a 48-hour review/delete
 deadline: you must archive privately or delete those exact media files by
 then; no broad temporary-directory purge is scheduled. Over-budget media
 are deleted, with the receipt recording that they were not retained.
+`retention.json` preserves the original command exit status, actual cleanup
+results and exact recovery CID; `cleanup.confirmed=false` means cleanup is
+incomplete even if the qualification command succeeded. Review the private
+cleanup log and recover only that owned identity, never a container guessed
+by name. The capture does not claim that a failed removal stopped anything.
 This plumbing does not recreate the lost pixels, rerun the failed cell,
 qualify sharp edges or change the encoder, graph, recipe or source generator.
 
