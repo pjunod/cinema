@@ -12,7 +12,7 @@ function harness(fetcher=async()=>reply({updated:true})){
  const c=vm.createContext({TextDecoder,TextEncoder,Uint8Array,URL,URLSearchParams,Response,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/settings/sharing",origin:"https://b.example"},PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   SETTINGS_DATA:{},SETTINGS_LOADED:new Set(),readAfterRequest:()=>({index:"",generation:1,epoch:0}),observeReadAfter(){},forgetReadAfter(){},clearLocalSession(){c.AUTH_GENERATION++;c.TOKEN=null;},
   esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),setHead:()=>"",setCard:v=>v,cardHead:()=>"",document:{getElementById(){return element;}},fetch:async(path,options)=>{requests.push({path,options});return fetcher(path,options,c);}});
- vm.runInContext(catalogue+"\n"+source+"\nthis.m={parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,endpointEdit:sharingEndpointEdit,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,state:()=>SHARING_MANAGEMENT};",c);
+ vm.runInContext(catalogue+"\n"+source+"\nthis.m={parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,recovery:sharingRecoveryHTML,mainReload:sharingReload,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,endpointEdit:sharingEndpointEdit,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,configure:sharingConfigureAddresses,back:sharingCloseEditor,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,state:()=>SHARING_MANAGEMENT};",c);
  const data={sharingImports:{imports:[imported()]},sharingExports:{exports:[exported()],next:null},sharingStatus:{listener:"ready"}};
  c.m.panel(data);return {c,m:c.m,requests,element,data};
 }
@@ -23,9 +23,9 @@ test("sharing management parses and serializes exact wire integers without round
  for(const text of ['{"id":1,"id":2}','[01]','1 trailing','[1e999]','{"x":'+"[".repeat(34)+'0'+"]".repeat(34)+'}'])assert.throws(()=>m.parse(text));
  assert.throws(()=>m.stringify({id:9007199254740992}));assert.throws(()=>m.stringify({id:9223372036854775808n}));
 });
-test("sharing initial settings budget remains three reads and editor lookups are lazy",async()=>{
+test("sharing initial settings budget remains four reads including address setup and editor lookups are lazy",async()=>{
  const {m,requests}=harness(async(path)=>reply(path.endsWith("imports")?{imports:[imported()]}:path.endsWith("exports")?{exports:[exported()],next:null}:{}));
- await Promise.all([m.read("/sharing/status"),m.read("/sharing/imports"),m.read("/sharing/exports")]);assert.deepEqual(requests.map(r=>r.path),["/api/v1/sharing/status","/api/v1/sharing/imports","/api/v1/sharing/exports"]);
+ await Promise.all([m.read("/sharing/status"),m.read("/sharing/imports"),m.read("/sharing/exports")]);assert.deepEqual(requests.map(r=>r.path),["/api/v1/sharing/status","/api/v1/sharing/imports","/api/v1/sharing/exports","/api/v1/sharing/endpoints"]);
  const settings=fs.readFileSync("crates/plurxd/src/web/pages/settings.js","utf8");assert.match(settings,/sharing:\{required:\["sharingStatus","sharingImports","sharingExports"\],secondary:\[\]/);
 });
 test("pair approval requires an explicitly entered matching code and keeps exact mutation generation with no409 retry",async()=>{
@@ -54,7 +54,7 @@ test("current401 and403 retire secrets before oversized response bodies while ol
  let release;const gate=new Promise(resolve=>release=resolve);const h=harness(async()=>{await gate;return new Response("",{status:403});});const pending=h.m.request("/sharing/status");h.c.AUTH_GENERATION=2;h.c.TOKEN="login-b";h.m.retire();h.m.panel({sharingImports:{imports:[imported()]},sharingExports:{exports:[exported()],next:null},sharingStatus:{}});await h.m.open("import");h.m.edit("text","cinema-share-v1:newsecret");release();await assert.rejects(pending);assert.equal(h.m.state().editor.text,"cinema-share-v1:newsecret");
 });
 test("page leave and late edit responses cannot restore retired secrets or overwrite a newer draft",async()=>{
- let release;const gate=new Promise(resolve=>release=resolve);const h=harness(async()=>{await gate;return reply({id,invitation:"cinema-share-v1:returned",expires_at_ms:1n});});
+ let release;const gate=new Promise(resolve=>release=resolve);const h=harness(async(path)=>{if(path==="/api/v1/sharing/endpoints")return reply({manifest:{revision:1n,endpoints:[endpoint]}});await gate;return reply({id,invitation:"cinema-share-v1:returned",expires_at_ms:1n});});
  h.m.state().editor={mode:"invite",libraries:[],selected:["7"],revision:0,ready:true,busy:false,error:""};const pending=h.m.save();h.c.location.hash="#/";h.m.route();release();await pending;assert.equal(h.m.state(),null);
  let finish;const delay=new Promise(resolve=>finish=resolve);const newer=harness(async()=>{await delay;return reply({manifest:{revision:large,endpoints:[endpoint]}});});const opening=newer.m.open("manifest");newer.m.state().editor.revision++;finish();await opening;assert.equal(newer.m.state().editor.ready,false);assert.equal(newer.m.state().busy,false);
 });
@@ -68,12 +68,13 @@ test("actual invitation import repair rotation cancellation and disconnect reque
  const made="cinema-share-v1:generated",input="cinema-share-v1:input";
  const h=harness(async(path,options)=>{
   if(path==="/api/v1/libraries")return reply([{id:large,name:"Movies",kind:"movies"}]);
+  if(path==="/api/v1/sharing/endpoints")return reply({manifest:{revision:1n,endpoints:[endpoint]}});
   if(path==="/api/v1/sharing/invitations"&&options.method==="POST")return reply({id,invitation:made,expires_at_ms:large});
   if(path.includes("/invitations/"))return reply({cancelled:true});
   if(path.endsWith("/re-pair")||path.endsWith("/rotate")||(path==="/api/v1/sharing/imports"&&options.method==="POST"))return reply(imported());
   return reply({disabled:true,revoked:true});
  });
- await h.m.open("invite");h.m.select(0,true);await h.m.save();assert.equal(h.m.state().invitation.invitation,made);assert.equal(h.m.parse(h.requests[1].options.body).library_ids[0],large.toString());await h.m.cancel();assert.equal(h.m.state().invitation,null);
+ await h.m.open("invite");h.m.select(0,true);await h.m.save();assert.equal(h.m.state().invitation.invitation,made);assert.equal(h.m.parse(h.requests.find(r=>r.options.method==="POST").options.body).library_ids[0],large.toString());await h.m.cancel();assert.equal(h.m.state().invitation,null);
  for(const mode of ["import","repair","rotate","disconnect","revoke"]){await h.m.open(mode,0);if(mode==="import"||mode==="repair")h.m.edit("text",input);await h.m.save();assert.equal(h.m.state().editor.saved,true,mode);}
  const repair=h.requests.find(r=>r.path.endsWith("/re-pair"));assert.equal(h.m.parse(repair.options.body).expected_lifecycle_generation,large);
  assert.equal(h.requests.find(r=>r.path.endsWith("/rotate")).options.body,"{}");assert.equal(h.requests.filter(r=>r.options.method==="DELETE").length,3);
@@ -95,7 +96,7 @@ test("route closure and account change during streamed response fail closed and 
 test("complete4096 actual Local library DTOs with paths remain within the bounded editor read",async()=>{
  const libraries=Array.from({length:4096},(_,i)=>({id:large+BigInt(i),name:"Movies "+i,kind:"movies",paths:Array.from({length:8},(_,j)=>"/library/"+i+"/"+j),anime:false,created_at:large,scan_interval_mins:0n,refresh_interval_mins:0n,last_scan_at:null,last_refresh_at:null}));
  const wire=stringify(libraries);assert.ok(Buffer.byteLength(wire)<4194304);
- const h=harness(async()=>reply(libraries));await h.m.open("invite");const e=h.m.state().editor;assert.equal(e.ready,true);assert.equal(e.libraries.length,4096);assert.equal(e.libraries[4095].library_id,(large+4095n).toString());h.m.select(4095,true);assert.equal(e.selected[0],(large+4095n).toString());
+ const h=harness(async(path)=>reply(path==="/api/v1/sharing/endpoints"?{manifest:{revision:1n,endpoints:[endpoint]}}:libraries));await h.m.open("invite");const e=h.m.state().editor;assert.equal(e.ready,true);assert.equal(e.libraries.length,4096);assert.equal(e.libraries[4095].library_id,(large+4095n).toString());h.m.select(4095,true);assert.equal(e.selected[0],(large+4095n).toString());
 });
 test("sharing node card reports orphaned playback recovery without inventing state",()=>{
  const {m}=harness();
@@ -104,5 +105,46 @@ test("sharing node card reports orphaned playback recovery without inventing sta
  const html=m.panel({...base,sharingStatus:{listener:"ready",receiver_recovery:{last_scan_at_ms:null,in_flight:[id],retired_total:3n,stranded:[{incarnation_id:id,reason:"dispatch_unknown",observed_at_ms:1}]}}});
  assert.match(html,/Playback recovery: not yet scanned · 3 retired · 1 in progress · 1 stranded/);
  assert.match(html,new RegExp(id+": dispatch unknown"));
- assert.doesNotMatch(m.panel({...base,sharingStatus:{listener:"ready",receiver_recovery:{last_scan_at_ms:5,in_flight:[],retired_total:0,stranded:[]}}}),/<ul>/);
+ assert.doesNotMatch(m.recovery({receiver_recovery:{last_scan_at_ms:5,in_flight:[],retired_total:0,stranded:[]}}),/<ul>/);
+});
+
+test("invitation address setup preserves selected libraries and never posts until configured",async()=>{
+ let manifest=null;const h=harness(async(path,options)=>{
+  if(path==="/api/v1/libraries")return reply([{id:large,name:"Movies",kind:"movies"}]);
+  if(path==="/api/v1/sharing/endpoints"&&options.method==="GET")return reply({manifest});
+  if(path==="/api/v1/sharing/endpoints"&&options.method==="PUT"){const body=h.m.parse(options.body);assert.equal(body.expected_revision,0n);manifest={revision:1n,endpoints:body.endpoints};return reply({updated:true});}
+  return reply({id,invitation:"cinema-share-v1:created",expires_at_ms:large});
+ });
+ await h.m.open("invite");h.m.select(0,true);assert.match(h.element.innerHTML,/Configure this Cinema’s addresses/);await h.m.save();assert.equal(h.requests.some(r=>r.options.method==="POST"),false);
+ await h.m.configure();assert.equal(h.m.state().editor.endpoints[0].port,32443n);assert.match(h.element.innerHTML,/Saving addresses does not check connectivity/);
+ for(const [key,value] of Object.entries(endpoint))h.m.endpointEdit(0,key,typeof value==="bigint"?value.toString():value);
+ h.m.edit("confirm",true);await h.m.save();assert.equal(h.m.state().editor.saved,true);await h.m.back();assert.equal(h.m.state().editor.selected[0],large.toString());assert.equal(h.m.state().editor.needsEndpoints,false);assert.equal(h.requests.some(r=>r.options.method==="POST"),false);
+ await h.m.save();assert.equal(h.m.state().invitation.invitation,"cinema-share-v1:created");assert.equal(h.requests.filter(r=>r.options.method==="POST").length,1);
+});
+test("missing-manifest invitation conflict offers setup without replay or losing draft",async()=>{
+ const h=harness(async(path,options)=>path==="/api/v1/libraries"?reply([{id:large,name:"Movies",kind:"movies"}]):path==="/api/v1/sharing/endpoints"?reply({manifest:{revision:1n,endpoints:[endpoint]}}):reply({code:"sharing_endpoints_unavailable",message:"sharing endpoints unavailable"},409));
+ await h.m.open("invite");h.m.select(0,true);await h.m.save();assert.equal(h.m.state().editor.ready,false);assert.equal(h.m.state().editor.needsEndpoints,true);assert.match(h.element.innerHTML,/Configure this Cinema’s addresses/);assert.match(h.element.innerHTML,/selected libraries are kept/);
+ await h.m.configure();await h.m.back();assert.equal(h.m.state().editor.selected[0],large.toString());assert.equal(h.requests.filter(r=>r.options.method==="POST").length,1);
+ await h.m.reload();assert.equal(h.m.state().editor.selected[0],large.toString());assert.equal(h.requests.filter(r=>r.options.method==="POST").length,1);
+});
+
+test("Sharing requirements distinguish missing addresses and observed TLS from unverified host network",async()=>{
+ const h=harness(async(path)=>reply(path==="/api/v1/sharing/endpoints"?{manifest:null}:{listener:"listening",certificate:{spki_sha256:endpoint.spki_sha256,expires_at_ms:large},serve:"unknown"}));
+ const status=await h.m.read("/sharing/status");const html=h.m.panel({...h.data,sharingStatus:status});
+ assert.match(html,/This Cinema’s addresses: Missing/);assert.match(html,/Listening on this serving node/);assert.match(html,/Sharing certificate: Observed/);assert.match(html,/Not verified by this Cinema/);assert.doesNotMatch(html,/Tailscale is installed|Network ready/);assert.equal(h.requests.some(r=>r.options.method!=="GET"),false);
+ const unavailable=harness(async(path)=>reply(path==="/api/v1/sharing/endpoints"?{message:"unavailable"}:{listener:"listening"},path==="/api/v1/sharing/endpoints"?503:200));const unknown=await unavailable.m.read("/sharing/status");assert.match(unavailable.m.panel({...unavailable.data,sharingStatus:unknown}),/address information could not be read/);assert.doesNotMatch(unavailable.element.innerHTML,/This Cinema’s addresses: Missing/);
+});
+
+test("confirmed Cinema address save refreshes requirements and failed latest read becomes unknown without replay",async()=>{
+ let manifest=null,failRead=false;const h=harness(async(path,options)=>{
+  if(path==="/api/v1/sharing/endpoints"){
+   if(options.method==="PUT"){manifest={revision:1n,endpoints:[endpoint]};return reply({updated:true});}
+   return failRead?reply({message:"unavailable"},503):reply({manifest});
+  }
+  return reply(path.endsWith("imports")?{imports:[imported()]}:path.endsWith("exports")?{exports:[exported()],next:null}:{listener:"listening"});
+ });
+ await h.m.mainReload();assert.match(h.element.innerHTML,/This Cinema’s addresses: Missing/);
+ await h.m.open("manifest");for(const [key,value] of Object.entries(endpoint))h.m.endpointEdit(0,key,typeof value==="bigint"?value.toString():value);h.m.edit("confirm",true);await h.m.save();await h.m.back();assert.match(h.element.innerHTML,/This Cinema’s addresses: Configured/);
+ failRead=true;await h.m.mainReload();assert.match(h.element.innerHTML,/address information could not be read/);assert.doesNotMatch(h.element.innerHTML,/This Cinema’s addresses: Configured/);assert.equal(h.requests.filter(r=>r.options.method==="PUT").length,1);
+ failRead=false;await h.m.open("manifest");h.m.edit("confirm",true);failRead=true;await h.m.save();assert.equal(h.m.state().editor.saved,true);assert.match(h.m.state().editor.error,/Addresses were saved/);await h.m.save();assert.equal(h.requests.filter(r=>r.options.method==="PUT").length,2);await h.m.back();assert.match(h.element.innerHTML,/address information could not be read/);
 });
