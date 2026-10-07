@@ -10,6 +10,30 @@ from validation.python_unit_receipts import ReceiptError
 
 
 class MainUnitReceiptsCase(unittest.TestCase):
+    def test_failed_pre_receipt_run_still_uses_legacy_bootstrap(self):
+        scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        commit = 'a' * 40
+        prior = {'id': 10, 'workflow_id': main.WORKFLOW, 'prettyref': '#7', 'event': 'pull_request',
+                 'commit_sha': commit, 'event_payload': {'repository': {'id': 1}, 'number': 7,
+                 'pull_request': {'number': 7, 'head': {'ref': 'topic', 'sha': commit, 'repo': {'id': 1}},
+                                  'base': {'ref': 'main', 'repo': {'id': 1}}}}}
+        expected = {'validation:test_fixture.Case.test_ok': {'run': 10, 'commit': commit}}
+        class API:
+            def pages(self, path, query=None, field=None):
+                if path == '/actions/artifacts': return []
+                if path == '/actions/runs': return [prior]
+                return [{'id': 3, 'name': main.JOB, 'repo_id': 1, 'run_id': 10,
+                         'attempt': 1, 'status': 'failure', 'task_id': 7}]
+            def bytes(self, path, query=None):
+                return b'Ran 2 tests in 0.01s' if path.endswith('/logs') else b'legacy workflow'
+        class Applicability:
+            def __call__(self, test, value): return True
+            def finish(self, passes): pass
+        with patch.object(main, 'bootstrap', return_value=expected) as bootstrap, \
+             patch.object(main, 'unexecuted_preflight', side_effect=AssertionError('legacy has no receipt source')):
+            self.assertEqual(main.restore(API(), scope, 11, Applicability()), expected)
+            bootstrap.assert_called_once()
+
     def test_cancelled_unassigned_preflight_does_not_require_test_evidence(self):
         scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
         class API:
@@ -143,6 +167,7 @@ class MainUnitReceiptsCase(unittest.TestCase):
 
         class API:
             status = 'failure'
+            task_id = 7
             def pages(self, path, query=None, field=None):
                 if path == '/actions/artifacts':
                     marker = query['name'].endswith('-start-10')
@@ -151,7 +176,7 @@ class MainUnitReceiptsCase(unittest.TestCase):
                 if path == '/actions/runs':
                     return [prior]
                 return [{'id': 3, 'name': main.JOB, 'repo_id': 1, 'run_id': 10,
-                         'attempt': 1, 'status': self.status}]
+                         'attempt': 1, 'status': self.status, 'task_id': self.task_id}]
             def bytes(self, path):
                 return start if path.endswith('/2/zip') else final
 
@@ -161,6 +186,10 @@ class MainUnitReceiptsCase(unittest.TestCase):
                 api.status = status
                 with self.subTest(status=status):
                     self.assertEqual(main.restore(api, scope, 11, Applicability()), final['passes'])
+            api.task_id = 0
+            with self.assertRaisesRegex(ReceiptError, 'Unassigned preflight has final journal'):
+                main.restore(api, scope, 11, Applicability())
+            api.task_id = 7
             final['passes'][test] = {'run': 9, 'commit': commit}
             with self.assertRaises(ReceiptError):
                 main.restore(api, scope, 11, Applicability())

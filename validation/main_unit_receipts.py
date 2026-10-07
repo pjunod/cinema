@@ -468,12 +468,16 @@ def restore(api, scope, current_run, applicability):
         if job['status'] == 'skipped':
             require(rid not in indexed, 'Skipped job has final journal')
             continue
+        if job['status'] == 'cancelled' and type(job.get('task_id')) is int and job['task_id'] == 0:
+            require(rid not in indexed, 'Unassigned preflight has final journal')
+            require(unexecuted_preflight(api, scope, prior, job), 'Unassigned preflight is ambiguous')
+            continue
         commit = receipts.sha(prior['commit_sha'])
         if rid not in indexed:
-            if unexecuted_preflight(api, scope, prior, job):
-                continue
             workflow = api.bytes('/raw/.github/workflows/' + WORKFLOW, {'ref': commit})
             if b'validation.main_unit_receipts' in workflow:
+                if unexecuted_preflight(api, scope, prior, job):
+                    continue
                 missing.append((prior, job))
                 continue
             # One exhaustive legacy baseline is the migration boundary. Older
