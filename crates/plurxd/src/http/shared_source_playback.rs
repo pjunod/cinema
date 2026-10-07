@@ -43,6 +43,7 @@ struct SourceStartEntry {
     ending: std::sync::Mutex<Option<std::sync::Arc<SourceEndOwner>>>,
     end_deadline: std::sync::OnceLock<std::time::Instant>,
     local_custody: std::sync::Mutex<Vec<ingress::LocalCustody>>,
+    registration_gate: std::sync::Arc<ingress::RegistrationGate>,
     changed: tokio::sync::Notify,
     result: std::sync::Mutex<Option<Result<SourceStartOwned, SourceStartFailure>>>,
     task: SourceStartTask,
@@ -347,6 +348,7 @@ impl SourceStartRegistry {
             ending: std::sync::Mutex::new(None),
             end_deadline: std::sync::OnceLock::new(),
             local_custody: Default::default(),
+            registration_gate: Default::default(),
             changed: tokio::sync::Notify::new(),
             result: std::sync::Mutex::new(None),
             task: SourceStartTask::default(),
@@ -823,6 +825,7 @@ async fn live_operation_owner(
         connection.ok_or_else(unavailable)?,
         &entry,
         &owned.assignment,
+        deadline,
     )
     .await?;
     Ok((entry, owned))
@@ -1021,6 +1024,7 @@ async fn status(
             &connection.as_ref().ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.connection", error_class = "absent", "Source status refused"); unavailable() })?.0,
             &entry,
             &owned.assignment,
+            deadline,
         )
         .await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.register_local", error_class = "operation_refused", "Source status refused"); })?;
     }
@@ -1498,6 +1502,7 @@ async fn resources(
         &connection.as_ref().ok_or_else(unavailable)?.0,
         &entry,
         &owned.assignment,
+        deadline,
     )
     .await?;
     let opened = owned
@@ -1632,7 +1637,7 @@ async fn start(
     }
     let assignment = ingress::assigned(&state, &entry, deadline).await?;
     let connection = connection.ok_or_else(unavailable)?;
-    ingress::register_local(&state, &connection.0, &entry, &assignment).await?;
+    ingress::register_local(&state, &connection.0, &entry, &assignment, deadline).await?;
     let owned = entry
         .wait(deadline)
         .await

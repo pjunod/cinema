@@ -473,6 +473,7 @@ pub(super) async fn direct_bytes(
         &connection.as_ref().ok_or_else(unavailable)?.0,
         &entry,
         &owned.assignment,
+        deadline,
     )
     .await?;
     if !owned.actor.is_direct() {

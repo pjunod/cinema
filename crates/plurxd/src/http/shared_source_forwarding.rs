@@ -432,12 +432,43 @@ struct FreshPin {
     registry_boot: Option<Uuid>,
     credential_hash: String,
 }
+struct RegistrationCoordinator {
+    owner_identity: String,
+    gate: std::sync::Weak<super::ingress::RegistrationGate>,
+}
 #[derive(Clone, Default)]
 pub(super) struct ForwardingRegistry {
     held: Arc<Mutex<Vec<Arc<HeldObligation>>>>,
     fresh: Arc<Mutex<Vec<FreshPin>>>,
+    registration_gates: Arc<Mutex<Vec<RegistrationCoordinator>>>,
 }
 impl ForwardingRegistry {
+    fn registration_gate(
+        &self,
+        owner_identity: &str,
+    ) -> Result<Arc<super::ingress::RegistrationGate>, ApiError> {
+        let mut gates = self
+            .registration_gates
+            .lock()
+            .expect("Source registration coordinators");
+        gates.retain(|entry| entry.gate.strong_count() != 0);
+        if let Some(gate) = gates
+            .iter()
+            .find(|entry| entry.owner_identity == owner_identity)
+            .and_then(|entry| entry.gate.upgrade())
+        {
+            return Ok(gate);
+        }
+        if gates.len() >= HELD_MAX {
+            return Err(unavailable());
+        }
+        let gate = Arc::new(super::ingress::RegistrationGate::default());
+        gates.push(RegistrationCoordinator {
+            owner_identity: owner_identity.to_owned(),
+            gate: Arc::downgrade(&gate),
+        });
+        Ok(gate)
+    }
     fn pin(&self, authority: &mut FreshAuthority, body: &[u8]) -> Result<(), ApiError> {
         use sha2::Digest;
         let body_hash: [u8; 32] = sha2::Sha256::digest(body).into();
@@ -782,6 +813,11 @@ async fn register(
     deadline: Instant,
 ) -> Result<ForwardIngress, ApiError> {
     let registry = &state.transcode.source_http_starts.forwarding;
+    // Only one known registration per retained principal runs on this ingress.
+    // An unknown exchange leaves its common pending fence intact after this
+    // coordinator releases; a different driver cannot adopt that reservation.
+    let registration_gate = registry.registration_gate(authority.owner_identity())?;
+    let _registration = registration_gate.acquire(deadline).await?;
     let driver = capture_driver(state, connection, &authority.owner_node_id, deadline).await?;
     let existing = registry
         .held

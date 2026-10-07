@@ -4198,7 +4198,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # its exact-owner sealed/settled observation by its retained315s deadline.
 # Timeout/read failure exits unresolved; only authenticated physical-close ACKs
 # settle debt. No timer elects work and no task or polling owner is added.
-expected_occurrences = 1562
+# +2 Source registration coordination: one inherited-deadline wait for the
+# retained principal's metadata mutex, and one whole local Register bound.
+# Cancellation preserves the exact common pending obligation; timeout never
+# supplies physical closure or authorizes a new driver. The existing60s monitor
+# ACK timeout becomes an absolute timeout_at including the same-entry gate
+# wait (net zero). No task, interval, sleep, retry or watchdog is added.
+expected_occurrences = 1564
 
 
 [[module_structures]]
