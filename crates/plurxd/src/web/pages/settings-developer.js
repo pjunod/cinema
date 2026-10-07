@@ -443,6 +443,7 @@ async function saveBoundedCatalogueReads(btn){
 function cinemaSharingCard(settings,readiness){
   return setCard(`${cardHead("Cinema shared libraries","Invite another Cinema to selected libraries through your private Tailscale connection.",'<span class="pill">Qualification pending</span>')}
     ${togRow("cinema-sharing-enabled","Enable shared libraries","The saved switch applies to this Cinema. Readiness observations never prevent saving.",!!settings.sharing_enabled)}
+    ${devReq(readiness,"cinema_sharing","source_activation","Source activation at this boot","First enabling sharing requires a coordinated drained restart of the cluster. This startup observation is advisory; it never changes your saved choice.")}
     ${devReq(readiness,"cinema_sharing","listener","Private sharing listener","A separate TLS listener serves only scoped peer requests.")}
     ${devReq(readiness,"cinema_sharing","tls","Node certificate and pin","Keep the node key and verify the invitation pin through your trusted channel.")}
     ${devReq(readiness,"cinema_sharing","network","Tailscale reachability and access policy","Both homes need qualified private transport and explicit recipient access.")}

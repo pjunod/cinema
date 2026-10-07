@@ -1797,6 +1797,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             return Ok(());
         };
         let parts = Boot {
+            source_activation_at_boot: Some(source_layout_ready),
             store,
             replication,
             membership,
@@ -1829,6 +1830,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
 
 /// What a measured node hands to the server it is about to become.
 struct Boot {
+    source_activation_at_boot: Option<bool>,
     store: Arc<dyn plurx_core::store::Store>,
     catalogue: plurx_core::store::CatalogueReader,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
@@ -2057,6 +2059,7 @@ async fn boot_observing(
         _ => None,
     };
     let Boot {
+        source_activation_at_boot,
         store,
         replication,
         membership,
@@ -2104,6 +2107,9 @@ async fn boot_observing(
         system,
         logs,
     );
+    state
+        .sharing
+        .observe_source_activation_at_boot(source_activation_at_boot);
     if let Some(owner) = &observation {
         let observer = owner.observer().await.ok_or_else(|| {
             anyhow::anyhow!("startup observation owner disappeared before activation")
@@ -7705,6 +7711,7 @@ mod startup_tests {
         let booted = tokio::spawn(boot(
             config.clone(),
             Boot {
+                source_activation_at_boot: None,
                 store: handle.store,
                 catalogue,
                 replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
