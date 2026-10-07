@@ -2758,18 +2758,26 @@ async fn media_offer_reports_resolved_pipeline_without_gating_unresolved_candida
 
     // Resolution can fail while the ordinary offer remains usable. Preserve
     // that fallback without representing an unplanned GPU graph as actual.
-    file.id = seed_file_with_probe_at(
-        &store,
-        work.path()
-            .join("absent-unresolved-source.mkv")
-            .to_str()
-            .expect("path"),
-        plurx_core::domain::ProbeResult {
-            raw_json: Some("{}".to_owned()),
-            ..Default::default()
-        },
-    )
-    .await;
+    let item_id = store
+        .get_file(file.id)
+        .await
+        .expect("seeded file lookup")
+        .expect("seeded file")
+        .item_id;
+    file.path = work.path().join("absent-unresolved-source.mkv");
+    file.id = store
+        .upsert_file(
+            item_id,
+            file.path.to_str().expect("path"),
+            1,
+            1,
+            &plurx_core::domain::ProbeResult {
+                raw_json: Some("{}".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("unresolved fixture file");
     assert!(manager
         .resolve_movie_plan(&file, &requested, Encoder::Qsv)
         .await
