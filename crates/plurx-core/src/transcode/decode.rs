@@ -349,6 +349,7 @@ pub enum DecodeReason {
 #[serde(rename_all = "snake_case")]
 pub enum FrameDomain {
     SystemMemory,
+    Cuda,
     DrmPrime,
     Qsv,
     Vaapi,
@@ -360,6 +361,7 @@ impl FrameDomain {
     fn name(self) -> &'static str {
         match self {
             Self::SystemMemory => "system_memory",
+            Self::Cuda => "cuda",
             Self::DrmPrime => "drm_prime",
             Self::Qsv => "qsv",
             Self::Vaapi => "vaapi",
@@ -3066,7 +3068,8 @@ pub fn resolve_transcode(
     if deinterlace == Deinterlace::BwdifSendFrame
         && matches!(
             options.pipeline,
-            Pipeline::VppQsv
+            Pipeline::TonemapCuda
+                | Pipeline::VppQsv
                 | Pipeline::TonemapVaapi
                 | Pipeline::Libplacebo
                 | Pipeline::LibplaceboVaapi
@@ -3497,6 +3500,7 @@ fn validate_media_options(options: &TranscodeMediaOptions) -> Result<(), PlanErr
 
 fn pipeline_accepts_decode(pipeline: Pipeline, backend: DecodeBackend) -> bool {
     match pipeline {
+        Pipeline::TonemapCuda => backend == DecodeBackend::Cuda,
         Pipeline::VppQsv => backend == DecodeBackend::Qsv,
         Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => backend == DecodeBackend::Vaapi,
         Pipeline::DoviTonemapx | Pipeline::DoviPassthrough => backend == DecodeBackend::Software,
@@ -3549,6 +3553,7 @@ fn preferred_backend(
         return (DecodeBackend::Software, DecodeReason::RendererRequirement);
     }
     match pipeline {
+        Pipeline::TonemapCuda => return (DecodeBackend::Cuda, DecodeReason::LegacyPreference),
         Pipeline::VppQsv => return (DecodeBackend::Qsv, DecodeReason::LegacyPreference),
         Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => {
             return (DecodeBackend::Vaapi, DecodeReason::LegacyPreference);
@@ -3585,6 +3590,7 @@ fn surface_contract(
 ) -> DecodeSurfaceContract {
     let ten_bit = facts.bit_depth().is_some_and(|depth| depth >= 10) || facts.is_hdr();
     let decode_domain = match backend {
+        DecodeBackend::Cuda if pipeline == Pipeline::TonemapCuda => FrameDomain::Cuda,
         DecodeBackend::Qsv => FrameDomain::Qsv,
         DecodeBackend::Vaapi => FrameDomain::Vaapi,
         DecodeBackend::V4l2Request => FrameDomain::DrmPrime,
@@ -3594,7 +3600,8 @@ fn surface_contract(
     };
     let vendor_native = matches!(
         (decode_domain, pipeline),
-        (FrameDomain::Qsv, Pipeline::VppQsv)
+        (FrameDomain::Cuda, Pipeline::TonemapCuda)
+            | (FrameDomain::Qsv, Pipeline::VppQsv)
             | (
                 FrameDomain::Vaapi,
                 Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi
@@ -3610,6 +3617,7 @@ fn surface_contract(
         None
     };
     let renderer_domain = match pipeline {
+        Pipeline::TonemapCuda => FrameDomain::Cuda,
         Pipeline::VppQsv => FrameDomain::Qsv,
         Pipeline::TonemapVaapi => FrameDomain::Vaapi,
         Pipeline::Libplacebo | Pipeline::LibplaceboVaapi => FrameDomain::Vulkan,
@@ -3626,7 +3634,8 @@ fn surface_contract(
             .clone()
             .or_else(|| facts.pixel_format.clone()),
         FrameDomain::OpenCl => Some("p010le".to_owned()),
-        FrameDomain::Qsv
+        FrameDomain::Cuda
+        | FrameDomain::Qsv
         | FrameDomain::Vaapi
         | FrameDomain::SystemMemory
         | FrameDomain::DrmPrime => None,
@@ -3634,12 +3643,16 @@ fn surface_contract(
     let renderer_download_format = match pipeline {
         Pipeline::Libplacebo => Some("nv12".to_owned()),
         Pipeline::TonemapOpencl if facts.is_hdr() => Some("nv12".to_owned()),
-        Pipeline::VppQsv | Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi
+        Pipeline::TonemapCuda
+        | Pipeline::VppQsv
+        | Pipeline::TonemapVaapi
+        | Pipeline::LibplaceboVaapi
             if subtitle_rendering != SubtitleRendering::None =>
         {
             Some("nv12".to_owned())
         }
-        Pipeline::VppQsv
+        Pipeline::TonemapCuda
+        | Pipeline::VppQsv
         | Pipeline::TonemapVaapi
         | Pipeline::LibplaceboVaapi
         | Pipeline::TonemapOpencl
@@ -3672,6 +3685,7 @@ fn surface_contract(
         Some(FrameDomain::Qsv | FrameDomain::Vaapi) => Some("nv12".to_owned()),
         Some(
             FrameDomain::SystemMemory
+            | FrameDomain::Cuda
             | FrameDomain::Vulkan
             | FrameDomain::OpenCl
             | FrameDomain::DrmPrime,

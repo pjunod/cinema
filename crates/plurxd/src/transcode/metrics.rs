@@ -54,6 +54,7 @@ impl CodecQualificationMetrics {
             Pipeline::Hdr10Passthrough => 6,
             Pipeline::Cpu => 7,
             Pipeline::LibplaceboVaapi => 8,
+            Pipeline::TonemapCuda => 9,
         }
     }
 

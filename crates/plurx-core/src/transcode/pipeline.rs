@@ -35,6 +35,8 @@ use crate::domain::ScanType;
 /// back to, and it is the reference the others are checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Pipeline {
+    /// NVDEC → CUDA tone-map/scale → NVENC, without a system-memory handoff.
+    TonemapCuda,
     /// Intel, frames never leave the GPU: `vpp_qsv` scales and tone-maps in
     /// one pass on the video-processing block.
     VppQsv,
@@ -110,6 +112,7 @@ pub enum Pipeline {
 
 /// Every pipeline the probe may consider, best first.
 pub const CANDIDATES: &[Pipeline] = &[
+    Pipeline::TonemapCuda,
     Pipeline::VppQsv,
     Pipeline::TonemapVaapi,
     Pipeline::LibplaceboVaapi,
@@ -122,6 +125,7 @@ impl Pipeline {
     /// Stable identifier for settings, logs, and the stats overlay.
     pub fn name(self) -> &'static str {
         match self {
+            Pipeline::TonemapCuda => "tonemap_cuda",
             Pipeline::VppQsv => "vpp_qsv",
             Pipeline::TonemapVaapi => "tonemap_vaapi",
             Pipeline::Libplacebo => "libplacebo",
@@ -149,6 +153,7 @@ impl Pipeline {
     /// Human label for the overlay and the admin log.
     pub fn label(self) -> &'static str {
         match self {
+            Pipeline::TonemapCuda => "GPU tone-map (CUDA)",
             Pipeline::VppQsv => "GPU tone-map (QSV)",
             Pipeline::TonemapVaapi => "GPU tone-map (VA-API)",
             Pipeline::Libplacebo => "GPU tone-map (Vulkan)",
@@ -182,6 +187,7 @@ impl Pipeline {
     /// anyway, which is the copy this exists to remove.
     pub fn pairs_with(self, encoder: Encoder) -> bool {
         match self {
+            Pipeline::TonemapCuda => encoder == Encoder::Nvenc,
             Pipeline::VppQsv => encoder == Encoder::Qsv,
             Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => encoder == Encoder::Vaapi,
             Pipeline::Libplacebo | Pipeline::TonemapOpencl => encoder != Encoder::Software,
@@ -254,6 +260,12 @@ impl Pipeline {
     pub fn decode_args(self) -> Vec<String> {
         let a = |s: &str| s.to_owned();
         match self {
+            Pipeline::TonemapCuda => vec![
+                a("-hwaccel"),
+                a("cuda"),
+                a("-hwaccel_output_format"),
+                a("cuda"),
+            ],
             Pipeline::VppQsv => vec![
                 a("-hwaccel"),
                 a("qsv"),
@@ -284,6 +296,12 @@ impl Pipeline {
     pub fn init_args(self) -> Vec<String> {
         let a = |s: &str| s.to_owned();
         match self {
+            Pipeline::TonemapCuda => vec![
+                a("-init_hw_device"),
+                a("cuda=cu:0"),
+                a("-filter_hw_device"),
+                a("cu"),
+            ],
             // libplacebo wants a Vulkan device; ffmpeg derives one from the
             // existing hardware context where it can, but naming it is what
             // makes the graph work on a box whose encoder is VA-API.
@@ -365,6 +383,18 @@ impl Pipeline {
         let w = width.map_or_else(|| "-1".to_owned(), |w| w.to_string());
         Some(match self {
             Pipeline::Cpu => return None,
+            Pipeline::TonemapCuda => {
+                let w = width.map_or_else(|| "-2".to_owned(), |w| w.to_string());
+                let scale = format!("scale_cuda=w={w}:h={height}");
+                if hdr {
+                    // Match the CPU reference's Hable/max-channel operator.
+                    // Jellyfin's auto mode selects ITP on newer GPUs, which
+                    // is a different picture, not a faster implementation.
+                    format!("tonemap_cuda=tonemap=hable:tonemap_mode=max:desat=0:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,{scale}")
+                } else {
+                    format!("{scale}:format=nv12")
+                }
+            }
             // vpp_qsv does scale and tone-map in one pass. `w=-1` keeps the
             // aspect; the output is nv12 in GPU memory, which is what h264_qsv
             // wants, so no format conversion is needed on either side.
@@ -474,7 +504,10 @@ impl Pipeline {
     pub fn keeps_frames_off_the_cpu(self) -> bool {
         matches!(
             self,
-            Pipeline::VppQsv | Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi
+            Pipeline::TonemapCuda
+                | Pipeline::VppQsv
+                | Pipeline::TonemapVaapi
+                | Pipeline::LibplaceboVaapi
         )
     }
 
@@ -495,7 +528,8 @@ impl Pipeline {
     pub fn output_grade(self) -> OutputGrade {
         match self {
             Pipeline::DoviPassthrough | Pipeline::Hdr10Passthrough => OutputGrade::Hdr10,
-            Pipeline::VppQsv
+            Pipeline::TonemapCuda
+            | Pipeline::VppQsv
             | Pipeline::TonemapVaapi
             | Pipeline::Libplacebo
             | Pipeline::LibplaceboVaapi
@@ -626,7 +660,8 @@ impl Pipeline {
         if matches!(scan_type, ScanType::Interlaced(_))
             && matches!(
                 proven,
-                Pipeline::VppQsv
+                Pipeline::TonemapCuda
+                    | Pipeline::VppQsv
                     | Pipeline::TonemapVaapi
                     | Pipeline::Libplacebo
                     | Pipeline::LibplaceboVaapi

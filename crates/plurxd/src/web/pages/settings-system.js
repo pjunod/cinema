@@ -199,11 +199,34 @@ function blockedGetsHtml(b){
   const advice=node?`<div class="muted" style="margin-top:2px">Raising “Waiting segment requests” under Streaming is what changes the second number. The first one it will not change.</div>`:"";
   return `${head} <span class="muted">· since start-up:</span> ${parts.join(" · ")}${advice}`;
 }
+function transcoderCard(sys){
+  if(!sys.node_id)return "";
+  const enc=sys.encoders||{}, active=sys.hwaccel_pref||"auto", requested=sys.hwaccel_requested||active;
+  const choices=[["auto","Auto",true],["nvenc","NVIDIA NVENC",enc.nvenc],["qsv","Intel Quick Sync",enc.qsv],["vaapi","VA-API",enc.vaapi],["videotoolbox","Apple VideoToolbox",enc.videotoolbox],["software","CPU",true]];
+  return `<div class="card"><h2 class="section" style="margin-top:0">Transcoding backend</h2>
+    <p class="muted">Choose for this server node only. Intel graphics can save power on laptops; a discrete NVIDIA GPU can provide more throughput. Auto prefers NVIDIA when available.</p>
+    <label for="node-hwaccel">Preferred backend</label>
+    <select id="node-hwaccel" data-node-id="${esc(sys.node_id)}">${choices.map(([value,label,available])=>`<option value="${value}"${value===requested?" selected":""}>${label}${available?"":" — not detected"}</option>`).join("")}</select>
+    <p>Active: <b>${esc(sys.encoder_selected||active)}</b> · HDR: ${toneMapHtml(sys.tone_map)}</p>
+    <p class="muted" id="node-hwaccel-status">${sys.hwaccel_restart_required||requested!==active?"Saved choice is waiting for this node to restart.":"Changes apply after restarting this node, when its HDR capabilities are tested again."} If the preferred backend is unavailable, an available backend is used; its name appears above.</p>
+    <button onclick="saveNodeHwaccel(this)">Save</button></div>`;
+}
+async function saveNodeHwaccel(button){
+  const field=document.getElementById("node-hwaccel"), preference=field.value, node_id=field.dataset.nodeId;
+  button.disabled=true;
+  try{
+    const result=await api("/system/transcoder",{method:"PUT",body:JSON.stringify({node_id,preference})});
+    if(SETTINGS_DATA.sys&&SETTINGS_DATA.sys.node_id===node_id){SETTINGS_DATA.sys.hwaccel_requested=preference;SETTINGS_DATA.sys.hwaccel_restart_required=result.restart_required;}
+    document.getElementById("node-hwaccel-status").textContent=result.restart_required?"Saved. Restart this node to apply the backend and test its HDR capabilities.":"Saved. This backend preference is already active.";
+    toast("Transcoding preference saved");
+  }catch(error){toast(error.message||"Could not save transcoding preference");}
+  finally{button.disabled=false;}
+}
 function systemPanel(sys,playbackEvents){
   const enc=sys.encoders||{};
   const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
     .map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
-  return `${setHead("System",`${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}${systemAttentionHtml(sys)}<div class="card"><h2 class="section" style="margin-top:0">This node</h2>
+  return `${setHead("System",`${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}${systemAttentionHtml(sys)}${transcoderCard(sys)}<div class="card"><h2 class="section" style="margin-top:0">This node</h2>
       <dl class="kvgrid system-grid">
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
         <dt>ffmpeg</dt><dd>${sys.ffmpeg_version?esc(sys.ffmpeg_version):`<span style="color:var(--bad)">not found at \`${esc(sys.ffmpeg)}\` — scanning and transcoding will fail</span>`}</dd>

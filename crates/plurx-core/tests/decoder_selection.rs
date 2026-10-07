@@ -677,6 +677,7 @@ fn operator_software_requirement_replaces_a_vendor_surface_graph() {
         Some("smpte2084"),
     ));
     for (encoder, pipeline) in [
+        (Encoder::Nvenc, Pipeline::TonemapCuda),
         (Encoder::Qsv, Pipeline::VppQsv),
         (Encoder::Vaapi, Pipeline::LibplaceboVaapi),
     ] {
@@ -695,6 +696,75 @@ fn operator_software_requirement_replaces_a_vendor_surface_graph() {
         );
         assert_eq!(plan.options().pipeline, Pipeline::Cpu);
         assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+    }
+}
+
+#[test]
+fn cuda_tone_map_keeps_hardware_frames_until_a_subtitle_composite() {
+    let input = facts(video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2160,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    ));
+    for burn in [None, Some(false), Some(true)] {
+        let mut media = options(Pipeline::TonemapCuda);
+        media.subtitle_burn = burn.map(|bitmap| SubtitleBurn {
+            subtitle_index: 0,
+            bitmap,
+        });
+        let plan = resolve_with_options(
+            Encoder::Nvenc,
+            media,
+            &input,
+            &capabilities(vec![capability(
+                DecodeBackend::Cuda,
+                "hevc",
+                None,
+                None,
+                CapabilityStatus::Advertised,
+            )]),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("CUDA plan");
+        assert_eq!(plan.decode().backend(), DecodeBackend::Cuda);
+        assert_eq!(plan.decode().surface().decode_domain(), FrameDomain::Cuda);
+        assert_eq!(plan.decode().surface().renderer_domain(), FrameDomain::Cuda);
+        assert_eq!(plan.decode().surface().decoder_download_format(), None);
+        assert_eq!(
+            plan.decode().surface().renderer_download_format(),
+            burn.map(|_| "nv12")
+        );
+        let mut opts = execution_options();
+        opts.subtitle_burn = plan.options().subtitle_burn.clone();
+        let file = execution_file("/fixture/hdr.mkv");
+        let execution =
+            TranscodeExecution::from_options(&file, &opts, Pacing::unpaced(), "/fixture/out")
+                .expect("execution");
+        let args = hls_args(&plan, &execution);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-hwaccel_output_format", "cuda"]));
+        let command = args.join(" ");
+        assert!(
+            command.contains("tonemap_cuda=tonemap=hable:tonemap_mode=max"),
+            "{command}"
+        );
+        assert!(command.contains("h264_nvenc"));
+        assert_eq!(
+            command.matches("hwdownload").count(),
+            usize::from(burn.is_some()),
+            "{command}"
+        );
+        assert!(
+            !command.contains("hwupload"),
+            "NVENC accepts CPU subtitle composites directly: {command}"
+        );
     }
 }
 

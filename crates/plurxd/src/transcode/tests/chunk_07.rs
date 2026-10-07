@@ -2,6 +2,30 @@
 #[cfg(test)]
 use crate::queue_fixture::QueueFixture;
     #[tokio::test]
+    async fn node_encoder_override_applies_to_playback_without_changing_cluster_preference() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store.put_setting(keys::HWACCEL, "nvenc").await.expect("node preference fixture");
+        let root = crate::test_tempdir().expect("node preference fixture");
+        let caps = EncoderCaps {
+            nvenc: true,
+            qsv: true,
+            ..EncoderCaps::default()
+        };
+        let manager = TranscodeManager::new(
+            Arc::clone(&store), root.path().join("intel"), caps.clone(), Pipeline::VppQsv,
+        ).with_encoder_override(Some("qsv".into()));
+        assert_eq!(manager.encoder().await, Encoder::Qsv);
+        assert_eq!(manager.encoder_for_preference("nvenc"), Encoder::Qsv);
+        assert_eq!(manager.content_encoding_applicability("nvenc")["selected_encoder"], "qsv");
+        // A newly saved choice is pending restart, not a mismatched new encoder
+        // paired with the running manager's old tone-map graph.
+        store.put_setting(&crate::state::node_hwaccel_key("test-node"), "nvenc").await.expect("node preference fixture");
+        assert_eq!(manager.encoder().await, Encoder::Qsv);
+        let other = TranscodeManager::new(store, root.path().join("other"), caps, Pipeline::TonemapCuda);
+        assert_eq!(other.encoder().await, Encoder::Nvenc);
+    }
+    #[tokio::test]
     async fn cancelled_copy_registration_rejection_keeps_exact_cleanup_ownership() {
         use plurx_core::store::SqliteStore;
 

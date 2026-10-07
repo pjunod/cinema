@@ -1692,10 +1692,13 @@ fn hls_args_inner(
     let pipeline_decode = opts.pipeline.decode_args();
     let (decode_args, hwdownload) = if let Some(plan) = plan {
         let decode = plan.decode();
-        let mut args = decode.backend().input_args(matches!(
-            decode.backend(),
-            DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request
-        ));
+        let mut args = decode.backend().input_args(
+            decode.surface().decode_domain() == FrameDomain::Cuda
+                || matches!(
+                    decode.backend(),
+                    DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request
+                ),
+        );
         if decode.backend() == DecodeBackend::Software {
             if let Some(implementation) = decode.software_decoder() {
                 args.extend(["-c:v".to_owned(), implementation.to_owned()]);

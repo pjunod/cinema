@@ -115,6 +115,7 @@ fn metrics_encoder_inventory_has_closed_labels_and_records_successful_starts() {
     metrics.record_encoder(Encoder::Qsv, OutputGrade::Hdr10);
     metrics.record_pipeline(Pipeline::DoviPassthrough);
     metrics.record_pipeline(Pipeline::LibplaceboVaapi);
+    metrics.record_pipeline(Pipeline::TonemapCuda);
     let rendered = metrics.prometheus(&EncoderCaps {
         qsv: true,
         vaapi: true,
@@ -144,6 +145,8 @@ fn metrics_encoder_inventory_has_closed_labels_and_records_successful_starts() {
     );
     assert!(rendered
         .contains("plurx_tone_map_pipeline_sessions_total{pipeline=\"libplacebo_vaapi\"} 1\n"));
+    assert!(rendered
+        .contains("plurx_tone_map_pipeline_sessions_total{pipeline=\"tonemap_cuda\"} 1\n"));
     assert!(rendered.contains("plurx_encoder_available{family=\"software\"} 1\n"));
     assert!(rendered.contains("plurx_encoder_available{family=\"qsv\"} 1\n"));
     assert!(rendered.contains("plurx_encoder_available{family=\"nvenc\"} 0\n"));

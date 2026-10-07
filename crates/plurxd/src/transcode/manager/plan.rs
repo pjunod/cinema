@@ -1145,7 +1145,7 @@ impl TranscodeManager {
             && plurx_core::playback::hdr_route(file).is_some()
             && matches!(target_height, HDR10_HEIGHT | HDR10_4K_HEIGHT)
         {
-            let preferred = self.caps.choose(preference);
+            let preferred = self.encoder_for_preference(preference);
             let qsv_proved = match plurx_core::playback::hdr_route(file) {
                 Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough_qsv,
                 _ => self.hdr10_passthrough_qsv,
@@ -1173,7 +1173,7 @@ impl TranscodeManager {
                 target_height,
                 hdr_candidate,
                 subtitle_burn,
-                self.caps.choose(preference),
+                self.encoder_for_preference(preference),
             )
             .await?;
         if grade == OutputGrade::Hdr10 {
@@ -1217,7 +1217,7 @@ impl TranscodeManager {
             // been proved at boot; an unproved pairing falls back to software
             // rather than failing in front of a viewer. Pinning it to x264
             // used to cap 4K Dolby Vision at 720p for every non-DV client.
-            let preferred = self.caps.choose(requested);
+            let preferred = self.encoder_for_preference(requested);
             if preferred != Encoder::Software
                 && crate::ffmpeg::has_dovi_reshape_with(preferred).await
             {
@@ -1226,7 +1226,7 @@ impl TranscodeManager {
                 Ok(Encoder::Software)
             }
         } else {
-            Ok(self.caps.choose(requested))
+            Ok(self.encoder_for_preference(requested))
         }
     }
 

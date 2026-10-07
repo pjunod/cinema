@@ -560,6 +560,17 @@ async fn run<T: Tools>(
 ) -> Result<Sample, String> {
     let args = probe_args(fixture, out, candidate, encoder);
 
+    if candidate == Pipeline::TonemapCuda {
+        // Compile the CUDA kernels into the same writable cache playback
+        // uses. A one-frame warm-up is not a throughput measurement.
+        let mut warmup = args.clone();
+        warmup.splice(
+            warmup.len() - 1..warmup.len() - 1,
+            ["-frames:v".into(), "1".into()],
+        );
+        check_exit(&tools.ffmpeg(warmup, Stdout::Discard).await?)?;
+    }
+
     let started = Instant::now();
     let output = tools.ffmpeg(args, Stdout::Discard).await?;
     let elapsed = started.elapsed();
@@ -1368,7 +1379,7 @@ mod tests {
         let mut command = tools.command("/bin/sh");
         command.env("HOME", "/").args([
             "-c",
-            "test \"$AV_LOG_FORCE_NOCOLOR\" = 1 && printf shader > \"$XDG_CACHE_HOME/probe-cache\"",
+            "test \"$AV_LOG_FORCE_NOCOLOR\" = 1 && test \"$CUDA_CACHE_PATH\" = \"$XDG_CACHE_HOME\" && printf shader > \"$CUDA_CACHE_PATH/probe-cache\"",
         ]);
         let output = crate::process_control::output_job_owned(
             &mut command,
@@ -1407,6 +1418,35 @@ mod tests {
             .contains("software encoder"));
         // And it did not leave a fixture behind on the way out.
         assert!(!dir.path().join("hdr10-probe.mkv").exists());
+    }
+
+    #[tokio::test]
+    async fn cuda_warms_its_shader_cache_before_the_measured_encode() {
+        let tools = Recorded {
+            ffmpeg: vec![ok_output(""), ok_output("")],
+            ffprobe: vec![ok_output(BT709_TAGS), ok_output(SIGNALSTATS)],
+            ..Recorded::default()
+        };
+        let result = run(
+            &tools,
+            Path::new("hdr.mkv"),
+            Path::new("out.mp4"),
+            Pipeline::TonemapCuda,
+            Encoder::Nvenc,
+        )
+        .await
+        .expect("measured CUDA sample");
+        assert!(result.y > 0.0);
+        let calls = tools.ffmpeg_args.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].windows(2).any(|pair| pair == ["-frames:v", "1"]));
+        assert!(!calls[1].contains(&"-frames:v".to_owned()));
+        for args in calls.iter() {
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-hwaccel_output_format", "cuda"]));
+            assert!(!args.join(" ").contains("hwdownload"));
+        }
     }
 
     /// No fixture means no measurement, and no measurement means the CPU chain
@@ -1565,8 +1605,8 @@ mod tests {
     async fn a_candidate_that_is_the_same_picture_and_faster_wins_the_probe() {
         let dir = crate::test_tempdir().expect("workdir");
         let tools = Recorded {
-            // fixture, reference encode, candidate encode
-            ffmpeg: vec![ok_output(""), ok_output(""), ok_output("")],
+            // fixture, reference, CUDA warm-up and measured encode
+            ffmpeg: vec![ok_output(""), ok_output(""), ok_output(""), ok_output("")],
             ffprobe: vec![
                 ok_output(BT709_TAGS),
                 ok_output(SIGNALSTATS),
@@ -1585,8 +1625,8 @@ mod tests {
         let candidate = report
             .verdicts
             .iter()
-            .find(|v| v.pipeline == Pipeline::Libplacebo.name())
-            .expect("libplacebo was tried");
+            .find(|v| v.pipeline == Pipeline::TonemapCuda.name())
+            .expect("CUDA was tried");
         assert!(
             candidate
                 .rejected
@@ -1702,17 +1742,17 @@ mod tests {
         let rec = Recorder::new(vec![
             (Pipeline::Cpu, Ok(sample(84.0, 10.0))),
             // Same picture, three times the speed.
-            (Pipeline::Libplacebo, Ok(sample(86.0, 3.0))),
+            (Pipeline::TonemapCuda, Ok(sample(86.0, 3.0))),
             (Pipeline::TonemapOpencl, Ok(sample(84.0, 1.0))),
         ]);
         let r = &rec;
         let report = probe_candidates(Encoder::Nvenc, |p| async move { r.run(p) }).await;
 
-        assert_eq!(report.selected(), Pipeline::Libplacebo);
+        assert_eq!(report.selected(), Pipeline::TonemapCuda);
         assert!(report.ran);
         assert_eq!(
             *rec.asked.borrow(),
-            vec![Pipeline::Cpu, Pipeline::Libplacebo],
+            vec![Pipeline::Cpu, Pipeline::TonemapCuda],
             "a faster candidate behind a winner must not be run"
         );
         // The CPU chain is always in the report, as the yardstick at 1.0x.
@@ -1740,7 +1780,12 @@ mod tests {
 
         assert_eq!(
             *rec.asked.borrow(),
-            vec![Pipeline::Cpu, Pipeline::Libplacebo, Pipeline::TonemapOpencl],
+            vec![
+                Pipeline::Cpu,
+                Pipeline::TonemapCuda,
+                Pipeline::Libplacebo,
+                Pipeline::TonemapOpencl
+            ],
             "the QSV and VA-API graphs do not pair with NVENC"
         );
         // Everything failed, so the node falls back — and says which graph
