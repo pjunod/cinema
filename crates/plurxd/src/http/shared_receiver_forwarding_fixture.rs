@@ -194,6 +194,10 @@ async fn actual_nonowner_b(address: IpAddr) {
     ))
     .await
     .expect("actual second admitted B voter");
+    assert!(
+        !config.cluster.join_token_file.exists(),
+        "actual B startup must finalize its identity-bound join and consume the one-use token before serving"
+    );
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual startup factory"));

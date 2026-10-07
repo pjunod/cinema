@@ -1019,6 +1019,33 @@ fn publish_join_activation(
 #[cfg(feature = "hiqlite-store")]
 async fn finalize_pending_join_best_effort(config: &Config, selected: &SelectedStore) {
     if let Err(error) = finalize_pending_join(config, selected).await {
+        #[cfg(feature = "fixtures")]
+        {
+            // Closed error class/API code only: never log the identity-bound
+            // token, request body, credential, or unbounded remote message.
+            let (class, message) = match &error {
+                StoreError::Database(message) => ("database", Some(message.as_str())),
+                StoreError::Migration(message) => ("migration", Some(message.as_str())),
+                StoreError::JoinRefused(message) => ("join_refused", Some(message.as_str())),
+                StoreError::Task(_) => ("task", None),
+                StoreError::Identity(_) => ("identity", None),
+                _ => ("other", None),
+            };
+            let code = message
+                .and_then(|message| message.split(':').next())
+                .filter(|code| {
+                    !code.is_empty()
+                        && code.len() <= 64
+                        && code
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                })
+                .unwrap_or("no_closed_api_code");
+            eprintln!(
+                "Actual joined startup token finalization pending: class={class} code={code}"
+            );
+        }
+
         // The voter and activation marker are already durable at this point.
         // Finalization only consumes the coordinator's one-time record, so a
         // temporarily unavailable coordinator must not take this voter back

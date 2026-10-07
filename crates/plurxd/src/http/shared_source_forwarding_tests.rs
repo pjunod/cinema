@@ -118,6 +118,11 @@ async fn actual_nonowner_forwarding() {
     ))
     .await
     .expect("actual joined second voter");
+    assert!(
+        !config.cluster.join_token_file.exists(),
+        "actual identity-bound Source ingress join token must be consumed by successful startup finalization before sharing admission"
+    );
+
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual candidate startup"));

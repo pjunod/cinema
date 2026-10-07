@@ -3328,9 +3328,19 @@ async fn sharing_member_floor_observation(
         .map(|(id, _)| *id)
         .collect::<BTreeSet<_>>();
     if before.current_leader.is_none() || !members.contains(&local_raft_id) {
+        #[cfg(feature = "fixtures")]
+        eprintln!(
+            "sharing floor observation refused reason=leader_or_local_roster capabilities={:?}",
+            required.capabilities()
+        );
         return Ok(None);
     }
     if require_transition_absence && before.membership_config.log_id().is_none() {
+        #[cfg(feature = "fixtures")]
+        eprintln!(
+            "sharing floor observation refused reason=membership_log_absent capabilities={:?}",
+            required.capabilities()
+        );
         return Ok(None);
     }
     let members_json = bounded_committed_raft_ids_json(&members)?;
@@ -3341,6 +3351,11 @@ async fn sharing_member_floor_observation(
         let present = client.query_consistent_map::<CountRow,_>(
             "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_sharing_membership_generation'",params!()).await?;
         if present.first().is_none_or(|row| row.count != 1) {
+            #[cfg(feature = "fixtures")]
+            eprintln!(
+                "sharing floor observation refused reason=generation_table_absent capabilities={:?}",
+                required.capabilities()
+            );
             return Ok(None);
         }
         guard = format!(
@@ -3357,11 +3372,32 @@ async fn sharing_member_floor_observation(
             sharing_member_transition_absence_predicate()
         );
     }
+    #[cfg(not(feature = "fixtures"))]
+    let diagnostic_projection = String::new();
+    #[cfg(feature = "fixtures")]
+    let diagnostic_projection = {
+        let predicates = [
+            required.capabilities().iter().map(|capability| capability_ready_predicate(capability)).collect::<Vec<_>>().join(" AND "),
+            no_join_in_flight_predicate().to_owned(),
+            no_removal_in_flight_predicates(),
+            "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2 OR present.last_seen_at>$3))".to_owned(),
+            if require_transition_absence { sharing_member_transition_absence_predicate().to_owned() } else { "1".to_owned() },
+            if require_transition_absence { sharing_membership_generation_shape_predicate() } else { "1".to_owned() },
+            "EXISTS(SELECT 1 FROM json_each($1)) AND NOT EXISTS(SELECT 1 FROM json_each($1) committed WHERE NOT EXISTS(SELECT 1 FROM cluster_nodes member WHERE member.raft_id=CAST(committed.value AS INTEGER) AND member.removed_at IS NULL))".to_owned(),
+        ];
+        predicates
+            .iter()
+            .enumerate()
+            .map(|(index, predicate)| {
+                format!(", CASE WHEN ({predicate}) THEN 1 ELSE 0 END AS floor_diagnostic_{index}")
+            })
+            .collect::<String>()
+    };
     let rows = client
         .query_consistent_map::<SourceFloorGenerationRow, _>(
             format!(
                 "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
-                 MIN(node.last_seen_at) AS oldest_heartbeat, {generation_projection} AS generation \
+                 MIN(node.last_seen_at) AS oldest_heartbeat, {generation_projection} AS generation{diagnostic_projection} \
                  FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
                 guard,
             ),
@@ -3378,18 +3414,44 @@ async fn sharing_member_floor_observation(
                 .map(|(id, _)| *id)
                 .collect::<BTreeSet<_>>()
     {
+        #[cfg(feature = "fixtures")]
+        eprintln!(
+            "sharing floor observation refused reason=membership_changed capabilities={:?}",
+            required.capabilities()
+        );
         return Ok(None);
     }
     let [row] = rows.as_slice() else {
+        #[cfg(feature = "fixtures")]
+        eprintln!(
+            "sharing floor observation refused reason=unexpected_row_count capabilities={:?}",
+            required.capabilities()
+        );
         return Ok(None);
     };
     let completed_at_ms = unix_ms()?;
+    #[cfg(feature = "fixtures")]
+    eprintln!(
+        "sharing floor observation capabilities={:?} ready={} generation={:?} oldest={:?} query_ms={} completed_ms={} predicates(capabilities,joins,removals,freshness,transitions,generation_shape,roster)={:?}",
+        required.capabilities(),
+        row.floor.ready,
+        row.generation,
+        row.floor.oldest_heartbeat,
+        now,
+        completed_at_ms,
+        row.diagnostics
+    );
     if !sharing_principal_floor_observation_ready(&row.floor, completed_at_ms)
         || row.generation.is_none_or(|generation| generation < 0)
         || (require_transition_absence
             && (completed_at_ms < now
                 || completed_at_ms.saturating_sub(now) > SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS))
     {
+        #[cfg(feature = "fixtures")]
+        eprintln!(
+            "sharing floor observation refused reason=guard_generation_or_timing capabilities={:?}",
+            required.capabilities()
+        );
         return Ok(None);
     }
     Ok(Some(SourceAdmissionMembers {
@@ -13214,12 +13276,18 @@ struct SharingPrincipalFloorRow {
 struct SourceFloorGenerationRow {
     floor: SharingPrincipalFloorRow,
     generation: Option<i64>,
+    #[cfg(feature = "fixtures")]
+    diagnostics: [i64; 7],
 }
 impl From<&mut Row<'_>> for SourceFloorGenerationRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             floor: SharingPrincipalFloorRow::from(&mut *row),
             generation: row.get("generation"),
+            #[cfg(feature = "fixtures")]
+            diagnostics: std::array::from_fn(|index| {
+                row.get(format!("floor_diagnostic_{index}").as_str())
+            }),
         }
     }
 }
