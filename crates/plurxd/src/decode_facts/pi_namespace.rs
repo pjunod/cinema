@@ -155,11 +155,6 @@ pub(super) fn configure(
             "--clearenv",
             "--chdir",
             "/",
-            "--perms",
-            "0500",
-            "--ro-bind-data",
-            "7",
-            "/probe-bootstrap",
             "--ro-bind",
             LIBRARY_DIRECTORY,
             LIBRARY_DIRECTORY,
@@ -176,7 +171,7 @@ pub(super) fn configure(
             "--tmpfs",
             "/tmp",
             "--",
-            "/probe-bootstrap",
+            "/proc/self/fd/5",
             BOOTSTRAP,
         ])
         .arg(remaining.to_string())
@@ -206,17 +201,16 @@ pub(super) fn configure(
                 }
                 assign_child_fd(bootstrap_copy, 5)?;
                 assign_child_fd(sender_copy, 6)?;
-                assign_child_fd(bootstrap_copy, 7)?;
                 Ok(())
             })();
             libc::close(bootstrap_copy);
             libc::close(sender_copy);
             result?;
             libc::close(receiver);
-            // Preserve only parser/bootstrap/control and consumed bootstrap-data FD7 across bwrap.
+            // Preserve only parser/bootstrap/control capabilities across bwrap.
             if libc::syscall(
                 libc::SYS_close_range,
-                8_u32,
+                7_u32,
                 u32::MAX,
                 libc::CLOSE_RANGE_CLOEXEC,
             ) == -1
@@ -264,9 +258,13 @@ fn bootstrap(arguments: Vec<OsString>) -> std::io::Result<()> {
     {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
     }
-    // The executable bind must refer to the exact descriptor held by the parent,
-    // not a mutable configured pathname or another namespace bootstrap image.
-    if bootstrap_digest("/proc/self/fd/5")? != bootstrap_digest("/proc/self/exe")? {
+    // Bubblewrap execs the held descriptor through private procfs directly;
+    // require the running inode to be exactly the parent's held bootstrap.
+    let held_bootstrap = std::fs::metadata("/proc/self/fd/5")?;
+    let running_bootstrap = std::fs::metadata("/proc/self/exe")?;
+    if held_bootstrap.dev() != running_bootstrap.dev()
+        || held_bootstrap.ino() != running_bootstrap.ino()
+    {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
     }
     // No unsandboxed init peer may remain visible in this namespace. PID 1
@@ -302,26 +300,6 @@ fn bootstrap(arguments: Vec<OsString>) -> std::io::Result<()> {
     mark_unrelated_fds_close_on_exec()?;
     drop(listener);
     args.execute_held_probe()
-}
-
-fn bootstrap_digest(path: &str) -> std::io::Result<[u8; 32]> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?.take(MAX_PROBE_EXECUTABLE_BYTES + 1);
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        total += count as u64;
-        if total > MAX_PROBE_EXECUTABLE_BYTES {
-            return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
-        }
-        digest.update(&buffer[..count]);
-    }
-    Ok(digest.finalize().into())
 }
 
 fn build_namespace_memory_seccomp() -> std::io::Result<LinuxProbeSeccomp> {

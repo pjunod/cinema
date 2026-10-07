@@ -426,3 +426,11 @@ Linux Rust 1.97.1 all-target checking passed for `d740dc6fd`. Clippy found two
 test-only `unwrap_err` calls; those now use descriptive `expect_err` messages.
 The repaired candidate still requires Clippy, focused regressions and actual
 app playback. No final qualification or merge is claimed by this source record.
+
+The coordinator then removed a per-probe daemon copy: Bubblewrap executes the
+held bootstrap descriptor directly through private procfs and the bootstrap
+checks device/inode identity. A bounded capability check successfully executed
+a held executable after its pathname was deleted. This avoids allocating a
+roughly 350 MB daemon copy per probe; the existing namespace and Landlock
+regressions still qualify the final launcher. Superseded binary preparation
+was stopped before its test/ARM64 stages completed, retaining dependency caches.

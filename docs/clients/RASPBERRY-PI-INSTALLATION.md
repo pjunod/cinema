@@ -179,9 +179,9 @@ unexpected permission/setup errors do not silently select another backend.
 Bubblewrap creates the Pi probe's user, mount, PID, IPC, UTS and network namespaces.
 Expose only its trusted executable/runtime and held media input, give it
 private temporary storage, and keep the server's database, credentials and
-other processes outside its view. Bubblewrap copies the already-open daemon executable into a private read-only
-bootstrap file; the bootstrap verifies those bytes against the held descriptor
-before the parser starts. The bootstrap executes synchronously before the
+other processes outside its view. Bubblewrap executes the already-open daemon descriptor through its private
+procfs. The bootstrap verifies its running device/inode against that descriptor
+before the parser starts, avoiding a per-probe copy of the large daemon. The bootstrap executes synchronously before the
 daemon runtime initializes. It installs the existing one-shot seccomp
 supervisor contract and executes the sealed parser descriptor. This preserves
 the parser/source identity, subsequent-execution restrictions, admission,
