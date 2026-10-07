@@ -338,6 +338,37 @@ mod tests {
         assert!(evaluate(&conn, &predecessor_guard(1)));
     }
     #[test]
+    fn sharing_source_schema_accepts_replicated_pointer_additive_upgrade() {
+        let conn = database();
+        conn.execute_batch("DROP TABLE media_playback_pointers")
+            .expect("replace empty pointer fixture");
+        conn.execute_batch(include_str!(
+            "../../tests/fixtures/media-playback-pointers-v10.sql"
+        ))
+        .expect("historical replicated pointer declaration");
+        conn.execute_batch(super::super::MEDIA_PLAYBACK_POINTER_DESIRED_REVISION_COLUMN)
+            .expect("actual additive desired-revision migration");
+        type Object = (String, String, String, Vec<Option<String>>);
+        let objects: Vec<Object> =
+            serde_json::from_str(include_str!("sharing_source_legacy_schema.json"))
+                .expect("frozen metadata");
+        for (kind, _, table, variants) in objects {
+            if table == "media_playback_pointers" && kind != "table" {
+                if let Some(sql) = variants.first().and_then(Option::as_ref) {
+                    conn.execute_batch(sql)
+                        .expect("restore exact pointer index/trigger");
+                }
+            }
+        }
+        assert!(evaluate(&conn, &predecessor_layout_guard()));
+        assert!(evaluate(&conn, &predecessor_guard(1)));
+        conn.execute_batch(
+            "CREATE INDEX unmodeled_pointer_index ON media_playback_pointers(updated_at_ms)",
+        )
+        .expect("unknown pointer index");
+        assert!(!evaluate(&conn, &predecessor_layout_guard()));
+    }
+    #[test]
     fn sharing_source_schema_refuses_substituted_external_watch_authority_trigger() {
         let conn = database();
         assert!(evaluate(&conn, &predecessor_layout_guard()));
