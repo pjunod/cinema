@@ -2710,9 +2710,8 @@ mod rewrap_tests {
         let session = Uuid::new_v4();
         let incarnation = Uuid::new_v4();
         let received = ReceivedSource {
-            credential: plurx_core::secrets::Secret::from_cleartext(
-                "retained actual Source credential",
-            ),
+            credential: plurx_core::sharing::new_secret()
+                .expect("real wire-valid retained credential"),
             viewer_hash: "a".repeat(64),
             endpoint: plurx_core::sharing::Endpoint {
                 ipv4: std::net::Ipv4Addr::new(100, 64, 0, 2),
@@ -2788,7 +2787,15 @@ mod rewrap_tests {
             current_capsule_matches_received(&intent, &binding, &capsule, &received)
                 .expect("lineage")
         );
-        capsule.credential = plurx_core::secrets::Secret::from_cleartext("different credential");
+        let mut malformed: serde_json::Value =
+            serde_json::from_str(opened.expose()).expect("capsule JSON");
+        malformed["credential"] = serde_json::Value::String("not a sharing secret".into());
+        assert!(
+            serde_json::from_value::<UpstreamCapsule>(malformed).is_err(),
+            "strict wire grammar still refuses malformed credentials"
+        );
+        capsule.credential = plurx_core::sharing::new_secret().expect("distinct valid credential");
+        assert_ne!(capsule.credential.expose(), received.credential.expose());
         assert!(
             !current_capsule_matches_received(&intent, &binding, &capsule, &received)
                 .expect("lineage")

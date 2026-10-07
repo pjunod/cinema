@@ -71,7 +71,10 @@ async fn actual_nonowner_forwarding() {
     let worker_address = worker_listener.local_addr().expect("worker address");
     drop(worker_listener); // The startup owner binds this exact reserved origin.
     let worker = real_source_start_fixture_at(worker_address).await;
+    // Exercise both actual node and sharing routes with the strict sharing
+    // fallback once; the ordinary web-shell fallback is irrelevant here.
     let worker_router = super::super::router((*worker.state).clone())
+        .reset_fallback()
         .merge(super::super::sharing::peer_router((*worker.state).clone()));
     let worker_server = FixtureServer::spawn(
         Arc::clone(
