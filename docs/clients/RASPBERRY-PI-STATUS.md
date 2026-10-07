@@ -378,7 +378,7 @@ assertions; no playback success is claimed from compilation.
 ### Installation review disposition
 
 The single adversarial review of `c55437408` against `7f0142d45` requested
-changes. It performed no tests or device mutations. The implementation agents addressed every finding. The later authorized namespace sandbox was outside that review; its review disposition must be resolved before merge.
+changes. It performed no tests or device mutations. The implementation agents addressed every finding. The later authorized namespace sandbox was outside that review. The coordinator used the user's delegated decision authority to keep the batched PR and obtain one review of the new scope before its tests, recording the exception to the one-review-per-PR convention.
 All six focused regression groups passed in run 4296. Main subsequently added
 automatic Docker GPU discovery and receipt-continuation fixes; integration
 preserves the Pi override and its explicit request devices. Current-candidate
@@ -410,3 +410,19 @@ check; this is prerequisite evidence, not completed app playback. Container
 Bubblewrap 0.8 and the narrow Pi Docker policy still require direct acceptance.
 See [the installation plan](RASPBERRY-PI-INSTALLATION.md#6-pi-probe-isolation--preserve-landlock-elsewhere)
 for the boundary, ownership and evidence requirements.
+
+### Namespace review disposition
+
+The new-scope adversarial review of `d740dc6fd` requested two corrections.
+Both are implemented before focused qualification; the review itself ran no
+tests or device operations.
+
+| Finding | Correction | Evidence state |
+|---|---|---|
+| Non-root Bubblewrap uses a second user namespace after creating private devpts; the container policy omitted that call | Permit only AArch64 `unshare(CLONE_NEWUSER)`, leaving the pinned baseline and capability drop intact | Focused policy regression and actual Docker probe acceptance pending |
+| An older receipt could allow an upgrade to overwrite and adopt operator files at newly managed paths | Reject every existing newly managed system destination absent from the previous ownership receipt before provisioning or writes | Older-receipt regression covers all five new profile/license/provenance destinations; execution pending |
+
+Linux Rust 1.97.1 all-target checking passed for `d740dc6fd`. Clippy found two
+test-only `unwrap_err` calls; those now use descriptive `expect_err` messages.
+The repaired candidate still requires Clippy, focused regressions and actual
+app playback. No final qualification or merge is claimed by this source record.

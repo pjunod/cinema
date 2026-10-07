@@ -141,7 +141,7 @@ class PiRuntimeTests(unittest.TestCase):
         self.assertEqual(inherited, baseline)
         additions = profile['syscalls'][len(baseline['syscalls']):]
         self.assertEqual(additions, metadata['appended_rules'])
-        self.assertEqual({name for rule in additions for name in rule['names']}, {'clone', 'mount', 'umount2', 'pivot_root'})
+        self.assertEqual({name for rule in additions for name in rule['names']}, {'clone', 'unshare', 'mount', 'umount2', 'pivot_root'})
         for rule in additions:
             self.assertEqual(rule['includes'], {'arches': ['arm64']})
             self.assertEqual(rule['action'], 'SCMP_ACT_ALLOW')
@@ -156,6 +156,21 @@ class PiRuntimeTests(unittest.TestCase):
         # Keep Docker's clone3 ENOSYS fallback; adding it unrestricted would
         # bypass the clone argument filter through an indirect structure pointer.
         self.assertTrue(any(rule['names'] == ['clone3'] and rule.get('errnoRet') == 38 for rule in profile['syscalls']))
+
+    def test_pi_seccomp_allows_only_devpts_identity_restoration_unshare(self):
+        metadata = runtime.MANIFEST['sandbox']
+        baseline = json.loads((runtime.ASSETS / metadata['moby']['profile']).read_text())
+        profile = json.loads((runtime.ASSETS / metadata['profile']).read_text())
+        additions = profile['syscalls'][len(baseline['syscalls']):]
+        rules = [rule for rule in additions if 'unshare' in rule['names']]
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule['includes'], {'arches': ['arm64']})
+        self.assertEqual(rule['args'], [{'index': 0, 'value': 0x10000000, 'op': 'SCMP_CMP_EQ'}])
+        allowed_flags = rule['args'][0]['value']
+        for forbidden in (0, 0x20000, 0x40000000, 0x10000000 | 0x20000, 0x10000000 | 0x20000000):
+            self.assertNotEqual(allowed_flags, forbidden)
+        self.assertIn('devpts', metadata['bubblewrap_audit']['identity_restoration'])
 
     def test_docker_preserves_standard_assets_and_private_runtime(self):
         dockerfile = (ROOT / "Dockerfile.pi").read_text()

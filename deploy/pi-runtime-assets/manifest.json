@@ -75,7 +75,7 @@
       "notice_sha256": "b40ec5b16182103ef1cd69d42a21c98369e35bd483b3973902da4807c0755446"
     },
     "profile": "pi-worker-seccomp.json",
-    "profile_sha256": "66885b1046fbf5e0fa4e4142d37d0223bfb16d4376e23b24b533658e95096f51",
+    "profile_sha256": "720e5a0bda464720a5f4b62012685d4df590c83c956efc03bd2b60e3770756c6",
     "appended_rules": [
       {
         "names": [
@@ -92,6 +92,25 @@
           {
             "index": 0,
             "value": 2080505873,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "unshare"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8 --dev devpts setup first maps namespace identity to root; exactly CLONE_NEWUSER restores requested non-root uid/gid before dropping capabilities. No other unshare flags.",
+        "args": [
+          {
+            "index": 0,
+            "value": 268435456,
             "op": "SCMP_CMP_EQ"
           }
         ]
@@ -287,7 +306,8 @@
       "source_url": "https://raw.githubusercontent.com/containers/bubblewrap/4ab175fe6d3a4053444b04d805a6d686f53455b9/bubblewrap.c",
       "source_sha256": "ac0c67ec07c220c419d64dc100e16650f3d7cccb221285f523613ab88755f6eb",
       "bind_mount_source_url": "https://raw.githubusercontent.com/containers/bubblewrap/4ab175fe6d3a4053444b04d805a6d686f53455b9/bind-mount.c",
-      "bind_mount_source_sha256": "488847bd99903180499909dc408913265f632d36356f2621b89708aade876d80"
+      "bind_mount_source_sha256": "488847bd99903180499909dc408913265f632d36356f2621b89708aade876d80",
+      "identity_restoration": "--dev requires devpts; for non-root caller the first namespace maps uid/gid zero, then unshare(CLONE_NEWUSER) restores requested identity before final capability drop."
     }
   }
 }

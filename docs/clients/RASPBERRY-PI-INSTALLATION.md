@@ -208,8 +208,11 @@ transaction and hash receipts. No additional service or watchdog is introduced.
 | Coordinator | This plan/status, integration, compiler loop, review and physical qualification | Native and Docker app-level playback; applicable evidence retained; complete cleanup; merge only after qualification |
 
 Compile committed source with Rust 1.97.1 on Linux before pushing. The earlier
-installer review did not cover this new security scope; the review convention
-must be reconciled before final qualification. Focused regressions must cover
+installer review did not cover this new security scope. Using the user's
+instruction to decide when unavailable, the coordinator keeps one batched PR
+and reviews the newly added sandbox scope once before its tests. This is an
+explicit exception to the one-review-per-PR convention, not a re-review of
+the original installer findings. Focused regressions must cover
 both the existing Landlock path and the Pi path, including rejected secondary
 execution, attempts to reach the server's processes/files, inherited descriptor
 identity, cancellation and descendant cleanup. Actual app playback must create

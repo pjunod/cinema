@@ -117,6 +117,12 @@ def conflict(previous, role, runtime, verify_daemon=True):
         elif player.autostart_path().exists():
             raise ValueError('existing Cinema autostart has no launcher ownership receipt')
     if previous:
+        # New managed files require a fresh destination; an older valid receipt
+        # does not confer ownership of files introduced by a newer installer.
+        recorded = previous.get('files', {})
+        for path, kind in managed_paths(role, runtime).items():
+            if kind == 'system' and path != STATE and (path.exists() or path.is_symlink()) and str(path) not in recorded:
+                raise ValueError('newly managed destination exists without ownership: ' + str(path))
         if role != 'cinema' and runtime == 'native' and Path(str(UNIT) + '.d').exists():
             raise ValueError('native service has unmanaged drop-ins')
         if role != 'cinema' and runtime == 'docker' and verify_daemon:

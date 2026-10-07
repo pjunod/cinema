@@ -389,12 +389,14 @@ mod tests {
     #[test]
     fn namespace_bootstrap_refuses_missing_boundary_metadata() {
         assert_eq!(
-            bootstrap(Vec::new()).unwrap_err().raw_os_error(),
+            bootstrap(Vec::new())
+                .expect_err("missing bootstrap arguments must be refused")
+                .raw_os_error(),
             Some(libc::EINVAL)
         );
         assert_eq!(
             bootstrap(vec!["1".into(), "0".into(), "probe".into()])
-                .unwrap_err()
+                .expect_err("incomplete namespace identity must be refused")
                 .raw_os_error(),
             Some(libc::EPERM)
         );

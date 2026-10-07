@@ -180,6 +180,28 @@ class PiSetupTests(unittest.TestCase):
                  patch.object(setup, 'root_protected', return_value=True):
                 yield root, previous, events, service
 
+    def test_upgrade_old_receipt_refuses_unowned_new_seccomp_destination_before_writes(self):
+        with self.native_host() as (root, previous, events, service):
+            previous.update(role='server', runtime='docker', files={})
+            setup.UNIT.unlink()
+            setup.BINARY.unlink()
+            for name in ('.env', 'docker-compose.override.yml'):
+                path = root / 'deploy' / name
+                path.write_text('previously owned configuration')
+                previous['files'][str(path)] = setup.sha(path)
+            # Models a pre-namespace receipt: the new profile and licensing
+            # destinations are not covered by its valid ownership hashes.
+            for path in setup.seccomp_paths():
+                path.write_text('operator file')
+                with patch.object(setup, 'provision') as provider, patch.object(setup, 'write') as writes:
+                    with self.assertRaisesRegex(ValueError, 'newly managed destination exists without ownership'):
+                        setup.install(self.args(command='upgrade', media=[]), previous)
+                provider.assert_not_called()
+                writes.assert_not_called()
+                self.assertEqual(path.read_text(), 'operator file')
+                path.unlink()
+            self.assertFalse(setup.JOURNAL.exists())
+
     def test_failed_upgrade_stops_active_replacement_before_restoring_and_proves_old_ready(self):
         with self.native_host() as (root, previous, events, service):
             candidate = root / 'candidate'

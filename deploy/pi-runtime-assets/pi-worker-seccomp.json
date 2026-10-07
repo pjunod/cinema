@@ -850,6 +850,25 @@
     },
     {
       "names": [
+        "unshare"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "includes": {
+        "arches": [
+          "arm64"
+        ]
+      },
+      "comment": "Pi bubblewrap 0.8 --dev devpts setup first maps namespace identity to root; exactly CLONE_NEWUSER restores requested non-root uid/gid before dropping capabilities. No other unshare flags.",
+      "args": [
+        {
+          "index": 0,
+          "value": 268435456,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    },
+    {
+      "names": [
         "mount"
       ],
       "action": "SCMP_ACT_ALLOW",
