@@ -909,14 +909,33 @@ pub(super) async fn source_forward_locality(
         wire.principal.clone(),
         deadline,
     );
-    current_reference(state, &headers, &wire.reference).await?;
+    current_reference(state, &headers, &wire.reference)
+        .await
+        .inspect_err(|_error| {
+            #[cfg(test)]
+            eprintln!("Source locate actual owner refused current reference");
+        })?;
+    #[cfg(test)]
+    eprintln!("Source locate actual owner current reference accepted");
     state
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|_error| {
+            #[cfg(test)]
+            eprintln!("Source locate actual owner member observation error");
+            unavailable()
+        })?
+        .ok_or_else(|| {
+            #[cfg(test)]
+            eprintln!("Source locate actual owner member floor unavailable");
+            unavailable()
+        })?;
+    #[cfg(test)]
+    eprintln!("Source locate actual owner member floor accepted");
     if !state.serving.accepting_new_media().await {
+        #[cfg(test)]
+        eprintln!("Source locate actual owner not serving media");
         return Ok(None);
     }
     let file_id = wire
