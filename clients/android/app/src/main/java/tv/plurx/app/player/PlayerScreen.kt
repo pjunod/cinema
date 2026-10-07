@@ -2197,13 +2197,14 @@ private fun PlayerInfo(
     val videoFormat = player.videoFormat
     val source = plan.source
     val clientLoadedSeconds = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0) / 1_000.0
-    val method = buildList {
-        add(deliveryLabel(controller.deliveryMode))
-        if (controller.deliveryMode == "transcode") {
-            controller.encoder?.takeIf { it.isNotBlank() }?.let(::add)
-            controller.sessionStatus?.target_height?.takeIf { it > 0 }?.let { add("${it}p") }
-        }
-    }.joinToString(" · ")
+    val method = playbackDeliverySummary(
+        mode = controller.deliveryMode,
+        encoder = controller.encoder,
+        measuredHeight = player.videoSize.takeIf {
+            it.width > 0 && it.height > 0 && it.unappliedRotationDegrees == 0
+        }?.height,
+        plannedHeight = controller.sessionStatus?.target_height,
+    )
     PlaybackInfoOverlay(
         details = PlaybackInfoDetails(
             title = plan.title,
@@ -2856,6 +2857,22 @@ private fun requestIdleTone(seconds: Long, suspended: Boolean): PlaybackStatTone
     seconds > 8 -> PlaybackStatTone.Warning
     else -> PlaybackStatTone.Neutral
 }
+
+/** The initial server target can outlive an in-place quality change. */
+internal fun playbackDeliverySummary(
+    mode: String,
+    encoder: String?,
+    measuredHeight: Int?,
+    plannedHeight: Long?,
+): String = buildList {
+    add(deliveryLabel(mode))
+    if (mode == "transcode") {
+        encoder?.takeIf { it.isNotBlank() }?.let(::add)
+        val measured = measuredHeight?.takeIf { it > 0 }
+        if (measured != null) add("${measured}p")
+        else plannedHeight?.takeIf { it > 0 }?.let { add("Planned ${it}p") }
+    }
+}.joinToString(" · ")
 
 internal fun deliveryLabel(mode: String): String = when (mode) {
     "direct" -> "Direct play"

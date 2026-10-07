@@ -7350,3 +7350,37 @@ the authenticated profile on a bootstrap transport failure. Production/test
 sources and debug APK compile in 23s; no units executed. The combined runtime
 verification uses a fresh monitored default-off lab; earlier receipts remain
 failed or explicitly partial.
+
+### 10.243 Default-off Android switch and truthful quality summary (2026-10-07)
+
+The combined Android fixes at `ca061b56b` passed the owned API36 emulator
+check against backend `9023815cb`, with display-aware Auto confirmed off.
+After cold re-login, manual 720p enrolled. Selecting 480p presented in the
+same attachment and generation: the first transaction is disposed and the
+second presented, with a measured 852×480 frame and Playing state. The saved
+before/after ledgers advance accepted sequence 106→145. Receipts live in
+ignored reports `android-default-{before480,after480}.json` and
+`android-ca061b56b-default-off-presented480-info.{xml,png}`.
+
+Playback Info nevertheless repeated the session's initial 720p target in its
+method summary. The corrective summary now prefers a valid measured frame
+height; unavailable measurements label the positive server target as Planned.
+Rotated/unavailable frames retain the existing conservative eligibility rule.
+The authored `switchedFrameOverridesTheInitialSessionTarget` regression
+covers the stale target and unavailable/non-transcoded cases; units remain
+deferred until final review and the human's external-review pause is released.
+
+Explicit Close returned to the detail screen. Owned producers were zero at
+0/1/3/5 seconds; the exact helper retired its daemon and temporary runtime,
+and both emulator and SSH forward retired. This proves enrollment, an in-place
+manual transition and bounded owned cleanup; physical output, audio continuity
+and switch-gap timing were not measured. The monitor's original convenience
+fields used an incorrect schema, so their zero/null placeholders are not pin
+or provenance evidence; the full before/after ledgers carry the facts above.
+Earlier partial/failed attempts are preserved.
+
+The browser image's owned build layers were removed after the lab host ran
+out of root space. Exact cache identifiers reclaimed 837 MB without pruning
+other workloads. Further optical tooling uses extracted packages in the
+owned temporary lab instead of growing the host's image cache. Physical-device
+availability remains unresolved; no native pass or merge readiness is claimed.

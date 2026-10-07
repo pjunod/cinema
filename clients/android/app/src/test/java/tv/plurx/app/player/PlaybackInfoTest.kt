@@ -6,6 +6,14 @@ import tv.plurx.app.data.Item
 
 class PlaybackInfoTest {
     @Test
+    fun switchedFrameOverridesTheInitialSessionTarget() {
+        assertEquals("Transcode · x264 · 480p", playbackDeliverySummary("transcode", "x264", 480, 720L))
+        assertEquals("Transcode · x264 · Planned 720p", playbackDeliverySummary("transcode", "x264", null, 720L))
+        assertEquals("Transcode · x264", playbackDeliverySummary("transcode", "x264", 0, 0L))
+        assertEquals("Direct play", playbackDeliverySummary("direct", "x264", 480, 720L))
+    }
+
+    @Test
     fun playbackInfoPreservesStoredModesAndAddsDetails() {
         assertEquals(
             listOf("Compact", "Overview", "Details", "Diagnostics"),
