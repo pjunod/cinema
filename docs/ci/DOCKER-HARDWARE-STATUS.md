@@ -20,6 +20,7 @@ macOS VideoToolbox separately. No Rust encoder selection or feature gates change
 | Adversarial agent review | addressed | Four findings: unrelated devices, explicit NVIDIA scope, hook-free CDI/VAAPI, Compose symlinks; each fixed with a regression |
 | Focused regression | passed | 14 hardware tests and three rollout contracts; only the failed temporary-path case was rerun |
 | Real Docker hardware smoke | passed | On rog, generated groups 44/992, preserved the override and group 1000, and completed CUDA decode plus NVENC encode as UID 1000 |
+| Catalog lint | fixed | Registered the helper in the existing operations point after preflight reported the missing path |
 | Fast lane | tracked in PR | The PR checks and description are the live qualification record |
 | Merge and cleanup | tracked in PR | Merge only after required checks pass; carry regression lines into the landing message |
 
