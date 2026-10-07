@@ -212,7 +212,7 @@ function transcoderCard(sys){
     <button onclick="saveNodeHwaccel(this)">Save</button></div>`;
 }
 async function saveNodeHwaccel(button){
-  const field=document.getElementById("node-hwaccel"), preference=field.value, node_id=field.dataset.nodeId;
+  const field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")), preference=field.value, node_id=field.dataset.nodeId;
   button.disabled=true;
   try{
     const result=await api("/system/transcoder",{method:"PUT",body:JSON.stringify({node_id,preference})});
