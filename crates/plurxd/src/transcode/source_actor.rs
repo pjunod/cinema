@@ -802,37 +802,38 @@ impl SourceProducerAuthority {
             .membership
             .observe_source_admission_members()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?
-            .ok_or(SourceWorkerError::Unavailable)?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_preparation.members_store", "Source preparation refused"); SourceWorkerError::Unavailable })?
+            .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_preparation.members_absent", "Source preparation refused"); SourceWorkerError::Unavailable })?;
         if !self.ingress.assignment().same_identity(assignment) {
+            tracing::warn!(target: "plurx::sharing", stage = "source_preparation.assignment_identity", "Source preparation refused");
             return Err(SourceWorkerError::Conflict);
         }
         let Some(permission) = self
             .store
             .refresh_source_ingress_admission(&self.ingress, &members)
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_preparation.permission_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
         else {
-            return Err(SourceWorkerError::Unavailable);
+            tracing::warn!(target: "plurx::sharing", stage = "source_preparation.permission_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
         };
         permission
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_preparation.permission_freshness", "Source preparation refused"); SourceWorkerError::Unavailable })?;
         let SourceWriteAuthorityRead::Ready(proof) = self
             .store
             .prepare_source_activation_authority(assignment, &self.master, &members)
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_preparation.activation_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
         else {
-            return Err(SourceWorkerError::Unavailable);
+            tracing::warn!(target: "plurx::sharing", stage = "source_preparation.activation_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
         };
         if !self
             .store
             .authorize_source_media_preparation(&proof)
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_preparation.preparation_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
         {
-            return Err(SourceWorkerError::Unavailable);
+            tracing::warn!(target: "plurx::sharing", stage = "source_preparation.preparation_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
         }
         Ok(proof)
     }
@@ -952,6 +953,7 @@ impl TranscodeManager {
             || !ingress.assignment().same_identity(&assignment)
             || ingress.registry_boot_id() != state.sharing.accepted_drivers.boot_id()
         {
+            tracing::warn!(target: "plurx::sharing", stage = "source_factory.identity", same_store = Arc::ptr_eq(&self.store, &state.store), prepared_matches = prepared.matches_assignment(&assignment), activation_matches = activation.assignment().same_identity(&assignment), ingress_matches = ingress.assignment().same_identity(&assignment), registry_boot_matches = ingress.registry_boot_id() == state.sharing.accepted_drivers.boot_id(), "Source factory admission refused");
             return Err(SourceWorkerNoAdmission::refused(
                 &assignment,
                 SourceWorkerError::Conflict,
@@ -961,6 +963,7 @@ impl TranscodeManager {
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .is_err()
         {
+            tracing::warn!(target: "plurx::sharing", stage = "source_factory.permission_freshness", "Source factory admission refused");
             return Err(SourceWorkerNoAdmission::refused(
                 &assignment,
                 SourceWorkerError::Unavailable,
@@ -975,6 +978,7 @@ impl TranscodeManager {
             return Ok(SourceViewerActor(Arc::clone(owner)));
         }
         if registry.len() >= 8 {
+            tracing::warn!(target: "plurx::sharing", stage = "source_factory.registry_capacity", "Source factory admission refused");
             return Err(SourceWorkerNoAdmission::refused(
                 &assignment,
                 SourceWorkerError::Capacity,
@@ -1188,12 +1192,12 @@ impl TranscodeManager {
         deadline: Instant,
         work: &mut Option<super::source_preparation::SourceProbeOperation>,
     ) -> Result<Arc<crate::vodencode::Encoding>, SourceWorkerError> {
-        let permit = self.admit_source_copy(deadline).await?;
+        let permit = self.admit_source_copy(deadline).await.inspect_err(|error| { tracing::warn!(target: "plurx::sharing", stage = "source_encoded.probe_admission", error_class = ?error, "Source encoded preparation refused"); })?;
         let source =
             crate::fragment_index_cluster::open_source_playback_fence(prepared.file(), None)
                 .await
-                .map_err(|_| SourceWorkerError::Unavailable)?;
-        let proof = owner.gate.current_preparation(&owner.assignment).await?;
+                .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_encoded.file_fence", "Source encoded preparation refused"); SourceWorkerError::Unavailable })?;
+        let proof = owner.gate.current_preparation(&owner.assignment).await.inspect_err(|error| { tracing::warn!(target: "plurx::sharing", stage = "source_encoded.probe_authority", error_class = ?error, "Source encoded preparation refused"); })?;
         // A burn's artifacts are made inside this same owned operation, from
         // the Source's own prepared request and scanned track facts.
         let burn = match prepared.request().subtitle_burn {
@@ -1225,14 +1229,32 @@ impl TranscodeManager {
             .expect("Source probe owner")
             .outcome()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_encoded.probe_outcome", "Source encoded preparation refused"); SourceWorkerError::Unavailable })?;
         self.source_workers.probe_hooks.after_evidence().await;
         // The probe permit is already dropped only after actual reap/pipes.
         // Encoder admission is separate and cannot self-deadlock against it.
         let current = owner.gate.current_preparation(&owner.assignment).await?;
         Box::pin(self.prepare_source_vod_encoding(prepared, &evidence, &current))
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)
+            .map_err(|error| {
+                let error_class = match super::vod_refusal(&error).map(|(code, _)| code) {
+                    Some("vod_source_rescan_required") => "source_rescan_required",
+                    Some("vod_video_geometry_unknown") => "video_geometry_unknown",
+                    Some("vod_invalid_height") => "invalid_height",
+                    Some("vod_audio_track_missing") => "audio_track_missing",
+                    Some("vod_subtitle_track_missing") => "subtitle_track_missing",
+                    Some("vod_subtitle_burn_unavailable") => "subtitle_burn_unavailable",
+                    Some("vod_frame_cadence_unknown") => "frame_cadence_unknown",
+                    Some("vod_decoder_plan_refused") => "decoder_plan_refused",
+                    Some(_) => "other_vod_refusal",
+                    None if super::is_start_infrastructure_error(&error) => "infrastructure",
+                    None if super::unsupported_build_reason(&error).is_some() => "unsupported_build",
+                    None if super::is_retryable_capacity_error(&error) => "capacity",
+                    None => "unclassified",
+                };
+                tracing::warn!(target: "plurx::sharing", stage = "source_encoded.encoder_plan", error_class, "Source encoded preparation refused");
+                SourceWorkerError::Unavailable
+            })
     }
 
     async fn run_source_owner(
@@ -1248,12 +1270,14 @@ impl TranscodeManager {
         let mut probe_work = None;
         let mut native_work = None;
         let mut unowned_existing = true;
+        let mut startup_stage = "deadline";
         let start = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             Box::pin(async {
                 if Instant::now() >= deadline {
                     return Err(SourceWorkerError::Deadline);
                 }
+                startup_stage = "route_absence";
                 if self
                     .store
                     .media_session_route_by_incarnation(
@@ -1269,6 +1293,7 @@ impl TranscodeManager {
                 unowned_existing = false;
                 // This actual worker owns the configured queue/materialization
                 // allowance. Its inherited deadline can only become shorter.
+                startup_stage = "startup_budget";
                 let startup_budget = self
                     .source_start_budget_for_request(prepared.request())
                     .await
@@ -1277,6 +1302,7 @@ impl TranscodeManager {
                 // The HTTP preparation refused these with typed reasons before
                 // factory admission; this owner rechecks the same prepared facts
                 // before admitting physical producer work.
+                startup_stage = "delivery_policy";
                 if (!prepared.native_subtitles().0 && prepared.native_subtitles().1.is_some())
                     || prepared.request().previous_session_id.is_some()
                     || prepared.request().reopen_reason.is_some()
@@ -1289,11 +1315,13 @@ impl TranscodeManager {
                 {
                     return Err(SourceWorkerError::Unsupported);
                 }
+                startup_stage = "vod_settings";
                 let settings = self
                     .vod_settings(prepared.request())
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
+                startup_stage = "native_tracks";
                 if prepared.native_subtitles().0 {
                     let tracks = Box::pin(self.prepare_source_native_tracks(
                         &owner,
@@ -1304,6 +1332,7 @@ impl TranscodeManager {
                     .await?;
                     owner.state.lock().expect("Source native actor").native = Some(tracks);
                 }
+                startup_stage = "recipe_preparation";
                 let encoding = if source_recipe_is_encoded(prepared.request()) {
                     Some(
                         Box::pin(self.prepare_source_encoded_recipe(
@@ -1324,6 +1353,7 @@ impl TranscodeManager {
                     .await?;
                     None
                 };
+                startup_stage = "vod_admission";
                 let admitted = Box::pin(self.vod.prepare_admitted_source_vod(
                     &prepared,
                     &owner.assignment,
@@ -1335,6 +1365,7 @@ impl TranscodeManager {
                 ))
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
+                startup_stage = "vod_reservation";
                 reserved = Some(
                     self.vod
                         .reserve_source_vod(admitted)
@@ -1348,18 +1379,21 @@ impl TranscodeManager {
                 {
                     return Err(SourceWorkerError::Unavailable);
                 }
+                startup_stage = "start_facts";
                 let reservation = reserved.as_mut().expect("Source reservation");
                 let session_id = uuid::Uuid::new_v4().to_string();
                 let facts = reservation
                     .start_info(&session_id)
                     .map_err(|_| SourceWorkerError::Unavailable)?;
                 let incarnation = owner.assignment.binding().incarnation_id().to_string();
+                startup_stage = "response_projection";
                 let response =
                     Box::pin(prepared.start_response(&state, facts.start_info(), &incarnation, 1))
                         .await
                         .map_err(|_| SourceWorkerError::Unavailable)?;
                 // Capacity waiting invalidates the caller's earlier snapshot. Mint
                 // actual current authority after admission and response construction.
+                startup_stage = "activation_members";
                 let members = owner
                     .gate
                     .membership
@@ -1367,6 +1401,7 @@ impl TranscodeManager {
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
+                startup_stage = "activation_authority";
                 let SourceWriteAuthorityRead::Ready(authority) = self
                     .store
                     .prepare_source_activation_authority(
@@ -1407,6 +1442,7 @@ impl TranscodeManager {
                     .lock()
                     .expect("Source worker state")
                     .planned_session = Some(session_id.clone());
+                startup_stage = "activation_write";
                 let outcome = self
                     .store
                     .activate_source_media_session(&authority, &activation)
@@ -1427,6 +1463,7 @@ impl TranscodeManager {
                 {
                     return Err(SourceWorkerError::Unavailable);
                 }
+                startup_stage = "vod_commit";
                 Box::pin(self.vod.commit_source_vod(
                     reservation,
                     &session_id,
@@ -1435,6 +1472,7 @@ impl TranscodeManager {
                 ))
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
+                startup_stage = "physical_readiness";
                 let physical = Box::pin(reservation.wait_ready(&self.vod, deadline))
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -1448,6 +1486,7 @@ impl TranscodeManager {
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
+                startup_stage = "publication_authority";
                 let SourcePublicationAuthorityRead::Ready(proof) = self
                     .store
                     .prepare_source_publication_authority(
@@ -1460,6 +1499,7 @@ impl TranscodeManager {
                 else {
                     return Err(SourceWorkerError::Unavailable);
                 };
+                startup_stage = "publication_write";
                 let route = self
                     .store
                     .complete_source_media_session_publication(&proof)
@@ -1477,6 +1517,9 @@ impl TranscodeManager {
         )
         .await
         .unwrap_or(Err(SourceWorkerError::Deadline));
+        if let Err(error) = &start {
+            tracing::warn!(target: "plurx::sharing", stage = startup_stage, error_class = ?error, "Source producer startup failed");
+        }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();
         // A graceful drain ends this owner the way retirement does: stop

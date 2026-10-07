@@ -194,6 +194,21 @@ impl SourceStartEntry {
                     SourceStartTaskJoined::PanickedOrCancelled,
                 ),
             };
+            if let Err(error) = &result {
+                let stage = match &*entry.task.stage.lock().expect("Source start stage") {
+                    SourceStartTaskStage::Registered => "registered",
+                    SourceStartTaskStage::ReadingIntent { .. } => "reading_intent",
+                    SourceStartTaskStage::IntentReady { .. } => "intent_ready",
+                    SourceStartTaskStage::Claiming { .. } => "claiming",
+                    SourceStartTaskStage::Acquired(_) => "preparing",
+                    SourceStartTaskStage::Assigning(_) => "assigning",
+                    SourceStartTaskStage::Assigned(_) => "ingress_admission",
+                    SourceStartTaskStage::Activating(_) => "activation_authority",
+                    SourceStartTaskStage::InvokingFactory(_) => "factory_invocation",
+                    SourceStartTaskStage::FactoryRefused(_) => "factory_refused",
+                };
+                tracing::warn!(target: "plurx::sharing", stage, error_class = ?error, "Source initial Start failed");
+            }
             if let Ok(owned) = &result {
                 debug_assert_eq!(
                     entry
@@ -1827,16 +1842,17 @@ async fn own_start(
         .store
         .initialize_source_ingress_custody(&assignment)
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_initialize", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     loop {
         let changed = entry.changed.notified();
         let ledger = state
             .store
             .source_ingress_custody(&assignment)
             .await
-            .map_err(|_| SourceStartFailure::Unresolved)?
-            .ok_or(SourceStartFailure::Unresolved)?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_read", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
+            .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
         if ledger.state.is_sealed() {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_sealed", "Source initial admission refused");
             return Err(SourceStartFailure::Unresolved);
         }
         if ledger.state.open().next().is_some() {
@@ -1844,15 +1860,15 @@ async fn own_start(
         }
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), changed)
             .await
-            .map_err(|_| SourceStartFailure::Unresolved)?;
+            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_wait", error_class = "deadline", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     }
 
     let members = state
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
-        .ok_or(SourceStartFailure::Unresolved)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.members", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_members_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     let ingress_permission = state
         .store
         .prepare_source_ingress_admission(
@@ -1861,18 +1877,18 @@ async fn own_start(
             &members,
         )
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
-        .ok_or(SourceStartFailure::Unresolved)?;
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_permission", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
+        .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_permission_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     entry.retain_stage(SourceStartTaskStage::Activating(assignment.clone()));
     let activation = match state
         .store
         .prepare_source_activation_authority(&assignment, &state.sharing.key, &members)
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
+        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
     {
         SourceWriteAuthorityRead::Ready(value) => *value,
-        SourceWriteAuthorityRead::Unavailable => return Err(SourceStartFailure::Unresolved),
-        SourceWriteAuthorityRead::Capacity => return Err(SourceStartFailure::Capacity),
+        SourceWriteAuthorityRead::Unavailable => { tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "refused", "Source initial admission refused"); return Err(SourceStartFailure::Unresolved); },
+        SourceWriteAuthorityRead::Capacity => { tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "capacity", "Source initial admission refused"); return Err(SourceStartFailure::Capacity); },
     };
     entry.retain_stage(SourceStartTaskStage::InvokingFactory(assignment.clone()));
     let actor = match direct::start_prepared_worker(
