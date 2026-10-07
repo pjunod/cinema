@@ -3103,7 +3103,8 @@ pub fn resolve_transcode(
     // must never inherit Legacy's speculative hardware admission.
     if request.encoder == Encoder::Software
         && options.pipeline == Pipeline::Cpu
-        && (!request.normalized_geometry || facts.rotation_degrees() == Some(0))
+        && facts.normalization_transform_known()
+        && facts.rotation_degrees() == Some(0)
         && matches!(facts.codec(), Some("hevc"))
         && matches!(
             (facts.profile(), facts.pixel_format(), facts.bit_depth()),
@@ -3145,6 +3146,19 @@ pub fn resolve_transcode(
     } else if request.encoder == Encoder::VideoToolbox && codec == "mpeg4" {
         if !restrictions.permits(DecodeBackend::Software) {
             return Err(PlanError::IncompatibleRestriction);
+        }
+        preferred = DecodeBackend::Software;
+        reason = DecodeReason::CompatibilityExclusion;
+    }
+
+    // FFmpeg skips autorotation on opaque hardware frames. The initial
+    // request path has no post-download transform, including continuations:
+    // scalar zero alone cannot rule out a mirrored or malformed matrix.
+    if preferred == DecodeBackend::V4l2Request
+        && (!facts.normalization_transform_known() || facts.rotation_degrees() != Some(0))
+    {
+        if restrictions.required == Some(DecodeBackend::V4l2Request) {
+            return Err(PlanError::IncompatibleRenderer);
         }
         preferred = DecodeBackend::Software;
         reason = DecodeReason::CompatibilityExclusion;

@@ -3713,9 +3713,7 @@
             "an alternate with the delivered plan's own digest is not an alternate"
         );
 
-        // A software encoder has no hardware slot to keep, so there is no
-        // mixed transition to make and every sentence the recipe's doc claims
-        // about one would be false.
+        // Entirely software plans likewise have no distinct decoder retry.
         let software_plan = mgr
             .resolve_movie_plan(&file, &opts, Encoder::Software)
             .await
@@ -3723,13 +3721,13 @@
         assert!(
             PrepublicationTranscodeRetry::prepare_decode_restricted(
                 &software_plan,
-                &already_software,
+                &software_plan,
                 &opts,
                 Encoder::Software,
             )
             .expect("a legal answer")
             .is_none(),
-            "a software encoder is not a mixed transition"
+            "an entirely software delivery has no distinct decoder alternate"
         );
     }
 
@@ -3822,4 +3820,159 @@
         }
         drop(session);
         assert!(mgr.stop_session(&info.session_id, "test").await);
+    }
+
+    #[tokio::test]
+    async fn request_decode_software_encode_has_one_frozen_software_startup_successor() {
+        use crate::playback_control::ProducerStartupKind;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::{
+            AttemptRestrictions, CapabilityStatus, DecodeBackend, DecodeCapabilities,
+            DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeFacts, DecodePlanPolicy,
+            DecodePolicySnapshot, DecodeSourceIdentity, DecodeSurfaceContract, SoftwareDecoder,
+            SubtitleRendering, TranscodeMediaOptions, TranscodeRequest,
+        };
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let mut file = store.get_file(file_id).await.expect("get").expect("file");
+        file.video_codec = Some("hevc".into());
+        file.video_profile = Some("Main".into());
+        file.bit_depth = Some(8);
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+        let facts = DecodeFacts::from_ffprobe_json(
+            &TranscodeManager::catalog_plan_probe(&file),
+            DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("identity"),
+        )
+        .expect("facts");
+        let caps = DecodeCapabilities::new(
+            DecodeCapabilitySnapshotIdentity::new("f".repeat(64), "fixture".into(), None)
+                .expect("snapshot"),
+            vec![DecodeCapability {
+                backend: DecodeBackend::V4l2Request,
+                codec: "hevc".into(),
+                profile: Some("main".into()),
+                pixel_format: Some("yuv420p".into()),
+                bit_depth: Some(8),
+                dynamic_range: None,
+                max_width: None,
+                max_height: None,
+                max_pixel_rate: None,
+                surface: Some(DecodeSurfaceContract::for_plan(
+                    DecodeBackend::V4l2Request,
+                    Pipeline::Cpu,
+                    &facts,
+                    Encoder::Software,
+                    SubtitleRendering::None,
+                )),
+                status: CapabilityStatus::Operational,
+            }],
+            vec![SoftwareDecoder {
+                codec: "hevc".into(),
+                implementation: None,
+            }],
+        )
+        .expect("caps");
+        let request = TranscodeRequest::new(
+            Encoder::Software,
+            TranscodeMediaOptions::from_options_with_facts(&file, &opts, &facts),
+        );
+        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+        let delivered = transcode::resolve_transcode(
+            &request,
+            &facts,
+            &caps,
+            &policy,
+            &AttemptRestrictions::none(),
+        )
+        .expect("hardware decode");
+        let alternate = transcode::resolve_transcode(
+            &request,
+            &facts,
+            &caps,
+            &policy,
+            &AttemptRestrictions::requiring(DecodeBackend::Software),
+        )
+        .expect("software successor");
+        assert_eq!(delivered.decode().backend(), DecodeBackend::V4l2Request);
+        assert!(needs_startup_transcode_retry(&delivered));
+        assert!(!needs_startup_transcode_retry(&alternate));
+        assert_eq!(
+            transcode_startup_kind(&delivered),
+            ProducerStartupKind::HardwareDecodeSoftwareEncode
+        );
+        assert_eq!(
+            transcode_startup_kind(&delivered).startup_budget(),
+            ProducerStartupKind::Software.startup_budget()
+        );
+        let prepared = PrepublicationTranscodeRetry::prepare_decode_restricted(
+            &delivered,
+            &alternate,
+            &opts,
+            Encoder::Software,
+        )
+        .expect("prepared")
+        .expect("successor");
+        assert_eq!(
+            prepared.software_threads, None,
+            "retain admitted CPU reservation"
+        );
+        let retry = PrepublicationTranscodeRetry::build(
+            &file,
+            prepared,
+            &alternate,
+            Pacing::unpaced(),
+            "/fixture/out",
+            "presentation",
+            mgr.admissions.software_pool(),
+            8,
+            mgr.runtime_cache.clone(),
+            &mgr.measured_decoders,
+            false,
+            "startup-software-decode",
+        )
+        .expect("frozen recipe");
+        assert_eq!(retry.encoder, Encoder::Software);
+        assert_eq!(retry.software_threads, None);
+        let work = Workload::of(&file, opts.target_height);
+        let initial_cost = crate::admission::TranscodeResourceEstimate::of(&delivered, &work);
+        let retry_cost = crate::admission::TranscodeResourceEstimate::of(&alternate, &work);
+        assert_eq!(
+            initial_cost.cpu_threads, retry_cost.cpu_threads,
+            "CPU pipeline already reserved decode capacity"
+        );
+        assert_eq!(retry.cpu_total, Some(retry_cost.cpu_threads));
+        assert!(retry
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-hwaccel", "none"]));
+        assert!(!retry.args.iter().any(|arg| arg == "drm"));
+        assert!(retry.decode_alternate.is_none());
+        assert!(PrepublicationTranscodeRetry::prepare_decode_restricted(
+            &alternate,
+            &alternate,
+            &opts,
+            Encoder::Software
+        )
+        .expect("already software")
+        .is_none());
+        let initial_policy = crate::playback_control::InitialProducerPolicy::hardware_with_startup(
+            "presentation".into(),
+            PROGRESS_STALL,
+            retry.actor_recipe.clone(),
+            transcode_startup_kind(&delivered),
+        );
+        assert_eq!(initial_policy.retry_recipe, Some(retry.actor_recipe));
+        assert!(initial_policy.decode_alternate.is_none());
     }

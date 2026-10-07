@@ -1,6 +1,6 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** building · **Updated:** 2026-10-06
+**Status:** review findings addressed; final validation pending · **Updated:** 2026-10-06
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -20,7 +20,7 @@ adversarial review are complete.
 | Server decoder integration | implemented; compiler passed | Sol 6.1; separate 8/10-bit graph proof, operational capabilities, shared HLS/VOD transfer |
 | Existing browser player | implemented; validation pending | Sol 6.1; delivered tuple and fenced nullable predictions; syntax/type checks passed |
 | Deployment | implemented; validation pending | Sol 6.1; `deploy/pi-player`, safe launcher ownership, bounded report, six regression cases written |
-| Adversarial review | running | Complete implementation frozen; one independent agent review before the fast lane |
+| Adversarial review | complete; both findings addressed | Reviewed `dfa775112`; Sol repaired P1 fallback and P2 transforms, coordinator inspected the changes |
 | Fast lane | not run | Run after review fixes, retain passing evidence, rerun failed checks only |
 | Physical Pi 5 | unavailable | Host/user requested; no hardware, HDR or concurrent-playback claim |
 
@@ -70,3 +70,27 @@ coordinator integrated their changes without changing the user's checkout.
   now recognizes that exact declaration; a negative-case regression is added.
 - Normal pre-commit formatting, catalog lint, Clippy and embedded JavaScript
   syntax checks pass. No hook was bypassed.
+
+## Adversarial review dispositions
+
+The reviewer examined the complete candidate `dfa775112` before test
+execution. Repairs stay in the existing media planner and startup owner.
+
+| Finding | Consequence | Disposition |
+|---|---|---|
+| P2: request hardware frames bypass FFmpeg autorotation | Rotated/mirrored input can change presentation when hardware is selected | Fixed: proven identity transform required for initial and continuation paths; rotated, mirrored and unknown transforms preserve existing software handling |
+| P1: startup retry excludes every software encoder | Hardware decoding paired with software encoding cannot recover when device/input initialization fails after boot | Fixed: decoder-aware retry eligibility, frozen software-only successor, retained CPU reservation, existing one-shot owner and software startup allowance |
+
+The review found no further blocking issue in browser diagnostics, launcher
+ownership, FFmpeg mapping, planar transfer, qualification boundaries or test
+marker parsing. Generic DRM on non-Pi Linux can consume some of the existing
+30-second inventory budget; this is a recorded bounded inventory limitation,
+not a hardware-support claim. No second review or early unit run is planned.
+
+Repair regressions are
+`request_decode_requires_proven_identity_transform_even_for_continuations`
+and `request_decode_software_encode_has_one_frozen_software_startup_successor`.
+They are written, compiled with the candidate and scheduled with the final
+fast lane; no unit execution preceded review. The existing actor still owns
+one in-process retry; its separately budgeted classified-health wrapper does
+not introduce another attempt or a new watchdog.

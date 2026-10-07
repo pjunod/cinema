@@ -1202,7 +1202,7 @@ impl TranscodeManager {
         if let Some(collection) = &rolling_collection {
             upload.bind_retained(Arc::clone(collection));
         }
-        let retry = if encoder == Encoder::Software {
+        let retry = if !needs_startup_transcode_retry(&plan) {
             None
         } else {
             // One value for both recipes: they are frozen together, and a
@@ -1210,35 +1210,65 @@ impl TranscodeManager {
             // different pictures of the node. It is the one this start was
             // admitted under, from its planning snapshot.
             let software_budget = sw_budget;
-            let prepared = PrepublicationTranscodeRetry::prepare(
-                &file,
-                &opts,
-                encoder,
-                rate_control.effective_for(Encoder::Software),
-            );
-            let retry = match prepared {
-                Ok(prepared) => match self
-                    .resolve_movie_plan(&file, &prepared.opts, prepared.encoder)
-                    .await
-                {
-                    Ok(retry_plan) => PrepublicationTranscodeRetry::build(
-                        &execution_file,
-                        prepared,
-                        &retry_plan,
-                        pacing,
-                        &upload.base_url(1),
-                        &presentation_contract_fingerprint,
-                        self.admissions.software_pool(),
-                        software_budget,
-                        self.runtime_cache.clone(),
-                        &self.measured_decoders,
-                        automatic_decoder_recovery,
-                        "one-step-color-safe",
+            let prepared_plan = if encoder == Encoder::Software {
+                // Keep the encoder, admitted CPU reservation and presentation;
+                // only the hardware decoder moves. Resolve under an explicit
+                // restriction so startup cannot reselect the failed backend.
+                self.resolve_restricted_movie_plan(
+                    &file,
+                    &opts,
+                    encoder,
+                    &plurx_core::transcode::AttemptRestrictions::requiring(
+                        plurx_core::transcode::DecodeBackend::Software,
                     ),
+                )
+                .await
+                .and_then(|retry_plan| {
+                    PrepublicationTranscodeRetry::prepare_decode_restricted(
+                        &plan,
+                        &retry_plan,
+                        &opts,
+                        encoder,
+                    )?
+                    .ok_or_else(|| {
+                        "hardware decode has no distinct software startup retry".to_owned()
+                    })
+                    .map(|prepared| (prepared, retry_plan))
+                })
+            } else {
+                match PrepublicationTranscodeRetry::prepare(
+                    &file,
+                    &opts,
+                    encoder,
+                    rate_control.effective_for(Encoder::Software),
+                ) {
+                    Ok(prepared) => self
+                        .resolve_movie_plan(&file, &prepared.opts, prepared.encoder)
+                        .await
+                        .map(|retry_plan| (prepared, retry_plan)),
                     Err(error) => Err(error),
-                },
-                Err(error) => Err(error),
+                }
             };
+            let retry = prepared_plan.and_then(|(prepared, retry_plan)| {
+                PrepublicationTranscodeRetry::build(
+                    &execution_file,
+                    prepared,
+                    &retry_plan,
+                    pacing,
+                    &upload.base_url(1),
+                    &presentation_contract_fingerprint,
+                    self.admissions.software_pool(),
+                    software_budget,
+                    self.runtime_cache.clone(),
+                    &self.measured_decoders,
+                    automatic_decoder_recovery,
+                    if encoder == Encoder::Software {
+                        "startup-software-decode"
+                    } else {
+                        "one-step-color-safe"
+                    },
+                )
+            });
             match retry {
                 Ok(retry) => {
                     // The software-decode alternate, frozen beside the
@@ -1403,11 +1433,7 @@ impl TranscodeManager {
                 presentation_contract_fingerprint,
                 PROGRESS_STALL,
                 retry.actor_recipe.clone(),
-                if plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software {
-                    crate::playback_control::ProducerStartupKind::MixedSoftwareDecode
-                } else {
-                    crate::playback_control::ProducerStartupKind::Hardware
-                },
+                transcode_startup_kind(&plan),
             )
             // The actor decides between the two; it can only do that if it can
             // see both. The executor holds the material either way, so an

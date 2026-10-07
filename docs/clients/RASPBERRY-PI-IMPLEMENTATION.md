@@ -134,7 +134,10 @@ qualification. Keep failed, absent and unmeasured results distinguishable.
 ### 3.3 Select hardware decode independently of software encode
 
 Use the existing `DecodeCapabilities`, `DecodePolicy`, restrictions and
-resolved-plan machinery. Prefer this backend only for the HEVC input class
+resolved-plan machinery. Preserve display transforms: until the
+request path applies them explicitly after transfer, it requires both a
+known pure transform and zero rotation, including required-backend
+continuations. A scalar zero alone does not exclude a reflected matrix. Prefer this backend only for the HEVC input class
 actually supported by the installed runtime. Preserve explicit software
 selection, existing decoder exclusions, failure fallback, delivered dynamic
 range and all software-only renderer requirements.
@@ -143,6 +146,13 @@ A Pi backend is ordinary discovered infrastructure; no Pi feature gate or
 extra switch is needed. Actual incompatible media may still select another
 working decoder: that is media planning, not a restriction on a user's saved
 choice. Existing Developer switches keep their current advisory lifecycle.
+
+Hardware decoding paired with software encoding must retain the existing
+one-shot prepublication fallback. Select retry eligibility from the resolved
+decoder as well as encoder, freeze a software-restricted successor (an
+unrestricted software encoder can select request decoding again), and retain
+the software encoder's startup allowance and current reservation ownership.
+An already-software decode/encode primary must not gain an unnecessary retry.
 
 Do not label a startup success as a health-qualified diagnostic contract.
 Existing contract identities bind exact FFmpeg build, backend, decoder and

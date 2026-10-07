@@ -3441,3 +3441,48 @@ fn request_hls_and_vod_share_depth_preserving_download_and_software_encoder() {
         }
     }
 }
+
+#[test]
+fn request_decode_requires_proven_identity_transform_even_for_continuations() {
+    let base = video(
+        0,
+        Some("hevc"),
+        Some("Main"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    );
+    let upright = facts(base.clone());
+    assert!(upright.normalization_transform_known());
+    assert_eq!(upright.rotation_degrees(), Some(0));
+    let mut rotated = base.clone();
+    rotated["tags"] = json!({"rotate": "90"});
+    let mut mirrored = base.clone();
+    mirrored["side_data_list"] = json!([{"side_data_type": "Display Matrix", "rotation": 0,
+        "displaymatrix": "00000000: -65536 0 0\n00000001: 0 65536 0\n00000002: 0 0 1073741824"}]);
+    let mut unknown = base;
+    unknown["side_data_list"] = json!([{"side_data_type": "Display Matrix"}]);
+    for stream in [rotated, mirrored, unknown] {
+        let input = facts(stream);
+        let plan = resolve(
+            Encoder::Software,
+            Pipeline::Cpu,
+            &input,
+            &operational_request_caps(8),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("software keeps autorotation ownership");
+        assert_eq!(plan.decode().backend(), DecodeBackend::Software);
+        let required = resolve_transcode(
+            &TranscodeRequest::new(Encoder::Software, options(Pipeline::Cpu)),
+            &input,
+            &operational_request_caps(8),
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::requiring(DecodeBackend::V4l2Request),
+        );
+        assert!(matches!(required, Err(PlanError::IncompatibleRenderer)));
+    }
+}

@@ -215,6 +215,29 @@ impl OfflineRecoveryState {
     }
 }
 
+/// A hardware stage can fail even when the encoder is software. Eligibility
+/// follows the frozen pipeline; an entirely software producer has no distinct
+/// hardware fallback to install.
+pub(super) fn needs_startup_transcode_retry(plan: &ResolvedTranscode) -> bool {
+    plan.encoder() != Encoder::Software
+        || plan.decode().backend() != plurx_core::transcode::DecodeBackend::Software
+}
+
+pub(super) fn transcode_startup_kind(
+    plan: &ResolvedTranscode,
+) -> crate::playback_control::ProducerStartupKind {
+    use crate::playback_control::ProducerStartupKind;
+    match (
+        plan.encoder() == Encoder::Software,
+        plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software,
+    ) {
+        (true, true) => ProducerStartupKind::Software,
+        (true, false) => ProducerStartupKind::HardwareDecodeSoftwareEncode,
+        (false, true) => ProducerStartupKind::MixedSoftwareDecode,
+        (false, false) => ProducerStartupKind::Hardware,
+    }
+}
+
 impl PrepublicationTranscodeRetry {
     /// The alternate a decode fault asks for: the same delivery, decoded in
     /// software — or `None` when there is no such thing to install.
@@ -243,22 +266,14 @@ impl PrepublicationTranscodeRetry {
     /// private to it, and a copy here would drift the first time a renderer is
     /// added.
     ///
-    /// `Ok(None)` for the two cases where an alternate is not a thing that
-    /// exists, both of which would otherwise install a producer that cannot
-    /// help:
-    ///
-    /// * a software encoder has no hardware slot to keep, so there is no mixed
-    ///   transition to make and nothing this function returns would be true of
-    ///   the recipe `build` produced;
-    /// * a delivered plan that already decoded in software has no alternate —
-    ///   the digests are equal, so the "recovery" would tear down the failed
-    ///   child and respawn the identical command.
-    /// * both the failed path and its same-codec software successor must use
-    ///   the receipt-qualified identity. A qualified fault is not permission
-    ///   to install a producer whose output cannot carry qualified evidence.
+    /// `Ok(None)` when the delivered plan already decoded in software and
+    /// the alternate digest is identical. Startup failure may use an
+    /// unqualified operational path; classified decode-health recovery keeps
+    /// the existing operator policy and diagnostic authority. Missing successor
+    /// qualification does not gate an enabled recovery.
     ///
     /// `software_threads` is `None`, which is what makes this the mixed
-    /// transition rather than a demotion. The encoder and its hardware slot
+    /// transition rather than a demotion. The encoder and existing admission
     /// stay; what grows is the CPU reservation, by the difference the executor
     /// takes from `cpu_total`. Returning `Some` here would hand the hardware
     /// slot back and leave a live hardware encoder with nothing reserved for
@@ -270,9 +285,6 @@ impl PrepublicationTranscodeRetry {
         opts: &TranscodeOptions,
         encoder: Encoder,
     ) -> Result<Option<PreparedTranscodeRetry>, String> {
-        if encoder == Encoder::Software {
-            return Ok(None);
-        }
         Ok(
             decode_restricted_options(delivered, alternate, opts)?.map(|retry_opts| {
                 PreparedTranscodeRetry {
@@ -412,7 +424,7 @@ impl PrepublicationTranscodeRetry {
             // Read off the resolved retry plan, not off the encoder's name:
             // the mixed cost is a property of the pipeline this retry will
             // actually run, and the estimate is the one type that knows it.
-            cpu_total: (retry_encoder != Encoder::Software).then(|| {
+            cpu_total: software_threads.is_none().then(|| {
                 crate::admission::TranscodeResourceEstimate::of(
                     plan,
                     &Workload::of(file, retry_opts.target_height),
