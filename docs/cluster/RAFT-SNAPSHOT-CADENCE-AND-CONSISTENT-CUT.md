@@ -1,10 +1,11 @@
 # Raft snapshot cadence and the consistent cut — measure, then move the copy off the writer without moving the cut
 
-**Status:** open — M0–M3 on `main` since 2026-10-04 (#793): fork patch 22
+**Status:** done — M0–M3 on `main` since 2026-10-04 (#793): fork patch 22
 (writer-fixed cut, off-writer copy) and storage admission run on every voter,
 with no switch, by design. Paul accepted the shipped path on 2026-10-04 and
-declined a 24-hour undisturbed readout; what remains is to observe one real
-snapshot on production data
+declined a 24-hour undisturbed readout; the retained 2026-10-07 production-data
+snapshot observation below closes that accepted residual. Cadence tuning and
+restore/release qualification are separate, not newly satisfied by this receipt
 · **Executes:** S2, S5, F-sc-2, F-sc-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -483,6 +484,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 instrumentation | [#427](http://forge.lan:3000/noirr/plurx/pulls/427) | Four fixed-label filesystem gauges are sampled by the existing passive local-Raft tick without Store or network access; direct node status and the Cluster page carry the database byte count. Rust 1.97.1 compiled `plurx-core`, `plurxd`, and `plurx-cluster-check`; the focused filesystem, Prometheus, and web contracts passed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 fleet readout | [#427](http://forge.lan:3000/noirr/plurx/pulls/427) | Blocked, not estimated: this execution host could not resolve the plan's `media1`/`lab1`–`lab3` aliases; SSH to the documented current addresses for media1, lab3, lab4, and lab6 timed out, and the configured `jump1` jump host could not reach their HTTP listeners. No voter was restarted. M1, M3, and therefore M2 remain unchanged until every current voter supplies the 24-hour B/E/S/W readout and an authorized follower restart supplies A. |
+| 2026-10-07 | gpt-6.1-sol | 01a117e1-13a6-78a0-9b82-9a9adbe668c1 | Objective post-merge production-data observation | Evidence-only branch `codex/k02-production-snapshot-evidence-20261007`; independent root review pending | Under Paul's delegated architecture-management instruction, this session records retained R1 evidence collected by `agent:/root/remaining_requirements_audit_sol61`, not new fleet execution. Successful build counters advanced 4→5 on all four nodes at unchanged revision `42eb851ec48df72488d45b5d3d29bdb67d37d3d0`; immutable published snapshot metadata and 6,328-row aggregate counts are retained. The accepted one-observation residual is fulfilled; original authors, failed access/window receipts and separate tuning/restore limits remain unchanged. |
 
 ### Historical execution boundary — 2026-09-21
 
@@ -540,3 +542,95 @@ the already-full volume refused file creation; the assertion was corrected
 to accept errno 28 at either boundary and the regression reran successfully.
 The volume was detached and synthetic leftovers removed. This is a local
 failure-semantics receipt, not the deferred fleet tuning or release drill.
+
+### 2026-10-07 production-data observation — accepted residual closed
+
+The October 4 owner acceptance narrowed K-02's remaining bar to observing one
+real snapshot on production data, not the declined undisturbed 24-hour readout
+or a new follower-restart requirement. The retained R1 passive collection
+fulfills that bar. This evidence-only continuation records it under Paul's
+delegation; it does not rerun a collector, change a setting, deploy or restart
+a node. The September access failures and interrupted/mixed-build windows
+remain failed historical receipts, not retrospectively qualified intervals.
+
+**Measured source:** all four running OCI/internal build identities agree on
+`42eb851ec48df72488d45b5d3d29bdb67d37d3d0`, tree
+`815503e354a9eeb04dd8ae7b24de5b2e0f6faa27`. Container identity, healthy state
+and zero restart count are unchanged between the first and final selected
+points. Three nodes are voters; `lab3` is the healthy nonvoting learner.
+These are retained observations on that deployed revision, not a claim that
+this docs candidate or the complete newer `main` binary ran on the fleet.
+
+| Public alias | First→final UTC, 2026-10-07 | Build-ok count | Build-error count | Build-ok sum first→final (s) |
+|---|---|---|---|---|
+| media1 | 19:47:16→19:58:21 | 4→5 | 0→0 | 2.513197679→3.164870502 |
+| lab6 | 19:47:18→19:58:39 | 4→5 | 0→0 | 4.371022808→5.243155817 |
+| lab3 | 19:47:19→19:58:19 | 4→5 | 0→0 | 3.870248822→4.852100876 |
+| lab4 | 19:47:18→19:58:21 | 4→5 | 0→0 | 3.428218964→4.746506528 |
+
+One new completed build per node contributes respectively
+0.651672823 · 0.872133009 · 0.981852054 · 1.318287564 seconds to the success
+histogram sum. Those deltas are not p50/p99, daily rates or continuous coverage.
+
+The retained inspector resolves the canonical `current` pointer, opens only
+its published SQLite image with `mode=ro&immutable=1` and `query_only=ON`,
+reads `_metadata` plus `SELECT count(*) FROM files`, then rechecks the
+pointer and inode/size/mtime. Each accepted inspection has stable pointer and
+file stat, 413 metadata bytes containing the current snapshot UUID, and 6,328
+file rows. No database file, row value, title, path or credential is exported.
+
+| Public alias | Inspection UTC, 2026-10-07 | Image bytes | Metadata SHA256 |
+|---|---|---|---|
+| media1 | 19:51:45.883646 | 319930368 | `f70c457f23d063036a7f398ba1294317792064aab9a1471956d22265cfa83b3f` |
+| lab6 | 19:51:48.375332 | 314499072 | `06988f511eb1d33a45802beae19185013cf321ab6111943cc530b74b1774c22b` |
+| lab3 | 19:51:53.314205 | 319930368 | `c20c24442ecdd0b4db09b17ea617b1a2a7f32a397358c3be539f305e0f886d46` |
+| lab4 | 19:58:43.232242 | 319930368 | `a59418caaeedb15c3f34ec92f1a935bec6e7a625bb41bdc2cc687576ee4a1528` |
+
+Media1/lab6 inspection captures the previously published generation; their
+later build-count increase proves a subsequent successful build, not that
+the inspected bytes are that later generation. Lab3's pointer changes before
+inspection and is stable during it. The receipt does not decode the cut log
+id or membership, restore an image, compute a full-database checksum, test a
+crash, measure K-01 RPO/RTO or qualify an entire release tree.
+
+**Current-source applicability:** the evidence writer and snapshot builder
+are byte-identical from measured `42eb851e` through fresh docs base
+`a1320fef340318485574143b20cc97bb0c0f4e01`. Their Git blobs are respectively
+`5b35806bf36ca7ae00c2f1f8ee685e09d8cc85ba` and
+`f81bfa899bed8635a48e2ffc2b670818c8203a30`. This supports the narrow unchanged
+snapshot mechanism, not deployment of the newer GPU or other unrelated work.
+
+**Raw retention and reproduction:** the private receipt directory is
+`~/code/plurx-agent/architecture-final-evidence-20261007/r1-passive-fleet/`.
+Its manifest SHA256 is
+`5b0e1c30b458e898df727b41edbce5d627eb3ce8ac4beff6d17205eeeb5b224a`;
+all 13 listed file hashes were reverified during this docs continuation.
+The manifest retains the inspector and exact command descriptions,
+acquisition brackets, selected metrics, pointer and metadata outputs.
+`details-results.json` is explicitly truncated/incomplete and excluded
+from acceptance. For the selected records, the binding hashes are:
+
+| Private receipt basename | SHA256 |
+|---|---|
+| `sample-1-results.json` | `357f8f7830056cdafe79996259395d63b9e45ff0d08384d8333b9465e28e567f` |
+| `final-selected-results.json` | `59b9bb9a76004b907ab3cc93b09a9ac9f848cc14f44a5acea3efcdddfcf71ac0` |
+| `snapshot-metadata-results.json` | `c120aaf8688e7bfaf03a8c1b10888e5b28ac754aaf467bc9988947313705ef3d` |
+| lab4 metadata-result receipt (private basename in manifest) | `b6367addd9e4f131092006879bc81ea3aca14f63a9df3a1f793d1e83924ada49` |
+| `inspect-existing-snapshot.py` | `c3e8523db1bd6117aae30a229780cb1e2bf1c31841350c3ddd1b715938090c07` |
+
+Reproduce the source comparison without contacting the fleet:
+
+```bash
+git diff --exit-code 42eb851ec48df72488d45b5d3d29bdb67d37d3d0 \
+  a1320fef340318485574143b20cc97bb0c0f4e01 -- \
+  vendor/hiqlite/src/store/state_machine/sqlite/writer.rs \
+  vendor/hiqlite/src/store/state_machine/sqlite/snapshot_builder.rs
+```
+
+Verify the private manifest/files, compare the exact named build count/sum
+series under unchanged container/revision, and verify pointer-before/after,
+file stat, metadata digest and aggregate count in the retained outputs.
+That reproduces the evidence calculation; it does not authorize reacquiring
+production data. N = 10,000 and retention 1 are not changed. B/E/S/W/A
+measurement remains required before a future cadence tuning change; declined
+duration and follower-restart prompts are not resurrected as this closure bar.
