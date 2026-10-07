@@ -824,10 +824,57 @@ Use Raspberry Pi OS 64-bit and the existing ARM64 server binary. Install the
 server with `deploy/install linux --binary /absolute/path/plurxd`; the normal
 systemd installation and `/readyz` checks still apply. Select your native
 FFmpeg and matching ffprobe with `PLURX_FFMPEG` and `PLURX_FFPROBE` in the
-service's existing configuration. Capture both resolved executable paths and
-package versions in your private acceptance notes. A generic `drm`
-advertisement is only a candidate: the server's operational request-decoder
-probe must succeed for each selected HEVC bit-depth class. Software encoding
+service's existing configuration. Also set `PLURX_BOUND_FFPROBE` to a separate,
+fully static ARM64 FFprobe for descriptor-bound local source facts. Native
+Pi OS FFmpeg/ffprobe can pass scans and hardware probes while caps-v2 web VOD
+creation still fails: its bound facts collector needs a self-contained
+executable identity, which the general-purpose dynamic ffprobe cannot supply.
+When unset, `PLURX_BOUND_FFPROBE` falls back to `PLURX_FFPROBE`; that fallback
+is insufficient for this native setup. Keep the identity checks intact.
+
+Build that dedicated parser on Linux ARM64 with the existing
+[`scripts/build-static-ffprobe`](../scripts/build-static-ffprobe). It pins
+FFmpeg 8.1.3 and verifies the source archive's SHA-256 before building. The
+host needs a C toolchain (`build-essential`, including make and binutils),
+`pkg-config`, `curl`, `ca-certificates`, `xz-utils`, and the static development
+libraries `zlib1g-dev`, `libbz2-dev`, `liblzma-dev` and `libc6-dev`. Build as a
+normal user into a staging directory; installation into system paths is a
+separate privileged step. Run from the repository root:
+
+```bash
+# Build the pinned local-file parser and retain its rebuild/identity receipts.
+mkdir -p "$HOME/plurx-static-probe"
+sh scripts/build-static-ffprobe \
+  "$HOME/plurx-static-probe/ffprobe" "$HOME/plurx-static-probe/receipts"
+# Install the parser outside /home, which the service's ProtectHome hides.
+sudo install -d /usr/local/lib/plurx /usr/share/doc/plurx/ffprobe
+sudo install -m 0755 "$HOME/plurx-static-probe/ffprobe" /usr/local/lib/plurx/ffprobe
+sudo cp -a "$HOME/plurx-static-probe/receipts/." /usr/share/doc/plurx/ffprobe/
+# Add these three separate entries with sudo systemctl edit plurxd.
+```
+
+```ini
+[Service]
+Environment=PLURX_FFMPEG=/usr/bin/ffmpeg
+Environment=PLURX_FFPROBE=/usr/bin/ffprobe
+Environment=PLURX_BOUND_FFPROBE=/usr/local/lib/plurx/ffprobe
+```
+
+Replace the first two paths if your measured native runtime lives elsewhere,
+then restart `plurxd`. Do not point them at the minimal static parser: it has
+network and device inputs disabled and only file/pipe protocols enabled. The
+build script verifies the version and rejects ELF program headers containing
+`INTERP` or `DYNAMIC`; static FFmpeg libraries alone are insufficient. Retain
+the generated source archive, resolved `config.h`/`config.mak`, version,
+licenses, dependency copyright files and `build.txt` source/binary hash and
+ELF receipts with the deployed binary. The Dockerfile already builds and
+ships this dedicated parser independently of its general media runtime.
+Capture all three resolved executable paths, versions and the bound parser's
+binary receipt in private acceptance notes. A successful build establishes
+parser identity, not successful Pi playback; exercise real caps-v2 VOD next.
+
+A generic `drm` advertisement is only a candidate: the server's operational
+request-decoder probe must succeed for each selected HEVC bit-depth class. Software encoding
 still needs transferred CPU frames. Pi 5 has no hardware video encoder.
 
 The standard ARM64 container keeps its pinned Jellyfin media runtime. Its

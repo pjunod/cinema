@@ -1623,7 +1623,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('major: "8"', unit_rust)
         self.assertIn("binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", unit_rust)
         # The shipped-runtime qualification uses FFmpeg 8; the independent
-        # main fast lane still retains FFmpeg 6 burst-honoring coverage.
+        # main fast lane retains its pinned FFmpeg 6 compiler environment.
         self.assertIn(
             'major: "6"',
             workflow_job_blocks(".github/workflows/main-fast-lane.yml")["rust_compile"],
@@ -1692,7 +1692,10 @@ assert.equal(context.ACT_TIMER, null);
         ):
             jobs = workflow_job_blocks(workflow_path)
             self.assertIn("windows_compile", jobs)
-            self.assertIn("timeout-minutes: 30", jobs["windows_compile"])
+            self.assertIn(
+                "timeout-minutes: 60" if workflow_path.endswith("main-fast-lane.yml")
+                else "timeout-minutes: 30", jobs["windows_compile"]
+            )
             for package in ("lld", "llvm", "ninja-build", "nodejs", "pkg-config"):
                 self.assertRegex(
                     jobs["windows_compile"], rf"(?<![-\\w]){package}(?![-\\w])"
@@ -1825,7 +1828,14 @@ assert.equal(context.ACT_TIMER, null);
         effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
             "preflight"
         ]
-        for contract_preflight in (preflight, effort_preflight):
+        main_preflight = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
+            "preflight"
+        ]
+        for workflow, contract_preflight, unit_command in (
+            ("ci", preflight, "run: make operations-check"),
+            ("effort-ci", effort_preflight, "run: python3 -m validation.python_unit_receipts run"),
+            ("main-fast-lane", main_preflight, "run: python3 -m validation.main_unit_receipts run"),
+        ):
             self.assertIn(
                 "uses: https://data.forgejo.org/actions/setup-node@"
                 "49933ea5288caeca8642d1e84afbd3f7d6820020",
@@ -1836,16 +1846,12 @@ assert.equal(context.ACT_TIMER, null);
                 contract_preflight.index(
                     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
                 ),
-                contract_preflight.index(
-                    "run: python3 -m validation.python_unit_receipts run"
-                    if contract_preflight == effort_preflight
-                    else "run: make operations-check"
-                ),
+                contract_preflight.index(unit_command),
             )
             # The shared player-input fixtures compile into no Rust and no
             # client on a fixture-only diff, so without this step a ruling
             # could be edited out of the contract with nothing to notice.
-            if contract_preflight == effort_preflight:
+            if workflow == "effort-ci":
                 self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
                 self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
             else:
@@ -2043,7 +2049,6 @@ assert.equal(context.ACT_TIMER, null);
                 "Restore the main fast Rust cache",
                 "Compile every Rust target without executing tests",
                 "Lint the workspace",
-                "Run the fast Rust unit and SQLite contract lane",
                 "Enforce persistent Cargo bounds",
                 "Restore persistent runner workspace ownership",
             ],
@@ -2060,13 +2065,18 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertEqual(
             workflow_step_literal(
-                fast_rust_steps["Run the fast Rust unit and SQLite contract lane"],
+                fast_rust_steps["Compile every Rust target without executing tests"],
                 "run",
             ),
-            ["make unit"],
+            ["make effort-rust-check", "make hiqlite-vendor-clippy"],
         )
+        # Full-suite execution belongs to manual CI. Exact step/command lists
+        # keep a renamed unit step or an appended broad test command from
+        # silently returning to the blocking PR lane.
+        self.assertNotIn("make unit", fast_jobs["rust_compile"])
+        self.assertNotIn("cargo test", fast_jobs["rust_compile"])
         self.assertIn('major: "6"', fast_rust_steps["Install the pinned FFmpeg"])
-        self.assertIn("timeout-minutes: 90", fast_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 60", fast_jobs["rust_compile"])
         fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
         playback_contracts = workflow_step_literal(
             fast_preflight["Check the shared player input contract"], "run"
@@ -3262,6 +3272,15 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("github.event.pull_request.number || github.ref", workflow)
         self.assertIn("cancel-in-progress: false", effort_workflow)
         self.assertNotIn("cancel-in-progress: true", effort_workflow)
+        main_workflow = read(".github/workflows/main-fast-lane.yml")
+        self.assertIn("cancel-in-progress: false", main_workflow)
+        self.assertNotIn("cancel-in-progress: true", main_workflow)
+        main_preflight = workflow_job_blocks(".github/workflows/main-fast-lane.yml")["preflight"]
+        self.assertIn("validation.main_unit_receipts prepare", main_preflight)
+        self.assertIn("validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations", main_preflight)
+        self.assertIn("if: always() && steps.receipts.outcome == 'success'", main_preflight)
+        self.assertIn("name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}", main_preflight)
+        self.assertIn("path: .main-python-unit-receipts/receipt.json", main_preflight)
 
         def cancels(
             event: str, *, ref: str = "", head: str = "", base: str = ""
@@ -3461,7 +3480,9 @@ assert.equal(context.ACT_TIMER, null);
                     "make history-check",
                     "make validation-lint",
                     "python3 -m validation.python_unit_receipts run"
-                    if workflow == "effort-ci" else "make operations-check",
+                    if workflow == "effort-ci" else
+                    "python3 -m validation.main_unit_receipts run"
+                    if workflow == "main-fast-lane" else "make operations-check",
                 ):
                     self.assertIn(command, preflight)
 
@@ -3982,7 +4003,8 @@ assert.equal(context.ACT_TIMER, null);
         ]
         self.assertIn("container: ubuntu:24.04", fast)
         self.assertIn('major: "6"', fast)
-        self.assertIn("make unit", fast)
+        self.assertIn("make effort-rust-check", fast)
+        self.assertNotIn("make unit", fast)
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
         self.assertIn("container: ubuntu:24.04", coverage)
         self.assertIn('major: "6"', coverage)
