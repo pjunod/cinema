@@ -1,6 +1,6 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** software implemented; named regressions pass; promotion policy and physical acceptance pending · **Updated:** 2026-10-06
+**Status:** merged; physical Pi acceptance in progress · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -22,7 +22,7 @@ validation receipt and merge result. Physical acceptance remains separate.
 | Deployment | implemented; tests passed | Sol 6.1; `deploy/pi-player`, safe launcher ownership, bounded report; all six regressions pass |
 | Adversarial review | complete; both findings addressed | Reviewed `dfa775112`; Sol repaired P1 fallback and P2 transforms, coordinator inspected the changes |
 | Validation | targeted checks passed; CI promotion incomplete | 292 validation methods, 729 operations methods, web inventory and all 10 named Rust regressions have passing evidence; one optional operations test skipped |
-| Physical Pi 5 | unavailable | Host/user requested; no hardware, HDR or concurrent-playback claim |
+| Physical Pi 5 | testing | 16 GB Pi 5, Raspberry Pi OS Trixie; 4K60 Wayland HDMI connected; real Main/Main10 decode-transfer probes passed |
 
 ## Standing decisions
 
@@ -125,3 +125,30 @@ and `request_decode_software_encode_has_one_frozen_software_startup_successor`.
 Both now pass; no unit execution preceded review. The existing actor still owns
 one in-process retry; its separately budgeted classified-health wrapper does
 not introduce another attempt or a new watchdog.
+
+## Physical acceptance — 2026-10-07
+
+Paul supplied a Pi 5 for cinema testing. Tests use an independent clone and
+isolated data/browser profiles; the existing desktop and system media tools
+are retained. The merge of PR #832 is complete. Its later coverage build was
+killed by SIGKILL before test execution; that does not establish a Pi defect.
+
+Initial observed runtime: Raspberry Pi OS Trixie reference 2026-10-06, kernel
+`6.18.50+rpt-rpi-2712`, ARM64, 16 GB memory; FFmpeg
+`7.1.5-0+deb13u1+rpt2`, Chromium `154.0.8037.92`, Mesa `26.2.2`.
+The active Wayland display is 3840x2160 at 59.982 Hz. Initial thermal status
+reported no throttling. These are fixture observations, not minimum versions.
+
+Both 8-bit and 10-bit HEVC completed the exact production request-decode,
+hardware download and software H.264 encode graph in under 0.2 seconds for
+two 160x120 frames. Driver diagnostics identify V4L2 stateless HEVC, DRM
+frames and the expected downloaded planar depth. The actual OS diagnostic
+uses `swfmt rpi4_8`/`swfmt rpi4_10`, whereas the original parser required
+`swfmt=`. The parser is being corrected at the existing inventory authority;
+the earlier equals form is retained and the remaining proof requirements
+are unchanged. Captured-log positive and negative regressions are written,
+with unit execution reserved for the reviewed candidate.
+
+Native daemon, browser playback, seeking, sustained concurrency, subtitles
+and HDR acceptance are in progress or pending; small FFmpeg probes alone do
+not satisfy those rows. All changes and evidence will be batched in one PR.
