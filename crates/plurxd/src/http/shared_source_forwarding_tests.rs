@@ -155,6 +155,33 @@ async fn actual_nonowner_forwarding() {
         .heartbeat()
         .await
         .expect("ingress current membership");
+    // Follow actual Raft progress changes while the production sampler and
+    // heartbeat publish bounded readiness. Never manufacture a progress row.
+    let mut progress = selected
+        .local_client()
+        .expect("actual ingress local client")
+        .local_db_raft_metrics()
+        .expect("actual applied progress watch");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let peers = ingress
+                .membership
+                .media_peers()
+                .await
+                .expect("actual bounded-ready media peer observation");
+            if peers.iter().any(|peer| {
+                peer.node_id == worker.state.node_id && peer.reachable && peer.http_base.is_some()
+            }) {
+                break;
+            }
+            assert!(
+                progress.wait_for_change().await,
+                "actual applied progress watch closed before Source placement readiness"
+            );
+        }
+    })
+    .await
+    .expect("Source worker production passive/quorum placement readiness");
     assert_ne!(worker.state.node_id, ingress.node_id);
     assert_ne!(
         worker.state.sharing.accepted_drivers.boot_id(),

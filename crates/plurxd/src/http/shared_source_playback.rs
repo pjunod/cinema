@@ -2119,6 +2119,15 @@ impl SourceFixtureMembershipOwner {
     pub(super) fn start(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
         Self(tokio::spawn(membership.heartbeat_loop()))
     }
+    pub(super) fn start_replication(
+        replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    ) -> Self {
+        // Main owns this sampler alongside heartbeat. Peer placement requires
+        // its actual local/quorum watermark, not heartbeat rows alone.
+        Self(tokio::spawn(
+            replication.passive_metrics_loop(std::future::pending()),
+        ))
+    }
     pub(super) async fn finish(&mut self) {
         self.0.abort();
         let stopped = tokio::time::timeout(std::time::Duration::from_secs(15), &mut self.0)
@@ -2144,6 +2153,7 @@ pub(crate) struct RealSourceStartFixture {
     selected: plurx_core::cluster::migration::SelectedStore,
     startup_clock: Option<std::sync::Arc<crate::StartupObservationHttp>>,
     membership_owner: SourceFixtureMembershipOwner,
+    replication_owner: SourceFixtureMembershipOwner,
     _directory: tempfile::TempDir,
 }
 #[cfg(test)]
@@ -2195,6 +2205,7 @@ impl RealSourceStartFixture {
     }
     pub async fn shutdown(mut self) {
         self.membership_owner.finish().await;
+        self.replication_owner.finish().await;
         if let Some(clock) = &self.startup_clock {
             clock.stop_and_drain().await;
         }
@@ -2357,6 +2368,8 @@ async fn build_real_source_start_fixture(
         .await
         .expect("actual registry boot publication before admission");
 
+    let replication_owner =
+        SourceFixtureMembershipOwner::start_replication(state.replication.clone());
     let membership_owner = SourceFixtureMembershipOwner::start(state.membership.clone());
     let store = Arc::clone(&state.store);
     store
@@ -2774,6 +2787,7 @@ async fn build_real_source_start_fixture(
         selected,
         startup_clock,
         membership_owner,
+        replication_owner,
         _directory: directory,
     }
 }
