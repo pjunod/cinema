@@ -56,7 +56,7 @@ def compose_files(environment: dict[str, str], directory: Path) -> list[str]:
         )
         if override is not None:
             files.append(override)
-    return [str((directory / path).resolve()) for path in files]
+    return [os.path.abspath(directory / path) for path in files]
 
 
 def local_linux_engine() -> bool:
@@ -88,32 +88,42 @@ def nvidia_available() -> bool:
             file=sys.stderr,
         )
         return False
-    if present and not shutil.which("nvidia-container-runtime-hook"):
-        raise HardwareError(
-            "NVIDIA GPU detected but nvidia-container-runtime-hook is missing; "
-            "install/configure NVIDIA Container Toolkit on the Docker host, "
-            "or set PLURX_DOCKER_GPU=manual to use only your override"
-        )
     return present
+
+
+def device_source(device: dict | str) -> str:
+    return device.get("source", "") if isinstance(device, dict) else str(device).split(":")[0]
+
+
+def gpu_selection(service: dict, dri: Path) -> tuple[bool, bool]:
+    """Explicit GPU choices suppress discovery, but unrelated devices do not."""
+    requests = service.get("deploy", {}).get("resources", {}).get("reservations", {}).get("devices") or []
+    nvidia = bool(service.get("gpus")) or service.get("runtime") == "nvidia" or any(
+        request.get("driver") == "nvidia" for request in requests
+    )
+    selected = nvidia or any("gpu" in request.get("capabilities", []) for request in requests)
+    for device in service.get("devices") or []:
+        source = device_source(device)
+        target = device.get("target", "") if isinstance(device, dict) else source
+        if source.startswith(("nvidia.com/gpu=", "/dev/nvidia")):
+            nvidia = True
+            selected = True
+        if any(Path(name) == dri or dri in Path(name).parents for name in (source, target)):
+            selected = True
+    return selected, nvidia
 
 
 def gpu_overlay(service: dict, *, dri: Path, nvidia: bool) -> dict:
     additions: dict = {}
     devices = service.get("devices") or []
-    # Explicit device mappings select the GPU(s); never broaden that selection.
+    explicit_gpu, nvidia_requested = gpu_selection(service, dri)
     selected = []
     for device in devices:
-        source = (
-            device.get("source", "")
-            if isinstance(device, dict)
-            else str(device).split(":")[0]
-        )
-        path = Path(source)
+        path = Path(device_source(device))
         if path == dri or dri in path.parents:
             selected.append(path)
     if (
-        not selected
-        and not devices
+        not explicit_gpu
         and dri.is_dir()
         and any(node.is_char_device() for node in dri.iterdir())
     ):
@@ -128,15 +138,7 @@ def gpu_overlay(service: dict, *, dri: Path, nvidia: bool) -> dict:
     if groups:
         additions["group_add"] = sorted(groups, key=int)
 
-    reservations = (
-        service.get("deploy", {}).get("resources", {}).get("reservations", {})
-    )
-    requests = reservations.get("devices") or []
-    gpus = service.get("gpus")
-    nvidia_requested = any(
-        request.get("driver") == "nvidia" for request in requests
-    ) or bool(gpus)
-    if nvidia and not requests and not gpus and not devices:
+    if nvidia and not explicit_gpu:
         additions["deploy"] = {
             "resources": {
                 "reservations": {
@@ -177,7 +179,17 @@ def prepare(output: Path) -> str:
         raise HardwareError("resolved Compose configuration has no plurxd service")
     overlay = {"services": {"plurxd": {}}}
     if mode == "auto" and local_linux_engine():
-        overlay = gpu_overlay(service, dri=Path("/dev/dri"), nvidia=nvidia_available())
+        dri = Path("/dev/dri")
+        explicit_gpu, _ = gpu_selection(service, dri)
+        # Existing selections (including hook-free CDI) need no legacy probe.
+        nvidia = not explicit_gpu and nvidia_available()
+        if nvidia and not shutil.which("nvidia-container-runtime-hook"):
+            raise HardwareError(
+                "NVIDIA GPU detected but the legacy NVIDIA runtime hook is missing; "
+                "configure NVIDIA Container Toolkit for Docker GPU requests, or "
+                "select the GPU through CDI in your override"
+            )
+        overlay = gpu_overlay(service, dri=dri, nvidia=nvidia)
         print(
             "docker hardware: "
             + json.dumps(overlay["services"]["plurxd"], sort_keys=True),
