@@ -3526,6 +3526,17 @@ including errors, carries `Cache-Control: no-store`.
 | ANY | `/sharing` | Refuse peer traffic on the ordinary listener with `404 sharing_not_found`. |
 | ANY | `/sharing/{*path}` | Refuse every peer path on the ordinary listener with the same typed 404. |
 
+`GET /api/v1/sharing/endpoints` returns `{ "manifest": null }` before
+initial address setup; a configured manifest contains `revision` and
+`endpoints`. Invitation creation refuses an absent manifest with
+`409 sharing_endpoints_unavailable`. The web invitation editor reads it
+before Create and offers the existing address editor, retaining the selected
+libraries for return. Address updates remain explicit `expected_revision`
+CAS writes with pin confirmation; no invitation POST is replayed.
+Configuration does not prove reachability. See
+[Cinema address setup](OPERATIONS.md#sharing-cinema-addresses--set-up-before-creating-invitations)
+for the private Serve port and trusted pin source.
+
 The separate listener mounts only the peer router in
 [sharing.rs](../crates/plurxd/src/http/sharing.rs). It accepts the dedicated
 `CinemaShare` credential after pinned TLS, never household account tokens or

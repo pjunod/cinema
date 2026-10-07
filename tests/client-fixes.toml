@@ -4618,3 +4618,11 @@ source = "crates/plurxd/src/web/pages/settings-developer.js"
 source_anchor = "Current Source activation"
 test = "tests/web/settings-sections.test.js"
 test_anchor = "Cinema sharing reports current activation during rolling upgrade without a restart gate"
+
+[[fixes]]
+id = "web.sharing-invitation-address-setup"
+commits = ["7a4facf648713c5b1035117669971bebf9467777"]
+source = "crates/plurxd/src/web/pages/sharing-management.js"
+source_anchor = "async function sharingConfigureAddresses()"
+test = "tests/web/sharing-management.test.js"
+test_anchor = "invitation address setup preserves selected libraries and never posts until configured"
