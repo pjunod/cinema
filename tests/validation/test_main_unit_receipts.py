@@ -177,7 +177,8 @@ class MainUnitReceiptsCase(unittest.TestCase):
                     return [prior]
                 return [{'id': 3, 'name': main.JOB, 'repo_id': 1, 'run_id': 10,
                          'attempt': 1, 'status': self.status, 'task_id': self.task_id}]
-            def bytes(self, path):
+            def bytes(self, path, query=None):
+                if path.endswith(main.WORKFLOW): return b'validation.main_unit_receipts'
                 return start if path.endswith('/2/zip') else final
 
         api = API()
@@ -193,6 +194,43 @@ class MainUnitReceiptsCase(unittest.TestCase):
             final['passes'][test] = {'run': 9, 'commit': commit}
             with self.assertRaises(ReceiptError):
                 main.restore(api, scope, 11, Applicability())
+
+    def test_legacy_retry_imports_latest_bound_log_but_receipt_retries_are_refused(self):
+        scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        commit = 'a' * 40
+        prior = {'id': 10, 'workflow_id': main.WORKFLOW, 'prettyref': '#7', 'event': 'pull_request',
+                 'commit_sha': commit, 'event_payload': {'repository': {'id': 1}, 'number': 7,
+                 'pull_request': {'number': 7, 'head': {'ref': 'topic', 'sha': commit, 'repo': {'id': 1}},
+                                  'base': {'ref': 'main', 'repo': {'id': 1}}}}}
+        passes = {'validation:test_fixture.Case.test_ok': {'run': 10, 'commit': commit}}
+        class API:
+            workflow = b'legacy unittest discovery'
+            attempt = 2
+            status = 'failure'
+            def pages(self, path, query=None, field=None):
+                if path == '/actions/artifacts': return []
+                if path == '/actions/runs': return [prior]
+                return [{'id': 3, 'name': main.JOB, 'repo_id': 1, 'run_id': 10,
+                         'attempt': self.attempt, 'status': self.status}]
+            def bytes(self, path, query=None):
+                return b'Ran 2 tests in 0.01s' if path.endswith('/logs') else self.workflow
+        class Applicability:
+            def __call__(self, identity, attribution): return True
+            def finish(self, passes): pass
+        api = API()
+        with patch.object(main, 'bootstrap', return_value=passes) as bootstrap:
+            self.assertEqual(main.restore(api, scope, 11, Applicability()), passes)
+            self.assertEqual(bootstrap.call_args.args[3]['attempt'], 2)
+            api.workflow = b'validation.main_unit_receipts'
+            for status in ('failure', 'skipped'):
+                api.status = status
+                with self.subTest(status=status), self.assertRaisesRegex(ReceiptError, 'ambiguous artifact identity'):
+                    main.restore(api, scope, 11, Applicability())
+            api.workflow = b'legacy unittest discovery'
+            for value in (0, -1, True, '2'):
+                api.attempt = value
+                with self.subTest(attempt=value), self.assertRaises(ReceiptError):
+                    main.restore(api, scope, 11, Applicability())
 
     def test_exhaustive_dot_failure_retains_only_named_successes(self):
         ids = {'validation:test_fixture.Case.test_ok', 'validation:test_fixture.Case.test_bad'}

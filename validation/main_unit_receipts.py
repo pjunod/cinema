@@ -464,7 +464,13 @@ def restore(api, scope, current_run, applicability):
         require(len(matches) == 1, 'Ambiguous main preflight job')
         job = matches[0]
         require(job['repo_id'] == scope['repository'] and job['run_id'] == rid
-                and job['attempt'] == 1, 'Historical job repository/run/attempt mismatch')
+                and type(job['attempt']) is int and job['attempt'] > 0,
+                'Historical job repository/run/attempt mismatch')
+        commit = receipts.sha(prior['commit_sha'])
+        workflow = api.bytes('/raw/.github/workflows/' + WORKFLOW, {'ref': commit})
+        receipt_workflow = b'validation.main_unit_receipts' in workflow
+        if receipt_workflow or rid in indexed:
+            require(job['attempt'] == 1, 'Receipt job retry has ambiguous artifact identity')
         if job['status'] == 'skipped':
             require(rid not in indexed, 'Skipped job has final journal')
             continue
@@ -472,10 +478,8 @@ def restore(api, scope, current_run, applicability):
             require(rid not in indexed, 'Unassigned preflight has final journal')
             require(unexecuted_preflight(api, scope, prior, job), 'Unassigned preflight is ambiguous')
             continue
-        commit = receipts.sha(prior['commit_sha'])
         if rid not in indexed:
-            workflow = api.bytes('/raw/.github/workflows/' + WORKFLOW, {'ref': commit})
-            if b'validation.main_unit_receipts' in workflow:
+            if receipt_workflow:
                 if unexecuted_preflight(api, scope, prior, job):
                     continue
                 missing.append((prior, job))

@@ -51,6 +51,10 @@ only validation successes: operations have not run. When both suites have
 terminal results, each inventory is checked separately against its own log.
 There are no PR IDs, run IDs, counts or imported pass lists in the adapter.
 
+The latest authenticated legacy job may be a retry: its exact source and
+exhaustive terminal log still bind the import. Receipt-era retries remain
+refused, including skipped jobs, because artifact identity is ambiguous.
+
 Older pre-receipt attempts are outside that migration baseline. Their missing
 logs or journals are not converted into passes or assertions of zero
 execution. After the source workflow adopts receipts, every executed attempt

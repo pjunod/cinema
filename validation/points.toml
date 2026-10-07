@@ -1208,6 +1208,7 @@ paths = [
   "scripts/windows-smoke.ps1",
   "scripts/decoder-diagnostic-qualification",
   "scripts/validate-docker-startup-budget",
+  "scripts/docker-hardware",
   "scripts/registry-push",
   "scripts/release-cut",
   "scripts/sign-android-release",
