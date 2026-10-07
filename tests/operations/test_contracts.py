@@ -612,6 +612,7 @@ assert.equal(context.ACT_TIMER, null);
         up_command: str,
         proof_exit: int,
         *,
+        hardware_exit: int = 0,
         image_revision: str = "a" * 40,
         checkout_revision: str = "a" * 40,
         tracked_dirty: bool = False,
@@ -635,6 +636,8 @@ assert.equal(context.ACT_TIMER, null);
         (stubs / "python3").write_text(
             "#!/bin/sh\n"
             'case "$*" in\n'
+            f'  *docker-hardware*) printf "%s" "$3" > "{directory / 'hardware-output-path'}"; '
+            f'echo docker-compose.yml; exit {hardware_exit} ;;\n'
             f'  *--emit-start-period*) printf derived > "{derive_marker}"; echo 2535s ;;\n'
             f'  *) printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{proof_marker}"; exit {proof_exit} ;;\n'
             "esac\n",
@@ -695,6 +698,20 @@ assert.equal(context.ACT_TIMER, null);
             up_marker,
             image_marker,
         )
+
+    def test_hardware_failure_stops_both_rollouts_and_removes_temporary_overlay(self):
+        for target, command in (
+            ("docker-up", "docker compose up -d --build"),
+            ("docker-image-up", "docker compose up -d --no-build --pull never"),
+        ):
+            with self.subTest(target=target):
+                code, pull, derive, proof, up, _ = self._run_rollout_recipe(
+                    target, command, proof_exit=0, hardware_exit=2
+                )
+                self.assertNotEqual(code, 0)
+                self.assertFalse(any(marker.exists() for marker in (pull, derive, proof, up)))
+                generated = Path((pull.parent / "hardware-output-path").read_text())
+                self.assertFalse(generated.exists())
 
     def test_a_failed_budget_proof_stops_the_rollout_before_it_touches_a_container(
         self,

@@ -272,6 +272,9 @@ COPY --from=build /plurxd.dwp /usr/local/bin/plurxd.dwp
 COPY --from=build /plurx-cluster-check /usr/local/bin/plurx-cluster-check
 COPY --from=build /plurx-cluster-check.dwp /usr/local/bin/plurx-cluster-check.dwp
 
+# NVIDIA Container Toolkit must also mount the video encode/decode libraries.
+# This default covers direct Docker users; GPU device access is still runtime
+# configuration, supplied automatically by make docker-up on local Linux.
 # Default to jellyfin-ffmpeg (recent GPUs need its driver stack); override
 # either var to point elsewhere. It's a superset of system ffmpeg, so this is
 # safe on hardware that the distro build would also handle.
@@ -281,7 +284,8 @@ ENV PLURX_BIND=0.0.0.0:32400 \
     PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe \
     PLURX_BOUND_FFPROBE=/usr/local/lib/plurx/ffprobe \
     PLURX_DOVI_TOOL=/usr/local/bin/dovi_tool \
-    PLURX_MKVMERGE=/usr/bin/mkvmerge
+    PLURX_MKVMERGE=/usr/bin/mkvmerge \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics
 
 EXPOSE 32400
 VOLUME ["/var/lib/plurx"]

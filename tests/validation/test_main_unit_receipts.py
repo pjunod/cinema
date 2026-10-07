@@ -67,7 +67,9 @@ class MainUnitReceiptsCase(unittest.TestCase):
                     return [{'name': query['name'], 'expired': False, 'size_in_bytes': 1,
                              'run_id': 10, 'id': 2 if marker else 1}]
                 return [{'id': 3, 'name': main.JOB, 'repo_id': 1, 'run_id': 10, 'attempt': 1, 'status': 'failure'}]
-            def bytes(self, path): return start
+            def bytes(self, path, query=None):
+                if path.endswith(main.WORKFLOW): return b'validation.main_unit_receipts'
+                return start
         bridge = ({test: dict(attribution, job=4, attempt=1, outcome='success')}, {5})
         with patch.object(main, 'authenticate_run'), patch.object(main, 'validate_bridge_environment'), \
              patch.object(main.receipts, 'artifact_json', side_effect=lambda value: value):
@@ -82,6 +84,77 @@ class MainUnitReceiptsCase(unittest.TestCase):
             self.assertEqual(main.applicability_for({'repository': 1, 'pr': 845}, 'a' * 40), 'declared')
             self.assertEqual(checker.call_count, 1)
             self.assertEqual(bridge.call_count, 1)
+
+    def test_failed_pre_receipt_run_still_uses_legacy_bootstrap(self):
+        scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        commit = 'a' * 40
+        prior = {'id': 10, 'workflow_id': main.WORKFLOW, 'prettyref': '#7', 'event': 'pull_request',
+                 'commit_sha': commit, 'event_payload': {'repository': {'id': 1}, 'number': 7,
+                 'pull_request': {'number': 7, 'head': {'ref': 'topic', 'sha': commit, 'repo': {'id': 1}},
+                                  'base': {'ref': 'main', 'repo': {'id': 1}}}}}
+        expected = {'validation:test_fixture.Case.test_ok': {'run': 10, 'commit': commit}}
+        class API:
+            def pages(self, path, query=None, field=None):
+                if path == '/actions/artifacts': return []
+                if path == '/actions/runs': return [prior]
+                return [{'id': 3, 'name': main.JOB, 'repo_id': 1, 'run_id': 10,
+                         'attempt': 1, 'status': 'failure', 'task_id': 7}]
+            def bytes(self, path, query=None):
+                return b'Ran 2 tests in 0.01s' if path.endswith('/logs') else b'legacy workflow'
+        class Applicability:
+            def __call__(self, test, value): return True
+            def finish(self, passes): pass
+        with patch.object(main, 'bootstrap', return_value=expected) as bootstrap, \
+             patch.object(main, 'unexecuted_preflight', side_effect=AssertionError('legacy has no receipt source')):
+            self.assertEqual(main.restore(API(), scope, 11, Applicability()), expected)
+            bootstrap.assert_called_once()
+
+    def test_cancelled_unassigned_preflight_does_not_require_test_evidence(self):
+        scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        class API:
+            markers = []
+            def pages(self, path, query=None):
+                return self.markers
+        api = API()
+        prior = {'id': 3, 'commit_sha': 'a' * 40}
+        self.assertTrue(main.unexecuted_preflight(api, scope, prior, {'status': 'cancelled', 'task_id': 0}))
+        for job in ({'status': 'cancelled'}, {'status': 'cancelled', 'task_id': 1},
+                    {'status': 'cancelled', 'task_id': False}, {'status': 'running', 'task_id': 0}):
+            with self.subTest(job=job):
+                self.assertFalse(main.unexecuted_preflight(api, scope, prior, job))
+        api.markers = [{'id': 9}]
+        with self.assertRaises(ReceiptError):
+            main.unexecuted_preflight(api, scope, prior, {'status': 'cancelled', 'task_id': 0})
+
+    def test_prepare_refusal_requires_admitted_source_and_complete_phase_evidence(self):
+        scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        commit = 'a' * 40
+        runner = b'reviewed prepare-before-tests source'
+        lines = [commit, commit, 'triggered by event: pull_request',
+                 'Main Python receipt refused: missing prior evidence',
+                 "skipping post step for 'Publish main Python attempt-start marker'; main step was skipped",
+                 f"Job '{main.JOB}' failed"]
+        class API:
+            log = '\n'.join(lines).encode()
+            raw = runner
+            def bytes(self, path, query=None):
+                return self.log if path.endswith('/logs') else self.raw
+            def pages(self, path, query=None):
+                return []
+        api = API()
+        prior, job = {'id': 3, 'commit_sha': commit}, {'id': 4, 'status': 'failure', 'task_id': 5}
+        with patch.object(main, 'PREPARE_REFUSAL_HASHES', {'validation/main_unit_receipts.py': main.hashlib.sha256(runner).hexdigest()}), \
+             patch.object(main, 'source', return_value=runner):
+            self.assertTrue(main.unexecuted_preflight(api, scope, prior, job))
+            for invalid in (lines[:-1], lines[1:], lines[:4] + lines[5:], lines + [lines[3]],
+                            lines[:3] + lines[4:5] + lines[3:4] + lines[5:],
+                            lines + ['MAIN-UNIT-JOURNAL start 1 ' + '0' * 64]):
+                api.log = '\n'.join(invalid).encode()
+                with self.subTest(lines=invalid):
+                    self.assertFalse(main.unexecuted_preflight(api, scope, prior, job))
+            api.log = '\n'.join(lines).encode()
+            api.raw = b'different remote source'
+            self.assertFalse(main.unexecuted_preflight(api, scope, prior, job))
 
     def test_log_snapshots_require_complete_ordered_digest_bound_frames(self):
         import contextlib
@@ -169,6 +242,7 @@ class MainUnitReceiptsCase(unittest.TestCase):
 
         class API:
             status = 'failure'
+            task_id = 7
             def pages(self, path, query=None, field=None):
                 if path == '/actions/artifacts':
                     marker = query['name'].endswith('-start-10')
@@ -177,8 +251,9 @@ class MainUnitReceiptsCase(unittest.TestCase):
                 if path == '/actions/runs':
                     return [prior]
                 return [{'id': 3, 'name': main.JOB, 'repo_id': 1, 'run_id': 10,
-                         'attempt': 1, 'status': self.status}]
-            def bytes(self, path):
+                         'attempt': 1, 'status': self.status, 'task_id': self.task_id}]
+            def bytes(self, path, query=None):
+                if path.endswith(main.WORKFLOW): return b'validation.main_unit_receipts'
                 return start if path.endswith('/2/zip') else final
 
         api = API()
@@ -187,9 +262,50 @@ class MainUnitReceiptsCase(unittest.TestCase):
                 api.status = status
                 with self.subTest(status=status):
                     self.assertEqual(main.restore(api, scope, 11, Applicability()), final['passes'])
+            api.task_id = 0
+            with self.assertRaisesRegex(ReceiptError, 'Unassigned preflight has final journal'):
+                main.restore(api, scope, 11, Applicability())
+            api.task_id = 7
             final['passes'][test] = {'run': 9, 'commit': commit}
             with self.assertRaises(ReceiptError):
                 main.restore(api, scope, 11, Applicability())
+
+    def test_legacy_retry_imports_latest_bound_log_but_receipt_retries_are_refused(self):
+        scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        commit = 'a' * 40
+        prior = {'id': 10, 'workflow_id': main.WORKFLOW, 'prettyref': '#7', 'event': 'pull_request',
+                 'commit_sha': commit, 'event_payload': {'repository': {'id': 1}, 'number': 7,
+                 'pull_request': {'number': 7, 'head': {'ref': 'topic', 'sha': commit, 'repo': {'id': 1}},
+                                  'base': {'ref': 'main', 'repo': {'id': 1}}}}}
+        passes = {'validation:test_fixture.Case.test_ok': {'run': 10, 'commit': commit}}
+        class API:
+            workflow = b'legacy unittest discovery'
+            attempt = 2
+            status = 'failure'
+            def pages(self, path, query=None, field=None):
+                if path == '/actions/artifacts': return []
+                if path == '/actions/runs': return [prior]
+                return [{'id': 3, 'name': main.JOB, 'repo_id': 1, 'run_id': 10,
+                         'attempt': self.attempt, 'status': self.status}]
+            def bytes(self, path, query=None):
+                return b'Ran 2 tests in 0.01s' if path.endswith('/logs') else self.workflow
+        class Applicability:
+            def __call__(self, identity, attribution): return True
+            def finish(self, passes): pass
+        api = API()
+        with patch.object(main, 'bootstrap', return_value=passes) as bootstrap:
+            self.assertEqual(main.restore(api, scope, 11, Applicability()), passes)
+            self.assertEqual(bootstrap.call_args.args[3]['attempt'], 2)
+            api.workflow = b'validation.main_unit_receipts'
+            for status in ('failure', 'skipped'):
+                api.status = status
+                with self.subTest(status=status), self.assertRaisesRegex(ReceiptError, 'ambiguous artifact identity'):
+                    main.restore(api, scope, 11, Applicability())
+            api.workflow = b'legacy unittest discovery'
+            for value in (0, -1, True, '2'):
+                api.attempt = value
+                with self.subTest(attempt=value), self.assertRaises(ReceiptError):
+                    main.restore(api, scope, 11, Applicability())
 
     def test_exhaustive_dot_failure_retains_only_named_successes(self):
         ids = {'validation:test_fixture.Case.test_ok', 'validation:test_fixture.Case.test_bad'}

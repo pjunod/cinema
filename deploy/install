@@ -389,7 +389,7 @@ docker_install() {
     fi
   fi
   if [ ! -f "$override" ]; then
-    say "creating deploy/docker-compose.override.yml from its example — put your media mounts and GPU there"
+    say "creating deploy/docker-compose.override.yml from its example — put your media mounts there; docker-up detects local Linux GPUs"
     run cp "$deploy/docker-compose.override.example.yml" "$override"
   fi
   data=/srv/plurx

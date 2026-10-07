@@ -537,6 +537,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [DOCKER-HARDWARE-STATUS.md](ci/DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
 | [PYTHON-UNIT-PR-RECEIPTS.md](ci/PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes, exact historical attribution, durable artifact journals and source-bound zero-unit/discovery recovery. | open |
 | [EFFORT-WEB-STATIC-CONTRACTS.md](ci/EFFORT-WEB-STATIC-CONTRACTS.md) | Current-source effort web lint, preserved shape obligations, and explicitly deferred behavioral qualification. | open |
 | [STATUS-HISTORY.md](ci/STATUS-HISTORY.md) | Includes the 2026-09-24/25 sections moved on 2026-10-05. Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |

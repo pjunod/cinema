@@ -313,6 +313,13 @@
       "reason": "Actual manifests, ledger/source hash and K06 census."
     },
     {
+      "id_prefix": "operations:test_docker_hardware.DockerHardwareTests.",
+      "inputs": [
+        "scripts/docker-hardware"
+      ],
+      "reason": "Loads the real helper with runpy; module/method/fixture AST binds test-owned Compose/device files and mocked Docker, platform, NVIDIA and current-directory boundaries. The automatic-NVIDIA-without-toolkit control can incidentally inspect /dev/dri but asserts only the mocked NVIDIA refusal, not real device inventory. No production Compose or deployment environment files are read."
+    },
+    {
       "id_prefix": "operations:test_docker_startup_budget.",
       "inputs": [
         "validation/__init__.py",
@@ -3451,6 +3458,14 @@
         "deploy/docker-compose.yml"
       ],
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
+    },
+    {
+      "id_prefix": "operations:test_contracts.OperationsContractCase.test_hardware_failure_stops_both_rollouts_and_removes_temporary_overlay",
+      "inputs": [
+        "Makefile",
+        "Cargo.toml"
+      ],
+      "reason": "make -n reads real Makefile and Cargo.toml via immediate VERSION assignment; the shared fixture executes the emitted rollout shell with test-owned python/docker/git stand-ins. Hardware generation fails in the stand-in before budget/Compose/Git mutations; neither the real docker-hardware script nor production Compose files are loaded."
     },
     {
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_a_failed_budget_proof_stops_the_rollout_before_it_touches_a_container",
