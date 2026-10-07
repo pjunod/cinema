@@ -1152,6 +1152,7 @@ impl TranscodeManager {
             }
             None => self.resolve_movie_plan(file, &opts, encoder).await?,
         };
+        opts.pipeline = plan.options().pipeline;
         let deadline =
             retain_production_budget_after_planning(deadline, planning_started.elapsed());
         let digest = self.digest().ok_or("no cache digest")?;
@@ -1390,6 +1391,10 @@ impl TranscodeManager {
         };
         let opts = self.offline_package_options(encoder, file, spec, subtitle_burn);
         let plan = self.resolve_movie_plan(file, &opts, encoder).await?;
+        let opts = TranscodeOptions {
+            pipeline: plan.options().pipeline,
+            ..opts
+        };
         let digest = self.digest().ok_or("no cache digest")?;
         let primary_hash = self.effective_recipe(&digest, &plan, false).hash();
         let mut recovery_state = OfflineRecoveryState::parse(&package.decoder_recovery_state)?;

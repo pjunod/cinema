@@ -775,14 +775,19 @@ impl TranscodeManager {
         // exactly the node that should serve, and answering `false` here would
         // refuse it. Plan resolution failing means we cannot name the artifact,
         // so we claim nothing and fail closed.
-        let cache_hit = match self.resolve_movie_plan(file, &opts, encoder).await {
-            Ok(plan) => self.verified_cache_hit(&plan).await,
+        let (cache_hit, pipeline) = match self.resolve_movie_plan(file, &opts, encoder).await {
+            Ok(plan) => (
+                self.verified_cache_hit(&plan).await,
+                plan.options().pipeline.name().to_owned(),
+            ),
             Err(reason) => {
                 tracing::debug!(
                     target: "plurxd::transcode",
                     file_id = file.id, %reason, "offer cannot name an artifact"
                 );
-                false
+                // Keep the existing offer fallback without claiming that
+                // an unresolved candidate is the graph that will run.
+                (false, String::new())
             }
         };
         let (hardware_used, hardware_max) = self.hardware_slots().await;
@@ -803,7 +808,7 @@ impl TranscodeManager {
             free_hardware_slots: hardware_max.saturating_sub(hardware_used),
             free_software_threads: software_max.saturating_sub(software_used),
             encoder: encoder.family_name().to_owned(),
-            pipeline: opts.pipeline.name().to_owned(),
+            pipeline,
             recent_speed: self
                 .admissions
                 .recent_speed(&workload.class(encoder.family_name())),

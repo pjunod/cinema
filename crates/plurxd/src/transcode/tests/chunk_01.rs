@@ -2626,6 +2626,169 @@ fn profile5_file() -> plurx_core::domain::MediaFile {
     }
 }
 
+#[tokio::test]
+async fn manager_routes_misflagged_heavy_source_from_resolved_interlace_verdict() {
+    use plurx_core::transcode::{Deinterlace, InterlaceVerdict};
+
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let work = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        store,
+        work.path().to_owned(),
+        EncoderCaps {
+            qsv: true,
+            ..EncoderCaps::default()
+        },
+        Pipeline::VppQsv,
+    )
+    .with_decoders(vec!["hevc".to_owned()]);
+    let mut file = profile5_file();
+    file.hdr = Some("hdr10".to_owned());
+    file.hdr_format = Some("HDR10".to_owned());
+    file.field_order = Some("tt".to_owned());
+    let requested = manager.options_for_tone_map(
+        Encoder::Qsv,
+        &file,
+        1080,
+        0.0,
+        None,
+        None,
+        None,
+        ToneMap::Zscale,
+        OutputGrade::Sdr,
+    );
+    assert_eq!(requested.pipeline, Pipeline::VppQsv);
+    let mut probe = TranscodeManager::catalog_plan_probe(&file);
+    probe["streams"][0]["field_order"] = serde_json::json!("tt");
+    let facts = DecodeFacts::from_ffprobe_json(
+        &probe,
+        TranscodeManager::plan_source_identity(&file).expect("source"),
+    )
+    .expect("facts");
+    for (verdict, pipeline, deinterlace) in [
+        (InterlaceVerdict::FlagOverruled, Pipeline::VppQsv, Deinterlace::None),
+        (InterlaceVerdict::FlagConfirmed, Pipeline::Cpu, Deinterlace::BwdifSendFrame),
+        (InterlaceVerdict::IdetUnavailable, Pipeline::Cpu, Deinterlace::BwdifSendFrame),
+    ] {
+        let plan = manager
+            .resolve_movie_plan_with_facts(
+                &file,
+                &requested,
+                Encoder::Qsv,
+                &facts.clone().with_interlace_verdict(verdict),
+                &AttemptRestrictions::none(),
+            )
+            .expect("resolved plan");
+        assert_eq!(plan.options().pipeline, pipeline, "{verdict:?}");
+        assert_eq!(plan.deinterlace(), deinterlace, "{verdict:?}");
+    }
+}
+
+#[tokio::test]
+async fn media_offer_reports_resolved_pipeline_without_gating_unresolved_candidate() {
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let work = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        work.path().to_owned(),
+        EncoderCaps {
+            qsv: true,
+            ..EncoderCaps::default()
+        },
+        Pipeline::VppQsv,
+    )
+    .with_decoders(vec!["hevc".to_owned()]);
+    store
+        .put_settings(&[(keys::HWACCEL, "qsv")])
+        .await
+        .expect("encoder preference");
+    let mut file = profile5_file();
+    file.hdr = Some("hdr10".to_owned());
+    file.hdr_format = Some("HDR10".to_owned());
+    file.field_order = Some("tt".to_owned());
+    file.path = work.path().join("absent-heavy-source.mkv");
+    let mut probe = TranscodeManager::catalog_plan_probe(&file);
+    probe["streams"][0]["field_order"] = serde_json::json!("tt");
+    file.id = seed_file_with_probe_at(
+        &store,
+        file.path.to_str().expect("path"),
+        plurx_core::domain::ProbeResult {
+            raw_json: Some(probe.to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let requested = manager.options_for_tone_map(
+        Encoder::Qsv,
+        &file,
+        1080,
+        0.0,
+        None,
+        None,
+        None,
+        ToneMap::Zscale,
+        OutputGrade::Sdr,
+    );
+    assert_eq!(
+        requested.pipeline,
+        Pipeline::VppQsv,
+        "the request proposes GPU"
+    );
+    let plan = manager
+        .resolve_movie_plan(&file, &requested, Encoder::Qsv)
+        .await
+        .expect("plan");
+    assert_eq!(
+        plan.options().pipeline,
+        Pipeline::Cpu,
+        "unverified interlace declines GPU"
+    );
+    let offer = manager
+        .media_offer_probe(&file, 1080, 0.0, None, None, false)
+        .await
+        .expect("offer");
+    assert_eq!(
+        offer.pipeline,
+        plan.options().pipeline.name(),
+        "offer reports the resolved graph, not the GPU request"
+    );
+    assert!(!offer.cache_hit);
+
+    // Resolution can fail while the ordinary offer remains usable. Preserve
+    // that fallback without representing an unplanned GPU graph as actual.
+    file.id = seed_file_with_probe_at(
+        &store,
+        work.path()
+            .join("absent-unresolved-source.mkv")
+            .to_str()
+            .expect("path"),
+        plurx_core::domain::ProbeResult {
+            raw_json: Some("{}".to_owned()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(manager
+        .resolve_movie_plan(&file, &requested, Encoder::Qsv)
+        .await
+        .is_err());
+    let unresolved = manager
+        .media_offer_probe(&file, 1080, 0.0, None, None, false)
+        .await
+        .expect("existing fallback still offers");
+    assert!(unresolved.pipeline.is_empty());
+    assert!(!unresolved.cache_hit);
+    assert_eq!(unresolved.target_supported, offer.target_supported);
+    assert_eq!(unresolved.decoder_supported, offer.decoder_supported);
+    assert_eq!(unresolved.encoder, offer.encoder);
+    assert!(
+        !file.path.exists(),
+        "offer fanout never opens the absent source"
+    );
+}
+
 #[test]
 fn frozen_codec_evidence_changes_identity_without_rewriting_the_legacy_shape() {
     let file = profile5_file();
