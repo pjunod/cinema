@@ -11717,7 +11717,7 @@ extension PlayerController: PreparedSuccessorHost {
         let stagedFilmLocalVOD = autoStagedObservation.map {
             autoStagedObservationCurrent($0) && $0.intervals != nil && action.mediaOriginMs == 0
         } ?? false
-        if automaticTrial && !autoTrialAllowsExposure(action) { return .failedWithoutReopen }
+        if automaticTrial && !autoTrialAllowsExposure(action) { return preparedCommitFailure(at: "automatic-exposure") }
         guard autoStagedProductionAllowsCommit(action) else { return .refused }
         guard autoStagedOriginalAllowsCommit(action) else { return .refused }
         guard started,
@@ -11765,17 +11765,17 @@ extension PlayerController: PreparedSuccessorHost {
         )
         guard layerReady == true, preparedPlayer === successor,
               preparedCommitStillOwned(commitAttempt), wantsPlayback else {
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "surface")
         }
         guard let frameDurationSeconds = await awaitPreparedFrameDuration(of: item),
               preparedItem === item, preparedPlayer === successor,
               preparedCommitStillOwned(commitAttempt), wantsPlayback else {
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "frame-duration")
         }
         let rendezvousRate = preferredRate
         guard rendezvousRate.isFinite, rendezvousRate > 0,
               preparedOverlapRemainingMs > 1_000 else {
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "rate-or-overlap")
         }
         let rendezvous = PreparedCommitRendezvous.plan(
             stagedFilmPositionMs: preparedFilmPositionMs,
@@ -11794,14 +11794,14 @@ extension PlayerController: PreparedSuccessorHost {
         // the viewer's tap produces nothing at all, because the prepared path
         // already claimed it and suppressed the in-place reopen.
         guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs) else {
-            return automaticTrial ? .failedWithoutReopen : PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+            return automaticTrial ? preparedCommitFailure(at: "seek") : PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
         guard let alignedOutput = preparedVideoOutput,
               await awaitPreparedDecodedAlignment(
                 item: item, successor: successor, output: alignedOutput,
                 rendezvous: rendezvous, frameDurationSeconds: frameDurationSeconds, commit: commitAttempt
               ) else {
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "decoded-alignment")
         }
 
         guard await awaitPreparedRendezvous(
@@ -11809,22 +11809,22 @@ extension PlayerController: PreparedSuccessorHost {
             frameDurationSeconds: frameDurationSeconds, rate: rendezvousRate,
             commit: commitAttempt
         ) else {
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "rendezvous", deltaMs: realPositionMs() - rendezvous.filmPositionMs)
         }
 
         // The staging can be taken away under that await — the player ending,
         // the app backgrounding. `.switching` stops anything else *opening*
         // one, but it does not stop the pipeline being freed, and handing a
         // released item to the incumbent would be worse than refusing.
-        guard preparedCommitStillOwned(commitAttempt), wantsPlayback else { return .failedWithoutReopen }
+        guard preparedCommitStillOwned(commitAttempt), wantsPlayback else { return preparedCommitFailure(at: "ownership") }
         guard preparedItem === item, preparedPlayer === successor,
               started, player.currentItem != nil,
               !automaticTrial || autoTrialAllowsExposure(action)
         else {
-            return automaticTrial ? .failedWithoutReopen : .refused
+            return automaticTrial ? preparedCommitFailure(at: "staging") : .refused
         }
         guard Double(abs(realPositionMs() - rendezvous.filmPositionMs)) <= frameDurationSeconds * 1_000 else {
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "boundary", deltaMs: realPositionMs() - rendezvous.filmPositionMs)
         }
         let incumbentPlayer = player
         let incumbentVolume = incumbentPlayer.volume
@@ -12018,6 +12018,14 @@ extension PlayerController: PreparedSuccessorHost {
             recipeRevision.didAttach(recipeRevision.desired)
         }
         return .committed(firstFrameUnixMs: firstFrameUnixMs)
+    }
+
+    /// Retain a finite checkpoint when AVFoundation reports no item error.
+    /// Only fixed call-site labels and relative film-clock drift are logged.
+    private func preparedCommitFailure(at checkpoint: String, deltaMs: Int? = nil) -> PreparedCommitOutcome {
+        let drift = deltaMs.map(String.init) ?? "unknown"
+        noteSurfaceLogOnly("prepared_commit_failed:checkpoint=\(checkpoint):delta_ms=\(drift)")
+        return .failedWithoutReopen
     }
 
     /// Asset track loading may ignore task cancellation. Return at the original

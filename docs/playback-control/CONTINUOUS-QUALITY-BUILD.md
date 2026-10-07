@@ -7871,3 +7871,51 @@ are next; experimental injected-page results are not evidence for the new
 production candidate. Phone build-216 UI-runner compilation/signing passed,
 without executing units or a device case; the phone currently reports a
 connected local-network tunnel, which does not prove it is unlocked.
+
+Candidate `0e778892d` passes its normal tracked hook and pinned exact-source
+Linux build in 2m30s. Both shipped browser windows still fail unchanged
+optical criteria despite complete capture and observed verifier activity
+(142 responses each, zero worker errors): Chrome 104.17ms upper hold;
+Firefox 137.47ms. Preserve `{chrome,firefox}-0e778892d-half-speed-optical-verifier1*`.
+Their exact daemons retire. The worker implementation is not asserted to
+resolve the whole-window acceptance failure. Thirteen PR regression fields
+resolve statically; no unit executes.
+
+The diagnostic core split reduces daemon admission capacity and refuses the
+family before any session creates. An encoder-wrapper attempt also fails
+before playback, with an artwork pipeline identity-change warning. Neither
+qualifies a CPU-contention hypothesis. Preserve both failed receipts; their
+daemons and the owned display retire. No global affinity or resource guard
+changes occur.
+
+A fresh bounded native backend uses the exact current candidate and the
+existing self-contained probe. Build-216 helper source checks, bundle IDs
+and completion markers are prepared; phone/TV UI attempts remain upcoming.
+The phone UI runner's strict signature check passes with host trust-store
+access after the sandboxed verifier cannot access that trust. No certificate
+or trust settings change.
+
+### 10.259 Physical phone bootstrap and safe-retention evidence (2026-10-07)
+
+The build-216 phone UI runner now executes. Its first case fails before
+playback because the isolated app cannot reach the shaping proxy. The proxy
+has the host's current address and returns public server identity from the lab
+node; host firewall readback requires no settings change. Resetting only the
+disposable app exposes its local-network permission sheet. The first scoped
+permission handler fails on XCTest's legacy Alert/modern Sheet snapshot
+conflict; a direct own-app/name predicate resolves that harness failure.
+Preserve all three `ios-0e778892d-diagnostic{1,2,3}.xcresult` receipts.
+
+The third UI case passes its control interaction, but the actual 1080p change
+fails safely. Sixteen probes remain at 720p in one session/attempt, advancing
+0–30.66s with zero access stalls and no empty-buffer sample. The failure
+journal reports `stage=switching:item=unreported:ready_ms=unknown:overlap_ms=9699`.
+This is retention evidence, not a successful transition or continuous
+physical audio/display qualification.
+
+Build 217 adds fixed commit-checkpoint labels, plus relative film-clock drift
+at rendezvous/boundary failure, to distinguish a bounded readiness failure
+that has no AVPlayer item error. Outcomes, fences, deadlines and retention
+remain the same. iOS UI-runner source compilation and tvOS production/test
+source compilation pass; units remain deferred. The next failed-only phone
+request identifies the checkpoint before any alignment behavior changes.
