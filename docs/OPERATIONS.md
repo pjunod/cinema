@@ -3392,6 +3392,9 @@ load that override. Mount changes do not require an image rebuild. Accepted
 scan and metadata-refresh jobs retry automatically when their roots become
 readable. Activity's job list shows the local path error in Reason; the
 header says **Library work queued** until execution begins.
+Local path observations are tied to the roots that were checked. Editing a
+library's roots suppresses the old diagnosis immediately, including when the
+edit came through another cluster member or an old check finishes late.
 
 When a scan reports that one directory is owned by duplicate catalogue items,
 it still indexes the file. The note lists every candidate item ID and the ID
