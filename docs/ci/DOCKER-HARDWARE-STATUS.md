@@ -1,6 +1,6 @@
 # Docker hardware setup — automatic device and group configuration
 
-**Status:** implementation complete; qualification and merge tracked in PR #849 · **Updated:** 2026-10-07
+**Status:** open — qualification and merge tracked in PR #849 · **Updated:** 2026-10-07
 
 The failure is at the deployment boundary: the image contains FFmpeg and GPU
 libraries, but Docker does not infer host device access or supplementary groups.
