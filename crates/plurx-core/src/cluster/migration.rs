@@ -1041,8 +1041,38 @@ async fn finalize_pending_join_best_effort(config: &Config, selected: &SelectedS
                             .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
                 })
                 .unwrap_or("no_closed_api_code");
+            let detail = match message {
+                Some(message)
+                    if message.contains("joining node has not committed voter membership") =>
+                {
+                    "voter_membership_not_committed"
+                }
+                Some(message)
+                    if message.contains("joining node has not committed learner membership") =>
+                {
+                    "learner_membership_not_committed"
+                }
+                Some(message)
+                    if message.contains(
+                        "installed sharing schema requires a compatible admitted member",
+                    ) =>
+                {
+                    "installed_sharing_admitted_capability_missing"
+                }
+                Some(message) if message.contains("sharing membership admission is in flight") => {
+                    "sharing_membership_intent_in_flight"
+                }
+                Some(message) if message.contains("no such table") => "sqlite_table_absent",
+                Some(message) if message.contains("no such column") => "sqlite_column_absent",
+                Some(message) if message.contains("constraint failed") => {
+                    "sqlite_constraint_failed"
+                }
+                Some(message) if message.contains("trigger") => "sqlite_trigger_failure",
+                Some(message) if message.contains("leader") => "leader_changed_or_unavailable",
+                _ => "unclassified",
+            };
             eprintln!(
-                "Actual joined startup token finalization pending: class={class} code={code}"
+                "Actual joined startup token finalization pending: class={class} code={code} detail={detail}"
             );
         }
 
@@ -1092,6 +1122,16 @@ async fn finalize_pending_join(
             "staged join token does not match local membership identity".to_owned(),
         ));
     }
+    // Installed Sharing finalization requires capabilities from this exact
+    // admitted member's current heartbeat. Selection precedes the ordinary
+    // Source schema phase, so qualify the retained real master here before
+    // consuming the token; token-bound join declarations are not a substitute
+    // for the current member's verified purpose material.
+    selected
+        .membership
+        .prepare_purpose_master(Arc::clone(&selected.credential_key))
+        .await
+        .map_err(|error| StoreError::Migration(format!("{}: {}", error.code(), error)))?;
     finalize_remote_join(
         &payload,
         FinalizeJoinRequest {
