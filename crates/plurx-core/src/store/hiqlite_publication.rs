@@ -885,9 +885,11 @@ impl FencedPublicationStore for HiqliteAuthStore {
             sort_title_for(&item.title)
         };
         let now = self.now()?;
+        // authority: current allocator installation selects the identity-fenced write path.
         let allocated = self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT count(*) AS value FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.value==1);
         for _ in 0..4 {
             let id = if allocated {
+                // authority: select the next candidate against the committed monotonic watermark.
                 self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT high_water+1 AS value FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807",params!()).await.map_err(database_error)?.first().map(|r|r.value).ok_or_else(||StoreError::Database("item identity allocation unavailable".into()))?
             } else {
                 publication_row_id()

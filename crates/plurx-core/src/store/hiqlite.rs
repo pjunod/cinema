@@ -3702,7 +3702,7 @@ impl HiqliteAuthStore {
                         .into_iter()
                         .map(|s| (s, params!()))
                         .collect();
-                    statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".into(),
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton=1 AND schema_version=$3".into(),
                         params!(SHARING_SCHEMA_VERSION,now,SHARING_SCHEMA_MIGRATION_SOURCE)));
                     admit_schema_migration(admission)?;
                     let attempt = self.schema_migration_transaction(statements).await;
@@ -3743,6 +3743,7 @@ impl HiqliteAuthStore {
         };
         let rows = self
             .client()
+            // authority: exact predecessor shape fences the custody migration transaction.
             .query_consistent_map::<CountRow, _>(
                 format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
                 params!(),
@@ -3761,7 +3762,7 @@ impl HiqliteAuthStore {
         let attempt = self.schema_migration_transaction(vec![
             (assertion, params!(previous)),
             (super::sharing_ingress_custody::declaration().to_owned(), params!()),
-            ("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".into(), params!(next, now, previous)),
+            ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton=1 AND schema_version=$3".into(), params!(next, now, previous)),
             (format!("INSERT INTO cluster_meta(singleton) SELECT NULL WHERE NOT ({shape})"),params!()),
         ]).await;
         self.settle_migration_attempt(previous, attempt).await?;
@@ -3775,6 +3776,7 @@ impl HiqliteAuthStore {
             .await
     }
     async fn committed_schema_version_unchecked(&self) -> Result<i64, StoreError> {
+        // authority: committed cluster marker selects the permitted migration lineage.
         let rows=self.client().query_consistent_map::<CompatibilityRow,_>(
             "SELECT schema_version,protocol_min,protocol_max FROM cluster_meta WHERE singleton=1",params!()).await?;
         match rows.as_slice() {
@@ -4251,6 +4253,7 @@ impl HiqliteAuthStore {
     pub(crate) async fn committed_schema_version_for_client(
         client: &Client,
     ) -> Result<i64, StoreError> {
+        // authority: actual committed marker fences Source installation evidence.
         let rows=client.query_consistent_map::<CompatibilityRow,_>(
             "SELECT schema_version,protocol_min,protocol_max FROM cluster_meta WHERE singleton=1",params!()).await.map_err(database_error)?;
         verify_compatibility_rows(rows.clone(), ClusterCompatibility::CURRENT)?;
@@ -4258,12 +4261,14 @@ impl HiqliteAuthStore {
     }
 
     async fn verify_source_schema_version(client: &Client) -> Result<(), StoreError> {
+        // authority: committed marker selects exact mandatory Source or custody shape validation.
         let rows=client.query_consistent_map::<CompatibilityRow,_>(
             "SELECT schema_version,protocol_min,protocol_max FROM cluster_meta WHERE singleton=1",params!()).await.map_err(database_error)?;
         if matches!(rows.as_slice(),[row] if row.schema_version == super::sharing_source_schema::SOURCE_SCHEMA_VERSION)
         {
             let guard = super::sharing_source_schema::installed_guard();
             let shape = client
+                // authority: verify exact installed objects before granting schema authority.
                 .query_consistent_map::<CountRow, _>(
                     format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
                     params!(),
@@ -4279,6 +4284,7 @@ impl HiqliteAuthStore {
         if matches!(rows.as_slice(), [row] if row.schema_version == AUTH_SCHEMA_BASELINE_VERSION) {
             let guard = super::sharing_ingress_custody::schema_guard();
             let shape = client
+                // authority: verify exact installed objects before granting schema authority.
                 .query_consistent_map::<CountRow, _>(
                     format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
                     params!(),

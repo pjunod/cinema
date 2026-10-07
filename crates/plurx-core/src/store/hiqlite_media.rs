@@ -1922,6 +1922,7 @@ impl MediaStore for HiqliteAuthStore {
             sort_title_for(&item.title)
         };
         let now = self.now()?;
+        // authority: current allocator installation selects the identity-fenced write path.
         let allocated = self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.count==1);
         let sql = if allocated {
             "INSERT INTO items(id,library_id,kind,parent_id,title,sort_title,year,season_number,episode_number,added_at,updated_at) SELECT high_water+1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$9 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807 RETURNING id"

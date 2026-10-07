@@ -368,6 +368,7 @@ async fn route_projection(store: &HiqliteAuthStore) -> Result<&'static str, Stor
     }
     let columns = store
         .client()
+        // authority: committed ownership layout selects principal-safe authority SQL.
         .query_consistent_map::<RouteProjectionRow, _>(
             "SELECT count(*) AS columns FROM pragma_table_info('media_sessions')
          WHERE name IN ('owner_key','principal_kind','share_grant_id','share_viewer_key')",
@@ -591,6 +592,7 @@ async fn desired_row(
     validate_sql(&sql)?;
     store
         .client()
+        // authority: current desired revision fences playback preparation against competing asks.
         .query_consistent_map::<PrincipalDesiredRow, _>(sql, params!(user_id, playback_id))
         .await?
         .into_iter()
@@ -750,6 +752,7 @@ async fn staged_row(
     validate_sql(&sql)?;
     let result = store
         .client()
+        // authority: current staged owner is required before publishing a preparation response.
         .query_consistent_map::<StagedRow, _>(sql, bindings)
         .await?
         .into_iter()
@@ -1280,6 +1283,30 @@ impl LocalSessionSql {
             "user_id, ('local:' || user_id) AS owner_key, 'local' AS principal_kind, NULL AS share_grant_id, NULL AS share_viewer_key"
         }
     }
+}
+
+// The SQL census evaluates both real Local layout helpers, never a neutral
+// substitute for the authority predicate or inserted principal columns.
+#[cfg(test)]
+pub(super) fn census_local_principal_fragment(
+    method: &str,
+    parameter: usize,
+    table: &str,
+    rebuilt: bool,
+) -> Option<String> {
+    let layout = LocalSessionSql { rebuilt };
+    Some(match method {
+        "column" => layout.column().to_owned(),
+        "equals" => layout.equals(parameter),
+        "key_expression" => layout.key_expression().to_owned(),
+        "insert_columns" => layout.insert_columns().to_owned(),
+        "insert_values" => layout.insert_values(parameter),
+        "existing_user" => layout.existing_user(parameter),
+        "live_local_user" => layout.live_local_user(table),
+        "projection" => layout.projection().to_owned(),
+        "user_id_value" => format!("${parameter}"),
+        _ => return None,
+    })
 }
 
 fn valid_uuid(value: &str) -> bool {

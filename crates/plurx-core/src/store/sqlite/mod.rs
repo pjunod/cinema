@@ -2512,6 +2512,9 @@ impl SettingsStore for SqliteStore {
 }
 
 #[cfg(test)]
+pub(crate) use sessions::census_local_principal_fragment;
+
+#[cfg(test)]
 #[cfg(feature = "hiqlite-store")]
 impl SqliteStore {
     pub(crate) fn apply_next_migration_for_test(conn: &Connection) -> Result<(), StoreError> {
