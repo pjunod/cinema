@@ -67,10 +67,10 @@ current verified Source activation; historical boot evidence remains historical.
 | Work | Owner | State |
 |---|---|---|
 | Exact first-assertion rollback certificate in vendored SQLite writer | Sol compiler/runtime lane | implemented; qualification pending |
-| Proposal dispatch and read transition safety | Sol session-store lane | implementing |
-| Compatible member proof and live Source migration | Sol cluster lane | implementing |
-| Current Developer readiness | Sol compiler/runtime lane | implementing |
-| Integration, independent final review, retained qualification and merge | Root | pending |
+| Proposal dispatch and read transition safety | Sol session-store lane | implemented; qualification pending |
+| Compatible member proof and live Source migration | Sol cluster lane | implemented; qualification pending |
+| Current Developer readiness | Sol compiler/runtime lane | implemented; qualification pending |
+| Integration, independent final review, retained qualification and merge | Root | adversarial review cleared; qualification underway |
 
 The final regression set must cover a proposal constructed before migration and
 submitted afterward, valid same-layout operations, failed rollback and later
@@ -82,4 +82,8 @@ unit-suite reruns are excluded.
 
 No cluster stop, live database mutation or fleet deployment was performed during
 the diagnosis. Implementation and deployment evidence will be recorded here when
-available; a proposed design is not completion evidence.
+available. The implementation passed pinned Rust 1.97.1 workspace Clippy,
+formatting and shipped JavaScript syntax checks. Independent adversarial review
+found a cancellation race in activation-marker persistence; both blocking
+writers now retain their owned mutex guard through I/O completion, and the
+focused re-review cleared that finding. Focused runtime qualification is pending.
