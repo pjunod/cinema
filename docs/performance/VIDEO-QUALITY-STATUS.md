@@ -107,6 +107,32 @@ qualifies signal preservation only and does not establish sharp-edge quality,
 gamut/skin fidelity, Dolby processing, 4K, subtitle burn, physical displays or
 the full client matrix. Original failures and exact commands are retained.
 
+**Failure capture continuation (2026-10-07):** the original sharp-panel
+receipt is unchanged, but its raw source, encoded output and decoded frame
+were removed by the old wrapper. It cannot establish where the 35-code
+maximum occurred. Capture version 2 of the existing
+[VAAPI harness](../evidence/video-quality-2026-10-03/qualify-vaapi.py) records
+full media SHA-256 and byte sizes before the unchanged mean <4 / maximum <32
+assertion. Its reference is one planar `yuv420p10le` frame repeated into the
+96-frame FFV1 source; it compares decoded frame 0, refusing wrong dimensions,
+truncated/extra raw frames and samples outside ten-bit range. Maximum-error
+coordinates/count and a reference-derived partition (constant four-neighbour
+interior versus transition or frame border) are diagnostics, not new quality
+criteria or an encoder-cause verdict.
+
+The [wrapper](../evidence/video-quality-2026-10-03/run-vaapi.sh) accepts an
+optional recipe path (default: its adjacent recipe) and allocates a new
+mode-0700 private `/var/tmp/plurx-vaapi-qualification.*` directory. The exit
+trap always stops its watcher and exact owned container ID. Success still
+removes all four media files; failure retains only that invocation's
+synthetic media if the entire bundle is at most 512 MiB. `retention.json`
+names the exact private path, four cleanup files and a 48-hour review/delete
+deadline: you must archive privately or delete those exact media files by
+then; no broad temporary-directory purge is scheduled. Over-budget media
+are deleted, with the receipt recording that they were not retained.
+This plumbing does not recreate the lost pixels, rerun the failed cell,
+qualify sharp edges or change the encoder, graph, recipe or source generator.
+
 The scorer builder/image/containers/volumes and lab6 container/media/control
 scratch are removed. No production settings, queues or deployments changed.
 The batch keeps B-frames and measured per-title encoding in Developer pending
