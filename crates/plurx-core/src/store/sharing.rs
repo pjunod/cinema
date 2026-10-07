@@ -1061,7 +1061,7 @@ pub(crate) fn fence_restored_sharing(connection: &rusqlite::Connection) -> Resul
     }
     let tx = connection.unchecked_transaction()?;
     super::sharing_purpose_keys::archive_for_restore(&tx)?;
-    tx.execute("INSERT INTO settings(key,value) VALUES('sharing_enabled','false') ON CONFLICT(key) DO UPDATE SET value='false'",[])?;
+    tx.execute("INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','false',unixepoch()) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[])?;
     tx.execute("UPDATE sharing_exports SET state='revoked',scope_generation=scope_generation+1,mutation_generation=mutation_generation+1 WHERE state!='revoked'",[])?;
     tx.execute(
         "UPDATE sharing_invitations SET state='cancelled' WHERE state='open'",
@@ -1158,6 +1158,156 @@ fn assignment_snapshot(
 #[cfg(test)]
 mod assignment_snapshot_tests {
     use super::*;
+    #[cfg(feature = "hiqlite-store")]
+    use rusqlite::OptionalExtension;
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn sharing_restore_fence_uses_required_setting_timestamp_and_preserves_custody() {
+        for existing in [false, true] {
+            let directory = tempfile::tempdir().expect("offline restored-image directory");
+            let path = directory.path().join("restored.sqlite");
+            drop(crate::store::SqliteStore::open(&path).expect("actual current production schema"));
+            let connection = rusqlite::Connection::open(&path).expect("offline restored image");
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .expect("actual foreign keys");
+            // The replicated archive has no SQLite convenience DEFAULT: use
+            // the actual bootstrap declaration that created the live image.
+            let settings_schema = super::super::hiqlite::AUTH_SCHEMA
+                .split(';')
+                .find(|statement| statement.contains("CREATE TABLE IF NOT EXISTS settings ("))
+                .expect("actual replicated settings declaration");
+            connection
+                .execute_batch("DROP TABLE settings")
+                .expect("replace SQLite convenience layout");
+            connection
+                .execute_batch(settings_schema)
+                .expect("actual replicated settings layout");
+            let default: Option<String> = connection
+                .query_row(
+                    "SELECT dflt_value FROM pragma_table_info('settings') WHERE name='updated_at'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("replicated timestamp has no default");
+            assert!(default.is_none());
+            let required: i64 = connection
+                .query_row(
+                    "SELECT [notnull] FROM pragma_table_info('settings') WHERE name='updated_at'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("actual timestamp column");
+            assert_eq!(required, 1);
+            connection
+                .execute("DELETE FROM settings WHERE key='sharing_enabled'", [])
+                .expect("absent setting case");
+            if existing {
+                connection.execute("INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','1',1)", []).expect("existing actual setting");
+            }
+            connection.execute_batch(
+                "INSERT INTO sharing_identity VALUES(1,'old-server','old-epoch',1);
+                 INSERT INTO sharing_invitations(id,token_hash,library_ids_json,created_at_ms,expires_at_ms,state)
+                   VALUES('invite','invitation-hash','[]',1,2,'open');
+                 INSERT INTO sharing_exports VALUES('grant','invite','recipient','Recipient','grant-hash',1,1,1,1,'active',2,1,1);
+                 INSERT INTO sharing_imports(id,source_server_id,catalogue_epoch,source_name,claim_id,credential_envelope,endpoints_json,assignment_generation,lifecycle_generation,endpoint_generation,state,created_at_ms,updated_at_ms)
+                   VALUES('import','remote-server','remote-epoch','Remote','claim','opaque-retained-envelope','[]',1,1,1,'active',1,1);"
+            ).expect("active archived sharing metadata");
+            let custody = "{\"version\":1,\"sealed\":false,\"slots\":[],\"highwater\":[]}";
+            connection
+                .execute(
+                    "INSERT INTO sharing_ingress_custody VALUES('source',?1,?2,?3,1)",
+                    rusqlite::params![Uuid::new_v4().to_string(), "a".repeat(64), custody],
+                )
+                .expect("retained custody metadata, not physical closure proof");
+            // A later fence failure must roll back the setting and grant writes.
+            connection.execute_batch("CREATE TRIGGER refuse_identity_fence BEFORE DELETE ON sharing_identity BEGIN SELECT RAISE(ABORT,'fixture fence failure'); END;").expect("atomic failure fixture");
+            assert!(fence_restored_sharing(&connection).is_err());
+            let before: Option<String> = connection
+                .query_row(
+                    "SELECT value FROM settings WHERE key='sharing_enabled'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .expect("rolled-back setting");
+            assert_eq!(before.as_deref(), existing.then_some("1"));
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT state FROM sharing_exports WHERE id='grant'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .expect("rolled-back grant"),
+                "active"
+            );
+            connection
+                .execute_batch("DROP TRIGGER refuse_identity_fence")
+                .expect("remove failure fixture");
+            let earliest: i64 = connection
+                .query_row("SELECT unixepoch()", [], |row| row.get(0))
+                .expect("canonical timestamp bound");
+            fence_restored_sharing(&connection).expect("actual offline restore sharing fence");
+            let setting: (String, i64) = connection
+                .query_row(
+                    "SELECT value,updated_at FROM settings WHERE key='sharing_enabled'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("disabled setting with timestamp");
+            assert_eq!(setting.0, "false");
+            assert!(setting.1 >= earliest);
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM sharing_identity", [], |row| row
+                        .get::<_, i64>(0))
+                    .expect("identity fence"),
+                0
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT state FROM sharing_exports WHERE id='grant'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .expect("grant fence"),
+                "revoked"
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT state FROM sharing_invitations WHERE id='invite'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .expect("invitation fence"),
+                "cancelled"
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT state FROM sharing_imports WHERE id='import'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .expect("import fence"),
+                "disabled"
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT custody_json,revision FROM sharing_ingress_custody",
+                        [],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    )
+                    .expect("unchanged custody"),
+                (custody.to_owned(), 1)
+            );
+        }
+    }
+
     #[test]
     fn sharing_assignment_snapshot_refuses_corruption_and_incomplete_matrices() {
         let id = Uuid::new_v4();
