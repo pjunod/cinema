@@ -7498,3 +7498,98 @@ still returns Locked. That older build is not qualification evidence and no
 phone playback was started. The physical TV is paired, connected, booted,
 Developer Mode enabled and DDI services available; preparation of an isolated
 current-source TV build can proceed without modifying the production app.
+
+### 10.248 Current-source native artifacts and campaign (2026-10-07)
+
+Current commit `eab5fceb8` passed its pinned Linux build. The full 15-manual/
+5-actual-Auto Firefox campaign is running on this exact source with the
+default shared CPU allocation. Its bounded guard verifies the daemon binary,
+configuration and process start time; the result is pending. No passing
+receipt from an older source is substituted for this run.
+
+Separate CQ Lab iOS and tvOS build-214 artifacts compile from the current
+Apple sources. Their bundle is `tv.plurx.cq.qual`, with no production URL
+scheme, shared app group or shared keychain group. The iOS strict signature
+check passes when the system trust store is accessible. These are compilation
+and isolation checks, not playback qualification or unit execution.
+
+The TV lab installed, but CoreDevice refused foreground launch because the
+TV is asleep. The unused lab app was uninstalled, and its isolated backend
+and forward retired; production was untouched. Preserve
+`tv-eab5fceb8-launch-blocked.{json,log}` as blocked evidence. The phone's
+previous availability probe reports Locked. CoreDevice subsequently installed
+the validated separate iOS build-214 lab artifact; it has not been launched. A hardware-readiness question is pending while
+independent software work continues. Physical display/audio remain unmeasured.
+
+All eight Regression-Test references in the draft PR resolve against the
+current checkout through `validation.regression_field --landing-lines`.
+This checks names only; no unit has run, and final adversarial review and
+the human's Fable pause have not begun.
+
+### 10.249 Current-code campaign and device baseline receipts (2026-10-07)
+
+Firefox on committed `eab5fceb8` **passed** all fifteen manual and five actual
+Auto changes with default shared CPUs. Mixed video-gap p95 is 84.04ms, TTFF
+2.737s, clock 1.005x, zero stalls/hitches/dropped frames over 21,178 frames.
+One session/player is retained. Live Close census is 2/0/0/0 producers at
+0/1/3/5 seconds; the exact owned daemon guard reports retired by harness.
+Preserve `firefox-eab5fceb8-full20-default1*` and
+`eab5fceb8-full20-owned-runtime-guard*.json`. The native lab startup and
+baselines overlapped later Auto stages; no CPU affinity or pool override
+was applied. This remains a browser oracle, not physical pixels/audio.
+
+The separate seek-collision diagnostic **passed** with the chosen target and
+attachment retained, zero stalls/hitches, and no wait episode recorded after
+its seek. The earlier 709ms strict failure is not reproduced, not erased.
+No counter or threshold was changed. Preserve
+`firefox-eab5fceb8-selection-seekcollision-diagnostic1*`.
+
+Half-speed film clock measures 0.49995x, but its strict rate probe **failed**
+on one backward frame callback: media time 2.291666→2.166666 while presented
+frame count increases 56→57. No stall/reopen occurred. Independent pixels
+are needed before attributing that to rendered media rather than callback
+metadata. Preserve `firefox-eab5fceb8-rate-windows1*`. The two unmeasured
+rates then ran once separately and **passed**: requested 1x measured 1.00346x,
+requested 2x measured 2.00546x, stable attachment/family, no stalls/hitches/
+reopens. Preserve `firefox-eab5fceb8-rate-windows12-first1*`. Owned software
+probe daemons retired; the original failure stays failed.
+
+The human readied both physical devices. Current isolated build-214 labs
+now launch. TV baseline has 29 AVPlayer probes, advancing 0.274→57.336s
+in one session/attempt with zero access-log stalls. The first phone window
+launched but saw no device API/media traffic and does not qualify playback;
+a longer window then has 73 probes advancing 1.158→148.596s in one session/
+attempt, zero access-log stalls. Preserve
+`tv-eab5fceb8-ready-baseline1.json` and
+`ios-eab5fceb8-ready-baseline{1,2}.json`. Both baseline app processes retired.
+These qualify only SDK baseline scope, not transitions, pixels or audio.
+A disposable external TV UI driver is compiling to exercise shipped quality
+controls and capture app-scoped screen/accessibility state; no production
+source changed and no unit suite executes. The native backend and new TV
+telemetry window remain bounded and active.
+
+### 10.250 Half-speed pixels and interrupted native UI preparation (2026-10-07)
+
+The independent half-speed Xvfb diagnostic does not reproduce a backward
+callback. Film clock is 0.499x; all 4,571 decoded counter samples are readable,
+with zero backward/skipped counters. It nevertheless **fails**: two capture
+gaps make coverage incomplete and a held-picture bound reaches 170.97ms.
+This cannot establish clean pixels or explain the original callback fault.
+The expected half-speed clock floor is 0.45x only for this diagnostic; the
+100ms optical criterion and zero-hitch checks remain unchanged. Preserve
+`firefox-eab5fceb8-half-speed-optical1*`. The exact owned daemon retired by
+harness and its private display was stopped. No production measurement
+threshold or counter changed.
+
+An interrupted tool session lost its temporary native build files before
+a physical UI result was saved; the baseline receipts remain intact.
+Disposable runtime work is now in the independent clone's ignored target
+area. The fresh TV UI lab uses a separate `tv.plurx.cq.qual214` identity so
+a retired lab's Keychain bearer cannot authenticate a new disposable backend.
+There are no production URL schemes or shared app/keychain groups.
+
+The first Xcode physical destination lookup missed the TV, but a refreshed
+`xcdevice` inventory reports both named physical devices available over the
+network. Xcode 27.0 is verified. The UI-only runtime scheme is compiling
+against generic tvOS; its physical execution is pending signature validation.
+No repository implementation source or unit suite is changed by this driver.
