@@ -10,11 +10,11 @@ The existing daemon and web player remain the product.
 implementation commits. Its checks and PR description carry the live final
 validation receipt and merge result. Physical acceptance remains separate.
 
-## Current work
+## Initial implementation — PR #832 (merged)
 
 | Work | State | Evidence / next action |
 |---|---|---|
-| Independent clone | ready | `/private/tmp/plurx-pi-agent`, branch `codex/raspberry-pi`, base `cca4a09b997171ba91136b396f7d484097305fd0` |
+| Independent clone | cleaned after merge | Original branch `codex/raspberry-pi`, base `cca4a09b997171ba91136b396f7d484097305fd0`; validation evidence retained on PR #832 |
 | Compiler | baseline passed | Rust 1.97.1; `cargo check --locked -p plurxd --all-targets`, exit 0 in 1m46s before Rust edits |
 | Implementation contract | implemented | Source audits of server decoder inventory and browser media predictions |
 | Server decoder integration | implemented; compiler passed | Sol 6.1; separate 8/10-bit graph proof, operational capabilities, shared HLS/VOD transfer |
@@ -68,17 +68,17 @@ removed. No repository credential was transferred. The infrastructure-name
 scrubber corrected two new status links and eight pre-existing links in three
 other documents. It changed no runtime configuration.
 
-**Promotion remains incomplete.** Main's fast lane bundles Python tests and
+**Historical gate limitation before the user merged #832.** Main's fast lane bundled Python tests and
 repeats overlapping web tests; it lacks the effort lane's per-test pass receipts.
 The failed run was cancelled after its result to release an unused queued job.
-The PR is draft to avoid replaying successful tests. Paul's reconciliation of
-that gate with the requested once-only policy is pending. No full Rust unit
+The PR was left draft to avoid replaying successful tests; the user subsequently
+merged it. No full Rust unit
 suite or Windows/Apple/Android CI compilation is claimed by the targeted local
 evidence, and no green CI status has been manufactured. The PR description
 holds the live receipt and final merge disposition.
 
-All 20 named PR regressions have passed. No physical-device acceptance has been
-recorded; server/browser/HDMI behavior still needs the exact Pi runtime.
+All 20 named PR regressions passed before merge. The physical-device evidence
+collected afterward is recorded below; it is separate from those regressions.
 
 The Pi FFmpeg source confirms its DRM SAND transfer uses planar `yuv420p`
 or `yuv420p10le`; treating every 10-bit DRM frame as P010 would be wrong.
@@ -149,6 +149,86 @@ the earlier equals form is retained and the remaining proof requirements
 are unchanged. Captured-log positive and negative regressions are written,
 with unit execution reserved for the reviewed candidate.
 
-Native daemon, browser playback, seeking, sustained concurrency, subtitles
-and HDR acceptance are in progress or pending; small FFmpeg probes alone do
-not satisfy those rows. All changes and evidence will be batched in one PR.
+The native daemon builds successfully with pinned Rust 1.97.1 (cold release
+build: 35m57s) and returns `/readyz`. Its actual inventory now reports both
+request decoder depths operational. The existing app scans the fixture
+library and directly plays 2160p Main10 through the patched browser's
+`V4L2VideoDecoder`. The eight-second application run drops 10/192 frames,
+all already counted in the initial three-second sample, with zero corruption.
+
+Real web caps-v2 conversion exposed a missing native runtime component:
+Pi OS's dynamic FFprobe cannot supply the bound executable identity required
+by the existing planner. A legacy request without a capability document did
+produce H.264/AAC, but does not prove the modern web path. The correct existing
+deployment seam is `PLURX_BOUND_FFPROBE`, pointing to the project's pinned
+static local-file parser, alongside the native FFmpeg and scanning FFprobe.
+That parser is being built with the existing script; identity validation is
+unchanged. The deployment recipe now records this prerequisite.
+
+Sustained concurrency, subtitles and HDR acceptance remain pending; small
+FFmpeg probes alone do not satisfy those rows. All changes and evidence are
+batched in [PR #843](http://forge.lan:3000/noirr/plurx/pulls/843).
+
+### Browser and decoded-picture observations
+
+Four synthetic HEVC fixtures cover 1080p/2160p, 8/10-bit, 24 fps, eight seconds,
+with AAC audio. For each 2160p depth, all 192 hardware-decoded frame hashes
+match the software-decoded reference. A standalone 2160p Main10 to 1080p H.264
+conversion completed in 6.448 seconds for eight seconds of media (1.25x).
+These are short-fixture results, not sustained throughput guarantees.
+
+Stock Chromium rejects the HEVC video tracks with an unsupported decoder
+configuration and plays only their audio. An advancing timeline is therefore
+not accepted as video playback evidence. The H.264 control renders at
+1920x1080 using `FFmpegVideoDecoder`, with `kIsPlatformVideoDecoder=false`.
+The range-capable fixture served all 192 frames with zero dropped/corrupted
+frames and completed a backward seek. An earlier fixture lacked HTTP ranges;
+that harness defect was corrected before accepting seek evidence.
+
+An isolated, checksum-verified build from the Pi Chromium HEVC patch project
+(`154.0.8037.57-1-rpt1-hevc1`) selects `V4L2VideoDecoder` with
+`kIsPlatformVideoDecoder=true` for all four HEVC fixtures. No system package
+was replaced, and the browser runs as the normal user with sandboxing. All
+four cases complete and seek. The short 2160p Main10 case drops 52/192 frames
+under the concurrent release compiler; with that owned compiler briefly
+paused it drops 0/192. Both runs report zero corrupted frames.
+
+The initial browser viewport was 1905x2140 despite its fullscreen window
+state. Explicitly leaving and re-entering fullscreen establishes a 3840x2160
+viewport. A separate Main10 run at that full output size drops 5/192 frames,
+with zero corruption and working seeking. Decoder dimensions, viewport size
+and HDMI mode are therefore recorded separately; these short cases do not
+establish sustained full-screen frame pacing.
+
+### HDR and Dolby Vision scope
+
+The cinema target now includes HDR and Dolby Vision. Track three separate
+facts: source format, renderer processing, and the HDMI signal delivered to
+the display. No Dolby Vision output claim follows from Main10 decoding or
+from processing Dolby Vision metadata into HDR10/SDR.
+
+The [Pi Chromium HEVC patch project](https://github.com/sslivins/chromium-rpi-hevc)
+is a candidate for retaining browser playback with hardware HEVC. Its
+documentation explicitly leaves HDR dependent on the display/graphics stack.
+[Firefox's stateless HEVC tracker](https://bugzilla.mozilla.org/show_bug.cgi?id=1969297)
+records outstanding FFmpeg and SAND import work. The Chromium fixture results
+above establish decoder use, while actual HDR output remains unverified.
+
+[LibreELEC's HDR documentation](https://wiki.libreelec.tv/configuration/4k-hdr)
+supports HDR10/HLG as a native Pi playback target. A libmpv/libplacebo backend
+is an architectural option if browser output cannot meet that requirement;
+it would retain the existing Plurx server, UI and playback authority.
+[mpv's output documentation](https://mpv.io/manual/stable/#options-target-colorspace-hint-mode)
+distinguishes using dynamic metadata from transmitting Dolby Vision/HDR10+
+metadata. Actual Dolby Vision HDMI output on the Pi remains unproven. The
+portable desk display is for development testing. The product must discover
+each user's runtime/display capabilities; it must not depend on a particular
+LG model or require a model-specific allowlist. Physical HDR verification is
+independent acceptance work on a suitable display chain.
+
+The source audit also found an existing browser reporting error:
+`dynamicRangeBadge` treated CSS HDR capability as observed rendering. The
+repair keeps decoder and delivery admission intact, describes the delivered
+format/profile, and leaves actual display output unverified. Positive and
+negative CSS answers cannot turn a delivery fact into measured HDR, DV or
+SDR output. Its focused regression is written; execution follows final review.

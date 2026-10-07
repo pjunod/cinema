@@ -209,9 +209,31 @@ API; operator evidence comes from Chromium media diagnostics on the Pi.
 ### 5.1 Native server is the first hardware-enabled deployment
 
 Use the existing `deploy/install linux --binary ...` path. Keep the current
-`PLURX_FFMPEG` and `PLURX_FFPROBE` configuration as the media-runtime seam.
-Native Pi OS FFmpeg is eligible only when its operational probe succeeds.
-Document package versions and both selected executable paths in acceptance.
+`PLURX_FFMPEG` and `PLURX_FFPROBE` configuration as the general media-runtime
+seam, and configure `PLURX_BOUND_FFPROBE` independently for descriptor-bound
+local source facts. Native Pi OS tools can complete scans and hardware probes
+while real caps-v2 web VOD creation fails because the bound facts collector
+requires a fully static executable identity. The bound parser otherwise
+falls back to the general ffprobe; do not bypass identity validation to admit
+a dynamic runtime.
+
+Use the existing [static parser build script](../../scripts/build-static-ffprobe)
+on Linux ARM64 with a C toolchain, make/binutils, pkg-config, curl,
+ca-certificates, xz-utils and static zlib/bzip2/lzma/libc development libraries
+(`zlib1g-dev`, `libbz2-dev`, `liblzma-dev`, `libc6-dev`). It pins FFmpeg 8.1.3,
+verifies the source archive hash, checks the built version and rejects ELF
+`INTERP`/`DYNAMIC` program headers. Retain its upstream source, resolved build
+configuration, licenses, dependency copyright files and source/binary/ELF
+receipts with the installed parser. The Dockerfile already packages this
+separate runtime. Keep the native scanner and hardware-enabled FFmpeg in their
+existing roles; the bound parser deliberately disables network/device inputs.
+
+The [native Pi deployment recipe](../../deploy/README.md#raspberry-pi--native-server-and-the-existing-fullscreen-web-player)
+shows staging, installation outside the service's protected home directories,
+and all three systemd environment entries. Native Pi OS FFmpeg is eligible
+only when its operational probe succeeds. Document package versions, all
+three selected executable paths and the bound parser's binary receipt in
+acceptance, then verify actual caps-v2 VOD creation as well as startup/scans.
 
 Add an opt-in fullscreen launcher for the existing web URL, using the
 installed Chromium executable and a normal desktop user's session. It must
