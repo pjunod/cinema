@@ -39,7 +39,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # value in a fixture start; three are read-only `stalled_for()` comparisons in
 # `resume_restarts_the_motion_clock`. None creates a timer and none starts a
 # producer.
-expected_occurrences = 12
+# 12 -> 13 for the Pi hardware-decode/software-encode startup successor
+# regression in `transcode/tests/chunk_05.rs`. It passes the existing budget
+# to one frozen InitialProducerPolicy and asserts the software startup
+# allowance and retained CPU reservation; it creates no new timer or owner.
+expected_occurrences = 13
 kind = "recovery_timer"
 replacement = "the sole actor-owned rolling producer progress budget before and after first media"
 
@@ -615,7 +619,9 @@ id = "legacy-progress-stall"
 pattern = "PROGRESS_STALL"
 # 10 -> 12 for the same two test-only actor-policy inputs inventoried under
 # `advancing-progress-stall`; neither is a shipped compatibility watchdog.
-expected_occurrences = 12
+# 12 -> 13 for the same Pi startup-policy regression documented under
+# `advancing-progress-stall`; the production timer ownership is unchanged.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "legacy-watchdog-poll"

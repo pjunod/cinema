@@ -1,6 +1,6 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** implementation and review complete; fast-lane validation next · **Updated:** 2026-10-06
+**Status:** implementation and review complete; static-contract repairs pass; remaining validation pending · **Updated:** 2026-10-06
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -21,7 +21,7 @@ validation receipt and merge result. Physical acceptance remains separate.
 | Existing browser player | implemented; validation pending | Sol 6.1; delivered tuple and fenced nullable predictions; syntax/type checks passed |
 | Deployment | implemented; validation pending | Sol 6.1; `deploy/pi-player`, safe launcher ownership, bounded report, six regression cases written |
 | Adversarial review | complete; both findings addressed | Reviewed `dfa775112`; Sol repaired P1 fallback and P2 transforms, coordinator inspected the changes |
-| Fast lane | ready to run | Follow PR #832 checks; retain passing evidence and rerun failed checks only |
+| Fast lane | targeted repairs passed | Run 4222 retained 289 passes; all three failed static-contract methods now pass; later stages not run |
 | Physical Pi 5 | unavailable | Host/user requested; no hardware, HDR or concurrent-playback claim |
 
 ## Standing decisions
@@ -42,9 +42,18 @@ validation receipt and merge result. Physical acceptance remains separate.
 
 ## Evidence ledger
 
-No test or physical-device acceptance has been recorded yet. Baseline
-compiler evidence above is compilation only. The PR validation receipt will identify candidate SHA, commands, results and
-outstanding limits without changing the candidate solely to record its checks.
+[Run 4222](http://192.168.4.7:3000/noirr/plurx/actions/runs/4222) tested
+`35d90bc4db1feb061250ae918987446660271d7f`. History and regression-field checks
+passed. Validation unittest ran 292 methods: 289 passed, three failed. One
+assertion still expected FFmpeg arguments in the inventory instead of their
+shared mapping; two ownership ledger counts need to include the new fallback
+regression. Later test stages have not run. Preserve the passing evidence and
+repair only those failures. All three now pass in targeted invocations; playback
+code is unchanged by these assertion/ledger repairs. The main workflow bundles
+Python tests without the effort workflow's per-test receipts; its retry granularity
+needs reconciliation before another CI run. The PR carries the live validation
+and merge receipt.
+No physical-device acceptance has been recorded.
 
 The Pi FFmpeg source confirms its DRM SAND transfer uses planar `yuv420p`
 or `yuv420p10le`; treating every 10-bit DRM frame as P010 would be wrong.
