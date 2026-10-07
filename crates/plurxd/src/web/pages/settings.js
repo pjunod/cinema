@@ -73,6 +73,7 @@ const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
   dvConversions:()=>api("/dv-conversions"),
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
+  sharingStatus:()=>sharingManagementRead("/sharing/status"),sharingImports:()=>sharingManagementRead("/sharing/imports"),sharingExports:()=>sharingManagementRead("/sharing/exports"),
   developerReadiness:()=>api("/developer/readiness"),
   analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
@@ -110,6 +111,7 @@ const SETTINGS_MANIFEST={
   users:{required:["settings","users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness"]},
+  sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
   integrations:{required:["settings","trakt"],secondary:[]},
   developer:{required:["settings"],secondary:["developerReadiness"]},
 };
@@ -261,6 +263,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   if(!ME.is_admin){ location.hash="#/"; return; }
   const route=location.hash;
   if(reset){
+    if(typeof sharingRetire==="function")sharingRetire();
     SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_DATA={};
     SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
     DV_SETTINGS_POLL_AT=0;
@@ -270,6 +273,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   // Leaving a section drops any minted join token: it is bearer material, and
   // the operator who switched away is done with it whether or not they said so.
   if(SETTINGS_SHOWN_TAB!==tab) forgetJoinToken();
+  if(SETTINGS_SHOWN_TAB!==tab&&typeof sharingRetire==="function")sharingRetire();
   SETTINGS_SHOWN_TAB=tab; LIB_DRAWER=null; USER_DRAWER=null; DEVICE_DRAWER=null;
   try{ localStorage.setItem("plurx_settings_tab",tab); }catch(e){}
   layoutChrome("settings",settingsShell(tab));

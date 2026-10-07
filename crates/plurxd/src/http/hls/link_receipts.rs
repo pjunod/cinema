@@ -773,7 +773,7 @@ impl LinkReceipts {
         };
         if route.owner_node_id != node
             || route.state != "active"
-            || route.user_id != row.binding.source.user_id
+            || route.principal.local_user_id() != Some(row.binding.source.user_id)
             || route.incarnation_id != row.binding.incarnation
             || staged
                 .as_ref()
@@ -1042,7 +1042,7 @@ impl LinkReceipts {
         route.session_id == binding.session
             && route.incarnation_id == binding.incarnation
             && route.owner_epoch == binding.owner_epoch
-            && route.user_id == binding.source.user_id
+            && route.principal.local_user_id() == Some(binding.source.user_id)
             && route.owner_node_id == node
             && route.state == "active"
             && route.publication_ready_at_ms == 0
@@ -1069,7 +1069,7 @@ impl LinkReceipts {
             && route.owner_epoch == binding.owner_epoch
             && route.owner_epoch == proof.owner_epoch
             && route.incarnation_id == proof.incarnation
-            && route.user_id == binding.source.user_id
+            && route.principal.local_user_id() == Some(binding.source.user_id)
             && route.owner_node_id == node
             && route.state == "active"
             && route.publication_ready_at_ms
@@ -1502,7 +1502,9 @@ mod tests {
         let activation = MediaSessionActivation {
             incarnation_id: uuid::Uuid::new_v4().to_string(),
             session_id,
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: "http-ack-player".into(),
             recovery_epoch: String::new(),
             expected_predecessor_incarnation_id: None,
@@ -1920,7 +1922,9 @@ mod tests {
             ),
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation.clone(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             source_size: file.size,
             source_mtime: file.mtime,
             typeless_playlist: false,
@@ -1933,7 +1937,9 @@ mod tests {
         let activation = MediaSessionActivation {
             incarnation_id: incarnation,
             session_id: session.clone(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: request.playback_id.clone(),
             recovery_epoch: uuid::Uuid::new_v4().to_string(),
             expected_predecessor_incarnation_id: None,
@@ -2185,7 +2191,9 @@ mod tests {
         let activation = MediaSessionActivation {
             incarnation_id: uuid::Uuid::new_v4().to_string(),
             session_id: uuid::Uuid::new_v4().to_string(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: "ack-player".into(),
             recovery_epoch: String::new(),
             expected_predecessor_incarnation_id: None,
@@ -2739,7 +2747,9 @@ mod tests {
             let activation = MediaSessionActivation {
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: uuid::Uuid::new_v4().to_string(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: user.id,
+                },
                 playback_id: "player".into(),
                 recovery_epoch: String::new(),
                 expected_predecessor_incarnation_id: None,

@@ -34,6 +34,7 @@ mod publication;
 mod reading;
 mod sessions;
 mod shared_cache;
+mod sharing;
 mod telemetry;
 mod timeline_annotations;
 mod trakt;
@@ -1288,6 +1289,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v103: parent-fenced continuous media facts and dependency reservations
     // (drafted as v93, then v99).
     super::quality_ledger::SCHEMA,
+    // v104: directional sharing authority and sealed outbound material.
+    super::sharing::SCHEMA,
+    // v105: exact Source/receiver outer-ingress custody; preserved across restore.
+    super::sharing_ingress_custody::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1762,6 +1767,11 @@ impl SqliteStore {
                 "database schema is v{current}, but this binary only knows v{target} — \
                 refusing to open a database from a newer plurx"
             )));
+        }
+        if current < 104 && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('sharing_identity','sharing_source_schema_installation','sharing_source_session_bindings','sharing_ingress_custody'))",
+            [], |row| row.get::<_,bool>(0))? {
+            return Err(StoreError::Migration("private sharing SQLite lineage collides with published main migrations; refusing ambiguous ordinal interpretation".into()));
         }
         super::schema_lineage::bridge_sqlite(conn, current)?;
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -2502,8 +2512,21 @@ impl SettingsStore for SqliteStore {
 }
 
 #[cfg(test)]
+pub(crate) use sessions::census_local_principal_fragment;
+
+#[cfg(test)]
 #[cfg(feature = "hiqlite-store")]
 impl SqliteStore {
+    pub(crate) fn apply_next_migration_for_test(conn: &Connection) -> Result<(), StoreError> {
+        let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let index =
+            usize::try_from(current).map_err(|error| StoreError::Migration(error.to_string()))?;
+        let sql = MIGRATIONS
+            .get(index)
+            .ok_or_else(|| StoreError::Migration("no next migration".into()))?;
+        Self::apply_migration_step(conn, current + 1, sql, false)
+    }
+
     pub(crate) fn apply_migrations_for_test(
         conn: &Connection,
         through_version: i64,
@@ -2650,6 +2673,42 @@ mod tests {
         assert_eq!(state("unrelated"), ("queued".into(), 7));
         assert_eq!(state("complete"), ("succeeded".into(), 7));
         assert_eq!(state("transcode"), ("cancelled".into(), 8));
+    }
+
+    #[test]
+    fn sharing_sqlite_main103_upgrade_appends104_105_and_private92_93_refuse() {
+        let conn = Connection::open_in_memory().expect("database");
+        SqliteStore::apply_migrations_for_test(&conn, 103).expect("main migrations");
+        SqliteStore::migrate(&conn).expect("composed sharing migration");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("marker"),
+            105
+        );
+        assert!(conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sharing_ingress_custody')",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .expect("custody"));
+        for marker in [92, 93] {
+            let old = Connection::open_in_memory().expect("old database");
+            old.execute_batch(
+                "CREATE TABLE sharing_identity(singleton INTEGER PRIMARY KEY,server_id TEXT);",
+            )
+            .expect("private shape");
+            old.pragma_update(None, "user_version", marker)
+                .expect("private marker");
+            assert!(
+                matches!(SqliteStore::migrate(&old),Err(StoreError::Migration(message)) if message.contains("private sharing SQLite lineage"))
+            );
+            assert_eq!(
+                old.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .expect("unchanged marker"),
+                marker
+            );
+        }
     }
 
     #[test]
@@ -2951,7 +3010,13 @@ mod tests {
 
         let store = SqliteStore::open_in_memory().expect("open");
         assert_eq!(
-            store.desired_selection(7, "play-a").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "play-a"
+                )
+                .await
+                .expect("read"),
             None,
             "a playback nobody has asked anything about says so, rather than \
              inventing a default that an admission point would compare against"
@@ -2965,7 +3030,13 @@ mod tests {
             let form = form.to_owned();
             async move {
                 store
-                    .record_desired_selection(7, "play-a", &digest, &form, now)
+                    .record_desired_selection(
+                        &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                        "play-a",
+                        &digest,
+                        &form,
+                        now,
+                    )
                     .await
                     .expect("record")
             }
@@ -3003,17 +3074,35 @@ mod tests {
         );
 
         assert_eq!(
-            store.desired_selection(7, "play-a").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "play-a"
+                )
+                .await
+                .expect("read"),
             Some(third),
             "and the row that is read back is the one that was written"
         );
         assert_eq!(
-            store.desired_selection(8, "play-a").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 8 },
+                    "play-a"
+                )
+                .await
+                .expect("read"),
             None,
             "asks are per viewer as well as per playback"
         );
         assert_eq!(
-            store.desired_selection(7, "play-b").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "play-b"
+                )
+                .await
+                .expect("read"),
             None
         );
     }
@@ -3052,14 +3141,26 @@ mod tests {
         ] {
             assert!(
                 store
-                    .record_desired_selection(7, playback_id, digest, form, now)
+                    .record_desired_selection(
+                        &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                        playback_id,
+                        digest,
+                        form,
+                        now
+                    )
                     .await
                     .is_err(),
                 "{why} must be refused"
             );
         }
         assert_eq!(
-            store.desired_selection(7, "play-a").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "play-a"
+                )
+                .await
+                .expect("read"),
             None,
             "and a refused write leaves nothing behind"
         );

@@ -7,7 +7,7 @@ const SET_GROUPS=[
   ["Content",[["libraries","Libraries"],["metadata","Metadata"],["livetv","Live TV"]]],
   ["Playback",[["playback","Playback"],["analysis","Analysis"]]],
   ["Server",[["maintenance","Maintenance"],["users","Users"],["system","System"],["cluster","Cluster"]]],
-  ["Outside",[["integrations","Integrations"]]],
+  ["Outside",[["integrations","Integrations"],["sharing","Sharing"]]],
   ["Developer",[["developer","Developer"]]],
 ];
 const SET_TABS=SET_GROUPS.flatMap(([,tabs])=>tabs);
@@ -79,6 +79,7 @@ function settingsPanel(tab,d){
   if(tab==="users")        return usersPanel(d.users,d.settings);
   if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")      return clusterPanel(d);
+  if(tab==="sharing")      return sharingManagementPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
   if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness);
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);

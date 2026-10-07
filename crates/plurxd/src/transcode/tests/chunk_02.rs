@@ -48,8 +48,8 @@ quality_catalog: None,
         let plain = copy(false);
         let converting = copy(true);
         assert_ne!(
-            plain.durable_intent_fingerprint(7),
-            converting.durable_intent_fingerprint(7)
+            plain.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }),
+            converting.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 })
         );
         assert!(converting.intent_fingerprint("paul").contains("+p81"));
         assert!(

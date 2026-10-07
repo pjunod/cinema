@@ -38,7 +38,7 @@ documented.forEach((row, index) => {
   if (row.file === "hls.min.js") {
     assert.equal(row.old, "Vendored dependency.");
   } else {
-    assert.match(row.old, /^(\d+–\d+|\*\*Relocated\.\*\*.*|\d+–\d+ \(less \d+–\d+\))$/,
+    assert.match(row.old, /^(\d+–\d+|\*\*(?:Relocated|New)\.\*\*.*|\d+–\d+ \(less \d+–\d+\))$/,
       `${row.file} has no usable old line range: ${row.old}`);
   }
 });

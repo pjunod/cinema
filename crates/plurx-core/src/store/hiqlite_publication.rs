@@ -124,6 +124,17 @@ fn publication_row_id() -> i64 {
     (u64::from_be_bytes(prefix) & i64::MAX as u64).max(1) as i64
 }
 
+struct ItemIdentityValue {
+    value: i64,
+}
+impl From<&mut Row<'_>> for ItemIdentityValue {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            value: row.get("value"),
+        }
+    }
+}
+
 struct FingerprintRow {
     fingerprint: String,
 }
@@ -874,47 +885,72 @@ impl FencedPublicationStore for HiqliteAuthStore {
             sort_title_for(&item.title)
         };
         let now = self.now()?;
-        let id = publication_row_id();
-        let results = self
-            .atomic_publication(
-                lease,
-                replacement,
-                vec![(
-                    "INSERT INTO items
+        // authority: current allocator installation selects the identity-fenced write path.
+        let allocated = self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT count(*) AS value FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.value==1);
+        for _ in 0..4 {
+            let id = if allocated {
+                // authority: select the next candidate against the committed monotonic watermark.
+                self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT high_water+1 AS value FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807",params!()).await.map_err(database_error)?.first().map(|r|r.value).ok_or_else(||StoreError::Database("item identity allocation unavailable".into()))?
+            } else {
+                publication_row_id()
+            };
+            let attempt = self
+                .atomic_publication(
+                    lease,
+                    replacement,
+                    vec![(
+                        "INSERT INTO items
                    (id, library_id, kind, parent_id, title, sort_title, year,
                     season_number, episode_number, added_at, updated_at)
                  SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10
                  WHERE EXISTS (
                    SELECT 1 FROM job_leases WHERE resource = $11 AND owner_node_id = $12
                      AND fence = $13 AND revision = $14 AND expires_at_ms = $15)"
-                        .to_owned(),
-                    params!(
-                        id,
-                        item.library_id,
-                        item.kind.as_str(),
-                        item.parent_id,
-                        item.title.as_str(),
-                        sort_title,
-                        item.year,
-                        item.season_number,
-                        item.episode_number,
-                        now,
-                        lease.resource.as_str(),
-                        lease.owner_node_id.as_str(),
-                        lease_i64("fence", lease.fence)?,
-                        lease_i64("revision", lease.revision)?,
-                        lease.expires_at_unix_ms
-                    ),
-                )],
-            )
-            .await?;
-        if results.first().copied() == Some(1) {
-            Ok(id)
-        } else {
-            Err(StoreError::Database(
-                "atomic fenced item insert changed no row".to_owned(),
-            ))
+                            .to_owned(),
+                        params!(
+                            id,
+                            item.library_id,
+                            item.kind.as_str(),
+                            item.parent_id,
+                            item.title.as_str(),
+                            sort_title.as_str(),
+                            item.year,
+                            item.season_number,
+                            item.episode_number,
+                            now,
+                            lease.resource.as_str(),
+                            lease.owner_node_id.as_str(),
+                            lease_i64("fence", lease.fence)?,
+                            lease_i64("revision", lease.revision)?,
+                            lease.expires_at_unix_ms
+                        ),
+                    )],
+                )
+                .await;
+            let results = match attempt {
+                Ok(results) => results,
+                Err(error)
+                    if allocated
+                        && (error.to_string().contains("item_identity_reuse")
+                            || error
+                                .to_string()
+                                .contains("UNIQUE constraint failed: items.id")) =>
+                {
+                    continue
+                }
+                Err(error) => return Err(error),
+            };
+            return if results.first().copied() == Some(1) {
+                Ok(id)
+            } else {
+                Err(StoreError::Database(
+                    "atomic fenced item insert changed no row".to_owned(),
+                ))
+            };
         }
+        Err(StoreError::Database(
+            "item identity allocation contention".into(),
+        ))
     }
 
     async fn apply_metadata_fenced(

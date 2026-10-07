@@ -440,6 +440,22 @@ async function saveBoundedCatalogueReads(btn){
     const card=document.getElementById("bounded-catalogue-settings");if(card)card.outerHTML=boundedCatalogueCard(saved,DEVELOPER_READINESS);
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
+function cinemaSharingCard(settings,readiness){
+  return setCard(`${cardHead("Cinema shared libraries","Invite another Cinema to selected libraries through your private Tailscale connection.",'<span class="pill">Qualification pending</span>')}
+    ${togRow("cinema-sharing-enabled","Enable shared libraries","The saved switch applies to this Cinema. Readiness observations never prevent saving.",!!settings.sharing_enabled)}
+    ${devReq(readiness,"cinema_sharing","listener","Private sharing listener","A separate TLS listener serves only scoped peer requests.")}
+    ${devReq(readiness,"cinema_sharing","tls","Node certificate and pin","Keep the node key and verify the invitation pin through your trusted channel.")}
+    ${devReq(readiness,"cinema_sharing","network","Tailscale reachability and access policy","Both homes need qualified private transport and explicit recipient access.")}
+    ${devReq(readiness,"cinema_sharing","qualification","Catalogue and client qualification","Shared catalogue and playback are implemented; private network, cluster recovery and device qualification remain in progress.")}
+    ${devGraduation("S3–S8 shared catalogue, playback, private history and device qualification are complete.","sharing controls move to Settings → Sharing after S8 evidence and promotion.")}<div class="err" id="cinema-sharing-error" role="alert"></div>${setCardFoot("saveCinemaSharing")}`,{id:"cinema-sharing-settings"});
+}
+async function saveCinemaSharing(btn){
+  const err=document.getElementById("cinema-sharing-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{sharing_enabled:/** @type {HTMLInputElement} */(document.getElementById("cinema-sharing-enabled")).checked}}));
+    const card=document.getElementById("cinema-sharing-settings");if(card)card.outerHTML=cinemaSharingCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
 function clusterClockCard(settings,readiness){
   const enabled=!!settings.cluster_clock_guard_enforced;
   return setCard(`${cardHead("Cluster clock guard","Refuse clock-dependent cluster decisions when peer clock offsets cannot be bounded.",enabled?`<span class="pill warn">enforced</span>`:`<span class="pill">advisory</span>`)}
@@ -518,7 +534,7 @@ function developerPanel(settings,readiness){
       ${destinations}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
-      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}
+      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}${cinemaSharingCard(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}

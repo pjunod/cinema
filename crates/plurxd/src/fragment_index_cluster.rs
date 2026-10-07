@@ -329,6 +329,40 @@ pub(crate) async fn open_source_fence(
     }
 }
 
+/// Source playback always checks the scanner facts and refuses link traversal.
+/// The held descriptor, rather than reopening an unchecked pathname, feeds
+/// the media process. Local opening policy remains on open_source_fence.
+pub(crate) async fn open_source_playback_fence(
+    file: &MediaFile,
+    expected_object_version: Option<&str>,
+) -> Result<SourceFence, String> {
+    let path = file.path.clone();
+    let source = tokio::task::spawn_blocking(move || {
+        plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+    })
+    .await
+    .map_err(|_| "Source file open task failed".to_owned())?
+    .map_err(|_| "Source file cannot be opened without following links".to_owned())?;
+    let metadata = source
+        .metadata()
+        .map_err(|_| "Source file cannot be stated".to_owned())?;
+    if !metadata.is_file() || file.size < 0 {
+        return Err("Source file is not a bounded regular media object".to_owned());
+    }
+    scanner_identity_matches(&metadata, file)?;
+    #[cfg(unix)]
+    let object_version = object_version(&metadata)?;
+    #[cfg(windows)]
+    let object_version = windows_object_version(&source)?;
+    if expected_object_version.is_some_and(|expected| expected != object_version) {
+        return Err("Source file changed after its owned observation".to_owned());
+    }
+    Ok(SourceFence {
+        handle: source,
+        object_version,
+    })
+}
+
 pub(crate) fn cache_root(cache_dir: &Path) -> PathBuf {
     cache_dir.join("fragment-index-v2")
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 
 #if os(iOS)
 import UIKit
@@ -3524,4 +3525,125 @@ struct PlaybackStatsView: View {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
+}
+
+
+/// Typed Shared dispatch never supplies sentinel numeric IDs to PlayerView.
+///
+/// A next Shared episode is a new title: its own fresh, reauthorized plan and
+/// its own controller (the session view is keyed by the plan's request id),
+/// never a continuation of the one that ended.
+struct SharedPlayerView: View {
+    let plan: SharedPlaybackPlan
+    @State private var next: SharedPlaybackPlan?
+    var body: some View {
+        let current = next ?? plan
+        SharedPlayerSessionView(plan: current) { following in next = following }
+            .id(current.request.requestId ?? current.request.playbackId)
+    }
+}
+
+struct SharedPlayerSessionView: View {
+    let plan: SharedPlaybackPlan
+    let playNext: (SharedPlaybackPlan) -> Void
+    @StateObject private var controller = SharedPlayerController()
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var ended = false
+    @State private var findingNext = false
+    var body: some View {
+        VStack(spacing: 12) {
+            Text(plan.subject.title).font(.headline)
+            VideoPlayer(player: controller.player).allowsHitTesting(false)
+            if controller.starting { ProgressView("Starting Shared playback") }
+            if controller.isDirect {
+                Text("Shared direct play").font(.caption).foregroundStyle(.secondary)
+            } else if let summary = controller.statusSummary {
+                Text(summary).font(.caption).foregroundStyle(.secondary)
+            }
+            if let notice = controller.notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
+            if let failure = controller.failure { Text(failure).foregroundStyle(.secondary) }
+            if findingNext { ProgressView("Finding the next episode") }
+            if controller.playback != nil, let current = controller.plan { SharedPlayerControls(controller: controller, plan: current) }
+            Button("Close") { Task { await controller.stop(); dismiss() } }
+        }
+        .task {
+            controller.onNaturalEnd = { ended = true }
+            await controller.start(plan)
+        }
+        // Owned by this view: closing it cancels the lookup.
+        .task(id: ended) {
+            guard ended, let reference = plan.subject.context.reference else { return }
+            findingNext = true
+            let following = try? await model.prepareSharedNextEpisode(after: reference)
+            findingNext = false
+            guard !Task.isCancelled, let following else { return }
+            playNext(following)
+        }
+        .onDisappear { Task { await controller.stop() } }
+    }
+}
+
+/// Seek, pause and play act only once B accepts them; quality, audio and
+/// subtitle changes reopen the shared session. Nothing here touches Local
+/// playback state.
+struct SharedPlayerControls: View {
+    @ObservedObject var controller: SharedPlayerController
+    let plan: SharedPlaybackPlan
+    var body: some View {
+        HStack(spacing: 16) {
+            Button { seek(by: -10_000) } label: { Image(systemName: "gobackward.10") }
+                .accessibilityLabel("Back 10 seconds").accessibilityIdentifier("shared-seek-back")
+            Button {
+                Task { await controller.control(controller.playing ? .pause : .play) }
+            } label: { Image(systemName: controller.playing ? "pause.fill" : "play.fill") }
+                .accessibilityLabel(controller.playing ? "Pause" : "Play").accessibilityIdentifier("shared-play-pause")
+            Button { seek(by: 10_000) } label: { Image(systemName: "goforward.10") }
+                .accessibilityLabel("Forward 10 seconds").accessibilityIdentifier("shared-seek-forward")
+            Menu("Quality") {
+                ForEach(PlaybackQuality.allCases) { quality in
+                    Button { Task { await controller.change(SharedDirectedChange(quality: quality)) } } label: {
+                        mark(quality.label, plan.rawQuality == quality)
+                    }
+                }
+            }.accessibilityIdentifier("shared-quality")
+            if let tracks = plan.decision.presentation.audio, tracks.count > 1 {
+                Menu("Audio") {
+                    ForEach(tracks) { track in
+                        Button { Task { await controller.change(SharedDirectedChange(audioIndex: .some(track.index))) } } label: {
+                            mark(Self.label(track.title, track.language, fallback: "Track \(track.index)"),
+                                 (plan.rawAudioIndex ?? plan.decision.presentation.delivery?.audio) == track.index)
+                        }
+                    }
+                }.accessibilityIdentifier("shared-audio")
+            }
+            let natives = (plan.decision.presentation.subtitles ?? []).filter(\.isNativeHLS)
+            if !natives.isEmpty {
+                Menu("Subtitles") {
+                    Button { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) } } label: {
+                        mark("Off", plan.rawSubtitleIndex == nil)
+                    }
+                    ForEach(natives) { track in
+                        Button { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) } } label: {
+                            mark(Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"), plan.rawSubtitleIndex == track.index)
+                        }
+                    }
+                }.accessibilityIdentifier("shared-subtitles")
+            }
+        }
+        // A preparation waiting for B or priming its successor yields to a
+        // viewer action; the switch itself and its settlement do not.
+        .disabled(controller.busy && !controller.preparing)
+    }
+    private func seek(by deltaMs: Int) {
+        let target = max(0, controller.currentPositionMs() + deltaMs)
+        Task { await controller.control(.seek(targetMs: target)) }
+    }
+    @ViewBuilder private func mark(_ text: String, _ selected: Bool) -> some View {
+        if selected { Label(text, systemImage: "checkmark") } else { Text(text) }
+    }
+    static func label(_ title: String?, _ language: String?, fallback: String) -> String {
+        let parts = [title, language].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return parts.isEmpty ? fallback : String(parts.joined(separator: " · ").prefix(80))
+    }
 }

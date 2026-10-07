@@ -44,8 +44,9 @@ use crate::config::{
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
 use crate::store::{
-    CatalogueReader, HiqliteAuthStore, SettingsStore, SqliteImportReport, SqliteImportTableDigest,
-    SqliteStore, Store, TraktStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    CatalogueReader, HiqliteAuthStore, SettingsStore, SharingStore, SqliteImportReport,
+    SqliteImportTableDigest, SqliteStore, Store, TraktStore, AUTH_SCHEMA_BASELINE_VERSION,
+    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "hiqlite-store")]
 use hiqlite::tls::ServerTlsConfig;
@@ -279,6 +280,7 @@ pub struct SelectedStore {
     replication: status::ReplicationMonitor,
     catalogue: CatalogueReader,
     local_client: Option<Client>,
+    source_schema_startup_consumed: bool,
     _daemon_lock: File,
 }
 
@@ -307,6 +309,48 @@ impl SelectedStore {
     #[must_use]
     pub fn local_client(&self) -> Option<Client> {
         self.local_client.clone()
+    }
+
+    /// Single-use startup coordinator. No State, listener or worker may exist
+    /// when this is called; serving membership handles cannot invoke it.
+    pub async fn prepare_source_schema_before_serving(&mut self) -> Result<bool, StoreError> {
+        if self.source_schema_startup_consumed {
+            return Err(StoreError::Migration(
+                "Source schema startup phase was already consumed".to_owned(),
+            ));
+        }
+        self.source_schema_startup_consumed = true;
+        if self.backend != SelectedBackend::Replicated {
+            return Ok(false);
+        }
+        self.membership
+            .prepare_purpose_master(Arc::clone(&self.credential_key))
+            .await
+            .map_err(|_| StoreError::Migration("Source startup master proof refused".to_owned()))?;
+        let ready = self
+            .membership
+            .coordinate_source_schema_startup()
+            .await
+            .map_err(|_| {
+                StoreError::Migration(
+                    "Source startup layout or intent settlement refused".to_owned(),
+                )
+            })?;
+        let client = self.local_client.as_ref().ok_or_else(|| {
+            StoreError::Migration("Source startup has no actual local replicated client".to_owned())
+        })?;
+        let committed = HiqliteAuthStore::committed_schema_version_for_client(client).await?;
+        let active = self
+            .membership
+            .active_storage_root_for_startup()?
+            .join(HIQLITE_ACTIVE_DIRNAME);
+        let mut marker = read_activation_marker(&active)?;
+        if marker.replicated_schema_version != committed {
+            marker.replicated_schema_version = committed;
+            write_activation_marker(&active, &marker)?;
+            sync_directory(&active)?;
+        }
+        Ok(ready)
     }
 
     /// Finish daemon shutdown before the Tokio runtime tears down the voter.
@@ -578,6 +622,7 @@ pub async fn select_daemon_store_observing(
             replication: status::ReplicationMonitor::sqlite(),
             catalogue,
             local_client: None,
+            source_schema_startup_consumed: false,
             _daemon_lock: daemon_lock,
         });
     }
@@ -735,6 +780,7 @@ async fn join_fresh_store(
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             protocol_min: crate::store::AUTH_PROTOCOL_MIN,
             protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            sharing: super::membership::SharingJoinCapabilities::for_current_binary(),
             live_tv_v1: true,
         },
     )
@@ -787,7 +833,7 @@ async fn join_fresh_store(
         // Keep the caught-up voter alive. No stop/rebind boundary is needed because
         // every durable file already lives at the final path. Pending ownership
         // remains armed until the final publication/finalization awaits complete.
-        let credential_key = open_active_credential_key(config, &store).await?;
+        let credential_key = open_active_credential_key(config, &store, &identity).await?;
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
         let replication = status::ReplicationMonitor::replicated(
@@ -855,6 +901,7 @@ async fn join_fresh_store(
             replication,
             catalogue,
             local_client: Some(client),
+            source_schema_startup_consumed: false,
             _daemon_lock: daemon_lock,
         };
         finalize_pending_join_best_effort(config, &selected).await;
@@ -972,6 +1019,63 @@ fn publish_join_activation(
 #[cfg(feature = "hiqlite-store")]
 async fn finalize_pending_join_best_effort(config: &Config, selected: &SelectedStore) {
     if let Err(error) = finalize_pending_join(config, selected).await {
+        #[cfg(feature = "fixtures")]
+        {
+            // Closed error class/API code only: never log the identity-bound
+            // token, request body, credential, or unbounded remote message.
+            let (class, message) = match &error {
+                StoreError::Database(message) => ("database", Some(message.as_str())),
+                StoreError::Migration(message) => ("migration", Some(message.as_str())),
+                StoreError::JoinRefused(message) => ("join_refused", Some(message.as_str())),
+                StoreError::Task(_) => ("task", None),
+                StoreError::Identity(_) => ("identity", None),
+                _ => ("other", None),
+            };
+            let code = message
+                .and_then(|message| message.split(':').next())
+                .filter(|code| {
+                    !code.is_empty()
+                        && code.len() <= 64
+                        && code
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                })
+                .unwrap_or("no_closed_api_code");
+            let detail = match message {
+                Some(message)
+                    if message.contains("joining node has not committed voter membership") =>
+                {
+                    "voter_membership_not_committed"
+                }
+                Some(message)
+                    if message.contains("joining node has not committed learner membership") =>
+                {
+                    "learner_membership_not_committed"
+                }
+                Some(message)
+                    if message.contains(
+                        "installed sharing schema requires a compatible admitted member",
+                    ) =>
+                {
+                    "installed_sharing_admitted_capability_missing"
+                }
+                Some(message) if message.contains("sharing membership admission is in flight") => {
+                    "sharing_membership_intent_in_flight"
+                }
+                Some(message) if message.contains("no such table") => "sqlite_table_absent",
+                Some(message) if message.contains("no such column") => "sqlite_column_absent",
+                Some(message) if message.contains("constraint failed") => {
+                    "sqlite_constraint_failed"
+                }
+                Some(message) if message.contains("trigger") => "sqlite_trigger_failure",
+                Some(message) if message.contains("leader") => "leader_changed_or_unavailable",
+                _ => "unclassified",
+            };
+            eprintln!(
+                "Actual joined startup token finalization pending: class={class} code={code} detail={detail}"
+            );
+        }
+
         // The voter and activation marker are already durable at this point.
         // Finalization only consumes the coordinator's one-time record, so a
         // temporarily unavailable coordinator must not take this voter back
@@ -1018,6 +1122,16 @@ async fn finalize_pending_join(
             "staged join token does not match local membership identity".to_owned(),
         ));
     }
+    // Installed Sharing finalization requires capabilities from this exact
+    // admitted member's current heartbeat. Selection precedes the ordinary
+    // Source schema phase, so qualify the retained real master here before
+    // consuming the token; token-bound join declarations are not a substitute
+    // for the current member's verified purpose material.
+    selected
+        .membership
+        .prepare_purpose_master(Arc::clone(&selected.credential_key))
+        .await
+        .map_err(|error| StoreError::Migration(format!("{}: {}", error.code(), error)))?;
     finalize_remote_join(
         &payload,
         FinalizeJoinRequest {
@@ -1367,7 +1481,7 @@ impl ActivationMarker {
             cluster_id: cluster_id.to_owned(),
             source_backup_sha256: report.backup_sha256,
             source_schema_version: report.source_schema_version,
-            replicated_schema_version: AUTH_SCHEMA_VERSION,
+            replicated_schema_version: AUTH_SCHEMA_BASELINE_VERSION,
             imported_rows: report.imported_rows,
             table_hashes: report.tables,
             admitted_role: None,
@@ -2054,6 +2168,7 @@ pub async fn restore_cluster_backup_archive(
         )?;
         let (remapped_files, remapped_libraries, remapped_dvr_recordings) =
             apply_restore_image_changes(&mut connection, &manifest, remaps)?;
+        crate::store::sharing::fence_restored_sharing(&connection)?;
         drop(connection);
         File::open(&database)
             .and_then(|file| file.sync_all())
@@ -2298,6 +2413,42 @@ fn verify_backup_key(
             );
         }
     }
+    for (table, columns) in [
+        ("sharing_imports", "credential_envelope,claim_envelope"),
+        ("sharing_import_rotations", "credential_envelope"),
+        (
+            "sharing_relay_upstream",
+            "capability_envelope,dispatch_envelope",
+        ),
+    ] {
+        let exists: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            continue;
+        }
+        let mut statement = connection.prepare(&format!("SELECT {columns} FROM {table}"))?;
+        let count = statement.column_count();
+        let rows = statement.query_map([], |row| {
+            (0..count)
+                .map(|i| row.get::<_, Option<String>>(i))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        for row in rows {
+            let envelopes: Vec<_> = row?
+                .into_iter()
+                .flatten()
+                .map(crate::secrets::SealedSecret::from_stored)
+                .collect();
+            census.observe_envelopes(table, &envelopes.iter().collect::<Vec<_>>());
+        }
+    }
+    let purpose_material = crate::store::sharing_purpose_keys::connection_material(connection)?;
+    if let Some(material) = &purpose_material {
+        material.observe(&mut census);
+    }
     let key = credential_key_override
         .map(Path::to_path_buf)
         .unwrap_or_else(|| archive.join(crate::secrets::CREDENTIAL_KEY_FILENAME));
@@ -2320,6 +2471,9 @@ fn verify_backup_key(
             expected_key_id.unwrap_or_default(),
             key.id()
         )));
+    }
+    if let Some(material) = purpose_material {
+        material.verify(&key)?;
     }
     Ok(())
 }
@@ -2696,9 +2850,10 @@ async fn open_active_store_with_key(
         // Written here rather than beside the rename so a crash in between still
         // converges: any boot that successfully opens an active target re-asserts
         // it, and this is the only place that can be reached without one.
-        let credential_key = match credential_key {
+        let first_activation_master = credential_key.is_some();
+        let mut credential_key = match credential_key {
             Some(key) => key,
-            None => match open_active_credential_key(config, &store).await {
+            None => match open_active_credential_key(config, &store, &identity).await {
                 Ok(key) => key,
                 Err(error) => {
                     drop(store);
@@ -2715,7 +2870,7 @@ async fn open_active_store_with_key(
         );
         let catalogue = CatalogueReader::replicated(
             Arc::clone(&store),
-            concrete_store,
+            concrete_store.clone(),
             replication.metrics_handle(),
             config.cluster.bounded_replica_reads,
             config.cluster.bounded_replica_max_lag_entries,
@@ -2813,11 +2968,12 @@ async fn open_active_store_with_key(
                 .finish_clock_observation()
                 .map_err(|error| StoreError::Database(error.to_string()))?;
         }
-        if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
+        let committed_schema = concrete_store.committed_schema_version().await?;
+        if marker.replicated_schema_version != committed_schema {
             activation_admission
                 .revalidate()
                 .map_err(|error| StoreError::Database(error.to_string()))?;
-            marker.replicated_schema_version = AUTH_SCHEMA_VERSION;
+            marker.replicated_schema_version = committed_schema;
             write_activation_marker(&active, &marker)?;
             sync_directory(&active)?;
         }
@@ -2828,6 +2984,18 @@ async fn open_active_store_with_key(
             .revalidate()
             .map_err(|error| StoreError::Database(error.to_string()))?;
         ensure_activated_source_record(&config.storage.data_dir, &marker)?;
+        if first_activation_master {
+            // The first admitted SQL node is established by the actual
+            // membership constructor. Census the replicated rows under that
+            // real identity before any purpose capability can be published.
+            let current = open_active_credential_key(config, &concrete_store, &identity).await?;
+            if current.sharing_purpose_master_fingerprint()
+                != credential_key.sharing_purpose_master_fingerprint()
+            {
+                return Err(crate::sharing::invalid());
+            }
+            credential_key = current;
+        }
         Ok(SelectedStore {
             store,
             identity,
@@ -2837,6 +3005,7 @@ async fn open_active_store_with_key(
             replication,
             catalogue,
             local_client: Some(client),
+            source_schema_startup_consumed: false,
             _daemon_lock: daemon_lock,
         })
     }
@@ -2920,14 +3089,29 @@ async fn materialize_readdress_join_snapshot(
 async fn open_active_credential_key(
     config: &Config,
     store: &HiqliteAuthStore,
+    identity: &crate::cluster::ClusterIdentity,
 ) -> Result<Arc<CredentialKey>, StoreError> {
+    use crate::store::SharingPurposeKeyStore;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| crate::sharing::invalid())?
+            .as_millis(),
+    )
+    .map_err(|_| crate::sharing::invalid())?;
+    let claim =
+        crate::store::sharing_purpose_keys::begin_replicated_census(store, identity, now).await?;
+    store.inspect_sharing_purpose_material().await?;
     let mut census = SealedRowCensus::default();
     for auth in store.list_trakt_auth().await? {
         census.observe_row(&auth.access_token, &auth.refresh_token);
     }
+    census.merge(store.sharing_sealed_census().await?);
     let path = config.cluster.credential_key_path(&config.storage.data_dir);
     let key = secrets::open_credential_key(&path, &census)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
+    store.verify_sharing_purpose_material(&key).await?;
+    crate::store::sharing_purpose_keys::finish_census(store, claim).await?;
     tracing::debug!(
         key_id = %key.id(),
         wrapped_rows = census.sealed_rows(),
@@ -4681,6 +4865,13 @@ pub fn prepare_sqlite_import(data_dir: &Path) -> Result<PreparedSqliteImport, St
         )));
     }
     let cluster_id = read_cluster_id(&source)?;
+    // The legacy row importer has no optional purpose-material inventory.
+    // Refuse before altering migration artifacts rather than discard sealed
+    // keys or repair their schema. Replicated restore uses the full image.
+    let purpose_tables: i64 = source.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_installation','sharing_purpose_key_archive','sharing_purpose_transaction_guard')",[],|row|row.get(0))?;
+    if purpose_tables != 0 {
+        return Err(StoreError::Migration("sharing purpose material requires an explicit preserved-image migration; legacy SQLite import is pending without changing sealed rows".to_owned()));
+    }
 
     remove_abandoned_incoming(data_dir)?;
 
@@ -5204,6 +5395,85 @@ mod tests {
                 .count(),
             0,
             "integrity failure must clean staging and never publish"
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn sharing_purpose_backup_verification_censuses_retired_keys_and_opens_original_aad() {
+        let archive = tempfile::tempdir().expect("archive");
+        let connection = Connection::open_in_memory().expect("offline image");
+        connection.execute_batch("CREATE TABLE sharing_identity(singleton INTEGER NOT NULL PRIMARY KEY,server_id TEXT NOT NULL,catalogue_epoch TEXT NOT NULL,created_at_ms INTEGER NOT NULL)").expect("empty retired identity");
+        for schema in [
+            crate::store::sharing_purpose_keys::SHARING_PURPOSE_KEYS_SCHEMA,
+            crate::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+            crate::store::sharing_file_locators::CANDIDATE_FILE_LOCATOR_KEY_SCHEMA,
+        ] {
+            connection
+                .execute_batch(schema)
+                .expect("candidate installed image");
+        }
+        let key_path = archive.path().join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+        let master = CredentialKey::load_or_create(&key_path).expect("fixture master");
+        let identity = crate::sharing::SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: 1,
+        };
+        let source = crate::sharing_catalogue_details::CatalogueRevisionKey::generate_sealed(
+            &master,
+            identity.clone(),
+        )
+        .expect("retired Source");
+        let receiver =
+            crate::sharing_file_locators::FileLocatorKey::generate_sealed(&master, &identity)
+                .expect("retired B");
+        for (purpose, envelope) in [("catalogue_revision", &source), ("file_locator", &receiver)] {
+            connection
+                .execute(
+                    "INSERT INTO sharing_purpose_key_archive VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![
+                        purpose,
+                        identity.server_id.to_string(),
+                        identity.catalogue_epoch.to_string(),
+                        envelope.as_stored()
+                    ],
+                )
+                .expect("retired archive");
+        }
+        connection.execute("INSERT INTO sharing_purpose_key_installation VALUES(1,?1,?2,?3,'restore_pending',2,1)",rusqlite::params![identity.server_id.to_string(),identity.catalogue_epoch.to_string(),master.id()]).expect("explicit restore disposition");
+        connection
+            .execute(
+                "INSERT INTO sharing_purpose_transaction_guard VALUES(1,1)",
+                [],
+            )
+            .expect("closed guard");
+        verify_backup_key(&connection, archive.path(), None, None)
+            .expect("all retired purpose material opens");
+        let retained = archive.path().join("retained-key");
+        std::fs::rename(&key_path, &retained).expect("missing-key fixture");
+        assert!(
+            verify_backup_key(&connection, archive.path(), None, None).is_err(),
+            "purpose-only image cannot be mistaken for no sealed rows"
+        );
+        assert!(!key_path.exists(), "verification never mints a replacement");
+        verify_backup_key(&connection, archive.path(), Some(&retained), None)
+            .expect("explicit correct key");
+        let wrong = archive.path().join("wrong-key");
+        CredentialKey::load_or_create(&wrong).expect("wrong fixture master");
+        assert!(verify_backup_key(&connection, archive.path(), Some(&wrong), None).is_err());
+        let foreign = crate::sharing_catalogue_details::CatalogueRevisionKey::generate_sealed(
+            &master,
+            crate::sharing::SharingIdentity {
+                server_id: uuid::Uuid::new_v4(),
+                ..identity.clone()
+            },
+        )
+        .expect("same key foreign AAD");
+        connection.execute("UPDATE sharing_purpose_key_archive SET envelope=?1 WHERE purpose='catalogue_revision'",[foreign.as_stored()]).expect("AAD corruption fixture");
+        assert!(
+            verify_backup_key(&connection, archive.path(), Some(&retained), None).is_err(),
+            "matching key ID is insufficient without authenticated open"
         );
     }
 
@@ -6811,6 +7081,698 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     #[test]
+    fn actual_source_schema_coordinator_three_voters_compete_under_real_boot_proofs() {
+        install_default_crypto_provider();
+        let source_dir = tempfile::tempdir().expect("Source node");
+        let second_dir = tempfile::tempdir().expect("second node");
+        let third_dir = tempfile::tempdir().expect("third node");
+        let make_runtime = || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .expect("actual voter runtime")
+        };
+        let before = make_runtime();
+        let configs = before.block_on(async {
+            let observed = startup_observer::MeasuredPeers::default();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("join listener");
+            let addr = listener.local_addr().expect("join address");
+            let mut config = membership_test_config(source_dir.path());
+            config.server.bind = addr;
+            config.cluster.join_url = format!("http://{addr}");
+            drop(
+                SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME))
+                    .expect("baseline SQLite"),
+            );
+            let source = observed
+                .select(&config, false)
+                .await
+                .expect("actual first voter");
+            let manager = source.membership_manager();
+            let app = Router::new()
+                .route("/api/v1/cluster/join/redeem", post(redeem_join_for_test))
+                .route(
+                    "/api/v1/cluster/join/finalize",
+                    post(finalize_join_for_test),
+                )
+                .with_state(manager.clone())
+                .merge(startup_observer::MeasuredPeers::route(manager.clone()));
+            let http_task = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("join gateway");
+            });
+            let mut configs = vec![config];
+            let mut members = vec![source];
+            for directory in [&second_dir, &third_dir] {
+                let token = manager
+                    .issue_token(Duration::from_secs(120))
+                    .await
+                    .expect("actual join invitation");
+                let path = directory.path().join("join.token");
+                std::fs::write(&path, format!("{}\n", token.token)).expect("isolated token file");
+                let mut joined_config = membership_test_config(directory.path());
+                joined_config.server.bind = format!("127.0.0.1:{}", free_test_port())
+                    .parse()
+                    .expect("distinct node HTTP origin");
+                joined_config.cluster.join_token_file = path;
+                members.push(
+                    observed
+                        .select(&joined_config, true)
+                        .await
+                        .expect("actual joined voter"),
+                );
+                configs.push(joined_config);
+            }
+            let client = members[0].local_client().expect("actual Source client");
+            assert_eq!(
+                client
+                    .metrics_db()
+                    .await
+                    .expect("real roster")
+                    .membership_config
+                    .voter_ids()
+                    .count(),
+                3
+            );
+            members[0]
+                .store
+                .put_setting("sharing_enabled", "true")
+                .await
+                .expect("replicated saved choice");
+            for member in &members {
+                assert_eq!(
+                    HiqliteAuthStore::committed_schema_version_for_client(
+                        &member.local_client().expect("actual client")
+                    )
+                    .await
+                    .expect("baseline metadata"),
+                    AUTH_SCHEMA_BASELINE_VERSION
+                );
+            }
+            for member in &members {
+                member
+                    .membership_manager()
+                    .prepare_purpose_master(Arc::clone(&member.credential_key))
+                    .await
+                    .expect("actual selected master proof for each running member");
+            }
+            assert!(!members[0]
+                .prepare_source_schema_before_serving()
+                .await
+                .expect("a single startup intent cannot rebuild three serving members"));
+            let client = members[0].local_client().expect("actual pending client");
+            let rows = client
+                .query_consistent_map::<SourceStartupPayloadRow, _>(
+                    "SELECT CAST(count(*) AS TEXT) AS payload FROM sharing_source_boot_intents",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("confirmed release census");
+            assert!(matches!(rows.as_slice(),[row] if row.payload=="0"));
+            assert_eq!(
+                HiqliteAuthStore::committed_schema_version_for_client(&client)
+                    .await
+                    .expect("unchanged legacy marker"),
+                AUTH_SCHEMA_BASELINE_VERSION
+            );
+            for member in &members {
+                member.shutdown().await.expect("full-stop voter shutdown");
+            }
+            http_task.abort();
+            configs
+        });
+        // Dropping the entire old runtime releases Hiqlite 0.14's retained TLS
+        // listeners. This is a real full stop, not a serving-time schema rebuild.
+        drop(before);
+        make_runtime().block_on(async {
+            let observed = startup_observer::MeasuredPeers::default();
+            let (first, second, third) = tokio::join!(
+                observed.select(&configs[0], true),
+                observed.select(&configs[1], true),
+                observed.select(&configs[2], true)
+            );
+            let mut first = first.expect("first full-stop restart");
+            let mut second = second.expect("second full-stop restart");
+            let mut third = third.expect("third full-stop restart");
+            let (first_result, second_result, third_result) = tokio::join!(
+                first.prepare_source_schema_before_serving(),
+                second.prepare_source_schema_before_serving(),
+                third.prepare_source_schema_before_serving()
+            );
+            assert!(first_result.expect("first startup factory"));
+            assert!(second_result.expect("second startup factory"));
+            assert!(third_result.expect("third startup factory"));
+            for member in [&first, &second, &third] {
+                assert_eq!(
+                    HiqliteAuthStore::committed_schema_version_for_client(
+                        &member.local_client().expect("actual client")
+                    )
+                    .await
+                    .expect("installed metadata"),
+                    AUTH_SCHEMA_VERSION
+                );
+            }
+            for member in [&first, &second, &third] {
+                member.shutdown().await.expect("Source shutdown");
+            }
+        });
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_source_schema_coordinator_keeps_complete_legacy_guard_local_only_without_repair(
+    ) {
+        install_default_crypto_provider();
+        let directory = tempfile::tempdir().expect("legacy guard data");
+        drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("legacy SQLite"));
+        let mut selected =
+            startup_observer::select_applied_singleton(&membership_test_config(directory.path()))
+                .await
+                .expect("actual admitted voter");
+        let client = selected.local_client().expect("actual client");
+        for sql in super::super::membership::sharing_member_admission_guard_schema()
+            .into_iter()
+            .filter(|sql| !sql.contains("cluster_sharing_purpose_keys_"))
+            .map(|sql| sql.replace(",'sharing_purpose_keys_v1'", ""))
+        {
+            client
+                .execute(sql, hiqlite::params!())
+                .await
+                .expect("known complete legacy guard fixture");
+        }
+        let query="SELECT json_array(type,name,sql) AS payload FROM sqlite_master WHERE name GLOB 'cluster_sharing_*' ORDER BY name";
+        let before = client
+            .query_consistent_map::<SourceStartupPayloadRow, _>(query, hiqlite::params!())
+            .await
+            .expect("legacy schema snapshot")
+            .into_iter()
+            .map(|row| row.payload)
+            .collect::<Vec<_>>();
+        selected
+            .store
+            .put_setting("sharing_enabled", "true")
+            .await
+            .expect("saved choice");
+        assert!(!selected
+            .prepare_source_schema_before_serving()
+            .await
+            .expect("recognized Local-only pending state"));
+        let after = client
+            .query_consistent_map::<SourceStartupPayloadRow, _>(query, hiqlite::params!())
+            .await
+            .expect("unchanged snapshot")
+            .into_iter()
+            .map(|row| row.payload)
+            .collect::<Vec<_>>();
+        assert_eq!(before, after, "no ALTER or repair");
+        assert_eq!(
+            selected
+                .store
+                .get_setting("sharing_enabled")
+                .await
+                .expect("saved choice")
+                .as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            HiqliteAuthStore::committed_schema_version_for_client(&client)
+                .await
+                .expect("legacy metadata"),
+            AUTH_SCHEMA_BASELINE_VERSION
+        );
+        assert!(client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT name AS payload FROM sqlite_master WHERE name IN('sharing_catalogue_keys','sharing_file_locator_keys','sharing_source_boot_intents','sharing_source_schema_installation')",hiqlite::params!()).await.expect("no mint or rebuild").is_empty());
+        selected
+            .store
+            .put_setting("sharing_enabled", "false")
+            .await
+            .expect("disabled choice preserved");
+        client
+            .execute(
+                "DROP TRIGGER cluster_sharing_generation_intent_update",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("test-only partial guard");
+        selected.shutdown().await.expect("settled shutdown");
+        drop(client);
+        drop(selected);
+        let mut restart =
+            startup_observer::select_applied_singleton(&membership_test_config(directory.path()))
+                .await
+                .expect("master census remains readable");
+        assert!(
+            restart
+                .prepare_source_schema_before_serving()
+                .await
+                .is_err(),
+            "unknown/partial guard does not become safe merely because Sharing is disabled"
+        );
+        let client = restart.local_client().expect("actual restarted client");
+        assert!(client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT name AS payload FROM sqlite_master WHERE name='cluster_sharing_generation_intent_update'",hiqlite::params!()).await.expect("no repair census").is_empty());
+        assert_eq!(
+            restart
+                .store
+                .get_setting("sharing_enabled")
+                .await
+                .expect("disabled choice")
+                .as_deref(),
+            Some("false")
+        );
+        restart.shutdown().await.expect("settled partial fixture");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_source_schema_coordinator_preserves_live_local_lease_and_releases_pending_intent(
+    ) {
+        install_default_crypto_provider();
+        let directory = tempfile::tempdir().expect("Local data");
+        let config = membership_test_config(directory.path());
+        drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("legacy SQLite"));
+        let mut selected = startup_observer::select_applied_singleton(&config)
+            .await
+            .expect("actual one voter");
+        selected
+            .store
+            .put_setting("sharing_enabled", "true")
+            .await
+            .expect("saved choice");
+        let client = selected.local_client().expect("actual client");
+        client.execute("INSERT INTO job_leases VALUES('retained-local-worker','actual-local-owner',7,9,9223372036854775807,1)",hiqlite::params!()).await.expect("live Local lease");
+        assert!(!selected
+            .prepare_source_schema_before_serving()
+            .await
+            .expect("pending readiness permits legacy Local startup after release"));
+        assert_eq!(
+            HiqliteAuthStore::committed_schema_version_for_client(&client)
+                .await
+                .expect("legacy marker"),
+            AUTH_SCHEMA_BASELINE_VERSION
+        );
+        let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) AS payload FROM job_leases WHERE resource='retained-local-worker'",hiqlite::params!()).await.expect("retained ownership");
+        assert!(
+            matches!(rows.as_slice(),[row] if row.payload=="[\"retained-local-worker\",\"actual-local-owner\",7,9,9223372036854775807,1]")
+        );
+        let rows = client
+            .query_consistent_map::<SourceStartupPayloadRow, _>(
+                "SELECT CAST(count(*) AS TEXT) AS payload FROM sharing_source_boot_intents",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("confirmed intent release");
+        assert!(matches!(rows.as_slice(),[row] if row.payload=="0"));
+        assert_eq!(
+            selected
+                .store
+                .get_setting("sharing_enabled")
+                .await
+                .expect("saved choice")
+                .as_deref(),
+            Some("true")
+        );
+        assert!(client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT name AS payload FROM sqlite_master WHERE name='sharing_source_session_bindings'",hiqlite::params!()).await.expect("no half installation").is_empty());
+        selected
+            .store
+            .put_setting("sharing_enabled", "false")
+            .await
+            .expect("operator disables optional sharing");
+        client.execute("INSERT INTO sharing_source_boot_intents SELECT node_id,raft_id,$1,$2,(SELECT generation FROM cluster_sharing_membership_generation WHERE singleton=1) FROM cluster_nodes WHERE removed_at IS NULL",hiqlite::params!(uuid::Uuid::new_v4().to_string(),selected.credential_key.sharing_purpose_master_fingerprint())).await.expect("retained crash startup intent fixture");
+        selected.shutdown().await.expect("settled shutdown");
+        drop(client);
+        drop(selected);
+        let mut restart =
+            startup_observer::select_applied_singleton(&membership_test_config(directory.path()))
+                .await
+                .expect("actual disabled-choice restart");
+        assert!(!restart
+            .prepare_source_schema_before_serving()
+            .await
+            .expect("withdraw stale process receipt before Local serving"));
+        let client = restart.local_client().expect("actual restart client");
+        let rows = client
+            .query_consistent_map::<SourceStartupPayloadRow, _>(
+                "SELECT CAST(count(*) AS TEXT) AS payload FROM sharing_source_boot_intents",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("old process receipt retired");
+        assert!(matches!(rows.as_slice(),[row] if row.payload=="0"));
+        assert_eq!(
+            restart
+                .store
+                .get_setting("sharing_enabled")
+                .await
+                .expect("saved disabled choice")
+                .as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            HiqliteAuthStore::committed_schema_version_for_client(&client)
+                .await
+                .expect("unchanged legacy"),
+            AUTH_SCHEMA_BASELINE_VERSION
+        );
+        restart.shutdown().await.expect("settled restart");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_source_schema_coordinator_one_voter_installs_and_restarts_without_repair() {
+        install_default_crypto_provider();
+        let directory = tempfile::tempdir().expect("Source coordinator data");
+        let config = membership_test_config(directory.path());
+        drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let mut selected = startup_observer::select_applied_singleton(&config)
+            .await
+            .expect("actual admitted one voter");
+        selected
+            .store
+            .put_setting("sharing_enabled", "true")
+            .await
+            .expect("preserve explicit choice");
+        let client = selected.local_client().expect("actual replicated client");
+        assert_eq!(
+            HiqliteAuthStore::committed_schema_version_for_client(&client)
+                .await
+                .expect("baseline marker"),
+            AUTH_SCHEMA_BASELINE_VERSION
+        );
+        assert!(selected
+            .prepare_source_schema_before_serving()
+            .await
+            .expect("actual selected master and boot factory"));
+        assert!(
+            selected
+                .prepare_source_schema_before_serving()
+                .await
+                .is_err(),
+            "startup authority is single use"
+        );
+        assert_eq!(
+            HiqliteAuthStore::committed_schema_version_for_client(&client)
+                .await
+                .expect("installed marker"),
+            AUTH_SCHEMA_VERSION
+        );
+        assert_eq!(
+            read_activation_marker(&directory.path().join(HIQLITE_ACTIVE_DIRNAME))
+                .expect("durable activation marker")
+                .replicated_schema_version,
+            AUTH_SCHEMA_VERSION
+        );
+        let marker = selected
+            .store
+            .get_setting("sharing_enabled")
+            .await
+            .expect("choice");
+        assert_eq!(marker.as_deref(), Some("true"));
+        selected.shutdown().await.expect("settled voter shutdown");
+        drop(client);
+        drop(selected);
+        let restart_config = membership_test_config(directory.path());
+        let mut restarted = startup_observer::select_applied_singleton(&restart_config)
+            .await
+            .expect("exact installed shape reopens");
+        assert!(restarted
+            .prepare_source_schema_before_serving()
+            .await
+            .expect("restart verifies winner"));
+        let client = restarted.local_client().expect("restarted voter");
+        client
+            .execute(
+                "DROP INDEX sharing_catalogue_binary_order",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("test-only partial installed layout");
+        restarted
+            .shutdown()
+            .await
+            .expect("shutdown malformed fixture");
+        drop(client);
+        drop(restarted);
+        assert!(
+            startup_observer::select_applied_singleton(&membership_test_config(directory.path()))
+                .await
+                .is_err(),
+            "v71 missing index is refused without read repair"
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_purpose_coordinator_one_voter_preserves_keys_across_restart() {
+        use crate::store::sharing_purpose_keys::PurposeKeyInstallation;
+        install_default_crypto_provider();
+        let directory = tempfile::tempdir().expect("purpose coordinator data");
+        let config = membership_test_config(directory.path());
+        drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let selected = startup_observer::select_applied_singleton(&config)
+            .await
+            .expect("actual one voter selection");
+        assert_eq!(selected.backend, SelectedBackend::Replicated);
+        let key = Arc::clone(&selected.credential_key);
+        selected
+            .local_client
+            .as_ref()
+            .expect("actual voter")
+            .execute(
+                "UPDATE cluster_nodes SET role=NULL WHERE node_id=$1",
+                hiqlite::params!(selected.identity.node_id.as_str()),
+            )
+            .await
+            .expect("legacy nullable voter role remains an actual Raft voter");
+        selected
+            .membership
+            .prepare_purpose_master(Arc::clone(&key))
+            .await
+            .expect("actual selected master proof");
+        selected
+            .membership
+            .coordinate_purpose_keys()
+            .await
+            .expect("disabled choice preserved");
+        assert_eq!(
+            selected
+                .store
+                .verify_sharing_purpose_material(&key)
+                .await
+                .expect("read-only absent keys"),
+            PurposeKeyInstallation::NotReady
+        );
+        selected
+            .store
+            .put_setting("sharing_enabled", "true")
+            .await
+            .expect("explicit saved choice");
+        selected
+            .membership
+            .coordinate_purpose_keys()
+            .await
+            .expect("actual first-install coordinator");
+        assert_eq!(
+            selected
+                .store
+                .verify_sharing_purpose_material(&key)
+                .await
+                .expect("installed keys open"),
+            PurposeKeyInstallation::Ready
+        );
+        #[derive(Debug, PartialEq, Eq)]
+        struct PurposeEnvelope {
+            envelope: String,
+        }
+        impl From<&mut hiqlite::Row<'_>> for PurposeEnvelope {
+            fn from(row: &mut hiqlite::Row<'_>) -> Self {
+                Self {
+                    envelope: row.get("envelope"),
+                }
+            }
+        }
+        let ciphertext_sql = "SELECT revision_envelope AS envelope FROM sharing_catalogue_keys UNION ALL SELECT locator_envelope AS envelope FROM sharing_file_locator_keys ORDER BY envelope";
+        let before = selected
+            .local_client
+            .as_ref()
+            .expect("actual client")
+            .query_consistent_map::<PurposeEnvelope, _>(ciphertext_sql, hiqlite::params!())
+            .await
+            .expect("current active ciphertexts");
+        let wrong = Arc::new(CredentialKey::from_bytes([233; 32]));
+        assert!(
+            selected
+                .membership
+                .prepare_purpose_master(wrong)
+                .await
+                .is_err(),
+            "arbitrary master cannot replace actual selected proof"
+        );
+        selected.shutdown().await.expect("durable shutdown");
+        drop(selected);
+        // Hiqlite's known TLS listener shutdown defect retains the old bind;
+        // exercise the real supported sole-voter readdress/restart path.
+        let restart_config = membership_test_config(directory.path());
+        let restarted = startup_observer::select_applied_singleton(&restart_config)
+            .await
+            .expect("actual voter restart");
+        assert_eq!(
+            restarted
+                .credential_key
+                .sharing_purpose_master_fingerprint(),
+            key.sharing_purpose_master_fingerprint()
+        );
+        restarted
+            .membership
+            .prepare_purpose_master(Arc::clone(&restarted.credential_key))
+            .await
+            .expect("restarted actual master proof");
+        restarted
+            .membership
+            .coordinate_purpose_keys()
+            .await
+            .expect("restart preserves winner");
+        assert_eq!(
+            restarted
+                .local_client
+                .as_ref()
+                .expect("actual restarted client")
+                .query_consistent_map::<PurposeEnvelope, _>(ciphertext_sql, hiqlite::params!())
+                .await
+                .expect("preserved active ciphertexts"),
+            before
+        );
+        assert_eq!(
+            restarted
+                .store
+                .get_setting("sharing_enabled")
+                .await
+                .expect("saved choice"),
+            Some("true".to_owned())
+        );
+        restarted.shutdown().await.expect("restart shutdown");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_redeem_rejoin_and_promotion_refuse_missing_installed_sharing_capabilities() {
+        use crate::cluster::membership::{
+            sharing_member_admission_guard_schema, MembershipError, SharingJoinCapabilities,
+        };
+        install_default_crypto_provider();
+        let directory = tempfile::tempdir().expect("candidate member source");
+        let config = membership_test_config(directory.path());
+        drop(
+            SqliteStore::open(&directory.path().join(SQLITE_FILENAME))
+                .expect("legacy source store"),
+        );
+        let selected = startup_observer::select_applied_singleton(&config)
+            .await
+            .expect("actual source voter");
+        let client = selected.local_client.as_ref().expect("local voter client");
+        for sql in sharing_member_admission_guard_schema() {
+            client
+                .execute(sql, hiqlite::params!())
+                .await
+                .expect("install test-only candidate membership guards");
+        }
+        selected
+            .membership
+            .activate_learner_protocol()
+            .await
+            .expect("activate existing learner protocol for real redeem path");
+        let make_request =
+            |issued: &crate::cluster::membership::IssuedJoinToken| RedeemJoinRequest {
+                token_digest: join_token_digest(&issued.token),
+                raft_id: issued.raft_id,
+                node_id: uuid::Uuid::new_v4().to_string(),
+                hostname: "candidate-joiner".to_owned(),
+                raft_address: "127.0.0.1:32401".to_owned(),
+                api_address: "127.0.0.1:32402".to_owned(),
+                http_base: String::new(),
+                schema_version: AUTH_SCHEMA_VERSION,
+                protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+                protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+                protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+                live_tv_v1: true,
+                sharing: SharingJoinCapabilities::default(),
+            };
+        let legacy_token = selected
+            .membership
+            .issue_learner_token(Duration::from_secs(120))
+            .await
+            .expect("legacy compatible learner token");
+        let legacy = make_request(&legacy_token);
+        selected
+            .membership
+            .redeem_learner(&legacy)
+            .await
+            .expect("uninstalled cluster preserves missing sharing declarations");
+        client
+            .execute(
+                "CREATE TABLE item_identity_watermark(malformed TEXT)",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("partial allocator marker");
+        assert!(matches!(selected.membership.redeem_learner(&legacy).await,Err(MembershipError::Incompatible)),"even an existing staged rejoin must explicitly implement installed allocator semantics");
+        assert!(
+            matches!(
+                selected.membership.promote_learner(&legacy.node_id).await,
+                Err(MembershipError::Incompatible)
+            ),
+            "actual promotion entry refuses older target before membership mutation"
+        );
+        let compatible_token = selected
+            .membership
+            .issue_learner_token(Duration::from_secs(120))
+            .await
+            .expect("compatible token");
+        let mut compatible = make_request(&compatible_token);
+        compatible.raft_address = "127.0.0.1:32403".to_owned();
+        compatible.api_address = "127.0.0.1:32404".to_owned();
+        compatible.sharing.catalogue_item_identity = true;
+        client
+            .execute(
+                "ALTER TABLE media_session_requests ADD COLUMN owner_key TEXT",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("partial principal owner column");
+        assert!(
+            matches!(
+                selected.membership.redeem_learner(&compatible).await,
+                Err(MembershipError::Incompatible)
+            ),
+            "allocator claim is independent of installed principal columns"
+        );
+        compatible.sharing.session_principal = true;
+        selected
+            .membership
+            .redeem_learner(&compatible)
+            .await
+            .expect("actual compatible redemption uses fresh token-bound intents");
+        selected
+            .membership
+            .redeem_learner(&compatible)
+            .await
+            .expect("compatible identity-bound retry remains resumable");
+        compatible.sharing = SharingJoinCapabilities::default();
+        assert!(
+            matches!(
+                selected.membership.redeem_learner(&compatible).await,
+                Err(MembershipError::Incompatible)
+            ),
+            "a retry cannot inherit an earlier request's declarations"
+        );
+        selected
+            .shutdown()
+            .await
+            .expect("stop actual candidate source voter");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
     fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
         startup_observer::run_plural_fixture("k06-r1-voter-join", daemon_join_observation_fixture);
     }
@@ -7015,6 +7977,7 @@ mod tests {
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             protocol_min: crate::store::AUTH_PROTOCOL_MIN,
             protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
             live_tv_v1: true,
         };
         coordinator
@@ -7417,6 +8380,7 @@ mod tests {
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             protocol_min: 0,
             protocol_max: 0,
+            sharing: Default::default(),
             live_tv_v1: false,
         };
         assert_ne!(
@@ -7520,6 +8484,7 @@ mod tests {
             // A joiner that predates the range sends no range fields.
             protocol_min: 0,
             protocol_max: 0,
+            sharing: Default::default(),
             live_tv_v1: false,
         };
         assert_eq!(
@@ -7533,6 +8498,7 @@ mod tests {
         let new_joiner = RedeemJoinRequest {
             protocol_min: crate::store::AUTH_PROTOCOL_MIN,
             protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
             live_tv_v1: true,
             ..old_joiner
         };
@@ -7581,6 +8547,19 @@ mod tests {
             .first()
             .expect("cluster_meta has exactly one row")
             .schema_version
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    struct SourceStartupPayloadRow {
+        payload: String,
+    }
+    #[cfg(feature = "hiqlite-store")]
+    impl From<&mut hiqlite::Row<'_>> for SourceStartupPayloadRow {
+        fn from(row: &mut hiqlite::Row<'_>) -> Self {
+            Self {
+                payload: row.get("payload"),
+            }
+        }
     }
 
     #[cfg(feature = "hiqlite-store")]
@@ -8322,7 +9301,7 @@ mod tests {
             .clone();
 
         let current = replicated_schema_version(&client).await;
-        assert_eq!(current, crate::store::AUTH_SCHEMA_VERSION);
+        assert_eq!(current, crate::store::AUTH_SCHEMA_BASELINE_VERSION);
         let behind = current - 1;
         client
             .execute(
@@ -8365,7 +9344,7 @@ mod tests {
         client
             .execute(
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-                hiqlite::params!(crate::store::AUTH_SCHEMA_VERSION),
+                hiqlite::params!(crate::store::AUTH_SCHEMA_BASELINE_VERSION),
             )
             .await
             .expect("restore the replicated schema marker");
@@ -8381,6 +9360,36 @@ mod tests {
 
         // The voter arm is the one that may migrate, and it opens the same
         // cluster through `open_or_migrate`.
+        // Reconstruct the preceding schema, rather than rewinding only its
+        // marker: migration 70 creates these tables and must actually execute.
+        for table in [
+            "sharing_delivery_grants",
+            "sharing_relay_upstream",
+            "sharing_endpoint_manifest",
+            "sharing_catalogue_revisions",
+            "sharing_import_rotations",
+            "sharing_rotations",
+            "sharing_watch",
+            "sharing_assignments",
+            "sharing_viewers",
+            "sharing_imports",
+            "sharing_export_libraries",
+            "sharing_exports",
+            "sharing_invitations",
+            "sharing_identity",
+        ] {
+            client
+                .execute(format!("DROP TABLE {table}"), hiqlite::params!())
+                .await
+                .expect("remove the test fixture's migration-70 tables");
+        }
+        client
+            .execute(
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(behind),
+            )
+            .await
+            .expect("restore the behind marker before the voter migration");
         drop(
             open_store_for_role(
                 ClusterRole::Voter,
@@ -8392,7 +9401,7 @@ mod tests {
         );
         assert_eq!(
             replicated_schema_version(&client).await,
-            crate::store::AUTH_SCHEMA_VERSION
+            crate::store::AUTH_SCHEMA_BASELINE_VERSION
         );
 
         selected.shutdown().await.expect("stop the voter");

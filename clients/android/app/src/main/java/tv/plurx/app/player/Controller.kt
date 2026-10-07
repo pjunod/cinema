@@ -72,6 +72,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import tv.plurx.app.data.PlaybackFileContext
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.CreateSessionReq
@@ -145,6 +146,8 @@ class Controller internal constructor(
     retainedSubtitle: SubtitleChoice? = null,
     private val replan: (Long, String, PlaybackQuality) -> Unit,
 ) {
+    private val fileContext = plan.fileContext.also { it.localId(plan.fileId) }
+
     /**
      * The authoritative player — the one on the surface, with the volume up.
      *
@@ -348,14 +351,14 @@ class Controller internal constructor(
         if (continuousUsed || player !== continuousPlayer || predecessorAttached() || plan.isAudioOnly) {
             Log.i("PlurxPlayback", "continuous enrollment not offered: used=$continuousUsed ownPlayer=${player === continuousPlayer} " +
                 "predecessor=${predecessorAttached()} audioOnly=${plan.isAudioOnly}")
-            return vm.createHlsSession(plan.fileId, body, recoveryLinkReceipt(body))
+            return vm.createHlsSession(plan.fileId, body, fileContext = fileContext, linkReceipt = recoveryLinkReceipt(body))
         }
         val enrollment = continuousAttempt ?: ContinuousEnrollment(Session.origin, Session.token.orEmpty()).also { continuousAttempt = it }
         val started = enrollment.open(plan.fileId, body)
         if (started == null) {
             enrollment.close()
             continuousAttempt = null
-            return vm.createHlsSession(plan.fileId, body, recoveryLinkReceipt(body))
+            return vm.createHlsSession(plan.fileId, body, fileContext = fileContext, linkReceipt = recoveryLinkReceipt(body))
         }
         continuousAttempt = null
         continuousUsed = true
@@ -1000,6 +1003,7 @@ class Controller internal constructor(
         api = { vm.api() },
         scope = scope,
         fileId = plan.fileId,
+        fileContext = fileContext,
         sourcePositionMs = ::realPosition,
         isPlaying = { player.isPlaying },
         playbackSpeed = { player.playbackParameters.speed },
@@ -2333,8 +2337,8 @@ class Controller internal constructor(
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
                 leaveSessionPlayback()
-                activeMediaPath = relativeMediaPath(plan.playUrl)
-                player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
+                activeMediaPath = relativeMediaPath(fileContext.translatedDeliveryPath(plan.playUrl))
+                player.setMediaItem(MediaItem.fromUri(fileContext.translatedDeliveryPath(plan.playUrl)), positionMs)
                 attachRecipe(recipe)
                 executionSequence?.let { sequence ->
                     markIntentExecuted(sequence, recipe)
@@ -3083,9 +3087,9 @@ class Controller internal constructor(
 
     private fun remuxUri(ms: Long): String = progressiveRemuxUri(
         plannedUrl = if (plan.mode == "direct") {
-            Session.url("/api/v1/files/${plan.fileId}/stream.mp4")
+            Session.url(fileContext.path("stream.mp4"))
         } else {
-            plan.playUrl
+            fileContext.translatedDeliveryPath(plan.playUrl)
         },
         startSeconds = ms / 1000.0,
         audioIndex = selectedAudio,
@@ -3502,7 +3506,7 @@ class Controller internal constructor(
         scope.launch {
             val fresh = try {
                 vm.playbackDecision(plan.fileId, PreplayTracks(selectedAudio, SubtitleChoice(selectedSubtitle)),
-                    PlaybackQuality.Auto, target, selectionKey.third, currentLinkReceipt()).decision
+                    PlaybackQuality.Auto, target, selectionKey.third, fileContext = fileContext, linkReceipt = currentLinkReceipt()).decision
             } catch (_: Exception) { return@launch }
             if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
             if (fresh.display_aware_auto_protocol == "route-v1") {
@@ -5722,6 +5726,7 @@ interface PlanLike {
     val title: String
     val isAudioOnly: Boolean get() = false
     val fileId: Long
+    val fileContext: PlaybackFileContext get() = PlaybackFileContext.local(fileId)
     val playUrl: String
     val mode: String // "direct" | "remux" | "transcode"
     /** `delivery.requires_hls`: this remux needs the copy-HLS producer. */
@@ -6457,6 +6462,237 @@ internal fun codecShort(mime: String?): String? = when {
 
 /** A hidden status panel cannot justify two-second network polling. */
 internal fun statusPollIntervalMs(visible: Boolean): Long = if (visible) 2_000L else 10_000L
+
+
+/** Fixed Shared player owner; numeric Local PlanLike/history/recovery are unreachable.
+ * The ExoPlayer half of [SharedPlaybackOwner]: it renders what the owner attaches
+ * and reports what the player does, and decides nothing itself. */
+internal class SharedPlayerController(private val context: android.content.Context, private val vm: AppViewModel) {
+    /** The pipeline on the surface. A committed handoff makes the successor this. */
+    private var active: ExoPlayer = buildPlayer(context, vm).player
+    val player: ExoPlayer get() = active
+    /** What the view shows; a handoff moves it to the successor and, on rollback, back. */
+    val surfacePlayer = kotlinx.coroutines.flow.MutableStateFlow(active)
+    /**
+     * A pipeline the surface has moved off and nothing needs any more. The
+     * view releases it from its own update once it no longer points at it
+     * ([collectRetired]), because that is the only place that knows the
+     * surface has moved; [stop] releases whatever is left.
+     */
+    val retired = kotlinx.coroutines.flow.MutableStateFlow<ExoPlayer?>(null)
+    val playing = kotlinx.coroutines.flow.MutableStateFlow(false)
+    /** The title played to its end and the session was settled as watched. */
+    val ended = kotlinx.coroutines.flow.MutableStateFlow(false)
+    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
+    /** B's direct byte URL already carries its narrow session binding; no account header rides with it. */
+    private val directSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
+        androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(tv.plurx.app.data.Net.capabilityClient))
+    private var reachedTimeline = false
+    private val frameEvidence = SharedFrameEvidence()
+    private var retainedFramePresented = false
+    private var authorizationObserver: Long? = null
+    private var stopped = false
+
+    /** The prepared successor, muted and without a surface until the switch. */
+    private var successor: ExoPlayer? = null
+    /** The predecessor after a switch, retained until the commit settles. */
+    private var retained: ExoPlayer? = null
+    private var successorSeekLanded = false
+    private var successorFailed = false
+    private var successorFirstFrameUnixMs: Long? = null
+    private var successorListener: androidx.media3.common.Player.Listener? = null
+    private fun successorListenerFor(expected: ExoPlayer): androidx.media3.common.Player.Listener = object : androidx.media3.common.Player.Listener {
+        override fun onPlayerError(error: androidx.media3.common.PlaybackException) { if (successor === expected) successorFailed = true }
+        override fun onPositionDiscontinuity(old: androidx.media3.common.Player.PositionInfo, new: androidx.media3.common.Player.PositionInfo, reason: Int) {
+            if (successor === expected && reason == androidx.media3.common.Player.DISCONTINUITY_REASON_SEEK) successorSeekLanded = true
+        }
+        override fun onRenderedFirstFrame() {
+            // Only a frame rendered on the surface is proof; before the switch
+            // the successor has none and cannot render.
+            if (successor === expected && active === expected && retained != null && successorFirstFrameUnixMs == null) {
+                successorFirstFrameUnixMs = System.currentTimeMillis()
+                frameEvidence.frameRendered(frameEvidence.generation)
+            }
+        }
+    }
+
+    private val renderer: SharedRenderer = object : SharedRenderer {
+        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) {
+            reachedTimeline = false; bindActiveFrameEvidence()
+            val media = MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build()
+            active.setMediaItem(media, positionMs); active.prepare(); active.playWhenReady = playWhenReady
+        }
+        override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) {
+            reachedTimeline = false; bindActiveFrameEvidence()
+            active.setMediaSource(directSource.createMediaSource(MediaItem.fromUri(url)), positionMs); active.prepare(); active.playWhenReady = playWhenReady
+        }
+        override fun seekTo(positionMs: Long) = active.seekTo(positionMs)
+        override fun setPlaying(playing: Boolean) { active.playWhenReady = playing }
+        override fun snapshot() = SharedRendererSnapshot(
+            positionMs = active.currentPosition.coerceAtLeast(0), bufferedMs = active.bufferedPosition.coerceAtLeast(0),
+            durationMs = active.duration.takeIf { it != C.TIME_UNSET && it >= 0 }, playing = active.playWhenReady,
+            renderState = when (active.playbackState) {
+                androidx.media3.common.Player.STATE_READY -> RenderState.RENDERING
+                androidx.media3.common.Player.STATE_BUFFERING -> if (reachedTimeline) RenderState.WAITING else RenderState.STARTING
+                androidx.media3.common.Player.STATE_ENDED -> RenderState.ENDED
+                else -> RenderState.STARTING
+            },
+            playbackRate = active.playbackParameters.speed.toDouble(), framePresented = frameEvidence.presented,
+        )
+        override fun release() {
+            dropSuccessor()
+            retained?.let { it.stop(); it.release() }; retained = null
+            retired.value?.let { if (it !== active) it.release() }; retired.value = null
+            active.stop(); active.release()
+        }
+        override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean) {
+            dropSuccessor()
+            val built = buildSuccessorPlayer(context, vm).player
+            // Register ownership before any setup that can throw on a TV.
+            successor = built
+            try {
+                successorSeekLanded = false; successorFailed = false; successorFirstFrameUnixMs = null
+                successorListener = successorListenerFor(built)
+                built.addListener(requireNotNull(successorListener))
+                built.trackSelectionParameters = built.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !textEnabled).setSelectUndeterminedTextLanguage(textEnabled).build()
+                // Parked from the start: a successor that runs keeps whatever lead
+                // it lands with. It still loads while paused.
+                built.playWhenReady = false
+                built.setMediaItem(MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build(), positionMs)
+                built.prepare()
+            } catch (error: Throwable) {
+                dropSuccessor()
+                throw error
+            }
+        }
+        override fun successorSnapshot(): SharedSuccessorSnapshot? = successor?.let {
+            SharedSuccessorSnapshot(
+                ready = it.playbackState == androidx.media3.common.Player.STATE_READY && !it.currentTracks.groups.isEmpty(),
+                positionMs = it.currentPosition.coerceAtLeast(0), bufferedMs = it.bufferedPosition.coerceAtLeast(0),
+                seekLanded = successorSeekLanded, failed = successorFailed, firstFrameUnixMs = successorFirstFrameUnixMs,
+            )
+        }
+        override fun parkSuccessor(positionMs: Long) {
+            val next = successor ?: return
+            successorSeekLanded = false
+            next.playWhenReady = false
+            next.seekTo(positionMs)
+        }
+        override fun switchToSuccessor() {
+            val next = successor ?: return
+            val previous = active
+            previous.removeListener(activeListener)
+            next.volume = previous.volume
+            next.playbackParameters = previous.playbackParameters
+            next.playWhenReady = previous.playWhenReady
+            previous.playWhenReady = false
+            retained = previous; retainedFramePresented = frameEvidence.presented
+            active = next
+            bindActiveFrameEvidence(successorFirstFrameUnixMs != null)
+            reachedTimeline = true
+            surfacePlayer.value = next
+        }
+        override fun restorePredecessor() {
+            val previous = retained ?: return
+            val dropped = active
+            dropped.removeListener(activeListener)
+            successorListener?.let(dropped::removeListener)
+            previous.playWhenReady = dropped.playWhenReady
+            dropped.playWhenReady = false
+            active = previous
+            bindActiveFrameEvidence(retainedFramePresented)
+            retained = null; successor = null
+            surfacePlayer.value = previous
+            retire(dropped)
+        }
+        override fun releasePredecessor() {
+            val previous = retained ?: return
+            if (successorFirstFrameUnixMs != null) frameEvidence.frameRendered(frameEvidence.generation)
+            successorListener?.let(active::removeListener); successorListener = null
+            retained = null; successor = null
+            retire(previous)
+        }
+        override fun releaseSuccessor() = dropSuccessor()
+    }
+
+    /** Drop an unswitched successor; it never had the surface, so release now. */
+    private fun dropSuccessor() {
+        val next = successor ?: return
+        if (next === active) return
+        successor = null
+        successorListener?.let(next::removeListener); successorListener = null
+        next.release()
+    }
+
+    private fun retire(player: ExoPlayer) {
+        retired.value?.let { if (it !== player) it.release() }
+        retired.value = player
+    }
+
+    /** Called from the view's update once it points at [viewPlayer]. */
+    fun collectRetired(viewPlayer: androidx.media3.common.Player?) {
+        val player = retired.value ?: return
+        if (player === viewPlayer || player === active) return
+        retired.value = null
+        player.release()
+    }
+
+    val owner: SharedPlaybackOwner = SharedPlaybackOwner(scope, { tv.plurx.app.data.SharedDecisionClient.create() }, renderer,
+        preparedHandoff = vm.preferences.value.preparedReplacement)
+
+    private var activeListener = activeListenerFor(active, frameEvidence.generation)
+    private fun bindActiveFrameEvidence(alreadyPresented: Boolean = false) {
+        active.removeListener(activeListener)
+        val generation = frameEvidence.attach(alreadyPresented)
+        activeListener = activeListenerFor(active, generation)
+        active.addListener(activeListener)
+    }
+    private fun activeListenerFor(expected: ExoPlayer, generation: Long): androidx.media3.common.Player.Listener = object : androidx.media3.common.Player.Listener {
+        private fun current() = active === expected && frameEvidence.accepts(generation)
+        override fun onRenderedFirstFrame() { if (current()) frameEvidence.frameRendered(generation) }
+        override fun onPlaybackStateChanged(state: Int) {
+            if (!current()) return
+            if (state == androidx.media3.common.Player.STATE_READY && !reachedTimeline) { reachedTimeline = true; owner.timelineReached() }
+            if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { if (!stopped && current()) { stop(watched = true); ended.value = true } }
+        }
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { if (current()) playing.value = playWhenReady }
+        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            if (!current()) return
+            val status = generateSequence(error.cause) { it.cause }
+                .filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>().firstOrNull()?.responseCode
+            owner.rendererFailed(status, error.message)
+        }
+    }
+
+    init {
+        active.addListener(activeListener)
+        // Text renditions exist only when the viewer chose a native subtitle;
+        // the Start that carries it is the one being rendered.
+        scope.launch {
+            owner.selection.collect { selection ->
+                active.trackSelectionParameters = active.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, selection?.subtitle == null)
+                    .setSelectUndeterminedTextLanguage(selection?.subtitle != null).build()
+            }
+        }
+    }
+    fun start(plan: tv.plurx.app.data.SharedPlaybackPlan) {
+        if (stopped || owner.currentPlan != null || authorizationObserver != null) return
+        authorizationObserver = tv.plurx.app.data.Session.observeAuthorizationChanges { scope.launch { stop() } }.id
+        owner.begin(plan)
+    }
+    fun seekBy(deltaMs: Long) { owner.launch { seek(renderer.snapshot().positionMs + deltaMs) } }
+    fun togglePlaying() { val next = !active.playWhenReady; owner.launch { setPlaying(next) } }
+    fun change(selection: tv.plurx.app.data.SharedSelection) { owner.launch { change(selection) } }
+    suspend fun stop(watched: Boolean = false) {
+        if (stopped) return
+        stopped = true
+        authorizationObserver?.let { tv.plurx.app.data.Session.removeAuthorizationObserver(it) }; authorizationObserver = null
+        owner.stop(watched)
+    }
+    fun close() { scope.launch { stop() } }
+}
 
 /** Private-controller transport interception; unchanged commands remain the
  * SDK delegate's commands, while stale transport wrappers have no authority. */

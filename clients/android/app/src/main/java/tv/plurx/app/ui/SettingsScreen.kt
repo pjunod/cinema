@@ -74,6 +74,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenDeveloper: () -> Unit = {},
     onOpenLiveTvSettings: () -> Unit = {},
+    onOpenSharing: () -> Unit = {},
 ) {
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val offlineRecords by vm.offlineRecords.collectAsStateWithLifecycle()
@@ -232,6 +233,10 @@ fun SettingsScreen(
                 "Tuner, programme guide, recording and Library channels for this server. Administrator access is required.",
             ) {
                 PreferenceAction("Tuner, guide, recording and Library channels", onClick = onOpenLiveTvSettings)
+            }
+
+            SettingsSection("Sharing", "Shared libraries and Source status.") {
+                PreferenceAction("Shared libraries and Source status", onClick = onOpenSharing)
             }
 
             SettingsSection("Account", null) {

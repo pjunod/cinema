@@ -36,7 +36,8 @@ axum = { workspace = true }
 # directly so it can delegate `size_hint`; the crate is already in the tree
 # under hyper and axum, so this names it rather than adding a build.
 http-body = { workspace = true }
-hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
+http-body-util = { workspace = true }
 hyper-util = { version = "0.1", features = [
     "server-auto",
     "server-graceful",
@@ -98,6 +99,7 @@ plurx-core = { path = "../plurx-core", features = [
   # an unprivileged uid; a permission-based injection is a no-op for uid 0.
   "scratch-fault-injection",
 ] }
+serde_urlencoded = { workspace = true }
 http-body-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }

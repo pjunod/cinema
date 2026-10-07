@@ -114,7 +114,7 @@
         let staged = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged");
@@ -128,7 +128,7 @@
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("route while staged")
                 .expect("the playback still has a pointer")
@@ -167,7 +167,7 @@
         let staged = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged");
@@ -221,7 +221,7 @@
         let staged = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged");
@@ -284,7 +284,7 @@
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("current route")
                 .expect("the predecessor remains current")
@@ -374,12 +374,12 @@
             expected_desired_revision: None,
             incarnation_id: staged_incarnation_id.clone(),
             session_id: staged_session_id,
-            user_id: route.user_id,
+            principal: route.principal.clone(),
             playback_id: route.playback_id.clone(),
             expected_predecessor_incarnation_id: route.incarnation_id.clone(),
             expected_predecessor_owner_node_id: route.owner_node_id.clone(),
             expected_predecessor_owner_epoch: route.owner_epoch,
-            request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
+            request_fingerprint: staged_request.durable_intent_fingerprint(&route.principal),
             owner_node_id: fixture.state.node_id.clone(),
             recipe_json: serde_json::to_string(&RemoteStartRequest {
                 retained_output: None,
@@ -390,7 +390,7 @@
                 decoder_caps: None,
                 protocol_version: crate::media_pool::PROTOCOL_VERSION,
                 incarnation_id: staged_incarnation_id,
-                user_id: route.user_id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: route.principal.local_user_id().expect("local test principal") },
                 source_size: 1,
                 source_mtime: 1,
                 typeless_playlist: false,
@@ -406,7 +406,7 @@
         let executor = crate::playback_control::PreparationExecutor::new(
             Arc::clone(&fixture.state.store),
             gate,
-            route.user_id,
+            route.principal.clone(),
             route.playback_id.clone(),
             route.owner_node_id.clone(),
             route.owner_epoch,
@@ -657,7 +657,7 @@
                     decoder_caps: None,
                     protocol_version: crate::media_pool::PROTOCOL_VERSION,
                     incarnation_id: route.incarnation_id.clone(),
-                    user_id: route.user_id,
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: route.principal.local_user_id().expect("local test principal") },
                     source_size: 0,
                     source_mtime: 0,
                     typeless_playlist: false,
@@ -704,7 +704,7 @@
         let staged = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("the seam staged a successor");
@@ -716,7 +716,7 @@
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("route while staged")
                 .expect("the playback still has a pointer")
@@ -790,7 +790,7 @@
                 if let Some(staged) = fixture
                     .state
                     .store
-                    .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                    .staged_media_session_for_playback(&route.principal, &route.playback_id)
                     .await
                     .expect("ledger read")
                 {
@@ -833,7 +833,7 @@
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("current route")
                 .expect("predecessor remains current")
@@ -911,7 +911,7 @@
             fixture
                 .state
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("ledger read")
                 .is_none(),
@@ -948,7 +948,7 @@
         let first = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("the first staged")
@@ -975,7 +975,7 @@
             fixture
                 .state
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("ledger read")
                 .expect("still exactly one")
@@ -1014,7 +1014,7 @@
             fixture
                 .state
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("ledger read")
                 .is_none(),
@@ -1049,7 +1049,7 @@
         let staged_incarnation_id = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged")
@@ -1135,7 +1135,7 @@
         let current = fixture
             .state
             .store
-            .media_session_route_for_playback(route.user_id, &route.playback_id)
+            .media_session_route_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("current route")
             .expect("the successor is current");
@@ -1184,7 +1184,7 @@
         assert!(fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger after rolling commit")
             .is_none());
@@ -1206,7 +1206,7 @@
         let current = fixture
             .state
             .store
-            .media_session_route_for_playback(route.user_id, &route.playback_id)
+            .media_session_route_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("current route")
             .expect("the predecessor stays current");
@@ -1222,7 +1222,7 @@
         assert!(fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger after rolling abort")
             .is_none());
@@ -1249,7 +1249,7 @@
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("route after retried settlement")
                 .expect("successor route")
@@ -1282,7 +1282,7 @@
         let staged_incarnation_id = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged")
@@ -1343,7 +1343,7 @@
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("current route")
                 .expect("successor is current")
@@ -1376,7 +1376,7 @@
         let staged_incarnation_id = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged")
@@ -1512,7 +1512,7 @@
         let staged_incarnation_id = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged")
@@ -1571,7 +1571,7 @@
             fixture
                 .state
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("ledger read after abort")
                 .is_none(),
@@ -1602,7 +1602,7 @@
         .await;
         let staged = fixture
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger")
             .expect("old preparation");
@@ -1649,7 +1649,7 @@
             .expect("cleanup before publication");
         assert!(fixture
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger")
             .is_none());
@@ -1696,7 +1696,7 @@
         assert!(
             fixture
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("ledger after stale worker")
                 .is_none(),
@@ -1812,7 +1812,7 @@
                 assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
                 assert!(fixture
                     .store
-                    .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                    .staged_media_session_for_playback(&route.principal, &route.playback_id)
                     .await
                     .expect("unchanged ledger")
                     .is_some());
@@ -1838,7 +1838,7 @@
                 );
                 assert!(fixture
                     .store
-                    .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                    .staged_media_session_for_playback(&route.principal, &route.playback_id)
                     .await
                     .expect("settled ledger")
                     .is_none());
@@ -1893,7 +1893,7 @@
             .await;
             let staged = fixture
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("ledger")
                 .expect("staged row");
@@ -1970,13 +1970,13 @@
                 .expect("loss task");
             assert!(fixture
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("settled ledger")
                 .is_none());
             let current = fixture
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("pointer")
                 .expect("current stream");
@@ -2045,7 +2045,7 @@ quality_catalog: None,
         let staged = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged");
@@ -2120,7 +2120,7 @@ quality_catalog: None,
         let committed = fixture
             .state
             .store
-            .media_session_route_for_playback(route.user_id, &route.playback_id)
+            .media_session_route_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("committed route")
             .expect("the successor is now current");
@@ -2141,7 +2141,7 @@ quality_catalog: None,
             fixture
                 .state
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("ledger read after acknowledgement")
                 .is_none(),
@@ -2205,7 +2205,7 @@ quality_catalog: None,
         let staged = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged");
@@ -2258,7 +2258,7 @@ quality_catalog: None,
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("pointer after failed settlement")
                 .expect("the predecessor stays current")
@@ -2270,7 +2270,7 @@ quality_catalog: None,
         let committed_before_retry = fixture
             .state
             .store
-            .media_session_route_for_playback(route.user_id, &route.playback_id)
+            .media_session_route_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("pointer after detached settlement")
             .expect("the detached settlement committed the successor");
@@ -2356,7 +2356,7 @@ quality_catalog: None,
         let first_staged = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged")
@@ -2399,7 +2399,7 @@ quality_catalog: None,
                 .state
                 .store
                 .abort_media_session_preparation(
-                    route.user_id,
+                    &route.principal,
                     &route.playback_id,
                     &plurx_core::domain::MediaSessionPreparationAbortRequest {
                         staged_incarnation_id: first_staged.clone(),
@@ -2443,7 +2443,7 @@ quality_catalog: None,
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("current route")
                 .expect("the predecessor stays current")
@@ -2453,7 +2453,7 @@ quality_catalog: None,
         assert!(fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger after abort")
             .is_none());
@@ -2478,7 +2478,7 @@ quality_catalog: None,
         let replacement = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("replacement ledger read")
             .expect("the settled slot accepts another preparation");
@@ -2522,7 +2522,7 @@ quality_catalog: None,
         let staged = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged");

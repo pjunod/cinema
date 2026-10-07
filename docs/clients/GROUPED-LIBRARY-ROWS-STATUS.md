@@ -1,7 +1,7 @@
 # Grouped library rows — implementation and acceptance status
 
 **Status:** open — native parity merged; post-merge CI monitoring continues · **Updated:** 2026-10-05 · **Branch:**
-`codex/grouped-library-rows` · **Pull request:** [#821](http://192.168.4.7:3000/noirr/plurx/pulls/821)
+`codex/grouped-library-rows` · **Pull request:** [#821](http://forge.lan:3000/noirr/plurx/pulls/821)
 
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md), which maps the web
 application. This page records the approved grouped-row library design,
@@ -33,7 +33,7 @@ handled explicitly, without invented dates or years.
 | Responsive controls and navigation | implemented | All three web layouts, touch rows, keyboard navigation, jump index and group grids. |
 | Regression coverage | passed | Seven unit/keyboard checks and eight browser cases have passed on the final source. Only failed browser cases were rerun. |
 | Adversarial agent review | addressed | Three P2 findings on `1affd2904`: Theater controls, group viewport navigation, index focus. All corrected with regression coverage. |
-| Fast lane | tracked on PR | [PR #821](http://192.168.4.7:3000/noirr/plurx/pulls/821) carries the current candidate verdict and final evidence. |
+| Fast lane | tracked on PR | [PR #821](http://forge.lan:3000/noirr/plurx/pulls/821) carries the current candidate verdict and final evidence. |
 | Merge and cleanup | tracked on PR | The PR records its landing commit and cleanup receipt under the user’s explicit merge-first instruction. |
 
 ## Decisions
@@ -118,7 +118,7 @@ The PR is ready for merge validation; `main` remained at `bf0bb6acf` through
 this local acceptance pass. Forgejo's API title change cleared draft status
 without emitting a ready-for-review run, so this documentation update supplies
 the normal ready-PR synchronization event. It changes no tested source.
-The [PR check list](http://192.168.4.7:3000/noirr/plurx/pulls/821) is the
+The [PR check list](http://forge.lan:3000/noirr/plurx/pulls/821) is the
 source of truth for the resulting candidate's gate and landing status.
 
 ## Fast-lane baseline correction — 2026-10-05
@@ -201,7 +201,7 @@ implemented before executing tests:
 - Reuse month labels and one date formatter per grouping pass; skip Apple
   grouping in Grid and cancel superseded grouping snapshots.
 
-Native PR: [#823](http://192.168.4.7:3000/noirr/plurx/pulls/823). Tests follow
+Native PR: [#823](http://forge.lan:3000/noirr/plurx/pulls/823). Tests follow
 these corrections; their final commands and outcomes are recorded on the PR.
 
 

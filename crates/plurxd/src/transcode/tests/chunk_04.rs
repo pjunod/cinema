@@ -2255,7 +2255,7 @@ quality_catalog: None,
         let failed_plan_digest = "a".repeat(64);
         let predecessor = crate::playback_control::ProducerRecoveryLedger::new(
             Arc::clone(&store),
-            7,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             "playback-spent",
             "epoch-spent",
             "incarnation-1",
@@ -2306,7 +2306,7 @@ quality_catalog: None,
         .with_recovery(DecodeRecoveryReservation {
             ledger: crate::playback_control::ProducerRecoveryLedger::new(
                 Arc::clone(&store),
-                7,
+                plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 "playback-spent",
                 "epoch-spent",
                 // A continuation of the same playback: same epoch, new

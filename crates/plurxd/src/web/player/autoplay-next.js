@@ -60,12 +60,12 @@ async function resolveNextEpisodePage(itemId,preparation){
 function prepareNextEpisodeIfNearEnd(p,video){
   const state=p?.nextEpisodePreparation;
   if(state&&(!state.current()||!autoNextOn()))cancelNextEpisodePreparation(p);
-  if(!p||!autoNextOn()||p.libraryChannel||p.bookParts||video.paused||video.seeking
+  if(!p||playbackFileContextForPlayer(p).source_ref.kind!=="local"||!autoNextOn()||p.libraryChannel||p.bookParts||video.paused||video.seeking
     ||!playbackOwnsAttachedMedia(p))return;
   const remaining=pbTotalSec()-pbPosSec();
   if(!(pbTotalSec()>0&&remaining>0&&remaining<=NEXT_EPISODE_PREPARE_SEC))return;
   if(p.nextEpisodePreparation)return;
-  const itemId=ITEM_FOR_FILE[p.fileId];
+  const itemId=ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(p))];
   if(!itemId||p.meta?.kind!=="episode")return;
   const current=playbackContinuation(p);
   const next={began:performance.now(),current,owner:null,promise:null,page:null};
@@ -81,7 +81,9 @@ function prepareNextEpisodeIfNearEnd(p,video){
 async function playNextEpisode(){
   const p=PLAYER,continuation=playbackContinuation(p);
   const current=()=>continuation()&&autoNextOn();
-  const itemId=ITEM_FOR_FILE[p&&p.fileId];if(!itemId)return false;
+  if(p&&playbackFileContextForPlayer(p).source_ref.kind!=="local")return playNextSharedEpisode(current);
+  if(!p)return false;
+  const itemId=ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(p))];if(!itemId)return false;
   const state=p.nextEpisodePreparation;
   const preparation=beginPlaybackPreparation(current);
   try{
@@ -106,6 +108,19 @@ async function playNextEpisode(){
     return false;
   }finally{preparation.finish();}
 }
+// Shared next episode: Source order read through B, then a new authorized
+// start from fresh details. A Source ID never reaches the Local router.
+async function playNextSharedEpisode(current){
+  const reference=PLAYER?.meta?.sharedReference;if(!reference)return false;
+  const preparation=beginPlaybackPreparation(current);
+  let next=null;
+  try{next=await sharedCatalogueNextEpisode(reference,path=>preparation.run(signal=>api(path,{signal})));}
+  catch(error){if(current())toast("Could not load the next shared episode. Choose it from the library to retry.");return false;}
+  finally{preparation.finish();}
+  if(!next||!current())return false;
+  try{toast("▶ Up next");await sharedCatalogueLaunch(next,null,current);return true;}
+  catch(error){if(current())toast(error.message||"The next shared episode is not available.");return false;}
+}
 function playbackContinuation(p){
   const action=p?.controlIntentGeneration||0, generation=p?._seekToken||0;
   const open=p?.pendingOpenAttempt;
@@ -114,6 +129,7 @@ function playbackContinuation(p){
 }
 async function playNextAudiobookPart(){
   if(!PLAYER||!PLAYER.bookParts||PLAYER.bookParts.length<2) return false;
+  if(playbackFileContextForPlayer(PLAYER).source_ref.kind!=="local")return false;
   const i=PLAYER.bookParts.findIndex(p=>p.id===PLAYER.fileId), next=PLAYER.bookParts[i+1];
   if(i<0||!next) return false;
   const m=Object.assign({},PLAYER.meta||{},{part_offset_ms:next.part_offset_ms||0});

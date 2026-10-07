@@ -91,6 +91,7 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ),
     ("hiqlite_reading.rs", include_str!("hiqlite_reading.rs")),
     ("hiqlite_sessions.rs", include_str!("hiqlite_sessions.rs")),
+    ("hiqlite_sharing.rs", include_str!("hiqlite_sharing.rs")),
     (
         "hiqlite_shared_cache.rs",
         include_str!("hiqlite_shared_cache.rs"),
@@ -158,6 +159,7 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
     ("reading.rs", include_str!("sqlite/reading.rs")),
     ("sessions.rs", include_str!("sqlite/sessions.rs")),
     ("shared_cache.rs", include_str!("sqlite/shared_cache.rs")),
+    ("sharing.rs", include_str!("sqlite/sharing.rs")),
     ("telemetry.rs", include_str!("sqlite/telemetry.rs")),
     (
         "timeline_annotations.rs",
@@ -222,15 +224,16 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// forbidden — it has to be looked at, and this number updated, which is what
 /// stops a whole statement from disappearing behind an interpolation.
 ///
-/// The seven today, each spliced into a host this census does judge:
+/// The eight today, each spliced into a host this census does judge:
 /// `hiqlite_media.rs`'s two `GENRE` predicates (into the item count and the
 /// item page), `hiqlite_durable.rs`'s two membership tombstone arms (into the
 /// offline-package insert, once per arm), and `hiqlite.rs`'s
 /// `CANONICAL_SETTINGS_GENERATION_PREDICATE`, `hiqlite_library_channels.rs`'s
 /// completed-request guard, and `hiqlite_publication.rs`'s artwork-repair
-/// exclusion.
+/// exclusion, plus `hiqlite_sessions.rs`'s `LocalSessionSql::existing_user`
+/// predicate, expanded through the actual finite helper at each host call.
 ///
-/// That last one opens on `$4` because it is the tail of the statement it is
+/// The canonical settings predicate opens on `$4` because it is the tail of the statement it is
 /// spliced into: `put_settings_if_generation` selects `$1, $2, $3` and then
 /// guards the write on the caller's expected generation. Judged on its own it
 /// would look like a statement introducing `$4` before `$1`; judged as part of
@@ -240,9 +243,10 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// `SELECT {…}`, by `replicated_generation_guard_matches_only_canonical_integer_state`;
 /// that is a `#[cfg(test)]` fixture bound by rusqlite's positional `params!`,
 /// stripped before this census runs, and not a replicated statement.
-const EXPECTED_FRAGMENTS: usize = 7;
+const EXPECTED_FRAGMENTS: usize = 8;
 
 /// One Rust string literal, with its escapes decoded.
+#[derive(Clone)]
 struct Literal {
     line: usize,
     start: usize,
@@ -603,6 +607,538 @@ fn string_bindings(
     bindings
 }
 
+/// Resolve only the new principal-composition family using the actual helper
+/// implementations. Bindings are collected before this template, so a later
+/// fixture or unrelated same-name binding cannot impersonate its authority.
+fn principal_bindings(
+    module: &str,
+    source: &str,
+    literal: &Literal,
+    literals: &[Literal],
+    is_code: &[bool],
+    rebuilt: bool,
+    source_principal: bool,
+) -> Vec<(String, Vec<String>)> {
+    let prefix = &source[..literal.start];
+    let prior = literals
+        .iter()
+        .filter(|value| value.end <= literal.start)
+        .cloned()
+        .collect::<Vec<_>>();
+    let scope_start = prefix
+        .match_indices("fn ")
+        .filter(|(at, _)| is_code[*at])
+        .map(|(at, _)| at)
+        .last()
+        .unwrap_or(0);
+    let scoped_literals = prior
+        .iter()
+        .filter(|value| value.start >= scope_start)
+        .cloned()
+        .map(|mut value| {
+            value.start -= scope_start;
+            value.end -= scope_start;
+            value
+        })
+        .collect::<Vec<_>>();
+    let mut bindings = string_bindings(
+        &prefix[scope_start..],
+        &scoped_literals,
+        &is_code[scope_start..literal.start],
+    );
+    if !matches!(module, "hiqlite_sessions.rs" | "sessions.rs") {
+        return bindings;
+    }
+    for (start, _) in prefix.match_indices("let ") {
+        if start < scope_start || !is_code[start] {
+            continue;
+        }
+        let tail = &prefix[start + 4..];
+        let Some(equals) = tail.find('=') else {
+            continue;
+        };
+        let name = tail[..equals].trim();
+        let expression_start = start + 4 + equals + 1;
+        // The current SQL literal may itself be inside a binding. Only
+        // completed preceding bindings can provide interpolation arguments.
+        let Some(expression_end) = (expression_start..prefix.len())
+            .find(|&at| is_code[at] && prefix.as_bytes()[at] == b';')
+        else {
+            continue;
+        };
+        let expression = prefix[expression_start..expression_end].trim();
+        // A closure definition supplies a helper, not a call with its bound
+        // parameter. Its literal arguments are resolved at the actual calls.
+        if expression.starts_with('|') {
+            continue;
+        }
+        if name.starts_with('(') {
+            if let Some(close) = name.find(')') {
+                let names = name[1..close].split(',').map(str::trim).collect::<Vec<_>>();
+                let principal_tuple = matches!(
+                    names.as_slice(),
+                    ["owner_column", "owner"]
+                        | ["columns", "values", "conflict", "owner_exists"]
+                        | ["columns", "values", "conflict"]
+                        | ["owner_columns", "owner_values", "conflict"]
+                        | ["projection", "owner", "identity"]
+                );
+                if principal_tuple && expression.starts_with("if ") {
+                    let arms =
+                        tuple_binding_arguments(source, is_code, expression_start, expression_end);
+                    assert_eq!(
+                        arms.len(),
+                        2,
+                        "principal tuple must enumerate both observed layouts"
+                    );
+                    assert!(
+                        arms.iter().all(|arm| arm.len() == names.len()),
+                        "principal tuple arity"
+                    );
+                    for (index, binding) in names.iter().enumerate() {
+                        let choices = arms
+                            .iter()
+                            .map(|arm| {
+                                let argument = arm[index].trim();
+                                literals
+                                    .iter()
+                                    .find(|value| {
+                                        value.start >= expression_start
+                                            && value.end <= expression_end
+                                            && source[value.start..value.end] == *argument
+                                    })
+                                    .map(|value| value.text.clone())
+                            })
+                            .collect::<Option<Vec<_>>>();
+                        if let Some(choices) = choices {
+                            bindings.push((
+                                (*binding).to_owned(),
+                                vec![choices[usize::from(!rebuilt)].clone()],
+                            ));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || value == b'_')
+        {
+            continue;
+        }
+        let expression_literals = prior
+            .iter()
+            .filter(|value| {
+                value.start > start && value.start < start + 4 + equals + 1 + expression.len()
+            })
+            .collect::<Vec<_>>();
+        // The examined SQLite read paths spell the same finite layout test
+        // directly or through their already-read projection. Do not accept
+        // arbitrary conditional bindings as principal SQL fragments.
+        let sqlite_route_layout = module == "sessions.rs"
+            && name == "owner_column"
+            && (expression.starts_with("if route_projection(&tx)? == PRINCIPAL_ROUTE_COLS {")
+                || expression.starts_with("if route_cols == PRINCIPAL_ROUTE_COLS {"));
+        let mut resolved = if expression.starts_with("if source")
+            || expression.starts_with("if rebuilt")
+            || sqlite_route_layout
+        {
+            let arm = if expression.starts_with("if source") {
+                if source_principal {
+                    0
+                } else if expression.contains("else if rebuilt") && !rebuilt {
+                    2
+                } else {
+                    1
+                }
+            } else if rebuilt {
+                0
+            } else {
+                1
+            };
+            expression_literals.get(arm).map(|value| value.text.clone())
+        } else {
+            None
+        };
+        if module == "hiqlite_sessions.rs" {
+            // These actual read-side bindings load the same finite Local SQL
+            // layout inline rather than naming a layout variable first.
+            if expression == "LocalSessionSql::load(self).await?.column()" {
+                resolved = super::hiqlite_sessions::census_local_principal_fragment(
+                    "column", 0, "", rebuilt,
+                );
+            }
+            for receiver in ["layout.", "ownership."] {
+                if let Some(at) = expression.find(receiver) {
+                    let call = &expression[at + receiver.len()..];
+                    if let Some(open) = call.find('(') {
+                        let method = &call[..open];
+                        let args = call[open + 1..]
+                            .split(')')
+                            .next()
+                            .unwrap_or_default()
+                            .trim();
+                        let parameter = if matches!(
+                            method,
+                            "equals" | "insert_values" | "existing_user" | "user_id_value"
+                        ) {
+                            args.parse()
+                                .expect("principal helper index must be a literal")
+                        } else {
+                            0
+                        };
+                        let table = args.trim_matches('"');
+                        resolved = super::hiqlite_sessions::census_local_principal_fragment(
+                            method, parameter, table, rebuilt,
+                        );
+                        if source_principal {
+                            let activation = &source[source
+                                .find("impl ActivationSql<'_>")
+                                .expect("actual Source composition")..];
+                            let definition = activation
+                                .split(&format!("fn {method}("))
+                                .nth(1)
+                                .map(|value| value.split("\n    fn ").next().unwrap_or(value));
+                            if let Some(definition) = definition {
+                                if definition.contains("if self.source.is_some()") {
+                                    resolved = if method == "existing_user" {
+                                        Some(String::new())
+                                    } else {
+                                        literals_and_code_mask(definition).0.first().map(|value| {
+                                            value
+                                                .text
+                                                .replace("{parameter}", &parameter.to_string())
+                                        })
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for method in ["local_owner_predicate", "live_local_session_predicate"] {
+                if let Some(at) = expression.find(&format!("{method}(")) {
+                    let args = &expression[at + method.len() + 1..];
+                    // The final argument is a literal parameter or table name;
+                    // the first may itself contain the schema-reader call.
+                    let end = args.rfind(')').unwrap_or(args.len());
+                    let last = args[..end]
+                        .rsplit(',')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .trim_end_matches(')');
+                    let parameter = if method == "local_owner_predicate" {
+                        last.parse()
+                            .expect("principal owner index must be a literal")
+                    } else {
+                        0
+                    };
+                    let table = last.trim_matches('"');
+                    resolved = super::sqlite::census_local_principal_fragment(
+                        method, parameter, table, rebuilt,
+                    );
+                }
+            }
+            if let Some((at, _)) = expression
+                .match_indices("owner_predicate(")
+                .find(|(at, _)| {
+                    *at == 0
+                        || !expression.as_bytes()[at - 1].is_ascii_alphanumeric()
+                            && expression.as_bytes()[at - 1] != b'_'
+                })
+            {
+                let argument = expression[at + "owner_predicate(".len()..]
+                    .split(')')
+                    .next()
+                    .unwrap_or_default();
+                {
+                    let parameter = argument
+                        .parse()
+                        .expect("Source owner index must be a literal");
+                    resolved = super::sqlite::census_local_principal_fragment(
+                        "local_owner_predicate",
+                        parameter,
+                        "",
+                        rebuilt,
+                    );
+                    if source_principal {
+                        let closure = prefix
+                            .rsplit("let owner_predicate")
+                            .next()
+                            .expect("actual Source predicate closure");
+                        resolved = literals_and_code_mask(closure)
+                            .0
+                            .first()
+                            .map(|value| value.text.replace("{parameter}", &parameter.to_string()));
+                    }
+                }
+            }
+            if let Some(value) = resolved.as_mut() {
+                if expression.starts_with("format!(") {
+                    if let Some(format) = prior.iter().find(|value| {
+                        value.start > start
+                            && value.start < start + 4 + equals + 1 + expression.len()
+                    }) {
+                        if let Some(alias) = format.text.strip_suffix("{}") {
+                            *value = format!("{alias}{value}");
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(value) = resolved {
+            bindings.push((name.to_owned(), vec![value]));
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    bindings.reverse();
+    bindings.retain(|(name, _)| seen.insert(name.clone()));
+    bindings
+}
+
+/// Walk just this format call's argument list. The closing outer parenthesis
+/// ends the list even when its final argument has no trailing comma; later
+/// SQL bindings cannot become part of a principal parameter. Strings and
+/// comments use the existing code mask, so delimiters inside them are inert.
+fn positional_format_arguments<'a>(
+    source: &'a str,
+    is_code: &[bool],
+    after_literal: usize,
+) -> Vec<&'a str> {
+    let bytes = source.as_bytes();
+    let mut at = after_literal;
+    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    if bytes.get(at) != Some(&b',') {
+        return Vec::new();
+    }
+    parenthesis_arguments(source, is_code, at + 1).0
+}
+
+/// Shared delimiter walk for the actual format arguments and the six finite
+/// principal-layout tuple bindings. It never reads past this parenthesis.
+fn parenthesis_arguments<'a>(
+    source: &'a str,
+    is_code: &[bool],
+    mut at: usize,
+) -> (Vec<&'a str>, usize) {
+    let bytes = source.as_bytes();
+    let mut start = at;
+    let mut depth = 0usize;
+    let mut arguments = Vec::new();
+    while at < bytes.len() {
+        if is_code[at] {
+            match bytes[at] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' if depth == 0 => {
+                    if !source[start..at].trim().is_empty() {
+                        arguments.push(&source[start..at]);
+                    }
+                    return (arguments, at);
+                }
+                b')' | b']' | b'}' => {
+                    depth = depth.checked_sub(1).expect("balanced principal arguments")
+                }
+                b',' if depth == 0 => {
+                    arguments.push(&source[start..at]);
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        at += 1;
+    }
+    panic!("unterminated principal arguments");
+}
+
+fn tuple_binding_arguments<'a>(
+    source: &'a str,
+    is_code: &[bool],
+    mut at: usize,
+    end: usize,
+) -> Vec<Vec<&'a str>> {
+    let bytes = source.as_bytes();
+    let mut arms = Vec::new();
+    while let Some(open) = (at..end).find(|&index| is_code[index] && bytes[index] == b'{') {
+        let tuple = (open + 1..end)
+            .find(|&index| is_code[index] && !bytes[index].is_ascii_whitespace())
+            .expect("principal tuple arm");
+        assert_eq!(
+            bytes[tuple], b'(',
+            "principal layout branch must return an explicit tuple"
+        );
+        let (arguments, close) = parenthesis_arguments(source, is_code, tuple + 1);
+        assert!(close < end, "tuple remains in its binding");
+        arms.push(arguments);
+        at = close + 1;
+    }
+    arms
+}
+
+fn principal_templates(
+    module: &str,
+    source: &str,
+    literal: &Literal,
+    literals: &[Literal],
+    is_code: &[bool],
+    constants: &[(String, String)],
+) -> Vec<String> {
+    if !matches!(module, "hiqlite_sessions.rs" | "sessions.rs") {
+        let bindings = string_bindings(source, literals, is_code);
+        return resolve_template(&literal.text, constants, &bindings);
+    }
+    let mut function_start = 0;
+    for (at, _) in source[..literal.start].match_indices("fn ") {
+        if is_code[at] {
+            function_start = at;
+        }
+    }
+    let context = &source[function_start..literal.start];
+    let source_activation = context.contains("ActivationSql {")
+        || context.contains("let owner_predicate=|parameter| if source");
+    let modes = if source_activation {
+        &[(false, false), (true, false), (true, true)][..]
+    } else {
+        &[(false, false), (true, false)][..]
+    };
+    static PARAMETERS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let parameters =
+        PARAMETERS.get_or_init(|| regex::Regex::new(r"\$(\d+)").expect("parameter grammar"));
+    let mut variants = Vec::new();
+    for &(rebuilt, source_principal) in modes {
+        let mut bindings = principal_bindings(
+            module,
+            source,
+            literal,
+            literals,
+            is_code,
+            rebuilt,
+            source_principal,
+        );
+        let mut template = literal.text.clone();
+        // Only these session composition sites pass layout helpers positionally.
+        // Evaluate their real output before numbering or ordering placeholders.
+        let positional_at = |template: &str| {
+            template.match_indices("{}").find_map(|(at, _)| {
+                (template.as_bytes().get(at.wrapping_sub(1)) != Some(&b'{')
+                    && template.as_bytes().get(at + 2) != Some(&b'}'))
+                .then_some(at)
+            })
+        };
+        let formatted = source[..literal.start].trim_end().ends_with("format!(");
+        // Plain SQL JSON braces and SQL arrays are not format argument lists.
+        let argument_list = if formatted && positional_at(&template).is_some() {
+            positional_format_arguments(source, is_code, literal.end)
+        } else {
+            Vec::new()
+        };
+        let mut arguments = argument_list.into_iter();
+        let mut argument_index = 0;
+        while let Some(at) = formatted.then(|| positional_at(&template)).flatten() {
+            let expression = arguments
+                .next()
+                .expect("positional SQL format argument")
+                .trim();
+            let Some(receiver) = ["layout.", "ownership."]
+                .into_iter()
+                .find_map(|value| expression.strip_prefix(value))
+            else {
+                break;
+            };
+            let Some(open) = receiver.find('(') else {
+                break;
+            };
+            let method = &receiver[..open];
+            let argument = receiver[open + 1..]
+                .strip_suffix(')')
+                .expect("complete principal helper call")
+                .trim();
+            let parameter = if matches!(
+                method,
+                "equals" | "insert_values" | "existing_user" | "user_id_value"
+            ) {
+                argument
+                    .parse()
+                    .expect("positional principal index must be a literal")
+            } else {
+                assert!(
+                    argument.is_empty(),
+                    "unsupported positional principal arguments"
+                );
+                0
+            };
+            let value = super::hiqlite_sessions::census_local_principal_fragment(
+                method, parameter, "", rebuilt,
+            )
+            .expect("unsupported positional principal helper must be reviewed");
+            let name = format!("census_arg_{argument_index}");
+            template.replace_range(at..at + 2, &format!("{{{name}}}"));
+            bindings.push((name, vec![value]));
+            argument_index += 1;
+        }
+        for name in template
+            .split('{')
+            .skip(1)
+            .filter_map(|part| part.split_once('}').map(|(name, _)| name))
+        {
+            if (matches!(
+                name,
+                "owner"
+                    | "request_owner"
+                    | "request_update_owner"
+                    | "live_route"
+                    | "live_route_sql"
+                    | "live_session"
+                    | "live_alias"
+                    | "local_inventory"
+                    | "existing_user"
+            ) || name.starts_with("owner_")
+                || name.starts_with("extra_")
+                || name.starts_with("user_value_")
+                || name.starts_with("principal_"))
+                && !bindings.iter().any(|(binding, _)| binding == name)
+                && !constants.iter().any(|(binding, _)| binding == name)
+            {
+                panic!(
+                    "{module}:{} unresolved principal fragment {name}",
+                    literal.line
+                );
+            }
+        }
+        for mut value in resolve_template(&template, constants, &bindings) {
+            if source_principal
+                && module == "hiqlite_sessions.rs"
+                && context.starts_with("fn activate_with_authority(")
+                && context.contains("let mut statements = vec![")
+                && is_statement(&value)
+            {
+                // This exact production branch maps every vector member through
+                // ordered_source_lifecycle_statement before the Raft proposal.
+                // Use its real canonicalizer, including rejection of holes or
+                // unused bindings; raw pre-remap introduction order is not wire SQL.
+                let max = parameters
+                    .captures_iter(&value)
+                    .map(|capture| capture[1].parse::<usize>().expect("parameter index"))
+                    .max()
+                    .unwrap_or(0);
+                value =
+                    super::sharing::ordered(&value, vec![super::sharing::Value::Integer(0); max])
+                        .expect("actual Source lifecycle canonicalization")
+                        .0;
+            }
+            if !variants.contains(&value) {
+                variants.push(value);
+            }
+        }
+    }
+    variants
+}
+
 /// At most this many arms per binding, and this many assembled variants per
 /// template. A runtime-chosen fragment with more shapes than this is a
 /// statement that should be written out, not a combinatorial explosion.
@@ -957,18 +1493,27 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // this scanner's reach. `marking_a_show_reaches_every_episode_under_it` and
 // `a_page_of_containers_rolls_up_in_one_pass_and_agrees_with_the_single_walk`
 // execute it.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
+// 93 -> 102: nine reviewed statement variants introduced by sharing's
+// principal/identity composition. Three are additional rebuilt-layout variants
+// of separately bound SELECTs: sessions::desired_within (?1..?2, two values),
+// expired_media_sessions (?1..?6, six), and owned_media_sessions (?1..?4, four).
+// Six are the two actual inline conditional INSERT arms in each of
+// sessions::claim_media_session_request (?1..?7, seven values),
+// media::insert_item and publication::insert_item_fenced (?1..?8, eight each).
+// Those six bind the shared params! immediately after the conditional, but this
+// deliberately conservative scanner stops at the arm's closing brace. Every
+// branch's placeholders remain validated; no source statement is exempted.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 102;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
     let mut offenders = Vec::new();
     let mut scanned = 0_usize;
-    let mut unchecked = 0_usize;
+    let mut unchecked = Vec::new();
     for (name, source) in SQLITE_SOURCES {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         let constants = constants_for(name, source, &literals);
-        let bindings = string_bindings(source, &literals, &is_code);
         for literal in &literals {
             if test_ranges
                 .iter()
@@ -977,7 +1522,9 @@ fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
             {
                 continue;
             }
-            for statement in resolve_template(&literal.text, &constants, &bindings) {
+            for statement in
+                principal_templates(name, source, literal, &literals, &is_code, &constants)
+            {
                 if !is_statement(&statement) {
                     continue;
                 }
@@ -995,7 +1542,11 @@ fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
                                 ));
                             }
                         } else {
-                            unchecked += 1;
+                            unchecked.push(format!(
+                                "{name}:{}: {}",
+                                literal.line,
+                                statement.split_whitespace().collect::<Vec<_>>().join(" ")
+                            ));
                         }
                     }
                     Ok(_) => {}
@@ -1018,8 +1569,10 @@ fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
         offenders.join("\n")
     );
     assert_eq!(
-        unchecked, EXPECTED_UNCHECKED_SQLITE_ARITY,
-        "the statically unchecked SQLite arity set changed; inspect every new site"
+        unchecked.len(),
+        EXPECTED_UNCHECKED_SQLITE_ARITY,
+        "the statically unchecked SQLite arity set changed; inspect every new site:\n{}",
+        unchecked.join("\n")
     );
 }
 
@@ -1079,7 +1632,6 @@ fn every_replicated_placeholder_is_introduced_in_order() {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         let constants = constants_for(name, source, &literals);
-        let bindings = string_bindings(source, &literals, &is_code);
         for literal in &literals {
             if test_ranges
                 .iter()
@@ -1091,7 +1643,9 @@ fn every_replicated_placeholder_is_introduced_in_order() {
                 continue;
             }
             let mut judged = false;
-            for statement in resolve_template(&literal.text, &constants, &bindings) {
+            for statement in
+                principal_templates(name, source, literal, &literals, &is_code, &constants)
+            {
                 if !is_statement(&statement) {
                     continue;
                 }
@@ -1174,9 +1728,9 @@ fn the_census_covers_every_slice_exactly_once() {
 
 mod scanner {
     use super::{
-        is_sql_candidate, is_statement, literals_and_code_mask, resolve_template,
-        same_statement_binding_arity, string_bindings, string_constants, test_item_ranges,
-        validate_sql, validate_sqlite_placeholders,
+        is_sql_candidate, is_statement, literals_and_code_mask, positional_format_arguments,
+        principal_templates, resolve_template, same_statement_binding_arity, string_bindings,
+        string_constants, test_item_ranges, validate_sql, validate_sqlite_placeholders,
     };
 
     /// A statement inside a `#[cfg(test)]` module is a fixture, not a
@@ -1297,6 +1851,47 @@ fn insert() {
             vec!["SELECT 1 FROM t ORDER BY 1 LIMIT $1".to_owned()]
         );
         validate_sql(&resolved[0]).expect("the neutral token keeps the statement well formed");
+    }
+
+    #[test]
+    fn principal_format_arguments_end_at_their_own_call_without_a_trailing_comma() {
+        let source = r#"fn read() { let sql = format!("SELECT {} WHERE {} AND playback_id=$2", layout.projection(), layout.equals(1)); let later = layout.equals(9); }"#;
+        let (literals, mask) = literals_and_code_mask(source);
+        let sql = literals
+            .iter()
+            .find(|literal| literal.text.starts_with("SELECT"))
+            .expect("SQL literal");
+        assert_eq!(
+            positional_format_arguments(source, &mask, sql.end)
+                .iter()
+                .map(|argument| argument.trim())
+                .collect::<Vec<_>>(),
+            ["layout.projection()", "layout.equals(1)"]
+        );
+        let variants =
+            principal_templates("hiqlite_sessions.rs", source, sql, &literals, &mask, &[]);
+        assert_eq!(variants.len(), 2);
+        for variant in variants {
+            validate_sql(&variant).expect("real principal predicate retains parameter one");
+        }
+    }
+
+    #[test]
+    fn local_owner_helper_is_not_misread_as_the_source_owner_closure() {
+        let source = r#"fn read() { let owner_1 = local_owner_predicate(rebuilt, 1); let sql = format!("SELECT ?2 WHERE {owner_1}"); }"#;
+        let (literals, mask) = literals_and_code_mask(source);
+        let sql = literals
+            .iter()
+            .find(|literal| literal.text.starts_with("SELECT"))
+            .expect("SQL literal");
+        let variants = principal_templates("sessions.rs", source, sql, &literals, &mask, &[]);
+        assert_eq!(variants.len(), 2);
+        for variant in variants {
+            assert_eq!(
+                validate_sqlite_placeholders(&variant).expect("complete actual owner binding"),
+                2
+            );
+        }
     }
 
     /// A compound `cfg` guards a test module just as completely as the bare

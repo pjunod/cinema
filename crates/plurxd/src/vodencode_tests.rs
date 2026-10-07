@@ -38,12 +38,8 @@ fn encoded_plan(
     )
     .expect("decode facts");
     let capabilities = DecodeCapabilities::new(
-        DecodeCapabilitySnapshotIdentity::new(
-            "b".repeat(64),
-            "vod-test-node".to_owned(),
-            None,
-        )
-        .expect("capability identity"),
+        DecodeCapabilitySnapshotIdentity::new("b".repeat(64), "vod-test-node".to_owned(), None)
+            .expect("capability identity"),
         vec![],
         vec![SoftwareDecoder {
             codec: codec.to_owned(),
@@ -197,7 +193,15 @@ fn encoded_vod_frozen_cpu_floor_preserves_empty_pool_and_lowered_policy() {
     assert!(mixed.hardware_slot);
     assert_eq!(mixed.cpu_threads, 8);
     assert!(matches!(
-        try_admit_frozen_bundle(&admissions, 1, 3, &mixed, options.software_threads, Priority::Live, None),
+        try_admit_frozen_bundle(
+            &admissions,
+            1,
+            3,
+            &mixed,
+            options.software_threads,
+            Priority::Live,
+            None
+        ),
         Err(true)
     ));
     assert_eq!(admissions.software_in_use(), 0);
@@ -287,7 +291,8 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         &crate::admission::Workload::of(&file, options.target_height),
     );
     let encoding = Arc::new(crate::vodencode::Encoding {
-            shared_audio: None,        candidate_recipe: None,
+        shared_audio: None,
+        candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
         active_production: StdMutex::new(crate::vodencode::ActiveProductionWindow::default()),
         nonpreemptive_trial: false,
@@ -359,7 +364,10 @@ async fn encoded_identity_never_shares_a_renderer_across_processes() {
     .await
     .expect("other process");
     let other = mutable.identity(&file, 96.0);
-    assert_ne!(first, other, "different nodes must never share encoded bytes");
+    assert_ne!(
+        first, other,
+        "different nodes must never share encoded bytes"
+    );
 }
 
 #[tokio::test]
@@ -369,8 +377,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let (file, mut encoding) = encoded_fixture(base.path()).await;
     let mutable = Arc::get_mut(&mut encoding).expect("unique recipe");
     let video_identity = mutable.identity(&file, 4.0);
-    mutable.shared_audio =
-        plurx_core::transcode::VodSharedAudioRecipe::from_plan(&mutable.plan);
+    mutable.shared_audio = plurx_core::transcode::VodSharedAudioRecipe::from_plan(&mutable.plan);
     assert!(mutable.shared_audio.is_some());
     mutable.resources = crate::admission::TranscodeResourceEstimate {
         hardware_slot: true,
@@ -390,39 +397,66 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let soundtrack_end = last.start_ticks + last.duration_ticks;
     assert_eq!(soundtrack_end, mutable.grid.shared_audio_end_ticks(4_000));
     let arguments = mutable.args(&file, 0.0, 4.0);
-    let duration_arg = arguments.windows(2).find(|pair| pair[0] == "-t").expect("audio duration");
+    let duration_arg = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "-t")
+        .expect("audio duration");
     let encoded_end: f64 = duration_arg[1].parse().expect("duration seconds");
     assert!((encoded_end - soundtrack_end as f64 / 48_000.0).abs() < 1e-9);
-    assert!(mutable.media_plan(4_000).entries.iter().all(|entry|
-        entry.kind == plurx_core::segplan::PlanEntryKind::AudioTail));
+    assert!(mutable
+        .media_plan(4_000)
+        .entries
+        .iter()
+        .all(|entry| entry.kind == plurx_core::segplan::PlanEntryKind::AudioTail));
     assert!(!mutable.resources().hardware_slot);
     assert_eq!(mutable.resources().cpu_threads, 3);
-    assert!(encoding.try_permit_after(std::future::ready(Ok((
-        Some("0".into()), Some("2".into()),
-    )))).await.is_none());
-    let permit = encoding.try_permit_after(std::future::ready(Ok((
-        Some("0".into()), Some("3".into()),
-    )))).await.expect("audio admits without a video hardware slot");
+    assert!(encoding
+        .try_permit_after(std::future::ready(Ok(
+            (Some("0".into()), Some("2".into()),)
+        )))
+        .await
+        .is_none());
+    let permit = encoding
+        .try_permit_after(std::future::ready(Ok((Some("0".into()), Some("3".into())))))
+        .await
+        .expect("audio admits without a video hardware slot");
     assert_eq!(encoding.admissions.software_in_use(), 3);
     let recipe = Recipe {
-        retained_logical: None, measured_candidate: None,
-        file: file.clone(), audio_index: None, aac: true, audio_delivery: None,
+        retained_logical: None,
+        measured_candidate: None,
+        file: file.clone(),
+        audio_index: None,
+        aac: true,
+        audio_delivery: None,
         video: CopyVideoOptions::new(false, false),
         source_object_version: Some(encoding.source_object_version.clone()),
-        cluster_cache_key: None, encoding: Some(Arc::clone(&encoding)),
+        cluster_cache_key: None,
+        encoding: Some(Arc::clone(&encoding)),
     };
     let producer_args = recipe_pipe_args(&recipe, 0.0, false);
-    let duration_arg = producer_args.windows(2).find(|pair| pair[0] == "-t").expect("producer duration");
+    let duration_arg = producer_args
+        .windows(2)
+        .find(|pair| pair[0] == "-t")
+        .expect("producer duration");
     let producer_end: f64 = duration_arg[1].parse().expect("producer end");
     let plan = encoding.media_plan(file.duration_ms.expect("source duration"));
     let tail = plan.entries.last().expect("planned tail");
-    assert!((producer_end - (tail.start_ticks + tail.duration_ticks) as f64 / 48_000.0).abs() < 1e-9,
-        "production must not round an already aligned end onto another frame");
+    assert!(
+        (producer_end - (tail.start_ticks + tail.duration_ticks) as f64 / 48_000.0).abs() < 1e-9,
+        "production must not round an already aligned end onto another frame"
+    );
     let output = tokio::process::Command::new(ffmpeg_bin())
         .args(["-hide_banner", "-loglevel", "error"])
         .args(encoding.args(&file, 0.0, 4.0))
-        .kill_on_drop(true).output().await.expect("encode soundtrack");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("encode soundtrack");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let mut reader = FragmentReader::new();
     reader.push(&output.stdout);
     let Some(Unit::Init(init)) = reader.next_unit().expect("soundtrack init") else {
@@ -431,121 +465,298 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     assert_eq!(init.tracks.len(), 1);
     assert_eq!(init.tracks[0].kind, plurx_core::fmp4::TrackKind::Audio);
     assert_eq!(init.tracks[0].timescale, 48_000);
-    let facts = encoding.shared_audio.as_ref().expect("soundtrack recipe")
-        .verify_init(&init).expect("actual soundtrack matches frozen recipe");
+    let facts = encoding
+        .shared_audio
+        .as_ref()
+        .expect("soundtrack recipe")
+        .verify_init(&init)
+        .expect("actual soundtrack matches frozen recipe");
     assert_eq!(facts.codec, "mp4a.40.2");
-    assert!(matches!(reader.next_unit().expect("soundtrack media"), Some(Unit::Fragment(_))));
+    assert!(matches!(
+        reader.next_unit().expect("soundtrack media"),
+        Some(Unit::Fragment(_))
+    ));
     drop(permit);
     assert_eq!(encoding.admissions.software_in_use(), 0);
-    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3").await.expect("bounded audio policy");
+    encoding
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3")
+        .await
+        .expect("bounded audio policy");
     let schedule_store = Arc::new(SqliteStore::open_in_memory().expect("schedule store"));
-    let serve = local_serve(base.path().join("shared-audio-cache"), schedule_store.clone());
+    let serve = local_serve(
+        base.path().join("shared-audio-cache"),
+        schedule_store.clone(),
+    );
     let (cached_init, first, second) = encoded_pair(&serve, &file, &encoding, 0).await;
-    let soundtrack = serve.shared.renditions.lock().await.values()
-        .find(|rendition| rendition.recipe.encoding.as_ref().is_some_and(|encoding| encoding.shared_audio.is_some()))
-        .cloned().expect("cached real soundtrack");
+    let soundtrack = serve
+        .shared
+        .renditions
+        .lock()
+        .await
+        .values()
+        .find(|rendition| {
+            rendition
+                .recipe
+                .encoding
+                .as_ref()
+                .is_some_and(|encoding| encoding.shared_audio.is_some())
+        })
+        .cloned()
+        .expect("cached real soundtrack");
     let parent = uuid::Uuid::new_v4().to_string();
     let other = uuid::Uuid::new_v4().to_string();
-    let mut video = encoding.clone_with_admissions_for_test(encoding.admissions.clone()).await;
+    let mut video = encoding
+        .clone_with_admissions_for_test(encoding.admissions.clone())
+        .await;
     let mutable = Arc::get_mut(&mut video).expect("new video recipe");
     mutable.shared_audio = None;
     mutable.options.normalized_geometry = true;
-    mutable.options.video_sample_envelope = plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50;
+    mutable.options.video_sample_envelope =
+        plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50;
     mutable.options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
     refresh_encoded_plan(&file, mutable);
     let budget = video.resources().cpu_threads + encoding.resources().cpu_threads;
-    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, &(budget - 1).to_string()).await.expect("one missing CPU credit");
+    encoding
+        .store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &(budget - 1).to_string(),
+        )
+        .await
+        .expect("one missing CPU credit");
     let mut parent_request = request(&parent, 0.0);
-    parent_request.kind = SessionKind::Transcode { height: video.options.target_height };
+    parent_request.kind = SessionKind::Transcode {
+        height: video.options.target_height,
+    };
     parent_request.continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
-            controlled: false,
-            autonomous_companion: None,
-            companion_catalog: None,
-            family_descriptor: None,
-            companion_context: None,
-        version: 1, family_generation: uuid::Uuid::new_v4().to_string(), role: crate::transcode::ContinuousMediaRole::Video,
+        controlled: false,
+        autonomous_companion: None,
+        companion_catalog: None,
+        family_descriptor: None,
+        companion_context: None,
+        version: 1,
+        family_generation: uuid::Uuid::new_v4().to_string(),
+        role: crate::transcode::ContinuousMediaRole::Video,
     }));
-    let attach = || VodRecipeRequest { measured_candidate: None, retained_capture: RetainedOutputCapture::New, companion: None, request: &parent_request, encoding: Some(Arc::clone(&video)), soundtrack: Some(Arc::clone(&encoding)) };
-    let attribution = VodAttribution { user_name: "test", item_title: "paired continuous attachment", supersession_user: "test" };
-    assert!(serve.try_create(attach(), &file, &settings(), attribution, parent.clone()).await.is_err());
+    let attach = || VodRecipeRequest {
+        measured_candidate: None,
+        retained_capture: RetainedOutputCapture::New,
+        companion: None,
+        request: &parent_request,
+        encoding: Some(Arc::clone(&video)),
+        soundtrack: Some(Arc::clone(&encoding)),
+    };
+    let attribution = VodAttribution {
+        user_name: "test",
+        item_title: "paired continuous attachment",
+        supersession_user: "test",
+    };
+    assert!(serve
+        .try_create(attach(), &file, &settings(), attribution, parent.clone())
+        .await
+        .is_err());
     assert!(!serve.shared.sessions.lock().await.contains_key(&parent));
     assert!(soundtrack.readers.lock().await.is_empty());
-    assert_eq!(encoding.admissions.software_in_use(), 0, "refused group leaves no partial capacity");
-    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, &budget.to_string()).await.expect("exact group budget");
-    serve.try_create(attach(), &file, &settings(), attribution, parent.clone()).await.expect("atomic paired parent attachment");
+    assert_eq!(
+        encoding.admissions.software_in_use(),
+        0,
+        "refused group leaves no partial capacity"
+    );
+    encoding
+        .store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &budget.to_string(),
+        )
+        .await
+        .expect("exact group budget");
+    serve
+        .try_create(attach(), &file, &settings(), attribution, parent.clone())
+        .await
+        .expect("atomic paired parent attachment");
     let video_rendition = rendition_of(&serve, &parent).await;
     {
         let sessions = serve.shared.sessions.lock().await;
         let children = &sessions[&parent].children;
         assert_eq!(children.len(), 2);
         assert!(children.iter().all(|child| child._reservation.is_some()));
-        assert!(children.iter().any(|child| Arc::ptr_eq(&child.rendition, &soundtrack)));
-        assert!(children.iter().any(|child| Arc::ptr_eq(&child.rendition, &video_rendition)));
+        assert!(children
+            .iter()
+            .any(|child| Arc::ptr_eq(&child.rendition, &soundtrack)));
+        assert!(children
+            .iter()
+            .any(|child| Arc::ptr_eq(&child.rendition, &video_rendition)));
     }
     assert_eq!(encoding.admissions.software_in_use(), budget);
     insert_control_session(&serve, &other, Arc::clone(&soundtrack), Instant::now()).await;
     let deadline = || Instant::now() + Duration::from_secs(5);
-    let playlist = serve.child_playlist_before(&parent, "audio", &soundtrack.key, deadline()).await
-        .expect("parent").result.expect("actual AAC playlist").expect("owned audio");
+    let playlist = serve
+        .child_playlist_before(&parent, "audio", &soundtrack.key, deadline())
+        .await
+        .expect("parent")
+        .result
+        .expect("actual AAC playlist")
+        .expect("owned audio");
     let playlist = String::from_utf8(playlist).expect("playlist UTF-8");
     let init_sha = hex::encode(Sha256::digest(&cached_init));
     assert!(playlist.contains(&format!("init/{init_sha}.mp4")));
     assert!(playlist.contains("#EXTINF:2.005333,\nsegment/0.m4s"));
     assert!(playlist.ends_with("#EXT-X-ENDLIST\n"));
-    assert!(serve.child_playlist_before(&other, "audio", &soundtrack.key, deadline()).await
-        .expect("other parent").result.expect("lookup").is_none());
-    assert!(serve.child_playlist_before(&parent, "video", &soundtrack.key, deadline()).await
-        .expect("parent").result.expect("role refusal").is_none());
-    let mut request = ChildMediaRequest { role: "audio".into(), rendition: soundtrack.key.clone(),
-        kind: "init".into(), object: format!("{init_sha}.mp4") };
-    let publication = serve.child_segment_before(&parent, &request, deadline()).await.expect("parent");
+    assert!(serve
+        .child_playlist_before(&other, "audio", &soundtrack.key, deadline())
+        .await
+        .expect("other parent")
+        .result
+        .expect("lookup")
+        .is_none());
+    assert!(serve
+        .child_playlist_before(&parent, "video", &soundtrack.key, deadline())
+        .await
+        .expect("parent")
+        .result
+        .expect("role refusal")
+        .is_none());
+    let mut request = ChildMediaRequest {
+        role: "audio".into(),
+        rendition: soundtrack.key.clone(),
+        kind: "init".into(),
+        object: format!("{init_sha}.mp4"),
+    };
+    let publication = serve
+        .child_segment_before(&parent, &request, deadline())
+        .await
+        .expect("parent");
     let mut ready = publication.result.expect("init ready").expect("exact init");
     assert_eq!(ready.etag, init_sha);
     let mut child_init = Vec::new();
-    ready.file.read_to_end(&mut child_init).await.expect("verified open descriptor");
+    ready
+        .file
+        .read_to_end(&mut child_init)
+        .await
+        .expect("verified open descriptor");
     assert_eq!(child_init, cached_init);
-    assert!(serve.commit_resolved_media(&parent, &publication.owner, None).await);
+    assert!(
+        serve
+            .commit_resolved_media(&parent, &publication.owner, None)
+            .await
+    );
     request.object = format!("{}.mp4", "0".repeat(64));
-    assert!(serve.child_segment_before(&parent, &request, deadline()).await
-        .expect("parent").result.expect("wrong init identity").is_none());
+    assert!(serve
+        .child_segment_before(&parent, &request, deadline())
+        .await
+        .expect("parent")
+        .result
+        .expect("wrong init identity")
+        .is_none());
     assert!(serve.end(&parent, Terminal::Deleted).await);
     assert!(serve.end(&other, Terminal::Deleted).await);
     for rendition in [&soundtrack, &video_rendition] {
         rendition.gen_epoch.fetch_add(1, Relaxed);
-        let _ = rendition.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;
+        let _ = rendition
+            .slot
+            .perform(
+                Step::Terminate {
+                    why: Termination::Idle,
+                },
+                || {},
+            )
+            .await;
         assert!(rendition.readers.lock().await.is_empty());
     }
-    assert_eq!(encoding.admissions.software_in_use(), 0, "End and confirmed reap release the whole group");
+    assert_eq!(
+        encoding.admissions.software_in_use(),
+        0,
+        "End and confirmed reap release the whole group"
+    );
     // End above tombstoned the paired parent, and a terminal session id never
     // starts again; the three-role family is a new presentation of the same playback.
     let parent = uuid::Uuid::new_v4().to_string();
     // Reuse the existing AAC campaign to exercise the real three-role parent.
-    let mut companion = video.clone_with_admissions_for_test(encoding.admissions.clone()).await;
+    let mut companion = video
+        .clone_with_admissions_for_test(encoding.admissions.clone())
+        .await;
     let mutable = Arc::get_mut(&mut companion).expect("new companion recipe");
     mutable.options.target_height = 72;
     refresh_encoded_plan(&file, mutable);
     let companion_id = plurx_core::playback::candidate::CandidateId([9; 16]);
     let mut companion_request = parent_request.clone();
     companion_request.kind = SessionKind::Transcode { height: 72 };
-    companion_request.candidate_context = Some(Box::new(crate::transcode::continuous_test_candidate_context(companion_id, [10; 32], 72)));
-    parent_request.candidate_context = Some(Box::new(crate::transcode::continuous_test_candidate_context(plurx_core::playback::candidate::CandidateId([7; 16]), [8; 32], 72)));
+    companion_request.candidate_context = Some(Box::new(
+        crate::transcode::continuous_test_candidate_context(companion_id, [10; 32], 72),
+    ));
+    parent_request.candidate_context = Some(Box::new(
+        crate::transcode::continuous_test_candidate_context(
+            plurx_core::playback::candidate::CandidateId([7; 16]),
+            [8; 32],
+            72,
+        ),
+    ));
     let media = parent_request.continuous_media.as_mut().expect("role");
     media.autonomous_companion = Some(companion_id);
     let family_budget = budget + companion.resources().cpu_threads;
-    let autonomous = || VodRecipeRequest { measured_candidate: None, retained_capture: RetainedOutputCapture::New, request: &parent_request,
-        encoding: Some(Arc::clone(&video)), soundtrack: Some(Arc::clone(&encoding)),
-        companion: Some((companion_request.clone(), Arc::clone(&companion))) };
-    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, &(family_budget - 1).to_string()).await.expect("one short family budget");
-    assert!(serve.try_create(autonomous(), &file, &settings(), attribution, parent.clone()).await.is_err());
-    assert_eq!(encoding.admissions.software_in_use(), 0, "three-role refusal is atomic");
+    let autonomous = || VodRecipeRequest {
+        measured_candidate: None,
+        retained_capture: RetainedOutputCapture::New,
+        request: &parent_request,
+        encoding: Some(Arc::clone(&video)),
+        soundtrack: Some(Arc::clone(&encoding)),
+        companion: Some((companion_request.clone(), Arc::clone(&companion))),
+    };
+    encoding
+        .store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &(family_budget - 1).to_string(),
+        )
+        .await
+        .expect("one short family budget");
+    assert!(serve
+        .try_create(
+            autonomous(),
+            &file,
+            &settings(),
+            attribution,
+            parent.clone()
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        encoding.admissions.software_in_use(),
+        0,
+        "three-role refusal is atomic"
+    );
     assert!(soundtrack.readers.lock().await.is_empty());
-    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, &family_budget.to_string()).await.expect("whole family budget");
-    serve.try_create(autonomous(), &file, &settings(), attribution, parent.clone()).await.expect("autonomous parent attachment");
+    encoding
+        .store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &family_budget.to_string(),
+        )
+        .await
+        .expect("whole family budget");
+    serve
+        .try_create(
+            autonomous(),
+            &file,
+            &settings(),
+            attribution,
+            parent.clone(),
+        )
+        .await
+        .expect("autonomous parent attachment");
     let owned = {
         let sessions = serve.shared.sessions.lock().await;
         assert_eq!(sessions[&parent].children.len(), 3);
-        assert!(sessions[&parent].children.iter().all(|child| child._reservation.is_some()));
-        sessions[&parent].children.iter().map(|child| Arc::clone(&child.rendition)).collect::<Vec<_>>()
+        assert!(sessions[&parent]
+            .children
+            .iter()
+            .all(|child| child._reservation.is_some()));
+        sessions[&parent]
+            .children
+            .iter()
+            .map(|child| Arc::clone(&child.rendition))
+            .collect::<Vec<_>>()
     };
     assert_eq!(encoding.admissions.software_in_use(), family_budget);
     // Publishing the family binds it to the parent's durable route, so the
@@ -560,12 +771,15 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         retained_output_receiver: None,
         retained_output: None,
         candidate_catalog: None,
-        candidate_id: parent_request.candidate_context.as_ref().map(|context| context.candidate_id),
+        candidate_id: parent_request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.candidate_id),
         presentation_target: None,
         decoder_caps: None,
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: generation.clone(),
-        user_id: 7,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
         source_size: file.size,
         source_mtime: file.mtime,
         typeless_playlist: false,
@@ -574,120 +788,383 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     };
     // A real start's route is owned by the node that serves it, and that node
     // schedules quality under its own id.
-    let owner_node = serve.shared.cluster_node_id.clone().expect("serving cluster node");
-    activate_control_route_with_recipe(schedule_store.as_ref(), &parent, &generation, &owner_node,
-        &serde_json::to_string(&route_recipe).expect("route recipe")).await;
-    let master = serve.continuous_master_before(&parent, Instant::now() + Duration::from_secs(30)).await
+    let owner_node = serve
+        .shared
+        .cluster_node_id
+        .clone()
+        .expect("serving cluster node");
+    activate_control_route_with_recipe(
+        schedule_store.as_ref(),
+        &parent,
+        &generation,
+        &owner_node,
+        &serde_json::to_string(&route_recipe).expect("route recipe"),
+    )
+    .await;
+    let master = serve
+        .continuous_master_before(&parent, Instant::now() + Duration::from_secs(30))
+        .await
         .expect("continuous parent");
-    let master_bytes = master.result.expect("verified family").expect("master bytes");
+    let master_bytes = master
+        .result
+        .expect("verified family")
+        .expect("master bytes");
     let master_text = String::from_utf8(master_bytes.clone()).expect("master UTF-8");
     assert_eq!(master_text.matches("#EXT-X-STREAM-INF:").count(), 2);
     assert_eq!(master_text.matches("#EXT-X-MEDIA:TYPE=AUDIO").count(), 1);
     assert!(!master_text.contains("AVERAGE-BANDWIDTH"));
     assert!(!master_text.contains("INDEPENDENT-SEGMENTS"));
     for rendition in &owned {
-        let role = if rendition.recipe.encoding.as_ref().expect("recipe").shared_audio.is_some() { "audio" } else { "video" };
+        let role = if rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("recipe")
+            .shared_audio
+            .is_some()
+        {
+            "audio"
+        } else {
+            "video"
+        };
         assert!(master_text.contains(&format!("{role}/{}/index.m3u8", rendition.key)));
-        assert!(serve.child_playlist_before(&parent, role, &rendition.key, Instant::now() + Duration::from_secs(5)).await
-            .expect("parent child").result.expect("verified child").is_some());
+        assert!(serve
+            .child_playlist_before(
+                &parent,
+                role,
+                &rendition.key,
+                Instant::now() + Duration::from_secs(5)
+            )
+            .await
+            .expect("parent child")
+            .result
+            .expect("verified child")
+            .is_some());
     }
-    assert_eq!(serve.continuous_master_before(&parent, Instant::now() + Duration::from_secs(5)).await
-        .expect("same parent").result.expect("stable family").expect("master"), master_bytes);
-    let description = serve.continuous_family_description_before(&parent, Instant::now() + Duration::from_secs(5)).await
-        .expect("family parent").result.expect("verified description").expect("description bytes");
+    assert_eq!(
+        serve
+            .continuous_master_before(&parent, Instant::now() + Duration::from_secs(5))
+            .await
+            .expect("same parent")
+            .result
+            .expect("stable family")
+            .expect("master"),
+        master_bytes
+    );
+    let description = serve
+        .continuous_family_description_before(&parent, Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("family parent")
+        .result
+        .expect("verified description")
+        .expect("description bytes");
     let description: serde_json::Value = serde_json::from_slice(&description).expect("family JSON");
     assert_eq!(description["version"], 1);
     assert_eq!(description["mode"], "autonomous_reserved");
     assert_eq!(description["video"].as_array().expect("rungs").len(), 2);
-    assert!(description["video"].as_array().expect("rungs").iter().any(|rung| rung["candidate_id"] == companion_id.to_hex()));
-    assert!(description["video"].as_array().expect("rungs").iter().all(|rung| rung["candidate_id"].is_string()));
+    assert!(description["video"]
+        .as_array()
+        .expect("rungs")
+        .iter()
+        .any(|rung| rung["candidate_id"] == companion_id.to_hex()));
+    assert!(description["video"]
+        .as_array()
+        .expect("rungs")
+        .iter()
+        .all(|rung| rung["candidate_id"].is_string()));
     assert_eq!(description["audio"]["rendition_id"], soundtrack.key);
-    let verified = serve.verified_continuous_family_before(&parent, Instant::now() + Duration::from_secs(5)).await
-        .expect("private family").result.expect("verified facts").expect("family");
-    let rung = verified.family.video().rungs().iter().find(|rung| verified.candidates.get(rung.rendition_id()) == Some(&companion_id)).expect("companion catalog provenance");
-    let intervals = serve.quality_ready_before(&parent, &verified.family, rung.rendition_id(), rung.grid().numerator,
-        0, Instant::now() + Duration::from_secs(30)).await.expect("actual video and AAC readiness");
+    let verified = serve
+        .verified_continuous_family_before(&parent, Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("private family")
+        .result
+        .expect("verified facts")
+        .expect("family");
+    let rung = verified
+        .family
+        .video()
+        .rungs()
+        .iter()
+        .find(|rung| verified.candidates.get(rung.rendition_id()) == Some(&companion_id))
+        .expect("companion catalog provenance");
+    let intervals = serve
+        .quality_ready_before(
+            &parent,
+            &verified.family,
+            rung.rendition_id(),
+            rung.grid().numerator,
+            0,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .await
+        .expect("actual video and AAC readiness");
     assert_eq!(intervals.len(), 2);
     assert_eq!(intervals[0].through_tick, intervals[1].from_tick);
-    assert!(intervals.iter().all(|interval| interval.valid() && interval.rendition_id == rung.rendition_id()));
-    use plurx_core::playback::continuous_quality::{QualityAttachment, QualityOperation, QualityState, QualityTransitionRequest};
-    let attachment = QualityAttachment { client_instance_id: uuid::Uuid::new_v4().to_string(), lifetime_id: "movie".into(),
-        attachment_id: uuid::Uuid::new_v4().to_string(), family_id: verified.family.id().to_owned() };
+    assert!(intervals
+        .iter()
+        .all(|interval| interval.valid() && interval.rendition_id == rung.rendition_id()));
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityOperation, QualityState, QualityTransitionRequest,
+    };
+    let attachment = QualityAttachment {
+        client_instance_id: uuid::Uuid::new_v4().to_string(),
+        lifetime_id: "movie".into(),
+        attachment_id: uuid::Uuid::new_v4().to_string(),
+        family_id: verified.family.id().to_owned(),
+    };
     let transaction_id = uuid::Uuid::new_v4().to_string();
-    let prepare = QualityTransitionRequest { version: 1, generation: generation.clone(), control_epoch: 1, sequence: 1,
-        attachment: attachment.clone(), transaction_id: transaction_id.clone(), operation: QualityOperation::Prepare {
-            intent_revision: 1, target_rendition_id: rung.rendition_id().into() } };
-    let mut schedule = super::vod_serve_quality::QualityScheduleRequest { version: 1, generation: generation.clone(), control_epoch: 1,
-        attachment, transition: Some(prepare.clone()), window: None, frontier: Some(super::vod_serve_quality::QualityAppendFrontier {
-            timescale: rung.grid().numerator, through_tick: 0 }) };
-    let prepared = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await
+    let prepare = QualityTransitionRequest {
+        version: 1,
+        generation: generation.clone(),
+        control_epoch: 1,
+        sequence: 1,
+        attachment: attachment.clone(),
+        transaction_id: transaction_id.clone(),
+        operation: QualityOperation::Prepare {
+            intent_revision: 1,
+            target_rendition_id: rung.rendition_id().into(),
+        },
+    };
+    let mut schedule = super::vod_serve_quality::QualityScheduleRequest {
+        version: 1,
+        generation: generation.clone(),
+        control_epoch: 1,
+        attachment,
+        transition: Some(prepare.clone()),
+        window: None,
+        frontier: Some(super::vod_serve_quality::QualityAppendFrontier {
+            timescale: rung.grid().numerator,
+            through_tick: 0,
+        }),
+    };
+    let prepared = serve
+        .quality_schedule_before(
+            &parent,
+            &owner_node,
+            &schedule,
+            Instant::now() + Duration::from_secs(12),
+        )
+        .await
         .expect("owner prepares actual family");
     assert_eq!(prepared.ledger.transactions[0].state, QualityState::Ready);
-    let replay = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await.expect("prepare replay");
+    let replay = serve
+        .quality_schedule_before(
+            &parent,
+            &owner_node,
+            &schedule,
+            Instant::now() + Duration::from_secs(12),
+        )
+        .await
+        .expect("prepare replay");
     assert_eq!(prepared.receipt, replay.receipt);
-    assert_eq!(prepared.ledger.transactions[0].preparation, replay.ledger.transactions[0].preparation);
+    assert_eq!(
+        prepared.ledger.transactions[0].preparation,
+        replay.ledger.transactions[0].preparation
+    );
     schedule.frontier = None;
-    let mut transition = prepare.clone(); transition.sequence = 2;
-    transition.operation = QualityOperation::Scheduled { intervals: prepared.ledger.transactions[0].ready.clone() };
+    let mut transition = prepare.clone();
+    transition.sequence = 2;
+    transition.operation = QualityOperation::Scheduled {
+        intervals: prepared.ledger.transactions[0].ready.clone(),
+    };
     schedule.transition = Some(transition.clone());
-    let reserved = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await.expect("physical reservation CAS");
-    assert_eq!(reserved.ledger.transactions[0].state, QualityState::Scheduled);
-    assert!(!reserved.ledger.shared_audio_reserved().is_empty(), "same CAS pins verified AAC dependencies");
+    let reserved = serve
+        .quality_schedule_before(
+            &parent,
+            &owner_node,
+            &schedule,
+            Instant::now() + Duration::from_secs(12),
+        )
+        .await
+        .expect("physical reservation CAS");
+    assert_eq!(
+        reserved.ledger.transactions[0].state,
+        QualityState::Scheduled
+    );
+    assert!(
+        !reserved.ledger.shared_audio_reserved().is_empty(),
+        "same CAS pins verified AAC dependencies"
+    );
     // The store deduplicates physical dependencies by artifact id; the ledger
     // keeps append order. Compare the exact pins in the store's key order.
     let mut expected_pins = reserved.ledger.transactions[0].reserved.clone();
     expected_pins.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
-    assert_eq!(schedule_store.quality_reserved_intervals(rung.rendition_id()).await.expect("durable video pins"), expected_pins);
-    let mut window = schedule.clone(); window.transition = None;
-    window.window = Some(super::vod_serve_quality::QualityReadyWindow { transaction_id: transaction_id.clone(),
-        frontier: super::vod_serve_quality::QualityAppendFrontier { timescale: rung.grid().numerator,
-            through_tick: reserved.ledger.transactions[0].reserved[0].through_tick } });
-    let extended = serve.quality_schedule_before(&parent, &owner_node, &window, Instant::now() + Duration::from_secs(12)).await.expect("next append window");
-    assert_eq!(extended.ledger.latest_intent_revision, reserved.ledger.latest_intent_revision);
-    assert_eq!(extended.ledger.accepted_sequence, reserved.ledger.accepted_sequence);
-    assert_eq!(extended.ledger.transactions[0].reserved, reserved.ledger.transactions[0].reserved);
-    assert_eq!(extended.ledger.shared_audio_reserved(), reserved.ledger.shared_audio_reserved());
-    assert!(extended.ledger.transactions[0].ready[0].from_tick >= reserved.ledger.transactions[0].reserved[0].through_tick);
+    assert_eq!(
+        schedule_store
+            .quality_reserved_intervals(rung.rendition_id())
+            .await
+            .expect("durable video pins"),
+        expected_pins
+    );
+    let mut window = schedule.clone();
+    window.transition = None;
+    window.window = Some(super::vod_serve_quality::QualityReadyWindow {
+        transaction_id: transaction_id.clone(),
+        frontier: super::vod_serve_quality::QualityAppendFrontier {
+            timescale: rung.grid().numerator,
+            through_tick: reserved.ledger.transactions[0].reserved[0].through_tick,
+        },
+    });
+    let extended = serve
+        .quality_schedule_before(
+            &parent,
+            &owner_node,
+            &window,
+            Instant::now() + Duration::from_secs(12),
+        )
+        .await
+        .expect("next append window");
+    assert_eq!(
+        extended.ledger.latest_intent_revision,
+        reserved.ledger.latest_intent_revision
+    );
+    assert_eq!(
+        extended.ledger.accepted_sequence,
+        reserved.ledger.accepted_sequence
+    );
+    assert_eq!(
+        extended.ledger.transactions[0].reserved,
+        reserved.ledger.transactions[0].reserved
+    );
+    assert_eq!(
+        extended.ledger.shared_audio_reserved(),
+        reserved.ledger.shared_audio_reserved()
+    );
+    assert!(
+        extended.ledger.transactions[0].ready[0].from_tick
+            >= reserved.ledger.transactions[0].reserved[0].through_tick
+    );
     transition.sequence = 3;
-    transition.operation = QualityOperation::CancelUnappended { completed: reserved.ledger.transactions[0].reserved.clone() };
+    transition.operation = QualityOperation::CancelUnappended {
+        completed: reserved.ledger.transactions[0].reserved.clone(),
+    };
     schedule.transition = Some(transition.clone());
-    let cancelled = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await.expect("lost append cancellation");
-    assert_eq!(cancelled.ledger.transactions[0].state, QualityState::Appended);
-    assert!(serve.quality_schedule_before(&parent, &owner_node, &window, Instant::now() + Duration::from_secs(12)).await.is_err(), "cancelled intent cannot renew readiness");
-    assert_eq!(cancelled.ledger.transactions[0].reserved, reserved.ledger.transactions[0].reserved);
-    assert_eq!(cancelled.ledger.shared_audio_reserved(), reserved.ledger.shared_audio_reserved());
+    let cancelled = serve
+        .quality_schedule_before(
+            &parent,
+            &owner_node,
+            &schedule,
+            Instant::now() + Duration::from_secs(12),
+        )
+        .await
+        .expect("lost append cancellation");
+    assert_eq!(
+        cancelled.ledger.transactions[0].state,
+        QualityState::Appended
+    );
+    assert!(
+        serve
+            .quality_schedule_before(
+                &parent,
+                &owner_node,
+                &window,
+                Instant::now() + Duration::from_secs(12)
+            )
+            .await
+            .is_err(),
+        "cancelled intent cannot renew readiness"
+    );
+    assert_eq!(
+        cancelled.ledger.transactions[0].reserved,
+        reserved.ledger.transactions[0].reserved
+    );
+    assert_eq!(
+        cancelled.ledger.shared_audio_reserved(),
+        reserved.ledger.shared_audio_reserved()
+    );
     transition.sequence = 4;
-    transition.operation = QualityOperation::Disposed { artifacts: cancelled.ledger.transactions[0].reserved.iter()
-        .chain(cancelled.ledger.shared_audio_reserved()).map(|interval| interval.artifact_id.clone()).collect() };
+    transition.operation = QualityOperation::Disposed {
+        artifacts: cancelled.ledger.transactions[0]
+            .reserved
+            .iter()
+            .chain(cancelled.ledger.shared_audio_reserved())
+            .map(|interval| interval.artifact_id.clone())
+            .collect(),
+    };
     schedule.transition = Some(transition);
-    let disposed = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await.expect("named completed disposal");
+    let disposed = serve
+        .quality_schedule_before(
+            &parent,
+            &owner_node,
+            &schedule,
+            Instant::now() + Duration::from_secs(12),
+        )
+        .await
+        .expect("named completed disposal");
     assert!(disposed.ledger.transactions[0].reserved.is_empty());
     assert!(disposed.ledger.shared_audio_reserved().is_empty());
-    assert!(schedule_store.quality_reserved_intervals(rung.rendition_id()).await.expect("released pins").is_empty());
-    assert!(serve.commit_resolved_media(&parent, &master.owner, None).await);
+    assert!(schedule_store
+        .quality_reserved_intervals(rung.rendition_id())
+        .await
+        .expect("released pins")
+        .is_empty());
+    assert!(
+        serve
+            .commit_resolved_media(&parent, &master.owner, None)
+            .await
+    );
     assert!(serve.end(&parent, Terminal::Deleted).await);
-    assert!(!serve.commit_resolved_media(&parent, &master.owner, None).await, "ended master cannot commit");
-    assert!(serve.quality_ready_before(&parent, &verified.family, rung.rendition_id(), rung.grid().numerator,
-        0, Instant::now() + Duration::from_secs(1)).await.is_err(), "End refuses preparation");
+    assert!(
+        !serve
+            .commit_resolved_media(&parent, &master.owner, None)
+            .await,
+        "ended master cannot commit"
+    );
+    assert!(
+        serve
+            .quality_ready_before(
+                &parent,
+                &verified.family,
+                rung.rendition_id(),
+                rung.grid().numerator,
+                0,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .is_err(),
+        "End refuses preparation"
+    );
     for rendition in owned {
         rendition.gen_epoch.fetch_add(1, Relaxed);
-        let _ = rendition.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;
+        let _ = rendition
+            .slot
+            .perform(
+                Step::Terminate {
+                    why: Termination::Idle,
+                },
+                || {},
+            )
+            .await;
         assert!(rendition.readers.lock().await.is_empty());
     }
-    assert_eq!(encoding.admissions.software_in_use(), 0, "every autonomous credit releases after reap");
+    assert_eq!(
+        encoding.admissions.software_in_use(),
+        0,
+        "every autonomous credit releases after reap"
+    );
     let mut cached_reader = FragmentReader::new();
     cached_reader.push(&cached_init);
-    let Some(Unit::Init(cached)) = cached_reader.next_unit().expect("cached AAC init") else { panic!("init first"); };
+    let Some(Unit::Init(cached)) = cached_reader.next_unit().expect("cached AAC init") else {
+        panic!("init first");
+    };
     let audio = plurx_core::transcode::VodSharedAudioRendition::from_verified_init(
-        &encoding.plan, encoding.shared_audio.as_ref().expect("AAC recipe"), &cached,
-        &"f".repeat(64), &encoding.source_object_version).expect("verified cached AAC");
+        &encoding.plan,
+        encoding.shared_audio.as_ref().expect("AAC recipe"),
+        &cached,
+        &"f".repeat(64),
+        &encoding.source_object_version,
+    )
+    .expect("verified cached AAC");
     let plan = encoding.media_plan(file.duration_ms.expect("source duration"));
     let verify = super::vod_serve_serve::verify_cached_shared_audio_interval;
     for (index, bytes) in [first, second].iter().enumerate() {
         let entry = &plan.entries[index];
         let interval = plurx_core::playback::continuous_quality::QualityInterval {
-            artifact_id: hex::encode(Sha256::digest(bytes)), rendition_id: audio.rendition_id().into(),
-            timescale: 48_000, from_tick: entry.start_ticks, through_tick: entry.end_ticks(),
+            artifact_id: hex::encode(Sha256::digest(bytes)),
+            rendition_id: audio.rendition_id().into(),
+            timescale: 48_000,
+            from_tick: entry.start_ticks,
+            through_tick: entry.end_ticks(),
             byte_length: bytes.len() as u64,
         };
         verify(&cached_init, bytes, &audio, &interval, false).expect("actual cached AAC samples");
@@ -717,51 +1194,131 @@ async fn continuous_reservation_verifies_actual_init_and_sample_bounds() {
     file.width = Some(128);
     file.height = Some(72);
     file.audio_streams.clear();
-    let options = TranscodeOptions { target_height: 36, video_bitrate_kbps: 300,
-        software_threads: Some(1), ..Default::default() };
-    let facts = DecodeFacts::from_ffprobe_json(&serde_json::json!({"streams":[{
-        "index":0,"codec_type":"video","codec_name":"h264","width":128,"height":72,
-        "pix_fmt":"yuv420p","avg_frame_rate":"24000/1001","r_frame_rate":"24000/1001",
-        "sample_aspect_ratio":"1:1","disposition":{"attached_pic":0}
-    }]}), DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source")).expect("facts");
+    let options = TranscodeOptions {
+        target_height: 36,
+        video_bitrate_kbps: 300,
+        software_threads: Some(1),
+        ..Default::default()
+    };
+    let facts = DecodeFacts::from_ffprobe_json(
+        &serde_json::json!({"streams":[{
+            "index":0,"codec_type":"video","codec_name":"h264","width":128,"height":72,
+            "pix_fmt":"yuv420p","avg_frame_rate":"24000/1001","r_frame_rate":"24000/1001",
+            "sample_aspect_ratio":"1:1","disposition":{"attached_pic":0}
+        }]}),
+        DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source"),
+    )
+    .expect("facts");
     let capabilities = DecodeCapabilities::new(
         DecodeCapabilitySnapshotIdentity::new("b".repeat(64), "reservation-fixture".into(), None)
-            .expect("capability identity"), vec![],
-        vec![SoftwareDecoder { codec:"h264".into(), implementation:Some("h264".into()) }],
-    ).expect("capabilities");
+            .expect("capability identity"),
+        vec![],
+        vec![SoftwareDecoder {
+            codec: "h264".into(),
+            implementation: Some("h264".into()),
+        }],
+    )
+    .expect("capabilities");
     let plan = resolve_transcode(
-        &TranscodeRequest::new(Encoder::Software, TranscodeMediaOptions::from_options(&file, &options))
-            .with_continuous_avc_video(),
-        &facts, &capabilities, &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        &TranscodeRequest::new(
+            Encoder::Software,
+            TranscodeMediaOptions::from_options(&file, &options),
+        )
+        .with_continuous_avc_video(),
+        &facts,
+        &capabilities,
+        &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
         &AttemptRestrictions::none(),
-    ).expect("continuous video plan");
-    let output = tokio::process::Command::new(ffmpeg_bin()).args([
-        "-hide_banner","-loglevel","error","-f","lavfi","-i",
-        "testsrc2=size=64x36:rate=24000/1001","-frames:v","96",
-        // The continuous recipe's tagging: newer ffmpeg leaves the stream
-        // unspecified unless the frames carry BT.709 themselves.
-        "-vf","setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
-        "-c:v","libx264","-preset","veryfast","-threads","1",
-        "-profile:v","high","-level:v","5.0","-pix_fmt","yuv420p","-bf","0",
-        "-g","48","-keyint_min","48","-sc_threshold","0",
-        "-color_primaries","bt709","-color_trc","bt709","-colorspace","bt709",
-        "-color_range","tv","-an","-video_track_timescale","24000",
-        // As the continuous recipe does: newer ffmpeg writes `colr` only on request.
-        "-movflags","frag_keyframe+empty_moov+default_base_moof+delay_moov+write_colr",
-        "-f","mp4","pipe:1",
-    ]).kill_on_drop(true).output().await.expect("encode interval fixture");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    )
+    .expect("continuous video plan");
+    let output = tokio::process::Command::new(ffmpeg_bin())
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x36:rate=24000/1001",
+            "-frames:v",
+            "96",
+            // The continuous recipe's tagging: newer ffmpeg leaves the stream
+            // unspecified unless the frames carry BT.709 themselves.
+            "-vf",
+            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-threads",
+            "1",
+            "-profile:v",
+            "high",
+            "-level:v",
+            "5.0",
+            "-pix_fmt",
+            "yuv420p",
+            "-bf",
+            "0",
+            "-g",
+            "48",
+            "-keyint_min",
+            "48",
+            "-sc_threshold",
+            "0",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-an",
+            "-video_track_timescale",
+            "24000",
+            // As the continuous recipe does: newer ffmpeg writes `colr` only on request.
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov+write_colr",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("encode interval fixture");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let mut reader = FragmentReader::new();
     reader.push(&output.stdout);
-    let Some(Unit::Init(init)) = reader.next_unit().expect("init") else { panic!("init first"); };
-    let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fragment") else { panic!("media second"); };
+    let Some(Unit::Init(init)) = reader.next_unit().expect("init") else {
+        panic!("init first");
+    };
+    let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fragment") else {
+        panic!("media second");
+    };
     let grid = VodFrameGrid::new(24_000, 1_001).expect("grid");
-    let rung = VodVideoRung::from_verified_init(&file, &plan, &init, grid,
-        &"c".repeat(64), "held-object-fixture", None).expect("actual verified rung");
+    let rung = VodVideoRung::from_verified_init(
+        &file,
+        &plan,
+        &init,
+        grid,
+        &"c".repeat(64),
+        "held-object-fixture",
+        None,
+    )
+    .expect("actual verified rung");
     let interval = plurx_core::playback::continuous_quality::QualityInterval {
-        artifact_id:hex::encode(Sha256::digest(&fragment.bytes)), rendition_id:rung.rendition_id().into(),
-        timescale:grid.numerator, from_tick:0, through_tick:grid.segment_ticks(),
-        byte_length:fragment.bytes.len() as u64,
+        artifact_id: hex::encode(Sha256::digest(&fragment.bytes)),
+        rendition_id: rung.rendition_id().into(),
+        timescale: grid.numerator,
+        from_tick: 0,
+        through_tick: grid.segment_ticks(),
+        byte_length: fragment.bytes.len() as u64,
     };
     let verify = super::vod_serve_serve::verify_cached_quality_interval;
     verify(&init.bytes, &fragment.bytes, &rung, &interval).expect("exact real samples");
@@ -772,13 +1329,13 @@ async fn continuous_reservation_verifies_actual_init_and_sample_bounds() {
     shifted.from_tick += 1_001;
     shifted.through_tick += 1_001;
     assert!(verify(&init.bytes, &fragment.bytes, &rung, &shifted).is_err());
-    let truncated = &fragment.bytes[..fragment.bytes.len()-1];
+    let truncated = &fragment.bytes[..fragment.bytes.len() - 1];
     let mut incomplete = interval.clone();
     incomplete.artifact_id = hex::encode(Sha256::digest(truncated));
     incomplete.byte_length = truncated.len() as u64;
     assert!(verify(&init.bytes, truncated, &rung, &incomplete).is_err());
     let mut wrong_init = init.bytes.clone();
-    let last = wrong_init.len()-1;
+    let last = wrong_init.len() - 1;
     wrong_init[last] ^= 1;
     assert!(verify(&wrong_init, &fragment.bytes, &rung, &interval).is_err());
 }
@@ -789,23 +1346,45 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     let base = crate::test_tempdir().expect("candidate cache proof");
     let (file, mut encoding) = encoded_fixture(base.path()).await;
     let candidate = [9; 32];
-    Arc::get_mut(&mut encoding).expect("unique recipe").candidate_recipe = Some(candidate);
+    Arc::get_mut(&mut encoding)
+        .expect("unique recipe")
+        .candidate_recipe = Some(candidate);
     let file_id = file.id;
     let plan_digest = encoding.plan.plan_digest();
     let serve = bare_serve(&base.path().join("renditions"));
-    let rendition = serve.shared.build_rendition(
-        "candidate-cache", None, Recipe {
-            retained_logical: None,
-            measured_candidate: None,
-            file, audio_index: None, aac: true,
-            audio_delivery: None,
-            video: CopyVideoOptions::new(false, false),
-            source_object_version: Some(encoding.source_object_version.clone()),
-            cluster_cache_key: None, encoding: Some(Arc::clone(&encoding)),
-        }, encoding.grid.plan(8_000, 428_000), &settings(),
-    ).await.expect("resolved rendition without producer");
-    serve.shared.renditions.lock().await.insert(rendition.key.clone(), Arc::clone(&rendition));
-    assert!(!serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
+    let rendition = serve
+        .shared
+        .build_rendition(
+            "candidate-cache",
+            None,
+            Recipe {
+                retained_logical: None,
+                measured_candidate: None,
+                file,
+                audio_index: None,
+                aac: true,
+                audio_delivery: None,
+                video: CopyVideoOptions::new(false, false),
+                source_object_version: Some(encoding.source_object_version.clone()),
+                cluster_cache_key: None,
+                encoding: Some(Arc::clone(&encoding)),
+            },
+            encoding.grid.plan(8_000, 428_000),
+            &settings(),
+        )
+        .await
+        .expect("resolved rendition without producer");
+    serve
+        .shared
+        .renditions
+        .lock()
+        .await
+        .insert(rendition.key.clone(), Arc::clone(&rendition));
+    assert!(
+        !serve
+            .complete_candidate_cache(file_id, candidate, &plan_digest)
+            .await
+    );
     let init = b"identity-bound init fixture";
     rendition.dir.write_init(init).await.expect("init");
     *rendition.identity.lock().await = IdentityState {
@@ -813,76 +1392,226 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
             muxer_init: "fixture".into(),
             served_init: hex::encode(Sha256::digest(init)),
             promotion: Default::default(),
-        }), from_disk: false,
+        }),
+        from_disk: false,
     };
     {
         let mut manifest = rendition.manifest.lock().await;
         for index in 0..manifest.len() as u32 {
-            rendition.dir.materialize(&mut manifest, index, b"complete segment fixture", now_ms())
-                .await.expect("publication");
+            rendition
+                .dir
+                .materialize(&mut manifest, index, b"complete segment fixture", now_ms())
+                .await
+                .expect("publication");
         }
-        manifest.complete(&Budgets {
-            working_set_bytes: u64::MAX, admission_sizing_bytes: u64::MAX, admission_share: 0.5,
-        }).expect("complete manifest");
+        manifest
+            .complete(&Budgets {
+                working_set_bytes: u64::MAX,
+                admission_sizing_bytes: u64::MAX,
+                admission_share: 0.5,
+            })
+            .expect("complete manifest");
     }
-    assert!(serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
-    assert!(!serve.complete_candidate_cache(file_id, [8; 32], &plan_digest).await);
-    assert!(!serve.complete_candidate_cache(file_id, candidate, "different plan").await);
-    let pipeline = plurx_core::transcode::PipelineDigest { ffmpeg_build: encoding.ffmpeg_build.clone() };
-    assert!(serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
-        Some(&pipeline), Some(&encoding.source_object_version), false).await);
-    assert!(!serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
-        Some(&pipeline), Some("another-held-source-object"), true).await);
-    let wrong_pipeline = plurx_core::transcode::PipelineDigest { ffmpeg_build: "different executable build".into() };
-    assert!(!serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
-        Some(&wrong_pipeline), Some(&encoding.source_object_version), true).await);
+    assert!(
+        serve
+            .complete_candidate_cache(file_id, candidate, &plan_digest)
+            .await
+    );
+    assert!(
+        !serve
+            .complete_candidate_cache(file_id, [8; 32], &plan_digest)
+            .await
+    );
+    assert!(
+        !serve
+            .complete_candidate_cache(file_id, candidate, "different plan")
+            .await
+    );
+    let pipeline = plurx_core::transcode::PipelineDigest {
+        ffmpeg_build: encoding.ffmpeg_build.clone(),
+    };
+    assert!(
+        serve
+            .complete_candidate_cache_bound(
+                file_id,
+                candidate,
+                &plan_digest,
+                Some(&pipeline),
+                Some(&encoding.source_object_version),
+                false
+            )
+            .await
+    );
+    assert!(
+        !serve
+            .complete_candidate_cache_bound(
+                file_id,
+                candidate,
+                &plan_digest,
+                Some(&pipeline),
+                Some("another-held-source-object"),
+                true
+            )
+            .await
+    );
+    let wrong_pipeline = plurx_core::transcode::PipelineDigest {
+        ffmpeg_build: "different executable build".into(),
+    };
+    assert!(
+        !serve
+            .complete_candidate_cache_bound(
+                file_id,
+                candidate,
+                &plan_digest,
+                Some(&wrong_pipeline),
+                Some(&encoding.source_object_version),
+                true
+            )
+            .await
+    );
 
-    let mut legacy_encoding = encoding.clone_with_admissions_for_test(encoding.admissions.clone()).await;
-    Arc::get_mut(&mut legacy_encoding).expect("unique legacy fixture").candidate_recipe = None;
-    assert!(!legacy_encoding.options.normalized_geometry, "fixture is the ordinary legacy recipe");
-    let legacy = serve.shared.build_rendition(
-        "legacy-candidate-cache", None, Recipe {
-            retained_logical: None,
-            measured_candidate: None,
-            audio_delivery: None,
-            file: rendition.recipe.file.clone(), audio_index: None, aac: true,
-            video: CopyVideoOptions::new(false, false),
-            source_object_version: Some(legacy_encoding.source_object_version.clone()),
-            cluster_cache_key: None, encoding: Some(Arc::clone(&legacy_encoding)),
-        }, legacy_encoding.grid.plan(8_000, 428_000), &settings(),
-    ).await.expect("legacy cached rendition without producer");
+    let mut legacy_encoding = encoding
+        .clone_with_admissions_for_test(encoding.admissions.clone())
+        .await;
+    Arc::get_mut(&mut legacy_encoding)
+        .expect("unique legacy fixture")
+        .candidate_recipe = None;
+    assert!(
+        !legacy_encoding.options.normalized_geometry,
+        "fixture is the ordinary legacy recipe"
+    );
+    let legacy = serve
+        .shared
+        .build_rendition(
+            "legacy-candidate-cache",
+            None,
+            Recipe {
+                retained_logical: None,
+                measured_candidate: None,
+                audio_delivery: None,
+                file: rendition.recipe.file.clone(),
+                audio_index: None,
+                aac: true,
+                video: CopyVideoOptions::new(false, false),
+                source_object_version: Some(legacy_encoding.source_object_version.clone()),
+                cluster_cache_key: None,
+                encoding: Some(Arc::clone(&legacy_encoding)),
+            },
+            legacy_encoding.grid.plan(8_000, 428_000),
+            &settings(),
+        )
+        .await
+        .expect("legacy cached rendition without producer");
     legacy.dir.write_init(init).await.expect("legacy init");
     *legacy.identity.lock().await = IdentityState {
-        identity: Some(InitIdentity { muxer_init: "fixture".into(),
-            served_init: hex::encode(Sha256::digest(init)), promotion: Default::default() }), from_disk: false,
+        identity: Some(InitIdentity {
+            muxer_init: "fixture".into(),
+            served_init: hex::encode(Sha256::digest(init)),
+            promotion: Default::default(),
+        }),
+        from_disk: false,
     };
-    { let mut manifest = legacy.manifest.lock().await;
-      for index in 0..manifest.len() as u32 {
-          legacy.dir.materialize(&mut manifest, index, b"complete segment fixture", now_ms()).await.expect("legacy publication");
-      }
-      manifest.complete(&Budgets { working_set_bytes: u64::MAX, admission_sizing_bytes: u64::MAX, admission_share: 0.5 }).expect("legacy complete");
+    {
+        let mut manifest = legacy.manifest.lock().await;
+        for index in 0..manifest.len() as u32 {
+            legacy
+                .dir
+                .materialize(&mut manifest, index, b"complete segment fixture", now_ms())
+                .await
+                .expect("legacy publication");
+        }
+        manifest
+            .complete(&Budgets {
+                working_set_bytes: u64::MAX,
+                admission_sizing_bytes: u64::MAX,
+                admission_share: 0.5,
+            })
+            .expect("legacy complete");
     }
     // Remove the candidate-tagged member to exercise the actual legacy branch.
     serve.shared.renditions.lock().await.clear();
-    serve.shared.renditions.lock().await.insert(legacy.key.clone(), Arc::clone(&legacy));
-    assert!(!serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
-        Some(&pipeline), Some(&encoding.source_object_version), false).await);
-    assert!(serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
-        Some(&pipeline), Some(&encoding.source_object_version), true).await);
-    assert!(!serve.complete_candidate_cache_bound(file_id, candidate, "normalized-or-other-plan",
-        Some(&pipeline), Some(&encoding.source_object_version), true).await);
+    serve
+        .shared
+        .renditions
+        .lock()
+        .await
+        .insert(legacy.key.clone(), Arc::clone(&legacy));
+    assert!(
+        !serve
+            .complete_candidate_cache_bound(
+                file_id,
+                candidate,
+                &plan_digest,
+                Some(&pipeline),
+                Some(&encoding.source_object_version),
+                false
+            )
+            .await
+    );
+    assert!(
+        serve
+            .complete_candidate_cache_bound(
+                file_id,
+                candidate,
+                &plan_digest,
+                Some(&pipeline),
+                Some(&encoding.source_object_version),
+                true
+            )
+            .await
+    );
+    assert!(
+        !serve
+            .complete_candidate_cache_bound(
+                file_id,
+                candidate,
+                "normalized-or-other-plan",
+                Some(&pipeline),
+                Some(&encoding.source_object_version),
+                true
+            )
+            .await
+    );
     serve.shared.renditions.lock().await.clear();
-    serve.shared.renditions.lock().await.insert(rendition.key.clone(), Arc::clone(&rendition));
+    serve
+        .shared
+        .renditions
+        .lock()
+        .await
+        .insert(rendition.key.clone(), Arc::clone(&rendition));
     let member = rendition.dir.path().join(segment_name(0));
-    tokio::fs::write(&member, b"short").await.expect("simulate truncated restore");
-    assert!(!serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
-    tokio::fs::write(&member, b"complete segment fixture").await.expect("restore member");
+    tokio::fs::write(&member, b"short")
+        .await
+        .expect("simulate truncated restore");
+    assert!(
+        !serve
+            .complete_candidate_cache(file_id, candidate, &plan_digest)
+            .await
+    );
+    tokio::fs::write(&member, b"complete segment fixture")
+        .await
+        .expect("restore member");
     tokio::fs::write(rendition.dir.path().join(INIT_NAME), b"wrong init")
-        .await.expect("simulate init corruption");
-    assert!(!serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
-    tokio::fs::remove_file(&member).await.expect("simulate missing member");
-    assert!(!serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
-    assert_eq!(encoding.admissions.software_in_use(), 0, "lookup never starts a producer");
+        .await
+        .expect("simulate init corruption");
+    assert!(
+        !serve
+            .complete_candidate_cache(file_id, candidate, &plan_digest)
+            .await
+    );
+    tokio::fs::remove_file(&member)
+        .await
+        .expect("simulate missing member");
+    assert!(
+        !serve
+            .complete_candidate_cache(file_id, candidate, &plan_digest)
+            .await
+    );
+    assert_eq!(
+        encoding.admissions.software_in_use(),
+        0,
+        "lookup never starts a producer"
+    );
 }
 
 #[tokio::test]
@@ -1036,7 +1765,8 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         .expect_err("a captured old source cannot attach a new object");
     assert!(refused.contains("source changed"), "{refused}");
     let fresh = Arc::new(crate::vodencode::Encoding {
-            shared_audio: None,        candidate_recipe: None,
+        shared_audio: None,
+        candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
         active_production: StdMutex::new(crate::vodencode::ActiveProductionWindow::default()),
         nonpreemptive_trial: false,
@@ -1218,9 +1948,9 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
                 measured_candidate: None,
                 file,
                 audio_index: None,
-               aac: true,
+                aac: true,
                 audio_delivery: None,
-               video: CopyVideoOptions::new(false, false),
+                video: CopyVideoOptions::new(false, false),
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 encoding: Some(Arc::clone(&encoding)),
@@ -1399,8 +2129,8 @@ async fn encoded_vod_burn_sidecar_cannot_reuse_replaced_source_captions() {
         None,
         crate::subtitles::SIDECAR_JOIN_UNBOUNDED,
     )
-        .await
-        .expect("first burn extraction");
+    .await
+    .expect("first burn extraction");
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut old, &mut bytes).expect("first sidecar");
     assert!(bytes.windows(5).any(|window| window == b"ALPHA"));
@@ -1418,8 +2148,8 @@ async fn encoded_vod_burn_sidecar_cannot_reuse_replaced_source_captions() {
         None,
         crate::subtitles::SIDECAR_JOIN_UNBOUNDED,
     )
-        .await
-        .expect("new source burn extraction");
+    .await
+    .expect("new source burn extraction");
     bytes.clear();
     std::io::Read::read_to_end(&mut new, &mut bytes).expect("new sidecar");
     assert!(bytes.windows(5).any(|window| window == b"BRAVO"));
@@ -1438,27 +2168,16 @@ async fn burn_extractor_physically_caps_oversized_matroska_attachment() {
         .set_len(CAP + 1024 * 1024)
         .expect("sparse attachment");
     let captions = base.path().join("caption.srt");
-    tokio::fs::write(
-        &captions,
-        "1\n00:00:00,000 --> 00:00:04,000\nCAP TEST\n\n",
-    )
-    .await
-    .expect("caption");
+    tokio::fs::write(&captions, "1\n00:00:00,000 --> 00:00:04,000\nCAP TEST\n\n")
+        .await
+        .expect("caption");
     let source = base.path().join("oversized.mkv");
     let output = tokio::process::Command::new(ffmpeg_bin())
         .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(testfixtures::source("h264"))
         .arg("-i")
         .arg(&captions)
-        .args([
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:s:0",
-            "-c",
-            "copy",
-            "-attach",
-        ])
+        .args(["-map", "0:v:0", "-map", "1:s:0", "-c", "copy", "-attach"])
         .arg(&attachment)
         .args([
             "-metadata:s:t",
@@ -1493,8 +2212,8 @@ async fn burn_extractor_physically_caps_oversized_matroska_attachment() {
         None,
         crate::subtitles::SIDECAR_JOIN_UNBOUNDED,
     )
-        .await
-        .expect_err("oversized attachment must be stopped before publication");
+    .await
+    .expect_err("oversized attachment must be stopped before publication");
     assert!(error.contains("disk bound"), "{error}");
     for entry in std::fs::read_dir(&cache).expect("cache directory") {
         let metadata = entry.expect("cache entry").metadata().expect("metadata");
@@ -1732,12 +2451,15 @@ async fn encoded_vod_aac_is_continuous_across_independently_regenerated_neighbor
     assert_encoded_neighbor_continuity(base.path(), &file, &encoding).await;
 }
 
-async fn assert_encoded_neighbor_continuity(base: &Path, file: &MediaFile, encoding: &Arc<crate::vodencode::Encoding>) {
+async fn assert_encoded_neighbor_continuity(
+    base: &Path,
+    file: &MediaFile,
+    encoding: &Arc<crate::vodencode::Encoding>,
+) {
     let serve = bare_serve(&base.join("neighbor-renditions"));
     for entry in [0, 44] {
         let (init, old_first, old_next) = encoded_pair(&serve, file, encoding, entry).await;
-        let (new_init, new_next, following) =
-            encoded_pair(&serve, file, encoding, entry + 1).await;
+        let (new_init, new_next, following) = encoded_pair(&serve, file, encoding, entry + 1).await;
         let (reverse_init, regenerated_first, _) =
             encoded_pair(&serve, file, encoding, entry).await;
         assert_eq!(init, new_init);
@@ -1767,16 +2489,17 @@ async fn assert_encoded_neighbor_continuity(base: &Path, file: &MediaFile, encod
             ("reverse", &regenerated_first, &old_next),
         ] {
             if encoding.reorder_frames {
-                assert_reordered_video_splice(&base.join(format!("video-{entry}-{label}.mp4")),
-                    &init, left, right, encoding.grid.frames_per_segment as usize * 2).await;
+                assert_reordered_video_splice(
+                    &base.join(format!("video-{entry}-{label}.mp4")),
+                    &init,
+                    left,
+                    right,
+                    encoding.grid.frames_per_segment as usize * 2,
+                )
+                .await;
             }
-            let joined = decoded_audio(
-                &base.join(format!("audio-{label}.mp4")),
-                &init,
-                left,
-                right,
-            )
-            .await;
+            let joined =
+                decoded_audio(&base.join(format!("audio-{label}.mp4")), &init, left, right).await;
             assert_eq!(
                 joined.len(),
                 baseline.len(),
@@ -1833,22 +2556,58 @@ async fn encoded_vod_ntsc_gets_decode_after_forward_and_backward_restarts() {
     assert_encoded_restarts(base.path(), file, encoding).await;
 }
 
-async fn assert_reordered_video_splice(path: &Path, init: &[u8], left: &[u8], right: &[u8], count: usize) {
-    tokio::fs::write(path, [init,left,right].concat()).await.expect("restart splice bytes");
+async fn assert_reordered_video_splice(
+    path: &Path,
+    init: &[u8],
+    left: &[u8],
+    right: &[u8],
+    count: usize,
+) {
+    tokio::fs::write(path, [init, left, right].concat())
+        .await
+        .expect("restart splice bytes");
     let output = tokio::process::Command::new(ffmpeg_bin())
-        .args(["-hide_banner","-loglevel","error","-xerror","-i"]).arg(path)
-        .args(["-map","0:v:0","-an","-fps_mode","passthrough","-f","framemd5","-"])
-        .kill_on_drop(true).output().await.expect("decode reordered restart splice");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        .args(["-hide_banner", "-loglevel", "error", "-xerror", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "framemd5",
+            "-",
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("decode reordered restart splice");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let text = String::from_utf8(output.stdout).expect("frame records");
-    let frames = text.lines().filter(|line| !line.starts_with('#') && !line.trim().is_empty())
-        .map(|line| line.split(',').map(str::trim).collect::<Vec<_>>()).collect::<Vec<_>>();
-    assert_eq!(frames.len(), count, "splice must neither drop nor duplicate pictures: {text}");
+    let frames = text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split(',').map(str::trim).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        frames.len(),
+        count,
+        "splice must neither drop nor duplicate pictures: {text}"
+    );
     for pair in frames.windows(2) {
         let before = pair[0][2].parse::<i64>().expect("PTS");
         let duration = pair[0][3].parse::<i64>().expect("duration");
         let next = pair[1][2].parse::<i64>().expect("PTS");
-        assert_eq!(next, before + duration, "presentation must be contiguous across restart");
+        assert_eq!(
+            next,
+            before + duration,
+            "presentation must be contiguous across restart"
+        );
     }
 }
 
@@ -1858,10 +2617,18 @@ async fn encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid() {
     let base = crate::test_tempdir().expect("reordered encoded fixture");
     let (file, mut encoding) = encoded_fixture(base.path()).await;
     let original = encoding.identity(&file, 96.0);
-    Arc::get_mut(&mut encoding).expect("new fixture").reorder_frames = true;
-    assert_ne!(encoding.identity(&file, 96.0), original, "reordered bytes need their own rendition");
+    Arc::get_mut(&mut encoding)
+        .expect("new fixture")
+        .reorder_frames = true;
+    assert_ne!(
+        encoding.identity(&file, 96.0),
+        original,
+        "reordered bytes need their own rendition"
+    );
     assert_encoded_neighbor_continuity(base.path(), &file, &encoding).await;
-    let encoding = encoding.clone_with_admissions_for_test(crate::admission::Admissions::new()).await;
+    let encoding = encoding
+        .clone_with_admissions_for_test(crate::admission::Admissions::new())
+        .await;
     assert_encoded_restarts(base.path(), file, encoding).await;
 }
 
@@ -2077,10 +2844,15 @@ async fn assert_encoded_restarts(
                         let expected = rendition.plan.entry(entry).expect("entry");
                         assert_eq!(video.base_decode_time, expected.start_ticks);
                         assert_eq!(video.duration(), expected.duration_ticks);
-                        plurx_core::fmp4::validate_encoded_grid(&fragment,
-                            parsed_init.as_ref().expect("init before media"), rendition.plan.timescale,
-                            expected.start_ticks, expected.duration_ticks, encoding.grid.denominator)
-                            .expect("served fragment owns the exact presentation grid");
+                        plurx_core::fmp4::validate_encoded_grid(
+                            &fragment,
+                            parsed_init.as_ref().expect("init before media"),
+                            rendition.plan.timescale,
+                            expected.start_ticks,
+                            expected.duration_ticks,
+                            encoding.grid.denominator,
+                        )
+                        .expect("served fragment owns the exact presentation grid");
                         saw_reorder |= video.samples().any(|sample| sample.cto != 0);
                         assert_eq!(
                             video.sample_count(),
@@ -2102,7 +2874,10 @@ async fn assert_encoded_restarts(
             }
         }
         if encoding.reorder_frames {
-            assert!(saw_reorder, "the reordered fixture must actually exercise B pictures");
+            assert!(
+                saw_reorder,
+                "the reordered fixture must actually exercise B pictures"
+            );
         }
         // A seek attaches at the containing segment boundary, which can
         // precede the requested film time. With VFR input, the fps filter may
@@ -2112,9 +2887,7 @@ async fn assert_encoded_restarts(
         let entry_start_seconds = rendition.plan.entry(entry).expect("entry").start_ticks as f64
             / f64::from(rendition.plan.timescale);
         let marker_offset = (target - entry_start_seconds).max(0.0);
-        let marker_filter = format!(
-            "select='gte(t,{marker_offset:.9})',crop=2:2:8:8,format=rgb24"
-        );
+        let marker_filter = format!("select='gte(t,{marker_offset:.9})',crop=2:2:8:8,format=rgb24");
         let pixel = tokio::process::Command::new(ffmpeg_bin())
             .args(["-hide_banner", "-loglevel", "error", "-i"])
             .arg(&output)
@@ -2152,9 +2925,14 @@ async fn assert_encoded_restarts(
             .expect("decode every output frame");
         assert!(frames.status.success());
         let checksums = String::from_utf8(frames.stdout).expect("frame checksums");
-        let frame_count = checksums.lines().filter(|line| !line.starts_with('#') && !line.trim().is_empty()).count();
-        assert_eq!(frame_count, encoding.grid.frames_per_segment as usize,
-            "standalone entry must decode every planned presentation slot");
+        let frame_count = checksums
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .count();
+        assert_eq!(
+            frame_count, encoding.grid.frames_per_segment as usize,
+            "standalone entry must decode every planned presentation slot"
+        );
         let distinct = checksums
             .lines()
             .filter(|line| !line.starts_with('#'))
@@ -2347,16 +3125,15 @@ async fn encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing()
         codec: "hdmv_pgs_subtitle".into(),
         ..Default::default()
     }];
-    let subtitle =
-        crate::subtitles::ensure_burn_file(
-            &base.path().join("subtitles"),
-            &file,
-            0,
-            None,
-            crate::subtitles::SIDECAR_JOIN_UNBOUNDED,
-        )
-            .await
-            .expect("production bitmap extraction");
+    let subtitle = crate::subtitles::ensure_burn_file(
+        &base.path().join("subtitles"),
+        &file,
+        0,
+        None,
+        crate::subtitles::SIDECAR_JOIN_UNBOUNDED,
+    )
+    .await
+    .expect("production bitmap extraction");
     let frozen = Arc::get_mut(&mut encoding).expect("unique recipe");
     frozen.source_object_version = crate::fragment_index_cluster::open_source_fence(&file, None)
         .await
@@ -2412,10 +3189,7 @@ async fn encoded_vod_manual_audio_correction_keeps_restart_init_stable() {
         let base = crate::test_tempdir().expect("audio offset fixture");
         let (mut file, mut encoding) = encoded_fixture(base.path()).await;
         file.audio_offset_ms = offset;
-        refresh_encoded_plan(
-            &file,
-            Arc::get_mut(&mut encoding).expect("unique recipe"),
-        );
+        refresh_encoded_plan(&file, Arc::get_mut(&mut encoding).expect("unique recipe"));
         assert_encoded_restarts(base.path(), file, encoding).await;
     }
 }
@@ -2499,7 +3273,8 @@ async fn copy_and_encoded_vod_refuse_missing_or_nonpositive_duration_without_att
             let refusal = serve
                 .try_create(
                     VodRecipeRequest {
-                        measured_candidate: None, retained_capture: crate::vodserve::RetainedOutputCapture::New,
+                        measured_candidate: None,
+                        retained_capture: crate::vodserve::RetainedOutputCapture::New,
                         companion: None,
                         soundtrack: None,
                         request: &req,

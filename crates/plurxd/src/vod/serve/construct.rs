@@ -178,6 +178,7 @@ impl VodServe {
             plan,
             identity: Mutex::new(IdentityState::default()),
             slot: ProducerSlot::new(),
+            source_owners: SourceRenditionOwners::default(),
             retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),
@@ -435,6 +436,9 @@ impl VodServe {
         video: CopyVideoOptions,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<Option<(FragmentIndex, String, String)>, String> {
+        if let Some(viewer) = viewer {
+            viewer.require_local_authority().map_err(str::to_owned)?;
+        }
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
             return Err("the fragment-index engine changed; restart is required".to_owned());
         }
@@ -501,14 +505,14 @@ impl VodServe {
                 .await
                 .map_err(|error| format!("queueing the exact v2 artifact: {error}"))?;
             if queued {
-                if let Some(viewer) = viewer.filter(|viewer| viewer.user_id > 0) {
+                if let Some(viewer) = viewer {
                     self.shared
                         .store
                         .join_artifact_viewer(plurx_core::store::ArtifactViewerInterest {
                             cache_key: cache_key.clone(),
                             file_id: file.id,
                             target_node_id: node_id.to_owned(),
-                            user_id: viewer.user_id,
+                            principal: viewer.principal.clone(),
                             playback_id: viewer.playback_id.clone(),
                             now_ms: crate::fragment_index_cluster::unix_ms(),
                         })

@@ -1106,7 +1106,7 @@ pub(crate) async fn activate_control_route(
     let fingerprint = "a".repeat(64);
     store
         .claim_media_session_request(
-            7,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             generation,
             &fingerprint,
             "player-control",
@@ -1117,7 +1117,13 @@ pub(crate) async fn activate_control_route(
         .await
         .expect("claim route");
     assert!(store
-        .assign_media_session_request_owner(7, generation, generation, owner_node_id, now_ms,)
+        .assign_media_session_request_owner(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+            generation,
+            generation,
+            owner_node_id,
+            now_ms,
+        )
         .await
         .expect("assign route owner"));
     let activation = plurx_core::domain::MediaSessionActivation {
@@ -1125,7 +1131,7 @@ pub(crate) async fn activate_control_route(
         expected_desired_revision: None,
         incarnation_id: generation.to_owned(),
         session_id: session_id.to_owned(),
-        user_id: 7,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
         playback_id: "player-control".to_owned(),
         expected_predecessor_incarnation_id: None,
         fence_predecessor: false,
@@ -2366,20 +2372,33 @@ async fn vod_admission_stays_closed_with_cache_budget_unset() {
         .await
         .expect("snapshot")
         .expect("enabled");
-    assert_eq!(settings.completed_cache_bytes, 0, "unset keeps admission closed");
-    assert_eq!(settings.output_budget_bytes, 50 << 30, "unset is the 50 GB output budget");
+    assert_eq!(
+        settings.completed_cache_bytes, 0,
+        "unset keeps admission closed"
+    );
+    assert_eq!(
+        settings.output_budget_bytes,
+        50 << 30,
+        "unset is the 50 GB output budget"
+    );
     assert_eq!(
         settings.output_preparation,
         crate::vodserve::OutputPreparation::Off,
         "output preparation defaults off"
     );
-    store.put_setting(keys::CACHE_MAX_GB, "0").await.expect("disable");
+    store
+        .put_setting(keys::CACHE_MAX_GB, "0")
+        .await
+        .expect("disable");
     let settings = manager
         .vod_settings(&snapshot_probe_request())
         .await
         .expect("snapshot")
         .expect("enabled");
-    assert_eq!((settings.completed_cache_bytes, settings.output_budget_bytes), (0, 0));
+    assert_eq!(
+        (settings.completed_cache_bytes, settings.output_budget_bytes),
+        (0, 0)
+    );
 }
 
 /// D4: the VOD create path's switches come from its one settings batch, so
@@ -2418,7 +2437,10 @@ async fn vod_copy_create_reads_settings_once() {
         keys::HEVC_UNVERIFIED_COPY,
         keys::VOD_LIVE_RECOVERY,
     ] {
-        assert!(reads[0].iter().any(|read| read == key), "{key} is in the batch: {reads:?}");
+        assert!(
+            reads[0].iter().any(|read| read == key),
+            "{key} is in the batch: {reads:?}"
+        );
     }
     assert!(settings.index_cluster_cache && settings.hevc_unverified_copy);
     assert!(!settings.live_recovery);
@@ -2439,7 +2461,14 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     );
     let mut req = snapshot_probe_request();
     // S-10: absent is off, carried in the same settings batch.
-    assert!(!manager.vod_settings(&req).await.expect("snapshot").expect("enabled").sdr_master_codecs);
+    assert!(
+        !manager
+            .vod_settings(&req)
+            .await
+            .expect("snapshot")
+            .expect("enabled")
+            .sdr_master_codecs
+    );
     store
         .put_settings(&[
             (keys::VOD_PRESENTATION, "1"),
@@ -3619,13 +3648,21 @@ fn the_grade_is_part_of_a_request_identity() {
         "the legacy process-local key keeps its global username scope"
     );
     assert_eq!(
-        request.durable_intent_fingerprint(7),
-        request.clone().durable_intent_fingerprint(7),
+        request.durable_intent_fingerprint(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }
+        ),
+        request.clone().durable_intent_fingerprint(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }
+        ),
         "the replicated key is scoped by immutable user id, not username"
     );
     assert_ne!(
-        request.durable_intent_fingerprint(7),
-        request.durable_intent_fingerprint(8),
+        request.durable_intent_fingerprint(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }
+        ),
+        request.durable_intent_fingerprint(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 8 }
+        ),
         "different durable users remain distinct"
     );
 }

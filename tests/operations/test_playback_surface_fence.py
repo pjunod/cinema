@@ -308,7 +308,21 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         # here, and the reviewer's question is "why does the player publish two
         # surfaces?".
         source = (ROOT / "clients/apple/Sources/PlayerController.swift").read_text(encoding="utf-8")
-        published = sorted(set(re.findall(r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", source)))
+        # The file holds two controllers. Each one's published surface is
+        # pinned separately, so a field added to either is a visible diff.
+        shared_start = source.index("final class SharedPlayerController")
+        published = sorted(set(re.findall(
+            r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", source[:shared_start])))
+        shared = sorted(set(re.findall(
+            r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", source[shared_start:])))
+        # The Shared player owns its own fixed state and never reaches Local
+        # recovery. Whether its `failure` text should render through the one
+        # PlaybackSurfaceModel instead is an open question for its lane.
+        # `busy`, `playing` and `plan` drive its server-accepted controls;
+        # `notice` is a refused control or change, never a playback fault.
+        # `preparing` only lets a viewer action interrupt a prepared change
+        # that has not reached its switch; it draws no surface.
+        self.assertEqual(shared, ["busy", "failure", "notice", "plan", "playback", "playing", "preparing", "starting", "statusSummary"])
         self.assertEqual(published, [
             "currentMs", "decision", "deliveredDolbyVisionProfile", "deliveredRange",
             "encoder", "finished", "isChangingStream", "isPlaying", "isVOD",

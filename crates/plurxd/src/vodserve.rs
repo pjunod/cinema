@@ -57,12 +57,16 @@ use crate::copyseg::sanitize_stale_dolby_brand;
 use crate::ffmpeg::ffmpeg_bin;
 use crate::prodexec::{next_step, yield_step, Contention, Producer, Step, Termination};
 use crate::prodrun::{Performed, ProducerSlot};
+#[path = "vod/source_lifetime.rs"]
+mod source_lifetime;
 use crate::prodsched::{decide, Action, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
 use crate::renditiondir::{InitIdentity, InitRefused, RenditionDir, INIT_NAME};
 use crate::titlestore::{Budgets, Manifest, ReaderWindow, SegState};
 use crate::transcode::{session_log_id, SessionKind, SessionRequest};
 use crate::vodgen::{self, Failure, Generation, Outcome};
 use crate::waitpool::{VodProducerKind, VodProducerTermination, WaitKey, WaitOutcome, WaitPool};
+pub(crate) use source_lifetime::SourceProducerAssociationsSettled;
+use source_lifetime::SourceRenditionOwners;
 
 /// Sliding idle TTL for a session (plan §2.5's dormant reap, scoped to this
 /// in-memory registry): a session none of whose authorized GETs have arrived
@@ -1196,6 +1200,9 @@ mod vod_serve_construct;
 mod vod_serve_control;
 #[path = "vod/serve/create.rs"]
 mod vod_serve_create;
+#[cfg(test)]
+pub(crate) use vod_serve_create::AdmittedSourceVodRendition;
+pub(crate) use vod_serve_create::ReservedSourceVodRendition;
 #[path = "vod/serve/delivery.rs"]
 mod vod_serve_delivery;
 #[path = "vod/serve/end.rs"]

@@ -1862,6 +1862,33 @@ async fn pause_marker_fallback_for_test(path: &Path) {
     }
 }
 
+/// Shared planning reads evidence only. Missing scan-time chapters never launch
+/// an unadmitted probe or mutate the revision captured by the Source request.
+async fn stored_markers_for_source(state: &AppState, file: &MediaFile) -> Vec<Marker> {
+    let identity = annotation_source_identity(file);
+    match state
+        .store
+        .timeline_annotation_set(file.id, &identity)
+        .await
+    {
+        Ok(Some(set)) => markers_from_annotation_set(set),
+        Ok(None) => markers_from_chapters(
+            &stored_chapters(state, file.id).await.unwrap_or_default(),
+            file.duration_ms,
+        ),
+        Err(error) => {
+            tracing::warn!(file_id=file.id, %error, "could not read Source timeline annotations");
+            Vec::new()
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MarkerReadPolicy {
+    LocalDerivation,
+    StoredSourceEvidence,
+}
+
 pub(crate) async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
     let source_identity = annotation_source_identity(file);
     match state
@@ -2223,7 +2250,53 @@ pub async fn decision(
     }
     let network_prior =
         super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
-    let mut file = load_file(&state, id).await?;
+    let file = load_file(&state, id).await?;
+    decision_for_file(
+        &state,
+        file,
+        q,
+        network_prior,
+        Some(&user),
+        (
+            identity.as_ref(),
+            super::hls::link_receipts::requested_receipt(&headers),
+        ),
+        MarkerReadPolicy::LocalDerivation,
+    )
+    .await
+    .map(Json)
+}
+
+/// The actual engine for both local and authorized Source media. Source callers
+/// never supply a local account or its node-local network prior.
+pub(super) async fn decision_for_source_file(
+    state: &AppState,
+    file: MediaFile,
+    q: Caps,
+) -> Result<DecisionResponse, ApiError> {
+    decision_for_file(
+        state,
+        file,
+        q,
+        None,
+        None,
+        (None, None),
+        MarkerReadPolicy::StoredSourceEvidence,
+    )
+    .await
+}
+
+async fn decision_for_file(
+    state: &AppState,
+    mut file: MediaFile,
+    q: Caps,
+    network_prior: Option<plurx_core::domain::NetworkPrior>,
+    user: Option<&plurx_core::domain::User>,
+    link_evidence: (Option<&crate::telemetry::NetworkIdentity>, Option<&str>),
+    marker_policy: MarkerReadPolicy,
+) -> Result<DecisionResponse, ApiError> {
+    let (identity, incumbent_receipt) = link_evidence;
+    let id = file.id;
     // Older builds stored this against the file. A fresh playback must never
     // inherit that historical value; its client starts at zero and carries
     // any adjustment on each stream request for this one playback only.
@@ -2280,7 +2353,7 @@ pub async fn decision(
     // therefore about whether `Auto` wants full subtitles at all.
     let container_audio_streams = file.audio_streams.clone();
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
-    let node = decision_render_caps(render_caps(&state).await, q.caps_v2.as_ref());
+    let node = decision_render_caps(render_caps(state).await, q.caps_v2.as_ref());
     let decision_now_ms = crate::media_sessions::unix_ms();
     let mut decision = q.decide(&file, &node, decision_now_ms);
     if let Some(caps) = q.caps_v2.as_ref().filter(|caps| {
@@ -2423,8 +2496,8 @@ pub async fn decision(
         })
         .unwrap_or_default();
     tracing::info!(
-        user_id = user.id,
-        username = %user.username,
+        user_id = user.map(|user| user.id),
+        username = user.map(|user| user.username.as_str()),
         file_id = id,
         client = q.client.as_deref().unwrap_or("unknown"),
         device = q.device.as_deref().unwrap_or("unknown"),
@@ -2473,7 +2546,10 @@ pub async fn decision(
     } else {
         None
     };
-    let markers = markers_for(&state, &file).await;
+    let markers = match marker_policy {
+        MarkerReadPolicy::LocalDerivation => markers_for(state, &file).await,
+        MarkerReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
+    };
 
     // DTO defaults and the verdict now come from the same selection above.
     let audio = audio_tracks(&file);
@@ -2525,7 +2601,7 @@ pub async fn decision(
             };
             let accepted = state
                 .media_pool
-                .quality_candidates(&state, request.clone())
+                .quality_candidates(state, request.clone())
                 .await;
             // Costs are advisory, but their source/settings must be the exact
             // accepted local row. Acquisition and projection share one deadline.
@@ -2554,7 +2630,7 @@ pub async fn decision(
                     .cloned()
                     .collect();
                 super::hls::link_receipts::measured_outputs(
-                    &state,
+                    state,
                     &file,
                     &request,
                     &local,
@@ -2589,25 +2665,21 @@ pub async fn decision(
             // `decision_catalog` and reused by the warm-Auto narrowing below.
             super::hls::link_receipts::with_decision_source_link(async {
                 let (catalog, positive) = super::hls::candidate_recovery::decision_catalog(
-                    &state,
-                    identity.as_ref(),
+                    state,
+                    identity,
                     &file,
-                    super::hls::link_receipts::requested_receipt(&headers),
+                    incumbent_receipt,
                     catalog.clone(),
                     advisory,
                 )
                 .await;
                 let catalog = super::hls::link_receipts::filter_catalog(
-                    &state,
-                    identity.as_ref(),
-                    &file,
-                    catalog,
-                    advisory,
+                    state, identity, &file, catalog, advisory,
                 )
                 .await;
                 // Cold start only: with an incumbent receipt the live transfer
                 // below is fresher evidence than a stored verdict.
-                let catalog = if super::hls::link_receipts::requested_receipt(&headers).is_none() {
+                let catalog = if incumbent_receipt.is_none() {
                     super::hls::link_receipts::link_starved_catalog(
                         network_prior.as_ref(),
                         catalog,
@@ -2681,7 +2753,7 @@ pub async fn decision(
                 })
         }
     });
-    Ok(Json(DecisionResponse {
+    Ok(DecisionResponse {
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
         quality_candidates,
@@ -2703,11 +2775,11 @@ pub async fn decision(
         }),
         markers,
         audio_offset_ms: file.audio_offset_ms,
-        declared_offset_ms: declared_av_offset(&state, id).await,
+        declared_offset_ms: declared_av_offset(state, id).await,
         ladder: crate::transcode::ladder(file.height),
         prior_kbps: candidate_prior.and_then(|prior| prior.sustained_kbps),
         prefer_segmented,
-    }))
+    })
 }
 
 /// The container's own per-stream start-time story: audio start minus video
@@ -2788,6 +2860,18 @@ pub async fn subtitles_vtt(
         .parse::<i64>()
         .map_err(|_| ApiError::NotFound("subtitle track"))?;
     let file = load_file(&state, id).await?;
+    subtitle_vtt_for_file(&state, &file, index).await
+}
+
+/// One text track of an already-resolved file as WebVTT. Local callers resolve
+/// the file by ID after login; the shared Source resolves it only after its
+/// grant/item/file/revision witness.
+pub(crate) async fn subtitle_vtt_for_file(
+    state: &AppState,
+    file: &MediaFile,
+    index: i64,
+) -> Result<Response, ApiError> {
+    let id = file.id;
     let stream = file
         .subtitle_streams
         .get(index as usize)
@@ -2802,7 +2886,7 @@ pub async fn subtitles_vtt(
 
     let bytes = crate::subtitles::ensure_vtt_bytes_with_store(
         &state.subs_dir,
-        &file,
+        file,
         index,
         &state.subtitle_source_access(),
         SUBTITLE_TRACK_FOR_A_VIEWER,
@@ -3417,6 +3501,74 @@ fn range_decimal(value: &str) -> Result<u64, ()> {
     }))
 }
 
+/// The byte answer one raw-file request receives. Local direct play and the
+/// shared Source direct lane derive it from the same inputs with the same
+/// function, so their 200/206/416 and If-Range behaviour cannot drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileRangePlan {
+    /// The whole representation (also every HEAD and every ignored Range).
+    Full,
+    /// One satisfiable inclusive byte range.
+    Partial { start: u64, end: u64 },
+    /// A Range this file cannot satisfy (416).
+    Unsatisfiable,
+}
+
+/// Plan a raw-file response. HEAD never ranges; an If-Range precondition
+/// cannot authorize a partial response because these routes publish no
+/// strong validator, so the Range is ignored and the whole file is sent.
+pub(crate) fn plan_file_range(headers: &HeaderMap, method: &Method, len: u64) -> FileRangePlan {
+    if method != Method::GET {
+        return FileRangePlan::Full;
+    }
+    match parse_range(headers, len) {
+        Err(()) => FileRangePlan::Unsatisfiable,
+        Ok(Some((start, end))) => FileRangePlan::Partial { start, end },
+        Ok(None) => FileRangePlan::Full,
+    }
+}
+
+/// The exact status and header set a planned raw-file response carries.
+/// Shared by Local direct play and the Source direct lane.
+pub(crate) fn file_range_head(
+    plan: FileRangePlan,
+    len: u64,
+    ctype: &str,
+) -> (StatusCode, Vec<(header::HeaderName, String)>) {
+    match plan {
+        FileRangePlan::Unsatisfiable => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            vec![
+                (header::CONTENT_RANGE, format!("bytes */{len}")),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, "0".to_owned()),
+            ],
+        ),
+        FileRangePlan::Partial { start, end } => (
+            StatusCode::PARTIAL_CONTENT,
+            vec![
+                (header::CONTENT_TYPE, ctype.to_owned()),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, (end - start + 1).to_string()),
+                (header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}")),
+            ],
+        ),
+        FileRangePlan::Full => (
+            StatusCode::OK,
+            vec![
+                (header::CONTENT_TYPE, ctype.to_owned()),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, len.to_string()),
+            ],
+        ),
+    }
+}
+
+/// The media type a raw-file response names for `path`.
+pub(crate) fn file_content_type(path: &Path) -> &'static str {
+    content_type(path)
+}
+
 /// HTTP range serving of a file (direct play). Shared by the native part
 /// endpoint and the Plex-compat `/library/parts/...` endpoint.
 pub(crate) async fn serve_file_range(
@@ -3437,65 +3589,33 @@ pub(crate) async fn serve_file_range(
         return Err(ApiError::NotFound("file on disk"));
     }
     let ctype = content_type(path);
-
-    let range = if method == Method::GET {
-        parse_range(headers, len)
-    } else {
-        Ok(None)
-    };
-    match range {
-        Err(()) => Ok((
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            [
-                (header::CONTENT_RANGE, format!("bytes */{len}")),
-                (header::ACCEPT_RANGES, "bytes".to_owned()),
-                (header::CONTENT_LENGTH, "0".to_owned()),
-            ],
-            Body::empty(),
-        )
-            .into_response()),
-        Ok(Some((start, end))) => {
-            let count = end - start + 1;
+    let plan = plan_file_range(headers, method, len);
+    let body = match plan {
+        FileRangePlan::Unsatisfiable => Body::empty(),
+        FileRangePlan::Partial { start, end } => {
             fh.seek(std::io::SeekFrom::Start(start))
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let stream = tokio_util::io::ReaderStream::with_capacity(
-                fh.take(count),
+            Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+                fh.take(end - start + 1),
                 crate::media_sessions::MEDIA_BODY_READ_BUFFER,
-            );
-            Ok((
-                StatusCode::PARTIAL_CONTENT,
-                [
-                    (header::CONTENT_TYPE, ctype.to_owned()),
-                    (header::ACCEPT_RANGES, "bytes".to_owned()),
-                    (header::CONTENT_LENGTH, count.to_string()),
-                    (header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}")),
-                ],
-                Body::from_stream(stream),
-            )
-                .into_response())
+            ))
         }
-        Ok(None) => {
-            let body = if method == Method::HEAD {
-                Body::empty()
-            } else {
-                Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
-                    fh,
-                    crate::media_sessions::MEDIA_BODY_READ_BUFFER,
-                ))
-            };
-            Ok((
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, ctype.to_owned()),
-                    (header::ACCEPT_RANGES, "bytes".to_owned()),
-                    (header::CONTENT_LENGTH, len.to_string()),
-                ],
-                body,
-            )
-                .into_response())
-        }
+        FileRangePlan::Full if method == Method::HEAD => Body::empty(),
+        FileRangePlan::Full => Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+            fh,
+            crate::media_sessions::MEDIA_BODY_READ_BUFFER,
+        )),
+    };
+    let (status, headers) = file_range_head(plan, len, ctype);
+    let mut response = (status, body).into_response();
+    for (name, value) in headers {
+        response.headers_mut().insert(
+            name,
+            HeaderValue::from_str(&value).map_err(|e| ApiError::Internal(e.to_string()))?,
+        );
     }
+    Ok(response)
 }
 
 // --- remux ------------------------------------------------------------------
@@ -6714,6 +6834,147 @@ mod tests {
     /// what else is in it — and refuses to invent a document for a file whose
     /// probe never succeeded, because `probe_json IS NULL` is the fingerprint
     /// the repair job keys on.
+    #[tokio::test]
+    async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_backfill() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        let (_, state) = super::super::tests::test_app_with_state();
+        let directory = tempfile::tempdir().expect("Source marker fixture");
+        let path = directory.path().join("legacy-source.mp4");
+        std::fs::write(&path, b"Source marker presence fixture").expect("actual presence");
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Source markers".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Source".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let raw = r#"{"format":{"duration":"600.0"},"streams":[]}"#;
+        let id = state
+            .store
+            .upsert_file(
+                item,
+                path.to_str().expect("path"),
+                30,
+                1000,
+                &ProbeResult {
+                    duration_ms: Some(600_000),
+                    container: Some("mp4".into()),
+                    video_codec: Some("h264".into()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    bit_depth: Some(8),
+                    raw_json: Some(raw.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("scan without chapter capture");
+        let file = state
+            .store
+            .get_file(id)
+            .await
+            .expect("file read")
+            .expect("file");
+        let pause = pause_next_marker_fallback_for_test(&path);
+        let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
+        let decision = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            decision_for_source_file(
+                &state,
+                file.clone(),
+                Caps {
+                    caps_v2: Some(caps),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("Source never enters the paused live-probe fallback")
+        .expect("actual Source engine");
+        assert_eq!(
+            serde_json::to_value(&decision.markers).expect("markers"),
+            serde_json::to_value(markers_from_chapters(&[], file.duration_ms))
+                .expect("stored evidence only")
+        );
+        assert_eq!(
+            state
+                .store
+                .get_file_probe_json(id)
+                .await
+                .expect("unchanged scan"),
+            Some(raw.into())
+        );
+        assert!(
+            state
+                .store
+                .timeline_annotation_set(id, &annotation_source_identity(&file))
+                .await
+                .expect("annotation read")
+                .is_none(),
+            "decision must not backfill an annotation set"
+        );
+        // The ordinary Local fallback still enters its existing owned seam.
+        let local_state = state.clone();
+        let local_file = file.clone();
+        let local = tokio::spawn(async move { markers_for(&local_state, &local_file).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), pause.wait())
+            .await
+            .expect("Local fallback retained");
+        local.abort();
+        let _ = local.await;
+        marker_fallback_pauses()
+            .lock()
+            .expect("pause registry")
+            .remove(path.to_str().expect("path"));
+        let chapters =
+            serde_json::to_string(&vec![chapter("Intro", "0.0", "60.0")]).expect("scan chapters");
+        state
+            .store
+            .merge_file_probe_chapters(id, &chapters)
+            .await
+            .expect("scanner evidence fixture");
+        assert_eq!(
+            serde_json::to_value(stored_markers_for_source(&state, &file).await)
+                .expect("stored markers"),
+            serde_json::to_value(markers_from_chapters(
+                &[chapter("Intro", "0.0", "60.0")],
+                file.duration_ms
+            ))
+            .expect("same common marker engine")
+        );
+        let manual = annotation_set_from_markers(
+            annotation_source_identity(&file),
+            &markers_from_chapters(&[chapter("Opening", "0", "90")], file.duration_ms),
+        );
+        state
+            .store
+            .put_timeline_annotation_set_if_missing(id, 600_000, &manual)
+            .await
+            .expect("persisted annotation fixture");
+        assert_eq!(
+            serde_json::to_value(stored_markers_for_source(&state, &file).await)
+                .expect("persisted markers"),
+            serde_json::to_value(markers_from_annotation_set(manual))
+                .expect("persisted evidence wins")
+        );
+    }
+
     #[tokio::test]
     async fn chapters_backfill_into_the_stored_probe() {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};

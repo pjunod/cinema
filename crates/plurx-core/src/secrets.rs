@@ -58,15 +58,15 @@ pub enum SecretError {
     KeyFile { path: PathBuf, message: String },
 
     #[error(
-        "credential key file {path} is missing, but {rows} stored Trakt credential(s) are \
-         encrypted under it; restore the key file or unlink Trakt — refusing to start without it"
+        "credential key file {path} is missing, but {rows} stored outbound credential(s) are \
+         encrypted under it; restore the key file or remove the affected sealed credentials — refusing to start without it"
     )]
     KeyMissingForWrappedRows { path: PathBuf, rows: usize },
 
     #[error(
-        "credential key file {path} holds key {held}, but {rows} stored Trakt credential(s) are \
+        "credential key file {path} holds key {held}, but {rows} stored outbound credential(s) are \
          sealed under key {wanted}; this is not the key that sealed this database — restore the \
-         matching key file or unlink Trakt, rather than starting with a key that opens nothing"
+         matching key file or remove the affected sealed credentials, rather than starting with a key that opens nothing"
     )]
     WrongKeyForStoredRows {
         path: PathBuf,
@@ -325,6 +325,52 @@ impl CredentialKey {
         &self.id
     }
 
+    /// Public coordinated-purpose master fingerprint. This fixed HMAC domain
+    /// is independent of credential envelopes, cursor MACs and signing keys;
+    /// only the canonical 256-bit fingerprint leaves the key object.
+    pub fn sharing_purpose_master_fingerprint(&self) -> String {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        hex_encode(
+            ring::hmac::sign(&key, b"cinema-sharing-purpose-master-fingerprint-v1\0").as_ref(),
+        )
+    }
+
+    /// Bind coordinator qualification to the selected startup master encoded
+    /// in the existing private join-secrets object, without exporting bytes.
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn matches_purpose_master_encoding(&self, encoded: &str) -> bool {
+        let Some(bytes) = hex_decode(encoded.trim()) else {
+            return false;
+        };
+        let bytes = Zeroizing::new(bytes);
+        if bytes.len() != KEY_LEN {
+            return false;
+        }
+        let selected = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        let recorded = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &bytes);
+        let proof = ring::hmac::sign(&recorded, b"cinema-sharing-purpose-master-fingerprint-v1\0");
+        ring::hmac::verify(
+            &selected,
+            b"cinema-sharing-purpose-master-fingerprint-v1\0",
+            proof.as_ref(),
+        )
+        .is_ok()
+    }
+
+    /// Authenticate a bounded catalogue cursor without exporting credential key material.
+    /// The fixed purpose prefix prevents reuse of an envelope or other sharing MAC.
+    pub(crate) fn sharing_catalogue_cursor_mac(&self, payload: &[u8]) -> [u8; 32] {
+        let root = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        let derived = ring::hmac::sign(&root, b"cinema-sharing-catalogue-key-v1");
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, derived.as_ref());
+        let mut context = ring::hmac::Context::with_key(&key);
+        context.update(b"cinema-sharing-catalogue-cursor-v1\0");
+        context.update(payload);
+        let mut result = [0; 32];
+        result.copy_from_slice(context.sign().as_ref());
+        result
+    }
+
     /// Mint fresh key material that is never written anywhere.
     ///
     /// For callers with no data directory to resolve a key file from. Anything
@@ -427,6 +473,10 @@ impl CredentialKey {
     /// sealed row to another user's `user_id` makes it fail to open rather than
     /// silently handing one household member another's Trakt account.
     pub fn seal_trakt(&self, user_id: i64, cleartext: &str) -> Result<SealedSecret, SecretError> {
+        self.seal_with_aad(trakt_aad(user_id).as_bytes(), cleartext)
+    }
+
+    fn seal_with_aad(&self, aad: &[u8], cleartext: &str) -> Result<SealedSecret, SecretError> {
         let mut nonce = [0u8; NONCE_LEN];
         getrandom::getrandom(&mut nonce).map_err(|error| {
             SecretError::Malformed(format!("no operating-system randomness: {error}"))
@@ -437,7 +487,7 @@ impl CredentialKey {
                 XNonce::from_slice(&nonce),
                 Payload {
                     msg: cleartext.as_bytes(),
-                    aad: trakt_aad(user_id).as_bytes(),
+                    aad,
                 },
             )
             .map_err(|_| SecretError::Undecryptable)?;
@@ -459,6 +509,32 @@ impl CredentialKey {
     /// contents, so a half-finished upgrade fails loudly instead of quietly
     /// continuing to use a plaintext secret.
     pub fn open_trakt(&self, user_id: i64, sealed: &SealedSecret) -> Result<Secret, SecretError> {
+        self.open_with_aad(trakt_aad(user_id).as_bytes(), sealed)
+    }
+
+    /// Seal sharing material, binding purpose and both local identities.
+    pub fn seal_sharing(
+        &self,
+        purpose: SharingSecretPurpose,
+        server: uuid::Uuid,
+        import: uuid::Uuid,
+        cleartext: &str,
+    ) -> Result<SealedSecret, SecretError> {
+        self.seal_with_aad(&sharing_aad(purpose, server, import), cleartext)
+    }
+
+    /// A ciphertext copied between imports, installations or purposes cannot open.
+    pub fn open_sharing(
+        &self,
+        purpose: SharingSecretPurpose,
+        server: uuid::Uuid,
+        import: uuid::Uuid,
+        sealed: &SealedSecret,
+    ) -> Result<Secret, SecretError> {
+        self.open_with_aad(&sharing_aad(purpose, server, import), sealed)
+    }
+
+    fn open_with_aad(&self, aad: &[u8], sealed: &SealedSecret) -> Result<Secret, SecretError> {
         let parsed = sealed.parse()?;
         if parsed.key_id != self.id {
             return Err(SecretError::WrongKey {
@@ -472,7 +548,7 @@ impl CredentialKey {
                 XNonce::from_slice(&parsed.nonce),
                 Payload {
                     msg: &parsed.ciphertext,
-                    aad: trakt_aad(user_id).as_bytes(),
+                    aad,
                 },
             )
             .map_err(|_| SecretError::Undecryptable)?;
@@ -494,6 +570,36 @@ impl Drop for CredentialKey {
     fn drop(&mut self) {
         self.key.zeroize();
     }
+}
+
+/// Distinct contexts prevent swapping claim, rotation and delivery material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharingSecretPurpose {
+    Credential,
+    Claim,
+    Rotation,
+    Upstream,
+    /// A stable random catalogue revision key, sealed to its Source and epoch.
+    CatalogueRevision,
+    /// Stable receiver-purpose material for non-capability file locators.
+    FileLocator,
+}
+
+fn sharing_aad(purpose: SharingSecretPurpose, server: uuid::Uuid, import: uuid::Uuid) -> Vec<u8> {
+    let tag = match purpose {
+        SharingSecretPurpose::Credential => b"credential".as_slice(),
+        SharingSecretPurpose::Claim => b"claim".as_slice(),
+        SharingSecretPurpose::Rotation => b"rotation".as_slice(),
+        SharingSecretPurpose::Upstream => b"upstream".as_slice(),
+        SharingSecretPurpose::CatalogueRevision => b"catalogue-revision".as_slice(),
+        SharingSecretPurpose::FileLocator => b"file-locator".as_slice(),
+    };
+    let mut aad = b"plurx.sharing.v1\0".to_vec();
+    aad.extend_from_slice(&(tag.len() as u32).to_be_bytes());
+    aad.extend_from_slice(tag);
+    aad.extend_from_slice(server.as_bytes());
+    aad.extend_from_slice(import.as_bytes());
+    aad
 }
 
 fn trakt_aad(user_id: i64) -> String {
@@ -531,8 +637,13 @@ impl SealedRowCensus {
     /// when only one is: a boot killed between the two columns leaves a mixed
     /// row that still needs the key that sealed the first half.
     pub fn observe_row(&mut self, access: &SealedSecret, refresh: &SealedSecret) {
+        self.observe_envelopes("trakt", &[access, refresh]);
+    }
+
+    /// Observe one row for any outbound-secret purpose, without decrypting it.
+    pub fn observe_envelopes(&mut self, _purpose: &str, values: &[&SealedSecret]) {
         let mut sealed = false;
-        for value in [access, refresh] {
+        for value in values {
             if !value.looks_wrapped() {
                 continue;
             }
@@ -544,6 +655,12 @@ impl SealedRowCensus {
         if sealed {
             self.rows += 1;
         }
+    }
+
+    /// Combine independent purpose inventories before startup key selection.
+    pub fn merge(&mut self, other: Self) {
+        self.rows += other.rows;
+        self.key_ids.extend(other.key_ids);
     }
 
     /// How many durable rows hold at least one sealed column.
@@ -1006,6 +1123,150 @@ mod tests {
                 value.to_persist().is_err(),
                 "`{rejected}` must not reach a durable row"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sharing_tests {
+    use super::*;
+    use uuid::Uuid;
+    #[test]
+    fn sharing_catalogue_revision_key_rewrap_preserves_purpose_and_epoch() {
+        let old = CredentialKey::from_bytes([7; 32]);
+        let new = CredentialKey::from_bytes([8; 32]);
+        let server = Uuid::new_v4();
+        let epoch = Uuid::new_v4();
+        let purpose = SharingSecretPurpose::CatalogueRevision;
+        let sealed = old
+            .seal_sharing(
+                purpose,
+                server,
+                epoch,
+                "synthetic-stable-random-purpose-key",
+            )
+            .expect("sealed purpose key");
+        let clear = old
+            .open_sharing(purpose, server, epoch, &sealed)
+            .expect("old key");
+        let rewrapped = new
+            .seal_sharing(purpose, server, epoch, clear.expose())
+            .expect("rewrap");
+        assert_eq!(
+            new.open_sharing(purpose, server, epoch, &rewrapped)
+                .expect("new sealing key")
+                .expose(),
+            clear.expose()
+        );
+        assert_ne!(sealed.key_id(), rewrapped.key_id());
+        for (p, s, e) in [
+            (SharingSecretPurpose::Credential, server, epoch),
+            (purpose, Uuid::new_v4(), epoch),
+            (purpose, server, Uuid::new_v4()),
+        ] {
+            assert!(new.open_sharing(p, s, e, &rewrapped).is_err());
+        }
+        assert!(old
+            .open_sharing(purpose, server, epoch, &rewrapped)
+            .is_err());
+        let mut census = SealedRowCensus::default();
+        census.observe_envelopes("catalogue-revision", &[&rewrapped]);
+        assert_eq!(census.sealed_rows(), 1);
+        let directory = tempfile::tempdir().expect("key fixture");
+        assert!(open_credential_key(&directory.path().join("missing.key"), &census).is_err());
+    }
+    #[test]
+    fn sharing_ciphertext_binds_server_import_and_purpose_without_plaintext() {
+        let key = CredentialKey::from_bytes([7; 32]);
+        let server = Uuid::from_u128(1);
+        let import = Uuid::from_u128(2);
+        let sealed = key
+            .seal_sharing(
+                SharingSecretPurpose::Credential,
+                server,
+                import,
+                "synthetic-bearer",
+            )
+            .expect("synthetic secret fixture");
+        assert_eq!(
+            key.open_sharing(SharingSecretPurpose::Credential, server, import, &sealed)
+                .expect("synthetic secret fixture")
+                .expose(),
+            "synthetic-bearer"
+        );
+        assert!(!sealed.as_stored().contains("synthetic-bearer"));
+        for (purpose, s, i) in [
+            (SharingSecretPurpose::Claim, server, import),
+            (SharingSecretPurpose::Credential, Uuid::from_u128(3), import),
+            (SharingSecretPurpose::Credential, server, Uuid::from_u128(3)),
+        ] {
+            assert!(key.open_sharing(purpose, s, i, &sealed).is_err());
+        }
+        assert!(key.open_trakt(2, &sealed).is_err());
+        assert!(!format!("{sealed:?}").contains(sealed.as_stored()));
+    }
+    #[test]
+    fn sharing_and_trakt_census_both_refuse_missing_or_wrong_startup_key() {
+        let dir = tempfile::tempdir().expect("synthetic secret fixture");
+        let path = dir.path().join("credentials.key");
+        let key = CredentialKey::from_bytes([7; 32]);
+        let sealed = key
+            .seal_sharing(
+                SharingSecretPurpose::Upstream,
+                Uuid::from_u128(1),
+                Uuid::from_u128(2),
+                "synthetic",
+            )
+            .expect("synthetic secret fixture");
+        let mut census = SealedRowCensus::default();
+        census.observe_envelopes("sharing-upstream", &[&sealed]);
+        assert!(matches!(
+            open_credential_key(&path, &census),
+            Err(SecretError::KeyMissingForWrappedRows { .. })
+        ));
+        assert!(!path.exists());
+        let other = open_credential_key(&path, &SealedRowCensus::default())
+            .expect("synthetic secret fixture");
+        assert_ne!(other.id(), key.id());
+        assert!(matches!(
+            open_credential_key(&path, &census),
+            Err(SecretError::WrongKeyForStoredRows { .. })
+        ));
+        census.observe_row(
+            &key.seal_trakt(1, "access")
+                .expect("synthetic secret fixture"),
+            &key.seal_trakt(1, "refresh")
+                .expect("synthetic secret fixture"),
+        );
+        assert_eq!(census.sealed_rows(), 2);
+    }
+    #[test]
+    fn sharing_purpose_master_fingerprint_is_canonical_stable_and_domain_separated() {
+        let key = CredentialKey::from_bytes([48; 32]);
+        let fingerprint = key.sharing_purpose_master_fingerprint();
+        assert_eq!(fingerprint.len(), 64);
+        assert!(fingerprint
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)));
+        assert_eq!(
+            fingerprint,
+            CredentialKey::from_bytes([48; 32]).sharing_purpose_master_fingerprint()
+        );
+        assert_ne!(
+            fingerprint,
+            CredentialKey::from_bytes([49; 32]).sharing_purpose_master_fingerprint()
+        );
+        assert_ne!(fingerprint, hex_encode(&[48; 32]));
+        assert_ne!(
+            fingerprint,
+            hex_encode(&key.sharing_catalogue_cursor_mac(b""))
+        );
+        assert_ne!(fingerprint, key.id());
+        #[cfg(feature = "hiqlite-store")]
+        {
+            assert!(key.matches_purpose_master_encoding(&hex_encode(&[48; 32])));
+            assert!(!key.matches_purpose_master_encoding(&hex_encode(&[49; 32])));
+            assert!(!key.matches_purpose_master_encoding("not a master"));
         }
     }
 }

@@ -860,6 +860,8 @@ function wirePlayerMedia(v){
     clearStall();
     const src=(v.currentSrc||"").split("?")[0];
     console.warn("[cinema] video error",{code,msg,method:PLAYER&&PLAYER.method,src});
+    // A Shared direct session B retired (a long pause): one fresh Start.
+    if(PLAYER.sharedDirect&&restartSharedDirectAfterError(v,PLAYER,code)) return;
     // Paused on a rolling session and the network failed: the pause grace
     // retired it (§9.5). Native HLS has no loader to stop, so this is where
     // Safari meets the dead playlist. Park it; Play opens the replacement.
@@ -1267,6 +1269,14 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // A retry must reconnect, not repeat the local seek that ordinary direct and
   // cached-VOD navigation uses. The old Try again button did exactly that: it
   // assigned the already-stalled currentTime to itself and changed no request.
+  // A Shared direct URL is bound to a B session that may have retired, so its
+  // reconnect is a fresh direct Start, never the same URL again.
+  if(forceReopen && PLAYER.method==='direct_play'
+     && playbackFileContextForPlayer(PLAYER).source_ref.kind!=="local"){
+    dispatchPlaybackSeekTelemetry(PLAYER,seekIntent);
+    return requestPlaybackMediaChange(PLAYER,{method:'direct_play',copyHls:false,sharedDirect:true,
+      reason:"stall-restart",forceReopen:true});
+  }
   if(forceReopen && PLAYER.method==='direct_play'){
     const {me,live}=streamGeneration();
     newAttempt("stall-restart");

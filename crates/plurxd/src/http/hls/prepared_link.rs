@@ -84,7 +84,9 @@ pub(super) async fn capture(
         return None;
     }
     let http = http?;
-    if http.network.user_id != Some(route.user_id) || route.owner_node_id != state.node_id {
+    if route.principal.local_user_id() != Some(http.network.user_id?)
+        || route.owner_node_id != state.node_id
+    {
         return None;
     }
     let gate = state
@@ -296,7 +298,7 @@ impl PreparedProof {
         };
         if route.incarnation_id != incarnation
             || route.owner_node_id != state.node_id
-            || route.user_id != self.source.user_id
+            || route.principal.local_user_id() != Some(self.source.user_id)
             || route.state != "active"
             || route.publication_ready_at_ms
                 != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
@@ -366,7 +368,7 @@ impl PreparedProof {
         if current_route.incarnation_id != incarnation
             || current_route.owner_epoch != owner_epoch
             || current_route.owner_node_id != state.node_id
-            || current_route.user_id != source.user_id
+            || current_route.principal.local_user_id() != Some(source.user_id)
             || current_route.state != "active"
             || current_route.publication_ready_at_ms
                 != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED

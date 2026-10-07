@@ -58,7 +58,7 @@ function assetShape(shell, rust, doc, onDisk) {
     assert.equal(m[3], `../../crates/plurxd/src/web/${m[2]}`);
     assert.ok(m[4].trim().length > 20, `${m[2]} has no useful description`);
     if (m[2] === "hls.min.js") assert.equal(m[5], "Vendored dependency.");
-    else assert.match(m[5], /^(\d+–\d+|\*\*Relocated\.\*\*.*|\d+–\d+ \(less \d+–\d+\))$/);
+    else assert.match(m[5], /^(\d+–\d+|\*\*(?:Relocated|New)\.\*\*.*|\d+–\d+ \(less \d+–\d+\))$/);
   });
   assert.deepEqual(onDisk.filter(f => !table.some(t => t.file === f)), [], "unserved shell file");
   for (const row of table) assert.ok(fs.statSync(path.join(WEB, row.file)).isFile(), `missing asset ${row.file}`);

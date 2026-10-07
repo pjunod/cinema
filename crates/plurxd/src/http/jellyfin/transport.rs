@@ -22,13 +22,15 @@ pub(super) async fn route(state: &AppState, play: &JellyfinPlay) -> Result<Strin
     let current = state
         .store
         .media_session_route_for_playback(
-            play.negotiation.scope.user_id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: play.negotiation.scope.user_id,
+            },
             &play.negotiation.playback_id,
         )
         .await?
         .ok_or(ApiError::Conflict("native play replaced".into()))?;
     if native.incarnation_id != current.incarnation_id
-        || native.user_id != play.negotiation.scope.user_id
+        || native.principal.local_user_id() != Some(play.negotiation.scope.user_id)
         || native.playback_id != play.negotiation.playback_id
         || native.state != "active"
         || native.publication_ready_at_ms != 0

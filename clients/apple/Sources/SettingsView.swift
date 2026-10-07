@@ -182,6 +182,8 @@ struct SettingsView: View {
                 #endif
             }
 
+            Section("Sharing") { NavigationLink("Shared libraries and Source status") { SharedSharingSettingsView() } }
+
             Section("Account") {
                 LabeledContent("Signed in as", value: model.username ?? "—")
                 LabeledContent("Server", value: model.serverName ?? model.origin)

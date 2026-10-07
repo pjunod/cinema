@@ -232,7 +232,10 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
   change.qualityIntent=qualityControlSupported(p)?qualityMediaIntent(p):null;
   let outcome="timed_out";
   try{ outcome=await awaitPreparedOffer(p,change.tappedAt); }catch(e){ outcome="timed_out"; }
-  if(p.directedChange===change){ change.outcome=outcome; change.outcomeAt=performance.now(); }
+  // A change already settled while the waiter confirmed -- a commit that beat
+  // the confirmation, or an offer that did not bind and took its reopen --
+  // keeps the outcome it settled with.
+  if(p.directedChange===change&&!change.settled){ change.outcome=outcome; change.outcomeAt=performance.now(); }
   // A prepared successor is now this change's business: its commit settles it,
   // and its failure reopens through the same owner.
   if(outcome==="prepared") return outcome;
@@ -622,8 +625,11 @@ function startPlaybackControl(v,p,bootstrap){
     const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
       ?PlurxPlaybackControl.capture(playbackControlSnapshot(document.getElementById("video"),p),
         p.controlIntentGeneration||0,owner):null;
+    // A Shared session also names B's successor transaction; dual-player
+    // preparation stays the Developer switch every session honours.
+    const shared=!!(p.fileContext&&p.fileContext.source_ref&&p.fileContext.source_ref.kind!=="local");
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
-      clientInstanceId:CONTROL_CLIENT_ID,
+      clientInstanceId:CONTROL_CLIENT_ID,sharedSuccessor:shared,
       capture,
       send:(url,body,signal)=>sendPlaybackControl(url,body,signal,
         p.controlReporter===reporter&&p.mediaAttachment===attachment?candidateLinkReceipt(p,p.fileId):null),
@@ -684,6 +690,12 @@ function startPlaybackControl(v,p,bootstrap){
             message:"playback-control exchange recovered; legacy recovery remained authoritative"});
         }
         if(error){
+          const pending=p.preparedControlPending;
+          if(shared&&pending?.sharedContext&&request.acknowledgement?.state==="committed"
+            &&request.acknowledgement.action_id===pending.actionId){
+            recoverSharedCommittedReplacement(p,pending);
+            return;
+          }
           const now=Date.now(), message=String(error.message||error);
           p.controlLastError={at:now,message};
           if(Number(error.status)===410){
@@ -760,6 +772,25 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
     const force=(typeof qualityForce==="function")?qualityForce():"auto";
     if(force && force!=="auto") body.overrides=Object.assign({force},body.overrides||{});
   }
+  const fileContext=playbackFileContext(fileId);
+  if(fileContext.source_ref.kind!=="local"){
+    // Shared initial Start never inherits a Local control/recovery envelope.
+    // Actual supplied unsupported fields are refused by the typed adapter.
+    if(opts&&opts.presentation==="direct"){
+      // Original bytes: no segment budget, HLS transport, rung or native
+      // subtitle group exists for them, and the Source refuses a subtitle ask.
+      body.presentation="direct";
+      for(const field of ["block_budget_secs","transport","height","copy","native_subtitles","subtitle"]) delete body[field];
+      return SHARED_DECISION.start(fileContext,body,signal);
+    }
+    const player=typeof PLAYER!=="undefined"?PLAYER:null;
+    const natives=(player&&player.subs||[]).filter(sub=>sub.native===true);
+    if(natives.length){body.native_subtitles=true;if(natives.some(sub=>sub.index===player.curSub))body.subtitle=player.curSub;}
+    const hevcCopy=!!body.copy&&["hevc","h265","hevc10"].includes(String(player&&player.source&&player.source.video_codec||"").toLowerCase());
+    const transport=typeof plannedHlsTransport==="function"?plannedHlsTransport(hevcCopy):null;if(transport)body.transport=transport;
+    if(body.height==null&&!Object.hasOwn(opts||{},"height"))delete body.height;
+    return SHARED_DECISION.start(fileContext,body,signal);
+  }
   // HLS sessions carry native WebVTT renditions whenever this server says a
   // track can become one. Publishing the group up front lets a later subtitle
   // selection and a readiness-directed re-fetch stay inside the current video
@@ -828,10 +859,10 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
   // enroll a fresh family; healthy replacement paths keep their incumbent.
   const continuous=body.transport==='hlsjs'&&(!player?.sessionId
       ||player.sessionId===restartSessionId&&player.continuousQualityBootstrap)
-    ?await openContinuousQualitySession(fileId,body,player,signal,restartSessionId):null;
+    ?await openContinuousQualitySession(playbackFileContext(fileId).source_ref.file_id,body,player,signal,restartSessionId):null;
   if(continuous) return continuous;
   const linkReceipt=typeof candidateLinkReceipt==='function'?candidateLinkReceipt(player,fileId):null;
-  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal,linkReceipt});
+  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal,linkReceipt});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the
@@ -1005,12 +1036,20 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
 // is now the whole immutable title, so the media element seeks there directly.
 // The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
+  if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){
+    const context=playbackFileContext(t.fileContext),bound=info&&info._sharedContext;
+    if(!bound||playbackFileKey(bound)!==playbackFileKey(context)||bound.session_id!==info.session_id)playbackFileReject();
+  }
   stopPlaybackControl(t);
   t.controlRenderOverride=null;
   t.controlObservationOverride=null;
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
+  if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){
+    t.fileContext=info._sharedContext;
+    t.meta={...(t.meta||{}),fileContext:t.fileContext};
+  }
   t.streamId=null;
   t.vod=!!info.vod;
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;
@@ -1055,10 +1094,73 @@ function attachSession(v, t, info, wantSec){
 // hardware slot held for nobody — every time a player closes or replaces its
 // stream. `keepalive` is what makes it survive the page going away, and is
 // also why the route authenticates by session id rather than by header.
-function releaseSession(sessionId){
+function releaseSession(sessionId,token=TOKEN){
   if(!sessionId) return;
   try{
     fetch(API+`/hls/${sessionId}`,{method:"DELETE",keepalive:true,
-      headers:TOKEN?{"authorization":"Bearer "+TOKEN}:{}}).catch(()=>{});
+      headers:token?{"authorization":"Bearer "+token}:{}}).catch(()=>{});
   }catch(e){}
+}
+// A Shared direct session ends with the attachment that reads it: the same
+// DELETE retires it. B also retires it after 300 s with no open body and no
+// byte request, which is why a resume after a long pause can find it gone.
+function releaseSharedDirect(p){
+  const direct=p&&p.sharedDirect;
+  if(!direct) return;
+  p.sharedDirect=null;
+  releaseSession(direct.session_id);
+}
+// Take on a Shared direct session and attach its byte URL. Direct play has no
+// playlist, status or control exchange, Local or Shared, so nothing here names
+// an HLS session or starts a reporter: the B session lives in `sharedDirect`,
+// owned by the attachment minted below, and the URL carries its binding.
+function attachSharedDirect(v,t,info,wantSec){
+  const context=playbackFileContext(t.fileContext),bound=info&&info._sharedContext;
+  if(context.source_ref.kind==="local"||!bound||info.presentation!=="direct"
+    ||playbackFileKey(bound)!==playbackFileKey(context)||bound.session_id!==info.session_id
+    ||info.url!==playbackFileUrl(bound,"direct")) playbackFileReject();
+  const at=Math.max(0,wantSec||0);
+  stopPlaybackControl(t);
+  t.controlRenderOverride=null;
+  t.controlObservationOverride=null;
+  t.fileContext=bound;
+  t.meta={...(t.meta||{}),fileContext:bound};
+  t.sessionId=null; t.streamId=null; t.vod=false; t.offset=0;
+  t.method='direct_play'; t.copyHls=false; t.started=false;
+  t.directUrl=info.url; t.probeUrl=info.url;
+  if(t===PLAYER) renderPlayerInfo();
+  resetMediaSource(v);
+  const attachment=beginPlaybackMediaAttachment(t);
+  const direct={session_id:info.session_id,attachment,timeline:false};
+  t.sharedDirect=direct;
+  setPlaybackMediaSource(v,info.url);
+  markPlaybackControlSeekExecuted(t,at);
+  v.onloadedmetadata=()=>{
+    if(!attachment.current()) return;
+    v.onloadedmetadata=null;
+    direct.timeline=true;
+    applyPlaybackAttachmentPosition(v,t,attachment,at); };
+  applyPlaybackTransportIntent(v,t);
+  return at;
+}
+// The element could not read its Shared direct session: B retired it after a
+// long pause, or the transfer failed. Answered once, through the ordinary
+// media-change owner, by a fresh direct Start at the current position. The
+// allowance belongs to an attachment that reached a timeline, so a successor
+// that fails before its metadata cannot restart again: its error takes the
+// ordinary failure path. Only a network error (2) — what a refused byte range
+// is — qualifies; a decode or format error is not an expiry and keeps the
+// compatibility rescue.
+function restartSharedDirectAfterError(v,p,code){
+  const direct=p&&p.sharedDirect;
+  if(!direct||!direct.timeline||!direct.attachment.current()||code!==2) return false;
+  direct.timeline=false;
+  const pos=positionForPlaybackIntent(v,p);
+  beginPlaybackControlSeek(p,pos,false);
+  clientLog(Object.assign({level:"info",event:"shared_direct_restart",detail:"media_error_"+code,
+    message:"the shared direct session could not be read — starting a fresh one at the saved position"},
+    playbackContext()));
+  requestPlaybackMediaChange(p,{method:'direct_play',copyHls:false,sharedDirect:true,reason:"direct-expired"})
+    .catch(()=>{});
+  return true;
 }
