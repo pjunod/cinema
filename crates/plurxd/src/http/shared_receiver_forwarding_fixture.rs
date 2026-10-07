@@ -92,6 +92,10 @@ async fn actual_nonowner_b(address: IpAddr) {
     let worker_address = worker_listener.local_addr().expect("worker address");
     drop(worker_listener); // Preserve the chosen origin for the startup socket owner.
     let fixture = real_receiver_fixture_at(address, SourceFixtureMode::Copy, worker_address).await;
+    let mut worker_membership =
+        super::super::shared_source_playback::SourceFixtureMembershipOwner::start(
+            fixture.state.membership.clone(),
+        );
     let tls = Arc::new(
         LiveNodeTls::open(
             &fixture.directory().join("forward-source-tls"),
@@ -113,10 +117,37 @@ async fn actual_nonowner_b(address: IpAddr) {
         port: source_listener.local_addr().expect("Source address").port(),
         spki_sha256: pin,
     };
-    let source_server = ServerOwner::serve_tls(
-        SharingTlsListener::new(source_listener, tls),
-        super::super::sharing::peer_router((*fixture.source.state).clone()),
+    // Diagnostics record actual HTTP arrival/status only; they confer no
+    // admission, actor ownership, or physical closure evidence.
+    let source_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source_start_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_starts = Arc::clone(&source_starts);
+    let observed_status = Arc::clone(&source_start_status);
+    let source_app = super::super::sharing::peer_router((*fixture.source.state).clone()).layer(
+        axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let starts = Arc::clone(&observed_starts);
+                let status = Arc::clone(&observed_status);
+                async move {
+                    let is_start = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/sessions");
+                    if is_start {
+                        starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let response = next.run(request).await;
+                    if is_start {
+                        status.store(
+                            usize::from(response.status().as_u16()),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    response
+                }
+            },
+        ),
     );
+    let source_server =
+        ServerOwner::serve_tls(SharingTlsListener::new(source_listener, tls), source_app);
     fixture.pair(endpoint).await;
     let worker_server = ServerOwner::serve(
         Arc::clone(
@@ -207,6 +238,10 @@ async fn actual_nonowner_b(address: IpAddr) {
     );
     // This ingress does no producer work; actual assigned B playback remains
     // owned by the serving worker and all data traverses signed member HTTP.
+    let mut ingress_membership =
+        super::super::shared_source_playback::SourceFixtureMembershipOwner::start(
+            ingress.membership.clone(),
+        );
     let ingress_server =
         ServerOwner::serve(Arc::clone(&observation), fixture_router(ingress.clone()));
     let (status, _, bytes) = b_request(
@@ -237,7 +272,29 @@ async fn actual_nonowner_b(address: IpAddr) {
         serde_json::to_vec(&original["session"]).expect("canonical session"),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    if status != StatusCode::OK {
+        eprintln!(
+            "actual Source HTTP diagnostic starts={}, last_status={}",
+            source_starts.load(std::sync::atomic::Ordering::Relaxed),
+            source_start_status.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        eprintln!(
+            "actual B diagnostic claim-stage counts: {}",
+            receiver_claim_observation(
+                &fixture,
+                original["session"]["request_id"]
+                    .as_str()
+                    .expect("actual B request UUID")
+            )
+            .await
+        );
+    }
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "actual worker Start response: {}",
+        String::from_utf8_lossy(&bytes)
+    );
     let start: Value = serde_json::from_slice(&bytes).expect("actual B Start");
     let session = start["session_id"].as_str().expect("B session");
     let session_uuid = Uuid::parse_str(session).expect("B UUID");
@@ -428,6 +485,8 @@ async fn actual_nonowner_b(address: IpAddr) {
     ingress_server.finish().await;
     worker_server.finish().await;
     source_server.finish().await;
+    ingress_membership.finish().await;
+    worker_membership.finish().await;
     selected.shutdown().await.expect("second voter shutdown");
     fixture.shutdown().await;
 }

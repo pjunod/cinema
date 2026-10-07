@@ -209,6 +209,18 @@ async fn seal_fixture_owned_empty_ingress(
     store: &SqliteStore,
     assignment: &SourceDispatchAssignment,
 ) {
+    // This SQL-only fixture installs the canonical private cleanup context.
+    // It admitted no transport or producer; these rows are not physical proof.
+    use crate::store::sharing_source_schema as layout;
+    store.sharing_txn(vec![
+        ("CREATE TABLE cluster_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL,protocol_min INTEGER NOT NULL,protocol_max INTEGER NOT NULL,migrated_at INTEGER NOT NULL) STRICT".into(), vec![]),
+        (layout::BOOT_INTENTS_SCHEMA.into(), vec![]),
+        (layout::INSTALLATION_SCHEMA.into(), vec![]),
+        (layout::TRANSACTION_SCHEMA.into(), vec![]),
+        ("INSERT INTO cluster_meta VALUES(1,$1,1,1,1)".into(), vec![layout::SOURCE_SCHEMA_VERSION.into()]),
+        ("INSERT INTO sharing_source_schema_installation VALUES(1,$1,$2,1)".into(), vec![layout::SOURCE_LAYOUT_VERSION.into(), "a".repeat(64).into()]),
+        ("INSERT INTO sharing_source_schema_transaction_guard VALUES(1,1)".into(), vec![]),
+    ]).await.expect("actual private schema cleanup context");
     let snapshot = store
         .source_ingress_custody(assignment)
         .await
