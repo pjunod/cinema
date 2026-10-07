@@ -1052,19 +1052,23 @@ impl ReceiverStartActor {
         state: Arc<AppState>,
         connection: &crate::SharingConnectionCancellation,
     ) -> Result<Arc<dyn Send + Sync>, ReceiverStartError> {
-        let incarnation = self.0.intent.recipe.source_request_id;
-        let route = state
-            .store
-            .media_session_route_by_incarnation(&incarnation.to_string())
-            .await
-            .map_err(|_| ReceiverStartError::Unresolved)?
-            .ok_or(ReceiverStartError::Unavailable)?;
-        let proof = state
-            .store
-            .receiver_relay_read_authority(&route)
-            .await
-            .map_err(|_| ReceiverStartError::Unresolved)?
-            .ok_or(ReceiverStartError::Unavailable)?;
+        let (route, proof) = {
+            let _lease_observation = self.0.lease_observation.lock().await;
+            let incarnation = self.0.intent.recipe.source_request_id;
+            let route = state
+                .store
+                .media_session_route_by_incarnation(&incarnation.to_string())
+                .await
+                .map_err(|_| ReceiverStartError::Unresolved)?
+                .ok_or(ReceiverStartError::Unavailable)?;
+            let proof = state
+                .store
+                .receiver_relay_read_authority(&route)
+                .await
+                .map_err(|_| ReceiverStartError::Unresolved)?
+                .ok_or(ReceiverStartError::Unavailable)?;
+            (route, proof)
+        };
         let ingress = receiver_forward_admit(
             state.clone(),
             &route,
@@ -2887,6 +2891,19 @@ pub(super) async fn test_actual_lease_commit_read_overlap(state: &AppState, sess
         .current_delivery_attachment_locked(state)
         .await
         .expect("exact actual attachment before renewal");
+    let route = state
+        .store
+        .media_session_route_by_incarnation(&attachment.owner.incarnation_id.to_string())
+        .await
+        .expect("actual route")
+        .expect("retained actual route");
+    let proof = state
+        .store
+        .receiver_relay_read_authority(&route)
+        .await
+        .expect("actual relay proof")
+        .expect("current exact proof");
+    let tuple = forwarding::ReceiverForwardTuple::from_read(&proof);
     let authority = state
         .store
         .prepare_receiver_session_authority(actor.0.intent.clone())
@@ -2926,11 +2943,18 @@ pub(super) async fn test_actual_lease_commit_read_overlap(state: &AppState, sess
     // SQL now carries the new exact lease; memory deliberately retains the
     // old lease until this fixture releases the same production owner lock.
     let mut reader = Box::pin(actor.current_delivery_attachment(state));
+    let mut owner_reader = Box::pin(validate_owner(state, &tuple));
+    let (attachment_blocked, owner_blocked) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(1), &mut reader),
+        tokio::time::timeout(Duration::from_secs(1), &mut owner_reader),
+    );
     assert!(
-        tokio::time::timeout(Duration::from_secs(1), &mut reader)
-            .await
-            .is_err(),
+        attachment_blocked.is_err(),
         "attachment reader must not observe an intermediate SQL/memory lease pair"
+    );
+    assert!(
+        owner_blocked.is_err(),
+        "actual owner proof must wait for complete SQL/memory writeback"
     );
     attachment.owner.lease_expires_at_ms = new_lease;
     {
@@ -2949,4 +2973,9 @@ pub(super) async fn test_actual_lease_commit_read_overlap(state: &AppState, sess
     assert_eq!(observed.owner.owner_epoch, attachment.owner.owner_epoch);
     assert_eq!(observed.owner.session_id, session);
     assert!(Arc::ptr_eq(&actual_received, &received));
+    let actual_owner = tokio::time::timeout(Duration::from_secs(9), owner_reader)
+        .await
+        .expect("finite actual owner proof after writeback")
+        .expect("exact retained owner proof");
+    assert!(Arc::ptr_eq(&actual_owner.0, &actor.0));
 }

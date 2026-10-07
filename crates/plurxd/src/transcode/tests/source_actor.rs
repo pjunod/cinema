@@ -151,6 +151,10 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     eprintln!("Source fixture: state constructed without Router");
     state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = membership.clone();
+    state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+        membership.clone(),
+        Arc::clone(&state_mut.store),
+    );
     state_mut.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&master),
         config.storage.data_dir.clone(),

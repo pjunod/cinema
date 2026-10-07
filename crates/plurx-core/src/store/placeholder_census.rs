@@ -1493,13 +1493,23 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // this scanner's reach. `marking_a_show_reaches_every_episode_under_it` and
 // `a_page_of_containers_rolls_up_in_one_pass_and_agrees_with_the_single_walk`
 // execute it.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
+// 93 -> 102: nine reviewed statement variants introduced by sharing's
+// principal/identity composition. Three are additional rebuilt-layout variants
+// of separately bound SELECTs: sessions::desired_within (?1..?2, two values),
+// expired_media_sessions (?1..?6, six), and owned_media_sessions (?1..?4, four).
+// Six are the two actual inline conditional INSERT arms in each of
+// sessions::claim_media_session_request (?1..?7, seven values),
+// media::insert_item and publication::insert_item_fenced (?1..?8, eight each).
+// Those six bind the shared params! immediately after the conditional, but this
+// deliberately conservative scanner stops at the arm's closing brace. Every
+// branch's placeholders remain validated; no source statement is exempted.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 102;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
     let mut offenders = Vec::new();
     let mut scanned = 0_usize;
-    let mut unchecked = 0_usize;
+    let mut unchecked = Vec::new();
     for (name, source) in SQLITE_SOURCES {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
@@ -1532,7 +1542,11 @@ fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
                                 ));
                             }
                         } else {
-                            unchecked += 1;
+                            unchecked.push(format!(
+                                "{name}:{}: {}",
+                                literal.line,
+                                statement.split_whitespace().collect::<Vec<_>>().join(" ")
+                            ));
                         }
                     }
                     Ok(_) => {}
@@ -1555,8 +1569,10 @@ fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
         offenders.join("\n")
     );
     assert_eq!(
-        unchecked, EXPECTED_UNCHECKED_SQLITE_ARITY,
-        "the statically unchecked SQLite arity set changed; inspect every new site"
+        unchecked.len(),
+        EXPECTED_UNCHECKED_SQLITE_ARITY,
+        "the statically unchecked SQLite arity set changed; inspect every new site:\n{}",
+        unchecked.join("\n")
     );
 }
 

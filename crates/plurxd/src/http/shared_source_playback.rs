@@ -2353,6 +2353,10 @@ async fn build_real_source_start_fixture(
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut.catalogue = selected.catalogue_reader();
     state_mut.replication = selected.replication_monitor();
+    state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+        state_mut.membership.clone(),
+        Arc::clone(&state_mut.store),
+    );
     state_mut.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&selected.credential_key),
         config.storage.data_dir.clone(),
