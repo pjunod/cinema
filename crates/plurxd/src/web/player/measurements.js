@@ -164,52 +164,86 @@ function playbackContext(){
     // measures min(link speed, encode speed) — which is exactly why a stall
     // needs the server's own `speed` reading beside it to say which one ran out.
     bandwidth:(p.hls&&p.hls.bandwidthEstimate)?Math.round(p.hls.bandwidthEstimate/1000):null,
-    // Whether this machine is decoding in hardware. `powerEfficient` is the
-    // browser's own word for it, and it is the difference between two failures
-    // that look identical from every other number here: a full buffer with
-    // late frames because the link is fine and the GPU is doing the work, and
-    // a full buffer with late frames because a CPU is software-decoding 4K.
-    // Nothing else in the beacon can tell those apart, and asking the operator
-    // which machine the browser is on has not worked.
-    decode_hw:p.decodeInfo?p.decodeInfo.hw:null,
-    decode_smooth:p.decodeInfo?p.decodeInfo.smooth:null,
+    // MediaCapabilities predicts support/efficiency; it cannot identify the
+    // active platform decoder. Keep the legacy hardware identity unknown.
+    decode_hw:null,
+    decode_supported:currentDecodePrediction(p)?.supported??null,
+    decode_smooth:currentDecodePrediction(p)?.smooth??null,
+    decode_power_efficient:currentDecodePrediction(p)?.powerEfficient??null,
   };
 }
-// Ask the browser what it will do with this stream, before it does it.
-//
-// mediaCapabilities is the only API that answers "will this be hardware
-// decoded" — `smooth` and `powerEfficient` are computed from the real codec,
-// resolution, framerate and bitrate rather than from a codec string alone, so
-// it distinguishes 1080p HEVC (fine nearly everywhere) from 4K HEVC at 69 Mb/s
-// (fine almost nowhere without a GPU path). Best-effort: a browser without it,
-// or one that throws on an odd configuration, leaves the field null rather
-// than blocking playback on a diagnostic.
+// A diagnostic query requires an evidenced output tuple. SourceSummary carries
+// codec names, not an RFC 6381 profile/level string or a video-track bitrate;
+// using its original codec for a transcode (or inventing a ladder entry) probes
+// a different stream. Until progressive/native HLS exposes equivalent facts,
+// its prediction is unavailable. HLS representation attributes are declarations,
+// not proof of the active hardware decoder.
+function decodePredictionTuple(p){
+  const hls=p&&p.hls;
+  const index=hls&&hls.currentLevel;
+  const level=hls&&hls.levels&&hls.levels[index];
+  if(!level) return null;
+  const codec=String(level.videoCodec||"");
+  if(!/^(?:avc[13]\.[0-9a-f]{6}|(?:hvc1|hev1|av01|vp09|dvh1|dvhe)\.[a-z0-9.]+)$/i.test(codec)) return null;
+  const width=Number(level.width),height=Number(level.height);
+  const bitrate=Number(level.bitrate);
+  const framerate=Number(level.attrs&&level.attrs["FRAME-RATE"]);
+  if(![width,height,bitrate,framerate].every(value=>Number.isFinite(value)&&value>0)) return null;
+  const video={contentType:`video/mp4; codecs="${codec}"`,width,height,bitrate,framerate};
+  return {config:{type:"media-source",video},
+    key:JSON.stringify([index,codec,width,height,bitrate,framerate]),
+    provenance:"HLS representation declaration"};
+}
+function currentDecodePrediction(p){
+  const tuple=decodePredictionTuple(p);
+  if(!playbackOwnsAttachedMedia(p)||!p.decodeInfo||
+      p.decodeInfo.attachment!==p.mediaAttachment||!tuple||p.decodeInfo.key!==tuple.key){
+    if(p) p.decodeInfo=null;
+    return null;
+  }
+  return p.decodeInfo;
+}
+function decodePredictionLabel(p){
+  const prediction=currentDecodePrediction(p);
+  if(!prediction) return "Unknown · MediaCapabilities prediction unavailable";
+  const word=value=>value===null?"unknown":value?"yes":"no";
+  return `Active decoder unknown · MediaCapabilities prediction: supported ${word(prediction.supported)} · smooth ${word(prediction.smooth)} · power efficient ${word(prediction.powerEfficient)} · ${prediction.provenance}`;
+}
+// Existing media events refresh diagnostics, never control or poll playback.
+// Every request has a generation and tuple fence in addition to attachment
+// ownership so an earlier representation's answer cannot become current.
 async function probeDecode(){
   const p=PLAYER; if(!playbackOwnsAttachedMedia(p)) return;
   const attachment=p.mediaAttachment;
-  const src=p.source||{};
-  // Same ladder the transport choice uses, for the same reason: `codec[0]` is
-  // what gets asked about, and on a 10-bit source the honest question is the
-  // Main10 one. Asking a Main (8-bit) string about a Main10 file would have
-  // this diagnostic report a decoder that is not the one doing the work.
-  const codec=MSE_VIDEO[mseCodecKey(src.video_codec, src.bit_depth)];
-  if(!codec || !navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) return;
-  const v=document.getElementById("video");
-  const cfg={
-    type:p.hls?"media-source":"file",
-    video:{
-      contentType:`video/mp4; codecs="${codec[0]}"`,
-      width:(v&&v.videoWidth)||src.width||1920,
-      height:(v&&v.videoHeight)||src.height||1080,
-      bitrate:Math.max(1, src.bitrate||5000000),
-      framerate:24,
-    },
-  };
+  const hls=p.hls;
+  if(hls&&(p.decodeProbeOwner?.hls!==hls||p.decodeProbeOwner?.attachment!==attachment)){
+    p.decodeProbeOwner={hls,attachment};
+    const refresh=()=>{if(playbackOwnsAttachedMedia(p)&&p.mediaAttachment===attachment&&p.hls===hls) probeDecode();};
+    for(const event of [Hls.Events.FRAG_CHANGED,Hls.Events.LEVEL_SWITCHED,Hls.Events.LEVEL_LOADED]){
+      if(event) hls.on(event,refresh);
+    }
+  }
+  const tuple=decodePredictionTuple(p);
+  if(tuple&&currentDecodePrediction(p)) return;
+  if(tuple&&p.decodeProbePending?.attachment===attachment&&p.decodeProbePending.key===tuple.key) return;
+  const generation=(p.decodeProbeGeneration||0)+1;
+  p.decodeProbeGeneration=generation;
+  p.decodeInfo=null;
+  const mc=navigator.mediaCapabilities;
+  if(!tuple||!mc||typeof mc.decodingInfo!=="function") return;
+  p.decodeProbePending={attachment,key:tuple.key,generation};
   try{
-    const r=await navigator.mediaCapabilities.decodingInfo(cfg);
-    if(playbackOwnsAttachedMedia(p)&&p.mediaAttachment===attachment)
-      p.decodeInfo={supported:!!r.supported, smooth:!!r.smooth, hw:!!r.powerEfficient};
+    const r=await mc.decodingInfo(tuple.config);
+    const current=decodePredictionTuple(p);
+    if(playbackOwnsAttachedMedia(p)&&p.mediaAttachment===attachment&&p.hls===hls&&
+        p.decodeProbeGeneration===generation&&current&&current.key===tuple.key){
+      const nullable=value=>typeof value==="boolean"?value:null;
+      p.decodeInfo={supported:nullable(r&&r.supported),smooth:nullable(r&&r.smooth),
+        powerEfficient:nullable(r&&r.powerEfficient),attachment,key:tuple.key,
+        provenance:tuple.provenance};
+    }
   }catch(e){}
+  finally{if(p.decodeProbePending?.generation===generation) p.decodeProbePending=null;}
 }
 function reportTtff(){
   const p=PLAYER; if(!playbackOwnsAttachedMedia(p)||!p.playStartedAt) return;
