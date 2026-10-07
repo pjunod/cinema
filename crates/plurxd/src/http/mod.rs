@@ -512,6 +512,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/system/playback-events"
         | "/api/v1/system/library-shape"
         | "/api/v1/system/storage"
+        | "/api/v1/system/transcoder"
         | "/api/v1/system/search-index/rebuild"
         | "/api/v1/client-log"
         | "/api/v1/coming-soon"
@@ -1725,6 +1726,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/system/library-shape", get(system::library_shape))
         .route("/system/storage", post(system::remeasure_storage))
+        .route(
+            "/system/transcoder",
+            put(system::update_hardware_preference),
+        )
         .route(
             "/system/search-index/rebuild",
             post(system::rebuild_search_index),
@@ -11299,6 +11304,82 @@ mod tests {
             !state.transcode.dv_convert_enabled().await,
             "the transcoder reads the switch, not the value this process booted with"
         );
+    }
+
+    #[tokio::test]
+    async fn hardware_preference_is_admin_only_node_scoped_and_pending_restart() {
+        let (app, state) = test_app_with_state();
+        let request = json!({"node_id": state.node_id, "preference": "qsv"});
+        assert_eq!(
+            call(
+                &app,
+                put("/api/v1/system/transcoder", None, request.clone())
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::HWACCEL, "nvenc")
+            .await
+            .expect("global preference");
+        for (node, preference, expected) in [
+            ("different-node", "qsv", StatusCode::CONFLICT),
+            (state.node_id.as_str(), "unknown", StatusCode::BAD_REQUEST),
+        ] {
+            assert_eq!(
+                call(
+                    &app,
+                    put(
+                        "/api/v1/system/transcoder",
+                        Some(&admin),
+                        json!({"node_id": node, "preference": preference})
+                    )
+                )
+                .await
+                .0,
+                expected
+            );
+        }
+        let (status, result) = call(
+            &app,
+            put("/api/v1/system/transcoder", Some(&admin), request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["restart_required"], true);
+        assert_eq!(
+            state
+                .store
+                .get_setting(&crate::state::node_hwaccel_key(&state.node_id))
+                .await
+                .expect("saved node preference")
+                .as_deref(),
+            Some("qsv")
+        );
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::HWACCEL)
+                .await
+                .expect("saved node preference")
+                .as_deref(),
+            Some("nvenc")
+        );
+        assert_eq!(
+            state
+                .store
+                .get_setting(&crate::state::node_hwaccel_key("different-node"))
+                .await
+                .expect("saved node preference"),
+            None
+        );
+        let (status, system) = call(&app, get("/api/v1/system", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(system["hwaccel_requested"], "qsv");
+        assert_eq!(system["hwaccel_pref"], state.system.hwaccel_pref);
     }
 
     #[tokio::test]

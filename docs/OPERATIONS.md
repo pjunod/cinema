@@ -5803,6 +5803,36 @@ advisory evidence only. An unmet or unavailable row never disables the switch.
 
 ## Hardware transcode & recent Intel GPUs
 
+**Settings → System → Transcoding backend** selects Auto, NVIDIA NVENC,
+Intel Quick Sync, VA-API, Apple VideoToolbox or CPU for the responding node.
+On a laptop with Intel and NVIDIA graphics, choose Quick Sync when you prefer
+the integrated GPU, or NVENC for the discrete GPU. Auto prefers NVIDIA when
+available. This selects a backend family, not an individual adapter among
+multiple GPUs of the same family; it does not measure or enforce a power budget.
+
+Save records a node-specific preference and shows whether a restart is needed.
+Restart that node to select its encoder and re-probe the matching HDR path;
+active playback is not changed by Save. A backend marked **not detected** can
+still be selected. If it remains unavailable at startup, the existing encoder
+fallback applies and **Active** shows what actually runs. Other nodes retain
+their own preferences. Nodes without an override keep the legacy
+`PLURX_HWACCEL`/stored cluster preference.
+
+Speculative jobs explicitly pinned to a different encoder family remain for
+compatible workers. A node advertises the backend it will execute, and CPU
+selection advertises the software resolution ceiling. The legacy cluster
+preference still defines queued job requirements; an Auto job can be claimed
+by either GPU family without changing its cluster-wide policy generation.
+
+For NVIDIA HDR10, the probe first tries NVDEC → `tonemap_cuda` → `scale_cuda`
+→ NVENC, keeping frames on the GPU unless subtitles need a CPU composite.
+This needs an FFmpeg build with the CUDA filters and NVIDIA compute/video
+device access in the container. CUDA uses the writable runtime cache for
+compiled shaders; the startup probe warms one frame before timing the graph.
+The existing SDR color checks and speed threshold still apply. A missing
+filter, device failure, color mismatch or slow candidate is reported in
+**HDR → Probe details**, then the probe considers its remaining candidates.
+
 The Docker image defaults to **jellyfin-ffmpeg**, which bundles a current Intel
 media driver + libva + oneVPL. This matters for newer silicon: an Arc / Meteor
 Lake / **Arrow Lake** iGPU (on the kernel `xe` driver) is years newer than the VA

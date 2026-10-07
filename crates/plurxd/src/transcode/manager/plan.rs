@@ -1145,7 +1145,7 @@ impl TranscodeManager {
             && plurx_core::playback::hdr_route(file).is_some()
             && matches!(target_height, HDR10_HEIGHT | HDR10_4K_HEIGHT)
         {
-            let preferred = self.caps.choose(preference);
+            let preferred = self.encoder_for_preference(preference);
             let qsv_proved = match plurx_core::playback::hdr_route(file) {
                 Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough_qsv,
                 _ => self.hdr10_passthrough_qsv,
@@ -1173,7 +1173,7 @@ impl TranscodeManager {
                 target_height,
                 hdr_candidate,
                 subtitle_burn,
-                self.caps.choose(preference),
+                self.encoder_for_preference(preference),
             )
             .await?;
         if grade == OutputGrade::Hdr10 {
@@ -1217,7 +1217,7 @@ impl TranscodeManager {
             // been proved at boot; an unproved pairing falls back to software
             // rather than failing in front of a viewer. Pinning it to x264
             // used to cap 4K Dolby Vision at 720p for every non-DV client.
-            let preferred = self.caps.choose(requested);
+            let preferred = self.encoder_for_preference(requested);
             if preferred != Encoder::Software
                 && crate::ffmpeg::has_dovi_reshape_with(preferred).await
             {
@@ -1226,7 +1226,7 @@ impl TranscodeManager {
                 Ok(Encoder::Software)
             }
         } else {
-            Ok(self.caps.choose(requested))
+            Ok(self.encoder_for_preference(requested))
         }
     }
 
@@ -1276,9 +1276,9 @@ impl TranscodeManager {
             },
             // The node proved a graph; this session may still not be entitled
             // to it (HLG, non-compatible Dolby Vision, a light source, an
-            // encoder it cannot feed). Deciding once, here,
-            // is what keeps the log line honest — `pipeline=` is what actually
-            // ran, not what the box is capable of. Routed by `routing_hdr`
+            // encoder it cannot feed). This chooses the candidate; resolution
+            // owns its final scan-dependent graph, which later execution and
+            // diagnostics retain. Routed by `routing_hdr`
             // rather than the raw column: a DV base layer that is
             // HDR10-compatible is an hdr10 stream to a tone-map, and a bitmap
             // subtitle burn keeps the GPU graph (it downloads once for
@@ -1305,13 +1305,15 @@ impl TranscodeManager {
             } else if dovi_reshape {
                 Pipeline::DoviTonemapx
             } else {
-                Pipeline::for_session_with_scan(
+                // This is a candidate graph. Descriptor-bound decode facts
+                // decide deinterlace in resolve_transcode; a catalog flag can
+                // be overruled by idet and must not discard the graph here.
+                Pipeline::for_session(
                     self.pipeline,
                     encoder,
                     transcode::routing_hdr(file),
                     transcode::heavy_source(file),
                     subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
-                    plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
                 )
             },
             subtitle_burn,
