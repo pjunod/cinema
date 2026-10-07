@@ -200,11 +200,14 @@ def prepare(output: Path) -> str:
         # Existing selections (including hook-free CDI) need no legacy probe.
         nvidia = not explicit_gpu and nvidia_available()
         if nvidia and not shutil.which("nvidia-container-runtime-hook"):
-            raise HardwareError(
-                "NVIDIA GPU detected but the legacy NVIDIA runtime hook is missing; "
-                "configure NVIDIA Container Toolkit for Docker GPU requests, or "
-                "select the GPU through CDI in your override"
+            print(
+                "docker hardware: NVIDIA GPU detected but its Docker runtime hook "
+                "is missing; leaving NVIDIA passthrough unset. Configure NVIDIA "
+                "Container Toolkit or select a CDI device in your override. "
+                "Other encoder paths remain available.",
+                file=sys.stderr,
             )
+            nvidia = False
         overlay = gpu_overlay(service, dri=dri, nvidia=nvidia)
         print(
             "docker hardware: "

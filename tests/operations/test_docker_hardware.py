@@ -216,9 +216,10 @@ class DockerHardwareTests(unittest.TestCase):
                 HELPER["prepare"](self.root / "generated.json")
             probe.assert_not_called()
 
-    def test_automatic_nvidia_without_toolkit_reports_actionable_error(self):
+    def test_automatic_nvidia_without_toolkit_keeps_startup_available(self):
         (self.root / "docker-compose.yml").touch()
         calls = mock.Mock(side_effect=["", json.dumps({"services": {"plurxd": {}}})])
+        output = self.root / "generated.json"
         with mock.patch("pathlib.Path.cwd", return_value=self.root), mock.patch(
             "shutil.which", return_value=None
         ), mock.patch.dict(
@@ -227,10 +228,8 @@ class DockerHardwareTests(unittest.TestCase):
             local_linux_engine=lambda: True,
             nvidia_available=lambda: True,
         ):
-            with self.assertRaisesRegex(
-                HELPER["HardwareError"], "NVIDIA Container Toolkit"
-            ):
-                HELPER["prepare"](self.root / "generated.json")
+            HELPER["prepare"](output)
+        self.assertNotIn("deploy", json.loads(output.read_text())["services"]["plurxd"])
 
     def test_symlinked_compose_base_keeps_lexical_project_directory(self):
         shared = self.root / "shared"

@@ -10,7 +10,9 @@ NVIDIA additionally needs its video driver libraries exposed by the toolkit.
 PR [#849](http://192.168.4.7:3000/noirr/plurx/pulls/849) implements deployment-time
 detection in both source and image startup
 paths, preserves explicit selections and host overrides, and documents native
-macOS VideoToolbox separately. No Rust encoder selection or feature gates change.
+macOS VideoToolbox separately. No Rust encoder selection or feature gates change. Missing NVIDIA toolkit
+setup is advisory: automatic discovery leaves that passthrough unset without
+blocking startup or other encoders.
 
 | Step | State | Evidence |
 |---|---|---|

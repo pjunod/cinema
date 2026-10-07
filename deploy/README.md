@@ -454,7 +454,9 @@ while jellyfin-ffmpeg drives it fine. Both `make docker-up` and
 - NVIDIA: detect a working host driver, request the GPUs through NVIDIA
   Container Toolkit, and include `compute,video,utility,graphics` driver capabilities.
   `graphics` supplies the Vulkan libraries used by GPU tone mapping. Encoding
-  runs in the Plurx container; no GPU sidecar is needed.
+  runs in the Plurx container; no GPU sidecar is needed. If the toolkit hook
+  is missing, detection prints the required setup and leaves NVIDIA passthrough
+  unset; other hardware and software paths remain available.
 - Existing device selections and NVIDIA reservations keep their selected
   devices/count. Existing groups and extra NVIDIA capabilities are preserved.
 - macOS, Docker Desktop, and remote Docker engines: keep explicit device
