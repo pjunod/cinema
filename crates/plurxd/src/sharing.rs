@@ -31,6 +31,7 @@ pub(crate) struct ImportTransportStatus {
 #[derive(Clone, Serialize)]
 pub(crate) struct SharingStatus {
     pub source_activation_at_boot: Option<bool>,
+    pub source_activation_current: Option<bool>,
     pub listener: &'static str,
     pub listener_address: String,
     pub certificate: Option<CertificateStatus>,
@@ -252,7 +253,7 @@ impl SharingManager {
             plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Applied
             | plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Replay => {}
             plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Refused => {
-                return Err(PeerError::Authentication)
+                return Err(PeerError::Authentication);
             }
         }
         let reply = peer
@@ -281,6 +282,7 @@ impl SharingManager {
             key_directory,
             status: RwLock::new(SharingStatus {
                 source_activation_at_boot: None,
+                source_activation_current: None,
                 listener: "not_started",
                 listener_address: network.bind.to_string(),
                 certificate: None,
@@ -315,6 +317,14 @@ impl SharingManager {
             .write()
             .expect("sharing status lock")
             .source_activation_at_boot = ready;
+    }
+    /// Read-only current layout observation; never admission authority or a
+    /// replacement for the historical startup observation.
+    pub fn observe_source_activation_current(&self, ready: Option<bool>) {
+        self.status
+            .write()
+            .expect("sharing status lock")
+            .source_activation_current = ready;
     }
     pub fn status(&self) -> SharingStatus {
         let mut status = self.status.read().expect("sharing status lock").clone();
@@ -1996,7 +2006,7 @@ impl SharingManager {
                 || cursor.as_ref().is_some_and(|c| c.len() > 4096)
                 || !(1..=200).contains(limit) =>
             {
-                return Err(PeerError::InvalidResponse)
+                return Err(PeerError::InvalidResponse);
             }
             CatalogueRead::Batch(batch) => {
                 batch.validate().map_err(|_| PeerError::InvalidResponse)?
@@ -2250,6 +2260,22 @@ mod tests {
         manager.enablement_written(false);
         assert_eq!(manager.status().source_activation_at_boot, Some(true));
         assert_eq!(manager.status().listener, "not_started");
+    }
+    #[test]
+    fn sharing_current_activation_refresh_preserves_historical_boot_observation() {
+        let manager = SharingManager::new(
+            Arc::new(CredentialKey::from_bytes([42; 32])),
+            PathBuf::from("unused-current-advisory-fixture"),
+            SharingNetworkConfig::default(),
+        );
+        manager.observe_source_activation_at_boot(Some(false));
+        manager.observe_source_activation_current(Some(true));
+        assert_eq!(manager.status().source_activation_at_boot, Some(false));
+        assert_eq!(manager.status().source_activation_current, Some(true));
+        manager.enablement_written(false);
+        manager.observe_source_activation_current(None);
+        assert_eq!(manager.status().source_activation_at_boot, Some(false));
+        assert_eq!(manager.status().source_activation_current, None);
     }
     #[test]
     fn sharing_source_dispatch_retains_complete_receiver_recipe_and_private_request() {

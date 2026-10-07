@@ -326,6 +326,12 @@ impl SelectedStore {
             return Ok(false);
         }
         self.membership
+            .prepare_source_dispatch_before_serving()
+            .await
+            .map_err(|_| {
+                StoreError::Migration("Source dispatch guard provisioning refused".to_owned())
+            })?;
+        self.membership
             .prepare_purpose_master(Arc::clone(&self.credential_key))
             .await
             .map_err(|_| StoreError::Migration("Source startup master proof refused".to_owned()))?;
@@ -2319,7 +2325,7 @@ fn project_restored_observation_identity(
                 return Err(StoreError::Migration(
                     "restored image has a missing or noncanonical sharing node admission guard"
                         .into(),
-                ))
+                ));
             }
         }
     }
@@ -3682,7 +3688,7 @@ async fn start_voter(
                 } else {
                     "voter"
                 }
-            )))
+            )));
         }
     };
     // No await between vendor Client handoff and cancellation-safe ownership.
@@ -4685,6 +4691,27 @@ fn write_local_membership(data_dir: &Path, membership: &LocalMembership) -> Resu
     })?;
     bytes.push(b'\n');
     write_atomic_private(data_dir, LOCAL_MEMBERSHIP_FILENAME, &bytes)
+}
+
+/// Refresh the local receipt only after exact committed Source verification.
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn persist_committed_source_schema(
+    data_dir: &Path,
+    version: i64,
+) -> Result<(), StoreError> {
+    let active = data_dir.join(HIQLITE_ACTIVE_DIRNAME);
+    let mut marker = read_activation_marker(&active)?;
+    if marker.replicated_schema_version > version {
+        return Err(StoreError::Migration(
+            "Source activation marker would regress".to_owned(),
+        ));
+    }
+    if marker.replicated_schema_version != version {
+        marker.replicated_schema_version = version;
+        write_activation_marker(&active, &marker)?;
+        sync_directory(&active)?;
+    }
+    Ok(())
 }
 
 /// Persist the target-local half of a committed learner promotion.
@@ -7310,7 +7337,7 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     #[test]
-    fn actual_source_schema_coordinator_three_voters_compete_under_real_boot_proofs() {
+    fn actual_live_source_activation_three_running_voters_preserves_local_renewal() {
         install_default_crypto_provider();
         let source_dir = tempfile::tempdir().expect("Source node");
         let second_dir = tempfile::tempdir().expect("second node");
@@ -7323,7 +7350,7 @@ mod tests {
                 .expect("actual voter runtime")
         };
         let before = make_runtime();
-        let configs = before.block_on(async {
+        before.block_on(async {
             let observed = startup_observer::MeasuredPeers::default();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
@@ -7352,7 +7379,6 @@ mod tests {
             let http_task = tokio::spawn(async move {
                 axum::serve(listener, app).await.expect("join gateway");
             });
-            let mut configs = vec![config];
             let mut members = vec![source];
             for directory in [&second_dir, &third_dir] {
                 let token = manager
@@ -7372,7 +7398,6 @@ mod tests {
                         .await
                         .expect("actual joined voter"),
                 );
-                configs.push(joined_config);
             }
             let client = members[0].local_client().expect("actual Source client");
             assert_eq!(
@@ -7407,65 +7432,51 @@ mod tests {
                     .await
                     .expect("actual selected master proof for each running member");
             }
-            assert!(!members[0]
-                .prepare_source_schema_before_serving()
-                .await
-                .expect("a single startup intent cannot rebuild three serving members"));
-            let client = members[0].local_client().expect("actual pending client");
-            let rows = client
-                .query_consistent_map::<SourceStartupPayloadRow, _>(
-                    "SELECT CAST(count(*) AS TEXT) AS payload FROM sharing_source_boot_intents",
-                    hiqlite::params!(),
-                )
-                .await
-                .expect("confirmed release census");
-            assert!(matches!(rows.as_slice(),[row] if row.payload=="0"));
-            assert_eq!(
-                HiqliteAuthStore::committed_schema_version_for_client(&client)
-                    .await
-                    .expect("unchanged legacy marker"),
-                AUTH_SCHEMA_BASELINE_VERSION
-            );
+            let owner=members[0].identity.node_id.clone();
+            let fixture=include_str!("../../tests/fixtures/session-principal-local.sql").replace("'node'",&format!("'{}'",owner.replace('\'',"''"))).replace("'live'","'00000000-0000-0000-0000-000000000001'").replace("'live-session'","'00000000-0000-0000-0000-000000000002'").replace("'staged'","'00000000-0000-0000-0000-000000000003'").replace("'ended-session'","'00000000-0000-0000-0000-000000000005'").replace("'session:live'","'session:00000000-0000-0000-0000-000000000001'");
+            let statements=fixture.split(';').map(str::trim).filter(|sql|!sql.is_empty()).map(|sql|(sql.to_owned(),hiqlite::params!())).collect::<Vec<_>>();
+            client.txn(statements).await.expect("live Local route before activation").into_iter().collect::<Result<Vec<_>,_>>().expect("retained route committed");
+            client.execute("UPDATE media_session_requests SET state='resolved' WHERE incarnation_id='00000000-0000-0000-0000-000000000001'",hiqlite::params!()).await.expect("already playing Local request");
+            client.execute("UPDATE media_sessions SET lease_expires_at_ms=9223372036854775000 WHERE incarnation_id='00000000-0000-0000-0000-000000000001'",hiqlite::params!()).await.expect("live producer ownership");
+            client.execute("UPDATE job_leases SET expires_at_ms=9223372036854775000 WHERE resource='session:00000000-0000-0000-0000-000000000001'",hiqlite::params!()).await.expect("live physical fence");
             for member in &members {
-                member.shutdown().await.expect("full-stop voter shutdown");
+                let route=member.store.media_session_route_by_incarnation("00000000-0000-0000-0000-000000000001").await.expect("prime each same Store legacy projection").expect("Local route before migration");
+                assert_eq!(route.owner_node_id,owner);
+                assert_eq!(route.owner_epoch,2);
             }
+            // The same three selected stores keep their live Raft identities.
+            // Publish compatible dispatch sequentially, as a rolling deployment
+            // does; no voter is shut down or reopened to install the layout.
+            for (index,member) in members.iter_mut().enumerate() {
+                let ready=member.prepare_source_schema_before_serving().await.expect("bounded compatibility publication");
+                if index<2 {
+                    assert!(!ready,"partial compatible roster must stay pending");
+                    assert_eq!(HiqliteAuthStore::committed_schema_version_for_client(&client).await.expect("unchanged baseline"),AUTH_SCHEMA_BASELINE_VERSION);
+                } else { assert!(ready,"final running member completes live installation"); }
+            }
+            // No Local read has run since the DDL. Every original Store still
+            // holds its primed81 dispatch hint: this no-pre-read writer must
+            // cross the actual Raft assertion rollback certificate bridge.
+            for (index,member) in members.iter().enumerate() {
+                let playback=format!("after-live-install-{index}");
+                let desired=member.store.record_desired_selection(&crate::playback_principal::PlaybackPrincipal::LocalUser{user_id:1},&playback,&"a".repeat(64),"{}",1_000).await.expect("certified stale81 proposal regenerates as principal82");
+                assert_eq!(desired.revision,1,"only one desired mutation committed");
+                let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array(owner_key,principal_kind,user_id,revision) AS payload FROM media_playback_desired WHERE playback_id=$1",hiqlite::params!(playback)).await.expect("principal-safe regenerated row");
+                assert_eq!(rows[0].payload,r#"["local:1","local",1,1]"#);
+            }
+            let renewal=crate::domain::MediaSessionRenewal { incarnation_id:"00000000-0000-0000-0000-000000000001".to_owned(),owner_epoch:2,produced_playable_through_ms:10_000,fetched_through_ms:8_000,media_sequence:4 };
+            for (index,member) in members.iter().enumerate() {
+                assert!(member.membership_manager().source_layout_ready().await.expect("each running voter verifies layout"));
+                let renewed=member.store.renew_media_sessions(&owner,std::slice::from_ref(&renewal),1_000+index as i64,9223372036854775001+index as i64).await.expect("ordinary Local writer survives live transition");
+                assert_eq!(renewed,vec!["00000000-0000-0000-0000-000000000001".to_owned()]);
+                let route=member.store.media_session_route_by_incarnation("00000000-0000-0000-0000-000000000001").await.expect("projection changes without process restart").expect("retained live route");
+                assert_eq!(route.owner_node_id,owner);
+                assert_eq!(route.owner_epoch,2);
+            }
+            let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array(fence,revision,expires_at_ms) AS payload FROM job_leases WHERE resource='session:00000000-0000-0000-0000-000000000001'",hiqlite::params!()).await.expect("same physical fence after renewals");
+            assert_eq!(rows[0].payload,"[2,6,9223372036854775003]");
+            for member in &members { member.shutdown().await.expect("shutdown only after live qualification"); }
             http_task.abort();
-            configs
-        });
-        // Dropping the entire old runtime releases Hiqlite 0.14's retained TLS
-        // listeners. This is a real full stop, not a serving-time schema rebuild.
-        drop(before);
-        make_runtime().block_on(async {
-            let observed = startup_observer::MeasuredPeers::default();
-            let (first, second, third) = tokio::join!(
-                observed.select(&configs[0], true),
-                observed.select(&configs[1], true),
-                observed.select(&configs[2], true)
-            );
-            let mut first = first.expect("first full-stop restart");
-            let mut second = second.expect("second full-stop restart");
-            let mut third = third.expect("third full-stop restart");
-            let (first_result, second_result, third_result) = tokio::join!(
-                first.prepare_source_schema_before_serving(),
-                second.prepare_source_schema_before_serving(),
-                third.prepare_source_schema_before_serving()
-            );
-            assert!(first_result.expect("first startup factory"));
-            assert!(second_result.expect("second startup factory"));
-            assert!(third_result.expect("third startup factory"));
-            for member in [&first, &second, &third] {
-                assert_eq!(
-                    HiqliteAuthStore::committed_schema_version_for_client(
-                        &member.local_client().expect("actual client")
-                    )
-                    .await
-                    .expect("installed metadata"),
-                    AUTH_SCHEMA_VERSION
-                );
-            }
-            for member in [&first, &second, &third] {
-                member.shutdown().await.expect("Source shutdown");
-            }
         });
     }
 
@@ -7545,7 +7556,7 @@ mod tests {
                 .await
                 .expect("known complete legacy guard fixture");
         }
-        let query="SELECT json_array(type,name,sql) AS payload FROM sqlite_master WHERE name GLOB 'cluster_sharing_*' ORDER BY name";
+        let query = "SELECT json_array(type,name,sql) AS payload FROM sqlite_master WHERE name GLOB 'cluster_sharing_*' ORDER BY name";
         let before = client
             .query_consistent_map::<SourceStartupPayloadRow, _>(query, hiqlite::params!())
             .await
@@ -7628,8 +7639,7 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn actual_source_schema_coordinator_preserves_live_local_lease_and_releases_pending_intent(
-    ) {
+    async fn actual_source_schema_coordinator_preserves_live_local_lease_without_boot_intents() {
         install_default_crypto_provider();
         let directory = tempfile::tempdir().expect("Local data");
         let config = membership_test_config(directory.path());
@@ -7644,15 +7654,15 @@ mod tests {
             .expect("saved choice");
         let client = selected.local_client().expect("actual client");
         client.execute("INSERT INTO job_leases VALUES('retained-local-worker','actual-local-owner',7,9,9223372036854775807,1)",hiqlite::params!()).await.expect("live Local lease");
-        assert!(!selected
+        assert!(selected
             .prepare_source_schema_before_serving()
             .await
-            .expect("pending readiness permits legacy Local startup after release"));
+            .expect("compatible live startup retains Local ownership"));
         assert_eq!(
             HiqliteAuthStore::committed_schema_version_for_client(&client)
                 .await
                 .expect("legacy marker"),
-            AUTH_SCHEMA_BASELINE_VERSION
+            crate::store::sharing_source_schema::SOURCE_SCHEMA_VERSION
         );
         let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) AS payload FROM job_leases WHERE resource='retained-local-worker'",hiqlite::params!()).await.expect("retained ownership");
         assert!(
@@ -7675,7 +7685,7 @@ mod tests {
                 .as_deref(),
             Some("true")
         );
-        assert!(client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT name AS payload FROM sqlite_master WHERE name='sharing_source_session_bindings'",hiqlite::params!()).await.expect("no half installation").is_empty());
+        assert_eq!(client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT name AS payload FROM sqlite_master WHERE name='sharing_source_session_bindings'",hiqlite::params!()).await.expect("complete installation").len(),1);
         selected
             .store
             .put_setting("sharing_enabled", "false")
@@ -7689,7 +7699,7 @@ mod tests {
             startup_observer::select_applied_singleton(&membership_test_config(directory.path()))
                 .await
                 .expect("actual disabled-choice restart");
-        assert!(!restart
+        assert!(restart
             .prepare_source_schema_before_serving()
             .await
             .expect("withdraw stale process receipt before Local serving"));
@@ -7715,9 +7725,118 @@ mod tests {
             HiqliteAuthStore::committed_schema_version_for_client(&client)
                 .await
                 .expect("unchanged legacy"),
-            AUTH_SCHEMA_BASELINE_VERSION
+            crate::store::sharing_source_schema::SOURCE_SCHEMA_VERSION
         );
         restart.shutdown().await.expect("settled restart");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_live_source_activation_preserves_local_ownership_and_requires_dispatch_proof() {
+        install_default_crypto_provider();
+        let directory = tempfile::tempdir().expect("live Source data");
+        let config = membership_test_config(directory.path());
+        drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("legacy SQLite"));
+        let mut selected = startup_observer::select_applied_singleton(&config)
+            .await
+            .expect("actual voter");
+        assert!(!selected
+            .prepare_source_schema_before_serving()
+            .await
+            .expect("disabled startup"));
+        let client = selected.local_client().expect("actual replicated client");
+        let fixture = include_str!("../../tests/fixtures/session-principal-local.sql");
+        let statements = fixture
+            .split(';')
+            .map(str::trim)
+            .filter(|sql| !sql.is_empty())
+            .map(|sql| (sql.to_owned(), hiqlite::params!()))
+            .collect::<Vec<_>>();
+        client
+            .txn(statements)
+            .await
+            .expect("retain active Local work")
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture committed");
+        client.execute("UPDATE media_sessions SET lease_expires_at_ms=9223372036854775000 WHERE incarnation_id='live'",hiqlite::params!()).await.expect("retain live producer lease");
+        client.execute("UPDATE job_leases SET expires_at_ms=9223372036854775000 WHERE resource='session:live'",hiqlite::params!()).await.expect("retain live worker lease");
+        selected
+            .store
+            .put_setting("sharing_enabled", "1")
+            .await
+            .expect("live enable");
+        let membership = selected.membership_manager();
+        membership
+            .coordinate_purpose_keys()
+            .await
+            .expect("current factory");
+        client
+            .execute(
+                "DELETE FROM cluster_node_capabilities WHERE capability=$1",
+                hiqlite::params!(super::super::membership::SHARING_SOURCE_LIVE_DISPATCH_CAPABILITY),
+            )
+            .await
+            .expect("mixed binary floor");
+        assert!(!membership
+            .coordinate_source_schema_live()
+            .await
+            .expect("missing dispatch remains pending"));
+        assert_eq!(
+            HiqliteAuthStore::committed_schema_version_for_client(&client)
+                .await
+                .expect("baseline"),
+            AUTH_SCHEMA_BASELINE_VERSION
+        );
+        membership
+            .prepare_purpose_master(Arc::clone(&selected.credential_key))
+            .await
+            .expect("force actual compatible heartbeat after capability removal");
+        // A retained capability from the previous process heartbeat is not proof
+        // that the current admitted process has installed compatible dispatch.
+        client
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at=last_seen_at+1 WHERE removed_at IS NULL",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("older binary heartbeat withdraws current coupling");
+        assert!(!membership
+            .coordinate_source_schema_live()
+            .await
+            .expect("stale prior capability refuses migration"));
+        membership
+            .prepare_purpose_master(Arc::clone(&selected.credential_key))
+            .await
+            .expect("force fresh compatible process proof without heartbeat coalescing");
+        assert!(membership
+            .coordinate_source_schema_live()
+            .await
+            .expect("install without stopping producer"));
+        let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array(incarnation_id,owner_node_id,owner_epoch,lease_expires_at_ms,state,recovery_epoch,drain_deadline_ms,owner_key,principal_kind) AS payload FROM media_sessions WHERE incarnation_id='live'",hiqlite::params!()).await.expect("retained route");
+        assert_eq!(
+            rows[0].payload,
+            r#"["live","node",2,9223372036854775000,"active","epoch",8000,"local:1","local"]"#
+        );
+        let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array(fence,revision,expires_at_ms) AS payload FROM job_leases WHERE resource='session:live'",hiqlite::params!()).await.expect("retained physical fence");
+        assert_eq!(rows[0].payload, "[2,3,9223372036854775000]");
+        let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array((SELECT count(*) FROM media_session_preparations),(SELECT count(*) FROM sharing_relay_upstream),(SELECT count(*) FROM sharing_delivery_grants),(SELECT count(*) FROM media_session_requests WHERE state='starting')) AS payload",hiqlite::params!()).await.expect("retained child and starting work");
+        assert_eq!(rows[0].payload, "[1,1,1,1]");
+        assert!(membership
+            .source_layout_ready()
+            .await
+            .expect("exact current evidence"));
+        assert_eq!(
+            read_activation_marker(&directory.path().join(HIQLITE_ACTIVE_DIRNAME))
+                .expect("refreshed receipt")
+                .replicated_schema_version,
+            crate::store::sharing_source_schema::SOURCE_SCHEMA_VERSION
+        );
+        assert!(membership
+            .coordinate_source_schema_live()
+            .await
+            .expect("idempotent existing82"));
+        selected.shutdown().await.expect("actual voter shutdown");
     }
 
     #[cfg(feature = "hiqlite-store")]
@@ -7998,7 +8117,13 @@ mod tests {
             )
             .await
             .expect("partial allocator marker");
-        assert!(matches!(selected.membership.redeem_learner(&legacy).await,Err(MembershipError::Incompatible)),"even an existing staged rejoin must explicitly implement installed allocator semantics");
+        assert!(
+            matches!(
+                selected.membership.redeem_learner(&legacy).await,
+                Err(MembershipError::Incompatible)
+            ),
+            "even an existing staged rejoin must explicitly implement installed allocator semantics"
+        );
         assert!(
             matches!(
                 selected.membership.promote_learner(&legacy.node_id).await,

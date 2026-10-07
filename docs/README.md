@@ -40,6 +40,8 @@ Apple seek icons: [Directional arrows for seek distances](apple-builds/694-seek-
 
 Apple display wake: [818-display-wake.md](apple-builds/818-display-wake.md) — playback owns the display idle timer.
 
+Sharing activation: [Running-cluster activation and SQL transition safety](features/SHARING-LIVE-ACTIVATION.md) — **open**.
+
 ## Find it fast
 
 | You want to know… | Read |

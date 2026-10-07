@@ -4610,3 +4610,11 @@ source = "clients/apple/Sources/LibraryView.swift"
 source_anchor = "proxy.scrollTo(LibraryScrollTarget.row(group.id), anchor: .top)"
 test = "clients/apple/UITests/LibraryRowsNavigationTests.swift"
 test_anchor = "func testLetterIndexScrollsToOffscreenRowAndRepeatsAfterManualScroll()"
+
+[[fixes]]
+id = "web.sharing-current-source-activation"
+commits = ["8177e7af8d42f17e8c8603b28662293f05a8b6a7"]
+source = "crates/plurxd/src/web/pages/settings-developer.js"
+source_anchor = "Current Source activation"
+test = "tests/web/settings-sections.test.js"
+test_anchor = "Cinema sharing reports current activation during rolling upgrade without a restart gate"

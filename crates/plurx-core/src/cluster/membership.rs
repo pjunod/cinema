@@ -161,6 +161,8 @@ pub const SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY: &str = "sharing_catalogue_
 pub const SHARING_PURPOSE_KEYS_CAPABILITY: &str = "sharing_purpose_keys_v1";
 /// Binary support plus a separately checked exact installed custody adjunct.
 pub const SHARING_INGRESS_CUSTODY_CAPABILITY: &str = "sharing_ingress_custody_v1";
+/// Guarded Local dispatch and snapshot-checked reads are active before publication.
+pub const SHARING_SOURCE_LIVE_DISPATCH_CAPABILITY: &str = "sharing_source_live_dispatch_v1";
 
 /// Closed, bounded capability requirements. No caller-supplied identifier can
 /// become SQL, and an empty capability set cannot authorize a new writer.
@@ -1675,7 +1677,11 @@ async fn bootstrap_purpose_admission_schema(
     {
         return Ok(());
     }
-    let shape = format!("({}) AND (NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='cluster_sharing_purpose_bootstrap_guard') OR EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_purpose_bootstrap_guard' AND sql='{}')) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='cluster_sharing_purpose_bootstrap_guard')",sharing_admission_schema_shape_predicate(),PURPOSE_BOOTSTRAP_GUARD_SCHEMA.replace('\'', "''"));
+    let shape = format!(
+        "({}) AND (NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='cluster_sharing_purpose_bootstrap_guard') OR EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_purpose_bootstrap_guard' AND sql='{}')) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='cluster_sharing_purpose_bootstrap_guard')",
+        sharing_admission_schema_shape_predicate(),
+        PURPOSE_BOOTSTRAP_GUARD_SCHEMA.replace('\'', "''")
+    );
     let names = sharing_admission_schema_names()
         .into_iter()
         .chain(["cluster_sharing_purpose_bootstrap_guard".to_owned()])
@@ -1728,8 +1734,19 @@ async fn bootstrap_purpose_admission_schema(
     let fingerprint = master.sharing_purpose_master_fingerprint();
     let master_guard = purpose_master_proof_predicate(&fingerprint)?;
     let exact_roster = purpose_roster_predicate(1);
-    let floor = format!("({}) AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={local_raft_id} AND role IS NOT 'learner' AND removed_at IS NULL)",sharing_member_guard_predicate(SharingMemberFloor::PurposeKeys,1,2,3));
-    let mut statements=vec![(PURPOSE_BOOTSTRAP_GUARD_SCHEMA.to_owned(),params!()),(format!("INSERT INTO cluster_sharing_purpose_bootstrap_guard VALUES(1,CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({names}) AND name!='cluster_sharing_purpose_bootstrap_guard') AND ({floor}) AND ({exact_roster}) AND ({master_guard}) AND NOT EXISTS(SELECT 1 FROM cluster_join_tokens WHERE state='redeeming') AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) THEN 1 ELSE 0 END)"),params!(roster.as_str(),cutoff,observed))];
+    let floor = format!(
+        "({}) AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={local_raft_id} AND role IS NOT 'learner' AND removed_at IS NULL)",
+        sharing_member_guard_predicate(SharingMemberFloor::PurposeKeys, 1, 2, 3)
+    );
+    let mut statements = vec![
+        (PURPOSE_BOOTSTRAP_GUARD_SCHEMA.to_owned(), params!()),
+        (
+            format!(
+                "INSERT INTO cluster_sharing_purpose_bootstrap_guard VALUES(1,CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({names}) AND name!='cluster_sharing_purpose_bootstrap_guard') AND ({floor}) AND ({exact_roster}) AND ({master_guard}) AND NOT EXISTS(SELECT 1 FROM cluster_join_tokens WHERE state='redeeming') AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) THEN 1 ELSE 0 END)"
+            ),
+            params!(roster.as_str(), cutoff, observed),
+        ),
+    ];
     statements.extend(
         sharing_member_admission_guard_schema()
             .into_iter()
@@ -1789,7 +1806,8 @@ pub fn sharing_member_admission_guard_schema() -> Vec<String> {
          token_hash TEXT NOT NULL CHECK(length(token_hash)=64), \
          capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}','{SHARING_PURPOSE_KEYS_CAPABILITY}')), \
          last_seen_at INTEGER NOT NULL CHECK(last_seen_at>0), \
-         PRIMARY KEY(token_hash,capability)) STRICT")];
+         PRIMARY KEY(token_hash,capability)) STRICT"
+    )];
     statements.extend([
         format!("CREATE TABLE IF NOT EXISTS cluster_sharing_join_declarations (token_hash TEXT NOT NULL CHECK(length(token_hash)=64),node_id TEXT NOT NULL CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),api_address TEXT NOT NULL CHECK(length(api_address) BETWEEN 1 AND 512),raft_address TEXT NOT NULL CHECK(length(raft_address) BETWEEN 1 AND 512),capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}','{SHARING_PURPOSE_KEYS_CAPABILITY}')),last_seen_at INTEGER NOT NULL CHECK(last_seen_at>0),PRIMARY KEY(token_hash,capability)) STRICT"),
         "CREATE TABLE IF NOT EXISTS cluster_sharing_membership_intents (raft_id INTEGER PRIMARY KEY CHECK(raft_id>0),node_id TEXT NOT NULL UNIQUE CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id) BETWEEN 1 AND 64),operation TEXT NOT NULL CHECK(operation IN ('learner','voter')),api_address TEXT NOT NULL CHECK(length(api_address) BETWEEN 1 AND 512),raft_address TEXT NOT NULL CHECK(length(raft_address) BETWEEN 1 AND 512),claimed_at INTEGER NOT NULL CHECK(claimed_at>0)) STRICT".to_owned(),
@@ -1848,11 +1866,22 @@ pub fn sharing_member_admission_guard_schema() -> Vec<String> {
              WHERE node.node_id=NEW.node_id AND node.removed_at IS NULL \
                AND cap.capability='{capability}')"
         );
-        for (event,suffix,freshness) in [
-            ("INSERT","insert"," AND node.last_seen_at>=NEW.started_at-120000 AND node.last_seen_at<=NEW.started_at"),
-            ("UPDATE","update"," AND node.last_seen_at>=NEW.started_at-120000"),
+        for (event, suffix, freshness) in [
+            (
+                "INSERT",
+                "insert",
+                " AND node.last_seen_at>=NEW.started_at-120000 AND node.last_seen_at<=NEW.started_at",
+            ),
+            (
+                "UPDATE",
+                "update",
+                " AND node.last_seen_at>=NEW.started_at-120000",
+            ),
         ] {
-            let fresh_target = target.replace("AND cap.capability",&format!("{freshness} AND cap.capability"));
+            let fresh_target = target.replace(
+                "AND cap.capability",
+                &format!("{freshness} AND cap.capability"),
+            );
             statements.push(format!(
                 "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_promotion_{suffix}_guard \
                  BEFORE {event} ON cluster_node_promotions WHEN ({installed}) AND NOT ({fresh_target}) \
@@ -3323,7 +3352,9 @@ impl PurposeKeyMembers {
     }
 }
 fn purpose_roster_predicate(parameter: usize) -> String {
-    format!("(SELECT count(*) FROM cluster_nodes WHERE removed_at IS NULL)=(SELECT count(*) FROM json_each(${parameter})) AND NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(${parameter}) member WHERE CAST(member.value AS INTEGER)=node.raft_id))")
+    format!(
+        "(SELECT count(*) FROM cluster_nodes WHERE removed_at IS NULL)=(SELECT count(*) FROM json_each(${parameter})) AND NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(${parameter}) member WHERE CAST(member.value AS INTEGER)=node.raft_id))"
+    )
 }
 fn purpose_master_proof_predicate(id: &str) -> Result<String, MembershipError> {
     if id.len() != 64
@@ -3333,7 +3364,9 @@ fn purpose_master_proof_predicate(id: &str) -> Result<String, MembershipError> {
     {
         return Err(MembershipError::Incompatible);
     }
-    Ok(format!("NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_purpose_master_v1:{id}'))"))
+    Ok(format!(
+        "NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_purpose_master_v1:{id}'))"
+    ))
 }
 
 async fn sharing_member_floor_observation(
@@ -4409,6 +4442,10 @@ struct ReplicatedMembership {
     secrets: JoinSecrets,
     purpose_master: Mutex<Option<Arc<crate::secrets::CredentialKey>>>,
     source_boot_attempt: Mutex<Option<String>>,
+    source_dispatch_ready: AtomicBool,
+    source_schema_coordination: tokio::sync::Mutex<()>,
+    activation_marker_lock: Arc<tokio::sync::Mutex<()>>,
+    source_schema_receipt_persisted: AtomicBool,
     ingress_custody_boot: Mutex<Option<String>>,
     activity_signing_key: ActivitySigningKey,
     activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -5151,6 +5188,10 @@ impl MembershipManager {
                 secrets,
                 purpose_master: Mutex::new(None),
                 source_boot_attempt: Mutex::new(None),
+                source_dispatch_ready: AtomicBool::new(false),
+                source_schema_coordination: tokio::sync::Mutex::new(()),
+                activation_marker_lock: Arc::new(tokio::sync::Mutex::new(())),
+                source_schema_receipt_persisted: AtomicBool::new(false),
                 ingress_custody_boot: Mutex::new(None),
                 activity_signing_key,
                 activity_public_keys: Mutex::new(BTreeMap::new()),
@@ -6553,6 +6594,10 @@ impl MembershipManager {
                 statements.push(("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents WHERE node_id=$1) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(inner.identity.node_id.as_str(),proof,now)));
             }
         }
+        if inner.source_dispatch_ready.load(Ordering::Acquire) {
+            let dispatch = crate::store::sharing_source_schema::dispatch_guard_shape();
+            statements.push((format!("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE ({dispatch}) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at"),params!(inner.identity.node_id.as_str(),SHARING_SOURCE_LIVE_DISPATCH_CAPABILITY,now)));
+        }
         // The physical accepted-driver registry supplies this boot identity.
         // Replace prior-boot evidence in the same heartbeat; stale rows cannot
         // register new obligations for a restarted or different driver registry.
@@ -6717,8 +6762,12 @@ impl MembershipManager {
         if inner.local_voter_role_persisted.load(Ordering::Acquire) {
             return Ok(());
         }
+        let receipt = Arc::clone(&inner.activation_marker_lock).lock_owned().await;
         let data_dir = inner.storage_root.clone();
         tokio::task::spawn_blocking(move || {
+            // Cancellation drops the awaiting future, not this durable writer.
+            // Keep serialization owned by the actual blocking I/O operation.
+            let _receipt = receipt;
             super::migration::persist_promoted_voter_role(&data_dir)
         })
         .await
@@ -9268,6 +9317,12 @@ impl MembershipManager {
                         ),
                         Ok(Ok(())) => {}
                     }
+                    if let Err(error) = self.coordinate_source_schema_live().await {
+                        tracing::warn!(
+                            code = error.code(),
+                            "live Source schema coordination is pending"
+                        );
+                    }
                     if let Err(error) = self.refresh_membership_metrics().await {
                         tracing::warn!(
                             code = error.code(),
@@ -10066,7 +10121,7 @@ impl MembershipManager {
             Err(error) => {
                 return Err(self
                     .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
-                    .await)
+                    .await);
             }
         };
         match self.settle_offline_work(node_id).await {
@@ -10469,7 +10524,7 @@ impl MembershipManager {
             Err(error) => {
                 return Err(self
                     .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
-                    .await)
+                    .await);
             }
         };
         if let Err(cause) = self.clock.admit_fenced_removal(&captured, &proof) {
@@ -10676,7 +10731,7 @@ impl MembershipManager {
             Err(error) => {
                 return Err(self
                     .rollback_node_removal_after_failure(&node_id, &removal_attempt, error)
-                    .await)
+                    .await);
             }
         };
         if let Err(cause) = self.clock.admit_fenced_removal(&captured, &proof) {
@@ -19177,8 +19232,14 @@ mod tests {
                 dispatch.trim_start().starts_with(&format!("{path},")),
                 "{signature} binds {path}"
             );
-            assert!(dispatch.contains(reconcile), "{signature} reconciles via {reconcile}");
-            assert!(dispatch.contains(finalize), "{signature} finalizes via {finalize}");
+            assert!(
+                dispatch.contains(reconcile),
+                "{signature} reconciles via {reconcile}"
+            );
+            assert!(
+                dispatch.contains(finalize),
+                "{signature} finalizes via {finalize}"
+            );
             for other in [
                 "RemovalPath::Learner",
                 "RemovalPath::Voter",
