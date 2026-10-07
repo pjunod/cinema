@@ -52,11 +52,19 @@ async fn build_receiver_fixture(
         config.server.bind = address;
         config.cluster.artwork_url = format!("http://{address}");
     }
-    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("B Raft port");
-    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("B API port");
+    let cluster_address = advertised_http.map_or(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        |http| http.ip(),
+    );
+    let raft = std::net::TcpListener::bind((cluster_address, 0)).expect("B Raft port");
+    let api = std::net::TcpListener::bind((cluster_address, 0)).expect("B API port");
     config.cluster.raft_bind = raft.local_addr().expect("B Raft address");
     config.cluster.api_bind = api.local_addr().expect("B API address");
-    config.cluster.advertise_host = "localhost".into();
+    config.cluster.advertise_host = if advertised_http.is_some() {
+        cluster_address.to_string()
+    } else {
+        "localhost".to_owned()
+    };
     drop((raft, api));
     let startup_clock =
         advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));

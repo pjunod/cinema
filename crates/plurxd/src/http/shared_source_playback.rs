@@ -3048,9 +3048,56 @@ mod tests {
                     .expect("settled receipts")
                     .is_empty());
             }
-            assert!(
-                std::sync::Arc::ptr_eq(&end, &entry.end(std::sync::Arc::clone(&fixture.state))),
-                "exact retry preserves unresolved or settled End ownership"
+            let original_deadline = *entry
+                .end_deadline
+                .get()
+                .expect("original bounded End deadline");
+            let retry = entry.end(std::sync::Arc::clone(&fixture.state));
+            if assignment_failure {
+                assert!(
+                    std::sync::Arc::ptr_eq(&end, &retry),
+                    "successful settlement keeps its exact receipt owner"
+                );
+            } else {
+                // An errored waiter may retry the retained actual UncertainG0
+                // cleanup. The failed INSERT left no binding: removing its
+                // trigger is not physical closure or positive no-admit proof.
+                assert!(!std::sync::Arc::ptr_eq(&end, &retry));
+                assert_eq!(
+                    retry
+                        .wait(Instant::now() + Duration::from_secs(1))
+                        .await
+                        .err(),
+                    Some(SourceStartFailure::Unresolved)
+                );
+                assert!(!entry.actual_finished());
+                assert!(
+                    matches!(&*entry.task.cleanup.lock().expect("retained cleanup intent"), Some(SourceUninvokedCleanup::UncertainG0 { planned_incarnation, .. }) if *planned_incarnation == incarnation)
+                );
+                assert_eq!(
+                    entry
+                        .task
+                        .stage
+                        .lock()
+                        .expect("same immutable Start stage")
+                        .incarnation(),
+                    Some(incarnation)
+                );
+                assert!(registry
+                    .entries
+                    .lock()
+                    .expect("retained exact unresolved Start")
+                    .iter()
+                    .any(|held| std::sync::Arc::ptr_eq(held, &entry)));
+                assert!(registry
+                    .settled
+                    .lock()
+                    .expect("no invented settlement")
+                    .is_empty());
+            }
+            assert_eq!(
+                *entry.end_deadline.get().expect("same original End bound"),
+                original_deadline
             );
             fixture.shutdown().await;
         }

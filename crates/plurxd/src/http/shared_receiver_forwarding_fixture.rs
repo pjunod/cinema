@@ -145,11 +145,11 @@ async fn actual_nonowner_b(address: IpAddr) {
     config.cluster.join_url = format!("http://{worker_address}");
     config.cluster.join_token_file = second_directory.path().join("join.token");
     std::fs::write(&config.cluster.join_token_file, token.token).expect("local one-use token");
-    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("second Raft bind");
-    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("second API bind");
+    let raft = std::net::TcpListener::bind((address, 0)).expect("second Raft bind");
+    let api = std::net::TcpListener::bind((address, 0)).expect("second API bind");
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
     config.cluster.api_bind = api.local_addr().expect("API address");
-    config.cluster.advertise_host = "localhost".into();
+    config.cluster.advertise_host = address.to_string();
     drop((raft, api));
     drop(second_listener);
     let observation = Arc::new(crate::StartupObservationHttp::new(second_address));
