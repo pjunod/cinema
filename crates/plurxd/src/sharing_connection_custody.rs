@@ -241,6 +241,7 @@ impl CapturedDriver {
             || !owner_identity_valid(owner_identity)
             || self.0.closed.is_closed()
         {
+            tracing::warn!(target: "plurx::sharing", stage = "ingress.prepare_obligation", error_class = "invalid_or_closed", closed = self.0.closed.is_closed(), "Ingress reservation refused");
             return Err(());
         }
         let mut gate = permit.gate.lock().expect("registration reservations");
@@ -262,6 +263,12 @@ impl CapturedDriver {
                     || entry.owner_identity != owner_identity
             })
         {
+            let conflicting_pending = gate.pending.iter().any(|(driver, entry)| {
+                entry.kind == kind
+                    && entry.incarnation == incarnation
+                    && (driver != &self.0.id || entry.owner_identity != owner_identity)
+            });
+            tracing::warn!(target: "plurx::sharing", stage = "ingress.prepare_obligation", error_class = "reservation_fence", conflicting_pending, pending_capacity = gate.pending.len() >= 256, permit_already_bound = permit.bound.is_some(), "Ingress reservation refused");
             return Err(());
         }
         let mut obligations = self
@@ -282,11 +289,13 @@ impl CapturedDriver {
                 && entry.owner_identity == owner_identity
         }) {
             if existing.acknowledged {
+                tracing::warn!(target: "plurx::sharing", stage = "ingress.prepare_obligation", error_class = "already_acknowledged", "Ingress reservation refused");
                 return Err(());
             }
             identity = existing.clone();
         } else {
             if obligations.len() >= 64 {
+                tracing::warn!(target: "plurx::sharing", stage = "ingress.prepare_obligation", error_class = "driver_capacity", "Ingress reservation refused");
                 return Err(());
             }
             identity.registration_sequence = self
@@ -295,7 +304,7 @@ impl CapturedDriver {
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                     (value < 9_007_199_254_740_991).then_some(value + 1)
                 })
-                .map_err(|_| ())?;
+                .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "ingress.prepare_obligation", error_class = "ordinal_exhausted", "Ingress reservation refused"); })?;
             obligations.push(identity.clone());
         }
         let pending = (self.0.id.clone(), PrincipalObligationKey::from(&identity));
