@@ -343,7 +343,12 @@ def install(args, previous):
             if not args.data_dir.exists():
                 run(['install', '-d', '-o', os.getuid(), '-g', os.getgid(), '-m', '0750', args.data_dir], root=True)
             # Root needs explicit identity to prevent make's environment overriding the deployment UID.
-            run(['make', 'docker-up'], root=True)
+            ref = run(['git', 'describe', '--tags', '--always', '--dirty'], capture=True).strip()
+            epoch = run(['git', 'log', '-1', '--format=%ct'], capture=True).strip()
+            hostname = platform.node().split('.')[0]
+            if not re.fullmatch(r'[A-Za-z0-9._-]+', ref) or not epoch.isdigit() or not re.fullmatch(r'[A-Za-z0-9_-]+', hostname):
+                raise ValueError('build identity contains unsupported characters')
+            run(['make', 'docker-up', 'BUILD_REF=' + ref, 'BUILD_SHA=' + source, 'SOURCE_DATE_EPOCH=' + epoch, 'HOST_SHORTNAME=' + hostname], root=True)
             wait_ready('http://127.0.0.1:32400')
         elif server:
             binary = args.binary or (Path(runtime['server_binary']) if runtime.get('server_binary') else None)
@@ -493,7 +498,7 @@ def main():
                 raise ValueError('media and data paths must be absolute without interpolation or control characters')
             safe(path)
         if args.command in ('install', 'upgrade') and not args.dry_run:
-            if args.data_dir.exists():
+            if args.role != 'cinema' and args.data_dir.exists():
                 expected_uid = os.getuid()
                 if args.server_runtime == 'native' and args.role != 'cinema':
                     import pwd

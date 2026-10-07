@@ -115,6 +115,19 @@ class PiSetupTests(unittest.TestCase):
         self.assertFalse(any('purge' in command or '/srv/plurx' in command for command in commands))
         self.assertFalse(any('profile' in item for command in commands for item in command))
 
+    def test_runtime_contract_refuses_external_executable_and_unrelated_docker_context(self):
+        with self.assertRaises(ValueError):
+            setup.runtime_contract(self.args(server_runtime='native'), {'ffmpeg': '/tmp/ffmpeg'})
+        with self.assertRaises(ValueError):
+            setup.runtime_contract(self.args(), {'compose_service': {'build': {'context': '/tmp/unrelated', 'dockerfile': 'Dockerfile.pi'}}})
+
+    def test_browser_promotion_refuses_unmanaged_setuid_source_before_root_copy(self):
+        with patch.object(setup, 'run') as run:
+            with self.assertRaises(ValueError):
+                setup.promote_browser({'browser_directory': '/tmp/unowned', 'chromium': '/tmp/unowned/chromium',
+                                       'browser_sandbox': '/tmp/unowned/chrome-sandbox'}, None)
+        run.assert_not_called()
+
     def test_native_does_not_require_docker(self):
         with patch.object(setup.shutil, 'which', return_value='/usr/bin/apt-get'), patch.object(setup, 'run') as run:
             setup.package_tools('native')

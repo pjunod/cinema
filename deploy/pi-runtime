@@ -162,6 +162,20 @@ def browser(prefix):
     binary = destination / "usr/lib/chromium/chromium"
     if not binary.is_file():
         raise RuntimeError("isolated browser binary is absent")
+    # A caller-writable extraction receipt cannot authorize a setuid helper.
+    # Derive its identity again from the checksum-pinned package itself.
+    sandbox_package = next(item for item in MANIFEST["browser"]["packages"] if item["name"].startswith("chromium-sandbox_"))
+    package = prefix / "downloads" / sandbox_package["name"]
+    download(sandbox_package, package)
+    import io
+    data = subprocess.check_output(["dpkg-deb", "--fsys-tarfile", str(package)])
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        helpers = [entry for entry in archive if entry.isfile() and entry.name.lstrip("./") == "usr/lib/chromium/chrome-sandbox"]
+        if len(helpers) != 1:
+            raise RuntimeError("pinned package has no unique browser sandbox")
+        expected = hashlib.sha256(archive.extractfile(helpers[0]).read()).hexdigest()
+    if sha(binary.parent / "chrome-sandbox") != expected:
+        raise RuntimeError("browser sandbox differs from pinned package")
     return binary
 
 
