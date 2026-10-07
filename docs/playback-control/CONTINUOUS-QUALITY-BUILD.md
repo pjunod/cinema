@@ -7621,3 +7621,28 @@ URLs and arbitrary nested context never enter the journal. The authored
 credential-exclusion regression and production/test sources compile through
 Xcode 27.0; no unit executes. Apple build counter advances to 215. The next
 failed-only device observation will use the committed diagnostic source.
+
+### 10.252 Diagnostic backend build recovery (2026-10-07)
+
+The diagnostic source is committed at `e4c367634`. The first isolated Linux
+build accidentally used debug information instead of the warm no-debug
+profile and failed on the owned workspace quota. Birth-time scoped cleanup
+removed only that attempt's new artifacts. The pinned no-debug build then
+compiled through the daemon but failed at linking; its linker diagnostic was
+truncated, so no more specific cause is asserted. Removing rebuildable
+dependency incremental caches reclaimed another 1.3 GB while preserving
+compiled libraries, daemon objects and all runtime receipts. Only the failed
+compile/link is being retried; no unit execution is implied.
+
+Both requested devices are available in the refreshed inventory. The build-215
+TV lab and UI-only runner pass strict signature validation, with isolated
+bundle identities and no custom URL schemes. The next runtime case requests
+only the previously failed 1080p replacement. Final adversarial review and
+the subsequent external Fable review stop remain ahead.
+
+A subsequent tiny diagnostic-file write returned `EDQUOT`, confirming the
+remaining quota constraint despite filesystem-wide free space. Failed partial
+executables and all rebuildable owned incremental caches were removed. The
+next pinned build uses `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0`; its
+receipt is written to the independent checkout rather than the constrained
+lab. Source, compiled dependency libraries and historical receipts remain.
