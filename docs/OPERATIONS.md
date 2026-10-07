@@ -3375,6 +3375,7 @@ In Settings → Libraries, the Status column is the truth about each library:
 | Status | Meaning | What to check |
 |---|---|---|
 | `idle` | No scan running; last scan finished | Item count looks right? |
+| `queued` | Accepted work has not started | Read the local library-root error; a free worker cannot scan an unreadable path |
 | `scanning… N / M files` | File pass in progress | — |
 | `fetching metadata…` | Files done, enrichment running | TMDB key set? |
 | `error: …` (red) | The scan failed, with the reason | Almost always a path the **server** can't see |
@@ -3383,6 +3384,17 @@ In Settings → Libraries, the Status column is the truth about each library:
 files while you can see the folder full of media. That means the path you typed
 isn't the path the server process has — under Docker, the container-side mount
 path must match. Fix the mount, not the library name.
+
+After adding mounts to a Compose override, `docker compose restart` still
+uses the container's old mounts. Run `docker compose up -d --force-recreate`
+from the Compose directory, preserving any explicit `-f` options needed to
+load that override. Mount changes do not require an image rebuild. Accepted
+scan and metadata-refresh jobs retry automatically when their roots become
+readable. Activity's job list shows the local path error in Reason; the
+header says **Library work queued** until execution begins.
+Local path observations are tied to the roots that were checked. Editing a
+library's roots suppresses the old diagnosis immediately, including when the
+edit came through another cluster member or an old check finishes late.
 
 When a scan reports that one directory is owned by duplicate catalogue items,
 it still indexes the file. The note lists every candidate item ID and the ID
@@ -4495,6 +4507,11 @@ refresh separately every 15 seconds and show their observation time. Expired
 leases identify a previous owner awaiting recovery, not a running worker.
 The assignment list is bounded to 100 running and 100 cancelling jobs and
 labels itself partial when either page has more results.
+
+A standalone setup shows **Server work**, labels its worker **This server**,
+and omits cluster totals and the node filter. This follows the server's
+cluster mode, not the number of nodes that answered: a cluster with only one
+reachable node keeps its cluster diagnostics.
 
 Each node admits **one heavy background pipeline** at a time. Preparation,
 indexing, subtitles, probing, artwork, semantic indexing, verification and
