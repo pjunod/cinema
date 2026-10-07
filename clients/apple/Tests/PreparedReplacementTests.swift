@@ -2,6 +2,28 @@ import Foundation
 import XCTest
 @testable import plurx
 
+final class PreparedFailureDiagnosticTests: XCTestCase {
+    func testPreparedFailureDiagnosticExcludesResourceCredentials() {
+        let secretURL = "https://example.invalid/media?token=private-playback-credential"
+        let context = [NSLocalizedDescriptionKey: secretURL, NSURLErrorFailingURLStringErrorKey: secretURL]
+        XCTAssertEqual(preparedSuccessorErrorDetail(
+            NSError(domain: NSURLErrorDomain, code: -1100, userInfo: context)), "NSURLErrorDomain:-1100")
+        XCTAssertEqual(preparedSuccessorErrorDetail(
+            NSError(domain: "AVFoundationErrorDomain", code: -11850, userInfo: context)),
+            "AVFoundationErrorDomain:-11850")
+        XCTAssertEqual(preparedSuccessorErrorDetail(
+            NSError(domain: secretURL, code: 42, userInfo: context)), "other:42")
+        let deep = NSError(domain: secretURL, code: 99, userInfo: context)
+        let decoder = NSError(domain: NSOSStatusErrorDomain, code: -12909,
+                              userInfo: [NSUnderlyingErrorKey: deep, NSLocalizedDescriptionKey: secretURL])
+        let wrapped = NSError(domain: "AVFoundationErrorDomain", code: -11800,
+                              userInfo: [NSUnderlyingErrorKey: decoder, NSLocalizedDescriptionKey: secretURL])
+        XCTAssertEqual(preparedSuccessorErrorDetail(wrapped),
+                       "AVFoundationErrorDomain:-11800>NSOSStatusErrorDomain:-12909")
+        XCTAssertEqual(preparedSuccessorErrorDetail(nil), "unreported")
+    }
+}
+
 // MARK: - Fixtures
 
 private let stagingId = "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01"

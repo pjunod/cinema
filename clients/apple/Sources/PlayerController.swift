@@ -11507,6 +11507,15 @@ extension PlayerController: PreparedSuccessorHost {
             autoPreparing = false
             autoUpgradeSinceMs = nil
         }
+        if reason == .failed {
+            let itemError = preparedSuccessorErrorDetail(preparedItem?.error as NSError?)
+            let phase = String(describing: preparedReplacement.phase)
+            let readiness = preparedReplacement.readinessRemainingMs().map(String.init) ?? "unknown"
+            noteSurfaceLogOnly(
+                "prepared_successor_failure:stage=\(phase):item=\(itemError)"
+                    + ":ready_ms=\(readiness):overlap_ms=\(preparedOverlapRemainingMs)"
+            )
+        }
         noteSurfaceLogOnly(
             "prepared_successor_abandoned:\(reason == .failed ? "failed" : "aborted")"
         )

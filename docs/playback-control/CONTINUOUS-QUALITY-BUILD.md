@@ -7593,3 +7593,31 @@ The first Xcode physical destination lookup missed the TV, but a refreshed
 network. Xcode 27.0 is verified. The UI-only runtime scheme is compiling
 against generic tvOS; its physical execution is pending signature validation.
 No repository implementation source or unit suite is changed by this driver.
+
+### 10.251 Physical TV controls expose retained successor failure (2026-10-07)
+
+The disposable TV UI driver now **passes its interaction scope**: it opens
+the shipped quality menu and requests 1080p then 720p while the film clock
+advances. Earlier driver failures remain in `tv-eab5fceb8-ui{2,3,4,5}.xcresult`;
+they exposed real tvOS accessibility menu cells, localized `1,080p` labels
+and the labeled reveal surface. No product navigation changed to satisfy
+the driver. The passed case is `tv-eab5fceb8-ui6.xcresult`, with its exported
+app-scoped screen and accessibility attachments.
+
+That UI pass is **not a transition pass**. The companion SDK trace records
+`prepared_successor_abandoned:failed` on the 1080p request and the truthful
+retained-quality message. All 33 probes remain at 720p in one session/attempt,
+advancing 0.534→65.906s with zero access-log stalls. Preserve
+`tv-eab5fceb8-quality-ui4.json`. The explicit 32.583s capture contains the
+numbered pattern; an earlier XCTest failure capture was black. Isolated
+images do not prove continuous physical display or sample-level audio.
+
+The failure journal previously omitted the failing stage and typed item
+error. A new diagnostic records stage, readiness/overlap budget, and a
+bounded two-error framework-domain/code chain before the successor is
+discarded. It leaves the original abandonment record, retention behavior
+and deadlines unchanged. Domains are whitelisted; descriptions, resource
+URLs and arbitrary nested context never enter the journal. The authored
+credential-exclusion regression and production/test sources compile through
+Xcode 27.0; no unit executes. Apple build counter advances to 215. The next
+failed-only device observation will use the committed diagnostic source.

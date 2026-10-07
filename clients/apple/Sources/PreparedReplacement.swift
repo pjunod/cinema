@@ -1,5 +1,28 @@
 import Foundation
 
+/// Resource URLs and NSError descriptions may contain playback credentials.
+/// Preserve only the typed framework domain and code for retained failures.
+func preparedSuccessorErrorDetail(_ error: NSError?) -> String {
+    guard let error else { return "unreported" }
+    var cursor: NSError? = error
+    var parts: [String] = []
+    // A bounded cause chain retains the decoder/HTTP code behind a framework
+    // wrapper without serializing resource context or following arbitrary chains.
+    for _ in 0..<2 {
+        guard let current = cursor else { break }
+        let domain: String
+        switch current.domain {
+        case NSURLErrorDomain, NSOSStatusErrorDomain, "AVFoundationErrorDomain", "CoreMediaErrorDomain":
+            domain = current.domain
+        default:
+            domain = "other"
+        }
+        parts.append("\(domain):\(current.code)")
+        cursor = current.userInfo[NSUnderlyingErrorKey] as? NSError
+    }
+    return parts.joined(separator: ">")
+}
+
 /// One optional manual choice, separate from the standing media recipe.
 /// A stale failure cannot restore a recipe over a newer viewer command.
 struct ManualQualityRetention: Equatable {
