@@ -78,11 +78,11 @@ fn admit_schema_migration(admission: SchemaMigrationAdmission<'_>) -> Result<(),
 // DVR event history, and the source video sample-entry fact; v41 adds typed
 // content-analysis diagnostics, fixed retry deadlines, identity-aware request
 // indexes, and durable repair receipts; v43 retains source luminance facts.
-// Every additive step is applied through Raft before
-// the daemon opens the store. v5 remains a
-// supported direct-upgrade source so an offline node is
-// not forced to install every intermediate Cinema release; older or future
-// schemas still fail closed. Version-step targets are named independently of
+// The dispatcher applies every additive v5→v81 step through Raft before the
+// daemon opens the store; coordinated Source activation at v82 is separate.
+// v5 remains a supported direct-upgrade source so an offline node need not
+// install every intermediate Cinema release; older or future schemas still
+// fail closed. Version-step targets are named independently of
 // `AUTH_SCHEMA_VERSION` so a later bump cannot silently make an older handler
 // skip intermediate migrations.
 const FRAGMENT_INDEX_SCHEMA_VERSION: i64 = 12;
