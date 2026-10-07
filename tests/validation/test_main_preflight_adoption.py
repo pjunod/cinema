@@ -11,6 +11,64 @@ from validation.python_unit_receipts import ReceiptError
 
 
 class MainPreflightAdoptionCase(unittest.TestCase):
+    def test_generic_bridge_workflow_has_one_python_executor_and_distinct_node_receipts(self):
+        commands = ['python3 -m validation.main_unit_receipts prepare',
+                    'python3 -m validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations',
+                    'python3 -m validation.main_preflight_adoption node']
+        self.assertTrue(adoption.adapter_workflow(commands))
+        for removed in commands:
+            self.assertFalse(adoption.adapter_workflow([command for command in commands if command != removed]))
+        self.assertTrue(adoption.adapter_workflow(
+            ['python3 -m validation.main_preflight_adoption ' + phase
+             for phase in ('prepare', 'validation', 'operations', 'node')]))
+
+    def test_exact_preunit4299_environment_recovery_imports_no_outcomes(self):
+        import copy
+        import hashlib
+        import json
+        proof = copy.deepcopy(adoption.PREUNIT4299)
+        scope = {'repository': 1, 'pr': 845}
+        repo = {'id': 1, 'full_name': 'owner/repository'}
+        event = {'action': 'synchronized', 'number': 845, 'repository': repo,
+                 'pull_request': {'number': 845, 'draft': False, 'state': 'open',
+                    'head': {'repo': repo, 'sha': proof['commit']},
+                    'base': {'repo': repo, 'ref': 'main', 'sha': proof['base']}}}
+        prior = {'id': 4299, 'repository': repo, 'event': 'pull_request', 'status': 'failure',
+                 'workflow_id': 'main-fast-lane.yml', 'commit_sha': proof['commit'],
+                 'event_payload': json.dumps(event)}
+        jobs = [{'id': identity, 'name': name, 'task_id': task, 'status': status,
+                 'run_id': 4299, 'repo_id': 1, 'attempt': 1}
+                for identity, name, task, status in proof['jobs']]
+        raw = (proof['commit'] + ':refs/remotes/pull/845/head\n'
+               'Main preflight receipt refusal: Legacy Linux/Python/Node environment applicability unavailable\n'
+               "skipping post step for 'Publish preflight attempt-start journal'; main step was skipped\n"
+               "skipping post step for 'Preserve per-ID preflight journal even on failure'; main step was skipped\n"
+               "Job 'fast policy and contract preflight' failed\n").encode()
+        proof['sources'] = {path: hashlib.sha256(b'source').hexdigest() for path in proof['sources']}
+        proof['log_bytes'], proof['log_sha256'] = len(raw), hashlib.sha256(raw).hexdigest()
+        class API:
+            log = raw
+            artifacts = []
+            def get(self, path): return prior if path == '/actions/runs/4299' else self.artifacts
+            def pages(self, path, query): return self.artifacts
+            def bytes(self, path, query=None): return self.log if path == '/actions/jobs/43909/logs' else b'source'
+        with mock.patch.object(adoption, 'PREUNIT4299', proof), mock.patch.object(adoption, 'atomic_json') as writer:
+            self.assertTrue(adoption.recover_preunit4299(API(), scope, prior, jobs))
+            self.assertFalse(adoption.recover_preunit4299(API(), scope, dict(prior, id=4300), jobs))
+            for changed in (jobs[:-1], [dict(job, attempt=2) for job in jobs]):
+                with self.assertRaises(ReceiptError):
+                    adoption.recover_preunit4299(API(), scope, prior, changed)
+            api = API()
+            api.artifacts = [{'run_id': 4299}]
+            with self.assertRaises(ReceiptError):
+                adoption.recover_preunit4299(api, scope, prior, jobs)
+            api = API()
+            api.log = raw.replace(b"Job 'fast", b"Main preflight outcome positive\nJob 'fast")
+            altered = dict(proof, log_bytes=len(api.log), log_sha256=hashlib.sha256(api.log).hexdigest())
+            with mock.patch.object(adoption, 'PREUNIT4299', altered), self.assertRaises(ReceiptError):
+                adoption.recover_preunit4299(api, scope, prior, jobs)
+            writer.assert_not_called()
+
     def test_ordered_events_bind_skips_without_inventing_positive_ids(self):
         inventory = {"validation": [f"v{i}" for i in range(293)],
                      "operations": [f"o{i}" for i in range(735)]}

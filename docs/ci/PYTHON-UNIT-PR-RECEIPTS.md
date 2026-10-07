@@ -7,12 +7,16 @@ policy changes repeated Python unit execution, not current-source compilation.
 
 ## Main preflight — authenticated legacy outcomes and declared inputs
 
-The main fast lane uses
+The main fast lane executes Python through
+[`main_unit_receipts.py`](../../validation/main_unit_receipts.py). Its prepare
+step calls
 [`main_preflight_adoption.py`](../../validation/main_preflight_adoption.py)
-and the reviewed
+to authenticate the legacy bridge and prepare the separate Node journal.
+PR #845 also applies the reviewed
 [`main-preflight-inputs.json`](../../validation/main-preflight-inputs.json).
 Each Python ID binds its method/local-fixture AST and declared production
-inputs. The manifest records actual read closures, including filename
+inputs to every retained Python success, including successes first recorded
+by the generic runner. The manifest records actual read closures, including filename
 inventories, absent paths, executable modes and narrowly declared Git-history
 consumers. Unknown witnesses refuse before execution; changing one sibling
 method does not invalidate unchanged methods through a whole test-file hash.
@@ -28,6 +32,15 @@ two skips. Summary totals alone cannot import a pass. The two skipped IDs
 retain their history and remain pending current controls. Linux x86_64,
 Python 3.12 and Node 22.23.2 are the proven legacy environment; the Node
 setup is pinned to that version. No unobserved Python patch is claimed.
+
+The preflight installs one job-local Python 3.12.15 Linux x86_64 runtime from
+the immutable October 3 public release. HTTPS download, 34,285,590-byte bound
+and SHA-256 `731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91`
+are checked before extraction. The job verifies the Python family/platform,
+adds only that runtime to its PATH and removes its exact owned temporary
+directory in an always step. This preserves the proven Python 3.12 family
+without claiming original patch, SQLite or OpenSSL equivalence or changing
+shared host packages. Node remains pinned to 22.23.2.
 
 Future journals bind their exact schema, repository/PR, source, producer and
 manifest blobs, actual terminal job and attempt1. Own outcomes require an
@@ -55,6 +68,26 @@ imports zero successes and creates no journal. It admits no other failed
 attempt or changed evidence. The two new fake-API controls remain reserved
 for their first actual candidate-lane execution.
 
+Run4299/job43909/attempt1 on `ef65129def6f8286976f8ff2a18394c0c0183704`
+failed the legacy environment check before units or journals. Its separate
+bounded recovery authenticates the complete nine-job terminal inventory,
+same ready event/base, original source hashes and 141038-byte raw log SHA-256
+`758d98b2e40c73432f8ca328fda7c5cf8aa1eedf4cf88f2a0e5e7af47f323e2c`.
+The exact environment refusal, absent unit outcomes and absent start/final/run
+artifacts establish zero execution; no outcome is imported.
+
+The bridge returns full authenticated original provenance before filtering
+current applicability, so changed inputs invalidate a method without losing
+its historical attribution. Only adapter-era runs authenticated by the bridge
+are omitted from generic bootstrap; unknown attempted runs still refuse.
+Generic start/final journals keep the original Python run/commit attribution,
+and PR #845 adds runtime and immutable producer-blob provenance. Both journals
+must match the authenticated original workflow and current runtime. Tracked
+worktree changes refuse execution before discovery. The adapter retains the
+seven Node script identities and executes only pending scripts; it does not
+execute Python alongside the generic runner. Both start and final artifact
+pairs are published independently, including after failures.
+
 Fixture, import, discovery and runner-abort errors remain in the durable
 journal even when earlier methods passed. They block later reuse until
 attributable evidence is recovered; retained method successes cannot hide a
@@ -80,9 +113,10 @@ this Python/Node adapter. No Rust test success is inferred from run4275, and
 these receipts cannot authorize repeating successful Rust cases. Compiler
 parallelism is bounded with `CARGO_BUILD_JOBS=1`; Windows compilation waits
 for the Rust gate to finish because their code generation exhausted a shared
-14 GiB guest. Test threads and target coverage are not reduced.
+14 GiB guest. Main's Rust fast lane compiles all targets and runs Clippy;
+full Rust unit suites remain in manual full CI.
 
-The effort preflight discovers the validation and operations suites on every
+Both preflights discover the validation and operations suites on every
 candidate. Each discovered test ID must have passed once for this repository
 and PR. Applicable successful methods are not executed again after a head or
 base refresh. A changed assertion body or shared local fixture is not proved
@@ -90,7 +124,9 @@ by an old success under the same ID. Failed, newly introduced and genuinely
 source-invalidated methods execute; unchanged sibling methods stay retained.
 A skipped test, an
 expected failure, discovery error, empty suite or unknown outcome is not a
-success. Removing a test does not erase its historical evidence.
+success. Main preserves ordinary unittest acceptance of legitimate skips and
+expected failures, recording skips separately without caching them as passes.
+Effort keeps its existing stricter policy. Removing a test does not erase its historical evidence.
 
 ## Identity and source remain explicit
 
@@ -103,6 +139,58 @@ Every success retains its original commit and workflow run. Reuse is
 historical unit evidence, never a statement that the test executed on the
 current source. Compiler, history, catalog and static web checks continue on
 the current candidate. There is no bypass flag or product setting.
+
+## Main continuation — authenticated cutover and separate journals
+
+Since 2026-10-07, [main_unit_receipts.py](../../validation/main_unit_receipts.py)
+uses the shared bounded API, source applicability and success recorder with
+its own workflow scope, artifact names and workspace directory. The event
+must identify an open same-repository PR into `main` at the exact checked-out
+head. Historical runs are queried by `refs/pull/<number>/head` and each run's
+authenticated event payload, repository, workflow, PR, head, base, job and
+attempt are checked. An effort receipt cannot satisfy main evidence.
+
+For a PR that began before main receipts existed, the adapter imports one
+latest exhaustive legacy baseline. The authenticated default unittest log
+must bind the source checkout, terminal counts and every failed method ID to
+an exhaustive AST inventory reconstructed from that commit's tracked files.
+Class inheritance and supported unittest decorators are source-bound; custom
+loaders, custom runners, dynamic discovery, missing source, count mismatch,
+errors, skips and ambiguous outcomes refuse migration. A failed subtest
+invalidates its whole named method. A terminal validation failure establishes
+only validation successes: operations have not run. When both suites have
+terminal results, each inventory is checked separately against its own log.
+This generic migration has no run-specific pass lists. PR #845's older
+skip-bearing baseline uses the independently authenticated bridge above;
+generic dot-log migration remains strict for other PRs.
+
+Older pre-receipt attempts are outside that migration baseline. Their missing
+logs or journals are not converted into passes or assertions of zero
+execution. After the source workflow adopts receipts, every executed attempt
+requires authenticated start and final journals, even when units fail.
+An incomplete final journal from a failed or cancelled attempt preserves its
+individually recorded positive successes; it makes no claim about unrecorded
+execution. A missing journal or unresolved fixture error refuses continuation;
+retain and recover its actual evidence. Inherited successes require an individually
+matching authenticated original journal or the authenticated legacy baseline,
+then current method/local-fixture applicability before reuse.
+
+Main queues concurrent PR attempts instead of cancelling the run publishing
+its journal. The existing current-head/base promotion guard rejects a stale
+candidate. Current history, catalog, Regression-Test fields, Node contracts
+and affected compiler gates continue normally. The run command explicitly
+declares `--suite-dir tests/validation --suite-dir tests/operations`; the CLI
+refuses any other list, and the regression-field checker derives the executed
+suite coverage from those declarations. Output separates discovered methods,
+historical passes and pending execution; it never claims a retained method
+executed on the current source. Unknown method outcomes refuse completion.
+
+The controls live in
+[test_main_unit_receipts.py](../../tests/validation/test_main_unit_receipts.py):
+exhaustive failure accounting, metadata mismatches, unsupported historical
+discovery, skip semantics, no execution of retained successes, failed units
+and silent custom runners. The main migration accepts only source-proven
+method/local-fixture evidence; the dependency limits below still apply.
 
 ## Current applicability — genuine history is not proof of new assertions
 
@@ -456,7 +544,7 @@ The small fake-fixture tests in
 new IDs, source preservation, skips, isolation, corrupt/incomplete evidence,
 unsafe archives, empty discovery, atomic publication and workflow ordering.
 Run each unit regression once per PR; retry only a failure. This change does
-not cache compiler or static checks, alter main qualification, or mutate a
+not cache compiler or static checks, bypass main qualification, or mutate a
 runner service. Legacy runs without sufficiently attributable per-ID evidence
 are not automatically labelled successful.
 
@@ -466,3 +554,36 @@ and player-DOM executions are removed; both remain in the unchanged mandatory
 after a Node success the gate must not be dispatched again until the separate
 static-only follow-up or attributable recovery preserves that success. These
 Python receipts do not claim to cache Node tests or exempt their contracts.
+
+
+## Ordinary main-lane continuation
+
+`validation.main_unit_receipts` applies the same source-attribution machinery
+to the main fast lane's validation and operations suites. It imports an
+exhaustive legacy unittest baseline only when exact-source static discovery
+and terminal counts account for every method and every non-success. Subsequent
+journals retain original run/commit attribution; changed methods or local
+fixtures invalidate their own evidence. This is not a claim that every possible
+production dependency change can be inferred from a test's source fingerprint.
+
+Forgejo can remove a run's artifacts when a different job in that run is
+retried. The successful Python job remains attempt 1 and retains its log.
+New main-lane attempts therefore write bounded, checksummed start/final journal
+frames into that log as well as publishing artifacts. Log-only restoration
+requires a successful Python job and a completed final snapshot; partial
+snapshots remain diagnostic evidence, not an automatic failure waiver.
+Restoration authenticates
+the same repository, PR, branch, workflow, source and Python job, and still
+requires original provenance for every inherited success. Framing detects
+truncation or corruption; its checksum does not replace API authentication.
+
+For pre-framing main receipt output, recovery accepts only the reviewed runner
+source digests, a successful attempt-1 Python job and inherited successes from
+older authenticated evidence. Each explicit pending method must resolve to
+immutable method/fixture source in exactly one suite. Discovery and pending
+counts, exhaustive verbose outcomes and terminal summaries must all agree.
+Only explicit successful methods add passes; optional skips do not. Ambiguous,
+incomplete or contradictory evidence stops continuation. Other receipt-policy
+attempts without either artifacts or sufficient authenticated logs remain
+blocking. This does not allow rerunning the Python job itself or replaying an
+entire suite to replace missing evidence.

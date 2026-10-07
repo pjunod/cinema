@@ -63,6 +63,26 @@ PREUNIT4294 = {
     ),
 }
 
+PREUNIT4299 = {
+    **PREUNIT4294, "run": 4299, "job": 43909,
+    "commit": "ef65129def6f8286976f8ff2a18394c0c0183704",
+    "log_bytes": 141038,
+    "log_sha256": "758d98b2e40c73432f8ca328fda7c5cf8aa1eedf4cf88f2a0e5e7af47f323e2c",
+    "sources": {**PREUNIT4294["sources"],
+        "validation/main_preflight_adoption.py": "6639de6317fc07a580a563a2d57a24a0257a9668d03b6a7527122177c974e6cc"},
+    "jobs": (
+        (43907, "fast-lane validation scope", 16504, "success"),
+        (43908, "fast-lane mobile release version", 0, "skipped"),
+        (43909, "fast policy and contract preflight", 16506, "failure"),
+        (43910, "fast Rust gate", 16513, "skipped"),
+        (43911, "fast Windows compile", 0, "skipped"),
+        (43912, "fast web syntax gate", 0, "skipped"),
+        (43913, "fast Apple compile", 0, "skipped"),
+        (43914, "fast Android compile", 0, "skipped"),
+        (43915, "Main promotion gate", 16515, "failure"),
+    ),
+}
+
 
 def run_commands(workflow, job="preflight"):
     """Literal unconditional run steps; comments/disabled steps are not proof."""
@@ -382,6 +402,7 @@ def api_context():
             and repo["full_name"] == os.environ["GITHUB_REPOSITORY"], "Not a ready same-repository main PR")
     commit = git("rev-parse", "HEAD")
     require(commit == pull["head"]["sha"] == os.environ["GITHUB_SHA"], "Checkout/source mismatch")
+    require(not git("diff", "--name-only", "HEAD"), "Current tracked source differs from prepared commit")
     require(os.environ.get("GITHUB_RUN_ATTEMPT", "1") == "1", "Use a new attempt, not rerun")
     root = os.environ["GITHUB_API_URL"]
     require(root.startswith(os.environ["GITHUB_SERVER_URL"].rstrip("/") + "/"),
@@ -450,10 +471,20 @@ def require_missing_journal_safe(prior, jobs, scope):
 
 def recover_preunit4294(api, scope, prior, jobs):
     """One authenticated early refusal; import neither outcomes nor a journal."""
-    proof = PREUNIT4294
+    return recover_preunit(api, scope, prior, jobs, PREUNIT4294,
+                          "Prior event/source/PR/base/readiness binding mismatch")
+
+
+def recover_preunit4299(api, scope, prior, jobs):
+    """Exact environment refusal, before any Python/Node unit or journal."""
+    return recover_preunit(api, scope, prior, jobs, PREUNIT4299,
+                          "Legacy Linux/Python/Node environment applicability unavailable")
+
+
+def recover_preunit(api, scope, prior, jobs, proof, reason):
     if scope != {"repository": proof["repository"], "pr": proof["pr"]} or prior["id"] != proof["run"]:
         return False
-    actual = api.get("/actions/runs/4294")
+    actual = api.get(f"/actions/runs/{proof['run']}")
     require(actual["id"] == prior["id"] == proof["run"]
             and actual["commit_sha"] == prior["commit_sha"] == proof["commit"]
             and terminal_status(actual) == "failure",
@@ -472,12 +503,12 @@ def recover_preunit4294(api, scope, prior, jobs):
         original = api.bytes("/raw/" + path, {"ref": proof["commit"]})
         require(hashlib.sha256(original).hexdigest() == expected,
                 "Prepare4294 immutable producer/workflow/source mismatch")
-    raw = api.bytes("/actions/jobs/43864/logs")
+    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
     require(len(raw) == proof["log_bytes"] and hashlib.sha256(raw).hexdigest() == proof["log_sha256"],
             "Prepare4294 original raw log mismatch")
     lines = [re.sub(r"^\d{4}-\d\d-\d\dT[0-9:.]+Z ", "", line)
              for line in raw.decode("utf-8").splitlines()]
-    refusal = "Main preflight receipt refusal: Prior event/source/PR/base/readiness binding mismatch"
+    refusal = "Main preflight receipt refusal: " + reason
     start = "skipping post step for 'Publish preflight attempt-start journal'; main step was skipped"
     final = "skipping post step for 'Preserve per-ID preflight journal even on failure'; main step was skipped"
     log = "\n".join(lines)
@@ -491,12 +522,12 @@ def recover_preunit4294(api, scope, prior, jobs):
             and not any(re.fullmatch(r"Ran \d+ tests in .*", line) for line in lines),
             "Prepare4294 contradicts reviewed zero-unit phase evidence")
     name = "main-preflight-v1-r1-pr845"
-    require(api.get("/actions/runs/4294/artifacts") == []
+    require(api.get(f"/actions/runs/{proof['run']}/artifacts") == []
             and not any(artifact["run_id"] == proof["run"] for artifact in
                         api.pages("/actions/artifacts", {"name": name}))
-            and not api.pages("/actions/artifacts", {"name": name + "-start-4294"}),
+            and not api.pages("/actions/artifacts", {"name": name + f"-start-{proof['run']}"}),
             "Prepare4294 unexpectedly has start/final/run artifacts")
-    print("Recovered exact prepare refusal run4294/job43864: zero units, no outcomes or journal imported")
+    print(f"Recovered exact prepare refusal run{proof['run']}/job{proof['job']}: zero units, no outcomes or journal imported")
     return True
 
 
@@ -517,7 +548,16 @@ def record_phase_error(journal, phase, message):
     atomic_json(JOURNAL, journal)
 
 
-def prepare():
+def adapter_workflow(commands):
+    old = all("python3 -m validation.main_preflight_adoption " + phase in commands
+              for phase in ("prepare", "validation", "operations", "node"))
+    bridge = ("python3 -m validation.main_unit_receipts prepare" in commands
+              and "python3 -m validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations" in commands
+              and "python3 -m validation.main_preflight_adoption node" in commands)
+    return old or bridge
+
+
+def prepare(output_key="receipt_key"):
     api, scope, commit, run_id = api_context()
     require(not JOURNAL.parent.is_symlink(), "Receipt directory symlink")
     document = bounded_json(MANIFEST.read_bytes())
@@ -525,6 +565,7 @@ def prepare():
     families = document["families"]
     name = f"main-preflight-v1-r{scope['repository']}-pr{scope['pr']}"
     candidates = {}
+    authenticated_runs = set()
     skipped_history = {}
     env = environment()
     if scope == {"repository": 1, "pr": 845}:
@@ -534,6 +575,7 @@ def prepare():
         require(len(matching) == 1, "Legacy preflight job unavailable")
         raw = api.bytes("/actions/jobs/43709/logs")
         lines = authenticate_legacy(run, matching[0], raw)
+        authenticated_runs.add(LEGACY["run"])
         outcomes = decode_progress(lines, inventory(LEGACY["commit"]))
         require(env == {"platform": "linux", "machine": "x86_64", "python": [3, 12], "node": "v22.23.2"},
                 "Legacy Linux/Python/Node environment applicability unavailable")
@@ -562,11 +604,14 @@ def prepare():
         if prior["id"] == run_id or prior["id"] in indexed_runs:
             continue
         workflow = api.bytes("/raw/.github/workflows/main-fast-lane.yml", {"ref": prior["commit_sha"]})
-        if "python3 -m validation.main_preflight_adoption prepare" in run_commands(workflow.decode()):
+        if adapter_workflow(run_commands(workflow.decode())):
             jobs = api.pages(f"/actions/runs/{prior['id']}/jobs")
-            if recover_preunit4294(api, scope, prior, jobs):
+            if (recover_preunit4294(api, scope, prior, jobs)
+                    or recover_preunit4299(api, scope, prior, jobs)):
+                authenticated_runs.add(prior["id"])
                 continue
             require_missing_journal_safe(prior, jobs, scope)
+            authenticated_runs.add(prior["id"])
     require(len({a["run_id"] for a in artifacts}) == len(artifacts), "Ambiguous duplicate journals")
     for artifact in sorted(artifacts, key=lambda a: a["run_id"]):
         require(artifact["name"] == name and not artifact["expired"], "Unavailable prior journal")
@@ -577,8 +622,7 @@ def prepare():
         bind_event(prior, scope)
         journal = artifact_json(api.bytes(f"/actions/artifacts/{artifact['id']}/zip"))
         producer_commands = run_commands(git("show", journal["commit"] + ":.github/workflows/main-fast-lane.yml"))
-        require(all("python3 -m validation.main_preflight_adoption " + phase in producer_commands
-                    for phase in ("prepare", "validation", "operations", "node"))
+        require(adapter_workflow(producer_commands)
                 and journal["producer_blob"] == git("rev-parse", journal["commit"] + ":validation/main_preflight_adoption.py")
                 and journal["manifest_blob"] == git("rev-parse", journal["commit"] + ":" + str(MANIFEST)),
                 "Unknown workflow/journal producer")
@@ -621,6 +665,7 @@ def prepare():
                 require(log.count(outcome_event(identity, record)) == 1,
                         "Own skip lacks original executable outcome event")
         skipped_history.update(journal["skips"])
+        authenticated_runs.add(prior["id"])
     source = SourceApplicability(commit)
     current_test_paths = set(git("ls-tree", "-r", "--name-only", commit, "tests").splitlines())
     adopted = {}
@@ -655,7 +700,8 @@ def prepare():
                "outcomes": adopted, "skips": skipped_history, "phase_errors": []}
     atomic_json(JOURNAL, journal)
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-        output.write("receipt_key=" + name + "\n")
+        output.write(output_key + "=" + name + "\n")
+    return candidates, authenticated_runs
 
 
 def execute_phase(phase):

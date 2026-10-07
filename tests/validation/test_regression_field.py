@@ -151,6 +151,7 @@ class RegressionFieldCase(unittest.TestCase):
                         steps:
                           - run: make invented-check
                           - run: node tests/invented/suite.test.js
+                          - run: python3 -m validation.main_unit_receipts run --suite-dir tests/receipt-one --suite-dir tests/receipt-two
                       rust_compile:
                         steps:
                           - run: node tests/also-not-preflight.test.js
@@ -164,7 +165,7 @@ class RegressionFieldCase(unittest.TestCase):
             )
             self.assertEqual(
                 executed_suites(root),
-                (("tests/invented/suite.test.js",), ("tests/invented-dir",)),
+                (("tests/invented/suite.test.js",), ("tests/invented-dir", "tests/receipt-one", "tests/receipt-two")),
             )
 
     def test_the_lane_this_repository_ships_really_runs_what_it_derives(self):

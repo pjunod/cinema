@@ -95,6 +95,27 @@ class CatalogCase(unittest.TestCase):
         self.assertIsNotNone(pattern.match("web/player/app.js"))
         self.assertIsNone(pattern.match("web/player/app.css"))
 
+    def test_glob_compilation_reuses_patterns_with_bounded_capacity(self):
+        glob_regex.cache_clear()
+        self.addCleanup(glob_regex.cache_clear)
+        pattern = glob_regex("web/**/{app,player}.js")
+        self.assertIs(glob_regex("web/**/{app,player}.js"), pattern)
+        self.assertEqual(glob_regex.cache_info().hits, 1)
+        for path in ("web/app.js", "web/nested/player.js"):
+            self.assertIsNotNone(pattern.match(path))
+        for path in ("web/app.css", "web/nested/other.js"):
+            self.assertIsNone(pattern.match(path))
+        self.assertIsNone(glob_regex("web/*.js").match("web/nested/app.js"))
+
+        # Unique inputs evict the oldest key rather than retaining unbounded
+        # caller input; querying that key must compile it again.
+        for index in range(1024):
+            glob_regex(f"cache-capacity/{index}.rs")
+        info = glob_regex.cache_info()
+        self.assertEqual((info.maxsize, info.currsize), (1024, 1024))
+        glob_regex("web/**/{app,player}.js")
+        self.assertEqual(glob_regex.cache_info().misses, info.misses + 1)
+
     def test_cluster_auth_budget_covers_a_cold_serial_run(self):
         catalog = load_catalog(ROOT / "validation/points.toml")
         cluster_auth = next(

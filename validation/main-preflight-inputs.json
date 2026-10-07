@@ -143,6 +143,17 @@
       "reason": "Synthetic API construction reads the committed descriptor."
     },
     {
+      "id_prefix": "validation:test_main_unit_receipts.",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/main_unit_receipts.py",
+        "validation/main_preflight_adoption.py",
+        "validation/main-preflight-inputs.json",
+        "validation/python_unit_receipts.py"
+      ],
+      "reason": "Generic receipt and bridge controls read this runner/helper closure; first CI execution remains required."
+    },
+    {
       "id_prefix": "validation:test_main_preflight_adoption.",
       "inputs": [
         "validation/__init__.py",
@@ -3677,6 +3688,13 @@
         ".github/workflows/coverage.yml"
       ],
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
+    },
+    {
+      "id_prefix": "operations:test_contracts.OperationsContractCase.test_main_preflight_runtime_is_job_local_bounded_and_precedes_receipts",
+      "inputs": [
+        ".github/workflows/main-fast-lane.yml"
+      ],
+      "reason": "Checks the immutable workflow runtime download, ordering, checksum and exact owned-path cleanup."
     },
     {
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_main_qualification_is_full_and_effort_prs_are_compile_only",
