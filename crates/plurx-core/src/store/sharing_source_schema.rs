@@ -1,5 +1,5 @@
-//! Closed Source layout activation inputs. Only startup coordination may apply them.
-//! Reads never repair a missing or partial layout, and legacy writers must drain.
+//! Closed Source layout inputs for startup and compatible live coordination.
+//! Reads never repair missing or partial layouts; guarded dispatch preserves Local work.
 use super::{
     sharing_catalogue_source, sharing_source_sessions, MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA,
 };
@@ -8,9 +8,78 @@ use super::{
 pub(crate) const SOURCE_LAYOUT_VERSION: i64 = 71;
 pub(crate) const SOURCE_SCHEMA_VERSION: i64 = 82;
 pub(crate) const SOURCE_SCHEMA_PREDECESSOR: i64 = 81;
+/// Additive, wire-compatible dispatch assertion. Never retains successful rows.
+pub(crate) const DISPATCH_GUARD_SCHEMA: &str = hiqlite::Error::SOURCE_LAYOUT_GUARD_DDL;
+
+pub(crate) fn dispatch_guard_shape() -> String {
+    format!(
+        "({}) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='sharing_source_dispatch_guard') AND NOT EXISTS(SELECT 1 FROM sharing_source_dispatch_guard)",
+        exact_object(DISPATCH_GUARD_SCHEMA)
+    )
+}
+
 pub(crate) const BOOT_INTENTS_SCHEMA: &str = "CREATE TABLE sharing_source_boot_intents (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64),membership_generation INTEGER NOT NULL CHECK(membership_generation>=0)) STRICT";
 pub(crate) const INSTALLATION_SCHEMA: &str = "CREATE TABLE sharing_source_schema_installation (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=71),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64),installed_at_ms INTEGER NOT NULL CHECK(installed_at_ms>0)) STRICT";
 pub(crate) const TRANSACTION_SCHEMA: &str = "CREATE TABLE sharing_source_schema_transaction_guard (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CHECK(passed=1)) STRICT";
+struct DispatchGuardRow(i64);
+impl From<&mut hiqlite::Row<'_>> for DispatchGuardRow {
+    fn from(row: &mut hiqlite::Row<'_>) -> Self {
+        Self(row.get("count"))
+    }
+}
+
+/// Provision only at Store construction, never from serving session I/O.
+/// Competing initializers may adopt an exact winner; fragments are never repaired.
+pub(crate) async fn provision_dispatch_guard(
+    client: &hiqlite::Client,
+) -> Result<(), crate::error::StoreError> {
+    use crate::error::StoreError;
+    let rows=client.query_consistent_map::<DispatchGuardRow,_>("SELECT count(*) AS count FROM sqlite_master WHERE name='sharing_source_dispatch_guard'",hiqlite::params!()).await.map_err(|error|StoreError::Database(error.to_string()))?;
+    if matches!(rows.as_slice(),[row] if row.0==0) {
+        let creation = client
+            .execute(DISPATCH_GUARD_SCHEMA, hiqlite::params!())
+            .await;
+        // Do not interpret an uncertain creation response as absence. Verify the
+        // actual committed complete shape; no mutation is replayed here.
+        let rows = client
+            .query_consistent_map::<DispatchGuardRow, _>(
+                format!(
+                    "SELECT CASE WHEN ({}) THEN 1 ELSE 0 END AS count",
+                    dispatch_guard_shape()
+                ),
+                hiqlite::params!(),
+            )
+            .await
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        if !matches!(rows.as_slice(),[row] if row.0==1) {
+            creation.map_err(|error| StoreError::Database(error.to_string()))?;
+            return Err(StoreError::Migration(
+                "Source dispatch guard is not exact".to_owned(),
+            ));
+        }
+    } else if !matches!(rows.as_slice(),[row] if row.0==1) {
+        return Err(StoreError::Migration(
+            "Source dispatch guard name is ambiguous".to_owned(),
+        ));
+    }
+    let rows = client
+        .query_consistent_map::<DispatchGuardRow, _>(
+            format!(
+                "SELECT CASE WHEN ({}) THEN 1 ELSE 0 END AS count",
+                dispatch_guard_shape()
+            ),
+            hiqlite::params!(),
+        )
+        .await
+        .map_err(|error| StoreError::Database(error.to_string()))?;
+    if !matches!(rows.as_slice(),[row] if row.0==1) {
+        return Err(StoreError::Migration(
+            "Source dispatch guard is not exact".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 const FAMILIES: [&str; 7] = [
     "media_session_requests",
     "media_playback_pointers",
@@ -34,17 +103,30 @@ fn exact_object(statement: &str) -> String {
     )
 }
 pub(crate) fn boot_shape_guard() -> String {
-    format!("({}) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='sharing_source_boot_intents')",exact_object(BOOT_INTENTS_SCHEMA))
+    format!(
+        "({}) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='sharing_source_boot_intents')",
+        exact_object(BOOT_INTENTS_SCHEMA)
+    )
 }
 /// The captured attempt set must still be the complete active roster, with
 /// each attempt explicitly advertised by that process's current heartbeat.
 /// Mere retained startup rows from a stopped process confer no authority.
 pub(crate) fn boot_authority_guard(parameter: usize) -> String {
     assert!((1..=256).contains(&parameter));
-    format!("({}) AND json_type(${parameter})='array' AND json_array_length(${parameter}) BETWEEN 1 AND 256 AND (SELECT count(*) FROM cluster_nodes WHERE removed_at IS NULL)=json_array_length(${parameter}) AND NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(${parameter}) expected JOIN sharing_source_boot_intents intent ON intent.node_id=node.node_id AND intent.raft_id=node.raft_id WHERE json_extract(expected.value,'$[0]')=intent.node_id AND json_extract(expected.value,'$[1]')=intent.raft_id AND json_extract(expected.value,'$[2]')=intent.attempt_id AND json_extract(expected.value,'$[3]')=intent.master_fingerprint AND json_extract(expected.value,'$[4]')=intent.membership_generation AND intent.membership_generation=(SELECT generation FROM cluster_sharing_membership_generation WHERE singleton=1) AND EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_source_boot_v1:'||intent.attempt_id)))",boot_shape_guard())
+    format!(
+        "({}) AND json_type(${parameter})='array' AND json_array_length(${parameter}) BETWEEN 1 AND 256 AND (SELECT count(*) FROM cluster_nodes WHERE removed_at IS NULL)=json_array_length(${parameter}) AND NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(${parameter}) expected JOIN sharing_source_boot_intents intent ON intent.node_id=node.node_id AND intent.raft_id=node.raft_id WHERE json_extract(expected.value,'$[0]')=intent.node_id AND json_extract(expected.value,'$[1]')=intent.raft_id AND json_extract(expected.value,'$[2]')=intent.attempt_id AND json_extract(expected.value,'$[3]')=intent.master_fingerprint AND json_extract(expected.value,'$[4]')=intent.membership_generation AND intent.membership_generation=(SELECT generation FROM cluster_sharing_membership_generation WHERE singleton=1) AND EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_source_boot_v1:'||intent.attempt_id)))",
+        boot_shape_guard()
+    )
 }
 fn installed_shape_guard_at(version: i64) -> String {
-    format!("({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",super::jellyfin_watch::session_dependency_guard(),boot_shape_guard(),exact_object(INSTALLATION_SCHEMA),exact_object(TRANSACTION_SCHEMA),sharing_source_sessions::schema_guard())
+    format!(
+        "({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",
+        super::jellyfin_watch::session_dependency_guard(),
+        boot_shape_guard(),
+        exact_object(INSTALLATION_SCHEMA),
+        exact_object(TRANSACTION_SCHEMA),
+        sharing_source_sessions::schema_guard()
+    )
 }
 pub(crate) fn installed_shape_guard() -> String {
     format!(
@@ -60,7 +142,10 @@ pub(crate) fn legacy_source_work_drained_guard() -> &'static str {
     "NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE reservation_state='held') AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE principal_kind='sharing' AND state='starting') AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE principal_kind='sharing' AND state!='ended') AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE principal_kind='sharing')"
 }
 pub(crate) fn installed_guard() -> String {
-    format!("({}) AND EXISTS(SELECT 1 FROM sharing_source_schema_transaction_guard WHERE singleton=1 AND passed=1) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE master_fingerprint NOT GLOB '*[^0-9a-f]*')",installed_shape_guard())
+    format!(
+        "({}) AND EXISTS(SELECT 1 FROM sharing_source_schema_transaction_guard WHERE singleton=1 AND passed=1) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE master_fingerprint NOT GLOB '*[^0-9a-f]*')",
+        installed_shape_guard()
+    )
 }
 /// Complete absence, not a count of new columns, is the only accepted predecessor.
 /// Persisted Local ownership remains untouched and blocks this nonrolling rebuild.
@@ -126,7 +211,11 @@ fn legacy_object_guard() -> String {
         let sql = sql.iter().map(|sql|sql.as_ref().map_or_else(|| "sql IS NULL".to_owned(), |sql| format!("sql={}",quote(sql)))).collect::<Vec<_>>().join(" OR ");
         format!("EXISTS(SELECT 1 FROM sqlite_master WHERE type={} AND name={} AND tbl_name={} AND ({sql}))",quote(kind),quote(name),quote(table))
     }).collect::<Vec<_>>();
-    format!("(SELECT count(*) FROM sqlite_master WHERE tbl_name IN({families}) OR name='background_analysis_viewer_refresh')={} AND ({})",objects.len(),predicates.join(") AND ("))
+    format!(
+        "(SELECT count(*) FROM sqlite_master WHERE tbl_name IN({families}) OR name='background_analysis_viewer_refresh')={} AND ({})",
+        objects.len(),
+        predicates.join(") AND (")
+    )
 }
 pub(crate) fn predecessor_layout_guard() -> String {
     let mut objects = vec![
@@ -160,7 +249,12 @@ pub(crate) fn predecessor_layout_guard() -> String {
         .map(|name| quote(name))
         .collect::<Vec<_>>()
         .join(",");
-    let mut guards=vec![format!("EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={SOURCE_SCHEMA_PREDECESSOR})"),format!("NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN({names}))")];
+    let mut guards = vec![
+        format!(
+            "EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={SOURCE_SCHEMA_PREDECESSOR})"
+        ),
+        format!("NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN({names}))"),
+    ];
     for table in FAMILIES {
         guards.push(format!("EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='{table}') AND NOT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name IN('owner_key','principal_kind','share_grant_id','share_viewer_key')) AND NOT EXISTS(SELECT 1 FROM {table} WHERE user_id<=0 OR user_id IS NULL)"));
         let primary = if table == "media_sessions" {
@@ -185,7 +279,10 @@ pub(crate) fn predecessor_layout_guard() -> String {
 }
 pub(crate) fn predecessor_guard(now_parameter: usize) -> String {
     assert!((1..=256).contains(&now_parameter));
-    format!("({}) AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE state!='ended') AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE state='starting') AND NOT EXISTS(SELECT 1 FROM media_session_preparations) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE expires_at_ms>${now_parameter})",predecessor_layout_guard())
+    format!(
+        "({}) AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE state!='ended') AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE state='starting') AND NOT EXISTS(SELECT 1 FROM media_session_preparations) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE expires_at_ms>${now_parameter})",
+        predecessor_layout_guard()
+    )
 }
 
 /// Frozen statement order preserves child authority rows and then seeds the
