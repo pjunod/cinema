@@ -55,6 +55,16 @@ Older pre-receipt attempts are outside that migration baseline. Their missing
 logs or journals are not converted into passes or assertions of zero
 execution. After the source workflow adopts receipts, every executed attempt
 requires authenticated start and final journals, even when units fail.
+An authenticated cancelled preflight with integer `task_id=0` was never
+assigned to a runner and contributes no test evidence. It must have neither
+a final journal nor an attempt-start artifact. Historical prepare refusals
+can also establish zero execution, but only with the admitted immutable
+workflow and runner hashes, exact-source checkout evidence, a preparation
+refusal followed by a skipped start-marker step, and a terminal failed-job
+log. Partial logs, started journals and unadmitted source still refuse. This
+distinguishes job lifecycle from lost test evidence; it neither deletes prior
+runs nor fabricates successes. The two lifecycle cases are covered in
+[`test_main_unit_receipts.py`](../../tests/validation/test_main_unit_receipts.py).
 An incomplete final journal from a failed or cancelled attempt preserves its
 individually recorded positive successes; it makes no claim about unrecorded
 execution. A missing journal or unresolved fixture error refuses continuation;

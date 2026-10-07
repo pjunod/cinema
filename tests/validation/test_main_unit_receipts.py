@@ -10,6 +10,53 @@ from validation.python_unit_receipts import ReceiptError
 
 
 class MainUnitReceiptsCase(unittest.TestCase):
+    def test_cancelled_unassigned_preflight_does_not_require_test_evidence(self):
+        scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        class API:
+            markers = []
+            def pages(self, path, query=None):
+                return self.markers
+        api = API()
+        prior = {'id': 3, 'commit_sha': 'a' * 40}
+        self.assertTrue(main.unexecuted_preflight(api, scope, prior, {'status': 'cancelled', 'task_id': 0}))
+        for job in ({'status': 'cancelled'}, {'status': 'cancelled', 'task_id': 1},
+                    {'status': 'cancelled', 'task_id': False}, {'status': 'running', 'task_id': 0}):
+            with self.subTest(job=job):
+                self.assertFalse(main.unexecuted_preflight(api, scope, prior, job))
+        api.markers = [{'id': 9}]
+        with self.assertRaises(ReceiptError):
+            main.unexecuted_preflight(api, scope, prior, {'status': 'cancelled', 'task_id': 0})
+
+    def test_prepare_refusal_requires_admitted_source_and_complete_phase_evidence(self):
+        scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        commit = 'a' * 40
+        runner = b'reviewed prepare-before-tests source'
+        lines = [commit, commit, 'triggered by event: pull_request',
+                 'Main Python receipt refused: missing prior evidence',
+                 "skipping post step for 'Publish main Python attempt-start marker'; main step was skipped",
+                 f"Job '{main.JOB}' failed"]
+        class API:
+            log = '\n'.join(lines).encode()
+            raw = runner
+            def bytes(self, path, query=None):
+                return self.log if path.endswith('/logs') else self.raw
+            def pages(self, path, query=None):
+                return []
+        api = API()
+        prior, job = {'id': 3, 'commit_sha': commit}, {'id': 4, 'status': 'failure', 'task_id': 5}
+        with patch.object(main, 'PREPARE_REFUSAL_HASHES', {'validation/main_unit_receipts.py': main.hashlib.sha256(runner).hexdigest()}), \
+             patch.object(main, 'source', return_value=runner):
+            self.assertTrue(main.unexecuted_preflight(api, scope, prior, job))
+            for invalid in (lines[:-1], lines[1:], lines[:4] + lines[5:], lines + [lines[3]],
+                            lines[:3] + lines[4:5] + lines[3:4] + lines[5:],
+                            lines + ['MAIN-UNIT-JOURNAL start 1 ' + '0' * 64]):
+                api.log = '\n'.join(invalid).encode()
+                with self.subTest(lines=invalid):
+                    self.assertFalse(main.unexecuted_preflight(api, scope, prior, job))
+            api.log = '\n'.join(lines).encode()
+            api.raw = b'different remote source'
+            self.assertFalse(main.unexecuted_preflight(api, scope, prior, job))
+
     def test_log_snapshots_require_complete_ordered_digest_bound_frames(self):
         import contextlib
         import io
