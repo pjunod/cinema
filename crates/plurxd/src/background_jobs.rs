@@ -1762,9 +1762,17 @@ pub(crate) async fn claim_fragment(
 /// Bounded, node-local eligibility observations. They never settle durable work:
 /// another member may have a readable mount while this one does not.
 #[derive(Default)]
-pub(crate) struct LibraryReadiness(std::sync::Mutex<std::collections::BTreeMap<i64, String>>);
+pub(crate) struct LibraryReadiness(
+    std::sync::Mutex<std::collections::BTreeMap<i64, LibraryReadinessProblem>>,
+);
+
+#[derive(Clone)]
+struct LibraryReadinessProblem {
+    roots: Vec<std::path::PathBuf>,
+    message: String,
+}
 impl LibraryReadiness {
-    fn record(&self, library_id: i64, problem: Option<String>) {
+    fn record(&self, library_id: i64, roots: &[std::path::PathBuf], problem: Option<String>) {
         let mut rows = self
             .0
             .lock()
@@ -1773,18 +1781,45 @@ impl LibraryReadiness {
             if rows.len() >= 128 && !rows.contains_key(&library_id) {
                 rows.pop_first();
             }
-            rows.insert(library_id, problem.chars().take(512).collect());
+            rows.insert(
+                library_id,
+                LibraryReadinessProblem {
+                    roots: roots.to_vec(),
+                    message: problem.chars().take(512).collect(),
+                },
+            );
         } else {
             rows.remove(&library_id);
         }
     }
 
-    pub(crate) fn problem(&self, library_id: i64) -> Option<String> {
-        self.0
+    /// Compare against the current catalogue, including edits made on another
+    /// node. A late check of old roots must not revive a superseded diagnosis.
+    /// One batched read only when there are cached failures; no filesystem I/O
+    /// or per-library store reads are added to the Activity request path.
+    pub(crate) async fn current_problems(
+        &self,
+        store: &dyn Store,
+    ) -> std::collections::HashMap<i64, String> {
+        let observations = self
+            .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&library_id)
-            .cloned()
+            .clone();
+        if observations.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        let Ok(libraries) = store.list_libraries().await else {
+            // Without current configuration, the old diagnosis is unverified.
+            return std::collections::HashMap::new();
+        };
+        libraries
+            .into_iter()
+            .filter_map(|library| {
+                let observed = observations.get(&library.id)?;
+                (observed.roots == library.paths).then(|| (library.id, observed.message.clone()))
+            })
+            .collect()
     }
 }
 
@@ -1860,7 +1895,13 @@ pub(crate) async fn claim_library(
                 }
             }
             let readable = problem.is_none();
-            readiness.record(library_id, problem);
+            readiness.record(
+                library_id,
+                library
+                    .as_ref()
+                    .map_or(&[], |library| library.paths.as_slice()),
+                problem,
+            );
             if !readable {
                 continue;
             }
@@ -2007,6 +2048,48 @@ mod tests {
         CancelJob, EnqueueJob, JobKind, JobPayload, JobRequest, JobState,
     };
     use plurx_core::store::SqliteStore;
+
+    #[tokio::test]
+    async fn library_readiness_rejects_observations_of_superseded_roots() {
+        use plurx_core::domain::{LibraryKind, NewLibrary};
+        use plurx_core::store::LibraryStore;
+        let store = SqliteStore::open_in_memory().expect("store");
+        let old = NewLibrary {
+            name: "Movies".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/old/movies".into()],
+            anime: false,
+        };
+        let library = store.create_library(&old).await.expect("library");
+        let readiness = LibraryReadiness::default();
+        readiness.record(library.id, &old.paths, Some("old root unavailable".into()));
+        assert_eq!(
+            readiness.current_problems(&store).await.get(&library.id),
+            Some(&"old root unavailable".to_owned())
+        );
+
+        // A direct Store edit also models configuration written through another
+        // cluster member: no local HTTP invalidation callback is involved.
+        let new = NewLibrary {
+            paths: vec!["/new/movies".into()],
+            ..old.clone()
+        };
+        store
+            .update_library(library.id, &new)
+            .await
+            .expect("update");
+        assert!(readiness.current_problems(&store).await.is_empty());
+        // A filesystem check issued before the edit may finish after it.
+        readiness.record(library.id, &old.paths, Some("late old failure".into()));
+        assert!(readiness.current_problems(&store).await.is_empty());
+        readiness.record(library.id, &new.paths, Some("new root unavailable".into()));
+        assert_eq!(
+            readiness.current_problems(&store).await.get(&library.id),
+            Some(&"new root unavailable".to_owned())
+        );
+        readiness.record(library.id, &new.paths, None);
+        assert!(readiness.current_problems(&store).await.is_empty());
+    }
 
     #[tokio::test]
     async fn preparation_refusals_settle_by_class_not_as_unbounded_yields() {

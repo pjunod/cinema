@@ -5167,7 +5167,8 @@ pub async fn activity_detail(
             BTreeMap::new(),
         )
     };
-    let clustered = !matches!(peers, PeerActivityRead::LocalOnly);
+    // Topology is configuration, not the number of peers answering this read.
+    let clustered = replicated;
     let live_tv = clustered_live_tv(state.live_tv.activities(), &peers);
     let dvr_peers = match &peers {
         PeerActivityRead::Peers(outcomes) => Some(outcomes),
@@ -5217,6 +5218,7 @@ pub async fn activity_detail(
             })
         });
     let mut response = serde_json::json!({
+        "clustered": clustered,
         "sessions": sessions,
         "deliveries": deliveries,
         "offline": offline,
