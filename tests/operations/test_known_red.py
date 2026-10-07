@@ -8,6 +8,8 @@ from validation.known_red import (
     KnownRedError,
     ignored_tests,
     load_entries,
+    load_opt_in_fixtures,
+    validate_opt_in_fixtures,
     validate_entries,
     validate_listed_tests,
 )
@@ -55,6 +57,23 @@ class KnownRedContractTest(unittest.TestCase):
         # needs the pinned model files its ignore reason names.
         # K-08 M5 adds embed_thread_scaling, the inference thread-count
         # measurement behind EMBED_THREADS, which needs the same model files.
+        fixtures = load_opt_in_fixtures()
+        validate_opt_in_fixtures(fixtures, ignored, load_entries())
+        fixture_ids = {fixture["test"] for fixture in fixtures}
+        self.assertEqual(fixture_ids, {
+            "crates/plurxd/src/http/shared_receiver_forwarding_fixture.rs::http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_direct_range_head_through_b",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot",
+            "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_prepared_handoff_commit_and_abort",
+            "crates/plurxd/src/http/mod.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart",
+            "crates/plurxd/tests/sharing_daemon_restart.rs::sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart",
+            "crates/plurxd/src/http/sharing_start_decode.rs::http::sharing_start_decode::tests::sharing_start_transport_pinned_source_h1_and_receiver_h1_h2_preserve_raw_envelope",
+            "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login",
+            "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope",
+            "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection",
+        })
         # #811 adds three ffmpeg 8 fixture checks of the repeated-HEVC
         # description collapse (generations, output, copy pipe), each needing
         # the captured ffmpeg 8 media its ignore reason names.
@@ -86,7 +105,7 @@ class KnownRedContractTest(unittest.TestCase):
             public_wire.cargo_name,
             "http::tests::public_copy_wire::public_copy_new_retained_attachment_freezes_measured_master_and_exact_mux_wire",
         )
-        admitted_identities = {capture_identity, public_wire_identity}
+        admitted_identities = {capture_identity, public_wire_identity} | fixture_ids
         # Main's native FFmpeg/libvmaf qualification remains independently
         # admitted; keep it in addition to effort's two acquisition identities.
         # #811 adds three operator-run ffmpeg 8 fixture checks (captured
@@ -108,6 +127,22 @@ class KnownRedContractTest(unittest.TestCase):
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))
         validate_entries(load_entries(), ignored, dt.date(2026, 9, 20))
+
+    def test_opt_in_fixture_is_explicit_and_separate_from_known_red(self):
+        ignored = (IgnoredTest("crates/example/src/lib.rs::held_case", "held_case", "namespace", "crates/example/src/lib.rs", 1),)
+        fixture = {"test": ignored[0].identity, "owner": "sharing", "reason": "namespace", "requires": "disposable network", "command": "cargo test -p example held_case -- --ignored --exact"}
+        validate_opt_in_fixtures((fixture,), ignored)
+        for invalid in (
+            {**fixture, "test": "held_case"},
+            {**fixture, "requires": ""},
+            {**fixture, "command": "cargo test -p example held_case"},
+        ):
+            with self.assertRaises(KnownRedError):
+                validate_opt_in_fixtures((invalid,), ignored)
+        with self.assertRaises(KnownRedError):
+            validate_opt_in_fixtures((fixture, fixture), ignored)
+        with self.assertRaisesRegex(KnownRedError, "known-red debt"):
+            validate_opt_in_fixtures((fixture,), ignored, (self._entry(ignored[0].identity),))
 
     def test_comments_and_raw_text_cannot_create_ignore_attributes(self):
         with tempfile.TemporaryDirectory() as directory:

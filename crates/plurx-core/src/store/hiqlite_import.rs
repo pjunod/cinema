@@ -174,6 +174,9 @@ enum SourceChunk {
 }
 
 enum SourceRequest {
+    ItemIdentityWatermark {
+        reply: oneshot::Sender<Result<Option<i64>, StoreError>>,
+    },
     Count {
         table: TablePlan,
         for_import: bool,
@@ -242,6 +245,9 @@ impl SourceReader {
 
             while let Some(request) = receiver.blocking_recv() {
                 match request {
+                    SourceRequest::ItemIdentityWatermark { reply } => {
+                        let _ = reply.send(source_item_identity_watermark(&source));
+                    }
                     SourceRequest::Count {
                         table,
                         for_import,
@@ -294,6 +300,12 @@ impl SourceReader {
         Ok((Self { requests }, metadata))
     }
 
+    async fn item_identity_watermark(&self) -> Result<Option<i64>, StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.send(SourceRequest::ItemIdentityWatermark { reply })
+            .await?;
+        receive_source(response).await
+    }
     async fn count(&self, table: TablePlan, for_import: bool) -> Result<i64, StoreError> {
         let (reply, response) = oneshot::channel();
         self.send(SourceRequest::Count {
@@ -366,6 +378,19 @@ impl SourceReader {
             .await
             .map_err(|_| import_error("SQLite source worker stopped during validation pause"))
     }
+}
+
+fn source_item_identity_watermark(source: &Connection) -> Result<Option<i64>, StoreError> {
+    let present = source.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )?;
+    if present == 0 {
+        return Ok(None);
+    }
+    let value=source.query_row("SELECT high_water FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)",[],|r|r.get::<_,i64>(0)).map_err(|_|import_error("invalid or interrupted source item identity allocator"))?;
+    Ok(Some(value))
 }
 
 async fn receive_source<T>(
@@ -1871,6 +1896,238 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
+    TablePlan {
+        name: "sharing_identity",
+        columns: &["singleton", "server_id", "catalogue_epoch", "created_at_ms"],
+        order_by: "singleton",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_invitations",
+        columns: &[
+            "id",
+            "token_hash",
+            "library_ids_json",
+            "created_at_ms",
+            "expires_at_ms",
+            "state",
+            "claim_id",
+            "claim_digest",
+        ],
+        order_by: "id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_exports",
+        columns: &[
+            "id",
+            "invitation_id",
+            "recipient_server_id",
+            "recipient_name",
+            "token_hash",
+            "scope_generation",
+            "credential_generation",
+            "catalogue_generation",
+            "mutation_generation",
+            "state",
+            "pending_expires_at_ms",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_export_libraries",
+        columns: &["grant_id", "library_id"],
+        order_by: "grant_id, library_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_imports",
+        columns: &[
+            "id",
+            "source_server_id",
+            "catalogue_epoch",
+            "source_name",
+            "claim_id",
+            "remote_grant_id",
+            "credential_envelope",
+            "claim_envelope",
+            "endpoints_json",
+            "assignment_generation",
+            "lifecycle_generation",
+            "endpoint_generation",
+            "observed_scope_generation",
+            "observed_credential_generation",
+            "observed_catalogue_generation",
+            "observed_endpoint_revision",
+            "state",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &["credential_envelope", "claim_envelope"],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_viewers",
+        columns: &["user_id", "viewer_id"],
+        order_by: "user_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_assignments",
+        columns: &["import_id", "remote_library_id", "user_id", "enabled"],
+        order_by: "import_id, remote_library_id, user_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_watch",
+        columns: &[
+            "source_server_id",
+            "catalogue_epoch",
+            "remote_library_id",
+            "remote_item_id",
+            "user_id",
+            "position_ms",
+            "duration_ms",
+            "watched",
+            "sequence",
+            "updated_at_ms",
+        ],
+        order_by: "source_server_id, catalogue_epoch, remote_item_id, user_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_rotations",
+        columns: &[
+            "grant_id",
+            "request_id",
+            "old_hash",
+            "new_hash",
+            "created_at_ms",
+            "expires_at_ms",
+        ],
+        order_by: "grant_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_import_rotations",
+        columns: &[
+            "import_id",
+            "request_id",
+            "credential_envelope",
+            "created_at_ms",
+            "expires_at_ms",
+        ],
+        order_by: "import_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &["credential_envelope"],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_catalogue_revisions",
+        columns: &["library_id", "order_revision"],
+        order_by: "library_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_endpoint_manifest",
+        columns: &["singleton", "endpoints_json", "revision"],
+        order_by: "singleton",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_relay_upstream",
+        columns: &[
+            "incarnation_id",
+            "import_id",
+            "lifecycle_generation",
+            "assignment_generation",
+            "remote_library_id",
+            "remote_item_id",
+            "remote_file_id",
+            "remote_revision",
+            "source_request_id",
+            "source_session_id",
+            "source_incarnation_id",
+            "endpoint_revision",
+            "capability_envelope",
+            "source_position_ms",
+            "dispatch_envelope",
+        ],
+        order_by: "incarnation_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &["capability_envelope", "dispatch_envelope"],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_delivery_grants",
+        columns: &[
+            "token_hash",
+            "incarnation_id",
+            "source_token_hash",
+            "state",
+            "deadline_ms",
+        ],
+        order_by: "token_hash",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    // Preserve unresolved physical debts as diagnostic custody. Imported rows
+    // never confer a driver handle or a closure receipt in this process boot.
+    TablePlan {
+        name: "sharing_ingress_custody",
+        columns: &[
+            "principal_kind",
+            "incarnation_id",
+            "owner_identity",
+            "custody_json",
+            "revision",
+        ],
+        order_by: "principal_kind, incarnation_id",
+        minimum_schema: 105,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
 ];
 
 /// Groups import rows into transactions bounded by serialized bytes.
@@ -2070,6 +2327,27 @@ impl HiqliteAuthStore {
         self.refuse_unsealed_source_credentials(&source, schema_version)
             .await?;
         self.verify_empty_import_target().await?;
+        let identity_allocator = self
+            .target_count(
+                "sqlite_master",
+                Some("type='table' AND name='item_identity_watermark'".into()),
+            )
+            .await?
+            == 1;
+        let source_watermark = source.item_identity_watermark().await?;
+        if source_watermark.is_some() && !identity_allocator {
+            return Err(import_error(
+                "source item identity allocator unavailable on import target",
+            ));
+        }
+        if identity_allocator {
+            let changed = self.client().execute("UPDATE item_identity_watermark SET importing=1 WHERE singleton=1 AND importing=0 AND high_water=0",params!()).await?;
+            if changed != 1 {
+                return Err(import_error(
+                    "item identity import target is not fresh; discard incoming target",
+                ));
+            }
+        }
         // A fresh queue schema has an empty seal marker. The backup supplies
         // its own marker; older backups are sealed only after parity is proved.
         self.client()
@@ -2156,6 +2434,11 @@ impl HiqliteAuthStore {
                 .await?;
         }
 
+        if identity_allocator {
+            self.client().execute("UPDATE item_identity_watermark SET high_water=max(high_water,$1) WHERE singleton=1 AND importing=1",params!(source_watermark.unwrap_or(0))).await?;
+            self.client().execute("INSERT INTO sharing_catalogue_revisions(library_id,order_revision) SELECT id,1 FROM libraries WHERE true ON CONFLICT(library_id) DO NOTHING",params!()).await?;
+            self.client().execute("UPDATE item_identity_watermark SET importing=0 WHERE singleton=1 AND importing=1",params!()).await?;
+        }
         Ok(SqliteImportReport {
             source_schema_version: schema_version,
             backup_sha256: metadata.backup_sha256,
@@ -2709,8 +2992,19 @@ fn unsealed_credential_rows(source: &Connection, table: TablePlan) -> Result<u64
         // either, so it fails closed with everything else rather than reading
         // as "nothing to check here".
         let sealed = (0..table.sealed_columns.len()).all(|index| {
-            row.get::<_, String>(index)
-                .is_ok_and(|value| SealedSecret::from_stored(value).is_wrapped())
+            row.get::<_, Option<String>>(index).is_ok_and(|value| {
+                value.map_or(
+                    matches!(
+                        table.sealed_columns[index],
+                        "claim_envelope" | "capability_envelope" | "dispatch_envelope"
+                    ),
+                    |value| {
+                        // The not-dispatched marker is not a credential.
+                        (table.sealed_columns[index] == "dispatch_envelope" && value == "none")
+                            || SealedSecret::from_stored(value).is_wrapped()
+                    },
+                )
+            })
         });
         if !sealed {
             unsealed = unsealed
@@ -3599,6 +3893,25 @@ mod tests {
         assert!(names.contains(&"live_tv_resource_records"));
         // The revision/nonce is reconstructed above the greatest restored epoch.
         assert!(!names.contains(&"live_tv_resource_revision"));
+        for name in [
+            "sharing_identity",
+            "sharing_invitations",
+            "sharing_exports",
+            "sharing_export_libraries",
+            "sharing_imports",
+            "sharing_viewers",
+            "sharing_assignments",
+            "sharing_watch",
+            "sharing_rotations",
+            "sharing_import_rotations",
+            "sharing_catalogue_revisions",
+            "sharing_endpoint_manifest",
+            "sharing_relay_upstream",
+            "sharing_delivery_grants",
+            "sharing_ingress_custody",
+        ] {
+            assert!(names.contains(&name), "durable sharing table: {name}");
+        }
         // Authenticated candidate failures are replicated: any node may serve
         // the next attempt, and each must refuse the recipe that failed. The
         // Link samples beside them are one node's measurements and never
@@ -3608,7 +3921,7 @@ mod tests {
         assert!(names.contains(&"jellyfin_login_tokens"));
         assert!(names.contains(&"jellyfin_entity_ids"));
         assert!(names.contains(&"jellyfin_plays"));
-        assert_eq!(names.len(), 77, "review every imported durable table");
+        assert_eq!(names.len(), 92, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

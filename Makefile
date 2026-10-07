@@ -1573,6 +1573,12 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/ui-baseline-capture-clamp.test.js
 	# The split shell is sixty-five plain scripts in one scope: the order they
 	# are served in is a load order. One reads them, one runs them.
+	@node --test tests/web/file-context.test.js
+	@node --test tests/web/shared-decision.test.js
+	@node --test tests/web/shared-libraries.test.js
+	@node --test tests/web/sharing-protocol-cases.test.js
+	@node --test tests/web/shared-artwork.test.js
+	@node --test tests/web/sharing-management.test.js
 	@node tests/web/asset-order.test.js
 	@node tests/web/asset-load.test.js
 	@node tests/web/asset-layout.test.js
@@ -1971,3 +1977,7 @@ ripwire-doctor:
 	./scripts/ripwire doctor
 ripwire-smoke:
 	./scripts/ripwire-smoke
+
+.PHONY: web-shared-artwork-browser-check
+web-shared-artwork-browser-check: ## Qualify actual Shared artwork decode and retirement in isolated Chromium
+	@python3 tests/web/shared-artwork.browser.py

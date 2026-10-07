@@ -2030,6 +2030,7 @@ pub struct SettingsDto {
     /// indexes. The cadence above remains the operator's I/O budget.
     pub vod_index_cluster_cache: bool,
     pub bounded_replica_reads: bool,
+    pub sharing_enabled: bool,
     /// Durable analysis claim/retry policy. These remain operator-visible and
     /// bounded because slow storage may need more time without permitting an
     /// unsupported source to retry forever.
@@ -2504,6 +2505,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::BOUNDED_REPLICA_READS).as_deref(),
             state.catalogue.bounded_reads_default(),
         ),
+        sharing_enabled: plurx_core::store::stored_switch(
+            setting(keys::SHARING_ENABLED).as_deref(),
+            false,
+        ),
         analysis_max_attempts,
         analysis_lease_secs,
         analysis_backoff_base_secs,
@@ -2781,6 +2786,7 @@ pub struct UpdateSettings {
     pub vod_index_mins: Option<i64>,
     pub vod_index_cluster_cache: Option<bool>,
     pub bounded_replica_reads: Option<bool>,
+    pub sharing_enabled: Option<bool>,
     pub analysis_max_attempts: Option<i64>,
     pub analysis_lease_secs: Option<i64>,
     pub analysis_backoff_base_secs: Option<i64>,
@@ -2949,6 +2955,7 @@ impl UpdateSettings {
             || self.vod_index_mins.is_some()
             || self.vod_index_cluster_cache.is_some()
             || self.bounded_replica_reads.is_some()
+            || self.sharing_enabled.is_some()
             || self.analysis_max_attempts.is_some()
             || self.analysis_lease_secs.is_some()
             || self.analysis_backoff_base_secs.is_some()
@@ -3969,6 +3976,15 @@ pub async fn update_settings(
             .store
             .put_setting(keys::LIVE_TV_DEINTERLACE_OUTPUT, output.as_str())
             .await?;
+    }
+    if let Some(on) = req.sharing_enabled {
+        state
+            .store
+            .put_setting(keys::SHARING_ENABLED, if on { "1" } else { "0" })
+            .await?;
+        // Off ends this node's bodies now; on wakes the idle listener and
+        // claim loops now. Other nodes see either write on their next poll.
+        state.sharing.enablement_written(on);
     }
     if let Some(on) = req.bounded_replica_reads {
         state

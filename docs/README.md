@@ -564,6 +564,18 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [SHARED-LIBRARIES-DESIGN.md](features/SHARED-LIBRARIES-DESIGN.md) | Why Cinema shares selected libraries over private Tailscale; scope and deferred Plex/Watch Together work. | open |
+| [SHARED-LIBRARIES-IMPLEMENTATION.md](features/SHARED-LIBRARIES-IMPLEMENTATION.md) | Revised S0–S8 build contract, authority, deployment, playback integration and acceptance evidence. | open |
+| [SHARED-LIBRARIES-STATUS.md](features/SHARED-LIBRARIES-STATUS.md) | Shared-libraries integration, live promotion evidence, failed-only qualification and remaining acceptance. | open |
+| [SHARED-LIBRARIES-OPERATIONS.md](features/SHARED-LIBRARIES-OPERATIONS.md) | How to configure the implemented private listener, pair viewers, diagnose retirement and distinguish remaining Docker/cluster/device qualification. | open |
+| [SHARED-LIBRARIES-INGRESS-CUSTODY.md](features/SHARED-LIBRARIES-INGRESS-CUSTODY.md) | Why cluster forwarding needs durable ingress obligations and exact outer-writer closure acknowledgements, with schema and retry boundaries. | open |
+| [SHARED-LIBRARIES-HANDOFF.md](features/SHARED-LIBRARIES-HANDOFF.md) | Dated integration and agent snapshot, all remaining S2–S8 implementation/qualification work, compiler commands and promotion requirements. | open |
+| [SHARED-LIBRARIES-RE-REVIEW.md](features/SHARED-LIBRARIES-RE-REVIEW.md) | Opus re-review of the revised contract; SL-18–24 and links to their corrections. | open |
+| [SHARED-LIBRARIES-REVIEW.md](features/SHARED-LIBRARIES-REVIEW.md) | Opus's original S0 findings; links to the current dispositions and remaining qualification. | open |
+| [SHARED-LIBRARIES-COORDINATED-UPGRADE.md](features/SHARED-LIBRARIES-COORDINATED-UPGRADE.md) | How archived daemons qualify schema refusal, retention and topology restore; the unexecuted real Local HLS drain extension and remaining Shared rollout limits. | open |
+| [SHARED-LIBRARIES-UPGRADE-QUALIFICATION.md](features/SHARED-LIBRARIES-UPGRADE-QUALIFICATION.md) | Which historical production Store reads, writes and cleanup work against the candidate ownership rebuild; reproducible compatibility evidence and upgrade limits. | open |
+| [SHARED-LIBRARIES-PRINCIPAL-CENSUS.md](features/SHARED-LIBRARIES-PRINCIPAL-CENSUS.md) | Finite session method/key/decoder census, caller ownership audit, explicit refusal repairs and remaining Source admission evidence. | open |
+| [SHARED-LIBRARIES-REPLICATED-PRINCIPALS.md](features/SHARED-LIBRARIES-REPLICATED-PRINCIPALS.md) | Which replicated session writers/readers use complete canonical ownership, their actual voter regressions, and remaining S3 admission/migration work. | open |
 | [LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md](features/LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md) | Remove permanent tuner ownership with distributed admission, session recovery, recording claims and safe storage publication; merged as #537. | built |
 | [LIVE-TV-CLUSTER-RESOURCE-REVIEW.md](features/LIVE-TV-CLUSTER-RESOURCE-REVIEW.md) | Design review findings and accepted corrections for distributed tuner access. | done |
 | [LIVE-TV-CLUSTER-RESOURCE-STATUS.md](features/LIVE-TV-CLUSTER-RESOURCE-STATUS.md) | Current implementation progress, decisions, commits, review and fast-lane evidence. | live |

@@ -87,17 +87,12 @@ quality_catalog: None,
         );
 
         let supersession_user = serde_json::json!(["username", "paul"]).to_string();
-        let recovery = SessionRecoveryIdentity {
-            user_id: 0,
-            incarnation_id: String::new(),
-            recovery_epoch: String::new(),
-        };
         let first_creation = mgr
             .create_session_inner(
                 &request,
                 "paul",
                 &supersession_user,
-                &recovery,
+                None,
                 None,
                 None,
                 None,
@@ -111,7 +106,7 @@ quality_catalog: None,
                 &request,
                 "paul",
                 &supersession_user,
-                &recovery,
+                None,
                 None,
                 None,
                 None,

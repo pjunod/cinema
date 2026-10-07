@@ -45,7 +45,7 @@ async function setSync(v){
 // browser; offset → fetch the VTT once and re-add the cues shifted back, into
 // one script-created track we keep reusing. pbTick() re-applies when the offset
 // moves, since seeking a transcode restarts the session at a new position.
-function subUrl(index){ return tok(`/api/v1/files/${PLAYER.fileId}/subs/${index}`); }
+function subUrl(index){ return tok(playbackFileUrl(playbackFileContextForPlayer(PLAYER),`subs/${index}`)); }
 function subLabelFor(s, index){ return s?subLabelMenu(s):("Subtitle "+(index+1)); }
 function clearSubs(v){
   [...v.querySelectorAll("track")].forEach(t=>t.remove());

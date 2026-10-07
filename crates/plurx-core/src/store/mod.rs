@@ -15,11 +15,48 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+pub mod sharing;
+pub use sharing::SharingStore;
+pub mod sharing_catalogue;
+pub use sharing_catalogue::SharingCatalogueStore;
+pub mod sharing_catalogue_artwork;
+pub use sharing_catalogue_artwork::SharingSourceArtworkStore;
+pub mod sharing_catalogue_source;
+pub use sharing_catalogue_source::SharingSourceCatalogueStore;
+pub mod sharing_catalogue_details;
+pub use sharing_catalogue_details::SharingSourceDetailsStore;
+pub mod sharing_file_locators;
+pub mod sharing_purpose_keys;
+pub use sharing_file_locators::SharingFileLocatorStore;
+pub use sharing_purpose_keys::SharingPurposeKeyStore;
+pub mod sharing_ingress_custody;
+mod sharing_receiver_delivery;
+pub use sharing_ingress_custody::SharingIngressCustodyStore;
+pub use sharing_receiver_delivery::SharingReceiverDeliveryStore;
+mod sharing_receiver_capsule_refresh;
+pub use sharing_receiver_capsule_refresh::ReceiverCleanupCapsules;
+mod sharing_receiver_ingress;
+pub use sharing_receiver_ingress::SharingReceiverIngressStore;
+pub mod sharing_receiver_orphans;
+pub mod sharing_receiver_progress;
+pub mod sharing_receiver_retirement;
+pub use sharing_receiver_retirement::SharingReceiverRetirementStore;
+pub mod sharing_receiver_sessions;
+pub use sharing_receiver_progress::SharingReceiverProgressStore;
+#[cfg(feature = "hiqlite-store")]
+pub(crate) mod sharing_source_schema;
+pub use sharing_receiver_sessions::SharingReceiverSessionStore;
+pub mod sharing_source_ingress_custody;
+pub mod sharing_source_sessions;
+pub use sharing_source_ingress_custody::SharingSourceIngressCustodyStore;
+pub use sharing_source_sessions::SharingSourceSessionStore;
 /// Application-owned measurement metadata grafted onto a stored FFprobe report.
 /// Source comparisons must omit this member; it is not emitted by FFprobe.
 pub const CONTENT_ENCODING_PROBE_KEY: &str = "plurx_content_encoding";
 
 pub mod classification;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_sharing;
 pub use classification::ClassificationStore;
 mod downloaded_subtitles;
 mod dv_conversion;
@@ -382,6 +419,38 @@ ALTER TABLE files ADD COLUMN max_fall INTEGER;
 ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER;
 ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'));";
 
+/// Refuse sharing before the ownership rebuild and its writer floor are installed.
+/// This adapter is removed from common session SQL when those keys are switched.
+pub(crate) fn local_media_principal_id(
+    principal: &crate::playback_principal::PlaybackPrincipal,
+) -> Result<i64, StoreError> {
+    principal.local_user_id().ok_or_else(|| {
+        StoreError::Task("sharing principal requires the ownership migration".to_owned())
+    })
+}
+
+/// Frozen ownership rebuild; both backends must install the same statements.
+/// Incompatible writers must be drained before applying this schema.
+pub const MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA: &str =
+    include_str!("session_principal_rebuild.sql");
+
+/// Current-schema orchestration around the unchanged frozen ownership layout.
+/// Execute every statement atomically; unrelated watch triggers stay installed.
+pub fn media_session_principal_rebuild_schema() -> String {
+    let separator = "\n-- next statement\n";
+    let dependencies = jellyfin_watch::session_dependency_triggers().collect::<Vec<_>>();
+    let mut statements = dependencies
+        .iter()
+        .map(|(name, _)| format!("DROP TRIGGER {name};"))
+        .collect::<Vec<_>>();
+    statements.push(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.to_owned());
+    statements.extend(dependencies.into_iter().map(|(_, sql)| sql.to_owned()));
+    statements.join(separator)
+}
+
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod session_principal_tests;
+
 /// The staged-generation ledger, shared verbatim by both backends.
 ///
 /// One statement, because SQLite's append-only migration list keeps one
@@ -567,7 +636,7 @@ pub(crate) fn validated_recovery_request(
     request: &crate::domain::ProducerRecoveryRequest,
 ) -> Result<crate::domain::ProducerRecoveryRequest, StoreError> {
     let (user_id, playback_id, recovery_epoch) = validated_epoch_key(
-        request.user_id,
+        local_media_principal_id(&request.principal)?,
         &request.playback_id,
         &request.recovery_epoch,
     )?;
@@ -602,7 +671,7 @@ pub(crate) fn validated_recovery_request(
         ));
     }
     Ok(crate::domain::ProducerRecoveryRequest {
-        user_id,
+        principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         playback_id,
         recovery_epoch,
         failed_incarnation_id: request.failed_incarnation_id.clone(),
@@ -660,7 +729,7 @@ pub(crate) fn encoded_recovery_restriction(
 /// a task error on the other.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recovery_reservation_from_row(
-    user_id: i64,
+    principal: crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
     recovery_epoch: &str,
     failed_incarnation_id: String,
@@ -673,6 +742,11 @@ pub(crate) fn recovery_reservation_from_row(
     created_at_ms: i64,
     updated_at_ms: i64,
 ) -> Result<crate::domain::ProducerRecoveryReservation, StoreError> {
+    if !principal.valid_admission_shape() {
+        return Err(StoreError::Task(
+            "stored recovery principal is invalid".to_owned(),
+        ));
+    }
     let decode_restriction = match stored_restriction {
         Some(stored) => Some(
             crate::domain::ContinuationDecodeRestriction::decode(&stored).map_err(|error| {
@@ -684,7 +758,7 @@ pub(crate) fn recovery_reservation_from_row(
     let state = crate::domain::ProducerRecoveryState::parse(state)
         .ok_or_else(|| StoreError::Task(format!("unknown recovery state {state}")))?;
     Ok(crate::domain::ProducerRecoveryReservation {
-        user_id,
+        principal,
         playback_id: playback_id.to_owned(),
         recovery_epoch: recovery_epoch.to_owned(),
         failed_incarnation_id,
@@ -978,8 +1052,8 @@ const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
     prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_LEARNER_PROTOCOL,
-    AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE,
-    AUTH_SCHEMA_VERSION,
+    AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_BASELINE_VERSION,
+    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 pub use self::hiqlite::{
@@ -2089,6 +2163,7 @@ pub mod keys {
     /// seed it, so a deployment that had turned it on keeps it on and can
     /// then find it in Settings.
     pub const PGS_OVERLAY: &str = "subtitles.pgs_overlay";
+    pub const SHARING_ENABLED: &str = "sharing_enabled";
     /// Convert a Dolby Vision Profile 7 title to Profile 8.1 so a Dolby Vision
     /// client sees Dolby Vision rather than HDR10.
     ///
@@ -4812,7 +4887,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     #[allow(clippy::too_many_arguments)]
     async fn claim_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         request_fingerprint: &str,
         playback_id: &str,
@@ -4825,7 +4900,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// durable identity before producer placement.
     async fn record_library_channel_session_recipe(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         recipe_json: &str,
@@ -4834,7 +4909,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     async fn assign_media_session_request_owner(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         owner_node_id: &str,
@@ -4845,6 +4920,26 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         &self,
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
+
+    /// Server-only, proof-bearing first Source activation. Backends without
+    /// the candidate conditional writer remain unavailable.
+    async fn activate_source_media_session(
+        &self,
+        _authority: &crate::sharing_source_sessions::SourceSessionWriteAuthority,
+        _activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        Ok(None)
+    }
+
+    /// B-only remote activation: current Local login/import proof and remote
+    /// side binding commit atomically with the ordinary blocked route.
+    async fn activate_receiver_media_session(
+        &self,
+        _authority: &crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority,
+        _activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        Ok(None)
+    }
 
     /// Stage a successor that exists without being current.
     ///
@@ -4895,7 +4990,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// was taken and nothing durable says so.
     async fn record_desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         digest: &str,
         canonical_form: &str,
@@ -4930,13 +5025,13 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// but a proof that the write chain reaches it does.
     async fn validation_playback_pointer_desired_revision(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<i64>, StoreError>;
 
     async fn validation_write_legacy_playback_pointer(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         incarnation_id: &str,
         now_ms: i64,
@@ -4944,7 +5039,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     async fn desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError>;
 
@@ -4977,7 +5072,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// The staged successor for one playback, if there is one.
     async fn staged_media_session_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError>;
 
@@ -5007,7 +5102,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// with a successful advance for replay after the predecessor retires.
     async fn commit_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &crate::domain::MediaSessionPreparationCommitRequest,
     ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError>;
@@ -5028,7 +5123,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// owner's timer cannot tear down a successor after takeover.
     async fn abort_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &crate::domain::MediaSessionPreparationAbortRequest,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
@@ -5091,7 +5186,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// continuation still has to avoid it.
     async fn settle_producer_recovery(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         failed_incarnation_id: &str,
@@ -5107,7 +5202,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// or looking up a cached one.
     async fn producer_recovery_for_epoch(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError>;
@@ -5126,7 +5221,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// `Ok(false)` when there is no such row.
     async fn validation_corrupt_recovery_restriction(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         stored: &str,
@@ -5144,7 +5239,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// the same resolved request returns its durable route.
     async fn publish_media_session_activation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
@@ -5201,7 +5296,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     async fn fail_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
@@ -5222,7 +5317,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// so commit-unknown reconciliation retains the identity it must fence.
     async fn media_session_route_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
@@ -5321,6 +5416,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         session_id: &str,
         now_ms: i64,
     ) -> Result<Option<crate::domain::MediaSessionTerminalAck>, StoreError>;
+
+    /// Exact current Source owner only. Does not publish or authorize takeover.
+    async fn renew_source_media_session(
+        &self,
+        _authority: &crate::sharing_source_sessions::SourceOwnedRouteAuthority,
+        _renewal: &MediaSessionRenewal,
+        _now_ms: i64,
+        _lease_expires_at_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        Ok(None)
+    }
 
     async fn renew_media_sessions(
         &self,
@@ -5631,6 +5737,21 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
+    + SharingStore
+    + SharingCatalogueStore
+    + SharingFileLocatorStore
+    + SharingPurposeKeyStore
+    + SharingSourceArtworkStore
+    + SharingSourceCatalogueStore
+    + SharingSourceDetailsStore
+    + SharingReceiverSessionStore
+    + SharingIngressCustodyStore
+    + SharingReceiverDeliveryStore
+    + SharingReceiverIngressStore
+    + SharingReceiverProgressStore
+    + SharingReceiverRetirementStore
+    + SharingSourceSessionStore
+    + SharingSourceIngressCustodyStore
     + SettingsStore
     + JellyfinCatalogStore
     + JellyfinIdentityStore
@@ -5672,6 +5793,21 @@ pub trait Store:
 
 impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
+        + SharingStore
+        + SharingCatalogueStore
+        + SharingFileLocatorStore
+        + SharingPurposeKeyStore
+        + SharingSourceArtworkStore
+        + SharingSourceCatalogueStore
+        + SharingSourceDetailsStore
+        + SharingReceiverSessionStore
+        + SharingIngressCustodyStore
+        + SharingReceiverDeliveryStore
+        + SharingReceiverIngressStore
+        + SharingReceiverProgressStore
+        + SharingReceiverRetirementStore
+        + SharingSourceSessionStore
+        + SharingSourceIngressCustodyStore
         + SettingsStore
         + JellyfinCatalogStore
         + JellyfinIdentityStore
@@ -6597,5 +6733,44 @@ mod item_sort_order_tests {
             );
             assert!(source.contains("item_sort_order_by(sort)"));
         }
+    }
+}
+
+#[cfg(test)]
+mod sharing_recovery_principal_tests {
+    use super::recovery_reservation_from_row;
+    use crate::playback_principal::PlaybackPrincipal;
+
+    #[test]
+    fn sharing_recovery_converter_preserves_complete_owner_and_refuses_invalid_local() {
+        let convert = |principal| {
+            recovery_reservation_from_row(
+                principal,
+                "playback",
+                "epoch",
+                "incarnation".to_owned(),
+                1,
+                1,
+                "a".repeat(64),
+                "b".repeat(64),
+                None,
+                "reserved",
+                1,
+                1,
+            )
+        };
+        let principal = PlaybackPrincipal::sharing(
+            uuid::Uuid::parse_str("00000000-0000-4000-a000-000000000001").expect("grant UUID"),
+            &"a".repeat(64),
+        )
+        .expect("viewer key");
+        assert_eq!(
+            convert(principal.clone())
+                .expect("valid shared row")
+                .principal,
+            principal
+        );
+        assert!(convert(PlaybackPrincipal::LocalUser { user_id: 0 }).is_err());
+        assert!(convert(PlaybackPrincipal::LocalUser { user_id: -1 }).is_err());
     }
 }

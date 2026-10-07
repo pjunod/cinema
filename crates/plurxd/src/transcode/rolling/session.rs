@@ -1579,7 +1579,7 @@ impl Session {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn recovery_identity(&self) -> Option<&SessionRecoveryIdentity> {
         self.recovery.as_ref().filter(|recovery| {
-            recovery.user_id > 0
+            recovery.principal.valid_admission_shape()
                 && !recovery.incarnation_id.is_empty()
                 && !recovery.recovery_epoch.is_empty()
         })

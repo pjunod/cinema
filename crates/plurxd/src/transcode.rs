@@ -119,7 +119,7 @@ pub(crate) use planning::unverified_hevc_copy_enabled;
 use planning::*;
 // split: end planning
 
-const ADMISSION_POLL: Duration = Duration::from_millis(250);
+pub(crate) const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
 const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
@@ -487,6 +487,12 @@ mod hls_codecs;
 use hls_codecs::*;
 // split: end hls-codecs
 
+#[allow(dead_code)] // Finite owned actor API; ordinary Shared ingress remains closed.
+#[path = "transcode/source_actor.rs"]
+pub(crate) mod source_actor;
+pub(crate) mod source_preparation;
+mod source_subtitles;
+
 // split: begin cluster-adoption
 #[path = "transcode/cluster_adoption.rs"]
 mod cluster_adoption;
@@ -530,6 +536,9 @@ pub use rate_control::*;
 // split: end rate-control
 
 pub struct TranscodeManager {
+    #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
+    source_workers: source_actor::SourceWorkerRegistry,
+    pub(crate) source_http_starts: crate::http::shared_source_playback::SourceStartRegistry,
     store: Arc<dyn Store>,
     work_dir: PathBuf,
     /// The VOD presentation's serving runtime (plan §2). Sessions created

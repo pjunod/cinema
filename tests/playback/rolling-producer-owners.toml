@@ -378,10 +378,30 @@ also_in = ["crates/plurxd/src/transcode"]
 # `control_and_flow_points_bracket_producer_policy`, and in `transcode/tests/chunk_09.rs` the
 # path-owner reader, the compatibility publication, the playlist request, the refresh and the
 # activity read of the position tests. None owns a producer, a process or a recipe decision.
+# 93 -> 104 with the shared libraries Source session actor
+# (transcode/source_actor.rs and its preparation modules). The registry entry
+# inserted before `run_source_owner` is that task's owner; it leaves the
+# registry only after physical, body and SQL settlement or a bounded, typed
+# final outcome. Resource, status and control custody tasks hold a counted
+# SourceResponseGuard that settlement waits out (`bodies == 0`), so a
+# waiter's timeout drops only the waiter. Probe, native-subtitle and
+# cold-index workers belong to an Operation with a cancellation token the
+# actor cancels and settles on every path; pipe readers are abort-and-joined.
+# Test additions are awaited, or aborted and joined. None elects recovery.
+# +2 for Shared direct play (transcode/source_direct.rs): the detached
+# direct Source owner, which ends on retirement, idle (300 s with no body and
+# no byte open), lease loss or drain and always settles its row and leaves the
+# registry; and the owned direct-open task, joined by its waiter under the
+# request deadline and otherwise run to completion holding its body credit.
 # 93 -> 95: the brief-loss and flapping serving-fence tests each spawn the
 # real `serving_fence_loop` and join it (or wait for its retirement) before
 # they end. Test-only; the loop is the existing production owner.
-expected_occurrences = 95
+# Promotion union: the raw transcode scope includes both main rolling/retained
+# output workers and the Source actor/preparation fixtures. The whole-module
+# structural task count equals effort + main - merge base; these three extra
+# scoped text references do not introduce an additional detached owner.
+expected_occurrences = 111
+# Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -488,6 +508,17 @@ also_in = ["crates/plurxd/src/transcode"]
 # test-side: `session_shipped_shape`'s two polling sleeps (the playlist poll and the retirement
 # poll, each inside a bound) and the position test's `PLAYLIST_WAIT_POLL * 2` wait that shows a
 # playlist below the first-playlist gate has not reached its hook point. No production timer.
+# 51 -> 65 with the shared libraries Source actor and its tests. Source
+# settlement retries Store or IO faults on the bounded scratch-owner schedule
+# (24 attempts at 5 s); a mismatch that can never settle ends at once. The
+# Source preparation quarantine reap keeps the child and job across a failed
+# wait at the existing 1 s cadence. Copy admission no longer sleeps here:
+# vodencode's admit_source_copy holds its live waiter for the whole wait.
+# Test additions are freshness windows (5100 ms) or orderings inside
+# asserting timeouts. None decides producer recovery.
+# 65 -> 66 with the shared directed-change reopen (P0): the Source control
+# test crosses the per-session control interval before its directed exchange
+# (the server's own retry hint plus 1 ms). Test-only; no production timer.
 # S11 #690: +1 in feature-only tests/rolling_grid_campaign.rs. The awaited
 # 250 ms stop-file poll is bounded by its 600 s deadline; the enclosing test
 # stops its actual manager session. This timer adds no separate producer or
@@ -502,7 +533,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # every 25 ms, inside a 30 s `tokio::time::timeout`, for a link or a
 # publication the session under test is already producing. Test-only; they own
 # no producer and decide nothing.
-expected_occurrences = 61
+expected_occurrences = 76
+# Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1019,11 +1051,17 @@ pattern = "VodPublication"
 # answer; it does not create or forward one.
 # 25 -> 26: the init facade maps one `VodPublication` while retaining its
 # response owner; it does not create or transfer another producer owner.
+# Shared libraries: vod/serve adds `source_segment_before` (a VodPublication
+# bound to its owner, with Source read custody), Source reservation readiness
+# that waits on the rendition's init signal and reads init within
+# HEAD_REGENERATION_MAX_BYTES, and a preparing-session guard on the Source
+# create path.
 # S10 #680: +2 in vod/serve/delivery.rs::segment_before. Both retained-object
 # early results carry the already captured ResponseOwner; neither creates an
 # owner, producer, or recovery decision.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 50
+expected_occurrences = 52
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
 id = "m4-vod-status-owner-admission"
@@ -1112,7 +1150,10 @@ pattern = "commit_guard_before"
 # zeroing this row: the two calls in `vod_serving_admission_shipped_shape`,
 # which ask the production-built admission for its commit guard before and
 # after serving is lost. Test-only; no new commit site.
-expected_occurrences = 17
+# Promotion union: the Source-specific deferred commit wrapper also checks the
+# existing serving authority. It does not mint a new producer or publication
+# proof; the opaque Source assignment and ingress permission remain required.
+expected_occurrences = 18
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
@@ -1149,7 +1190,11 @@ pattern = "MediaSessionEnd"
 # bound to the incarnation, owner epoch and exact lease boundary this tick's
 # own inventory read, and the route is left out of the renewal batch first so
 # nothing this node did between the two can move the boundary underneath it.
-expected_occurrences = 3
+# Shared libraries: the Source actor's settlement ends its own route with
+# `end_media_session_if_owner`, pinned to owner epoch 1 and the observed lease
+# expiry, before releasing its dispatch row. plurx-core Store tests cover the
+# same exact-owner end. No new end authority.
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-exact-playback-route-read"
@@ -1220,7 +1265,11 @@ pattern = "end_media_session_if_owner"
 # until the normal exact-owner settlement path retires it.
 # The merged tree therefore has two production calls plus that explanatory M6
 # reference; the inventory counts symbols in comments deliberately.
-expected_occurrences = 3
+# Shared libraries: the Source actor's settlement ends its own route with
+# `end_media_session_if_owner`, pinned to owner epoch 1 and the observed lease
+# expiry, before releasing its dispatch row. plurx-core Store tests cover the
+# same exact-owner end. No new end authority.
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-exact-activation-handoff-store"
@@ -1325,6 +1374,16 @@ pattern = "publication_ready_at_ms"
 # any first activation, and one assertion that the ended row's projection is
 # armed while a release is held after its durable proof. No shipped fence
 # moves.
+# Shared libraries: Source and receiver activations commit with
+# MEDIA_SESSION_PUBLICATION_BLOCKED and publish (`publication_ready_at_ms =
+# 0`) only after physical readiness and fresh authority; the receiver
+# projection and Source status read the same sentinel. No new publisher.
+# 105 -> 107 for orphaned-receiver recovery tests: one test-only blocked B
+# activation and one read-only route census column. Recovery never writes the
+# fence itself; the Store retirement it reuses already zeroes it.
+# +3 for Shared direct play: the direct Source owner activates its route
+# blocked, completes publication and requires `publication_ready_at_ms == 0`,
+# and its Start/status replay checks the same. No handoff or predecessor.
 # J0: one public recovery fixture verifies the existing durable publication fence.
 # J4 native HLS reads the native ready sentinel when admitting a mapped
 # resource; it neither clears nor publishes the sentinel itself.
@@ -1352,7 +1411,8 @@ pattern = "publication_ready_at_ms"
 # staged link proof can be shown to end at commit. No shipped fence moves.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 120
+expected_occurrences = 137
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1388,6 +1448,15 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # ended row has left the sentinel while the release is held at its point.
 # Test-only; no shipped path writes or clears the sentinel that did not
 # before.
+# Shared libraries: Source and receiver activations commit with
+# MEDIA_SESSION_PUBLICATION_BLOCKED and publish (`publication_ready_at_ms =
+# 0`) only after physical readiness and fresh authority; the receiver
+# projection and Source status read the same sentinel. No new publisher.
+# 35 -> 37 for orphaned-receiver recovery tests: the test-only blocked B
+# activation and an assertion that recovery leaves the sentinel untouched
+# before retirement (it never publishes an adopted producer).
+# +1: the direct Source owner activates its route publication-blocked before
+# completing publication, exactly as the VOD Source owner does.
 # A05 #683: +1 blocked activation fixture in link_receipts.rs, subsequently
 # confirmed through the existing durable activation API; no shipped write.
 # The same four prepared observations above; three refusal-only reads and
@@ -1399,7 +1468,8 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # A05 recovery: 35 -> 38, three new exact ack/typed-recovery fixtures use
 # the existing blocked activation then Confirm. No new shipped sentinel write.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 39
+expected_occurrences = 49
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -1458,7 +1528,10 @@ pattern = "(?:MAX_ADMITTED_MEDIA_BODY_LIFETIME|MEDIA_BODY_NO_PROGRESS_TIMEOUT)"
 # Landed 63cc43f3a shares consumer-first local-body timeout ownership and
 # adds exact-deadline fixtures in hls/response.rs. Net source references +2;
 # the lifetime and no-progress budgets themselves are unchanged.
-expected_occurrences = 17
+# Promotion union: separate Local and Source preparation/commit wrappers retain
+# the same admitted response-owner lifetimes. Four extra references expose
+# those existing guards without creating another body or settlement owner.
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-bounded-prepared-body-owner"
@@ -1565,7 +1638,9 @@ pattern = "terminal_reason"
 # Three define/validate/map its optional ControlErrorBody field; four existing
 # control fixtures explicitly initialize it to None. None writes durable state
 # or chooses a cause: retirement and the playback actor retain ownership.
-expected_occurrences = 48
+# Shared libraries: the Source actor and its tests read the terminal cause
+# of a settled Source route. The terminal causes are unchanged.
+expected_occurrences = 50
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1639,7 +1714,11 @@ pattern = "expected_lease_expires_at_ms"
 # 1 -> 2 with the §4 drain. The lease boundary the owner tick passes comes
 # from the inventory read that selected the route, which is what makes a
 # renewal racing this end defeat it rather than be overwritten by it.
-expected_occurrences = 2
+# Shared libraries: the Source actor's settlement ends its own route with
+# `end_media_session_if_owner`, pinned to owner epoch 1 and the observed lease
+# expiry, before releasing its dispatch row. plurx-core Store tests cover the
+# same exact-owner end. No new end authority.
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-takeover-settlement-capacity"
@@ -1746,12 +1825,18 @@ pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|own
 # lock for one slot transition, pinned to the exact incarnation it was made
 # for, and releases it. That is why the count moves and the ownership picture
 # does not.
+# Shared libraries: vod/serve adds `source_segment_before` (a VodPublication
+# bound to its owner, with Source read custody), Source reservation readiness
+# that waits on the rendition's init signal and reads init within
+# HEAD_REGENERATION_MAX_BYTES, and a preparing-session guard on the Source
+# create path.
 # J0: three test-only registry reads verify dormant renewal and terminal/expiry retirement.
 # J4 adds three test-only preparation registry/empty-session assertions.
 # Recipe preview reuses the existing preparation queue and creates no reader
 # or rendition producer; it introduces no preparation owner.
 # J4 shared startup: One test-only registry read proves concurrent compatibility entries share one preparing/active native session; no new owner.
-expected_occurrences = 39
+expected_occurrences = 40
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"
@@ -1763,7 +1848,12 @@ id = "m4-bounded-vod-head-regeneration"
 pattern = "HEAD_REGENERATION_(?:TIMEOUT|CAPACITY|MAX_BYTES)"
 # Quality-candidate cache inspection reuses MAX_BYTES to bound init hashing;
 # it reads an existing complete cache and never regenerates or starts media.
-expected_occurrences = 9
+# Shared libraries: vod/serve adds `source_segment_before` (a VodPublication
+# bound to its owner, with Source read custody), Source reservation readiness
+# that waits on the rendition's init signal and reads init within
+# HEAD_REGENERATION_MAX_BYTES, and a preparing-session guard on the Source
+# create path.
+expected_occurrences = 10
 
 [[module_symbols]]
 id = "m4-vod-terminal-compaction-owner"
@@ -1836,6 +1926,8 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# Shared H2 drain: the accepted driver moves to JoinSet.spawn; two finite
+# regression drivers are explicitly stopped and joined (+1 net).
 # Durable queue: background_jobs.rs adds one ActiveJob-owned heartbeat (joined
 # before retirement), plus two joined race/process fixtures; ffmpeg.rs adds a
 # joined cancellation fixture. main.rs starts the daemon-owned consumer loop.
@@ -2585,6 +2677,62 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # replacement waiter in the test task instead of spawning a joined task.
 # This removes a test-only owner; production cleanup ownership is unchanged.
 # Combined native fixture addition and main cleanup fixture removal.
+# Shared libraries S2: two daemon-shutdown-owned listener/claim loops; two
+# awaited blocking TLS key/renewal operations; one PeerConnection-owned Hyper
+# driver aborted on Drop; and two fixture listener spawns. The lost-response
+# fixture owns its accepted connections in a JoinSet (abort on owner Drop);
+# the client fixture server is aborted and awaited. No media producer exists.
+# Shared libraries lanes. Source session actor: registry-owned
+# `run_source_owner`; resource, status and control custody tasks holding a
+# counted SourceResponseGuard; probe/native/index workers owned by cancellable
+# Operations and settled; the HTTP start worker plus a supervisor that joins
+# it before publishing; the End owner; source-file conversion and read jobs
+# that keep the guard until their blocking call joins (reads capped at 8).
+# Receiver projection: the start task joined by retirement; the bounded
+# retirement task; status, control and resource custody tasks counted by the
+# body registry retirement joins. Peer client: GuardedPeerDriver, aborted in
+# Drop for PeerConnection. Content monitors: one per streaming Source media
+# body, cancelled when that body drops. Artwork: an idempotent disk writer
+# holding its lease, plus awaited spawn_blocking reads. Daemon loops take
+# background_shutdown. Test fixtures are joined, or aborted and joined.
+# 784 -> 787: vod/generation.rs joins the generation writer task in a
+# supervisor that reports only a panic as a rendition failure (the writer's
+# own end reports everything else), plus the two awaited fixture tasks of
+# its regression test.
+# +3 for orphaned shared-playback receiver recovery: main.rs spawns the
+# daemon-owned receiver_recovery_loop beside the sharing claim loop; it ends on
+# the background drain token and holds no producer. Two test-only spawns run
+# one recovery attempt and one loop, each joined under a timeout after drain.
+# +2 for shared pre-session assets: two test-only in-memory HTTP/1 Source
+# stand-ins (the bounded-body fixture and the real Source router behind the
+# collision test), each aborted and joined at the end of its exchange.
+# +11 for Shared direct play. Production: the detached direct Source owner
+# (ends on retirement/idle/lease loss/drain, always settles), the owned direct
+# open (Source) and the owned B direct relay open (bounded by the receiver body
+# registry, run to completion so a sent Source request is never abandoned).
+# Test-only: three direct-test servers/readers and five pinned CGNAT fixture
+# servers/readers, each joined or aborted and awaited before the test ends.
+# +3 for the shared directed-change reopen (P0), all test-only: a completed
+# stand-in Start task the B supersession tests join, and the reopen CGNAT
+# fixture's Source and B servers, each stopped and joined at its end. The
+# supersession itself reuses the existing single retirement owner.
+# +1 for the shared prepared successor (P1/P2), test-only: the completed
+# stand-in Start task of a registered successor, joined by its retirement owner
+# in the successor tests. A staged successor is started through the existing
+# registry owner (`spawn_owner`, the same spawn moved out of `begin`) and
+# withdrawn or superseded through the existing retirement owner. The prepared
+# handoff CGNAT fixture shares the reopen fixture's two servers (`PinnedPair`),
+# each stopped and joined in `finish`.
+# +1 Shared burn sidecar creation: the Source probe owns and awaits the
+# blocking tempfile job; its anonymous file closes on failure or rendition
+# settlement. No timer or detached recovery owner is added.
+# +1 approved-endpoint fixture: its replacement TLS server is stopped and
+# joined by the fixture after the real immutable End settles.
+# 810 -> 821, shared cluster forwarding completion (2026-10-06).
+# Source/receiver forwarding completion: actual Source HTTP and factory fixtures own
+# their finite servers, H2 drivers and closure monitors, cancelling and joining
+# them during teardown. Production Source Start/End keep their existing tasks
+# in retained entry/retirement owners; no periodic monitor was introduced.
 # J0: two fixture tasks only: owner lease_loop is aborted and joined; cancelled create is aborted and joined before quota reuse. No production spawn is added.
 # +1 for playback_preparation_wakes_busy_analysis_for_any_live_request_waiter:
 # a test-only background consumer, retained in `consumer`, then explicitly
@@ -2629,7 +2777,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # media); and one test helper spawns that real loop over a test fence.
 # Measured on the merge with main at 741: 741 + 2 = 743.
 # +1: the preparation capture test joins its spawn_blocking helper.
-expected_occurrences = 744
+# +1 shared qualification fixture: owns the existing production membership
+# heartbeat loop and aborts/joins it before Store shutdown; Drop aborts on panic.
+# Fixture startup owns the existing production passive/quorum metrics sampler;
+# it is aborted and joined before its Store, with Drop cancellation on panic.
+expected_occurrences = 882
+# Promotion union: final count is measured after architectural conflict resolution.
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2666,6 +2819,8 @@ expected_occurrences = 744
 
 [[module_structures]]
 id = "method-spawn"
+# Shared H2 drain: the HTTP server JoinSet owns every accepted driver through
+# daemon drain; each driver drops its socket before publishing actual closure.
 # Durable queue removes the state.rs fragment JoinSet launcher. The common
 # consumer now awaits each admitted execution and owns its fence through reap.
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
@@ -2806,9 +2961,16 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
+# Shared libraries S2: the lost-response fixture JoinSet owns and aborts
+# accepted TLS connections; this is the same in-process task inventoried above.
+# 54 -> 55, shared cluster forwarding completion (2026-10-06).
+# Receiver retirement owns the bounded JoinSet of actual ingress close exchanges;
+# it joins every result, or shuts the set down at the original retirement deadline.
+# Source uses awaited FuturesUnordered, with no independently spawned close task.
 # Review64 R4: +1 owned/joined finite-stack test thread. No production task.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 57
+expected_occurrences = 60
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2821,10 +2983,19 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # the drop and slot-termination reap fixtures, and the fd-6 closure fixture).
 # None of them is a task call, and the five shipped callers reach the builder by
 # its `crate::producer_spawn::` path, which the namespaced sentinel counts.
-expected_occurrences = 12
+# 10 -> 11, shared cluster forwarding completion (2026-10-06).
+# The Source non-owner fixture adds its server constructor named spawn; the
+# fixture retains the server task and cancels/joins it on teardown.
+expected_occurrences = 13
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Shared ingress custody adds one bounded actual-driver closure wait and two
+# finite regression bounds (independent admission and real HTTP driver closure).
+# The accepted driver owns monitors through their join; no polling owner is added.
+# Shared H2 drain: retirement bounds its actual writer join without treating
+# timeout as closure; two finite regression waits bound frame and socket evidence.
 # Durable queue: background_jobs.rs adds four claim/heartbeat lease timers and
 # three bounded fixture waits (+7); ffmpeg replaces timeout with sleep and adds
 # three fixture waits (+3); fragindex removes two outer waits in favor of the
@@ -3857,6 +4028,63 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # wrapper and directly checks Pending before releasing cleanup. The real
 # gate future retains its production deadline; no production timer changed.
 # Combined native-init fixture and TCL source: measured total 1129.
+# Shared libraries S2: two one-second authority reads, listener pacing (five
+# seconds), certificate/enablement and claim-loop pacing (one second each),
+# the peer router's three-second deadline, and client dial/request five-second
+# deadlines. All are awaited by their request or daemon-shutdown owner;
+# cancellation drops the transport futures. None starts a media producer.
+# Shared libraries lanes. Request-owned deadlines: Store and peer authority
+# reads (1-15 s), peer client dial and request (5/12/35 s; End 315 s so it
+# covers the Source End owner's 305 s budget), the peer router's per-route
+# deadline, and Source start/End waits. Leases: Source actor renewal every
+# 10 s (60 s lease), which also carries the receiver's one Source status
+# probe per period; receiver pending and published renewals every 10 s of
+# 30 s leases. Bounded retries: receiver retirement (six attempts, 5-80 s
+# backoff) and Source settlement (24 x 5 s). Loops: claim loop sleeps to the
+# next due import or a local wake, bounded at 10 s for remote writes; the
+# listener's 1 s enablement check. A streaming Source media body re-observes
+# authority each second while it lives. Process deadlines: 5 s exit grace for
+# the Source probe and index children. Test timers sit inside asserting
+# timeouts or are fixed window delays.
+# +9 for orphaned shared-playback receiver recovery: the loop's 30 s pacing
+# sleep, raced with the drain token, owned by receiver_recovery_loop. Eight are
+# test-only bounded waits (four timeouts, three polls, one settle sleep) in
+# the joined recovery fixtures.
+# +2 for shared pre-session assets: the receiver's 35 s bound around one
+# pinned Source asset read (`read_file_asset`) and the 32 s bound around its
+# single exchange (`PeerConnection::file_asset`). Both are awaited by the
+# requesting handler; neither owns a task, producer or process.
+# +17 for Shared direct play. source_direct.rs: the ready wait, the open
+# wait and the publication deadline (timeout_at) plus the owner's 10 s
+# lease/idle interval, which ends with the owner. sharing_direct_client.rs: the
+# 30 s head deadline, the per-frame idle deadline, the empty-body drain bound
+# and two paused-clock fixture sleeps. Test-only: five direct-test waits and
+# three CGNAT fixture waits, all bounded. No recovery timer is added.
+# +4 for the shared directed-change reopen (P0), all test-only: the Source
+# control test's wait across the control interval (counted in
+# `all-async-sleeps` too) and the reopen CGNAT fixture's outer bound, its
+# control-interval wait and its bounded predecessor-retirement poll. The reopen
+# itself adds no timer: it is driven by the control answer and the existing
+# client fallback.
+# +3 for the shared prepared successor (P1/P2), all test-only, in the prepared
+# handoff CGNAT fixture: its outer bound, its control-interval wait between
+# new sequences, and its bounded Source-session poll. The successor deadline
+# adds no timer: it is checked on the successor owner's existing renewal tick.
+# +1 for Shared manual watched state: `viewer_watched` bounds its 64-byte body
+# read with the same 15 s timeout as the progress route. The requesting handler
+# awaits it; it owns no task, producer or process.
+# +1 for the shared prepared successor hand-over fix, test-only: the bound on
+# the hand-over transport test's waits (busy and revoked transports cut, idle
+# custody released). The commit hand-off itself adds no task or timer: it runs
+# when the commit answer's writer is released.
+# +4 approved-endpoint cleanup: bounded import lookup and total-budget
+# endpoint attempt replace the old unbounded dial loop; two fixture bounds
+# cover an actual End refusal and an accepted request stalled until settlement.
+# 1329 -> 1380, shared cluster forwarding completion (2026-10-06).
+# Forwarded control, admission, close and ACK operations inherit bounded request
+# or retirement deadlines. Response owners retain delivery/no-progress budgets;
+# test fixtures own finite wait/teardown deadlines. No periodic SQL poller or
+# playback watchdog is added, and retries do not renew retirement deadlines.
 # J0: three bounded fixture waits observe the existing owner loop and expiry; no production recovery timer is added.
 # J4 adds one awaited 15-second compatibility-start timeout and one
 # 120-second real native index fixture deadline. Neither spawns a task.
@@ -3960,7 +4188,23 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Combined #810/#814: +2 from architecture close-out, +9 from output
 # containment and +1 test-only abandoned-link collection deadline.
 # Combined fence grace and close-out/preparation waits: 1288 + 12 = 1300.
-expected_occurrences = 1300
+# +1 for the H2 graceful-drain fixture's bounded terminal-frame reader.
+# It inspects empty END_STREAM DATA before EOF and retains the actual accepted
+# writer closure/receipt checks; no timer elects work and no task is added.
+# +1 shared qualification fixture: finite join bound for its existing membership
+# heartbeat owner; no new production timer or recovery loop.
+# +2 failed-resource diagnostic bounds: status and member observations cannot
+# park the test before reporting its original HTTP refusal; no production timer.
+# Four test-only bounds: actual placement readiness, blocked lease read,
+# completed lease read, and one bounded real-clock wake; no production timer.
+# +2 actual owner-lease regression bounds: owner-proof reader remains blocked
+# independently of the attachment reader, then finishes only after writeback.
+# Both observe the retained actor and exact SQL fences; no production timer.
+# +1 receiver custody final-ledger read: the existing retirement owner bounds
+# its exact-owner sealed/settled observation by its retained315s deadline.
+# Timeout/read failure exits unresolved; only authenticated physical-close ACKs
+# settle debt. No timer elects work and no task or polling owner is added.
+expected_occurrences = 1562
 
 
 [[module_structures]]
@@ -4308,6 +4552,16 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Both existing Tools calls still await output_job_owned, which retains the
 # child job and enables kill-on-drop. The HOME=/ regression uses this same
 # constructor and awaits its finite shell child; no new detached owner exists.
+# Shared libraries Source preparation: `source_held_probe_command` and
+# `source_native_text_command` (ffmpeg.rs) build commands over the held
+# descriptor and never spawn; `run_probe` builds the ffprobe `-version`
+# reporter query. Each launches only through `run_child` under the admitted
+# Source permit, `spawn_job_owned` and kill_on_drop. Test-only: ffmpeg and
+# ffprobe fixture generators awaited through `.output()`, and finite
+# `sleep 60` children in vod/tests/source_lifetime.rs the producer slot reaps.
+# +3 Shared burns: held-source subtitle extraction and the filter listing
+# both run through the admitted Source executor and are reaped before its
+# result. The third is a test-only subtitle fixture mux, awaited by its fixture.
 # +1 authenticated Jellyfin subtitle regression: finite ffmpeg copy/mux
 # through the existing testfixture runner; synchronous, reaped by that runner.
 # Production aliases delegate the existing subtitle owner and add no launcher.
@@ -4321,10 +4575,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # fixtures and main's admitted diagnostic children remain under their owners.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 214
+expected_occurrences = 229
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# Shared H2 drain: JoinSet.spawn starts the accepted HTTP task described above,
+# not an operating-system process.
 # Durable queue removes state.rs JoinSet.spawn for the fragment worker. This
 # is the same removed task counted by method-spawn, not an OS child.
 pattern = "\\.(?:spawn|output|status)\\s*\\("
@@ -4812,6 +5069,42 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Combined current-main 409 plus the queued-publication test child = 410.
 # +1 TCL legacy admission fixture: Response::status() asserts typed Auto/1440
 # overflow versus ordinary copy/manual admission. This does not launch a child.
+# Shared libraries S2: eight status-shaped reads/builders (manager/TLS state,
+# HTTP response and fixture assertions), none an OS process launch. One
+# JoinSet.spawn owns accepted TLS fixture connections and aborts them when its
+# listener fixture is dropped; completed connections are joined in its loop.
+# Shared libraries: no new OS process launch outside the owned Source
+# executor. `SourceCommandExecutor::output` routes Source engine capture
+# through `run_child`. `runtime.spawn(async move` in prodrun.rs is the
+# producer slot's reaper, which now finishes the reap when its writer is
+# gone. The remainder are `.status()` reads on HTTP responses, the sharing
+# manager and TLS identity, and `Response::builder().status(..)`. Test
+# `.output()` calls await fixture generation; the JoinSet `spawn` in
+# http/mod.rs owns accepted TLS fixture connections, aborted on Drop.
+# +6 test-only SharingManager::status() reads in the orphaned-receiver
+# recovery tests; they read process-local status and launch nothing.
+# +25 for shared pre-session assets: `Response::status()` reads and
+# `Response::builder().status(..)` in the Source and receiver asset code and
+# their tests. No OS process is launched; subtitle, overlay and thumbnail work
+# stays in the existing Local owners.
+# +19 for Shared direct play: every one is an HTTP `.status()` read on a
+# request/response builder or a reply (4 in the B direct relay, 1 in the
+# direct client, 12 in the direct tests, 2 in the CGNAT fixture). No process.
+# +2 for the shared directed-change reopen (P0): one HTTP `.status()` read in
+# the Source adapter test's directed-change case and the reopen CGNAT
+# fixture's `LiveNodeTls::status()` SPKI read. No process.
+# +1 for the S4 catalogue audit: a test-only HTTP `Response::status()` read
+# in the typed page-failure mapping test. No process.
+# +1 for Shared manual watched state: a test-only HTTP `Response::status()`
+# read in the viewer-route test's watched-route loop. No process.
+# +4 Shared burns/HDR: filter-listing output uses Source-owned run_child;
+# fixture subtitle mux output is awaited; two HTTP status assertions inspect
+# responses only. None creates an additional detached owner.
+# +1 approved-endpoint fixture server launch, owned and joined by the fixture.
+# 577 -> 594, shared cluster forwarding completion (2026-10-06).
+# Forwarding adds response status builders/readers and finite fixture server
+# launches to this conservative method-shape census. B retirement owns and
+# joins its close-task fanout. No additional media child-process factory is added.
 # J0: one Axum Response::status assertion in the public recovery fixture; it launches no process.
 # +3 for Jellyfin J2: two in-process Axum Response::status reads in the
 # facade fixture and one in the bounded cold-artwork fixture. None starts
@@ -4857,7 +5150,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1: `state.membership.status()` in the Developer readiness read is a
 # membership observation the `.status(` shape matches, not a process launch.
 # +6: integrated Jellyfin admission, catalog and refusal response reads.
-expected_occurrences = 524
+# Three fixture calls to start_replication own the existing sampler for
+# Source, B worker and B ingress; these are not process launchers.
+expected_occurrences = 708
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -4871,6 +5166,13 @@ expected_occurrences = 0
 
 [[module_structures]]
 id = "process-lifecycle-method"
+# Common ingress adds three waits on the actual accepted-driver closure signal
+# and one real HTTP fixture closure wait. These are not process lifecycle calls;
+# the server JoinSet owns the driver and joins its finite closure monitors.
+# Source failed-Start receipt fixtures add four net waits on exact Start/End
+# owners. They join existing owners and create no process or background loop.
+# Shared H2 regression awaits the accepted connection closure observer; this
+# wait observes a driver already owned by the server JoinSet, not a child process.
 # Durable queue adds start_kill and an awaited wait to the ffmpeg collector.
 # Cancellation/expiry retains the child job and caller admission until reap;
 # the normal completion wait remains. There is no second process owner.
@@ -5091,6 +5393,20 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
+# Shared libraries Source preparation and index: `start_kill` on deadline,
+# cancel or a missing pipe; a 5 s grace `wait`; then kill and a wait-retry
+# that keeps the child, job and permit (a wait error is never settlement).
+# prodrun.rs: the reaper's `wait`/`start_kill` retry and the slot's
+# `reaping.wait()`/`operation.wait()` barriers. The rest are notifier waits,
+# not processes: SharingConnectionClosure::wait, SourceStartEntry and
+# SourceEndOwner::wait(deadline), and test gates. Test `child.wait()` reaps
+# the fixture sleeper.
+# +1: the Source direct byte route awaits its Start entry (`entry.wait`), the
+# same in-process outcome wait every Source operation uses. No child process.
+# 293 -> 297, shared cluster forwarding completion (2026-10-06).
+# Source non-owner and actual-driver fixture waits use retained Start/End or
+# closure owners. Fixture teardown cancels and joins its finite transport tasks;
+# these method shapes do not add an independent media-process lifecycle.
 # Review59: +3 only in the NEW exact executable fixture: ordinary child.wait
 # and timeout start_kill + wait, retaining the job through exact reap.
 # Video-quality batch: +2 net lifecycle calls in BoundedDiagnosticChild. The
@@ -5098,7 +5414,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # successful ordinary/cancelled wait retains the same child-job owner until reap.
 # Main/effort source union retains both sets: 255 exact lifecycle method sites.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 260
+# One bounded fixture wait follows actual Raft watch changes until the
+# real Source peer publishes bounded-read readiness; no polling owner.
+expected_occurrences = 316
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -5158,7 +5477,13 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # zeroing this row on the merge of main into #562. Both test-only observations coexist; the merge adds no new site.
 # E1 plus S-14 M8: both reviewed fixture ownership sets retained.
 # E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
-expected_occurrences = 57
+# Shared libraries: declarations, not process calls. `async fn wait` on
+# SourceStartEntry, SourceEndOwner, SharingConnectionClosure and prodrun's
+# ReapOperation are notifier waits matched by name. Test-only `libc::kill
+# (pid, 0)` probes in vod/tests/source_lifetime.rs assert the production
+# slot reaped (ESRCH) or kept its fixture child; they send no signal.
+expected_occurrences = 64
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -5266,6 +5591,10 @@ pattern = "kill_on_drop\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
+# Shared libraries Source preparation: `run_child` sets kill_on_drop on every
+# held-descriptor probe, reporter and native-text child before
+# `spawn_job_owned`. It is an unwind backstop; the normal path still
+# start_kills and reaps inside the owner before the permit drops.
 # 93 -> 94 with J4 encoded qualification: the Jellyfin HTTP regression decodes
 # one actually fetched mapped encoded fragment with a finite test-only FFmpeg
 # `framehash` child. It is awaited to completion through `output()` before the
@@ -5275,7 +5604,8 @@ pattern = "kill_on_drop\\s*\\("
 # finite reordered-VOD decode fixture. Their enclosing owners also await reap.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 98
+expected_occurrences = 99
+# Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

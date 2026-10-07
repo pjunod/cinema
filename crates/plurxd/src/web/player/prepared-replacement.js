@@ -180,6 +180,14 @@ function settlePlaybackControlAcknowledgement(p,request){
     const pending=p.preparedControlPending;
     if(sent.state==="committed"&&pending&&pending.actionId===sent.action_id){
       p.preparedControlPending=null;
+      // Only B's acceptance of the commit makes a Shared successor the
+      // player's session: progress, status and any later reopen now name its
+      // bound context. The predecessor is not released here; B supersedes it
+      // through its own retirement owner.
+      if(pending.sharedContext&&p.sessionId===pending.sessionId){
+        p.fileContext=pending.sharedContext;
+        p.meta={...(p.meta||{}),fileContext:pending.sharedContext};
+      }
       if(pending.bootstrap&&p.sessionId===pending.sessionId){
         // The predecessor reporter owns the commit response; start the
         // successor reporter only after that callback has finished.
@@ -190,6 +198,25 @@ function settlePlaybackControlAcknowledgement(p,request){
       }
     }
   }
+}
+
+// A visible Shared switch whose commit is refused or lost has two possible
+// server owners. Reopen under the accepted predecessor context and then end
+// both old sessions; the fresh Start owns the viewer's current selection.
+function recoverSharedCommittedReplacement(p,pending){
+  if(PLAYER!==p||p.preparedControlPending!==pending) return false;
+  p.preparedControlPending=null;
+  stopPlaybackControl(p);
+  const accountToken=TOKEN;
+  const predecessor=p.fileContext?.session_id;
+  const successor=pending.sessionId;
+  const position=positionForPlaybackIntent(document.getElementById("video"),p);
+  const reopening=play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
+  Promise.resolve(reopening).finally(()=>{
+    releaseSession(predecessor,accountToken);
+    if(successor!==predecessor) releaseSession(successor,accountToken);
+  }).catch(()=>{});
+  return true;
 }
 
 /** @returns {HTMLVideoElement|null} */
@@ -249,7 +276,30 @@ function handlePreparedReplacementAction(p,action){
   const existing=preparedState(p);
   if(existing&&existing.actionId===action.action_id) return existing;
   if(existing) abandonPreparedReplacement(p,"aborted","superseded by a newer preparation");
-  return beginPreparedReplacement(p,action);
+  const shared=preparedSharedSuccessor(p,action);
+  if(shared===false) return null;
+  return beginPreparedReplacement(p,action,shared);
+}
+// A Shared session's successor is B's own second B session. Its offer binds
+// whole through B's Shared Start grammar, under the accepted login, before a
+// second pipeline is primed (`SHARED_DECISION.successor`): null for a Local
+// session, the successor's bound context, or false for an offer that does not
+// bind -- settled `failed` on the predecessor's channel, which withdraws it at
+// B, and answered with the change's one P0 reopen.
+function preparedSharedSuccessor(p,action){
+  const context=p&&p.fileContext;
+  if(!context||!context.source_ref||context.source_ref.kind==="local") return null;
+  try{ return SHARED_DECISION.successor(context,action); }
+  catch(error){
+    markPreparedSettlement(p,action.action_id);
+    queuePlaybackControlAcknowledgement(p,action.action_id,"failed");
+    clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
+      message:`shared successor ${String(action.session_id).slice(0,36)} refused: the offer does not bind`},
+      playbackContext()));
+    raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
+    fallBackDirectedChange(p,p.directedChange,"failed");
+    return false;
+  }
 }
 // Settled stagings, so a replay is recognised rather than rebuilt. Bounded and
 // keyed by `action_id`; a session sees a handful of these at most.
@@ -264,7 +314,7 @@ function markPreparedSettlement(p,actionId){
   while(settled.length>PREPARED_SETTLED_MEMORY) settled.shift();
 }
 
-function beginPreparedReplacement(p,action){
+function beginPreparedReplacement(p,action,sharedContext=null){
   const v=document.getElementById("video"), spare=ensurePreparedVideoElement();
   if(!v||!spare||PLAYER!==p) return null;
   // Two origins, and they are not the same number.
@@ -295,6 +345,7 @@ function beginPreparedReplacement(p,action){
     fileId:p.fileId,
     candidateRecipeDigest:(p.qualityCandidates||[]).find(row=>row.id===action.effective_selection?.candidate_id)?.recipe_digest?.slice(),
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
+    sharedContext,
     mediaOriginMs:originMs,offeredOriginMs,
     selection:action.effective_selection,
     startAtSec:preparedLocalPositionMs(filmMs+startLeadMs,originMs)/1000,
@@ -1088,7 +1139,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     if(p.directedChange&&p.directedChange.autoMove)
       p.directedChange.committedActionId=state.actionId;
     p.preparedControlPending={actionId:state.actionId,sessionId:state.sessionId,
-      bootstrap:state.controlBootstrap};
+      bootstrap:state.controlBootstrap,sharedContext:state.sharedContext};
     settleDirectedChange(p,p.directedChange,"committed",
       Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));
     deferPreparedPredecessorRetirement(p,state,spare);

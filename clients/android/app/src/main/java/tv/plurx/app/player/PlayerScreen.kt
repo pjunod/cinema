@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -3096,5 +3097,78 @@ private fun offsetLabel(ms: Long): String = if (ms == 0L) {
 private fun BackChip(onExit: () -> Unit) {
     TvIconButton(onClick = onExit, modifier = Modifier.padding(4.dp)) {
         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+    }
+}
+
+
+/** Explicit Shared dispatch, without a numeric Local PlanLike sentinel. Every
+ * control here asks the server first; the picture moves only after B accepts. */
+@Composable
+internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, onEnded: () -> Unit = {}, onExit: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val controller = remember(vm, plan) { SharedPlayerController(context, vm) }
+    val starting by controller.owner.starting.collectAsStateWithLifecycle()
+    val failure by controller.owner.failure.collectAsStateWithLifecycle()
+    val statusSummary by controller.owner.statusSummary.collectAsStateWithLifecycle()
+    val selection by controller.owner.selection.collectAsStateWithLifecycle()
+    val playing by controller.playing.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    BackHandler { scope.launch { controller.stop(); onExit() } }
+    LaunchedEffect(plan) { controller.start(plan) }
+    val ended by controller.ended.collectAsStateWithLifecycle()
+    val finished by rememberUpdatedState(onEnded)
+    LaunchedEffect(ended) { if (ended) finished() }
+    DisposableEffect(controller) { onDispose { controller.close() } }
+    Column(Modifier.fillMaxSize()) {
+        Text(plan.subject.title, style = MaterialTheme.typography.headlineSmall)
+        // A prepared handoff moves the surface to the successor (and a rollback
+        // back); the view releases the pipeline it left once it no longer
+        // points at it.
+        val surface by controller.surfacePlayer.collectAsStateWithLifecycle()
+        val retired by controller.retired.collectAsStateWithLifecycle()
+        AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = surface } },
+            update = { view -> if (view.player !== surface) view.player = surface; if (retired != null) controller.collectRetired(view.player) },
+            modifier = Modifier.weight(1f).fillMaxWidth())
+        if (starting) Text("Starting Shared playback")
+        statusSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        failure?.let { Text(it) }
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.material3.TextButton(onClick = { controller.seekBy(-10_000) }, enabled = !starting) { Text("−10 s") }
+            androidx.compose.material3.TextButton(onClick = { controller.togglePlaying() }, enabled = !starting) { Text(if (playing) "Pause" else "Play") }
+            androidx.compose.material3.TextButton(onClick = { controller.seekBy(30_000) }, enabled = !starting) { Text("+30 s") }
+            selection?.let { current ->
+                SharedChoiceMenu("Quality", current.quality.label, tv.plurx.app.data.PlaybackQuality.entries.map { it.label to current.copy(quality = it) }, !starting, controller::change)
+                val audio = plan.decision.presentation.audio
+                if (audio.size > 1) SharedChoiceMenu("Audio", audio.firstOrNull { it.index.toInt() == current.audio }?.let(::sharedTrackLabel) ?: "Default",
+                    audio.filter { it.index in 0..1024 }.map { sharedTrackLabel(it) to current.copy(audio = it.index.toInt()) }, !starting, controller::change)
+                val subtitles = plan.decision.presentation.subtitles.filter { it.native == true && it.index in 0..1024 }
+                if (subtitles.isNotEmpty()) SharedChoiceMenu("Subtitles", subtitles.firstOrNull { it.index.toInt() == current.subtitle }?.let { sharedTrackLabel(it.language, it.title, it.codec) } ?: "Off",
+                    listOf("Off" to current.copy(subtitle = null)) + subtitles.map { sharedTrackLabel(it.language, it.title, it.codec) to current.copy(subtitle = it.index.toInt()) }, !starting, controller::change)
+            }
+            androidx.compose.material3.TextButton(onClick = { scope.launch { controller.stop(); onExit() } }) { Text("Close") }
+        }
+    }
+}
+
+private fun sharedTrackLabel(track: tv.plurx.app.data.AudioTrack): String =
+    sharedTrackLabel(track.language, track.title, track.codec) + (track.channels?.let { " · ${it}ch" } ?: "")
+
+private fun sharedTrackLabel(language: String?, title: String?, codec: String): String =
+    listOfNotNull(title?.takeIf { it.isNotBlank() }, language?.takeIf { it.isNotBlank() }).joinToString(" · ").ifEmpty { codec }
+
+/** A directed change: the choice is an ask, and the reopen it causes is the owner's. */
+@Composable
+private fun SharedChoiceMenu(
+    label: String, current: String, options: List<Pair<String, tv.plurx.app.data.SharedSelection>>, enabled: Boolean,
+    onChoose: (tv.plurx.app.data.SharedSelection) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        androidx.compose.material3.TextButton(onClick = { open = true }, enabled = enabled) { Text("$label: $current") }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            options.forEach { (text, choice) ->
+                androidx.compose.material3.DropdownMenuItem(text = { Text(text) }, onClick = { open = false; onChoose(choice) })
+            }
+        }
     }
 }

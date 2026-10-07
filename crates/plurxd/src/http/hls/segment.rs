@@ -520,12 +520,15 @@ async fn resurrect_vod_before(
         Ok(DurableRouteResolution::ActiveLocal(route)) => route,
         Err(_) => return VodResurrection::Unavailable,
     };
+    let Some(local_user_id) = route.principal.local_user_id() else {
+        return VodResurrection::Unavailable;
+    };
     match tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         state.transcode.vod_resurrect_before(
             &route.recipe_json,
             session,
-            route.user_id,
+            local_user_id,
             adoption,
             deadline,
             false,

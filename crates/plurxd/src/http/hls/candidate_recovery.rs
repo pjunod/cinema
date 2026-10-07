@@ -84,7 +84,9 @@ pub(crate) async fn accept_sample(
     tokio::time::timeout_at(deadline, async {
         let session = session?;
         let route = state.store.media_session_route(session).await.ok()??;
-        if route.user_id != network.user_id? || route.recipe_json.len() > 64 * 1024 {
+        if route.principal.local_user_id() != Some(network.user_id?)
+            || route.recipe_json.len() > 64 * 1024
+        {
             return None;
         }
         let recipe: RemoteStartRequest = serde_json::from_str(&route.recipe_json).ok()?;
@@ -490,7 +492,10 @@ pub(super) async fn incumbent(
         let user = network.user_id?;
         let route = state
             .store
-            .media_session_route_for_playback(user, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user },
+                playback,
+            )
             .await
             .ok()??;
         if route.owner_node_id != state.node_id
@@ -504,7 +509,7 @@ pub(super) async fn incumbent(
             return None;
         }
         let recipe: RemoteStartRequest = serde_json::from_str(&route.recipe_json).ok()?;
-        if recipe.user_id != user
+        if recipe.principal.local_user_id() != Some(user)
             || recipe.request.file_id != file.id
             || recipe.source_size != file.size
             || recipe.source_mtime != file.mtime
@@ -535,7 +540,10 @@ pub(super) async fn incumbent(
         // Source work may await. A retired/replaced incumbent cannot mint memory.
         let current = state
             .store
-            .media_session_route_for_playback(user, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user },
+                playback,
+            )
             .await
             .ok()??;
         if current.incarnation_id != route.incarnation_id

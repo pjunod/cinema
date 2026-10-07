@@ -605,7 +605,7 @@ async function refreshQualityCandidates(p){
   p.abr.catalogRefreshing=true;
   const attachment=p.mediaAttachment, intent=p.controlIntentGeneration;
   try{
-    const decision=await askDecision(p.fileId,qualityForce(),
+    const decision=await askDecision(playbackFileContextForPlayer(p),qualityForce(),
       {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},null,p);
     if(PLAYER!==p||p.mediaAttachment!==attachment||p.controlIntentGeneration!==intent
       ||candidateQualityContext(p)!==key) return false;
@@ -628,7 +628,8 @@ function candidateTransferEvidence(p,now){
     ? {...transfer,age_ms:now-transfer.atMs}:null;
 }
 function candidateLinkReceipt(p,fileId,now=performance.now()){
-  if(!p||PLAYER!==p||p.fileId!==fileId||qualityForce()!=='auto'
+  const localId=fileId&&typeof fileId==="object"&&fileId.source_ref?.kind==="local"?fileId.source_ref.file_id:fileId;
+  if(!p||PLAYER!==p||p.fileId!==localId||qualityForce()!=='auto'
     ||!playbackOwnsAttachedMedia(p)) return null;
   const sample=candidateTransferEvidence(p,now);
   return sample&&candidateTransferOriginCurrent(sample)&&sample.linkPositiveReported&&sample.etag
@@ -715,7 +716,7 @@ async function naturalBoundaryQualityCandidate(p,seekIntent){
   const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),1500);
   const generation=p.controlIntentGeneration;
   try{
-    const decision=await askDecision(p.fileId,'auto',
+    const decision=await askDecision(playbackFileContextForPlayer(p),'auto',
       {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal,p);
     if(PLAYER!==p||p.controlSeek!==seekIntent||p.controlIntentGeneration!==generation
       ||qualityForce()!=='auto'||!Array.isArray(decision.quality_candidates)) return null;

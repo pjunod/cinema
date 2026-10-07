@@ -146,7 +146,7 @@ async fn release(state: &AppState, play: &JellyfinPlay) -> Result<(), ApiError> 
     if let Some(id) = play.native_incarnation_id.as_deref() {
         if let Some(route) = state.store.media_session_route_by_incarnation(id).await? {
             if route.state != "ended"
-                && route.user_id == play.negotiation.scope.user_id
+                && route.principal.local_user_id() == Some(play.negotiation.scope.user_id)
                 && route.playback_id == play.negotiation.playback_id
             {
                 let status = super::super::hls::release_with_terminal(
@@ -297,7 +297,7 @@ async fn bind_native_start(
         .ok_or(ApiError::Conflict(
             "native play activation unavailable".into(),
         ))?;
-    if route.user_id != play.negotiation.scope.user_id
+    if route.principal.local_user_id() != Some(play.negotiation.scope.user_id)
         || route.playback_id != play.negotiation.playback_id
     {
         return Err(ApiError::Conflict("native play owner changed".into()));

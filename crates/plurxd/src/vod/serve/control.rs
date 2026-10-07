@@ -1,6 +1,20 @@
 use super::*;
 
 impl VodServe {
+    #[cfg(test)]
+    pub(crate) async fn source_control_observation_for_test(
+        &self,
+        session_id: &str,
+    ) -> Option<(
+        Option<crate::playback_control::PlaybackDemandSnapshot>,
+        Instant,
+    )> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        let touched = *session.last_touch.lock().expect("touch lock");
+        Some((session.last_control_snapshot.clone(), touched))
+    }
+
     /// Apply one fenced control exchange without conflating a replay or stale
     /// request with a media-object touch. Only a newly accepted non-terminal
     /// sequence moves the existing five-minute VOD activity clock. A fresh
@@ -27,6 +41,48 @@ impl VodServe {
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
         preparation_admission: Option<
             Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        self.control_with_authority(
+            control,
+            deadline_unix_ms,
+            terminal_committer,
+            preparation_admission,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn control_source(
+        &self,
+        authority: &mut crate::transcode::source_actor::control::SourceControlAuthority<'_>,
+        control: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        self.control_with_authority(control, deadline_unix_ms, None, None, Some(authority))
+            .await
+    }
+
+    async fn control_with_authority(
+        &self,
+        control: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+        terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+        preparation_admission: Option<
+            Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
+        mut source: Option<
+            &mut crate::transcode::source_actor::control::SourceControlAuthority<'_>,
         >,
     ) -> Option<
         Result<
@@ -121,7 +177,11 @@ impl VodServe {
             return Some(Ok(result));
         }
 
-        if let Err(error) = crate::playback_control::verify_authority(
+        if let Some(authority) = source.as_deref_mut() {
+            if let Err(error) = authority.refresh(&control).await {
+                return Some(Err(error));
+            }
+        } else if let Err(error) = crate::playback_control::verify_authority(
             self.shared.store.as_ref(),
             control.session_id,
             control.generation,
@@ -214,6 +274,18 @@ impl VodServe {
                     return Some(Err(crate::playback_control::ControlStateError::Unavailable));
                 }
                 child_readers.push(guard);
+            }
+            if let Some(authority) = source.as_deref() {
+                authority.before_acceptance().await;
+                if authority.validate().is_err()
+                    || session.supersession_user
+                        != authority.assignment().binding().principal().owner_key()
+                    || !control_rendition
+                        .source_owners
+                        .contains_live_assignment(authority.assignment())
+                {
+                    return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+                }
             }
             // Acceptance and M6's selection gate are one lock scope. They are
             // two reads of the same fence, and taking the lock twice would let
@@ -365,8 +437,8 @@ impl VodServe {
                     kind: session.kind,
                 })
             } else {
-                let marker_prewarm = (disposition
-                    == crate::playback_control::ControlDisposition::Accepted)
+                let marker_prewarm = (source.is_none()
+                    && disposition == crate::playback_control::ControlDisposition::Accepted)
                     .then(|| MarkerPrewarmControl {
                         rendition: session
                             .live_rendition()

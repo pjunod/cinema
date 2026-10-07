@@ -203,6 +203,7 @@ function catalogTabsHtml(active, homeOn){
     <a href="#/recordings" data-tab="recordings"${on(active==="recordings")}>${catalogIcon("act")}<span>Recordings</span></a>
     <button type="button" data-tab="libs" class="px-tab" aria-expanded="false" aria-controls="pxnav" onclick="catalogToggleLibs(event)">${catalogIcon("stack")}<span>Libraries</span></button>
     <button type="button" data-tab="search" class="px-tab" onclick="catalogFocusSearch(event)">${catalogIcon("search")}<span>Search</span></button>
+    <a href="#/shared" data-tab="shared"${on(active==="shared")}>${catalogIcon("stack")}<span>Shared</span></a>
     <a href="#/activity" data-tab="activity"${on(active==="activity")}>${catalogIcon("act")}<span>Activity</span></a>
   </nav>`;
 }
@@ -248,6 +249,7 @@ function catalogChrome(active, inner){
            <a href="#/live-tv" class="${active==="live-tv"?"on":""}"${active==="live-tv"?' aria-current="page"':""}>${catalogIcon("tv")}<span class="px-lbl">Live TV</span></a>
            <a href="#/recordings" class="${active==="recordings"?"on":""}"${active==="recordings"?' aria-current="page"':""}>${catalogIcon("act")}<span class="px-lbl">Recordings</span></a>
            <a href="#/library-channels" class="${active==="library-channels"?"on":""}"${active==="library-channels"?' aria-current="page"':""}>${catalogIcon("film")}<span class="px-lbl">Library channels</span></a>
+           <a href="#/shared" class="${active==="shared"?"on":""}"${active==="shared"?' aria-current="page"':""}>${catalogIcon("stack")}<span class="px-lbl">Shared libraries</span></a>
          </nav>
          <div id="pxlibs"></div>
          <div class="px-sec">Manage</div>

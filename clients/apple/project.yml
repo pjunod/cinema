@@ -16,7 +16,7 @@ settings:
     SWIFT_VERSION: "5.9"
     SWIFT_STRICT_CONCURRENCY: targeted
     MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "213"
+    CURRENT_PROJECT_VERSION: "214"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -133,6 +133,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
         buildPhase: resources
+      - path: ../../tests/sharing/protocol-cases.json
+        buildPhase: resources
     dependencies:
       - target: plurx-iOS
     settings:
@@ -166,6 +168,8 @@ targets:
       - path: ../../tests/playback/pgs-overlay-cases.json
         buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
+        buildPhase: resources
+      - path: ../../tests/sharing/protocol-cases.json
         buildPhase: resources
     dependencies:
       - target: plurx-tvOS

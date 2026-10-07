@@ -22,6 +22,8 @@
     "core/errors.js",
     "core/app.js",
     "core/api.js",
+    "core/file-context.js",
+    "core/shared-decision.js",
     "player/measurements.js",
     "core/auth.js",
     "core/keyboard-reach.js",
@@ -83,6 +85,9 @@
     "layouts/theater.js",
     "pages/reader.js",
     "pages/library-channels-page.js",
+    "pages/shared-artwork.js",
+    "pages/shared-libraries.js",
+    "pages/sharing-management.js",
     "router.js"
   ]
 }

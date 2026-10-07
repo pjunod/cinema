@@ -61,6 +61,20 @@ const RETRY_RESOURCE_ACTION: &str = "retry_resource";
 /// declared it is never sent one, which is what makes shipping the server half
 /// ahead of the client half safe.
 pub(crate) const PREPARE_REPLACEMENT_ACTION: &str = "prepare_replacement";
+/// The name a client declares, beside [`PREPARE_REPLACEMENT_ACTION`], when it
+/// can consume a `prepare` on a Shared session: at commit it moves its Shared
+/// progress beats, status and bound playback context to the successor B
+/// session the action names. A Shared receiver offers its own prepared
+/// successor only to a client that declares both; every other client keeps
+/// the `preparation: "none"` reopen. Like `prepare_replacement`, it lets the
+/// server half ship ahead of the client halves, and a server that does not
+/// know the name ignores it.
+pub(crate) const SHARED_PREPARE_REPLACEMENT_ACTION: &str = "shared_prepare_replacement";
+/// The actions that report what production is doing and carry no
+/// transaction, session or URL: a relay may forward exactly these.
+pub(crate) fn is_advisory_action_name(name: &str) -> bool {
+    matches!(name, HOLD_ACTION | TERMINAL_ACTION | RETRY_RESOURCE_ACTION)
+}
 /// An `action_id` is minted by this server as a UUID; the bound exists for the
 /// relayed case, where it arrives from a peer.
 const MAX_ACTION_ID_LEN: usize = 64;
@@ -2316,7 +2330,7 @@ pub(crate) fn resolve_action(
 ///
 /// Deliberately not the producer's own prose: that text carries file paths and
 /// ffmpeg diagnostics, and this travels to three clients and their logs.
-fn terminal_message(decision: ProducerDecisionReason) -> String {
+pub(crate) fn terminal_message(decision: ProducerDecisionReason) -> String {
     let text = match decision {
         ProducerDecisionReason::Unsupported => {
             "this source cannot be carried by this delivery pipeline"
@@ -5615,7 +5629,7 @@ pub(crate) struct ActionProposal {
 pub(crate) struct PreparationExecutor {
     store: std::sync::Arc<dyn plurx_core::store::Store>,
     control: std::sync::Arc<dyn PreparationGate>,
-    user_id: i64,
+    principal: plurx_core::playback_principal::PlaybackPrincipal,
     playback_id: String,
     expected_predecessor_owner_node_id: String,
     expected_predecessor_owner_epoch: i64,
@@ -5720,7 +5734,7 @@ impl RecoveryOutcome {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct ProducerRecoveryLedger {
     store: std::sync::Arc<dyn plurx_core::store::Store>,
-    user_id: i64,
+    principal: plurx_core::playback_principal::PlaybackPrincipal,
     playback_id: String,
     recovery_epoch: String,
     failed_incarnation_id: String,
@@ -5746,7 +5760,7 @@ impl ProducerRecoveryLedger {
     /// still handles one.
     pub(crate) fn new(
         store: std::sync::Arc<dyn plurx_core::store::Store>,
-        user_id: i64,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         failed_incarnation_id: &str,
@@ -5754,7 +5768,7 @@ impl ProducerRecoveryLedger {
         // The same bound the store applies, spelled once here.
         const MAX_KEY_BYTES: usize = 128;
         let bounded = |value: &str| !value.is_empty() && value.len() <= MAX_KEY_BYTES;
-        if user_id <= 0
+        if !principal.valid_admission_shape()
             || !bounded(playback_id)
             || !bounded(recovery_epoch)
             || !bounded(failed_incarnation_id)
@@ -5763,7 +5777,7 @@ impl ProducerRecoveryLedger {
         }
         Some(Self {
             store,
-            user_id,
+            principal,
             playback_id: playback_id.to_owned(),
             recovery_epoch: recovery_epoch.to_owned(),
             failed_incarnation_id: failed_incarnation_id.to_owned(),
@@ -5792,7 +5806,7 @@ impl ProducerRecoveryLedger {
         now_ms: i64,
     ) -> Result<RecoveryReservation, plurx_core::error::StoreError> {
         let request = plurx_core::domain::ProducerRecoveryRequest {
-            user_id: self.user_id,
+            principal: self.principal.clone(),
             playback_id: self.playback_id.clone(),
             recovery_epoch: self.recovery_epoch.clone(),
             failed_incarnation_id: self.failed_incarnation_id.clone(),
@@ -5828,7 +5842,7 @@ impl ProducerRecoveryLedger {
         }
         let Some(existing) = self
             .store
-            .producer_recovery_for_epoch(self.user_id, &self.playback_id, &self.recovery_epoch)
+            .producer_recovery_for_epoch(&self.principal, &self.playback_id, &self.recovery_epoch)
             .await?
         else {
             return Ok(RecoveryReservation::Unavailable);
@@ -5862,7 +5876,7 @@ impl ProducerRecoveryLedger {
         plurx_core::error::StoreError,
     > {
         self.store
-            .producer_recovery_for_epoch(self.user_id, &self.playback_id, &self.recovery_epoch)
+            .producer_recovery_for_epoch(&self.principal, &self.playback_id, &self.recovery_epoch)
             .await
     }
 
@@ -5884,7 +5898,7 @@ impl ProducerRecoveryLedger {
         if self
             .store
             .settle_producer_recovery(
-                self.user_id,
+                &self.principal,
                 &self.playback_id,
                 &self.recovery_epoch,
                 &self.failed_incarnation_id,
@@ -5898,7 +5912,7 @@ impl ProducerRecoveryLedger {
         }
         match self
             .store
-            .producer_recovery_for_epoch(self.user_id, &self.playback_id, &self.recovery_epoch)
+            .producer_recovery_for_epoch(&self.principal, &self.playback_id, &self.recovery_epoch)
             .await?
         {
             None => Ok(RecoverySettlement::Absent),
@@ -5956,7 +5970,7 @@ impl PreparationExecutor {
     pub(crate) fn new(
         store: std::sync::Arc<dyn plurx_core::store::Store>,
         control: std::sync::Arc<dyn PreparationGate>,
-        user_id: i64,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
         playback_id: String,
         expected_predecessor_owner_node_id: String,
         expected_predecessor_owner_epoch: i64,
@@ -5964,7 +5978,7 @@ impl PreparationExecutor {
         Self {
             store,
             control,
-            user_id,
+            principal,
             playback_id,
             expected_predecessor_owner_node_id,
             expected_predecessor_owner_epoch,
@@ -6051,7 +6065,7 @@ impl PreparationExecutor {
     ) -> Result<bool, plurx_core::error::StoreError> {
         self.store
             .abort_media_session_preparation(
-                self.user_id,
+                &self.principal,
                 &self.playback_id,
                 &plurx_core::domain::MediaSessionPreparationAbortRequest {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
@@ -6094,7 +6108,7 @@ impl PreparationExecutor {
         let committed = self
             .store
             .commit_media_session_preparation(
-                self.user_id,
+                &self.principal,
                 &self.playback_id,
                 &plurx_core::domain::MediaSessionPreparationCommitRequest {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
@@ -6111,7 +6125,7 @@ impl PreparationExecutor {
                     // mind twice inside it.
                     expected_desired_revision: self
                         .store
-                        .desired_selection(self.user_id, &self.playback_id)
+                        .desired_selection(&self.principal, &self.playback_id)
                         .await
                         .ok()
                         .flatten()
@@ -6178,7 +6192,7 @@ impl PreparationExecutor {
         }
         self.store
             .abort_media_session_preparation(
-                self.user_id,
+                &self.principal,
                 &self.playback_id,
                 &plurx_core::domain::MediaSessionPreparationAbortRequest {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
@@ -6224,7 +6238,7 @@ impl PreparationExecutor {
         let aborted = self
             .store
             .abort_media_session_preparation(
-                self.user_id,
+                &self.principal,
                 &self.playback_id,
                 &plurx_core::domain::MediaSessionPreparationAbortRequest {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
@@ -14582,7 +14596,7 @@ impl RollingControlHandle {
     }
 }
 
-fn node_hash(node_id: &str) -> String {
+pub(crate) fn node_hash(node_id: &str) -> String {
     let digest = Sha256::digest(node_id.as_bytes());
     format!("n-{}", hex::encode(&digest[..8]))
 }
@@ -25120,7 +25134,7 @@ mod tests {
         let fingerprint = "a".repeat(64);
         store
             .claim_media_session_request(
-                7,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 &incarnation,
                 &fingerprint,
                 "player-a",
@@ -25131,7 +25145,13 @@ mod tests {
             .await
             .expect("claim route");
         assert!(store
-            .assign_media_session_request_owner(7, &incarnation, &incarnation, "node-a", now_ms,)
+            .assign_media_session_request_owner(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                &incarnation,
+                &incarnation,
+                "node-a",
+                now_ms,
+            )
             .await
             .expect("assign owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
@@ -25139,7 +25159,7 @@ mod tests {
             expected_desired_revision: None,
             incarnation_id: incarnation.clone(),
             session_id: session.clone(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "player-a".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -26518,7 +26538,7 @@ mod tests {
             expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: uuid::Uuid::new_v4().to_string(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "player-a".to_owned(),
             expected_predecessor_incarnation_id: predecessor.to_owned(),
             expected_predecessor_owner_node_id: "node-a".to_owned(),
@@ -26560,7 +26580,7 @@ mod tests {
         let executor = PreparationExecutor::new(
             Arc::clone(&store),
             Arc::new(control.clone()),
-            7,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             "player-a".to_owned(),
             "node-a".to_owned(),
             1,
@@ -26588,7 +26608,10 @@ mod tests {
         );
         assert_eq!(
             store
-                .staged_media_session_for_playback(7, "player-a")
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("ledger")
                 .expect("a successor is staged")
@@ -26597,7 +26620,10 @@ mod tests {
         );
         assert_eq!(
             store
-                .media_session_route_for_playback(7, "player-a")
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("route while staged")
                 .expect("the playback still has a pointer")
@@ -26623,7 +26649,10 @@ mod tests {
         );
         assert_eq!(
             store
-                .media_session_route_for_playback(7, "player-a")
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("route after commit")
                 .expect("the playback has a pointer")
@@ -26632,7 +26661,10 @@ mod tests {
         );
         assert!(
             store
-                .staged_media_session_for_playback(7, "player-a")
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("ledger after commit")
                 .is_none(),
@@ -26720,7 +26752,7 @@ mod tests {
             expected_desired_revision: None,
             incarnation_id: winner.clone(),
             session_id: uuid::Uuid::new_v4().to_string(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "player-a".to_owned(),
             expected_predecessor_incarnation_id: Some(predecessor.clone()),
             fence_predecessor: true,
@@ -26775,7 +26807,10 @@ mod tests {
         );
         assert_eq!(
             store
-                .media_session_route_for_playback(7, "player-a")
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("route after the lost CAS")
                 .expect("the playback has a pointer")
@@ -26794,7 +26829,10 @@ mod tests {
         );
         assert!(
             store
-                .staged_media_session_for_playback(7, "player-a")
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("ledger after the lost CAS")
                 .is_none(),
@@ -26836,7 +26874,10 @@ mod tests {
             .expect("abort");
 
         let current = store
-            .media_session_route_for_playback(7, "player-a")
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                "player-a",
+            )
             .await
             .expect("route after abort")
             .expect("the current stream survives an abort");
@@ -26855,7 +26896,10 @@ mod tests {
             "ended",
         );
         assert!(store
-            .staged_media_session_for_playback(7, "player-a")
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                "player-a"
+            )
             .await
             .expect("ledger after abort")
             .is_none());
@@ -26929,7 +26973,10 @@ mod tests {
         );
         assert_eq!(
             store
-                .media_session_route_for_playback(7, "player-a")
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("route after the refused commit")
                 .expect("the playback has a pointer")
@@ -26943,7 +26990,10 @@ mod tests {
         // the slot it is holding for exactly this reason.
         assert_eq!(
             store
-                .staged_media_session_for_playback(7, "player-a")
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("ledger after the refused commit")
                 .expect("the staged row survives a gate refusal")
@@ -26966,7 +27016,7 @@ mod tests {
         let executor = PreparationExecutor::new(
             Arc::clone(&store),
             Arc::new(RollingControlHandle::unavailable_for_test()),
-            7,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             "player-a".to_owned(),
             "node-a".to_owned(),
             1,
@@ -26982,7 +27032,10 @@ mod tests {
         );
         assert!(
             store
-                .staged_media_session_for_playback(7, "player-a")
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("ledger after the refused stage")
                 .is_none(),
@@ -27001,7 +27054,10 @@ mod tests {
         assert_eq!(rolled_back.terminal_reason.as_deref(), Some("replaced"));
         assert_eq!(
             store
-                .media_session_route_for_playback(7, "player-a")
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "player-a"
+                )
                 .await
                 .expect("route after the refused stage")
                 .expect("the current stream is untouched")
@@ -31292,7 +31348,7 @@ mod tests {
     ) -> ProducerRecoveryLedger {
         ProducerRecoveryLedger::new(
             std::sync::Arc::clone(store),
-            7,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback,
             epoch,
             incarnation,
@@ -31591,7 +31647,7 @@ mod tests {
             assert!(
                 ProducerRecoveryLedger::new(
                     std::sync::Arc::clone(&store),
-                    user_id,
+                    plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
                     playback,
                     epoch,
                     incarnation,

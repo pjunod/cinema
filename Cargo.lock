@@ -809,6 +809,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
 name = "crossbeam"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1726,6 +1732,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hickory-proto"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12b92608f679a6fa515dd1d15c1ff89443026e391200a2c840c7afcba482893d"
+dependencies = [
+ "data-encoding",
+ "idna",
+ "ipnet",
+ "jni",
+ "once_cell",
+ "rand 0.10.2",
+ "ring",
+ "thiserror 2.0.19",
+ "tinyvec",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "hiqlite"
 version = "0.14.0"
 dependencies = [
@@ -2624,6 +2649,10 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+dependencies = [
+ "critical-section",
+ "portable-atomic",
+]
 
 [[package]]
 name = "once_cell_polyfill"
@@ -2855,6 +2884,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bincode",
  "chacha20poly1305",
  "chrono",
@@ -2863,6 +2893,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.17",
  "hex",
+ "hickory-proto",
  "hiqlite",
  "hmac",
  "icu_normalizer",
@@ -2871,23 +2902,29 @@ dependencies = [
  "libc",
  "openraft",
  "quick-xml",
+ "rcgen",
  "regex",
  "reqwest 0.12.28",
  "ring",
  "rusqlite",
  "rustls",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "thiserror 2.0.19",
+ "time",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "toml",
  "tracing",
  "uuid",
  "walkdir",
  "windows-sys 0.61.2",
+ "x509-parser",
  "zeroize",
  "zip",
 ]
@@ -2969,6 +3006,12 @@ dependencies = [
  "opaque-debug",
  "universal-hash",
 ]
+
+[[package]]
+name = "portable-atomic"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
 name = "potential_utf"
@@ -4646,6 +4689,7 @@ checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

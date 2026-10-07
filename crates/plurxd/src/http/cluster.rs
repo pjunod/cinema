@@ -578,7 +578,9 @@ mod tests {
             expected_desired_revision: None,
             incarnation_id: "00000000-0000-4000-8000-0000000000c1".to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000d1".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: "player-a".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,

@@ -86,7 +86,7 @@ impl CandidateRecoveryObservation {
     pub(crate) fn valid(&self, now_ms: i64) -> bool {
         self.scope.valid()
             && (!self.quality_step || self.cause == CandidateRecoveryCause::Decode)
-            && self.route.user_id == self.scope.user_id
+            && self.route.principal.local_user_id() == Some(self.scope.user_id)
             && self.route.playback_id == self.scope.playback_id
             && self.route.recovery_epoch == self.scope.recovery_epoch
             && self.route.state == "active"
@@ -168,5 +168,65 @@ pub(crate) fn memory(recipes: Vec<(String, bool)>) -> CandidateRecoveryMemory {
             .find(|(_, step)| *step)
             .map(|(recipe, _)| *recipe),
         rejected_recipes: recipes.into_iter().map(|(recipe, _)| recipe).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_recovery_rejects_shared_principal_with_matching_local_scope() {
+        let epoch = uuid::Uuid::new_v4().to_string();
+        let mut observation = CandidateRecoveryObservation {
+            scope: CandidateRecoveryScope {
+                user_id: 7,
+                playback_id: "player".into(),
+                recovery_epoch: epoch.clone(),
+                file_id: 1,
+                source_size: 100,
+                source_mtime: 1,
+                source_object_version: "file-version".into(),
+                credential_generation: "a".repeat(64),
+                client_class: "web".into(),
+            },
+            route: MediaSessionRoute {
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: uuid::Uuid::new_v4().to_string(),
+                principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                playback_id: "player".into(),
+                recovery_epoch: epoch,
+                request_fingerprint: "b".repeat(64),
+                owner_node_id: "owner".into(),
+                owner_epoch: 1,
+                lease_expires_at_ms: 1000,
+                state: "active".into(),
+                terminal_reason: None,
+                publication_ready_at_ms: 0,
+                recipe_json: "{}".into(),
+                response_json: "{}".into(),
+                produced_playable_through_ms: 0,
+                fetched_through_ms: 0,
+                media_origin_ms: 0,
+                media_sequence: 0,
+                discontinuity_sequence: 0,
+                updated_at_ms: 1,
+                drain_deadline_ms: None,
+            },
+            recipe_digest: [0; 32],
+            event_id: "decoder-failure".into(),
+            cause: CandidateRecoveryCause::Decode,
+            quality_step: true,
+        };
+        assert!(observation.valid(10));
+        observation.route.principal = crate::playback_principal::PlaybackPrincipal::sharing(
+            uuid::Uuid::new_v4(),
+            &"c".repeat(64),
+        )
+        .expect("shared principal");
+        assert!(!observation.valid(10));
+        observation.route.principal =
+            crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 8 };
+        assert!(!observation.valid(10));
     }
 }

@@ -156,6 +156,27 @@ pub(super) fn notify_new_vod_live_wait(
     }
 }
 
+pub(super) async fn request_registered_driver_retirement(
+    shared: &Shared,
+    rendition: &Rendition,
+    generation: &crate::prodrun::ProducerRegistration,
+) -> std::io::Result<()> {
+    if rendition
+        .slot
+        .request_registered_retirement(generation)
+        .await?
+    {
+        record_performed_step(
+            shared,
+            rendition,
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+        );
+    }
+    Ok(())
+}
+
 pub(super) async fn perform_driver_step(
     shared: &Shared,
     rendition: &Rendition,
@@ -540,6 +561,15 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 }
             );
         if matches!(step, Step::Start { .. } | Step::Restart { .. }) && prepared_permit.is_none() {
+            if rendition.key.starts_with("source-") {
+                prepared_permit = rendition.source_owners.take_initial_permit();
+                if prepared_permit.is_some() {
+                    // Fresh actual Source admission preceded blocked activation.
+                    // Re-evaluate belief/demand before consuming this permit.
+                    drop(manifest);
+                    continue;
+                }
+            }
             if let Some(encoding) = &rendition.recipe.encoding {
                 // The old child may own this pool's only permit. Retire it before
                 // admission, but never hold the manifest over process or Store I/O:
@@ -604,6 +634,36 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 // seek/cancellation/publication may have changed it while waiting.
                 // Re-read producer belief and current admitted/accepted demand.
                 continue;
+            } else if rendition.key.starts_with("source-") {
+                // The actual Source actor reserves first-start capacity before
+                // activation. Later generations reacquire the same real pool;
+                // the spawn path separately obtains fresh Source authority.
+                drop(manifest);
+                if matches!(step, Step::Restart { .. }) {
+                    rendition.gen_epoch.fetch_add(1, Relaxed);
+                    clear_marker_prewarm_dispatch(rendition);
+                    if perform_driver_step(shared, rendition, step).await.is_err() {
+                        return;
+                    }
+                }
+                prepared_permit = rendition.source_owners.take_initial_permit();
+                if prepared_permit.is_none() {
+                    let Some(admissions) = rendition.source_owners.copy_admissions() else {
+                        return;
+                    };
+                    if let crate::vodencode::SourceCopyPermitRead::Admitted(permit) =
+                        crate::vodencode::EncodePermit::try_source_copy(
+                            &admissions,
+                            shared.store.as_ref(),
+                        )
+                        .await
+                    {
+                        prepared_permit = Some(permit);
+                    } else {
+                        return;
+                    }
+                }
+                continue;
             }
         }
         if fence_marker_prewarm_before_room(rendition, belief, step) {
@@ -613,6 +673,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             let terminate = Step::Terminate {
                 why: Termination::IndefiniteHold,
             };
+            // Retirement joins the actual output writer. Its final trailer
+            // must acquire this manifest before it can settle the reaper.
+            drop(manifest);
             match perform_driver_step(shared, rendition, terminate).await {
                 Ok(_) => {}
                 Err(error) => {
@@ -632,6 +695,10 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         match step {
             Step::Nothing => {}
             Step::Stop | Step::Resume => {
+                // Even signaling may first join an already-retiring worker.
+                // The slot serializes/checks the actual current process; the
+                // manifest must remain available to its output writer.
+                drop(manifest);
                 // TODO(m3-wire): session progress clock — the manager's motion
                 // clock replaces this no-op touch when it attaches.
                 match perform_driver_step(shared, rendition, step).await {
@@ -651,6 +718,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     .as_ref()
                     .filter(|_| yielding_for_handoff)
                     .map(reserve_for_successor);
+                // Epoch and handoff decisions are committed above, as for
+                // Start/Restart. Join only after releasing the publication lock.
+                drop(manifest);
                 match perform_driver_step(shared, rendition, step).await {
                     Ok(_) => {}
                     Err(error) => {

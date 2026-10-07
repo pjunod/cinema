@@ -71,6 +71,9 @@ private struct Refusal: Decodable {
 /// models stay idiomatic.
 struct PlurxAPI {
     let origin: String
+    #if DEBUG
+    var testTransport: URLSession? = nil
+    #endif
     /// A cold embedded-subtitle extraction can require one full sequential
     /// read of a large MKV before the HLS session exists. Keep ordinary API
     /// calls brisk, but let this explicit playback-preparation action finish.
@@ -102,7 +105,18 @@ struct PlurxAPI {
         configuration.timeoutIntervalForResource = 5
         return URLSession(configuration: configuration)
     }()
-    private var session: URLSession { Self.waitingSession }
+    private var session: URLSession {
+        #if DEBUG
+        if let testTransport { return testTransport }
+        #endif
+        return Self.waitingSession
+    }
+    private var preparationSession: URLSession {
+        #if DEBUG
+        if let testTransport { return testTransport }
+        #endif
+        return Self.playbackPreparationSession
+    }
 
     private static let decoder: JSONDecoder = {
         let d = JSONDecoder()
@@ -403,17 +417,19 @@ struct PlurxAPI {
         fileId: Int,
         caps: DeviceCaps,
         query: [URLQueryItem],
-        legacyQuery: () -> [URLQueryItem]
+        legacyQuery: () -> [URLQueryItem],
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> Decision {
+        let context = try PlaybackFileContext.localCall(fileId, context: fileContext)
         do {
             return try await post(
-                "files/\(fileId)/decision",
+                try context.apiPath("decision"),
                 query: query,
                 body: DecisionBody(caps: caps)
             )
         } catch {
             guard Self.shouldFallBackToLegacyDecision(after: error, caps: caps) else { throw error }
-            return try await get("files/\(fileId)/decision", query: legacyQuery())
+            return try await get(try context.apiPath("decision"), query: legacyQuery())
         }
     }
 
@@ -436,9 +452,11 @@ struct PlurxAPI {
 
     func pgsOverlayManifest(
         fileId: Int,
-        trackIndex: Int
+        trackIndex: Int,
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> PGSOverlayManifestFetch {
-        guard let url = makeURL("files/\(fileId)/subs/\(trackIndex)/overlay.json") else {
+        let context = try PlaybackFileContext.localCall(fileId, context: fileContext)
+        guard let url = makeURL(try context.apiPath("subs/\(trackIndex)/overlay.json")) else {
             throw APIError.badURL
         }
         var request = URLRequest(url: url)
@@ -497,10 +515,12 @@ struct PlurxAPI {
         fileId: Int,
         trackIndex: Int,
         generation: String,
-        path: String
+        path: String,
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> Data {
+        let context = try PlaybackFileContext.localCall(fileId, context: fileContext)
         guard PGSOverlayManifest.objectHash(from: path, generation: generation) != nil,
-              let url = makeURL("files/\(fileId)/subs/\(trackIndex)/\(path)")
+              let url = makeURL(try context.apiPath("subs/\(trackIndex)/\(path)"))
         else { throw PGSOverlayError.invalidManifest }
         var request = URLRequest(url: url)
         Session.shared.authorize(&request)
@@ -521,11 +541,12 @@ struct PlurxAPI {
     /// GET could spawn a second encoder. The body carries this player's
     /// `playback_id` and a per-attempt `request_id` so a replay recovers the
     /// same session instead.
-    func createHlsSession(fileId: Int, body: CreateSessionRequest) async throws -> HlsStart {
+    func createHlsSession(fileId: Int, body: CreateSessionRequest, fileContext: PlaybackFileContext? = nil) async throws -> HlsStart {
+        let context = try PlaybackFileContext.localCall(fileId, context: fileContext)
         let started: HlsStart = try await post(
-            "files/\(fileId)/hls/sessions",
+            try context.apiPath("hls/sessions"),
             body: body,
-            using: Self.playbackPreparationSession
+            using: preparationSession
         )
         return Self.acceptHlsSessionPresentation(started)
     }

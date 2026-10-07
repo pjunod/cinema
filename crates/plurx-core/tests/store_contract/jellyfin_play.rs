@@ -791,7 +791,9 @@ async fn reserved_media_session(
         expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
-        user_id: play.scope.user_id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: play.scope.user_id,
+        },
         playback_id: play.playback_id.clone(),
         expected_predecessor_incarnation_id: None,
         fence_predecessor: false,
@@ -808,7 +810,9 @@ async fn reserved_media_session(
     assert!(matches!(
         store
             .claim_media_session_request(
-                play.scope.user_id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: play.scope.user_id
+                },
                 &request_id,
                 &activation.request_fingerprint,
                 &activation.playback_id,
@@ -822,7 +826,9 @@ async fn reserved_media_session(
     ));
     assert!(store
         .assign_media_session_request_owner(
-            play.scope.user_id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: play.scope.user_id
+            },
             &request_id,
             incarnation_id,
             &activation.owner_node_id,
@@ -1345,8 +1351,10 @@ async fn jellyfin_play_import_preserves_terminal_and_active_references_on_anothe
             .await
             .expect("native imported reference")
             .expect("native route")
-            .user_id,
-        terminal.scope.user_id
+            .principal,
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: terminal.scope.user_id
+        }
     );
     let restored_active = store
         .jellyfin_play(&active.play_id, &active.scope)
@@ -2210,7 +2218,9 @@ async fn jellyfin_reserved_native_start_cannot_replace_a_current_player_after_ne
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    play.scope.user_id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: play.scope.user_id
+                    },
                     &request_id,
                     &start.request_fingerprint,
                     &start.playback_id,
@@ -2224,7 +2234,9 @@ async fn jellyfin_reserved_native_start_cannot_replace_a_current_player_after_ne
         ));
         assert!(store
             .assign_media_session_request_owner(
-                play.scope.user_id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: play.scope.user_id
+                },
                 &request_id,
                 &start.incarnation_id,
                 &start.owner_node_id,
@@ -2245,7 +2257,12 @@ async fn jellyfin_reserved_native_start_cannot_replace_a_current_player_after_ne
             "{backend}: cancelled negotiation must not replace native pointer"
         );
         let preserved = store
-            .media_session_route_for_playback(play.scope.user_id, &play.playback_id)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: play.scope.user_id,
+                },
+                &play.playback_id,
+            )
             .await
             .expect("pointer")
             .expect("live current");
@@ -2279,7 +2296,9 @@ async fn jellyfin_reserved_native_start_cannot_replace_a_current_player_after_ne
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    valid.scope.user_id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: valid.scope.user_id
+                    },
                     &valid_request,
                     &replacement.request_fingerprint,
                     &replacement.playback_id,
@@ -2293,7 +2312,9 @@ async fn jellyfin_reserved_native_start_cannot_replace_a_current_player_after_ne
         ));
         assert!(store
             .assign_media_session_request_owner(
-                valid.scope.user_id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: valid.scope.user_id
+                },
                 &valid_request,
                 &replacement.incarnation_id,
                 &replacement.owner_node_id,
@@ -2384,7 +2405,9 @@ async fn jellyfin_native_publication_binds_exact_play_before_response_and_refuse
             assert!(matches!(
                 store
                     .claim_media_session_request(
-                        play.scope.user_id,
+                        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: play.scope.user_id
+                        },
                         &request_id,
                         &start.request_fingerprint,
                         &start.playback_id,
@@ -2398,7 +2421,9 @@ async fn jellyfin_native_publication_binds_exact_play_before_response_and_refuse
             ));
             assert!(store
                 .assign_media_session_request_owner(
-                    play.scope.user_id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: play.scope.user_id
+                    },
                     &request_id,
                     &start.incarnation_id,
                     &start.owner_node_id,
@@ -2420,7 +2445,9 @@ async fn jellyfin_native_publication_binds_exact_play_before_response_and_refuse
             }
             let published = store
                 .publish_media_session_activation(
-                    play.scope.user_id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: play.scope.user_id,
+                    },
                     &request_id,
                     &start.incarnation_id,
                     1003,
@@ -2460,7 +2487,9 @@ async fn jellyfin_native_publication_binds_exact_play_before_response_and_refuse
                 assert!(
                     store
                         .publish_media_session_activation(
-                            play.scope.user_id,
+                            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                                user_id: play.scope.user_id
+                            },
                             &request_id,
                             &start.incarnation_id,
                             1005,
@@ -2486,7 +2515,9 @@ async fn jellyfin_native_publication_binds_exact_play_before_response_and_refuse
                 assert!(
                     store
                         .publish_media_session_activation(
-                            play.scope.user_id,
+                            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                                user_id: play.scope.user_id
+                            },
                             &request_id,
                             &start.incarnation_id,
                             1007

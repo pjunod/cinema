@@ -529,11 +529,19 @@ impl Shared {
         plan: SegmentPlan,
         settings: &VodSettings,
     ) -> Result<Arc<Rendition>, String> {
-        let source = crate::fragment_index_cluster::open_source_fence(
-            &recipe.file,
-            recipe.source_object_version.as_deref(),
-        )
-        .await?;
+        let source = if key.starts_with("source-") {
+            crate::fragment_index_cluster::open_source_playback_fence(
+                &recipe.file,
+                recipe.source_object_version.as_deref(),
+            )
+            .await?
+        } else {
+            crate::fragment_index_cluster::open_source_fence(
+                &recipe.file,
+                recipe.source_object_version.as_deref(),
+            )
+            .await?
+        };
         let dir = RenditionDir::new(self.base.join(key));
         let mut existed = tokio::fs::metadata(dir.path()).await.is_ok();
         let protected = !self
@@ -620,6 +628,12 @@ impl Shared {
             match load_identity(&dir.path().join(IDENTITY_NAME)).await {
                 Some(identity) => {
                     if !report.init_present && manifest.materialized_count() > 0 {
+                        if key.starts_with("source-") {
+                            return Err(crate::transcode::vod_refusal_error(
+                                "vod_source_head_pending",
+                                "Source cached-head recovery needs owned admitted activation",
+                            ));
+                        }
                         // Handoff §5's missing-init arm, and it cannot wait
                         // for the next ordinary generation: a fully adopted
                         // manifest has no gap, so the scheduler answers Idle
@@ -757,6 +771,7 @@ impl Shared {
             cancelled_preparation_epoch: AtomicU64::new(0),
             identity: Mutex::new(identity_state),
             slot: ProducerSlot::new(),
+            source_owners: SourceRenditionOwners::default(),
             retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),

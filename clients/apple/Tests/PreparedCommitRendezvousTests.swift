@@ -231,4 +231,29 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             "a seek that comes back in the last poll answered; it did not time out"
         )
     }
+    func testSharedInitialParkingUsesBoundedGenerationAndAbortOrFailureSettlement() throws {
+        let source = try playerControllerSource()
+        let start = try XCTUnwrap(source.range(of: "private func prime(_ offer: SharedPreparedOffer"))
+        let end = try XCTUnwrap(source.range(of: "private func adopt(_ adoption:", range: start.upperBound..<source.endIndex))
+        let prime = source[start.lowerBound..<end.lowerBound]
+        XCTAssertFalse(prime.contains("await item.seek"), "AVFoundation completion is not a readiness bound")
+        XCTAssertTrue(prime.contains("coordinator.readinessRemainingMs()"))
+        XCTAssertTrue(prime.contains("guard await alignPrepared(item, to: preparedFilmPositionMs, boundMs: remaining)"))
+        XCTAssertTrue(prime.contains("coordinator.abandonWithoutFallback(.aborted)"))
+        XCTAssertTrue(prime.contains("coordinator.abandon(.failed)"))
+        let alignment = try XCTUnwrap(source.range(of: "private func alignPrepared(_ item:"))
+        let tail = source[alignment.upperBound...]
+        XCTAssertTrue(tail.contains("preparedAlignment.generation &+= 1"))
+        XCTAssertTrue(tail.contains("item.cancelPendingSeeks()"))
+        XCTAssertTrue(tail.contains("!self.preemptRequested, !self.closing, !Task.isCancelled"))
+    }
+
+    func testFirstFrameBoundaryUsesActualCadenceForLocalAndShared() {
+        XCTAssertTrue(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: 7_980, boundaryMs: 8_000, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: 7_950, boundaryMs: 8_000, frameDurationSeconds: 1 / 24))
+        XCTAssertTrue(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: 8_050, boundaryMs: 8_000, frameDurationSeconds: 1 / 60))
+        XCTAssertFalse(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: 8_000, boundaryMs: 8_000, frameDurationSeconds: 0))
+        XCTAssertFalse(PreparedCommitRendezvous.frameHasReachedBoundary(displayMs: .nan, boundaryMs: 8_000, frameDurationSeconds: 1 / 24))
+    }
+
 }

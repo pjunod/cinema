@@ -96,19 +96,12 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        // A legacy process-local start has no cluster identity: no user id, no
-        // incarnation, and therefore no epoch. The ledger refuses an empty
-        // epoch, so this is "no budget" rather than "an unused one".
-        let recovery = SessionRecoveryIdentity {
-            user_id: 0,
-            incarnation_id: String::new(),
-            recovery_epoch: String::new(),
-        };
+        // A process-local start has no durable recovery identity.
         self.create_session_inner(
             req,
             user_name,
             &supersession_user,
-            &recovery,
+            None,
             None,
             None,
             None,
@@ -204,13 +197,12 @@ impl TranscodeManager {
         admitted_serving_generation: u64,
         priority: (Priority, crate::vodserve::RetainedOutputCapture),
     ) -> Result<ClusterSessionStart, String> {
-        let user_id = recovery.user_id;
         let serving_admission = ClusterServingAdmission {
             generation: admitted_serving_generation,
             deadline,
         };
         self.require_cluster_serving_authority(serving_admission)?;
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let supersession_user = recovery.supersession_scope();
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
         let replacement = self
@@ -231,7 +223,7 @@ impl TranscodeManager {
                 req,
                 user_name,
                 &supersession_user,
-                recovery,
+                Some(recovery),
                 Some(deadline),
                 None,
                 Some(serving_admission),
@@ -270,10 +262,10 @@ impl TranscodeManager {
     pub(crate) async fn acquire_cluster_takeover_replacement(
         &self,
         req: &SessionRequest,
-        user_id: i64,
+        principal: &plurx_core::playback_principal::PlaybackPrincipal,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterReplacementGuard, String> {
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let supersession_user = principal_supersession_scope(principal);
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
         self.acquire_cluster_replacement_gate(
@@ -295,7 +287,7 @@ impl TranscodeManager {
         deadline: tokio::time::Instant,
         takeover: SessionTakeoverStart,
     ) -> Result<StartInfo, String> {
-        let supersession_user = serde_json::json!(["user_id", recovery.user_id]).to_string();
+        let supersession_user = recovery.supersession_scope();
         // Same check the ordinary cluster start makes after its gate wait: a
         // start with no budget left cannot finish, and spawning ffmpeg only to
         // abandon it costs an admission slot for nothing.
@@ -308,7 +300,7 @@ impl TranscodeManager {
             req,
             user_name,
             &supersession_user,
-            recovery,
+            Some(recovery),
             Some(deadline),
             Some(takeover),
             None,
@@ -530,7 +522,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
-        recovery: &SessionRecoveryIdentity,
+        recovery: Option<&SessionRecoveryIdentity>,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
@@ -644,7 +636,13 @@ impl TranscodeManager {
                 .try_vod_session(
                     vod_settings,
                     req,
-                    recovery.user_id,
+                    recovery
+                        .map(|identity| {
+                            identity.principal.local_user_id().ok_or_else(|| {
+                                "sharing VOD requires typed viewer demand".to_owned()
+                            })
+                        })
+                        .transpose()?,
                     user_name,
                     supersession_user,
                     replacement_deadline,
@@ -766,7 +764,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
-        recovery: &SessionRecoveryIdentity,
+        recovery: Option<&SessionRecoveryIdentity>,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         priority: Priority,
@@ -938,6 +936,46 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        Box::pin(self.prepare_vod_encoding_with_source(req, file, None)).await
+    }
+
+    pub(in crate::transcode) async fn prepare_source_vod_encoding(
+        &self,
+        prepared: &crate::http::hls::PreparedSourcePlayback,
+        evidence: &crate::transcode::source_preparation::SourceHeldProbeEvidence,
+        proof: &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+    ) -> Result<Arc<crate::vodencode::Encoding>, String> {
+        // A burn's sidecar must be the one this Source operation extracted for
+        // this exact track; nothing here reaches Local's shared burn cache.
+        let burn_matches = match (prepared.request().subtitle_burn, evidence.burn()) {
+            (None, None) => true,
+            (Some(index), Some(burn)) => burn.subtitle_index() == index,
+            _ => false,
+        };
+        if !prepared.matches_assignment(proof.assignment())
+            || !burn_matches
+            || !crate::transcode::source_actor::source_recipe_is_encoded(prepared.request())
+        {
+            return Err("Source encoding requires its exact prepared assignment and burn".into());
+        }
+        Box::pin(self.prepare_vod_encoding_with_source(
+            prepared.request(),
+            prepared.file(),
+            Some((evidence, proof)),
+        ))
+        .await?
+        .ok_or_else(|| "Source encoding recipe missing".to_owned())
+    }
+
+    async fn prepare_vod_encoding_with_source(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        source_evidence: Option<(
+            &crate::transcode::source_preparation::SourceHeldProbeEvidence,
+            &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+        )>,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         if req
             .continuous_media
             .as_ref()
@@ -965,7 +1003,12 @@ impl TranscodeManager {
                 // A copy whose burn track the store holds as having no cues
                 // has nothing to burn: it stays the copy it would have been,
                 // rather than a full re-encode to overlay nothing.
-                Some(index) if self.burn_track_is_stored_empty(file, index).await => {
+                // Local only: the Source burns what its own sidecar holds and
+                // never reads Local's subtitle store to skip it.
+                Some(index)
+                    if source_evidence.is_none()
+                        && self.burn_track_is_stored_empty(file, index).await =>
+                {
                     tracing::info!(
                         target: "plurxd::transcode",
                         file_id = file.id,
@@ -988,14 +1031,24 @@ impl TranscodeManager {
             );
         };
         let phase_started = std::time::Instant::now();
-        let source = crate::fragment_index_cluster::open_source_fence(file, None)
-            .await
-            .map_err(|error| {
-                vod_refusal_error(
-                    "vod_source_rescan_required",
-                    format!("the source could not be held for encoded preparation: {error}"),
-                )
-            })?;
+        let source = if source_evidence.is_some() {
+            crate::fragment_index_cluster::open_source_playback_fence(file, None).await
+        } else {
+            crate::fragment_index_cluster::open_source_fence(file, None).await
+        }
+        .map_err(|error| {
+            vod_refusal_error(
+                "vod_source_rescan_required",
+                format!("the source could not be held for encoded preparation: {error}"),
+            )
+        })?;
+        if let Some((evidence, proof)) = source_evidence {
+            if !evidence.matches(proof.assignment(), source.object_version()) {
+                return Err(
+                    "Source held-probe evidence differs from actual file/assignment".into(),
+                );
+            }
+        }
         note_phase("source_fence", phase_started);
         // Bind preparation, burn extraction, key construction, and the final
         // producer open to the same inspected object, not scanner seconds.
@@ -1058,42 +1111,69 @@ impl TranscodeManager {
             })
             .transpose()?;
         if let Some(burn) = &subtitle_burn {
-            if let Some(reason) = crate::pipeprobe::burn_filters().await.refusal(burn.bitmap) {
+            // A Source recipe reads the filter listing its own operation
+            // proved; Local keeps the process-wide preflight.
+            let filters = match source_evidence.and_then(|(evidence, _)| evidence.burn()) {
+                Some(artifacts) => {
+                    if artifacts.bitmap() != burn.bitmap {
+                        return Err(vod_refusal_error(
+                            "vod_subtitle_track_missing",
+                            "the Source burn sidecar differs from the selected track",
+                        ));
+                    }
+                    artifacts.filters()
+                }
+                None if source_evidence.is_some() => {
+                    return Err(vod_refusal_error(
+                        "vod_subtitle_burn_unavailable",
+                        "the Source preparation made no burn sidecar",
+                    ));
+                }
+                None => crate::pipeprobe::burn_filters().await,
+            };
+            if let Some(reason) = filters.refusal(burn.bitmap) {
                 return Err(unsupported_build_error(reason));
             }
         }
-        let probe = self
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .map_err(|error| {
-                start_infrastructure_error(format!("reading the stored source probe: {error}"))
-            })?;
-        let phase_started = std::time::Instant::now();
-        let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
-            vod_refusal_error(
-                "vod_source_rescan_required",
-                format!("the held source could not be retained for verification: {error}"),
-            )
+        let probe = if let Some((_, proof)) = source_evidence {
+            self.store.source_index_probe_evidence(proof).await
+        } else {
+            self.store.get_file_probe_json(file.id).await
+        }
+        .map_err(|error| {
+            start_infrastructure_error(format!("reading the stored source probe: {error}"))
         })?;
-        let collected = self.probe_vod_source_once(file, held_plan_handle).await?;
-        let (held_probe, held_decode_facts) = match collected {
-            Some(mut collected) => (std::mem::take(&mut collected.document), Some(collected)),
-            // Platforms without a sealed probe keep their existing source
-            // verification and stored-facts planning behavior.
-            None => (
-                crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
-                    .await
-                    .map_err(|error| {
-                        vod_refusal_error(
-                            "vod_source_rescan_required",
-                            format!(
+        let phase_started = std::time::Instant::now();
+        let (held_probe, held_decode_facts) = if let Some((evidence, _)) = source_evidence {
+            // Source's actual operation supplied this evidence; no Local cache
+            // or stored-account probe can authorize the foreign descriptor.
+            (evidence.document().to_owned(), None)
+        } else {
+            let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
+                vod_refusal_error(
+                    "vod_source_rescan_required",
+                    format!("the held source could not be retained for verification: {error}"),
+                )
+            })?;
+            let collected = self.probe_vod_source_once(file, held_plan_handle).await?;
+            match collected {
+                Some(mut collected) => (std::mem::take(&mut collected.document), Some(collected)),
+                // Platforms without a sealed probe keep their existing source
+                // verification and stored-facts planning behavior.
+                None => (
+                    crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
+                        .await
+                        .map_err(|error| {
+                            vod_refusal_error(
+                                "vod_source_rescan_required",
+                                format!(
                                 "the held source could not be verified against its scan: {error}"
                             ),
-                        )
-                    })?,
-                None,
-            ),
+                            )
+                        })?,
+                    None,
+                ),
+            }
         };
         note_phase("held_source_probe", phase_started);
         let comparison = probe
@@ -1178,7 +1258,25 @@ impl TranscodeManager {
         // A `Nothing` answer chooses the encoder and grade again without the
         // burn: the HTTP layer admits an HDR delivery whose burn track the
         // store holds as `empty`, and that session must keep its range.
+        let source_sidecar = source_evidence.and_then(|(evidence, _)| evidence.burn());
         let (subtitle_burn, burn_file) = match subtitle_burn {
+            // The Source's own sidecar, extracted by its owned preparation
+            // from this same held object. Local's cache, its detached flight
+            // and its stored-track shortcuts are never consulted for it.
+            Some(burn) if source_evidence.is_some() => {
+                let artifacts = source_sidecar.ok_or_else(|| {
+                    vod_refusal_error(
+                        "vod_subtitle_burn_unavailable",
+                        "the Source preparation made no burn sidecar",
+                    )
+                })?;
+                let handle = artifacts.sidecar().map_err(|error| {
+                    start_infrastructure_error(format!(
+                        "retaining the Source burn sidecar: {error}"
+                    ))
+                })?;
+                (Some(burn), Some(handle))
+            }
             Some(burn) => {
                 // The only caller that passes the short budget. A start has 50 s
                 // for everything; a cold burn sidecar on a remux of this size needs
@@ -1419,15 +1517,19 @@ impl TranscodeManager {
             None
         };
         let phase_started = std::time::Instant::now();
-        let engine = crate::ffmpeg::EncodedEngine::capture(
-            options
-                .subtitle_burn
-                .as_ref()
-                .is_some_and(|burn| !burn.bitmap)
-                .then_some(self.runtime_cache.as_path()),
-        )
-        .await
-        .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+        let engine = if let Some((evidence, _)) = source_evidence {
+            evidence.engine()
+        } else {
+            crate::ffmpeg::EncodedEngine::capture(
+                options
+                    .subtitle_burn
+                    .as_ref()
+                    .is_some_and(|burn| !burn.bitmap)
+                    .then_some(self.runtime_cache.as_path()),
+            )
+            .await
+            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?
+        };
         note_phase("encoded_engine_capture", phase_started);
         if !source.unchanged() {
             return Err(vod_refusal_error(
@@ -1445,7 +1547,11 @@ impl TranscodeManager {
             reorder_frames,
             subtitle,
             subtitle_digest,
-            ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
+            ffmpeg_build: if let Some((evidence, _)) = source_evidence {
+                evidence.build().into()
+            } else {
+                crate::ffmpeg::ffmpeg_build().await
+            },
             executable: crate::ffmpeg::EncodedExecutable::capture()
                 .await
                 .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?,
@@ -1612,7 +1718,7 @@ impl TranscodeManager {
         &self,
         vod_settings: Option<crate::vodserve::VodSettings>,
         req: &SessionRequest,
-        user_id: i64,
+        user_id: Option<i64>,
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
@@ -1841,6 +1947,14 @@ impl TranscodeManager {
             item_title: &item_title,
             supersession_user,
         };
+        let local_viewer = crate::state::PlaybackViewerDemand {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user_id.ok_or_else(|| {
+                    "Local VOD start requires its explicit viewer principal".to_owned()
+                })?,
+            },
+            playback_id: req.playback_id.clone(),
+        };
         let start = if let Some(admission) = serving_admission {
             self.vod
                 .try_create_cluster_for_viewer(
@@ -1854,10 +1968,7 @@ impl TranscodeManager {
                         admission.generation,
                         admission.deadline.into_std(),
                     ),
-                    crate::state::PlaybackViewerDemand {
-                        user_id,
-                        playback_id: req.playback_id.clone(),
-                    },
+                    local_viewer.clone(),
                 )
                 .await
                 .map_err(|error| {
@@ -1879,10 +1990,7 @@ impl TranscodeManager {
                     &settings,
                     attribution,
                     session_id,
-                    crate::state::PlaybackViewerDemand {
-                        user_id,
-                        playback_id: req.playback_id.clone(),
-                    },
+                    local_viewer,
                 )
                 .await?
         };

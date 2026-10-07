@@ -1527,7 +1527,7 @@ mod snapshot_catalog_regression {
             ),
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: "00000000-0000-4000-8000-0000000000f3".into(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             source_size: file.size,
             source_mtime: file.mtime,
             typeless_playlist: true,

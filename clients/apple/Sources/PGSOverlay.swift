@@ -329,15 +329,16 @@ struct PGSOverlayFetcher {
 
 extension PGSOverlayFetcher {
     @MainActor
-    init(model: AppModel) {
+    init(model: AppModel, fileContext: PlaybackFileContext? = nil) {
         self.init(
-            manifest: { try await model.pgsOverlayManifest(fileId: $0, trackIndex: $1) },
+            manifest: { try await model.pgsOverlayManifest(fileId: $0, trackIndex: $1, fileContext: fileContext) },
             object: {
                 try await model.pgsOverlayObject(
                     fileId: $0,
                     trackIndex: $1,
                     generation: $2,
-                    path: $3
+                    path: $3,
+                    fileContext: fileContext
                 )
             }
         )

@@ -1407,7 +1407,7 @@ pub struct AnalysisViewerInterest {
     pub pipeline_version: String,
     pub video_identity: String,
     pub target_node_id: String,
-    pub user_id: i64,
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
     pub now_ms: i64,
 }
@@ -1416,7 +1416,12 @@ impl AnalysisViewerInterest {
     pub fn consumer_id(&self) -> String {
         crate::segplan::argv_fingerprint(&[
             "playback-analysis-v1".to_owned(),
-            self.user_id.to_string(),
+            match &self.principal {
+                crate::playback_principal::PlaybackPrincipal::LocalUser { user_id } => {
+                    user_id.to_string()
+                }
+                principal => principal.owner_key(),
+            },
             self.playback_id.clone(),
             self.analysis_request_id.clone(),
         ])
@@ -1429,7 +1434,7 @@ pub struct ArtifactViewerInterest {
     pub cache_key: String,
     pub file_id: i64,
     pub target_node_id: String,
-    pub user_id: i64,
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
     pub now_ms: i64,
 }
@@ -1449,7 +1454,12 @@ impl ArtifactViewerInterest {
     pub fn consumer_id(&self) -> String {
         crate::segplan::argv_fingerprint(&[
             "playback-artifact-v1".to_owned(),
-            self.user_id.to_string(),
+            match &self.principal {
+                crate::playback_principal::PlaybackPrincipal::LocalUser { user_id } => {
+                    user_id.to_string()
+                }
+                principal => principal.owner_key(),
+            },
             self.playback_id.clone(),
             self.cache_key.clone(),
             self.target_node_id.clone(),
@@ -1832,6 +1842,9 @@ impl<T: QueueSql> BackgroundJobStore for T {
         &self,
         interest: AnalysisViewerInterest,
     ) -> Result<bool, StoreError> {
+        // Until the ownership rebuild is installed, background demand shares
+        // the session store's local-only admission bridge. Typed identities
+        // must not turn structural validity into grant authority.
         if !identifier(&interest.analysis_request_id)
             || !identifier(&interest.target_node_id)
             || interest.requested_generation.is_empty()
@@ -1839,7 +1852,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
             || interest.pipeline_version.is_empty()
             || interest.pipeline_version.len() > 128
             || interest.video_identity.len() > 128
-            || interest.user_id <= 0
+            || !interest.principal.local_user_id().is_some_and(|id| id > 0)
             || interest.playback_id.is_empty()
             || interest.playback_id.len() > 128
             || interest.now_ms < 0
@@ -1849,6 +1862,8 @@ impl<T: QueueSql> BackgroundJobStore for T {
         }
         let mut body =
             serde_json::to_value(&interest).map_err(|error| invalid(&error.to_string()))?;
+        body["user_id"] = interest.principal.local_user_id().into();
+        body["owner_key"] = interest.principal.owner_key().into();
         body["consumer_id"] = interest.consumer_id().into();
         body["command_id"] = uuid::Uuid::new_v4().to_string().into();
         let rows = self
@@ -1865,10 +1880,12 @@ impl<T: QueueSql> BackgroundJobStore for T {
         &self,
         interest: ArtifactViewerInterest,
     ) -> Result<bool, StoreError> {
+        // See join_analysis_viewer: sharing admission requires the migrated
+        // session ownership and current source grant, not just a viewer key.
         if !digest(&interest.cache_key)
             || interest.file_id <= 0
             || !identifier(&interest.target_node_id)
-            || interest.user_id <= 0
+            || !interest.principal.local_user_id().is_some_and(|id| id > 0)
             || interest.playback_id.is_empty()
             || interest.playback_id.len() > 128
             || interest.now_ms < 0
@@ -1878,6 +1895,8 @@ impl<T: QueueSql> BackgroundJobStore for T {
         }
         let mut body =
             serde_json::to_value(&interest).map_err(|error| invalid(&error.to_string()))?;
+        body["user_id"] = interest.principal.local_user_id().into();
+        body["owner_key"] = interest.principal.owner_key().into();
         body["consumer_id"] = interest.consumer_id().into();
         body["command_id"] = uuid::Uuid::new_v4().to_string().into();
         let rows = self
@@ -3292,3 +3311,71 @@ LEFT JOIN items parent ON parent.id = i.parent_id
 LEFT JOIN items grandparent ON grandparent.id = parent.parent_id
 WHERE f.id = json_extract($1, '$.file_id')
 "#;
+
+#[cfg(test)]
+mod principal_tests {
+    use super::*;
+    use crate::playback_principal::{PlaybackPrincipal, SharingViewerKey};
+
+    #[test]
+    fn sharing_background_consumer_keys_preserve_local_retries_and_isolate_grants_and_viewers() {
+        let mut interest = AnalysisViewerInterest {
+            analysis_request_id: "analysis".into(),
+            requested_generation: "generation".into(),
+            pipeline_version: "pipeline".into(),
+            video_identity: "video".into(),
+            target_node_id: "node".into(),
+            principal: PlaybackPrincipal::LocalUser { user_id: 7 },
+            playback_id: "playback".into(),
+            now_ms: 1,
+        };
+        let local = interest.consumer_id();
+        assert_eq!(
+            local,
+            crate::segplan::argv_fingerprint(&[
+                "playback-analysis-v1".into(),
+                "7".into(),
+                "playback".into(),
+                "analysis".into()
+            ])
+        );
+        let grant = uuid::Uuid::new_v4();
+        interest.principal = PlaybackPrincipal::Sharing {
+            grant_id: grant,
+            viewer_key: SharingViewerKey::parse(&"a".repeat(64)).expect("canonical viewer"),
+        };
+        let first = interest.consumer_id();
+        assert_ne!(local, first);
+        interest.principal = PlaybackPrincipal::Sharing {
+            grant_id: grant,
+            viewer_key: SharingViewerKey::parse(&"b".repeat(64)).expect("canonical viewer"),
+        };
+        assert_ne!(first, interest.consumer_id());
+        interest.principal = PlaybackPrincipal::Sharing {
+            grant_id: uuid::Uuid::new_v4(),
+            viewer_key: SharingViewerKey::parse(&"a".repeat(64)).expect("canonical viewer"),
+        };
+        assert_ne!(first, interest.consumer_id());
+        let mut artifact = ArtifactViewerInterest {
+            cache_key: "c".repeat(64),
+            file_id: 1,
+            target_node_id: "node".into(),
+            principal: PlaybackPrincipal::LocalUser { user_id: 7 },
+            playback_id: "playback".into(),
+            now_ms: 1,
+        };
+        assert_eq!(
+            artifact.consumer_id(),
+            crate::segplan::argv_fingerprint(&[
+                "playback-artifact-v1".into(),
+                "7".into(),
+                "playback".into(),
+                "c".repeat(64),
+                "node".into()
+            ])
+        );
+        let old = artifact.consumer_id();
+        artifact.principal = interest.principal;
+        assert_ne!(old, artifact.consumer_id());
+    }
+}

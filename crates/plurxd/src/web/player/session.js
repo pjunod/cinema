@@ -35,14 +35,16 @@ function newStreamId(){ return PLAYBACK_ID+"-s"+(++STREAM_SEQ); }
 // progressive remux is built here — first play, seek, audio switch — because
 // each of those is a *new* ffmpeg, and a handle that outlived its process
 // would have the overlay reporting a dead stream's numbers as live.
-function remuxUrl(base, audioIndex, startSec){
+function remuxUrl(context, audioIndex, startSec){
   PLAYER.streamId=newStreamId(); PLAYER.sessionId=null;
-  let u=tok(base)+"&"+CAPS_Q;
-  if(audioIndex!=null) u+="&audio="+audioIndex;
-  if(PLAYER.aoffset) u+="&audio_offset_ms="+PLAYER.aoffset;
-  if(startSec>0) u+="&start="+startSec.toFixed(1);
-  return u+"&stream="+encodeURIComponent(PLAYER.streamId);
+  const query=playbackFileQueryFromLegacy(CAPS_Q);
+  if(audioIndex!=null) query.audio=audioIndex;
+  if(PLAYER.aoffset) query.audio_offset_ms=PLAYER.aoffset;
+  if(startSec>0) query.start=startSec.toFixed(1);
+  query.stream=PLAYER.streamId;
+  return tok(playbackFileUrl(context,"stream.mp4",query));
 }
+
 // Open a stream. POST, not GET: this spawns a process and supersedes the
 // previous one, and a GET that does that can be replayed by anything that
 // believes GETs are safe.

@@ -158,13 +158,7 @@ impl TranscodeManager {
         playback_id: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        // A legacy process-local start carries no cluster identity, so no
-        // budget. The ledger refuses an empty epoch, which is the answer.
-        let recovery = SessionRecoveryIdentity {
-            user_id: 0,
-            incarnation_id: String::new(),
-            recovery_epoch: String::new(),
-        };
+        // A process-local start has no durable recovery identity.
         self.start_with_audio_offset(
             file_id,
             target_height,
@@ -174,7 +168,7 @@ impl TranscodeManager {
             0,
             user_name,
             &supersession_user,
-            &recovery,
+            None,
             None,
             None,
             playback_id,
@@ -199,11 +193,8 @@ impl TranscodeManager {
         playback_id: &str,
         claim: &plurx_core::playback::audio::AudioClaim,
     ) -> Result<StartInfo, String> {
-        let recovery = SessionRecoveryIdentity {
-            user_id: 0,
-            incarnation_id: String::new(),
-            recovery_epoch: String::new(),
-        };
+        // Match the ordinary fixture start: this unclaimed manager launch has
+        // no durable recovery identity, rather than a synthetic Local user0.
         self.start_with_audio_offset(
             file_id,
             target_height,
@@ -213,7 +204,7 @@ impl TranscodeManager {
             0,
             "paul",
             &serde_json::json!(["username", "paul"]).to_string(),
-            &recovery,
+            None,
             None,
             None,
             playback_id,
@@ -620,7 +611,7 @@ impl TranscodeManager {
         audio_offset_ms: i64,
         user_name: &str,
         supersession_user: &str,
-        recovery: &SessionRecoveryIdentity,
+        recovery: Option<&SessionRecoveryIdentity>,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
@@ -1358,15 +1349,17 @@ impl TranscodeManager {
                     // both terminal states are a budget already spent.
                     let alternate = match (
                         alternate,
-                        crate::playback_control::ProducerRecoveryLedger::new(
-                            Arc::clone(&self.store),
-                            recovery.user_id,
-                            playback_id,
-                            &recovery.recovery_epoch,
-                            // The generation being started is the one that will
-                            // fail, which is what a reservation records.
-                            &recovery.incarnation_id,
-                        ),
+                        recovery.and_then(|identity| {
+                            crate::playback_control::ProducerRecoveryLedger::new(
+                                Arc::clone(&self.store),
+                                identity.principal.clone(),
+                                playback_id,
+                                &identity.recovery_epoch,
+                                // The generation being started is the one that will
+                                // fail, which is what a reservation records.
+                                &identity.incarnation_id,
+                            )
+                        }),
                     ) {
                         (Some(alternate), Some(ledger)) => match ledger.existing().await {
                             Ok(None) => Some(alternate.with_recovery(DecodeRecoveryReservation {
@@ -1504,7 +1497,7 @@ impl TranscodeManager {
             user_name: user_name.to_owned(),
             supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
-            recovery: Some(recovery.clone()),
+            recovery: recovery.cloned(),
             automatic,
             kind: session_kind,
             audio_delivery: opts.audio.clone(),
@@ -1725,11 +1718,6 @@ impl TranscodeManager {
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
         // As above: no cluster identity, no budget.
-        let recovery = SessionRecoveryIdentity {
-            user_id: 0,
-            incarnation_id: String::new(),
-            recovery_epoch: String::new(),
-        };
         self.start_copy_with_audio_offset(
             file_id,
             start_seconds,
@@ -1738,7 +1726,7 @@ impl TranscodeManager {
             options,
             user_name,
             &supersession_user,
-            &recovery,
+            None,
             None,
             None,
             playback_id,
@@ -1759,7 +1747,7 @@ impl TranscodeManager {
         options: CopySessionOptions,
         user_name: &str,
         supersession_user: &str,
-        recovery: &SessionRecoveryIdentity,
+        recovery: Option<&SessionRecoveryIdentity>,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
@@ -2232,7 +2220,7 @@ impl TranscodeManager {
             user_name: user_name.to_owned(),
             supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
-            recovery: Some(recovery.clone()),
+            recovery: recovery.cloned(),
             automatic,
             kind: copy_kind,
             audio_delivery: audio_delivery.cloned(),

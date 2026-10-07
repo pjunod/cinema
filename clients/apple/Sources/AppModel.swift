@@ -57,7 +57,7 @@ final class AppModel: ObservableObject {
     private var api: PlurxAPI?
     private var homeLoadTask: Task<Void, Never>?
 
-    init() {
+    init(startServices: Bool = true) {
         discovery = ServerDiscovery()
         origin = settings.origin
         username = settings.username
@@ -74,6 +74,7 @@ final class AppModel: ObservableObject {
         libraryGrouping = settings.libraryGrouping
         offlineQuality = settings.offlineQuality
         offlineNetwork = settings.offlineNetwork
+        guard startServices else { return }
         discovery.start()
         Task {
             // Give NWBrowser a turn to enter its permission-gated operation
@@ -932,7 +933,8 @@ final class AppModel: ObservableObject {
         fileId: Int,
         selection: PrePlaySelection = .none,
         quality: PlaybackQuality = .auto,
-        audioOffsetMs: Int = 0
+        audioOffsetMs: Int = 0,
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> (decision: Decision, caps: DeviceCaps) {
         let snapshot = Caps.snapshot()
         var document = snapshot.document
@@ -945,7 +947,8 @@ final class AppModel: ObservableObject {
                 fileId: fileId,
                 caps: document,
                 query: query,
-                legacyQuery: { snapshot.legacyQuery + query }
+                legacyQuery: { snapshot.legacyQuery + query },
+                fileContext: fileContext
             )
             return (decision, document)
         } catch {
@@ -956,12 +959,14 @@ final class AppModel: ObservableObject {
 
     func pgsOverlayManifest(
         fileId: Int,
-        trackIndex: Int
+        trackIndex: Int,
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> PGSOverlayManifestFetch {
         do {
             return try await requireAPI().pgsOverlayManifest(
                 fileId: fileId,
-                trackIndex: trackIndex
+                trackIndex: trackIndex,
+                fileContext: fileContext
             )
         } catch {
             noteAuthFailure(error)
@@ -973,14 +978,16 @@ final class AppModel: ObservableObject {
         fileId: Int,
         trackIndex: Int,
         generation: String,
-        path: String
+        path: String,
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> Data {
         do {
             return try await requireAPI().pgsOverlayObject(
                 fileId: fileId,
                 trackIndex: trackIndex,
                 generation: generation,
-                path: path
+                path: path,
+                fileContext: fileContext
             )
         } catch {
             noteAuthFailure(error)
@@ -988,12 +995,50 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createHlsSession(fileId: Int, body: CreateSessionRequest) async throws -> HlsStart {
+    /// Shared preparation is a distinct typed path; it never calls Local
+    /// decision/session/history helpers with a Source identifier.
+    /// A fresh authorized Shared plan from fresh B details. `fileId` nil takes
+    /// the first deliverable file of those details (the next episode, which
+    /// inherits nothing from the episode that ended).
+    func prepareSharedPlayback(reference: SharedPlaybackReference, fileId requested: String?) async throws -> SharedPlaybackPlan {
+        do {
+            let catalogue = try SharedLibraryClient()
+            let detail = try await catalogue.detail(reference); try catalogue.requireCurrent()
+            let chosen: SharedLibraryFile?
+            if let requested { chosen = detail.files.first { $0.fileId == requested } }
+            else { chosen = detail.files.first { $0.fileBase != nil } }
+            guard detail.deliveryStatus == "available", let fileId = chosen?.fileId, chosen?.fileBase != nil else {
+                throw APIError.transport("Playback is unavailable for this Shared title.")
+            }
+            let context = try await PlaybackFileContext.authenticatedDetail(reference: reference, fileId: fileId)
+            guard context.lifecycleGeneration == detail.lifecycleGeneration else { throw APIError.badURL }
+            let client = try SharedDecisionClient()
+            let result = try await client.decision(context: context, quality: playbackQuality)
+            let position = detail.watch.map { $0.watched ? 0 : $0.positionMs } ?? 0
+            let subject = SharedPlaybackSubject(context: context, title: detail.item.title, resumeMs: position, watchSequence: detail.watch?.sequence ?? 0)
+            return try SharedPlaybackPlan.make(subject: subject, decision: result.decision, caps: result.caps, quality: playbackQuality)
+        } catch { noteAuthFailure(error); throw error }
+    }
+
+    /// The Shared episode after `reference` in Source order, started from
+    /// fresh details, or nil at the end of the series, for a movie, or with
+    /// autoplay off.
+    func prepareSharedNextEpisode(after reference: SharedPlaybackReference) async throws -> SharedPlaybackPlan? {
+        guard autoplay else { return nil }
+        do {
+            let catalogue = try SharedLibraryClient()
+            guard let next = try await catalogue.nextEpisode(after: reference) else { return nil }
+            try catalogue.requireCurrent()
+            return try await prepareSharedPlayback(reference: next, fileId: nil)
+        } catch { noteAuthFailure(error); throw error }
+    }
+
+    func createHlsSession(fileId: Int, body: CreateSessionRequest, fileContext: PlaybackFileContext? = nil) async throws -> HlsStart {
         guard body.caps != nil else {
             throw APIError.transport("Playback session is missing its decision capabilities.")
         }
         do {
-            return try await requireAPI().createHlsSession(fileId: fileId, body: body)
+            return try await requireAPI().createHlsSession(fileId: fileId, body: body, fileContext: fileContext)
         } catch {
             noteAuthFailure(error)
             throw error

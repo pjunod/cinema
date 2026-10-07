@@ -37,10 +37,25 @@ pub mod mediafacts;
 pub mod metadata;
 pub mod output_measurement;
 pub mod playback;
+pub mod playback_principal;
 pub mod process;
 pub mod scan;
 pub mod secrets;
 pub mod segplan;
+pub mod sharing;
+pub mod sharing_artwork;
+pub mod sharing_catalogue;
+pub mod sharing_catalogue_details;
+pub mod sharing_dns;
+pub mod sharing_file_locators;
+pub mod sharing_ingress_custody;
+pub mod sharing_receiver_delivery;
+pub mod sharing_receiver_progress;
+pub mod sharing_receiver_retirement;
+pub mod sharing_receiver_sessions;
+pub mod sharing_resources;
+pub mod sharing_source_sessions;
+pub mod sharing_tls;
 pub mod store;
 /// Media fixtures for the test suites, shared so `plurx-core` and `plurxd`
 /// cannot drift onto different GOP structures and disagree about what the

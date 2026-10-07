@@ -393,6 +393,118 @@ impl From<crate::admission::TranscodePermit> for EncodePermit {
     }
 }
 
+/// Conservative Source copy pipeline estimate: bounded input codec, audio
+/// encoder, filter and mux/fragment work. This is the existing governor's
+/// reservation, not a process CPU quota or a one-thread profiling claim.
+pub(crate) const SOURCE_COPY_CPU_THREADS: usize = 4;
+
+#[allow(dead_code)] // The owned Source actor retains and consumes the actual permit.
+pub(crate) enum SourceCopyPermitRead {
+    Admitted(EncodePermit),
+    Capacity,
+    Unavailable,
+}
+impl EncodePermit {
+    /// One Source copy attempt, as a live start: a single admission against
+    /// the node's current pool policy. Later generations of an attached
+    /// rendition use this; a first start waits with [`Self::admit_source_copy`].
+    #[allow(dead_code)] // The owned Source actor acquires before first activation.
+    pub(crate) async fn try_source_copy(
+        admissions: &Admissions,
+        store: &dyn plurx_core::store::Store,
+    ) -> SourceCopyPermitRead {
+        let _waiting = admissions.wait_for_slot();
+        let Some((hardware_limit, software_budget)) = source_copy_policy(store).await else {
+            return SourceCopyPermitRead::Unavailable;
+        };
+        Self::try_source_copy_under(admissions, hardware_limit, software_budget)
+    }
+
+    /// Wait for a Source copy permit until `deadline`, as a live start.
+    ///
+    /// The waiter is registered for the whole wait, the way `admit_live`
+    /// holds its queue guard: background work is told to yield for as long as
+    /// this start is queuing, and cannot take the capacity back between two
+    /// attempts. Pool policy is node state read once per wait, under the same
+    /// bound every encoder admission uses. A budget below the copy's own
+    /// estimate cannot change during that wait and is refused at once;
+    /// anything else is retried on the manager's admission cadence, clamped
+    /// to the deadline.
+    pub(crate) async fn admit_source_copy(
+        admissions: &Admissions,
+        store: &dyn plurx_core::store::Store,
+        deadline: Instant,
+    ) -> SourceCopyPermitRead {
+        let _waiting = admissions.wait_for_slot();
+        let Some((hardware_limit, software_budget)) = source_copy_policy(store).await else {
+            return SourceCopyPermitRead::Unavailable;
+        };
+        if software_budget < SOURCE_COPY_CPU_THREADS {
+            return SourceCopyPermitRead::Capacity;
+        }
+        loop {
+            if let admitted @ SourceCopyPermitRead::Admitted(_) =
+                Self::try_source_copy_under(admissions, hardware_limit, software_budget)
+            {
+                return admitted;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return SourceCopyPermitRead::Capacity;
+            }
+            tokio::time::sleep(crate::transcode::ADMISSION_POLL.min(deadline - now)).await;
+        }
+    }
+
+    fn try_source_copy_under(
+        admissions: &Admissions,
+        hardware_limit: usize,
+        software_budget: usize,
+    ) -> SourceCopyPermitRead {
+        let resources = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: SOURCE_COPY_CPU_THREADS,
+            decoder_threads: Some(1),
+        };
+        if software_budget < SOURCE_COPY_CPU_THREADS {
+            return SourceCopyPermitRead::Capacity;
+        }
+        let Some(bundle) = admissions.try_admit_bundle(
+            hardware_limit,
+            software_budget,
+            &resources,
+            Priority::Live,
+        ) else {
+            return SourceCopyPermitRead::Capacity;
+        };
+        SourceCopyPermitRead::Admitted(bundle.into())
+    }
+}
+
+/// The node's pool policy for a Source copy: hardware cap and software
+/// budget, defaulted exactly as encoder admission defaults them. A read that
+/// fails or outlives its bound closes admission.
+async fn source_copy_policy(store: &dyn plurx_core::store::Store) -> Option<(usize, usize)> {
+    let Ok(Ok((hardware, software))) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        store.get_setting_pair(
+            plurx_core::store::keys::MAX_HW_SESSIONS,
+            plurx_core::store::keys::SW_POOL_THREADS,
+        ),
+    )
+    .await
+    else {
+        return None;
+    };
+    let hardware_limit = hardware
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(crate::admission::DEFAULT_MAX_HW_SESSIONS);
+    let software_budget = software
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_else(crate::admission::software_budget);
+    Some((hardware_limit, software_budget))
+}
+
 impl Encoding {
     #[cfg(test)]
     pub(crate) async fn clone_with_admissions_for_test(
@@ -944,5 +1056,90 @@ mod production_evidence_tests {
             },
         );
         assert!(proofs.get(recipe).is_none());
+    }
+}
+
+#[cfg(test)]
+mod source_copy_admission_tests {
+    use super::*;
+    use plurx_core::store::SettingsStore;
+
+    /// The handoff gap `admit_live` closes. A copy start waiting for CPU must
+    /// stay queued across its attempts, or background work is not told to
+    /// yield and may take the capacity back in the gap between two of them.
+    #[tokio::test]
+    async fn a_source_copy_wait_stays_queued_until_capacity_frees() {
+        let store = plurx_core::store::SqliteStore::open_in_memory().expect("policy store");
+        store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "4")
+            .await
+            .expect("policy");
+        let admissions = Admissions::new();
+        let copy = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: SOURCE_COPY_CPU_THREADS,
+            decoder_threads: Some(1),
+        };
+        let held = admissions
+            .try_admit_bundle(1, 4, &copy, Priority::Live)
+            .expect("the whole software pool");
+        let waiting = {
+            let admissions = admissions.clone();
+            tokio::spawn(async move {
+                EncodePermit::admit_source_copy(
+                    &admissions,
+                    &store,
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !admissions.live_is_waiting() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the copy start queues");
+        // Several refused attempts later, it is still the one queued start.
+        tokio::time::sleep(crate::transcode::ADMISSION_POLL * 3).await;
+        assert_eq!(admissions.snapshot().live_waiting, 1);
+        assert!(!waiting.is_finished());
+        drop(held);
+        let admitted = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the freed capacity admits the waiter")
+            .expect("admission task");
+        assert!(matches!(admitted, SourceCopyPermitRead::Admitted(_)));
+        assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert_eq!(admissions.software_in_use(), SOURCE_COPY_CPU_THREADS);
+        drop(admitted);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    /// A budget below the copy's own estimate cannot change during one wait,
+    /// which reads policy once, so it is refused without waiting out the
+    /// deadline or leaving a queued start behind.
+    #[tokio::test]
+    async fn a_source_copy_wait_refuses_an_insufficient_budget_at_once() {
+        let store = plurx_core::store::SqliteStore::open_in_memory().expect("policy store");
+        store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3")
+            .await
+            .expect("policy");
+        let admissions = Admissions::new();
+        let read = tokio::time::timeout(
+            Duration::from_secs(2),
+            EncodePermit::admit_source_copy(
+                &admissions,
+                &store,
+                Instant::now() + Duration::from_secs(30),
+            ),
+        )
+        .await
+        .expect("refused without waiting for the deadline");
+        assert!(matches!(read, SourceCopyPermitRead::Capacity));
+        assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert_eq!(admissions.software_in_use(), 0);
     }
 }

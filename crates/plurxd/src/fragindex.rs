@@ -1548,6 +1548,326 @@ async fn probe_completion_expectation_inner(
     })
 }
 
+trait SourceIndexHooks: std::any::Any + Send + Sync {
+    fn before_spawn(&self) -> crate::seam_hooks::HookFuture<'_>;
+    fn after_spawn(&self, pid: u32) -> crate::seam_hooks::HookFuture<'_>;
+    fn before_reap_retry(&self) -> crate::seam_hooks::HookFuture<'_>;
+    fn inject_wait_failure(&self) -> bool;
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+struct NoSourceIndexHooks;
+impl SourceIndexHooks for NoSourceIndexHooks {
+    fn before_spawn(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn after_spawn(&self, _: u32) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn before_reap_retry(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn inject_wait_failure(&self) -> bool {
+        false
+    }
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+static NO_SOURCE_INDEX_HOOKS: NoSourceIndexHooks = NoSourceIndexHooks;
+/// Per actual manager, with identical no-op hook fields/awaits in production.
+pub(crate) struct SourceIndexHookOwner {
+    slot: crate::seam_hooks::HookSlot<dyn SourceIndexHooks>,
+}
+impl Default for SourceIndexHookOwner {
+    fn default() -> Self {
+        Self {
+            slot: crate::seam_hooks::HookSlot::new(&NO_SOURCE_INDEX_HOOKS),
+        }
+    }
+}
+#[cfg(test)]
+#[derive(Default)]
+struct PausingSourceIndexHooks {
+    before: crate::seam_hooks::PauseSlot,
+    after: crate::seam_hooks::PauseSlot,
+    retry: crate::seam_hooks::PauseSlot,
+    failed_wait: std::sync::atomic::AtomicBool,
+    spawned_pid: std::sync::atomic::AtomicU32,
+    closed_parents: std::sync::atomic::AtomicUsize,
+    open_parent_at_settlement: std::sync::atomic::AtomicBool,
+}
+#[cfg(test)]
+impl SourceIndexHooks for PausingSourceIndexHooks {
+    fn before_spawn(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.before.hold()
+    }
+    fn after_spawn(&self, pid: u32) -> crate::seam_hooks::HookFuture<'_> {
+        self.spawned_pid
+            .store(pid, std::sync::atomic::Ordering::Release);
+        self.after.hold()
+    }
+    fn before_reap_retry(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.retry.hold()
+    }
+    fn inject_wait_failure(&self) -> bool {
+        self.failed_wait
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+impl SourceIndexHookOwner {
+    fn record_parent_closed(&self, _closed: bool) {
+        #[cfg(all(test, unix))]
+        {
+            let hooks = self.test_hooks();
+            hooks
+                .open_parent_at_settlement
+                .fetch_or(!_closed, std::sync::atomic::Ordering::Release);
+            hooks
+                .closed_parents
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn assert_closed_parent_settlements(&self) {
+        let hooks = self.test_hooks();
+        assert!(
+            hooks
+                .closed_parents
+                .load(std::sync::atomic::Ordering::Acquire)
+                > 0
+        );
+        assert!(!hooks
+            .open_parent_at_settlement
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+}
+#[cfg(test)]
+impl SourceIndexHookOwner {
+    fn test_hooks(&self) -> &PausingSourceIndexHooks {
+        self.slot
+            .get_or_install(|| Box::new(PausingSourceIndexHooks::default()))
+            .as_any()
+            .downcast_ref()
+            .expect("Source index test hooks")
+    }
+    pub(crate) fn pause_before_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.test_hooks().before.arm("source_index_before_spawn")
+    }
+    pub(crate) fn pause_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.test_hooks().after.arm("source_index_after_spawn")
+    }
+    pub(crate) fn pause_after_wait_failure(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.test_hooks()
+            .failed_wait
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.test_hooks().retry.arm("source_index_reap_retry")
+    }
+    pub(crate) fn spawned_pid(&self) -> u32 {
+        self.test_hooks()
+            .spawned_pid
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+struct SourceIndexExecution<'a> {
+    authority: &'a plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+    store: &'a dyn plurx_core::store::Store,
+    source: &'a crate::fragment_index_cluster::SourceFence,
+    deadline: Instant,
+    hooks: &'a SourceIndexHookOwner,
+}
+
+/// Private admitted scan ownership; retained by the Source viewer actor until
+/// the actual child and pipe tasks have settled. No wire constructor.
+pub(crate) struct SourceIndexOperation {
+    assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    state: Arc<SourceIndexState>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+/// Minted only after this actual scan's child and pipe tasks have settled.
+/// It is neither route authority nor a general capacity-release capability.
+pub(crate) struct SourceIndexSettlement {
+    assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+}
+impl SourceIndexSettlement {
+    pub(crate) fn matches(
+        &self,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    ) -> bool {
+        self.assignment.same_identity(assignment)
+    }
+}
+struct SourceIndexState {
+    permit: std::sync::Mutex<Option<crate::vodencode::EncodePermit>>,
+    result: std::sync::Mutex<Option<IndexBuild>>,
+    settled: std::sync::atomic::AtomicBool,
+    changed: tokio::sync::Notify,
+}
+impl SourceIndexOperation {
+    pub(crate) fn cancel(&self) {
+        self.cancel.cancel();
+    }
+    pub(crate) async fn settle(&self) -> SourceIndexSettlement {
+        loop {
+            let notified = self.state.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .state
+                .settled
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return SourceIndexSettlement {
+                    assignment: self.assignment.clone(),
+                };
+            }
+            notified.await;
+        }
+    }
+    pub(crate) async fn outcome(&self) -> Result<IndexBuild, String> {
+        let _receipt = self.settle().await;
+        self.state
+            .result
+            .lock()
+            .map_err(|_| "Source index result poisoned".to_owned())?
+            .take()
+            .ok_or_else(|| "Source index result was already consumed".to_owned())
+    }
+}
+
+/// The first Source index lane uses current bounded stored H264 completion
+/// evidence. Missing/ambiguous evidence never starts a fallback live probe.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_source_index(
+    file: MediaFile,
+    source: crate::fragment_index_cluster::SourceFence,
+    stored_probe: String,
+    video: transcode::CopyVideoOptions,
+    runtime_cache: std::path::PathBuf,
+    deadline: Instant,
+    permit: crate::vodencode::EncodePermit,
+    authority: Box<plurx_core::sharing_source_sessions::SourceSessionWriteAuthority>,
+    store: Arc<dyn plurx_core::store::Store>,
+    hooks: Arc<SourceIndexHookOwner>,
+) -> Result<SourceIndexOperation, String> {
+    if file.video_codec.as_deref() != Some("h264")
+        || Instant::now() >= deadline
+        || file.id.to_string() != authority.assignment().binding().file_id().as_str()
+    {
+        return Err("Source index supports bounded H264 copy only".into());
+    }
+    if stored_probe.len() > 1024 * 1024 {
+        return Err("Source index has no bounded stored completion evidence".into());
+    }
+    let raw = stored_probe.as_str();
+    let expectation = completion_expectation_from_probe(raw, source.object_version()).map_err(
+        |error| match error {
+            CompletionExpectationError::Unsupported(reason)
+            | CompletionExpectationError::Unverified(reason) => reason,
+        },
+    )?;
+    #[cfg(unix)]
+    let input = "/dev/fd/3".to_owned();
+    #[cfg(windows)]
+    let input = crate::ffmpeg::windows_source_path(&source.handle)?
+        .to_string_lossy()
+        .into_owned();
+    let mut pass = index_pass(&file, video, Some(&input), expectation, None)?;
+    // Same conservative CPU4 resource estimate as Source copy: one decoder,
+    // one audio encoder and explicitly bounded filter pools.
+    let mut at = 0;
+    while at < pass.args.len() {
+        if pass.args[at] == "-i" {
+            pass.args
+                .splice(at..at, ["-threads".to_owned(), "1".to_owned()]);
+            at += 2;
+        }
+        at += 1;
+    }
+    pass.args.splice(
+        0..0,
+        [
+            "-filter_threads".to_owned(),
+            "1".to_owned(),
+            "-filter_complex_threads".to_owned(),
+            "1".to_owned(),
+        ],
+    );
+    let output = pass.args.len().saturating_sub(1);
+    pass.args
+        .splice(output..output, ["-threads:a".to_owned(), "1".to_owned()]);
+    let state = Arc::new(SourceIndexState {
+        permit: std::sync::Mutex::new(Some(permit)),
+        result: std::sync::Mutex::new(None),
+        settled: std::sync::atomic::AtomicBool::new(false),
+        changed: tokio::sync::Notify::new(),
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let assignment = authority.assignment().clone();
+    let owned = Arc::clone(&state);
+    let owned_cancel = cancel.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        let (fd, handoff) = {
+            use std::os::fd::AsRawFd;
+            (Some(source.handle.as_raw_fd()), None)
+        };
+        #[cfg(windows)]
+        let (fd, handoff) = (None, Some((&source.handle, std::path::Path::new(&input))));
+        let mut result = if Instant::now() >= deadline
+            || !source.unchanged()
+            || authority
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .is_err()
+        {
+            IndexBuild::plain(IndexOutcome::Unsupported(
+                "Source index authority or start deadline expired".into(),
+            ))
+        } else {
+            let execution = SourceIndexExecution {
+                authority: &authority,
+                store: store.as_ref(),
+                source: &source,
+                deadline,
+                hooks: &hooks,
+            };
+            build_with_args_owned(
+                &file,
+                pass,
+                fd,
+                handoff,
+                &runtime_cache,
+                deadline.saturating_duration_since(Instant::now()),
+                Instant::now(),
+                None,
+                Some(&owned_cancel),
+                Some(&execution),
+            )
+            .await
+        };
+        result.source_unchanged = source.unchanged();
+        *owned.result.lock().expect("Source index result") = Some(result);
+        crate::transcode::source_preparation::close_source_before_settlement(source, |closed| {
+            hooks.record_parent_closed(closed);
+        });
+        // Publish settlement only after dropping the parent descriptor and actual permit.
+        drop(owned.permit.lock().expect("Source index permit").take());
+        owned
+            .settled
+            .store(true, std::sync::atomic::Ordering::Release);
+        owned.changed.notify_waiters();
+    });
+    Ok(SourceIndexOperation {
+        assignment,
+        state,
+        cancel,
+    })
+}
+
 /// Build a file's index by running the index pipe.
 ///
 /// `budget` bounds the whole pass. An index is background work; a NAS read
@@ -1739,6 +2059,34 @@ async fn build_with_args(
     progress: Option<SharedIndexProgress>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> IndexBuild {
+    build_with_args_owned(
+        file,
+        pass,
+        source_fd,
+        source_handoff,
+        runtime_cache,
+        budget,
+        started,
+        progress,
+        cancel,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_with_args_owned(
+    file: &MediaFile,
+    pass: IndexPass,
+    source_fd: Option<SourceFd>,
+    source_handoff: Option<(&std::fs::File, &Path)>,
+    runtime_cache: &Path,
+    budget: Duration,
+    started: Instant,
+    progress: Option<SharedIndexProgress>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    source_owned: Option<&SourceIndexExecution<'_>>,
+) -> IndexBuild {
     let IndexPass {
         args,
         dolby_vision,
@@ -1801,6 +2149,48 @@ async fn build_with_args(
     }
     #[cfg(not(windows))]
     let _ = source_handoff;
+    if let Some(execution) = source_owned {
+        execution.hooks.slot.get().before_spawn().await;
+        let now = crate::fragment_index_cluster::unix_ms();
+        if Instant::now() >= execution.deadline
+            || cancel.is_some_and(|token| token.is_cancelled())
+            || execution
+                .authority
+                .validate_observation_freshness(now)
+                .is_err()
+        {
+            return IndexBuild::plain(IndexOutcome::Unsupported(
+                "Source scan permission expired before spawn".into(),
+            ));
+        }
+        let physical = crate::fragment_index_cluster::open_source_playback_fence(
+            file,
+            Some(execution.source.object_version()),
+        )
+        .await;
+        if physical.is_err() {
+            return IndexBuild::plain(IndexOutcome::Unsupported(
+                "Source scan physical identity changed".into(),
+            ));
+        }
+        if !matches!(
+            execution
+                .store
+                .authorize_source_index_preparation(execution.authority)
+                .await,
+            Ok(true)
+        ) || execution
+            .authority
+            .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+            .is_err()
+            || Instant::now() >= execution.deadline
+            || cancel.is_some_and(|token| token.is_cancelled())
+        {
+            return IndexBuild::plain(IndexOutcome::Unsupported(
+                "Source scan current authority unavailable".into(),
+            ));
+        }
+    }
     let (mut child, _child_job) = match crate::process_control::spawn_job_owned(
         &mut command,
         crate::process_control::ChildWork::background("fragment index"),
@@ -1824,7 +2214,24 @@ async fn build_with_args(
             )));
         }
     };
+    if let Some(execution) = source_owned {
+        execution
+            .hooks
+            .slot
+            .get()
+            .after_spawn(child.id().unwrap_or(0))
+            .await;
+    }
     let Some(stdout) = child.stdout.take() else {
+        if source_owned.is_some() {
+            let _ = child.start_kill();
+            loop {
+                match child.wait().await {
+                    Ok(_) => break,
+                    Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+                }
+            }
+        }
         return IndexBuild::plain(IndexOutcome::Failed(Box::new(IndexFailure::new(
             IndexFailureCode::IndexProcessFailed,
             "the index pipe started without a stdout",
@@ -1919,7 +2326,15 @@ async fn build_with_args(
     if deadline_fired {
         let _ = child.start_kill();
     }
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    let status =
+        if source_owned.is_some_and(|execution| execution.hooks.slot.get().inject_wait_failure()) {
+            Ok(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "injected initial Source scan wait failure",
+            )))
+        } else {
+            tokio::time::timeout(Duration::from_secs(5), child.wait()).await
+        };
     let exit_category = match status {
         Ok(Ok(status)) if status.success() => Some("success".to_owned()),
         Ok(Ok(status)) => {
@@ -1970,6 +2385,25 @@ async fn build_with_args(
             Some("exit_grace_exceeded".to_owned())
         }
     };
+    if source_owned.is_some()
+        && matches!(
+            exit_category.as_deref(),
+            Some("wait_failed" | "exit_grace_exceeded")
+        )
+    {
+        // The private Source owner retains its actual permit and ChildJob here.
+        // Killing or a timed-out wait is never physical settlement.
+        let _ = child.start_kill();
+        if let Some(execution) = source_owned {
+            execution.hooks.slot.get().before_reap_retry().await;
+        }
+        loop {
+            match child.wait().await {
+                Ok(_) => break,
+                Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+            }
+        }
+    }
     // `scan` is `None` unless the reader ran to the end of the stream: a
     // scan that did not finish cannot vouch that no slave failed.
     let (stderr_tail, scan, hevc_trace) = match stderr_task {

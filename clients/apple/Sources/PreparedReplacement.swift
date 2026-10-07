@@ -420,6 +420,14 @@ struct PreparedCommitRendezvous: Equatable {
 
     /// A completed seek and a layer's old ready bit do not identify its new
     /// decoded sample. Require finite item-local time and an actual raster.
+    /// A decoded frame covers its timestamp through its actual sample duration.
+    /// The first frame may start just before the rendezvous on that sample grid.
+    static func frameHasReachedBoundary(displayMs: Double, boundaryMs: Int, frameDurationSeconds: Double) -> Bool {
+        displayMs.isFinite && displayMs >= 0 && boundaryMs >= 0
+            && frameDurationSeconds.isFinite && frameDurationSeconds > 0 && frameDurationSeconds <= 1
+            && displayMs + frameDurationSeconds * 1_000 >= Double(boundaryMs)
+    }
+
     func acceptsDecodedAlignment(displaySeconds: Double, width: Int, height: Int, frameDurationSeconds: Double) -> Bool {
         displaySeconds.isFinite && displaySeconds >= 0
             && width > 0 && height > 0
