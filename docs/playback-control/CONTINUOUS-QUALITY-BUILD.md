@@ -7435,3 +7435,66 @@ fences remain. The authored `parsed master survives level loads and early
 Pause/Play` regression follows nested event order, a level send, the immediate
 pause/resume retry, and a retired attachment. No units execute yet. The focused
 runtime repeat will use the committed corrective tree after its pinned build.
+
+### 10.246 Corrected pause and selection lifecycle evidence (2026-10-07)
+
+Committed `25ecd16f4` passed its normal catalog/formatting/all-target Clippy/
+served-script hook. Its pinned Linux build passed in 3m24s. The failed-only
+pause repeat **passed**: master readiness remains Parsed before/through the
+eight-second pause, Play retains its clock/session/player, clock 0.999x,
+no hitches/stalls and exactly one session create. Receipt:
+`firefox-25ecd16f4-pause-fixed1*`. Original failures remain unchanged.
+
+Rapid shipped manual choices 720→480→720 **passed** on the same source: final
+720p presented, same session/player/family, one create, no stalls/hitches.
+The temporary harness deduplicated the two steady-shaped case names, so its
+first receipt covers rapid choices only. The missing seek collision was run
+separately instead of repeating the passing case. Receipts:
+`firefox-25ecd16f4-selection-lifecycle1*` and
+`firefox-25ecd16f4-selection-seekcollision1*`.
+
+The separate quality/seek collision retained the final 720p choice and its
+session/family; film 10s presented in 2.358s (seek proof 2.097s). Its strict
+zero-stall steady report **failed** on one reported 709ms supply interruption.
+The subsequent measured eight-second interval advanced 8.001s with no dropped
+frames or reopens. This is partial action/intent evidence, not a zero-
+interruption or optical pass; the failed report stays failed.
+
+Android release counter advances to 151 above current main's 150. Production,
+test sources and debug APK compile in 32s; units remain unexecuted. On the
+owned emulator an outside-family 480p→720p attempt retained 480p and offered
+Retry/Apply with restart. Explicit restart presented measured 1280×720.
+The bounded backend then expired before its later buffered 480p target reached
+the screen: this repeat is partial. The unavailable-frame fallback visibly
+says Planned 720p. A separate short startup-bound label check is active;
+no physical display/audio claim is made.
+
+Future committed-source transfers use checksum synchronization from a fresh
+archive extraction, exclude the warm target, and preserve unchanged source
+timestamps. This avoids rebuilding identical crates solely because git archive
+uses a new commit timestamp. No repository credential or Git metadata crosses
+the source-only boundary.
+
+### 10.247 Android measured-summary qualification and native readiness (2026-10-07)
+
+The separate short lab at backend `25ecd16f4`, display-aware Auto off and
+Android build 151, **passed** the actual measured-summary check. The saved
+manual 720p start changed in-family to 480p; Playback Info shows Playing,
+measured 852×480, and Transcode/software (x264)/480p. The misleading initial
+720p footer is gone. Evidence: `android151-25ecd16f4-presented480-info.{xml,png}`.
+The final ledger contains one generation, accepted sequence 324, with both
+transactions disposed after explicit Close and first-presented ticks 0 and
+1632. Preserve `android151-25ecd16f4-final-ledgers.json`.
+
+The bounded backend retired before the subsequent 0/1/3/5-second census;
+its daemon is absent throughout, so this is retirement evidence, not a live
+producer-drain measurement. Both owned runtimes from the last two attempts,
+the forward and emulator are retired. Earlier live End measurements remain
+in their original source scope. No physical output or gap timing is claimed.
+
+CoreDevice inventory now responds. 17promax is paired and reachable, but an
+availability-only launch of the already-installed isolated CQ Lab build 206
+still returns Locked. That older build is not qualification evidence and no
+phone playback was started. The physical TV is paired, connected, booted,
+Developer Mode enabled and DDI services available; preparation of an isolated
+current-source TV build can proceed without modifying the production app.
