@@ -517,7 +517,7 @@ function metadataPanel(settings,readiness){
   const keyCard=(id,title,sub,configured,value,link,saveFn,errId)=>setCard(`${cardHead(title,sub,`<span class="pill ${configured?"ok":"bad"}">${configured?"configured":"not set"}</span>`)}
       <div class="setfields">
         <div style="flex:1 1 320px"><label for="${id}">API key${configured?` <span class="muted">— click to reveal, or type a new key to replace it</span>`:` <span class="muted">— free from ${link}</span>`}</label>
-          <input id="${id}" placeholder="${esc(title)} API key" type="password" autocomplete="off" value="${esc(value||'')}" onfocus="this.type='text'" onblur="this.type='password'" style="min-width:100%"></div>
+          <input id="${id}" name="${id}-api-key" placeholder="${esc(title)} API key" type="password" autocomplete="new-password" value="${esc(value||'')}" onfocus="this.type='text'" onblur="this.type='password'" style="min-width:100%"></div>
         <div class="err" id="${errId}"></div>
       </div>
       ${setCardFoot(saveFn)}`);
