@@ -96,6 +96,10 @@ async fn actual_nonowner_b(address: IpAddr) {
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start(
             fixture.state.membership.clone(),
         );
+    let mut worker_replication =
+        super::super::shared_source_playback::SourceFixtureMembershipOwner::start_replication(
+            fixture.state.replication.clone(),
+        );
     let tls = Arc::new(
         LiveNodeTls::open(
             &fixture.directory().join("forward-source-tls"),
@@ -212,6 +216,10 @@ async fn actual_nonowner_b(address: IpAddr) {
             ..SharingNetworkConfig::default()
         },
     ));
+    let mut ingress_replication =
+        super::super::shared_source_playback::SourceFixtureMembershipOwner::start_replication(
+            ingress.replication.clone(),
+        );
     ingress
         .membership
         .set_ingress_custody_boot(Some(ingress.sharing.accepted_drivers.boot_id()));
@@ -309,6 +317,11 @@ async fn actual_nonowner_b(address: IpAddr) {
         .receiver_starts
         .by_session(session_uuid)
         .is_none());
+    super::super::shared_receiver_playback::test_actual_lease_commit_read_overlap(
+        &fixture.state,
+        session_uuid,
+    )
+    .await;
     let playlist = start["playlist_url"]
         .as_str()
         .expect("actual playlist")
@@ -487,6 +500,8 @@ async fn actual_nonowner_b(address: IpAddr) {
     source_server.finish().await;
     ingress_membership.finish().await;
     worker_membership.finish().await;
+    ingress_replication.finish().await;
+    worker_replication.finish().await;
     selected.shutdown().await.expect("second voter shutdown");
     fixture.shutdown().await;
 }

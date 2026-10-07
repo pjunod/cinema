@@ -94,6 +94,9 @@ struct ReceiverStartInner {
     request_id: String,
     fingerprint: String,
     state: Mutex<ReceiverStartState>,
+    // Serialize actual owner observations with the SQL lease commit and its
+    // retained-owner writeback. SQL remains the exact authority fence.
+    lease_observation: tokio::sync::Mutex<()>,
     start_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stop: tokio_util::sync::CancellationToken,
     bodies: Arc<retirement::ReceiverBodyRegistry>,
@@ -621,6 +624,7 @@ impl ReceiverStartRegistry {
             request_id,
             fingerprint,
             state: Mutex::new(ReceiverStartState::default()),
+            lease_observation: tokio::sync::Mutex::new(()),
             start_task: Mutex::new(None),
             stop: tokio_util::sync::CancellationToken::new(),
             bodies: Arc::new(retirement::ReceiverBodyRegistry::default()),
@@ -662,6 +666,20 @@ impl ReceiverStartActor {
         Ok((self.0.intent.user_id, self.0.intent.login_hash.clone()))
     }
     async fn current_delivery_attachment(
+        &self,
+        state: &AppState,
+    ) -> Result<
+        (
+            plurx_core::sharing_receiver_sessions::ReceiverSessionWriteAuthority,
+            ReceiverSourceAttachment,
+            Arc<ReceivedSource>,
+        ),
+        ReceiverStartError,
+    > {
+        let _lease_observation = self.0.lease_observation.lock().await;
+        self.current_delivery_attachment_locked(state).await
+    }
+    async fn current_delivery_attachment_locked(
         &self,
         state: &AppState,
     ) -> Result<
@@ -1732,7 +1750,11 @@ async fn run_owner(
         actor
             .current_source_status_owned(&state, connection_lifetime.clone())
             .await?;
-        let (_, current_attachment, _) = actor.current_delivery_attachment(&state).await?;
+        // The Source exchange above never holds this lock. A reader may
+        // observe the old or new exact lease, never SQL's new lease paired
+        // with the retained owner's old lease between commit and writeback.
+        let _lease_observation = entry.lease_observation.lock().await;
+        let (_, current_attachment, _) = actor.current_delivery_attachment_locked(&state).await?;
         attachment = current_attachment;
         let authority = state
             .store
@@ -2849,4 +2871,82 @@ mod rewrap_tests {
             )
             .is_err());
     }
+}
+
+/// Exercise the actual SQL-commit/writeback boundary against a live retained
+/// actor. The fixture supplies no reconstructed actor, permission, or receipt.
+#[cfg(test)]
+pub(super) async fn test_actual_lease_commit_read_overlap(state: &AppState, session: Uuid) {
+    let actor = state
+        .sharing
+        .receiver_starts
+        .by_session(session)
+        .expect("actual retained B actor");
+    let held = actor.0.lease_observation.lock().await;
+    let (_, mut attachment, received) = actor
+        .current_delivery_attachment_locked(state)
+        .await
+        .expect("exact actual attachment before renewal");
+    let authority = state
+        .store
+        .prepare_receiver_session_authority(actor.0.intent.clone())
+        .await
+        .expect("fresh actual login authority")
+        .expect("current actual scope");
+    // Use a real later clock observation, never manufacture a future proof
+    // timestamp. At most one tiny wake is needed for millisecond quantization.
+    let previous_renewal_ms = attachment.owner.lease_expires_at_ms - 30_000;
+    let later_ms = previous_renewal_ms + 1;
+    let now = clock_ms();
+    if now < later_ms {
+        let delay_ms = u64::try_from(later_ms - now).expect("positive actual clock delay");
+        assert!(
+            delay_ms <= 1000,
+            "actual clock must remain near the retained renewal"
+        );
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+    attachment.owner.now_ms = clock_ms();
+    let new_lease = attachment.owner.now_ms + 30_000;
+    assert!(new_lease > attachment.owner.lease_expires_at_ms);
+    assert_ne!(
+        state
+            .store
+            .renew_receiver_source_session(
+                &authority,
+                &ReceiverSourceRenewal {
+                    attachment: attachment.clone(),
+                    lease_expires_at_ms: new_lease,
+                }
+            )
+            .await
+            .expect("actual fenced renewal commit"),
+        ReceiverSourceWrite::Refused
+    );
+    // SQL now carries the new exact lease; memory deliberately retains the
+    // old lease until this fixture releases the same production owner lock.
+    let mut reader = Box::pin(actor.current_delivery_attachment(state));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut reader)
+            .await
+            .is_err(),
+        "attachment reader must not observe an intermediate SQL/memory lease pair"
+    );
+    attachment.owner.lease_expires_at_ms = new_lease;
+    {
+        let mut owned = actor.0.state.lock().expect("actual retained owner");
+        owned.owner = Some(attachment.owner.clone());
+        owned.source = Some(attachment.clone());
+    }
+    drop(held);
+    let (_, observed, actual_received) = tokio::time::timeout(Duration::from_secs(9), reader)
+        .await
+        .expect("finite actual attachment read after writeback")
+        .expect("exact actual renewed attachment");
+    // A queued real renewal may have completed after the paused writeback.
+    // The reader still checked its exact current SQL lease under this lock.
+    assert!(observed.owner.lease_expires_at_ms >= new_lease);
+    assert_eq!(observed.owner.owner_epoch, attachment.owner.owner_epoch);
+    assert_eq!(observed.owner.session_id, session);
+    assert!(Arc::ptr_eq(&actual_received, &received));
 }

@@ -224,15 +224,16 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// forbidden — it has to be looked at, and this number updated, which is what
 /// stops a whole statement from disappearing behind an interpolation.
 ///
-/// The seven today, each spliced into a host this census does judge:
+/// The eight today, each spliced into a host this census does judge:
 /// `hiqlite_media.rs`'s two `GENRE` predicates (into the item count and the
 /// item page), `hiqlite_durable.rs`'s two membership tombstone arms (into the
 /// offline-package insert, once per arm), and `hiqlite.rs`'s
 /// `CANONICAL_SETTINGS_GENERATION_PREDICATE`, `hiqlite_library_channels.rs`'s
 /// completed-request guard, and `hiqlite_publication.rs`'s artwork-repair
-/// exclusion.
+/// exclusion, plus `hiqlite_sessions.rs`'s `LocalSessionSql::existing_user`
+/// predicate, expanded through the actual finite helper at each host call.
 ///
-/// That last one opens on `$4` because it is the tail of the statement it is
+/// The canonical settings predicate opens on `$4` because it is the tail of the statement it is
 /// spliced into: `put_settings_if_generation` selects `$1, $2, $3` and then
 /// guards the write on the caller's expected generation. Judged on its own it
 /// would look like a statement introducing `$4` before `$1`; judged as part of
@@ -242,7 +243,7 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// `SELECT {…}`, by `replicated_generation_guard_matches_only_canonical_integer_state`;
 /// that is a `#[cfg(test)]` fixture bound by rusqlite's positional `params!`,
 /// stripped before this census runs, and not a replicated statement.
-const EXPECTED_FRAGMENTS: usize = 7;
+const EXPECTED_FRAGMENTS: usize = 8;
 
 /// One Rust string literal, with its escapes decoded.
 #[derive(Clone)]
@@ -733,25 +734,34 @@ fn principal_bindings(
                 value.start > start && value.start < start + 4 + equals + 1 + expression.len()
             })
             .collect::<Vec<_>>();
-        let mut resolved =
-            if expression.starts_with("if source") || expression.starts_with("if rebuilt") {
-                let arm = if expression.starts_with("if source") {
-                    if source_principal {
-                        0
-                    } else if expression.contains("else if rebuilt") && !rebuilt {
-                        2
-                    } else {
-                        1
-                    }
-                } else if rebuilt {
+        // The examined SQLite read paths spell the same finite layout test
+        // directly or through their already-read projection. Do not accept
+        // arbitrary conditional bindings as principal SQL fragments.
+        let sqlite_route_layout = module == "sessions.rs"
+            && name == "owner_column"
+            && (expression.starts_with("if route_projection(&tx)? == PRINCIPAL_ROUTE_COLS {")
+                || expression.starts_with("if route_cols == PRINCIPAL_ROUTE_COLS {"));
+        let mut resolved = if expression.starts_with("if source")
+            || expression.starts_with("if rebuilt")
+            || sqlite_route_layout
+        {
+            let arm = if expression.starts_with("if source") {
+                if source_principal {
                     0
+                } else if expression.contains("else if rebuilt") && !rebuilt {
+                    2
                 } else {
                     1
-                };
-                expression_literals.get(arm).map(|value| value.text.clone())
+                }
+            } else if rebuilt {
+                0
             } else {
-                None
+                1
             };
+            expression_literals.get(arm).map(|value| value.text.clone())
+        } else {
+            None
+        };
         if module == "hiqlite_sessions.rs" {
             // These actual read-side bindings load the same finite Local SQL
             // layout inline rather than naming a layout variable first.

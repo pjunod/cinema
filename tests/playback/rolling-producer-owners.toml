@@ -2773,7 +2773,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # +1: the preparation capture test joins its spawn_blocking helper.
 # +1 shared qualification fixture: owns the existing production membership
 # heartbeat loop and aborts/joins it before Store shutdown; Drop aborts on panic.
-expected_occurrences = 881
+# Fixture startup owns the existing production passive/quorum metrics sampler;
+# it is aborted and joined before its Store, with Drop cancellation on panic.
+expected_occurrences = 882
 # Promotion union: final count is measured after architectural conflict resolution.
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -4187,7 +4189,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # heartbeat owner; no new production timer or recovery loop.
 # +2 failed-resource diagnostic bounds: status and member observations cannot
 # park the test before reporting its original HTTP refusal; no production timer.
-expected_occurrences = 1555
+# Four test-only bounds: actual placement readiness, blocked lease read,
+# completed lease read, and one bounded real-clock wake; no production timer.
+expected_occurrences = 1559
 
 
 [[module_structures]]
@@ -5133,7 +5137,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1: `state.membership.status()` in the Developer readiness read is a
 # membership observation the `.status(` shape matches, not a process launch.
 # +6: integrated Jellyfin admission, catalog and refusal response reads.
-expected_occurrences = 705
+# Three fixture calls to start_replication own the existing sampler for
+# Source, B worker and B ingress; these are not process launchers.
+expected_occurrences = 708
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5395,7 +5401,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # successful ordinary/cancelled wait retains the same child-job owner until reap.
 # Main/effort source union retains both sets: 255 exact lifecycle method sites.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 315
+# One bounded fixture wait follows actual Raft watch changes until the
+# real Source peer publishes bounded-read readiness; no polling owner.
+expected_occurrences = 316
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
