@@ -1,14 +1,14 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** review findings addressed; final validation pending · **Updated:** 2026-10-06
+**Status:** implementation and review complete; fast-lane validation next · **Updated:** 2026-10-06
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
 The existing daemon and web player remain the product.
 
-[Draft PR #832](http://192.168.4.7:3000/noirr/plurx/pulls/832) batches all
-implementation commits. It stays draft until implementation and the single
-adversarial review are complete.
+[PR #832](http://192.168.4.7:3000/noirr/plurx/pulls/832) batches all
+implementation commits. Its checks and PR description carry the live final
+validation receipt and merge result. Physical acceptance remains separate.
 
 ## Current work
 
@@ -16,12 +16,12 @@ adversarial review are complete.
 |---|---|---|
 | Independent clone | ready | `/private/tmp/plurx-pi-agent`, branch `codex/raspberry-pi`, base `cca4a09b997171ba91136b396f7d484097305fd0` |
 | Compiler | baseline passed | Rust 1.97.1; `cargo check --locked -p plurxd --all-targets`, exit 0 in 1m46s before Rust edits |
-| Implementation contract | ready to build | Source audits of server decoder inventory and browser media predictions |
+| Implementation contract | implemented | Source audits of server decoder inventory and browser media predictions |
 | Server decoder integration | implemented; compiler passed | Sol 6.1; separate 8/10-bit graph proof, operational capabilities, shared HLS/VOD transfer |
 | Existing browser player | implemented; validation pending | Sol 6.1; delivered tuple and fenced nullable predictions; syntax/type checks passed |
 | Deployment | implemented; validation pending | Sol 6.1; `deploy/pi-player`, safe launcher ownership, bounded report, six regression cases written |
 | Adversarial review | complete; both findings addressed | Reviewed `dfa775112`; Sol repaired P1 fallback and P2 transforms, coordinator inspected the changes |
-| Fast lane | not run | Run after review fixes, retain passing evidence, rerun failed checks only |
+| Fast lane | ready to run | Follow PR #832 checks; retain passing evidence and rerun failed checks only |
 | Physical Pi 5 | unavailable | Host/user requested; no hardware, HDR or concurrent-playback claim |
 
 ## Standing decisions
@@ -43,8 +43,8 @@ adversarial review are complete.
 ## Evidence ledger
 
 No test or physical-device acceptance has been recorded yet. Baseline
-compiler evidence above is compilation only. The final ledger will identify
-candidate SHA, commands, results and outstanding limits.
+compiler evidence above is compilation only. The PR validation receipt will identify candidate SHA, commands, results and
+outstanding limits without changing the candidate solely to record its checks.
 
 The Pi FFmpeg source confirms its DRM SAND transfer uses planar `yuv420p`
 or `yuv420p10le`; treating every 10-bit DRM frame as P010 would be wrong.
