@@ -1,7 +1,7 @@
 # Continuous quality — build uninterrupted resolution changes
 
-**Status:** production implementation in progress; upstream integrated;
-final adversarial review and qualification pending · **Written:** 2026-09-30 ·
+**Status:** implementation landed in PR #774; post-merge qualification resumed;
+physical/native acceptance and Firefox whole-window evidence remain open · **Written:** 2026-09-30 ·
 **Source anchor:** `origin/main` at `1b2ae4f62e7d131d18c088a643470e40cdb9789c`
 · **Effort:** `effort/continuous-quality`
 
@@ -7223,3 +7223,34 @@ shares no code with this branch, so the PR merged as `f01031b45` without
 another lane. Deploy and physical-device checks follow; physical display and
 audio, native device behaviour and the Firefox full campaign stay open.
 
+
+### 10.239 Post-merge acceptance resumed (2026-10-07)
+
+The human asked this session to finish the remaining work. The independent
+clone now branches from current main `9023815cb` on
+`codex/continuous-quality-acceptance`. PR #774 is already merged; its final
+review and fast-lane history in §10.232–§10.238 are completed work, not tasks
+to repeat. Earlier passing receipts describe their recorded sources.
+
+The remaining acceptance is Firefox whole-window optical continuity,
+physical display/audio and native Apple/Android device behaviour, the broader
+source/lifecycle matrix, and disk/shared-reader pressure and physical
+multi-host qualification. A private namespace partition proves only its
+recorded scope; recovery after serving-fence refusal remains unresolved.
+Reconcile these rows against current main before making further fixes.
+
+Retain existing Plurx Apple policy and prepared handoffs. Keep the current
+continuous-family cost and evidence rules while measuring their consequences;
+no autonomous AVPlayer policy change is implied by resuming acceptance.
+No new feature gate is authorized. Preserve the human's external Fable pause:
+a new corrective batch receives one final adversarial review when ready, then
+stops for external review before unit execution or merge. Required fast-lane
+units run once on the merging code after that pause is released; rerun only
+failures.
+
+Rust 1.97.1 is installed and verified on the checkout host. An all-target
+`plurxd` compile was started before code edits; no unit tests were run. The
+previously approved source-only lab directory is absent and must be rebuilt
+from committed source without Git history or credentials. Apple CoreDevice
+inventory currently fails with a service-initialization timeout, not evidence
+that any physical device is locked or unavailable.
