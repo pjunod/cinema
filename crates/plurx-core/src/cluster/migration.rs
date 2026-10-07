@@ -7433,14 +7433,14 @@ mod tests {
                     .expect("actual selected master proof for each running member");
             }
             let owner=members[0].identity.node_id.clone();
-            let fixture=include_str!("../../tests/fixtures/session-principal-local.sql").replace("'node'",&format!("'{}'",owner.replace('\'',"''")));
+            let fixture=include_str!("../../tests/fixtures/session-principal-local.sql").replace("'node'",&format!("'{}'",owner.replace('\'',"''"))).replace("'live'","'00000000-0000-0000-0000-000000000001'").replace("'live-session'","'00000000-0000-0000-0000-000000000002'").replace("'staged'","'00000000-0000-0000-0000-000000000003'").replace("'ended-session'","'00000000-0000-0000-0000-000000000005'").replace("'session:live'","'session:00000000-0000-0000-0000-000000000001'");
             let statements=fixture.split(';').map(str::trim).filter(|sql|!sql.is_empty()).map(|sql|(sql.to_owned(),hiqlite::params!())).collect::<Vec<_>>();
             client.txn(statements).await.expect("live Local route before activation").into_iter().collect::<Result<Vec<_>,_>>().expect("retained route committed");
-            client.execute("UPDATE media_session_requests SET state='resolved' WHERE incarnation_id='live'",hiqlite::params!()).await.expect("already playing Local request");
-            client.execute("UPDATE media_sessions SET lease_expires_at_ms=9223372036854775000 WHERE incarnation_id='live'",hiqlite::params!()).await.expect("live producer ownership");
-            client.execute("UPDATE job_leases SET expires_at_ms=9223372036854775000 WHERE resource='session:live'",hiqlite::params!()).await.expect("live physical fence");
+            client.execute("UPDATE media_session_requests SET state='resolved' WHERE incarnation_id='00000000-0000-0000-0000-000000000001'",hiqlite::params!()).await.expect("already playing Local request");
+            client.execute("UPDATE media_sessions SET lease_expires_at_ms=9223372036854775000 WHERE incarnation_id='00000000-0000-0000-0000-000000000001'",hiqlite::params!()).await.expect("live producer ownership");
+            client.execute("UPDATE job_leases SET expires_at_ms=9223372036854775000 WHERE resource='session:00000000-0000-0000-0000-000000000001'",hiqlite::params!()).await.expect("live physical fence");
             for member in &members {
-                let route=member.store.media_session_route_by_incarnation("live").await.expect("prime each same Store legacy projection").expect("Local route before migration");
+                let route=member.store.media_session_route_by_incarnation("00000000-0000-0000-0000-000000000001").await.expect("prime each same Store legacy projection").expect("Local route before migration");
                 assert_eq!(route.owner_node_id,owner);
                 assert_eq!(route.owner_epoch,2);
             }
@@ -7464,16 +7464,16 @@ mod tests {
                 let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array(owner_key,principal_kind,user_id,revision) AS payload FROM media_playback_desired WHERE playback_id=$1",hiqlite::params!(playback)).await.expect("principal-safe regenerated row");
                 assert_eq!(rows[0].payload,r#"["local:1","local",1,1]"#);
             }
-            let renewal=crate::domain::MediaSessionRenewal { incarnation_id:"live".to_owned(),owner_epoch:2,produced_playable_through_ms:10_000,fetched_through_ms:8_000,media_sequence:4 };
+            let renewal=crate::domain::MediaSessionRenewal { incarnation_id:"00000000-0000-0000-0000-000000000001".to_owned(),owner_epoch:2,produced_playable_through_ms:10_000,fetched_through_ms:8_000,media_sequence:4 };
             for (index,member) in members.iter().enumerate() {
                 assert!(member.membership_manager().source_layout_ready().await.expect("each running voter verifies layout"));
                 let renewed=member.store.renew_media_sessions(&owner,std::slice::from_ref(&renewal),1_000+index as i64,9223372036854775001+index as i64).await.expect("ordinary Local writer survives live transition");
-                assert_eq!(renewed,vec!["live".to_owned()]);
-                let route=member.store.media_session_route_by_incarnation("live").await.expect("projection changes without process restart").expect("retained live route");
+                assert_eq!(renewed,vec!["00000000-0000-0000-0000-000000000001".to_owned()]);
+                let route=member.store.media_session_route_by_incarnation("00000000-0000-0000-0000-000000000001").await.expect("projection changes without process restart").expect("retained live route");
                 assert_eq!(route.owner_node_id,owner);
                 assert_eq!(route.owner_epoch,2);
             }
-            let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array(fence,revision,expires_at_ms) AS payload FROM job_leases WHERE resource='session:live'",hiqlite::params!()).await.expect("same physical fence after renewals");
+            let rows=client.query_consistent_map::<SourceStartupPayloadRow,_>("SELECT json_array(fence,revision,expires_at_ms) AS payload FROM job_leases WHERE resource='session:00000000-0000-0000-0000-000000000001'",hiqlite::params!()).await.expect("same physical fence after renewals");
             assert_eq!(rows[0].payload,"[2,6,9223372036854775003]");
             for member in &members { member.shutdown().await.expect("shutdown only after live qualification"); }
             http_task.abort();
@@ -7789,9 +7789,9 @@ mod tests {
             AUTH_SCHEMA_BASELINE_VERSION
         );
         membership
-            .heartbeat()
+            .prepare_purpose_master(Arc::clone(&selected.credential_key))
             .await
-            .expect("actual compatible heartbeat");
+            .expect("force actual compatible heartbeat after capability removal");
         // A retained capability from the previous process heartbeat is not proof
         // that the current admitted process has installed compatible dispatch.
         client
@@ -7806,9 +7806,9 @@ mod tests {
             .await
             .expect("stale prior capability refuses migration"));
         membership
-            .heartbeat()
+            .prepare_purpose_master(Arc::clone(&selected.credential_key))
             .await
-            .expect("fresh compatible process proof");
+            .expect("force fresh compatible process proof without heartbeat coalescing");
         assert!(membership
             .coordinate_source_schema_live()
             .await
