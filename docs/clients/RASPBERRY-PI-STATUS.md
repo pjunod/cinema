@@ -1,6 +1,6 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** open — physical acceptance unfinished; initial implementation merged;
+**Status:** open — stock-kernel protected-probe compatibility blocks installer promotion; initial implementation merged;
 PR #843 merged; Docker-default setup and its live qualification are tracked on PR #851 · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
@@ -10,6 +10,24 @@ The existing daemon and web player remain the product.
 [PR #832](http://forge.lan:3000/noirr/plurx/pulls/832) batches all
 implementation commits. Its checks and PR description carry the live final
 validation receipt and merge result. Physical acceptance remains separate.
+
+## Current installation qualification blocker
+
+The Docker-default installation and managed browser passed physical Main/Main10
+request decoding, software-reference frame hashes, planar transfer, browser
+presentation and seeking. Actual Plurx session creation exposed a separate
+kernel prerequisite: the tested Pi kernel omits `CONFIG_SECURITY_LANDLOCK` and
+its Landlock ABI query returns `ENOSYS`. The bound FFprobe identity cannot be
+established, so server playback is blocked. No protection has been bypassed and
+PR #851 remains unmerged pending an architectural compatibility decision.
+
+Physical testing also exposed two deployment defects. Compose 2.26 lacks
+`config --environment`; hardware configuration now uses Compose's own label
+interpolation on that version. The isolated native service lacked writable
+temporary storage; systemd now owns a mode-0700 runtime directory and provides
+`TMPDIR` without making system files writable or hiding media under `/var/tmp`.
+Each correction has a focused regression. Live physical results, package
+changes, cleanup and CI receipts remain on PR #851.
 
 ## Initial implementation — PR #832 (merged)
 

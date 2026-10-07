@@ -1,6 +1,6 @@
 # Raspberry Pi installation — Docker by default, native by choice
 
-**Status:** open — implementation in progress · **Written:** 2026-10-07
+**Status:** open — installer implemented; stock-kernel playback compatibility blocked · **Written:** 2026-10-07
 
 Companion to [the decoder implementation](RASPBERRY-PI-IMPLEMENTATION.md)
 and [the live status](RASPBERRY-PI-STATUS.md). This plan closes the installation
@@ -8,6 +8,14 @@ gap: users should not assemble FFmpeg paths, device permissions, systemd
 overrides and a browser themselves. The existing server and web player remain
 the product. The commands below are the implementation contract until the
 status records their acceptance.
+
+Physical acceptance found that Raspberry Pi OS kernel
+`6.18.50+rpt-rpi-2712` omits `CONFIG_SECURITY_LANDLOCK`. Plurx's current protected
+FFprobe launcher requires Landlock, so server playback on that stock kernel
+fails before streaming even though request decoding and browser playback pass.
+Docker shares this host-kernel limitation. A compatible sandbox or kernel is
+still required; these commands do not yet establish a working stock-OS server.
+The PR live status records the resolution and complete acceptance evidence.
 
 ## 1. Decision — containers are the default server deployment
 

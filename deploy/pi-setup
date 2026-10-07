@@ -244,6 +244,7 @@ def native_unit(args, runtime):
         lines.append('Environment=' + quoted('PLURX_' + key.upper() + '=' + runtime[key]))
     lines += ['SupplementaryGroups=' + ' '.join(groups), 'Restart=on-failure', 'RestartSec=5', 'TimeoutStopSec=3900',
               'NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=read-only',
+              'RuntimeDirectory=plurx', 'RuntimeDirectoryMode=0700', 'Environment=TMPDIR=/run/plurx',
               'ReadWritePaths=' + quoted(args.data_dir), '[Install]', 'WantedBy=multi-user.target']
     return '\n'.join(lines) + '\n'
 

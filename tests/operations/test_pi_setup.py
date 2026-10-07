@@ -64,6 +64,23 @@ class PiSetupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             setup.native_unit(self.args(), runtime | {'groups': ['video\nUser=root']})
 
+    def test_native_unit_has_private_writable_temp_without_hiding_var_tmp_media(self):
+        args = self.args(server_runtime='native', data_dir=Path('/var/tmp/plurx-pi-native-data'),
+                         media=[Path('/var/tmp/plurx-pi-media')])
+        runtime = {'ffmpeg': '/opt/plurx-runtime/ffmpeg', 'ffprobe': '/opt/plurx-runtime/ffprobe',
+                   'bound_ffprobe': '/opt/plurx-runtime/static', 'groups': ['44']}
+        unit = setup.native_unit(args, runtime)
+        lines = unit.splitlines()
+        self.assertIn('User=plurx', lines)
+        self.assertIn('Group=plurx', lines)
+        self.assertIn('RuntimeDirectory=plurx', lines)
+        self.assertIn('RuntimeDirectoryMode=0700', lines)
+        self.assertIn('Environment=TMPDIR=/run/plurx', lines)
+        self.assertIn('ProtectSystem=strict', lines)
+        self.assertIn('ReadWritePaths="/var/tmp/plurx-pi-native-data"', lines)
+        self.assertNotIn('PrivateTmp=true', lines)
+        self.assertFalse(any(line.startswith('ReadWritePaths=') and line.split('=', 1)[1] in ('/tmp', '/var/tmp') for line in lines))
+
     def test_compose_media_read_only_and_provider_build_selection(self):
         env, text = setup.docker_files(self.args(), {'compose_service': {'build': {'dockerfile': 'Dockerfile.pi'}}})
         service = json.loads(text)['services']['plurxd']
