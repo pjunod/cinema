@@ -1,11 +1,11 @@
 # Python unit receipts — one success per test per PR
 
-**Status:** open · **Decision:** Paul, 2026-10-01 · **Scope:** effort preflight
+**Status:** open · **Decision:** Paul, 2026-10-01 · **Scope:** effort and main preflight
 
 Companion to [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md): this
 policy changes repeated Python unit execution, not current-source compilation.
 
-The effort preflight discovers the validation and operations suites on every
+Both preflights discover the validation and operations suites on every
 candidate. Each discovered test ID must have passed once for this repository
 and PR. Applicable successful methods are not executed again after a head or
 base refresh. A changed assertion body or shared local fixture is not proved
@@ -13,7 +13,9 @@ by an old success under the same ID. Failed, newly introduced and genuinely
 source-invalidated methods execute; unchanged sibling methods stay retained.
 A skipped test, an
 expected failure, discovery error, empty suite or unknown outcome is not a
-success. Removing a test does not erase its historical evidence.
+success. Main preserves ordinary unittest acceptance of legitimate skips and
+expected failures, recording skips separately without caching them as passes.
+Effort keeps its existing stricter policy. Removing a test does not erase its historical evidence.
 
 ## Identity and source remain explicit
 
@@ -26,6 +28,56 @@ Every success retains its original commit and workflow run. Reuse is
 historical unit evidence, never a statement that the test executed on the
 current source. Compiler, history, catalog and static web checks continue on
 the current candidate. There is no bypass flag or product setting.
+
+## Main continuation — authenticated cutover and separate journals
+
+Since 2026-10-07, [main_unit_receipts.py](../../validation/main_unit_receipts.py)
+uses the shared bounded API, source applicability and success recorder with
+its own workflow scope, artifact names and workspace directory. The event
+must identify an open same-repository PR into `main` at the exact checked-out
+head. Historical runs are queried by `refs/pull/<number>/head` and each run's
+authenticated event payload, repository, workflow, PR, head, base, job and
+attempt are checked. An effort receipt cannot satisfy main evidence.
+
+For a PR that began before main receipts existed, the adapter imports one
+latest exhaustive legacy baseline. The authenticated default unittest log
+must bind the source checkout, terminal counts and every failed method ID to
+an exhaustive AST inventory reconstructed from that commit's tracked files.
+Class inheritance and supported unittest decorators are source-bound; custom
+loaders, custom runners, dynamic discovery, missing source, count mismatch,
+errors, skips and ambiguous outcomes refuse migration. A failed subtest
+invalidates its whole named method. A terminal validation failure establishes
+only validation successes: operations have not run. When both suites have
+terminal results, each inventory is checked separately against its own log.
+There are no PR IDs, run IDs, counts or imported pass lists in the adapter.
+
+Older pre-receipt attempts are outside that migration baseline. Their missing
+logs or journals are not converted into passes or assertions of zero
+execution. After the source workflow adopts receipts, every executed attempt
+requires authenticated start and final journals, even when units fail.
+An incomplete final journal from a failed or cancelled attempt preserves its
+individually recorded positive successes; it makes no claim about unrecorded
+execution. A missing journal or unresolved fixture error refuses continuation;
+retain and recover its actual evidence. Inherited successes require an individually
+matching authenticated original journal or the authenticated legacy baseline,
+then current method/local-fixture applicability before reuse.
+
+Main queues concurrent PR attempts instead of cancelling the run publishing
+its journal. The existing current-head/base promotion guard rejects a stale
+candidate. Current history, catalog, Regression-Test fields, Node contracts
+and affected compiler gates continue normally. The run command explicitly
+declares `--suite-dir tests/validation --suite-dir tests/operations`; the CLI
+refuses any other list, and the regression-field checker derives the executed
+suite coverage from those declarations. Output separates discovered methods,
+historical passes and pending execution; it never claims a retained method
+executed on the current source. Unknown method outcomes refuse completion.
+
+The controls live in
+[test_main_unit_receipts.py](../../tests/validation/test_main_unit_receipts.py):
+exhaustive failure accounting, metadata mismatches, unsupported historical
+discovery, skip semantics, no execution of retained successes, failed units
+and silent custom runners. The main migration accepts only source-proven
+method/local-fixture evidence; the dependency limits below still apply.
 
 ## Current applicability — genuine history is not proof of new assertions
 
@@ -379,7 +431,7 @@ The small fake-fixture tests in
 new IDs, source preservation, skips, isolation, corrupt/incomplete evidence,
 unsafe archives, empty discovery, atomic publication and workflow ordering.
 Run each unit regression once per PR; retry only a failure. This change does
-not cache compiler or static checks, alter main qualification, or mutate a
+not cache compiler or static checks, bypass main qualification, or mutate a
 runner service. Legacy runs without sufficiently attributable per-ID evidence
 are not automatically labelled successful.
 

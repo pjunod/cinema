@@ -1,6 +1,6 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** initial implementation merged; follow-up PR reviewed; Pi tests stopped and cleaned · **Updated:** 2026-10-07
+**Status:** initial implementation merged; follow-up disposition on PR #843; Pi tests stopped and cleaned · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -264,8 +264,9 @@ Normal pinned Rust 1.97.1 compilation and commit hooks pass. The full Rust
 unit suite and main promotion gate are not claimed. Paul authorized resolving the CI conflict and merging PR #843 on 2026-10-07.
 The follow-up removes the full Rust unit step from the main fast lane while
 retaining all-target compilation, Clippy, policy and regression-field checks.
-Full CI and coverage remain separate. The CI amendment awaits final review
-and its fast-lane result; earlier #832 evidence is retained.
+Full CI and coverage remain separate. The [PR description](http://forge.lan:3000/noirr/plurx/pulls/843) holds the
+current candidate, review, fast-lane result and merge disposition; earlier
+#832 evidence is retained.
 
 [Sanitized device and validation evidence](http://forge.lan:3000/attachments/348a359f-ac02-4ec5-bf00-c9e89bd52f72)
 is attached to PR #843 and was downloaded again to verify its hash:
@@ -279,3 +280,26 @@ was removed. Verification found no task processes, matching user services
 or listeners on the test ports. System packages were not replaced.
 The 30-minute concurrency run was not performed; no background acceptance
 job remains running.
+
+
+### Main-lane CI follow-up
+
+The full Rust suite is separate from the blocking fast lane. All-target
+compilation, workspace/vendor Clippy, static policy and named regression
+evidence remain required. A failed first preflight exposed repeated glob
+compilation in the history audit: bounded caching preserves matching policy
+and reduced the remote audit from a ten-minute timeout to about 100 seconds.
+The complete local cached audit passed in 190.93 seconds.
+
+Main subsequently added four read-only sharing-status assertions. The broad
+process-shape inventory correctly noticed four new `.status()` calls; review
+confirmed they launch no process, and the count now records those reads.
+The failed remote validation attempt ran 294 methods, with 293 passing and
+this single inventory mismatch. Main-lane Python receipts retain attributable
+passing results and execute failed, new or changed methods plus unrun checks;
+they share the existing receipt machinery and preserve historical source
+attribution. The PR records the final continuation result.
+
+The new main base was merged cleanly before qualification. Its integrated
+Rust compilation and Clippy passed; all four decoder regressions passed with
+`hiqlite-store`. This CI work did not start another process on the Pi.

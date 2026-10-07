@@ -11,14 +11,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Returning a PR to draft cancels the active run: `converted_to_draft` enters
-# this group and every job below declines it, so the run in flight is
-# superseded and nothing replaces it. Marking it ready again starts one
-# exact-head promotion attempt. That is what removing and reapplying the
-# `fast-lane` label used to do.
+# Preserve per-method success journals through head updates and draft changes.
+# Queued runs still fail the current-head/base guard when superseded.
 concurrency:
   group: main-fast-lane-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   scope:
@@ -92,6 +89,19 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Restore attributable main Python successes
+        id: receipts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 -m validation.main_unit_receipts prepare
+      - name: Publish main Python attempt-start marker
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}
+          path: .main-python-unit-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Audit corrective-history evidence
         run: make history-check
       # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
@@ -115,12 +125,22 @@ jobs:
       - name: Check validation catalog and static contracts
         run: |
           make validation-lint
-          python3 -m unittest discover -s tests/validation -p 'test_*.py'
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Check CI, deploy, and shipping contracts
-        run: make operations-check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 -m validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations
+      - name: Preserve main Python success journal even on unit failure
+        if: always() && steps.receipts.outcome == 'success'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.receipt_key }}
+          path: .main-python-unit-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Check the shared player input contract
         run: |
           node tests/playback/player-input-contract.test.js

@@ -1839,7 +1839,7 @@ assert.equal(context.ACT_TIMER, null);
                 contract_preflight.index(
                     "run: python3 -m validation.python_unit_receipts run"
                     if contract_preflight == effort_preflight
-                    else "run: make operations-check"
+                    else "run: python3 -m validation.main_unit_receipts run"
                 ),
             )
             # The shared player-input fixtures compile into no Rust and no
@@ -3266,6 +3266,15 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("github.event.pull_request.number || github.ref", workflow)
         self.assertIn("cancel-in-progress: false", effort_workflow)
         self.assertNotIn("cancel-in-progress: true", effort_workflow)
+        main_workflow = read(".github/workflows/main-fast-lane.yml")
+        self.assertIn("cancel-in-progress: false", main_workflow)
+        self.assertNotIn("cancel-in-progress: true", main_workflow)
+        main_preflight = workflow_job_blocks(".github/workflows/main-fast-lane.yml")["preflight"]
+        self.assertIn("validation.main_unit_receipts prepare", main_preflight)
+        self.assertIn("validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations", main_preflight)
+        self.assertIn("if: always() && steps.receipts.outcome == 'success'", main_preflight)
+        self.assertIn("name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}", main_preflight)
+        self.assertIn("path: .main-python-unit-receipts/receipt.json", main_preflight)
 
         def cancels(
             event: str, *, ref: str = "", head: str = "", base: str = ""
@@ -3465,7 +3474,9 @@ assert.equal(context.ACT_TIMER, null);
                     "make history-check",
                     "make validation-lint",
                     "python3 -m validation.python_unit_receipts run"
-                    if workflow == "effort-ci" else "make operations-check",
+                    if workflow == "effort-ci" else
+                    "python3 -m validation.main_unit_receipts run"
+                    if workflow == "main-fast-lane" else "make operations-check",
                 ):
                     self.assertIn(command, preflight)
 
