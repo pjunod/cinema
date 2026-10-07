@@ -11,7 +11,7 @@ function classicChrome(active, inner){
      <span class="spacer"></span>
      <button class="dvr-global" id="dvr-global" onclick="location.hash='#/activity'" aria-label="Recording status"></button>
      <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
-     <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
+     <input class="search" id="q" type="search" name="q" autocomplete="off" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
      <div class="topctl"><button class="ghost sm mobile-search" onclick="toggleMobileSearch()" aria-label="Search" aria-expanded="${!!(getQ()||searchFocus)}" aria-controls="q">⌕</button>
        <div style="position:relative">
          <button class="ghost sm lookbtn" onclick="toggleLookMenu(event)" title="Appearance — layout, theme, light or dark, poster size" aria-label="Appearance" aria-haspopup="menu"><span class="tsw"></span><span class="lookword">Appearance</span></button>
@@ -27,10 +27,26 @@ function classicChrome(active, inner){
      </div>
    </header><main id="main">${inner}<div class="versionstamp">Version ${esc(buildLabel())}</div></main>`;
   const q=document.getElementById("q");
-  let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  wireSearchInput(q);
   restoreSearchFocus(searchFocus);
   navKeyboardWireOnce();
   pollActivity();
 }
 function getQ(){ const m=location.hash.match(/^#\/search\/(.*)$/); return m?decodeURIComponent(m[1]):""; }
 
+function wireSearchInput(q){
+  let timer;
+  q.addEventListener("input",()=>{
+    clearTimeout(timer);
+    // Saved-login autofill can mistake the header for a username beside a
+    // Settings API-key field. Only editing the search field may navigate.
+    if(document.activeElement!==q) return;
+    const route=location.hash, value=q.value;
+    timer=setTimeout(()=>{
+      // A pending search belongs to this header and route, not the page the
+      // user opened while the debounce was waiting.
+      if(!q.isConnected||location.hash!==route) return;
+      location.hash=value?("#/search/"+encodeURIComponent(value)):"#/";
+    },300);
+  });
+}
