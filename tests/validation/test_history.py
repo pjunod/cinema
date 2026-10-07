@@ -1488,6 +1488,59 @@ class CorrectiveBoundaryCase(RepositoryFixture):
         self.assertEqual(report.errors, ())
         self.assertEqual(report.covered_by_trailer, (fix,))
 
+    def test_verified_api_landing_requires_exact_identity_and_own_tree_trailers(self):
+        """Recognition recovers a real API merge, never exempts its evidence."""
+        for variant in ("valid", "tree", "parents", "title", "bad_trailer", "missing_trailer"):
+            with self.subTest(variant=variant):
+                root, catalog, coverage = self.repository()
+                (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n")
+                self.commit(root, "feat: seed")
+                (root / "src/boundary.txt").write_text("boundary\n")
+                boundary = self.commit(root, "docs: draw the boundary")
+                base = self.branch(root)
+                subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
+                (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n")
+                (root / "tests/app_test.rs").write_text(
+                    "#[test]\nfn exact_api_fix() { assert!(true); }\n")
+                fix = self.commit(root, "fix(app): exact API repair")
+                subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+                title = "fix(app): promote exact API repair"
+                trailer = ("" if variant == "missing_trailer" else
+                           "Regression-Test: tests/app_test.rs::" +
+                           ("absent_test" if variant == "bad_trailer" else "exact_api_fix"))
+                landing = self.merge(root, "topic", title + "\n\n" + trailer + "\n")
+                tree = subprocess.check_output(["git", "show", "-s", "--format=%T", landing], cwd=root, text=True).strip()
+                parents = subprocess.check_output(["git", "show", "-s", "--format=%P", landing], cwd=root, text=True).strip().split()
+                ledger = self.ledger(root, boundary)
+                # An unregistered raw title remains unrecognised; a trailer on
+                # an arbitrary corrective subject is not itself PR provenance.
+                unrecognised = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+                self.assertFalse(unrecognised.merges)
+                recorded_tree = "0" * 40 if variant == "tree" else tree
+                recorded_parents = list(reversed(parents)) if variant == "parents" else parents
+                recorded_title = title + " altered" if variant == "title" else title
+                with ledger.open("a") as handle:
+                    handle.write(
+                        "\n[[landings]]\n"
+                        f'commit = "{landing}"\n'
+                        f'tree = "{recorded_tree}"\n'
+                        f'parents = ["{recorded_parents[0]}", "{recorded_parents[1]}"]\n'
+                        f'title = "{recorded_title}"\n'
+                        'pull = "828"\nreason = "verified synthetic API merge"\n')
+                report = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+                if variant == "valid":
+                    self.assertEqual(report.errors, ())
+                    self.assertIn(fix, report.covered_by_trailer)
+                    self.assertEqual(report.merges[0].pull, "828")
+                    self.assertTrue(report.merges[0].resolved)
+                elif variant in ("tree", "parents", "title"):
+                    self.assertTrue(any("immutable merge identity mismatch" in error for error in report.errors), report.errors)
+                    self.assertNotIn(fix, report.covered_by_trailer)
+                else:
+                    self.assertTrue(report.errors, "recognition cannot waive a bad or absent trailer")
+                    self.assertFalse(report.merges[0].resolved)
+                    self.assertNotIn(fix, report.covered_by_trailer)
+
     def test_the_merge_ledger_refuses_a_malformed_boundary(self):
         root, _catalog, _coverage = self.repository()
         path = root / "merge-errata.toml"
