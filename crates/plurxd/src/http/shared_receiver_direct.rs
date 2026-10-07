@@ -205,7 +205,8 @@ pub(super) async fn receiver_direct(
     let Some(actor) = actor else {
         let route = match state.store.media_session_route(&session.to_string()).await {
             Ok(Some(route)) => route,
-            _ => {
+            Ok(None) => return refusal(StatusCode::NOT_FOUND, "sharing_delivery_unavailable"),
+            Err(_) => {
                 return refusal(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "sharing_delivery_unavailable",
