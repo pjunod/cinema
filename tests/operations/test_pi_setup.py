@@ -276,11 +276,38 @@ class PiSetupTests(unittest.TestCase):
             calls.append(argv)
             if argv == ['docker', 'compose', 'version'] and calls.count(argv) == 1:
                 raise subprocess.CalledProcessError(1, argv)
+            if argv == ['apt-cache', 'policy', 'docker-compose']:
+                return 'docker-compose:\n  Candidate: 2.26.1-4\n'
         with patch.object(setup.shutil, 'which', return_value='/usr/bin/tool'), patch.object(setup, 'run', side_effect=run):
             setup.package_tools('docker')
-        self.assertIn(['apt-get', 'install', '-y', 'docker-compose-v2'], calls)
+        self.assertIn(['apt-get', 'install', '-y', 'docker-compose'], calls)
         self.assertFalse(any('docker.io' in call for call in calls))
         self.assertEqual(calls[-1], ['docker', 'compose', 'version'])
+
+    def test_fresh_trixie_installs_engine_and_verified_compose_v2_package(self):
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv == ['apt-cache', 'policy', 'docker-compose']:
+                return 'docker-compose:\n  Candidate: 2.26.1-4\n'
+        def which(name):
+            return '/usr/bin/apt-get' if name == 'apt-get' else None
+        with patch.object(setup.shutil, 'which', side_effect=which), patch.object(setup, 'run', side_effect=run):
+            setup.package_tools('docker')
+        self.assertIn(['apt-get', 'install', '-y', 'docker.io', 'docker-compose'], calls)
+        self.assertLess(calls.index(['apt-get', 'update']), calls.index(['apt-cache', 'policy', 'docker-compose']))
+        self.assertEqual(calls[-1], ['docker', 'compose', 'version'])
+
+    def test_compose_v1_candidate_refused_before_package_install(self):
+        def run(argv, **kwargs):
+            if argv == ['docker', 'compose', 'version']:
+                raise subprocess.CalledProcessError(1, argv)
+            if argv == ['apt-cache', 'policy', 'docker-compose']:
+                return 'docker-compose:\n  Candidate: 1.29.2-3\n'
+        with patch.object(setup.shutil, 'which', return_value='/usr/bin/tool'), patch.object(setup, 'run', side_effect=run) as commands:
+            with self.assertRaisesRegex(ValueError, 'no Compose v2 candidate'):
+                setup.package_tools('docker')
+        self.assertFalse(any(call.args[0][:2] == ['apt-get', 'install'] for call in commands.call_args_list))
 
     def test_native_readiness_budget_uses_retained_cluster_config(self):
         with tempfile.TemporaryDirectory() as directory:

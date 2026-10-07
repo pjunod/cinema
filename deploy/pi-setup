@@ -142,17 +142,25 @@ def package_tools(runtime):
         raise ValueError('automatic setup requires Raspberry Pi OS or Debian with apt-get')
     if runtime == 'docker':
         packages = []
+        need_compose = False
         if not shutil.which('docker'):
             packages.append('docker.io')
+            need_compose = True
         else:
             try:
                 run(['docker', 'compose', 'version'], root=True)
             except subprocess.CalledProcessError:
-                packages.append('docker-compose-v2')
-        if 'docker.io' in packages:
-            packages.append('docker-compose-v2')
-        if packages:
+                need_compose = True
+        if packages or need_compose:
             run(['apt-get', 'update'], root=True)
+            if need_compose:
+                # Pi OS / Debian Trixie packages Compose v2 as docker-compose.
+                # Bookworm's same package name denotes v1: refuse that candidate.
+                policy = run(['apt-cache', 'policy', 'docker-compose'], capture=True)
+                candidate = re.search(r'(?m)^\s*Candidate:\s*(?:[0-9]+:)?([0-9]+)\.', policy)
+                if not candidate or candidate.group(1) != '2':
+                    raise ValueError('docker-compose has no Compose v2 candidate; use supported Raspberry Pi OS Trixie repositories')
+                packages.append('docker-compose')
             run(['apt-get', 'install', '-y', *packages], root=True)
         run(['systemctl', 'enable', '--now', 'docker'], root=True)
         # Use sudo for the daemon; never require a new login or docker-group privileges.
