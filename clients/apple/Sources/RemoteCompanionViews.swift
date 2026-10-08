@@ -168,8 +168,8 @@ struct RemoteCompanionView: View {
     private var remoteControls: some View {
         VStack(spacing: 20) {
             if !remote.controlling {
-                Text(remote.controllerControl.map { "\($0.controllerName) is controlling this screen." } ?? "This phone is ready to request control.")
-                Button(remote.controllerControl == nil ? "Use as remote" : "Take over") { remote.acquire(takeover: remote.controllerControl != nil) }
+                Text(remote.controlledByOtherPhone ? "\(remote.controllerControl?.controllerName ?? "Another phone") is controlling this screen." : "Tap Use as remote to request or resume control.")
+                Button(remote.controlledByOtherPhone ? "Take over" : "Use as remote") { remote.acquire(takeover: remote.controlledByOtherPhone) }
                     .buttonStyle(.borderedProminent)
             }
             Text(remote.controllerState?.focusedLabel ?? "Waiting for a safe TV focus target")

@@ -117,6 +117,21 @@ final class RemoteReceiverTests: XCTestCase {
         owner.claim(before: nil, after: 40_000)
         XCTAssertEqual(owner.cancel(current: 50_000), 50_000)
     }
+    func testReopenAndConnectionRecoveryRequireExplicitControlAcquisition() {
+        var eligibility = RemoteControlEligibility()
+        let original = UUID(), reopened = UUID()
+        XCTAssertFalse(eligibility.permits(original))
+        eligibility.acquired(original)
+        XCTAssertTrue(eligibility.permits(original))
+        eligibility.retire()
+        XCTAssertFalse(eligibility.permits(original))
+        XCTAssertFalse(eligibility.permits(reopened))
+        eligibility.acquired(reopened)
+        XCTAssertTrue(eligibility.permits(reopened))
+        eligibility.retire() // state-poll/renewal failure
+        XCTAssertFalse(eligibility.permits(reopened)) // a recovered state reply cannot reacquire
+    }
+
     func testUnknownOwnEpochRecoveryCarriesObservedEpochAndCannotTargetOtherGrant() {
         let target = CinemaRemoteTarget(ownerNodeID: "node", sessionID: UUID(), receiverEpoch: UUID())
         let grant = UUID(), oldEpoch = UUID(), newerEpoch = UUID()

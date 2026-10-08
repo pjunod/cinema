@@ -44,6 +44,7 @@ final class RemoteClientModel: ObservableObject {
     private var controllerRevision: UInt64 = 0
     private var nextSequence: UInt64 = 0
     private var sequences = RemoteControlSequence()
+    private var controlEligibility = RemoteControlEligibility()
     private var selectedGrant: RemoteSecretStorage.Grant?
     private var dismissedSuggestions: Set<UUID> = []
     private var sending = false
@@ -361,8 +362,10 @@ final class RemoteClientModel: ObservableObject {
         remotePresented = true
         beginStatePoll()
     }
+    var controlledByOtherPhone: Bool { controllerControl != nil && controllerControl?.activeGrantID != selectedGrant?.id }
     var selectedIsPaired: Bool { selectedGrant != nil }
     func closeController() {
+        controlEligibility.retire()
         controllerGeneration = UUID()
         controllerTask?.cancel(); controllerTask = nil
         renewTask?.cancel(); renewTask = nil
@@ -380,6 +383,7 @@ final class RemoteClientModel: ObservableObject {
         guard let api, let device = selectedDevice, let target = device.target, let grant = selectedGrant else { return }
         let recoveryEpoch = sequences.recoveryEpoch(target: target, grant: grant.id, control: controllerControl)
         let renewUnknownEpoch = recoveryEpoch != nil
+        controlEligibility.retire()
         controllerGeneration = UUID()
         controllerTask?.cancel(); renewTask?.cancel(); stopHolding()
         controlling = false; sending = false; sendToken = UUID(); controllerState = nil
@@ -397,6 +401,7 @@ final class RemoteClientModel: ObservableObject {
                     reply = try await api.control(target: target, grantID: grant.id, action: "takeover", epoch: expected, secret: grant.secret)
                     guard current(life), generation == controllerGeneration, selectedDevice?.target == target, reply.target == target else { return }
                 }
+                controlEligibility.acquired(generation)
                 acceptControl(reply.control, revision: reply.responseRevision, acquired: true)
                 beginStatePoll()
                 if controlling { beginRenewal() }
@@ -414,9 +419,9 @@ final class RemoteClientModel: ObservableObject {
         controllerControl = control
         if let control, let target = selectedDevice?.target, let grant = selectedGrant, control.activeGrantID == grant.id {
             if acquired { sequences.acquired(target: target, grant: grant.id, epoch: control.controlEpoch) }
-            controlling = sequences.knows(target: target, grant: grant.id, epoch: control.controlEpoch)
+            controlling = controlEligibility.permits(controllerGeneration) && sequences.knows(target: target, grant: grant.id, epoch: control.controlEpoch)
         } else { controlling = false }
-        if !controlling { stopHolding() }
+        if !controlling { controlEligibility.retire(); stopHolding() }
     }
     private func beginStatePoll() {
         controllerTask?.cancel()
@@ -438,7 +443,7 @@ final class RemoteClientModel: ObservableObject {
                     if let last = reply.outcomes.last(where: { $0.controlEpoch == controllerControl?.controlEpoch && $0.sequence == nextSequence }) { commandStatus = "TV: " + last.outcome.rawValue }
                 } catch {
                     guard current(life), generation == controllerGeneration else { return }
-                    controlling = false
+                    controlling = false; controlEligibility.retire()
                     stopHolding()
                     commandStatus = "Remote connection unavailable; no command is replayed."
                     try? await Task.sleep(for: .seconds(1))
@@ -459,12 +464,13 @@ final class RemoteClientModel: ObservableObject {
                     let reply = try await api.control(target: target, grantID: grant.id, action: "renew", epoch: epoch, secret: grant.secret)
                     guard current(life), generation == controllerGeneration, reply.target == target else { return }
                     acceptControl(reply.control, revision: reply.responseRevision)
-                } catch { if generation == controllerGeneration { controlling = false; stopHolding(); commandStatus = "Control lease renewal failed." }; return }
+                } catch { if generation == controllerGeneration { controlling = false; controlEligibility.retire(); stopHolding(); commandStatus = "Control lease renewal failed." }; return }
             }
         }
     }
     func releaseControl() {
         guard let api, let target = selectedDevice?.target, let grant = selectedGrant, let epoch = controllerControl?.controlEpoch else { closeController(); return }
+        controlEligibility.retire()
         controllerGeneration = UUID()
         controllerTask?.cancel(); renewTask?.cancel(); stopHolding()
         controlling = false; sending = false; sendToken = UUID()

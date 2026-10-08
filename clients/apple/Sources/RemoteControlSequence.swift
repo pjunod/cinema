@@ -27,3 +27,11 @@ struct RemoteControlSequence {
         return previous + 1
     }
 }
+
+/// State replies describe a lease; only explicit acquisition permits effects.
+struct RemoteControlEligibility {
+    private var acquiredGeneration: UUID?
+    mutating func acquired(_ generation: UUID) { acquiredGeneration = generation }
+    mutating func retire() { acquiredGeneration = nil }
+    func permits(_ generation: UUID) -> Bool { acquiredGeneration == generation }
+}
