@@ -2948,6 +2948,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "candle-core",
  "candle-nn",
@@ -2959,6 +2960,7 @@ dependencies = [
  "hex",
  "hiqlite",
  "hiqlite-wal",
+ "hmac",
  "http-body",
  "http-body-util",
  "hyper",

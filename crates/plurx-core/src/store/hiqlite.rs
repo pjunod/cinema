@@ -2028,6 +2028,7 @@ impl HiqliteAuthStore {
                 "cluster instance.id is {persisted}, refusing bootstrap as {instance_id}"
             )));
         }
+        store.install_remote_schema(None).await?;
         Ok(store)
     }
 
@@ -2147,7 +2148,9 @@ impl HiqliteAuthStore {
                 .await?;
             admit_schema_migration(admission)?;
             match schema_migration_action(&rows, ClusterCompatibility::CURRENT)? {
-                SchemaMigrationAction::Current => return Ok(()),
+                SchemaMigrationAction::Current => {
+                    return self.install_remote_schema(admission).await
+                }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     admit_schema_migration(admission)?;
@@ -3780,6 +3783,73 @@ impl HiqliteAuthStore {
                 }
             }
         }
+    }
+
+    /// Remote has an adjunct version because81/82 are frozen Source lifecycle
+    /// ordinals. Install only at bootstrap/daemon migration, never maintenance.
+    async fn remote_schema_current(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(super::remote::SHAPE_SQL, params!())
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        if !super::remote::verify_shape(&shape)? {
+            return Ok(false);
+        }
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT count(*) AS count FROM remote_schema WHERE singleton=1 AND version=1",
+                params!(),
+            )
+            .await?;
+        if !matches!(rows.as_slice(),[r] if r.count==1) {
+            return Err(StoreError::Migration(
+                "incompatible Cinema remote version".into(),
+            ));
+        }
+        Ok(true)
+    }
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    pub async fn validation_install_remote_schema(&self, denied: bool) -> Result<(), StoreError> {
+        let admission = || {
+            if denied {
+                Err(StoreError::Migration("fixture denied migration".into()))
+            } else {
+                Ok(())
+            }
+        };
+        self.install_remote_schema(Some(&admission)).await
+    }
+
+    async fn install_remote_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.remote_schema_current().await? {
+            return Ok(());
+        }
+        let mut statements = super::remote::SCHEMA
+            .iter()
+            .map(|(_, sql)| (sql.to_string(), params!()))
+            .collect::<Vec<_>>();
+        statements.push(("INSERT INTO remote_schema VALUES(1,1)".into(), params!()));
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        // Consistent settlement handles concurrent installs and unknown commit:
+        // absence/partial shape can never be called successfully installed.
+        if self.remote_schema_current().await? {
+            return Ok(());
+        }
+        attempt?;
+        Err(StoreError::Migration(
+            "Cinema remote schema install did not settle".into(),
+        ))
     }
 
     /// Additive custody migration is separate from the frozen Source rebuild.
@@ -6958,6 +7028,19 @@ dump_row!(MediaSessionTerminalAckDumpRow {
 
 fn sharing_lineage_is_ambiguous(version: i64, sharing_objects: i64) -> bool {
     version < SHARING_SCHEMA_VERSION && sharing_objects > 0
+}
+
+struct RemoteShapeRow {
+    name: String,
+    sql: String,
+}
+impl From<&mut Row<'_>> for RemoteShapeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+            sql: row.get("sql"),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -2206,6 +2206,7 @@ pub struct SettingsDto {
     /// (see migration v13), and an upgrade that started that on its own is
     /// the failure v9 documents.
     pub genre_backfill: bool,
+    pub cinema_remote_control: bool,
     /// "Sign-ins expire" (Settings → Users). On by default: a device that
     /// goes unused for `auth_token_idle_days` is signed out; one in regular
     /// use never is. Off keeps login tokens valid until revoked.
@@ -2632,6 +2633,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or(14)
             .clamp(1, 365),
         genre_backfill,
+        cinema_remote_control: setting(super::remote::FEATURE_KEY).as_deref() == Some("1"),
         auth_token_expiry: plurx_core::store::stored_switch(
             setting(keys::AUTH_TOKEN_EXPIRY_ENABLED).as_deref(),
             true,
@@ -2928,6 +2930,7 @@ pub struct UpdateSettings {
     pub dv_disk_convert_parallel: Option<i64>,
     /// Arm or disarm the one-off genre backfill.
     pub genre_backfill: Option<bool>,
+    pub cinema_remote_control: Option<bool>,
     /// "Sign-ins expire". Switching it on (from off) restarts the idle clock
     /// at that moment, so enabling it never signs a device out on the spot.
     pub auth_token_expiry: Option<bool>,
@@ -3062,6 +3065,7 @@ impl UpdateSettings {
             || self.dv_disk_keep_original.is_some()
             || self.dv_disk_convert_parallel.is_some()
             || self.genre_backfill.is_some()
+            || self.cinema_remote_control.is_some()
             || self.auth_token_expiry.is_some()
             || self.auth_token_idle_days.is_some()
             // The DVR settings are their own transaction boundary for the same
@@ -4293,6 +4297,15 @@ pub async fn update_settings(
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
         state.store.put_settings(&borrowed).await?;
+    }
+    if let Some(on) = req.cinema_remote_control {
+        state
+            .store
+            .put_setting(super::remote::FEATURE_KEY, if on { "1" } else { "0" })
+            .await?;
+        if !on {
+            state.remote.disable();
+        }
     }
     if let Some(on) = req.genre_backfill {
         // Arming rewinds the cursor. A pass that finished left it at 0 and

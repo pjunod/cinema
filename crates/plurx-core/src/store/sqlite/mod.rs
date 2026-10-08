@@ -32,6 +32,7 @@ mod outbox;
 mod pretranscode;
 mod publication;
 mod reading;
+mod remote;
 mod sessions;
 mod shared_cache;
 mod sharing;
@@ -1293,6 +1294,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::sharing::SCHEMA,
     // v105: exact Source/receiver outer-ingress custody; preserved across restore.
     super::sharing_ingress_custody::SCHEMA,
+    // v106: additive Cinema receiver credentials, with independent replica marker.
+    REMOTE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1436,6 +1439,13 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     .with_downloaded_subtitles(&row.get::<_, String>(31)?)
     .map_err(|e| conversion_err(31, format!("downloaded_subtitles: {e}")))
 }
+
+const REMOTE_SCHEMA: &str = r#"CREATE TABLE remote_schema (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1)) STRICT;
+CREATE TABLE remote_receivers (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, platform TEXT NOT NULL, secret_hash TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER) STRICT;
+CREATE TABLE remote_grants (id TEXT PRIMARY KEY, receiver_id TEXT NOT NULL REFERENCES remote_receivers(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, secret_hash TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER) STRICT;
+CREATE INDEX remote_grants_receiver ON remote_grants(receiver_id, revoked_at);
+CREATE TABLE remote_claim_budget (user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, window_started INTEGER NOT NULL, attempts INTEGER NOT NULL) STRICT;
+INSERT INTO remote_schema VALUES(1,1);"#;
 
 const USER_COLS: &str = "id, username, password_hash, is_admin, created_at";
 

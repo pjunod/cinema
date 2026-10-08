@@ -65,6 +65,10 @@ pub use field_order_backfill::{
     field_order_backfill_page, FieldOrderBackfillPage, FieldOrderBackfillPort,
 };
 mod file_grants;
+pub mod remote;
+pub use remote::RemoteStore;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_remote;
 pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
@@ -5776,6 +5780,7 @@ pub trait Store:
     + PretranscodeJobStore
     + OfflinePackageStore
     + FileGrantStore
+    + RemoteStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
@@ -5833,6 +5838,7 @@ impl<T> Store for T where
         + PretranscodeJobStore
         + OfflinePackageStore
         + FileGrantStore
+        + RemoteStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore
