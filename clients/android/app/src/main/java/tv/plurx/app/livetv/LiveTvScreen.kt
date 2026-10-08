@@ -3,6 +3,7 @@
 package tv.plurx.app.livetv
 
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.CompositionLocalProvider
 import tv.plurx.app.remote.*
 import kotlinx.serialization.json.*
 import java.util.UUID
@@ -480,7 +481,7 @@ fun LiveTvScreen(
         } }
         return options.take(64)
     }
-    fun remoteCapabilities(): Set<String> = if (isInPip || showingInfo || showingMore || showingCaptions || detail != null) emptySet() else
+    fun remoteCapabilities(): Set<String> = if (isInPip || showingInfo || showingMore || showingCaptions || searchOpen || recordingsOpen || stopRecordingFor != null || deleteFileFor != null) emptySet() else
         setOf("navigate", "select", "back") + (if (state.playing && !state.busy) setOf("set_playing", "stop") else emptySet()) +
             (if (captionOptions().isNotEmpty()) setOf("open_tracks", "choose_track") else emptySet())
     fun remoteDispatch(action: RemoteAction): RemoteOutcome {
@@ -497,7 +498,7 @@ fun LiveTvScreen(
                 return result
             }
         }
-        if (remoteCaptions) return remoteNavigation?.dispatch(action, remoteNavigation.context) ?: RemoteOutcome.Unavailable
+        if (remoteCaptions || detail != null) return remoteNavigation?.dispatch(action, remoteNavigation.context) ?: RemoteOutcome.Unavailable
         val input = when (action.type) {
             "navigate" -> when (action.text("direction")) { "left" -> LiveTvContractInput.Left; "right" -> LiveTvContractInput.Right; "up" -> LiveTvContractInput.Up; else -> LiveTvContractInput.Down }
             "select" -> LiveTvContractInput.Select
@@ -517,10 +518,10 @@ fun LiveTvScreen(
                 put("position_ms", 0); put("duration_ms", 0)
                 put("tracks", JsonArray(captionOptions().map { option -> buildJsonObject { put("kind", "subtitles"); put("option_id", option.id); put("label", RemoteWire.safeLabel(option.label)) } }))
             } }
-        }, ::remoteDispatch, {}, { !isInPip && !showingInfo && !showingMore && !showingCaptions && detail == null && (!remoteCaptions || remoteNavigation?.ownedChoicesReady == true) }))
+        }, ::remoteDispatch, controller::cancelRemoteChannelGesture, { !isInPip && !showingInfo && !showingMore && !showingCaptions && !searchOpen && !recordingsOpen && stopRecordingFor == null && ((detail == null && !remoteCaptions) || remoteNavigation?.ownedChoicesReady == true) }))
     }
     DisposableEffect(remoteClient, remoteOwnerToken) { onDispose { remoteClient?.playback?.detach(remoteOwnerToken) } }
-    if (isInPip || showingInfo || showingMore || showingCaptions || detail != null) RemoteRestricted()
+    if (isInPip || showingInfo || showingMore || showingCaptions || searchOpen || recordingsOpen || stopRecordingFor != null || deleteFileFor != null) RemoteRestricted()
     if (remoteCaptions) RemoteChoiceDialog("Captions", captionOptions().map { option -> RemoteChoice(option.id, option.label, option.selected, option.choose) }) { remoteCaptions = false; lastInteraction += 1 }
     // Each host builds its own PlayerView; see LiveTvPlayerSurface.
     val playerSurface: @Composable () -> Unit = remember(controller) {
@@ -558,6 +559,9 @@ fun LiveTvScreen(
     } else {
         Modifier.fillMaxSize().windowInsetsPadding(safeDisplayInsets()).padding(16.dp)
     }
+    CompositionLocalProvider(LocalRemoteLiveTune provides { channel ->
+        RemoteDeferredEffect(RemoteDeferredBinding(remoteScope, controller.remoteOwnerToken, channel.id), { remoteNavigation?.scope == remoteScope }, { check -> controller.admitRemoteChannel(channel, check) })
+    }) {
     Column(
         screenModifier
             // Key spellings and the handler that installs them both live in
@@ -980,8 +984,25 @@ fun LiveTvScreen(
             touchRecordingsPanel(Modifier.fillMaxWidth().fillMaxHeight(0.85f))
         }
     }
-    detail?.let { (channel, programme) ->
+    detail?.let { selected ->
+        val (channel, programme) = selected
+        val token = remember(channel.id, programme.start) { "live-programme:" + UUID.randomUUID().toString() }
+        val closeKey = token + ":close"
+        val watchKey = token + ":watch"
+        val currentAiring = programme.start <= now && now < programme.end && channel.watchable && state.channels.any { it == channel && it.watchable }
         ModalBottomSheet(onDismissRequest = { detail = null }) {
+            val owned = RemoteOwnedWindow(token, listOf(closeKey) + if (currentAiring) listOf(watchKey) else emptyList(), RemotePresentationKind.ProgrammeDetails) { if (detail == selected) detail = null }
+            if (!owned) RemoteRestricted()
+            val closeRequester = remember(token) { FocusRequester() }
+            tv.plurx.app.ui.components.RequestInitialFocus(closeRequester, enabled = owned, reinforce = false)
+            fun closeProgramme(): RemoteOutcome {
+                if (detail != selected || remoteNavigation?.menuOwned(token) != true) return RemoteOutcome.StaleContext
+                remoteNavigation.closeMenu(token); detail = null; return RemoteOutcome.Applied
+            }
+            val watchModifier = if (owned && currentAiring) Modifier.remoteAction(watchKey, "Watch") {
+                if (detail != selected || remoteNavigation?.menuOwned(token) != true || !currentAiring) RemoteOutcome.StaleContext
+                else { remoteNavigation.closeMenu(token); detail = null; controller.watch(channel); RemoteOutcome.Applied }
+            } else Modifier
             LiveTvProgrammeDetail(
                 channel,
                 programme,
@@ -991,6 +1012,7 @@ fun LiveTvScreen(
                         programme = programme,
                         dvr = dvrState,
                         now = now,
+                        watchModifier = watchModifier,
                         onWatch = { detail = null; controller.watch(channel) },
                         onRecord = { dvr?.record(channel.id, programme.start) },
                         onRecordSeries = { detail = null; recordSeries(channel.id, programme.start) },
@@ -999,6 +1021,7 @@ fun LiveTvScreen(
                         onForgetReminder = { id -> dvr?.forgetReminder(id) },
                     )
                 },
+                closeModifier = Modifier.remoteAction(closeKey, "Close", enabled = owned) { closeProgramme() }.focusRequester(closeRequester),
             ) { detail = null }
         }
     }
@@ -1077,6 +1100,7 @@ fun LiveTvScreen(
             }
         }
     }
+}
 }
 
 /** 64 dp of nav bar: the title, search, and everything else in one menu. */
@@ -1972,6 +1996,14 @@ private fun LiveTvOnNowList(
             requester.requestFocus()
         }
     }
+    val remoteWork = rememberCoroutineScope()
+    val semanticScope = LocalRemoteScope.current
+    val semanticNavigation = LocalRemoteNavigation.current
+    val semanticChannels = channels.filter { it.watchable }.take(16384)
+    RemoteOrder(semanticChannels.map { "live-channel:" + it.id }) { key ->
+        val index = channels.indexOfFirst { "live-channel:" + it.id == key }
+        if (index >= 0) remoteWork.launch { listState.scrollToItem(index) }
+    }
     LazyColumn(modifier, state = listState, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         items(channels, key = { it.id }) { channel ->
             val requester = remember(channel.id) { FocusRequester() }
@@ -1990,7 +2022,7 @@ private fun LiveTvOnNowList(
                 watching = watchingChannelId == channel.id,
                 onFocused = { onFocused(channel) },
                 onSelect = { onSelect(channel) },
-                modifier = Modifier.focusRequester(requester),
+                modifier = Modifier.remoteAction("live-channel:" + channel.id, channel.title, enabled = channel in semanticChannels, deferred = { action -> if (action.type != "select") null else RemoteDeferredEffect(RemoteDeferredBinding(semanticScope, controller.remoteOwnerToken, channel.id), { semanticNavigation?.scope == semanticScope }, { check -> controller.admitRemoteChannel(channel, check) }) }) { if (channel.watchable) { onSelect(channel); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }.focusRequester(requester),
             )
         }
     }
@@ -2232,6 +2264,14 @@ private fun LiveTvOverlay(
         }
         return
     }
+    val remoteTune = LocalRemoteLiveTune.current
+    val previousChannel = LiveTvGuideReducer.adjacent(neighbours.filter { it.watchable }.map { it.id }, channel?.id, -1)?.let { id -> neighbours.firstOrNull { it.id == id } }
+    val nextChannel = LiveTvGuideReducer.adjacent(neighbours.filter { it.watchable }.map { it.id }, channel?.id, 1)?.let { id -> neighbours.firstOrNull { it.id == id } }
+    if (!temporaryGuide && !moreOpen) RemoteOrder(buildList {
+        add("live-overlay:guide"); add("live-overlay:channels"); add("live-overlay:playing"); add("live-overlay:captions")
+        if (previousChannel != null) add("live-overlay:previous")
+        if (nextChannel != null) add("live-overlay:next")
+    })
     val guideFocus = remember { FocusRequester() }
     val type = LiveTvTypography.current()
     RequestInitialFocus(guideFocus, enabled = !temporaryGuide && !showingInfo && !moreOpen)
@@ -2312,7 +2352,7 @@ private fun LiveTvOverlay(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Spacer(Modifier.weight(1f))
-                        TextButton(onClick = onClosePanel, compact = true) {
+                        TextButton(modifier = Modifier.remoteAction("live-guide:close", "Close guide") { onClosePanel(); RemoteOutcome.Applied }, onClick = onClosePanel, compact = true) {
                             Text("Close", style = type.primary)
                         }
                     }
@@ -2336,6 +2376,7 @@ private fun LiveTvOverlay(
                             )
                         }
                         LiveTvGuideGrid(
+                            extraRemoteKeys = listOf("live-guide:close"),
                             layout = grid,
                             slots = remember(window) { LiveTvGuideReducer.gridSlots(window) },
                             playingChannelId = channel?.id,
@@ -2366,15 +2407,18 @@ private fun LiveTvOverlay(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onGuide, modifier = Modifier.focusRequester(guideFocus)) {
+                TextButton(onClick = onGuide, modifier = Modifier.remoteAction("live-overlay:guide", "Guide") { onGuide(); RemoteOutcome.Applied }.focusRequester(guideFocus)) {
                     Text("Guide", color = Color.White)
                 }
-                TextButton(onClick = onChannels) { Text("Channels", color = Color.White) }
-                TextButton(onClick = onTogglePause) {
+                TextButton(modifier = Modifier.remoteAction("live-overlay:channels", "Channels") { onChannels(); RemoteOutcome.Applied }, onClick = onChannels) { Text("Channels", color = Color.White) }
+                TextButton(modifier = Modifier.remoteAction("live-overlay:playing", if (paused) "Play live" else "Pause") { onTogglePause(); RemoteOutcome.Applied }, onClick = onTogglePause) {
                     Text(if (paused) "Play live" else "Pause", color = Color.White)
                 }
                 TextButton(onClick = onInfo) { Text("Info", color = Color.White) }
-                TextButton(onClick = onCaptions) { Text("Captions", color = Color.White) }
+                TextButton(modifier = Modifier.remoteAction("live-overlay:captions", "Captions") { onCaptions(); RemoteOutcome.Applied }, onClick = onCaptions) { Text("Captions", color = Color.White) }
+                listOf("previous" to previousChannel, "next" to nextChannel).forEach { (direction, candidate) ->
+                    if (candidate != null) TextButton(modifier = Modifier.remoteAction("live-overlay:" + direction, candidate.title, deferred = { action -> if (action.type == "select") remoteTune?.invoke(candidate) else null }) { RemoteOutcome.Unsupported }, onClick = { onSelect(candidate) }) { Text(if (direction == "previous") "Previous channel" else "Next channel", color = Color.White) }
+                }
                 Box {
                     TextButton(onClick = onMore) { Text("More", color = Color.White) }
                     DropdownMenu(expanded = moreOpen, onDismissRequest = onDismissMore) {
@@ -2758,6 +2802,7 @@ private fun LiveTvProgrammeDetail(
     programme: LiveTvProgramme,
     /** Record · Record series · Remind me, beside Watch. */
     actions: @Composable () -> Unit = {},
+    closeModifier: Modifier = Modifier,
     onClose: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp)) {
@@ -2773,6 +2818,6 @@ private fun LiveTvProgrammeDetail(
             Text(programme.filters.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
         }
         actions()
-        TextButton(onClick = onClose) { Text("Close") }
+        TextButton(modifier = closeModifier, onClick = onClose) { Text("Close") }
     }
 }

@@ -6688,21 +6688,40 @@ internal class SharedPlayerController(private val context: android.content.Conte
             }
         }
     }
+    private fun observeAuthorization() {
+        if (authorizationObserver == null) authorizationObserver = tv.plurx.app.data.Session.observeAuthorizationChanges { beginStop() }.id
+    }
     fun start(plan: tv.plurx.app.data.SharedPlaybackPlan) {
         if (stopped || owner.currentPlan != null || authorizationObserver != null) return
-        authorizationObserver = tv.plurx.app.data.Session.observeAuthorizationChanges { scope.launch { stop() } }.id
+        observeAuthorization()
         owner.begin(plan)
     }
+    val remoteStartAvailable: Boolean get() = !stopped && owner.remoteStartAvailable
+    val remoteTransportAvailable: Boolean get() = !stopped && owner.remoteTransportAvailable
+    suspend fun startPreparedPhysical(plan: tv.plurx.app.data.SharedPlaybackPlan, permitted: () -> Boolean): tv.plurx.app.remote.RemoteOutcome {
+        owner.retireNetworkOperation()
+        if (!remoteStartAvailable || !permitted()) return tv.plurx.app.remote.RemoteOutcome.Unavailable
+        observeAuthorization()
+        return owner.startRemote(plan, network = false, permitted = permitted)
+    }
+    suspend fun startRemote(plan: tv.plurx.app.data.SharedPlaybackPlan, permitted: () -> Boolean): tv.plurx.app.remote.RemoteOutcome {
+        if (!remoteStartAvailable || !permitted()) return tv.plurx.app.remote.RemoteOutcome.Unavailable
+        observeAuthorization()
+        return owner.startRemote(plan, permitted = permitted)
+    }
+    suspend fun setPlayingRemote(playing: Boolean, permitted: () -> Boolean): tv.plurx.app.remote.RemoteOutcome = owner.setPlayingRemote(playing, permitted)
+    fun retireNetworkOperation() { owner.retireNetworkOperation() }
     fun seekBy(deltaMs: Long) { owner.launch { seek(renderer.snapshot().positionMs + deltaMs) } }
     fun togglePlaying() { val next = !active.playWhenReady; owner.launch { setPlaying(next) } }
     fun change(selection: tv.plurx.app.data.SharedSelection) { owner.launch { change(selection) } }
-    suspend fun stop(watched: Boolean = false) {
-        if (stopped) return
+    fun beginStop(watched: Boolean = false): kotlinx.coroutines.Job {
         stopped = true
         authorizationObserver?.let { tv.plurx.app.data.Session.removeAuthorizationObserver(it) }; authorizationObserver = null
-        owner.stop(watched)
+        return owner.beginStop(watched)
     }
-    fun close() { scope.launch { stop() } }
+    suspend fun stop(watched: Boolean = false) { beginStop(watched).join() }
+    fun close() { beginStop() }
+
 }
 
 /** Private-controller transport interception; unchanged commands remain the

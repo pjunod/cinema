@@ -1206,6 +1206,7 @@ paths = [
   "scripts/ci-execution-mode",
   "scripts/ci-cargo-cache-prepare",
   "scripts/ci-cargo-cache-refresh",
+  "scripts/provision-hiqlite-upstream",
   "scripts/image-base-drift",
   "scripts/p02-release-cost.py",
   "scripts/p02-release-cost.Dockerfile",

@@ -27,6 +27,7 @@ internal class RemoteClientModel(private val app: Context) {
     var unavailableNodes by mutableStateOf<List<String>>(emptyList()); private set
     var target by mutableStateOf<RemoteTarget?>(null); private set
     var challenge by mutableStateOf<JsonObject?>(null); private set
+    var pairingExpired by mutableStateOf(false); private set
     var pairingOpening by mutableStateOf(false); private set
     private val receiverPairLifetime = RemotePairingSurfaceLifetime()
     private var receiverPairJob: Job? = null
@@ -44,6 +45,9 @@ internal class RemoteClientModel(private val app: Context) {
     private var navigation: RemoteNavigationCoordinator? = null
     val playback = RemotePlaybackAdapter()
     private val receiverGuard = RemoteReceiverGuard()
+    // A semantic slot may retire before its cleanup. Each task reserves one
+    // retained slot before starting; cleanup never creates unbounded waiters.
+    private val deferredWorkers = linkedMapOf<String, Job>()
     private var api: RemoteApi? = null
     private var vault: RemoteSecretStorage? = null
     private var receiver: RemoteSecretStorage.Receiver? = null
@@ -53,7 +57,7 @@ internal class RemoteClientModel(private val app: Context) {
     private var active = false
     var mainWindowEligible: () -> Boolean = { false }
     private fun effectsEligible() = uiOwner() && RemoteEffectEligibility.semanticEffects(sceneEligible && scene.eligible, mainWindowEligible(), navigation?.ownedWindowFocused() == true)
-    fun windowChanged() { receiverGuard.invalidate(); stopHolding(); playback.physicalInput(); navigation?.windowContextChanged() }
+    fun windowChanged() { retireNetworkWorkers(); receiverGuard.invalidate(); stopHolding(); playback.physicalInput(); navigation?.windowContextChanged() }
     private var television = false
     private val scene = RemoteSceneEligibility()
     private var lifecycle = UUID.randomUUID().toString()
@@ -111,7 +115,8 @@ internal class RemoteClientModel(private val app: Context) {
     }
     private fun uiOwner() = Looper.myLooper() == Looper.getMainLooper()
     private fun current(generation: String) = uiOwner() && active && RemoteEffectEligibility.sessionAlive(sceneEligible && scene.eligible) && lifecycle == generation && api?.current == true
-    fun physicalInput() { navigation?.physicalInput() ?: run { receiverGuard.invalidate(); playback.physicalInput(); stopHolding() } }
+    private fun retireNetworkWorkers() { deferredWorkers.values.toList().forEach { it.cancel() } }
+    fun physicalInput() { navigation?.physicalInput() ?: run { receiverGuard.invalidate(); retireNetworkWorkers(); playback.physicalInput(); stopHolding() } }
     fun suspendNavigation() { shutdown(false); navigation?.suspend(); navigation = null }
     fun sceneChanged(resumed: Boolean, background: Boolean) {
         check(uiOwner()); scene.transition(resumed, background); sceneEligible = resumed
@@ -120,7 +125,7 @@ internal class RemoteClientModel(private val app: Context) {
     fun saveEnabled(value: Boolean) { preferences.edit().putBoolean("enabled", value).apply(); enabled = value; if (!value) shutdown(false) }
     fun configure(vm: AppViewModel, nav: RemoteNavigationCoordinator, isTelevision: Boolean) {
         check(uiOwner()); navigation = nav; television = isTelevision
-        nav.onPhysicalInput = { receiverGuard.invalidate(); stopHolding(); playback.physicalInput() }
+        nav.onPhysicalInput = { receiverGuard.invalidate(); retireNetworkWorkers(); stopHolding(); playback.physicalInput() }
         val instance = vm.serverInstanceId; val user = vm.currentUserId
         val auth = Session.playbackAuthorization()
         if (!enabled || !sceneEligible || instance == null || user == null || auth.token == null) { shutdown(false); return }
@@ -134,12 +139,13 @@ internal class RemoteClientModel(private val app: Context) {
         if (television) receiverJob = scope.launch { receiverLoop(generation) }
     }
     private fun shutdown(identityChange: Boolean) {
+        retireNetworkWorkers()
         active = false; lifecycle = UUID.randomUUID().toString()
         receiverJob?.cancel(); presenceJob?.cancel(); discoveryJob?.cancel(); pairingJob?.cancel()
         receiverJob = null; presenceJob = null; discoveryJob = null; pairingJob = null
         receiverPairLifetime.retire(); receiverPairJob?.cancel(); receiverPairJob = null; pairingOpening = false
         pairingRestricted.reset(); navigation?.unrestrict(pairingRestriction)
-        closeController(preserveScan = !identityChange); receiverGuard.deactivate(); target = null; receiverControl = null; receiver = null; challenge = null
+        closeController(preserveScan = !identityChange); receiverGuard.deactivate(); target = null; receiverControl = null; receiver = null; challenge = null; pairingExpired = false
         pendingPairings = emptyList(); devices = emptyList(); unavailableNodes = emptyList(); grantList = emptyList()
         if (identityChange) { vault?.clear(); vault = null; identity = null; serverInstance = null; sequences = RemoteControlSequence(); navigation?.resetIdentity() }
         status = if (enabled) "Waiting for an active authenticated Cinema session." else "Cinema remotes disabled."
@@ -185,13 +191,13 @@ internal class RemoteClientModel(private val app: Context) {
                     val nextRevision = batch.number("response_revision"); require(nextRevision in 1..REMOTE_MAX_INTEGER)
                     if (nextRevision >= revision) {
                         val nextControl = parseControl(batch["control"])
-                        if (receiverControl != nextControl) { receiverControl = nextControl; receiverGuard.invalidate(); playback.physicalInput(); if (nextControl == null) receiverGuard.deactivate(); restartPresence(generation, bound, installation.secret) }
+                        if (receiverControl != nextControl) { receiverControl = nextControl; receiverGuard.invalidate(); retireNetworkWorkers(); playback.physicalInput(); if (nextControl == null) receiverGuard.deactivate(); restartPresence(generation, bound, installation.secret) }
                         pendingPairings = batch.getValue("pairings").jsonArray.take(8).map { it.jsonObject }
                         syncPairingRestriction()
                         revision = nextRevision
                     }
                     val commands = RemoteWire.pollCommands(batch)
-                    val outcomes = commands.map { command -> RemoteReceiverGuard.Ack(command.controlEpoch, command.sequence, apply(command).wire) }
+                    val outcomes = commands.mapNotNull { command -> apply(command)?.let { RemoteReceiverGuard.Ack(command.controlEpoch, command.sequence, it.wire) } }
                     if (outcomes.isNotEmpty()) { api.ack(bound, outcomes, installation.secret); if (!current(generation) || target != bound) return }
                     delivery = maxOf(delivery, batch.number("delivery_id"))
                 }
@@ -239,34 +245,91 @@ internal class RemoteClientModel(private val app: Context) {
         return RemotePresenceState.encode(stateRevision, snapshot, capabilities, if (snapshot.blocked) emptyList() else receiverGuard.currentCredits, summary)
     }
 
-    private fun apply(command: RemoteCommand): RemoteOutcome {
+    private fun apply(command: RemoteCommand): RemoteOutcome? {
         if (!current(lifecycle) || !effectsEligible()) return RemoteOutcome.Unavailable
         val navigation = navigation ?: return RemoteOutcome.Unavailable
         if (playback.owner?.takeIf { it.scope == navigation.scope }?.effectsEligible?.invoke() == false) { receiverGuard.invalidate(); return RemoteOutcome.Restricted }
         refreshPlaybackContext()
         updateGuard()?.let { return it }
         val snapshot = navigation.snapshot()
+        receiverGuard.retainedResult(command, SystemClock.elapsedRealtime())?.let { return RemoteOutcome.entries.first { outcome -> outcome.wire == it.outcome } }
+        if (receiverGuard.pending(command)) return null
+        val incumbent = playback.owner?.takeIf { it.scope == navigation.scope }
+        val deferred = if (!snapshot.blocked) incumbent?.deferred?.invoke(command.action) ?: navigation.deferred(command.action, snapshot.context) else null
+        if (deferred != null) {
+            if (deferredWorkers.size >= 4) return RemoteOutcome.Unavailable
+            val bound = target ?: return RemoteOutcome.Unavailable
+            val installation = receiver ?: return RemoteOutcome.Unavailable
+            val api = api ?: return RemoteOutcome.Unavailable
+            val reservation = receiverGuard.reserve(command, deferred.binding, SystemClock.elapsedRealtime())
+            if (reservation is RemoteReservation.Refused) return reservation.outcome
+            val permit = (reservation as RemoteReservation.Admitted).permit
+            val generation = lifecycle
+            val ticket = UUID.randomUUID().toString()
+            fun owned(): Boolean {
+                if (!current(generation) || target != bound || !effectsEligible() || navigation.context != snapshot.context || !deferred.stillOwned()) return false
+                updateGuard()?.let { return false }
+                return true
+            }
+            fun effectCheck() = owned() && receiverGuard.permits(permit, deferred.binding, SystemClock.elapsedRealtime())
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    val remaining = permit.resultDeadline - SystemClock.elapsedRealtime()
+                    val outcome = if (remaining <= 0) RemoteOutcome.Unavailable else try {
+                        withTimeout(remaining) { if (effectCheck()) deferred.run(::effectCheck) else RemoteOutcome.Unavailable }
+                    } catch (_: TimeoutCancellationException) { RemoteOutcome.Unavailable }
+                    catch (cancel: CancellationException) { throw cancel }
+                    catch (_: Exception) { RemoteOutcome.Unavailable }
+                    val ack = if (owned()) receiverGuard.complete(permit, deferred.binding, SystemClock.elapsedRealtime(), outcome) else {
+                        receiverGuard.abandon(permit); null
+                    }
+                    // This callback is synchronous and bound to the same exact
+                    // owner. It runs only after the guard recorded terminal ACK.
+                    if (ack != null && owned()) {
+                        deferred.didComplete(outcome)
+                        if (current(generation) && target == bound) api.ack(bound, listOf(ack), installation.secret)
+                    }
+                } finally {
+                    if (owned()) receiverGuard.complete(permit, deferred.binding, SystemClock.elapsedRealtime(), RemoteOutcome.Unavailable) else receiverGuard.abandon(permit)
+                    withContext(NonCancellable) { try { deferred.dispose() } finally { deferredWorkers.remove(ticket) } }
+                }
+            }
+            deferredWorkers[ticket] = job; job.start()
+            return null
+        }
         return receiverGuard.apply(command, SystemClock.elapsedRealtime(), if (snapshot.blocked) RemoteOutcome.Restricted else null) {
             val owner = playback.owner?.takeIf { it.scope == navigation.scope }
+            if (command.action.type in setOf("back", "home") || command.action.type == "stop" && owner?.capabilities?.invoke()?.contains("stop") == true) { receiverGuard.retireDeferred(); retireNetworkWorkers() }
             if (owner != null && command.action.type in owner.capabilities()) playback.dispatch(command.action, navigation.scope)
             else navigation.dispatch(command.action, snapshot.context)
         }
     }
     private fun syncPairingRestriction() {
-        val next = pairingOpening || challenge != null || pendingPairings.isNotEmpty()
+        val next = pairingOpening || challenge != null || pairingExpired || pendingPairings.isNotEmpty()
         navigation?.restrict(pairingRestriction, next)
-        if (pairingRestricted.transition(next)) { receiverGuard.invalidate(); playback.physicalInput() }
+        if (pairingRestricted.transition(next)) { receiverGuard.invalidate(); retireNetworkWorkers(); playback.physicalInput() }
     }
-    private fun retireReceiverPairing() { receiverPairLifetime.retire(); receiverPairJob?.cancel(); receiverPairJob = null; pairingOpening = false; challenge = null; syncPairingRestriction() }
+    private fun retireReceiverPairing() { receiverPairLifetime.retire(); receiverPairJob?.cancel(); receiverPairJob = null; pairingOpening = false; challenge = null; pairingExpired = false; syncPairingRestriction() }
     fun startPairing() {
         val bound = target ?: return; val installation = receiver ?: return; val generation = lifecycle
         if (!current(generation)) return
         receiverPairJob?.cancel(); val ticket = receiverPairLifetime.begin()
-        challenge = null; pairingOpening = true; syncPairingRestriction()
+        challenge = null; pairingExpired = false; pairingOpening = true; syncPairingRestriction()
+        val startedAt = SystemClock.elapsedRealtime()
         receiverPairJob = scope.launch {
             try {
                 val result = api!!.pairStart(bound, installation.secret)
-                if (current(generation) && target == bound && receiverPairLifetime.accepts(ticket)) { challenge = result; pairingOpening = false; syncPairingRestriction() }
+                if (current(generation) && target == bound && receiverPairLifetime.accepts(ticket)) {
+                    val expiry = RemoteChallengeExpiry(startedAt, result.getValue("expires_in_ms").jsonPrimitive.long)
+                    val remaining = expiry.remaining(SystemClock.elapsedRealtime())
+                    pairingOpening = false
+                    if (remaining <= 0) pairingExpired = true else challenge = result
+                    syncPairingRestriction()
+                    if (remaining > 0) {
+                        delay(remaining)
+                        if (current(generation) && target == bound && receiverPairLifetime.accepts(ticket)) { challenge = null; pairingExpired = true; syncPairingRestriction() }
+                    }
+                }
             } catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) { if (current(generation) && receiverPairLifetime.accepts(ticket)) { pairingOpening = false; status = "Pairing unavailable."; syncPairingRestriction() } }
         }
@@ -276,7 +339,7 @@ internal class RemoteClientModel(private val app: Context) {
         val bound = target ?: return; val installation = receiver ?: return; val generation = lifecycle
         if (!current(generation)) return
         val ticket = receiverPairLifetime.begin() // approval owns this visible pairing surface
-        receiverPairJob?.cancel(); receiverPairJob = null; pairingOpening = false
+        receiverPairJob?.cancel(); receiverPairJob = null; pairingOpening = false; challenge = null; pairingExpired = false; syncPairingRestriction()
         scope.launch {
             try {
                 api!!.pairApprove(bound, RemoteWire.uuid(pending.string("pending_id")), allowed, installation.secret)
