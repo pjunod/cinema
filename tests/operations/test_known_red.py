@@ -127,6 +127,10 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/http/remote/live_fixture.rs::http::remote::live_fixture::"
             "remote_live_server_fixture"
         ] = "explicit loopback-only synthetic acceptance server; stops by file, Ctrl-C or one hour"
+        additional_fixture_reasons[
+            "crates/plurx-core/src/transcode/encoder.rs::transcode::encoder::tests::"
+            "benchmark_real_cpu_emits_a_complete_positive_measurement"
+        ] = "requires a real FFmpeg with libx264"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -134,8 +138,8 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 4)
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 28)
+        self.assertEqual(len(additional_fixtures), 5)
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 29)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

@@ -10,6 +10,30 @@ source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
 source_anchor = "guard !blocked else { return .restrictedSurface }"
 test = "clients/apple/Tests/RemoteNavigationTests.swift"
 test_anchor = "testRestrictedModalFencesAllActionsAndSensitiveState"
+[[fixes]]
+id = "apple.tv-theater-preserves-classic-preference"
+commits = ["f69f8ae94"]
+source = "clients/apple/Sources/SettingsStore.swift"
+source_anchor = 'get { TvHomeLayout(rawValue: defaults.string(forKey: Key.tvHomeLayout) ?? "") ?? .classic }'
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testClassicRemainsDefaultAndTheaterPersistsIndependently"
+
+[[fixes]]
+id = "apple.tv-theater-video-feature-and-shelf-preservation"
+commits = []
+supplements = "apple.tv-theater-preserves-classic-preference"
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "if let item = continueWatching.first(where: video) {"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testTheaterFeaturesVideoWithoutDroppingOtherContinueWatchingItems"
+
+[[fixes]]
+id = "apple.tv-theater-skips-unavailable-files"
+commits = ["6dec4b114"]
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "guard let file = detail.files?.first(where: { $0.available != false }) else { return nil }"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testTheaterPlaybackSkipsUnavailableFilesAndRejectsUnavailableTitles"
 
 # 2026-10-06 — fix(sharing): bound initial Apple successor parking.
 # Current regression definitions for 39a72929; execution qualification is

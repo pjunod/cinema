@@ -273,7 +273,14 @@ Tier 1 is honest old-Plex compatibility on day one: a Kodi box or the `plexapi` 
 
 Classic, Catalog and Theater retain their original web Home compositions.
 Native Home also uses its original featured cards, media shelves and platform
-navigation. Apple TV retains its shared card-clipping repairs.
+navigation. Apple TV retains its shared card-clipping repairs and defaults to
+**Classic**, the existing media shelves. Settings → Appearance → Home layout
+also offers **Theater**: a wide backdrop, title, synopsis, Play/Resume and
+Details above the same shelves. The choice persists on the device, independently
+of theme, library grouping and Live TV layout. Theater features the first video
+in Continue Watching, falling back to the first recently added video; books,
+photos and show/season containers stay on their shelves. A featured Continue
+Watching title is omitted from that shelf only while Theater is selected.
 Global Recently added excludes DVR libraries before the server limit. The
 [revision record](clients/CALM-LIBRARY-PAGES.md) records the web Home restoration
 and the Apple and Android restoration, and the web item page's return to its

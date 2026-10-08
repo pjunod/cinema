@@ -50,6 +50,40 @@ PREUNIT_UPLOAD4324 = {
     },
 }
 
+# Both attempts of this one run refused in prepare. The second attempt must
+# never hide execution by the first: authenticate both original task logs.
+PREUNIT4431 = {
+    'repository': 1, 'pr': 888, 'run': 4431, 'job': 44940,
+    'commit': 'd05da1109708c4c9574899018c314603b2040f1b',
+    'base': 'b3ac74a161a3a0d1b9836ac98d356a9aaea51de6',
+    'branch': 'codex/avatar-apple-tv-resume',
+    'sources': {
+        'validation/__init__.py': '347a3ad6f8a7cdabc285fac0bdd906d7c579115edebde81b08fad15426de5b4e',
+        'validation/main_unit_receipts.py': '979b65c62c70d0b51299df9c36e56ba83da6b4c129e13014759b9c2a1a38b7a2',
+        'validation/main_preflight_adoption.py': '0816a274932a8e3bd89f27bf24c5a571d63613280529955551753c64e6208b2e',
+        'validation/python_unit_receipts.py': '8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258',
+        'validation/main-preflight-inputs.json': '7261bb1597fe9706775353d44c5366638716505f032758a49cbe90d6477131e9',
+        '.github/workflows/main-fast-lane.yml': '414ba7aa7885a52cca54f0b0f80fbf6feaa03e94c17f241846a0696e414979b2',
+    },
+    'attempts': (
+        (1, 16781, 142318, '8b8f7ce7b1987a3760c6eed90c1bb62b0d7868c869e922777c5297e0fd53c2b8',
+         'Missing final journal for prior attempt 4429; preserve possibly passed IDs'),
+        (2, 16793, 142964, '99580c2e2b36b35c0d940ba789f48c9942f604036be06bdfd3b835b92907e7a7',
+         'Dispatch fresh runs; never rerun jobs'),
+    ),
+    'jobs': (
+        (44938, 'fast-lane validation scope', 16791, 'success'),
+        (44939, 'fast-lane mobile release version', 16792, 'success'),
+        (44940, JOB, 16793, 'failure'),
+        (44941, 'fast Rust gate', 16794, 'skipped'),
+        (44942, 'fast Windows compile', 0, 'skipped'),
+        (44943, 'fast web syntax gate', 0, 'skipped'),
+        (44944, 'fast Apple compile', 0, 'cancelled'),
+        (44945, 'fast Android compile', 0, 'skipped'),
+        (44946, 'Main promotion gate', 0, 'cancelled'),
+    ),
+}
+
 
 def identity(api, pr, commit):
     repository = receipts.positive(api.get('')['id'])
@@ -69,7 +103,8 @@ def key(scope):
 
 def source(commit, path):
     require(re.fullmatch(r'tests/(validation|operations)/test_[a-z0-9_]+\.py', path)
-            or path in ('.github/workflows/' + WORKFLOW, 'Makefile', *LEGACY_RUNNER_HASHES), 'Unsafe historical source path')
+            or path in ('.github/workflows/' + WORKFLOW, 'Makefile', *LEGACY_RUNNER_HASHES,
+                        *PREUNIT4431['sources']), 'Unsafe historical source path')
     if path.startswith('tests/'):
         return receipts.read_git_test_source(commit, path)
     object_name = f'{receipts.sha(commit)}:{path}'
@@ -363,6 +398,80 @@ def verbose_passes(lines, inventories, inherited):
     return passes
 
 
+def recover_preunit4431(api, scope, prior, jobs):
+    """Account for two exact prepare refusals; import no journal or outcomes."""
+    from validation import main_preflight_adoption as adoption
+    proof = PREUNIT4431
+    if (scope.get('repository'), scope.get('pr'), prior['id']) != (proof['repository'], proof['pr'], proof['run']):
+        return False
+    expected_scope = {'repository': proof['repository'], 'pr': proof['pr'], 'branch': proof['branch'],
+                      'base': 'main', 'workflow': WORKFLOW}
+    require(all(scope.get(field, value) == value for field, value in expected_scope.items()),
+            'Prepare4431 receipt scope mismatch')
+    actual = api.get(f"/actions/runs/{proof['run']}")
+    require(actual['id'] == prior['id'] == proof['run']
+            and actual['commit_sha'] == prior['commit_sha'] == proof['commit']
+            and adoption.terminal_status(actual) == adoption.terminal_status(prior) == 'cancelled',
+            'Prepare4431 terminal run/source mismatch')
+    event_scope = {'repository': proof['repository'], 'pr': proof['pr']}
+    event = adoption.bind_event(actual, event_scope)
+    require(event == adoption.bind_event(prior, event_scope)
+            and event['action'] == 'synchronized'
+            and event['pull_request']['head']['ref'] == proof['branch']
+            and event['pull_request']['base']['sha'] == proof['base'],
+            'Prepare4431 original event/branch/base mismatch')
+    require(len(jobs) == len(proof['jobs'])
+            and all(type(job['id']) is int and type(job['task_id']) is int
+                    and type(job['attempt']) is int and job['attempt'] == 2
+                    and job['run_id'] == proof['run'] and job['repo_id'] == proof['repository'] for job in jobs)
+            and tuple(sorted((job['id'], job['name'], job['task_id'], adoption.terminal_status(job))
+                             for job in jobs)) == proof['jobs'],
+            'Prepare4431 complete terminal job/task/attempt inventory mismatch')
+    for path, digest in proof['sources'].items():
+        raw = source(proof['commit'], path)
+        require(hashlib.sha256(raw).hexdigest() == digest
+                and raw == api.bytes('/raw/' + path, {'ref': proof['commit']}),
+                'Prepare4431 immutable producer/workflow/runtime mismatch')
+    # Forgejo 16's documented job-log endpoint accepts an explicit attempt.
+    # The ordinary endpoint defaults to the latest task and cannot prove the
+    # first attempt. Exact hashes also bind the runner and task identities.
+    skipped = ["skipping post step for '" + step + "'; main step was skipped" for step in (
+        'Preserve per-ID preflight journal even on failure',
+        'Preserve main Python success journal even on unit failure',
+        'Publish preflight attempt-start journal',
+        'Publish main Python attempt-start marker',
+    )]
+    for attempt, task, size, digest, reason in proof['attempts']:
+        raw = api.bytes(f"/actions/jobs/{proof['job']}/logs", {'attempt': attempt})
+        require(len(raw) == size and hashlib.sha256(raw).hexdigest() == digest,
+                f'Prepare4431 attempt {attempt} original complete log mismatch')
+        lines = log_lines(raw)
+        refusal = 'Main Python receipt refused: ' + reason
+        log = '\n'.join(lines)
+        require(raw.endswith(b'\n') and lines[-1] == f"Job '{JOB}' failed"
+                and lines.count(refusal) == 1 and all(lines.count(line) == 1 for line in skipped)
+                and [lines.index(line) for line in skipped] == sorted(lines.index(line) for line in skipped)
+                and lines.index(refusal) < lines.index(skipped[0])
+                and proof['commit'] + f":refs/remotes/pull/{proof['pr']}/head" in log
+                and sum(f'received task {task} of job preflight, triggered by event: pull_request' in line
+                        for line in lines[:lines.index(refusal)]) == 1
+                and 'node: v22.23.2' in lines[:lines.index(refusal)]
+                and not any(marker in log for marker in (
+                    'MAIN-UNIT-', 'Main preflight outcome ', 'Authenticated candidates=',
+                    'discovered=', 'pending=', 'has been successfully uploaded!',
+                    '... ok', '... FAIL', '... ERROR', 'TAP version '))
+                and not any(re.fullmatch(r'Ran \d+ tests? in .*', line) for line in lines),
+                f'Prepare4431 attempt {attempt} contradicts reviewed zero-unit phase evidence')
+    require(api.get(f"/actions/runs/{proof['run']}/artifacts") == [],
+            'Prepare4431 unexpectedly has run artifacts')
+    for name in (key(expected_scope), f"main-preflight-v1-r{proof['repository']}-pr{proof['pr']}"):
+        require(not any(item['run_id'] == proof['run'] for item in api.pages('/actions/artifacts', {'name': name}))
+                and not api.pages('/actions/artifacts', {'name': name + f"-start-{proof['run']}"}),
+                'Prepare4431 unexpectedly has start/final artifacts')
+    print('Accounted run4431/job44940 attempts1+2: zero units; no outcomes or journal imported')
+    return True
+
+
 def recover_preunit_upload4324(api, scope, prior, job):
     """Return the actual incomplete start only; authenticate origins elsewhere."""
     from validation import main_preflight_adoption as adoption
@@ -548,6 +657,9 @@ def restore(api, scope, current_run, applicability, bridge=None):
             require(rid not in indexed, 'Attempt already executed')
             continue
         jobs = api.pages(f'/actions/runs/{rid}/jobs')
+        if recover_preunit4431(api, scope, prior, jobs):
+            require(rid not in indexed, 'Prepare4431 unexpectedly has indexed final journal')
+            continue
         matches = [job for job in jobs if job['name'] == JOB]
         require(len(matches) == 1, 'Ambiguous main preflight job')
         job = matches[0]

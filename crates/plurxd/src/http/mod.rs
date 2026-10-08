@@ -495,6 +495,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/settings"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
+        | "/api/v1/developer/macos-video-processing/reprobe"
         | "/api/v1/scan"
         | "/api/v1/scan/status"
         | "/api/v1/scan/requests/{id}"
@@ -1501,6 +1502,10 @@ pub fn router(state: AppState) -> Router {
         // process can currently observe. Nothing reads it to decide
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
+        .route(
+            "/developer/macos-video-processing/reprobe",
+            post(developer::reprobe_macos_video),
+        )
         .merge(library_channels::collection_router())
         .nest("/library-channels", library_channels::router())
         .nest("/dvr", dvr::router())
@@ -1729,7 +1734,7 @@ pub fn router(state: AppState) -> Router {
         .route("/system/storage", post(system::remeasure_storage))
         .route(
             "/system/transcoder",
-            put(system::update_hardware_preference),
+            put(system::update_hardware_preference).post(system::optimize_transcoder),
         )
         .route(
             "/system/search-index/rebuild",
@@ -4974,6 +4979,8 @@ mod tests {
         assert_exact_store_inventory(
             include_str!("images.rs"),
             &[
+                "shared_materialize_original:store.source_art_snapshot",
+                "shared_artwork_asset:store.source_art_snapshot",
                 "sweep_content_orphans:store.referenced_artwork_filenames",
                 "sweep_content_orphans:store.artwork_filename_is_referenced",
                 "sweep_content_orphans:store.prune_unreferenced_book_cover_origins",
@@ -5128,6 +5135,93 @@ mod tests {
             runtime_cache: base.join("runtime"),
             renditions: base.join("renditions"),
         }
+    }
+
+    #[tokio::test]
+    async fn macos_processing_choice_persists_without_runtime_readiness() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        for enabled in [false, true, false, true] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    serde_json::json!({"macos_video_processing_enabled": enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["macos_video_processing_enabled"], enabled);
+            assert_eq!(state.transcode.macos_video_processing_enabled(), enabled);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED)
+                    .await
+                    .expect("Mac processing regression fixture or settings lookup")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+            let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+            let item = readiness["items"]
+                .as_array()
+                .expect("Mac processing regression fixture or settings lookup")
+                .iter()
+                .find(|item| item["id"] == "macos_video_processing")
+                .expect("Mac processing regression fixture or settings lookup");
+            assert_eq!(item["enabled"], enabled);
+            assert_eq!(item["requirements"][2]["status"], "unobservable");
+        }
+        // Reload durable choice independently of observation state.
+        state.transcode.set_macos_video_processing_enabled(false);
+        state.transcode.publish_macos_video_processing().await;
+        assert!(state.transcode.macos_video_processing_enabled());
+    }
+
+    #[tokio::test]
+    async fn macos_processing_reprobe_requires_admin_and_preserves_saved_choice() {
+        let (app, state) = test_app_with_state();
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/developer/macos-video-processing/reprobe",
+                None,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let admin = setup_admin(&app).await;
+        state
+            .transcode
+            .apply_macos_video_processing_setting(true)
+            .await
+            .expect("Mac processing regression fixture or settings lookup");
+        // Settle through the real cancellation branch; no hardware child runs.
+        state.shutdown.cancel();
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/developer/macos-video-processing/reprobe",
+                Some(&admin),
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["accepted"], true);
+        state.transcode.reprobe_macos_video(&state.shutdown).await;
+        assert!(state.transcode.macos_video_processing_enabled());
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED)
+                .await
+                .expect("Mac processing regression fixture or settings lookup")
+                .as_deref(),
+            Some("1")
+        );
     }
 
     fn test_app() -> Router {
@@ -10638,6 +10732,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "cinema_sharing",
                 // Jellyfin compatibility: one advisory row (pinned-client
                 // qualification) that never gates the switch.
                 "jellyfin_compatibility",
@@ -10732,6 +10827,7 @@ mod tests {
                         | "durable_capacity"
                         | "durable_scratch"
                         | "probe_reporter_named"
+                        | "sources_match_their_scan_whole"
                         | "stored_source_self_test"
                         | "stored_source_local_cache"
                         | "stored_source_free_space"
@@ -10811,7 +10907,6 @@ mod tests {
                 "runtime",
                 "server_preparation_is_real",
                 "source_fencing",
-                "sources_match_their_scan_whole",
                 "stored_source_producer",
                 "tuner_reserve",
                 "watch_floor"
@@ -11309,6 +11404,41 @@ mod tests {
             !state.transcode.dv_convert_enabled().await,
             "the transcoder reads the switch, not the value this process booted with"
         );
+    }
+
+    #[tokio::test]
+    async fn transcoder_optimization_is_admin_only_node_scoped_and_admitted() {
+        let (app, state) = test_app_with_state();
+        let request = json!({"node_id": state.node_id});
+        assert_eq!(
+            call(&app, post("/api/v1/system/transcoder", None, request))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    "/api/v1/system/transcoder",
+                    Some(&admin),
+                    json!({"node_id":"different-node"})
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        let permit = state
+            .transcode
+            .admit_transcoder_benchmark()
+            .await
+            .expect("idle admission");
+        assert!(state.transcode.admit_transcoder_benchmark().await.is_none());
+        assert!(!state.transcode.pretranscode_worker_idle());
+        drop(permit);
+        assert!(state.transcode.pretranscode_worker_idle());
     }
 
     #[tokio::test]
@@ -11850,6 +11980,7 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             [
                 "analysis",
+                "clustered",
                 "deliveries",
                 // Recording and Live TV both run on one unreplicated node, so
                 // their keys are in the base payload rather than behind the
@@ -11873,6 +12004,10 @@ mod tests {
             .map(str::to_owned)
             .collect(),
             "SQLite includes local analysis and worker health"
+        );
+        assert_eq!(
+            detail["clustered"], false,
+            "SQLite reports its standalone role"
         );
         assert_eq!(detail["analysis"]["enabled"], false);
         assert_eq!(detail["analysis"]["total"], 0);

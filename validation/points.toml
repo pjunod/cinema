@@ -624,6 +624,8 @@ paths = [
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/transcode.rs",
   "crates/plurxd/src/transcode/**",
+  "crates/plurxd/fixtures/macos-processing/**",
+  "crates/plurxd/src/macos_video.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
@@ -871,6 +873,7 @@ paths = [
   "crates/plurx-core/src/segplan.rs",
   "crates/plurx-core/src/output_measurement.rs",
   "crates/plurx-core/src/transcode/**",
+  "crates/plurxd/src/transcoder_optimization.rs",
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
@@ -906,6 +909,7 @@ paths = [
   "docs/evidence/ffmpeg-hls-write-boundary-*.md",
   "docs/streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md",
   "scripts/dv-evidence",
+  "scripts/generate-macos-video-fixtures",
   "scripts/decoder-media-baseline",
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
@@ -1216,6 +1220,7 @@ paths = [
   "scripts/p02-release-cost.py",
   "scripts/p02-release-cost.Dockerfile",
   "scripts/build-static-ffprobe",
+  "scripts/build-macos-video-ffmpeg",
   "scripts/build-static-vmaf-scorer",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
@@ -1225,6 +1230,7 @@ paths = [
   "scripts/release-package-candidate",
   "scripts/package-windows",
   "scripts/{bench,codec-qualification-corpus.json,codec-hdr-score,dv-evidence,gop-census,rolling-grid-census,rolling-grid-acquire,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
+  "scripts/bench-macos-video",
   "scripts/encoder-calibration-screen",
   "scripts/content-aware-encoding",
   "scripts/tone-map-calibration",

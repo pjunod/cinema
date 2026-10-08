@@ -675,6 +675,13 @@ fn principal_bindings(
         if name.starts_with('(') {
             if let Some(close) = name.find(')') {
                 let names = name[1..close].split(',').map(str::trim).collect::<Vec<_>>();
+                if names.len() == 2 && expression.starts_with("principal_lookup(") {
+                    bindings.push((
+                        names[0].to_owned(),
+                        super::hiqlite_sessions::census_principal_lookup(rebuilt),
+                    ));
+                    continue;
+                }
                 let principal_tuple = matches!(
                     names.as_slice(),
                     ["owner_column", "owner"]

@@ -592,6 +592,52 @@ Report exact text of any error; do not retry more than once.
 
 ---
 
+## 8. 2026-10-08 static HTTP sample — not the waterfall or reader bar
+
+At 02:05:40 UTC a bounded, unauthenticated LAN observer acquired the shell
+and five responses each for four assets from the existing media1 deployment.
+The prior 02:00:27 identity read recorded source `8e242787c5112d6ba2bd66b2d30c4dd0a0bbc2a4`,
+container `f491ba50d1f1` and image
+`sha256:e9e82cd3769e2c2023b4bcd6204e8e20ea3e58693c650ecfea896a75785d9836`.
+The four identity bodies equal that source's immutable Git blobs and each
+served version tag equals its SHA-256 prefix. This compares those served
+bytes, not every executable byte or every asset. Other fleet images differ;
+this is not uniform-fleet qualification.
+
+| Sampled asset | Identity body bytes | Gzip body bytes |
+|---|---:|---:|
+| `player/player.js` | 95,884 | 28,540 |
+| `hls.min.js` | 543,243 | 163,207 |
+| `app.css` | 473,076 | 217,031 |
+| `reader.js` sidecar | 19,561 | 5,805 |
+
+For each asset, identity and `gzip;q=0` returned the same bytes without a
+content encoding; gzip decoded to those bytes and had a distinct ETag.
+Both conditional representations returned empty 304s with the matching
+ETag, `Vary: Accept-Encoding` and immutable cache policy: eight actual 304s.
+The shell returned `nosniff`, `Referrer-Policy: same-origin` and CSP
+`frame-ancestors 'none'; base-uri 'none'; object-src 'none'`.
+
+The 21-response sample retained 2,691,202 body bytes in a 0.722542-second
+helper interval. Neither number is browser page weight, a cold/warm median
+or time-to-usable UI. The initial attempt fetched only the shell and stopped
+on a sidecar/page-name ambiguity; its raw body remains preserved, not counted
+as a product failure or silently rewritten as a successful run.
+
+Private receipt SHA-256:
+`d70cf1f2d9f5a5bee14b4991847d4cd7d2b1a0a36fd7ef2e12af4210e6de94ea`.
+One independent Sol 6.1 adversarial evidence review found no actionable
+P1/P2 within this sample, report SHA-256
+`aa66f15689ee218cd1cba6a261311627e3858528f4597a9cb52d0e878f76f92e`.
+Raw bodies, selected response headers, source witnesses and both attempts
+are retained by the architecture coordinator. No units were replayed.
+
+The full §6.3 before/after waterfall, three-run medians and HARs remain
+unproved, as do §6.4 browser/native book paging and §6.2 listener/handler
+soak. A visible Chrome sign-in page is not reader or performance evidence.
+No production deployment, authentication, settings change or full C-01
+Done claim accompanies this sample.
+
 ## Execution log
 
 Executing sessions append one row per milestone PR (see the

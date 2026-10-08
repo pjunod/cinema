@@ -1,11 +1,11 @@
 # Vendored Hiqlite WAL 0.14.0
 
 This directory is the crates.io `hiqlite-wal` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries four patches for replicated SQLite: three
-restart-recovery repairs and one K-06 startup-ownership policy:
+Apache-2.0. Plurx carries six patches for replicated SQLite: three
+restart-recovery repairs and three Plurx policies:
 
-**Owner:** Paul Junod (repository owner). Rows 1-3 are generic bugs; row 4
-is a Plurx policy.
+**Owner:** Paul Junod (repository owner). Rows 1-3 are generic bugs; rows 4-6
+are Plurx policies.
 As of 2026-09-30, row 2 has an accepted upstream mechanism; the two
 `pending M6` rows still need upstream coordination and a real public URL.
 
@@ -15,6 +15,8 @@ As of 2026-09-30, row 2 has an accepted upstream mechanism; the two
 | 2 | Atomic `meta.hql` replacement | generic bug | https://github.com/sebadob/hiqlite/pull/357 | Upstream release syncs and atomically renames same-directory metadata updates. |
 | 3 | WAL incarnation and layout guard | generic bug | pending M6 | Upstream release rejects stale memo/mmap reuse and serializes path reuse with readers. |
 | 4 | K-06 staged WAL construction (`start_staged`, `PartialStartupWriter`) | plurx policy | — | Never; Plurx's cancellable clock-observation start requires a failed constructor to drain its writer, not abandon it. |
+| 5 | Bounded writer-owned WAL runtime status | plurx policy | — | Never; Plurx owns this observational runtime status and its writer lifecycle attribution. |
+| 6 | Read-only stopped-node WAL inspection | plurx policy | — | Never; Plurx requires stopped-node boundary diagnostics without returning application payloads or reopening a writer. |
 
 - Missing `last_purged_log_id` metadata is reconstructed whenever the first
   retained WAL entry is above the initial log range. Snapshot installation can
@@ -56,30 +58,37 @@ As of 2026-09-30, row 2 has an accepted upstream mechanism; the two
   `k06_cancelled_wal_constructor_retains_real_writer_until_drained` and
   `k06_staged_wal_timer_panic_drains_actual_writer_before_error` tests pin it.
 
-**Unledgered fork changes, 2026-10-04:** `src/status.rs` (bounded WAL runtime
-status), `src/inspection.rs` (described below) and the `src/lib.rs` exports
-for both are Plurx code no row above owns yet. `PLURX-FILES.toml` lists those
-three under `unledgered` so the gap stays visible and cannot grow; they need a
-row before this ledger is complete. The status surface is wider than those
-files. Its plumbing also lives in two files the manifest classifies as
-`patched` because rows 1, 3 and 4 name them, though no row describes this
-change: `src/writer.rs` builds the `WalStatusHandle` in `spawn` (about lines
-112-182: the sync-mode label, WAL size and integrity flag it reports, the
-clone handed to the writer thread, `record_error` on a failed writer, and the
-handle returned beside the sender), threads it into `run` (about line 238),
-and records state, sync, compaction, error and stop transitions through the
-writer loop (from about line 304); its two `status_*` tests are there too.
-`src/log_store.rs` carries the handle on `LogStore` and exposes it as
-`status_handle()`. And `Cargo.toml` adds tokio's `macros` feature beside the
-upstream `fs`, `sync` and `rt-multi-thread` in the normal (not dev)
-dependency, which only the `#[tokio::test]` status test in `src/writer.rs`
-uses. A row for the status surface must name all of these.
+- **Row 5 — WAL runtime status:** `src/status.rs` defines a cloneable
+  `WalStatusHandle` over the writer's existing WAL/metadata state. Snapshots
+  report lifecycle state, lock ownership, unclean startup, sync policy,
+  segment allocation, retained/log/purge and writer-reported sync boundaries,
+  transition times and bounded errors. They do not reopen or walk WAL files,
+  return application payloads or certify fsync durability. `src/writer.rs`
+  constructs and returns the handle beside its sender, carries its clone into
+  the writer loop, and records sync, compaction, error and clean-stop
+  transitions. `src/log_store.rs` retains it and exposes `status_handle()`;
+  `src/lib.rs` exports the status types. `Cargo.toml` already enables Tokio
+  `macros` beside `fs`, `sync` and `rt-multi-thread` in the normal dependency
+  for the `#[tokio::test]` status regression in `src/writer.rs`. This row
+  records that existing placement; it does not move or add a feature edge.
+  Files: `src/status.rs`, `src/writer.rs`, `src/log_store.rs`, `src/lib.rs`,
+  `Cargo.toml`.
+- **Row 6 — Stopped-node inspection:** `src/inspection.rs` exposes metadata,
+  physical WAL and decoded Raft log-id boundaries through a read-only
+  diagnostic API exported by `src/lib.rs`. It refuses a live advisory lock,
+  non-regular WAL files and oversized WAL files, checks record CRCs and
+  contiguity, and reports boundary inconsistencies without returning
+  application payloads. It neither starts a writer nor publishes metadata.
+  The `plurx-cluster-check inspect-wal` caller adds immutable SQLite
+  snapshot/applied boundaries and file hashes to its versioned artifact.
+  Files: `src/inspection.rs`, `src/lib.rs`.
 
-The additive `inspection` module is a read-only stopped-node diagnostic
-surface. It refuses a live lock and exposes metadata, WAL, and decoded log-id
-boundaries without returning application payloads. `plurx-cluster-check
-inspect-wal` adds immutable SQLite snapshot/applied boundaries and file hashes
-to its versioned JSON artifact.
+**M1 ledger continuation, 2026-10-08:** rows 5 and 6 own the status and
+inspection surfaces and their existing plumbing previously disclosed as
+unledgered on October 4. `PLURX-FILES.toml` now classifies all three defining
+or export sources as `patched`; the `unledgered` table is empty. This is
+metadata reconciliation, not a new runtime acceptance result, upstream
+disposition or permission to remove a patch.
 
 **Upstream receipt, 2026-09-30:** row 2's PR was accepted at merge
 [`5e93f594bb955449616bcf8f4f6128998944ec42`](https://github.com/sebadob/hiqlite/commit/5e93f594bb955449616bcf8f4f6128998944ec42).
@@ -106,9 +115,9 @@ reproduction, full equivalence, upgrade or patch removal is claimed.
 Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 2 and 3: the `generic bug` kind) have
 met their drop conditions in a release Plurx has upgraded to. Second, the
-`plurx policy` row (row 4) no longer needs a patch: its drop condition is
-`Never` by design, so it leaves only when upstream offers a way to express
-staged writer ownership without patching this source, or when the owner
+`plurx policy` rows (rows 4, 5 and 6) no longer need a patch: their drop
+conditions are `Never` by design, so a row leaves only when upstream offers
+a way to express its policy without patching this source, or when the owner
 records that Plurx no longer needs it as a change to that row. Until then,
 `single_file_snapshot_tail_restores_its_missing_purge_boundary`,
 `interrupted_metadata_replacement_keeps_the_previous_record_readable`, and

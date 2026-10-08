@@ -1,23 +1,23 @@
 # Raspberry Pi installation — Docker by default, native by choice
 
-**Status:** open — installer and Pi namespace probe isolation implemented; qualification in progress · **Written:** 2026-10-07
+**Status:** built — software implementation and bounded Pi application
+acceptance complete; final candidate CI and merge pending · **Updated:** 2026-10-08
 
 Companion to [the decoder implementation](RASPBERRY-PI-IMPLEMENTATION.md)
 and [the live status](RASPBERRY-PI-STATUS.md). This plan closes the installation
 gap: users should not assemble FFmpeg paths, device permissions, systemd
 overrides and a browser themselves. The existing server and web player remain
-the product. The commands below are the implementation contract until the
-status records their acceptance.
+the product. The commands below describe the implemented installation contract.
+[PR #889](http://forge.lan:3000/noirr/plurx/pulls/889) holds the authoritative
+final candidate, retained evidence and pending CI/merge disposition.
 
 Physical acceptance found that Raspberry Pi OS kernel
-`6.18.50+rpt-rpi-2712` omits `CONFIG_SECURITY_LANDLOCK`. Plurx's current protected
-FFprobe launcher requires Landlock, so server playback on that stock kernel
-fails before streaming even though request decoding and browser playback pass.
-Docker shares this host-kernel limitation. A compatible sandbox or kernel is
-still required; these commands do not yet establish a working stock-OS server.
-The Pi namespace backend below addresses this prerequisite without removing
-Landlock from other systems. The PR live status records implementation and
-complete acceptance evidence.
+`6.18.50+rpt-rpi-2712` omits `CONFIG_SECURITY_LANDLOCK`. The Pi-only namespace
+backend addresses that prerequisite without removing Landlock from other
+systems. Docker then exposed a separate procfs mount restriction; section 6
+records the narrow correction. The live status distinguishes merged source
+from actual application acceptance; these commands alone are not playback
+evidence.
 
 ## 1. Decision — containers are the default server deployment
 
@@ -79,6 +79,29 @@ the desktop user, invoking sudo only for package and system configuration.
 The browser never runs as root. `--dry-run` performs no package installation,
 download, service operation, configuration write or hardware probe.
 
+### Existing Compose installations
+
+`make docker-up` remains the server entry point for an existing checkout and
+its `deploy/.env` and Compose overrides. On a verified local ARM64 Raspberry Pi,
+it prepares the same Pi runtime used by `pi-setup`, adds the actual decoder
+devices and protected probe profile, and then starts the resolved Compose
+project. It preserves existing data paths, media mount destinations, ports and
+networks. It does not install or start the HDMI browser; use `pi-setup` for a
+new combined installation.
+
+Pi detection requires the local Linux Docker engine and the host device-tree
+compatible value. A remote Docker context is not configured from the client's
+hardware. `PLURX_DOCKER_GPU=manual` preserves manual GPU device selection;
+the required Pi decoder and probe runtime still accompany a verified Pi
+server. The read-only startup-budget check does not provision runtime assets.
+
+Compose preparation uses a caller-owned cache under
+`~/.cache/plurx/compose-pi` and a root-owned, hash-recorded profile generation
+under `/var/lib/plurx-compose-pi`. It reuses an existing protected profile when
+its contents match the required policy. It never overwrites an operator's
+different profile, relaxes container privileges or claims the existing stack
+as an installer-owned deployment.
+
 ## 3. Runtime and ownership contracts
 
 - Provision required packages automatically. Existing Docker, browser,
@@ -137,6 +160,24 @@ provisioning cannot silently replace an unowned server or browser.
 
 ## 5. Verification and cleanup
 
+Bounded physical acceptance is complete on source `a72212b5b`: automatic
+1080p Main10 direct playback used `V4L2VideoDecoder` and passed tight forward
+and backward seeks. Continuous playback at the default CPU pool of 3 started
+the complete 720p/480p/shared-AAC family with non-root request decoding and
+x264, verified 1280×720 output, resumed seeks at 10.27 s and 3.33 s, and took
+25.25 s to cold-start. Daemon-selected `libplacebo_software` passed a 4K HDR10
+to 1080p picture/tag comparison at 1.57× CPU speed. These bounded checks do not
+establish sustained real-time playback, concurrency/soak or Dolby Vision HDMI.
+The [physical receipt](http://forge.lan:3000/attachments/221bc723-202d-4737-bd7d-6aaf01f6e8c9)
+and [live status](RASPBERRY-PI-STATUS.md) preserve exact results and limits.
+
+All task Pi containers, browsers, compiler processes, native test paths and
+roots were removed; user containers were preserved. UID 999 remains because
+the user's discovery service uses it. Only the image alias retaining the
+user's older image was preserved. Final CI must qualify the current candidate;
+physical acceptance does not replace that gate.
+
+
 Establish the pinned Rust compiler loop before any Rust edits. Compilation,
 source patch application and syntax checks may run during development. Defer
 unit and physical regression execution until final adversarial review, then
@@ -179,8 +220,17 @@ unexpected permission/setup errors do not silently select another backend.
 Bubblewrap creates the Pi probe's user, mount, PID, IPC, UTS and network namespaces.
 Expose only its trusted executable/runtime and held media input, give it
 private temporary storage, and keep the server's database, credentials and
-other processes outside its view. Bubblewrap executes the already-open daemon descriptor through its private
-procfs. The bootstrap verifies its running device/inode against that descriptor
+other processes outside its view. Bubblewrap creates an empty `/proc` and
+read-only binds only its own task directory at `/proc/self`, resolving the
+source after the namespace clone. It executes the already-open daemon
+descriptor through that task's FD view. Docker refused the fresh procfs mount,
+with a contemporaneous kernel `Mount too revealing` message. Locked masked
+proc children are the explanation supported by
+[Linux 6.18 mount source](https://github.com/torvalds/linux/blob/v6.18/fs/namespace.c#L5820);
+the exact kernel call
+stack has not been traced. The own-task bind keeps those masks and the
+container policy intact without exposing the container's full procfs.
+The bootstrap verifies its running device/inode against that descriptor
 before the parser starts, avoiding a per-probe copy of the large daemon. The bootstrap executes synchronously before the
 daemon runtime initializes. It installs the existing one-shot seccomp
 supervisor contract and executes the sealed parser descriptor. This preserves
@@ -190,6 +240,14 @@ The parser runs as namespace PID 1, so no unsandboxed init peer remains visible
 and the kernel kills its descendants when it exits. Bubblewrap 0.8 in the container and 0.12 on the native acceptance OS must both
 be supported; descriptor inheritance and namespace-child cleanup need direct
 evidence, not an assumption from command-line compatibility.
+
+The bound task remains the parser's PID 1 after a parser fork: `/proc/self`
+continues to identify that task, within the same untrusted parser domain.
+Its `root` link resolves inside the probe's mount namespace. Numeric process
+directories are absent; bootstrap/control descriptors close before parser
+execution. The hostile-probe regression checks private-marker access through
+the task's `root`, absent parent/PID-1 directories, exact source access through
+FD 3, and the complete inherited FD census.
 
 The Pi container's seccomp policy must retain its pinned Docker default rules
 and add only AArch64 rules needed for the nested namespace setup. The checked-in
@@ -205,7 +263,7 @@ transaction and hash receipts. No additional service or watchdog is introduced.
 |---|---|---|
 | Probe agent, Sol 6.1 | Existing Rust probe launcher, early internal bootstrap and focused Rust regressions | Non-Pi Landlock behavior retained; verified-Pi selection; exact descriptors; filesystem/process/network isolation; bounded failure and cleanup |
 | Setup agent, Sol 6.1 | Pi Bubblewrap package/image, narrow container policy and platform mount, installer ownership and focused operations regressions | Both packaged Bubblewrap versions; non-root nested operation; no broad privileges; rollback/uninstall preserve operator files |
-| Coordinator | This plan/status, integration, compiler loop, review and physical qualification | Native and Docker app-level playback; applicable evidence retained; complete cleanup; merge only after qualification |
+| Coordinator | This plan/status, integration, compiler loop, review and physical qualification | Native and Docker app-level playback; applicable evidence retained; complete cleanup; CI merge authorization is separate from physical acceptance |
 
 Compile committed source with Rust 1.97.1 on Linux before pushing. The earlier
 installer review did not cover this new security scope. Using the user's
@@ -218,3 +276,13 @@ execution, attempts to reach the server's processes/files, inherited descriptor
 identity, cancellation and descendant cleanup. Actual app playback must create
 the protected parser identity and stream on the stock Pi kernel before this
 work is considered accepted.
+
+**Historical prerequisite failures, since resolved:** Paul authorized merging
+PR #851 after its required CI gate passes while
+physical verification continues. This authorization does not establish
+default app playback: the original Docker procfs mount failed with `Operation
+not permitted`, and native session admission separately refused an eight-unit
+720p/480p/shared-AAC family against the default three-unit CPU pool. The narrow
+proc-view follow-up requires review and focused qualification. Any temporary
+pool increase used to measure the actual unchanged recipes is diagnostic
+evidence only, restored after collection, and cannot qualify the defaults.

@@ -5112,6 +5112,7 @@ mod tests {
 #define NR_OPENAT 257
 #define NR_PTRACE 101
 #define NR_PROCESS_VM_READV 310
+#define NR_GETDENTS64 217
 #if defined(__aarch64__)
 #undef NR_READ
 #undef NR_WRITE
@@ -5131,9 +5132,11 @@ mod tests {
 #undef NR_OPENAT
 #undef NR_PTRACE
 #undef NR_PROCESS_VM_READV
+#undef NR_GETDENTS64
 #define NR_OPENAT 56
 #define NR_PTRACE 117
 #define NR_PROCESS_VM_READV 270
+#define NR_GETDENTS64 61
 #define NR_READ 63
 #define NR_WRITE 64
 #define NR_CLOSE 57
@@ -5323,6 +5326,45 @@ void probe_main(unsigned long *stack) {
 #elif PROBE_MODE == 7
     if (syscall6(NR_OPENAT, -100, (long)PROBE_PRIVATE_PATH, 0, 0, 0, 0) >= 0) finish(96);
     if (syscall6(NR_OPENAT, -100, (long)PROBE_PARENT_ROOT_PATH, 0, 0, 0, 0) >= 0) finish(97);
+    if (syscall6(NR_OPENAT, -100, (long)("/proc/self/root" PROBE_PRIVATE_PATH), 0, 0, 0, 0) >= 0) finish(100);
+    if (syscall6(NR_OPENAT, -100, (long)PROBE_PARENT_PROC_PATH, 0, 0, 0, 0) >= 0) finish(101);
+    if (syscall6(NR_OPENAT, -100, (long)"/proc/1", 0, 0, 0, 0) >= 0) finish(102);
+    // Enumerate all inherited capabilities, not just low-numbered bootstrap
+    // and supervisor FDs. The directory opened for this check is the sole
+    // allowed descriptor above the held source/parser pair.
+    long directory = syscall6(NR_OPENAT, -100, (long)"/proc/self/fd", 0, 0, 0, 0);
+    if (directory < 0) finish(103);
+    char entries[4096];
+    for (;;) {
+        long count = syscall6(NR_GETDENTS64, directory, (long)entries, sizeof(entries), 0, 0, 0);
+        if (count < 0) finish(104);
+        if (count == 0) break;
+        for (long offset = 0; offset < count;) {
+            if (count - offset < 20) finish(105);
+            unsigned short size = *(unsigned short *)(entries + offset + 16);
+            if (size < 20 || size > count - offset) finish(106);
+            const char *name = entries + offset + 19;
+            long fd = 0;
+            long index = 0;
+            while (19 + index < size && name[index] >= '0' && name[index] <= '9') {
+                if (fd > 214748364) finish(107);
+                fd = fd * 10 + name[index++] - '0';
+            }
+            if (index > 0 && (19 + index >= size || name[index] != 0 || (fd > 4 && fd != directory))) finish(108);
+            offset += size;
+        }
+    }
+    syscall6(NR_CLOSE, directory, 0, 0, 0, 0, 0);
+    if (!(argc > 1 && same(argv[1], "-version"))) {
+        long source_fd = syscall6(NR_OPENAT, -100, (long)"/proc/self/fd/3", 0, 0, 0, 0);
+        if (source_fd < 0) finish(109);
+        char source[64];
+        long count = syscall6(NR_READ, source_fd, (long)source, sizeof(source) - 1, 0, 0, 0);
+        if (count != 23) finish(110);
+        source[count] = 0;
+        if (!same(source, "production-bound source")) finish(111);
+        syscall6(NR_CLOSE, source_fd, 0, 0, 0, 0, 0);
+    }
     if (syscall6(NR_PTRACE, 0, 0, 0, 0, 0, 0) != -1) finish(98);
     if (syscall6(NR_PROCESS_VM_READV, PROBE_PARENT_PID, 0, 0, 0, 0, 0) != -1) finish(99);
 #elif PROBE_MODE == 8 || PROBE_MODE == 9
@@ -5379,6 +5421,10 @@ void probe_main(unsigned long *stack) {
                 )
             ))
             .arg(format!("-DPROBE_PARENT_PID={}", std::process::id()))
+            .arg(format!(
+                "-DPROBE_PARENT_PROC_PATH={:?}",
+                format!("/proc/{}", std::process::id())
+            ))
             .arg(&source)
             .arg("-o")
             .arg(path)

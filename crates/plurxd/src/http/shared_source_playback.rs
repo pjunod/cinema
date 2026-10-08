@@ -580,15 +580,18 @@ impl SourceStartEntry {
         // Disconnect loses only the HTTP waiter, never this actual obligation.
         let handle = tokio::spawn(async move {
             let result = async {
-                if let Some(assignment) = ingress::actual_assignment(&entry) {
-                    ingress::retire_custody(&state, &assignment, deadline)
-                        .await
-                        .map_err(|_| SourceStartFailure::Unresolved)?;
-                    entry.changed.notify_waiters();
-                }
+                // A live actor must request retirement before waiting for its
+                // ingress writers: held response bodies finish on that signal.
+                // The actor settles their custody before releasing its SQL row.
                 let owned = match entry.wait(deadline).await {
                     Ok(owned) => owned,
                     Err(_) => {
+                        if let Some(assignment) = ingress::actual_assignment(&entry) {
+                            ingress::retire_custody(&state, &assignment, deadline)
+                                .await
+                                .map_err(|_| SourceStartFailure::Unresolved)?;
+                            entry.changed.notify_waiters();
+                        }
                         let (incarnation_id, confirmation_id) =
                             entry.release_uninvoked(&state).await?;
                         return Ok(SourceEndReceipt {
@@ -3974,11 +3977,24 @@ mod tests {
                 .await
                 .expect("actual End response")
         });
+        tokio::time::timeout(Duration::from_secs(8), connection.drain_token().cancelled())
+            .await
+            .expect("End requests graceful writer drain");
+        assert!(!connection.closed().is_closed());
+        assert_ne!(owned.actor.settlement_status(), Some(Ok(())));
+        probe.gate.store(false, Ordering::SeqCst);
+        probe.writer_waker.wake();
         let response = tokio::time::timeout(Duration::from_secs(15), ending)
             .await
             .expect("actual VTT writer and physical settlement")
             .expect("End task");
-        assert_eq!(response.status(), StatusCode::OK);
+        let status = response.status();
+        if status != StatusCode::OK {
+            panic!(
+                "End response {status}: {}",
+                response.text().await.expect("End failure body")
+            );
+        }
         assert!(entry
             .ending
             .lock()
@@ -4738,19 +4754,13 @@ mod tests {
             .expect("wrong End");
         assert_eq!(denied.status(), StatusCode::CONFLICT);
         assert!(entry.ending.lock().expect("End owner").is_none());
-        // This is an actual actor-created metadata Body guard, not a projected
-        // readiness flag. End cannot certify terminal settlement while held.
-        let held = fixture_start(
-            axum::extract::State((*fixture.state).clone()),
-            fixture.headers.clone(),
-            axum::extract::Path((
-                fixture.reference.item_id.as_str().to_owned(),
-                fixture.reference.file_id.as_str().to_owned(),
-            )),
-            axum::body::Body::from(fixture.request.clone()),
-        )
-        .await
-        .expect("held actual Source Body");
+        // Hold the actual actor guard. A returned fixture HTTP response is
+        // already copied client-side and cannot keep Source body debt alive.
+        let (_, held) = owned
+            .actor
+            .open_start_response(Instant::now() + Duration::from_secs(5))
+            .await
+            .expect("held actual Source Body guard");
         fixture
             .state
             .store
@@ -4907,7 +4917,9 @@ mod tests {
             .send()
             .await
             .expect("wrong cleanup principal");
-        assert_eq!(denied.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // The authenticated viewer has no matching retained route; routing
+        // conceals another viewer's cleanup identity as not found.
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
         stop.send(()).expect("stop");
         server.await.expect("server task").expect("shutdown");
         fixture.shutdown().await;
@@ -4961,6 +4973,7 @@ mod tests {
         actor: std::sync::Mutex<Option<crate::transcode::source_actor::SourceViewerActor>>,
         settled_before_drop: std::sync::atomic::AtomicBool,
         gate: std::sync::atomic::AtomicBool,
+        writer_waker: futures_util::task::AtomicWaker,
         blocked: std::sync::atomic::AtomicBool,
         queued_start: std::sync::atomic::AtomicBool,
         dropped: std::sync::atomic::AtomicBool,
@@ -5014,6 +5027,7 @@ mod tests {
                 b"incarnation_id"
             };
             let source_data = bytes.windows(marker.len()).any(|part| part == marker);
+            self.probe.writer_waker.register(cx.waker());
             if self.probe.gate.load(std::sync::atomic::Ordering::SeqCst)
                 && (source_data || self.data_blocked)
             {
@@ -5229,6 +5243,13 @@ mod tests {
             let actor = owned.actor.clone();
             assert_eq!(actor.settlement_status(), None);
             let retire = tokio::spawn(async move { actor.retire().await });
+            tokio::time::timeout(Duration::from_secs(8), connection.drain_token().cancelled())
+                .await
+                .expect("retirement requests graceful writer drain");
+            assert!(!connection.closed().is_closed());
+            assert_ne!(owned.actor.settlement_status(), Some(Ok(())));
+            probe.gate.store(false, Ordering::SeqCst);
+            probe.writer_waker.wake();
             tokio::time::timeout(Duration::from_secs(10), connection.closed().wait())
                 .await
                 .expect("actual accepted writer dropped");
@@ -5732,6 +5753,8 @@ mod tests {
         // The supervisor publishes an outcome only after its worker joined.
         // A failure there handed no actor to this entry, so nothing in this
         // process still works for it.
+        *failed.task.joined.lock().expect("joined failed supervisor") =
+            Some(SourceStartTaskJoined::Returned);
         *failed.result.lock().expect("Source HTTP outcome") =
             Some(Err(SourceStartFailure::Unavailable));
         value["session"]["request_id"] = json!(Uuid::new_v4());

@@ -76,6 +76,58 @@ same ready event/base, original source hashes and 141038-byte raw log SHA-256
 The exact environment refusal, absent unit outcomes and absent start/final/run
 artifacts establish zero execution; no outcome is imported.
 
+### One retried prepare refusal — authenticate both original attempts
+
+PR #888 run4431/job44940 on
+`d05da1109708c4c9574899018c314603b2040f1b` has two attempts. Attempt1,
+task16781, refused prepare while run4429's final journal was unavailable.
+Attempt2, task16793, refused at the prohibition on rerunning jobs. Both ended
+before Python or Node execution and before either start journal was published.
+The run was subsequently cancelled to settle unassigned downstream jobs;
+the preflight job's own outcome remains failure.
+
+The bounded proof in
+[`main_unit_receipts.py`](../../validation/main_unit_receipts.py) authenticates
+the ready PR event, original base and branch, complete terminal nine-job
+inventory, immutable workflow/receipt producers/input manifest, and both
+original task logs. Forgejo 16's documented
+`GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs?attempt=N` selects each
+historical attempt; omitting the query would authenticate only the latest.
+
+| Attempt | Task | Original bytes | SHA-256 |
+|---|---|---|---|
+| 1 | 16781 | 142318 | `8b8f7ce7b1987a3760c6eed90c1bb62b0d7868c869e922777c5297e0fd53c2b8` |
+| 2 | 16793 | 142964 | `99580c2e2b36b35c0d940ba789f48c9942f604036be06bdfd3b835b92907e7a7` |
+
+Each complete log must bind its task and checkout and show its exact prepare
+refusal before all four skipped journal-publication steps and terminal
+failure. Unit outcomes, suite summaries or uploaded artifacts contradict the
+proof. Run artifacts and both receipt families' start/final artifacts must be
+absent. Changed, expired, incomplete or unavailable evidence refuses recovery.
+
+Both receipt readers share this proof before their ordinary missing-journal
+and retry checks. It returns only a zero-execution verdict: no journal,
+success or skip is created. Run4429's actual successes retain their original
+attribution and applicability checks. Other retries remain rejected, and new
+work must use a fresh run with attempt1. The synthetic controls in
+[`test_main_unit_receipts.py`](../../tests/validation/test_main_unit_receipts.py)
+reject a first attempt that executed tests even when the retry refused early.
+
+**How to read output:** `Accounted run4431/job44940 attempts1+2: zero units`
+means both historical attempts were proved empty. It does not grant a passing
+gate or authorize replay of previously passed IDs.
+
+**Adversarial review:** PR #900 received one independent review on
+2026-10-08 against `8445f1a3a46f463445cf117dbbbf0285e99fa1cb`. The reviewer
+confirmed both retained logs' byte counts, hashes, task identities and prepare
+refusals; all six immutable source hashes; the terminal job/task metadata;
+and the documented API attempt parameter. The review found no actionable
+issues and confirmed that the proof imports zero outcomes while unrelated
+retries remain rejected. Live API authentication and the merge gate remain
+required; this review does not replace either.
+
+### Retained outcomes keep their original provenance
+
 The bridge returns full authenticated original provenance before filtering
 current applicability, so changed inputs invalidate a method without losing
 its historical attribution. Only adapter-era runs authenticated by the bridge

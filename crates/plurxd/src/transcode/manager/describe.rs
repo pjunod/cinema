@@ -169,6 +169,44 @@ impl TranscodeManager {
         self
     }
 
+    /// Benchmarks share the background lane and reserve the software budget so
+    /// production demand can preempt them before it waits for an encode slot.
+    pub(crate) async fn admit_transcoder_benchmark(
+        &self,
+    ) -> Option<(
+        tokio::sync::MutexGuard<'_, ()>,
+        tokio::sync::OwnedSemaphorePermit,
+        crate::admission::TranscodePermit,
+    )> {
+        if !self.pretranscode_worker_idle() {
+            return None;
+        }
+        let lane = self.background_producer.try_lock().ok()?;
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
+        let budget = self.software_budget().await;
+        let estimate = crate::admission::TranscodeResourceEstimate {
+            hardware_slot: self.caps.nvenc
+                || self.caps.qsv
+                || self.caps.vaapi
+                || self.caps.videotoolbox,
+            cpu_threads: budget.max(crate::transcoder_optimization::benchmark_threads()),
+            decoder_threads: None,
+        };
+        let permit = self.admissions.try_admit_bundle(
+            self.max_hw_sessions().await,
+            budget,
+            &estimate,
+            Priority::Background,
+        )?;
+        Some((lane, heavy, permit))
+    }
+
+    pub(crate) fn transcoder_benchmark_must_yield(&self) -> bool {
+        self.pretranscode_publication_yield_reason().is_some()
+    }
+
     /// Choose the encoder given the admin preference setting (empty = auto).
     pub(super) async fn encoder(&self) -> Encoder {
         let prefer = self
@@ -205,6 +243,68 @@ impl TranscodeManager {
     /// hardware-to-software decoder fallback.
     pub fn automatic_decoder_recovery_enabled(&self) -> bool {
         self.automatic_decoder_recovery.load(Acquire)
+    }
+
+    pub(crate) fn macos_video_processing_enabled(&self) -> bool {
+        self.macos_video_processing_enabled.load(Acquire)
+    }
+
+    pub(crate) fn set_macos_video_processing_enabled(&self, enabled: bool) {
+        self.macos_video_processing_enabled.store(enabled, Release);
+    }
+
+    pub(crate) fn macos_video_report(&self) -> Arc<crate::macos_video::MacosVideoReport> {
+        self.macos_video_probe.snapshot()
+    }
+
+    pub(crate) fn macos_video_diagnostics(&self) -> serde_json::Value {
+        let mut report = self.macos_video_report().diagnostics();
+        report["enabled"] = serde_json::json!(self.macos_video_processing_enabled());
+        report
+    }
+
+    /// The saved choice always publishes, including with pending/unavailable
+    /// runtime observations. Other workers observe replicated writes through
+    /// the existing two-second settings refresh owner.
+    pub(crate) async fn publish_macos_video_processing(&self) {
+        let _serial = self.macos_video_preference_update.lock().await;
+        match self
+            .store
+            .get_setting(keys::MACOS_VIDEO_PROCESSING_ENABLED)
+            .await
+        {
+            Ok(value) => self.set_macos_video_processing_enabled(plurx_core::store::stored_switch(
+                value.as_deref(),
+                false,
+            )),
+            Err(error) => tracing::warn!(target: "plurxd::transcode", %error,
+                "could not refresh saved Mac processing preference; retaining published choice"),
+        }
+    }
+
+    pub(crate) async fn apply_macos_video_processing_setting(
+        &self,
+        enabled: bool,
+    ) -> Result<(), plurx_core::error::StoreError> {
+        let _serial = self.macos_video_preference_update.lock().await;
+        self.store
+            .put_setting(
+                keys::MACOS_VIDEO_PROCESSING_ENABLED,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
+        self.set_macos_video_processing_enabled(enabled);
+        Ok(())
+    }
+
+    pub(crate) async fn reprobe_macos_video(
+        &self,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) {
+        let report = self.macos_video_probe.reprobe(cancelled).await;
+        tracing::info!(target: "plurxd::transcode", generation = report.generation,
+            sdr = report.sdr_scale.reason.as_str(), hdr10 = report.hdr10_metal.reason.as_str(),
+            "completed node-local Mac processing compatibility probe");
     }
 
     /// Apply the Developer switch immediately. It changes only whether a new
@@ -698,6 +798,7 @@ impl TranscodeManager {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            self.publish_macos_video_processing().await;
             match self.refresh_rate_control().await {
                 Ok(Some(_)) => {}
                 Ok(None) => tracing::debug!(

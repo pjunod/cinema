@@ -233,6 +233,17 @@ private struct HomeDashboard: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #if os(tvOS)
+    @AppStorage("plurx.tvHomeLayout") private var tvHomeLayoutRaw = TvHomeLayout.classic.rawValue
+
+    private var theaterFeature: TvTheaterFeature? {
+        TvHomeLayoutPolicy.feature(
+            layout: TvHomeLayout(rawValue: tvHomeLayoutRaw) ?? .classic,
+            continueWatching: model.hubs.continueWatching ?? [],
+            recentlyAdded: model.hubs.recentlyAdded ?? []
+        )
+    }
+    #endif
 
     private var featured: Item? {
         (model.hubs.continueWatching ?? []).first
@@ -327,6 +338,12 @@ private struct HomeDashboard: View {
 
     @ViewBuilder
     private var homeContent: some View {
+        #if os(tvOS)
+        if let theaterFeature {
+            TvTheaterHero(feature: theaterFeature)
+                .padding(.bottom, 12)
+        }
+        #endif
         if HomeLayoutPolicy.usesFeaturedHero, let featured {
             FeaturedHero(item: featured, compact: horizontalSizeClass == .compact)
                 #if os(tvOS)
@@ -338,9 +355,7 @@ private struct HomeDashboard: View {
         MediaRow(
             title: "Continue Watching",
             remoteShelf: "shelf:0",
-            items: HomeLayoutPolicy.continueWatchingShelfItems(
-                model.hubs.continueWatching ?? []
-            ),
+            items: continueWatchingItems,
             style: .landscape,
             landscapeCopyStyle: HomeLayoutPolicy.continueWatchingCopyStyle
         )
@@ -372,6 +387,16 @@ private struct HomeDashboard: View {
             .frame(maxWidth: .infinity)
             .padding(.top, 80)
         }
+    }
+
+    private var continueWatchingItems: [Item] {
+        #if os(tvOS)
+        return TvHomeLayoutPolicy.shelfItems(
+            model.hubs.continueWatching ?? [], feature: theaterFeature
+        )
+        #else
+        return HomeLayoutPolicy.continueWatchingShelfItems(model.hubs.continueWatching ?? [])
+        #endif
     }
 }
 

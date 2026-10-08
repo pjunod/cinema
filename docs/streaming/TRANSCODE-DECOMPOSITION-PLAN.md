@@ -1,6 +1,13 @@
 # Transcode decomposition — behaviour-preserving moves first, redesign later
 
-**Status:** open — M0–M8 on `main` since 2026-10-04 (#793), including the M7 removal transition and joins (M0 to M6 came in through [PR #425](http://forge.lan:3000/noirr/plurx/pulls/425) and [PR #511](http://forge.lan:3000/noirr/plurx/pulls/511); M4 through S-05); learner removal and voter leave are being moved onto the shared `RemovalTransition` in the 2026-10-04 close-out PR; the D-M7 and D-M8 decisions were taken under delegation and await Paul's ratification (see the 2026-10-04 relevance pass §2.15) · **Executes:** §4.1, §4.2, §4.9, F-stream-15,
+**Status:** built — M0–M8 source milestones on `main` through #793;
+#814 completes all three removal consumers. D-M7/D-M8 decisions stand under
+delegated authority, subject to owner reversal; S-05's physical spawn
+acceptance remains open. Registry evaluation is deferred, not measured or
+decided against unification (2026-10-08 continuation below). M0–M6 came
+through [PR #425](http://forge.lan:3000/noirr/plurx/pulls/425) and
+[PR #511](http://forge.lan:3000/noirr/plurx/pulls/511); M4 through S-05.
+**Executes:** §4.1, §4.2, §4.9, F-stream-15,
 F-core-10, F-sc-12, F-hist-13, F-build-ops-codehealth-3 and -14 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (§5.3 "this quarter", size L) · **Written:** 2026-09-20 against `main` @
@@ -397,6 +404,14 @@ in the file:
   decision by Paul. If the answer is "no", the duplication is documented
   as intentional in a module-level comment on both registries.
 
+**2026-10-08 delegated disposition:** defer this optional evaluation outside
+S-14 close-out. No registry unification, new measurement campaign or hot-path
+change is authorized by this record. The retained-session and VOD
+reader/rendition boundaries remain separate; a future unification proposal
+must still measure the four points above. This is not a measured final "no"
+or a performance-benefit claim, so it does not silently satisfy the
+conditional module-comment requirement. No lock timings were obtained here.
+
 ### 3.7 `ControlState::accept_at` → pure step (behaviour-preserving)
 
 Target signature:
@@ -571,6 +586,23 @@ runs its five outcomes for each path, and
 `cluster::membership::tests::self_leave_finalize_is_bounded_and_succeeds_on_timeout`
 pins the bounded finalize.
 
+**2026-10-08 current-source verification:** [#793](http://forge.lan:3000/noirr/plurx/pulls/793)
+carried the removal/join continuation to `main`; [#814](http://forge.lan:3000/noirr/plurx/pulls/814)
+completed the three removal consumers. At `8e242787c`,
+`remove_learner_captured`, `remove_voter_captured` and `leave_voter_captured`
+each call the actual `dispatch_removal_outcome`; the consumer's transition
+step is byte-identical to #814 (SHA-256
+`1c2fb0320a08bf5e2914872b50936591ccbcbbb8e312b25af3acc4f1fe9f06c4`
+for the bytes after its signature prefix through before the next test item).
+Later settings work changed other membership code, not this consumer.
+The original one-release files above were read again: `pid.json` is
+102 bytes and the daily gzip 123,873 bytes, both matching their recorded
+hashes; the first eight rows still prove the two exact-build four-node ticks.
+The corrected agreement commit is an ancestor of that delivered build.
+This verifies the existing prerequisite, not a new release, uninterrupted
+week, current runtime matrix or physical qualification. The original
+removal-only and pending-join notes remain dated historical checkpoints.
+
 **M7 join continuation (2026-10-01, gpt-6.1-sol,
 agent:/root/p02_663_resume_sol61).** The removal implementation landed through
 [#666](http://forge.lan:3000/noirr/plurx/pulls/666). Its prerequisite evidence
@@ -600,8 +632,10 @@ role-step cases live under `lifecycle::join_transition_tests`; the actual
 finalization consumer's effect/error case is
 `cluster::membership::tests::join_finalization_consumer_preserves_failure_and_effect_order`.
 Focused pass receipts, exact current compiler evidence, independent review
-and the effort gate belong to the task PR; this paragraph does not claim
-those pending checks have passed.
+and the effort gate belong to the task PR; this original 2026-10-01
+checkpoint does not claim those then-pending checks passed. The continuation
+is now merged source through #793; its old pending wording is not a new
+permission wait or a current runtime-acceptance receipt.
 
 ### 3.9 Test-seam migration
 
@@ -921,7 +955,7 @@ commits, recorded as a deviation), `Session` and `TranscodeManager` ([#581](http
 each armed through a `seam_hooks::HookSlot`, Decision D-M8-I; separate
 commits, recorded as a deviation), the `http/hls/` route sites behind one
 `AppState`-held `HlsRouteHooks` ([#583](http://forge.lan:3000/noirr/plurx/pulls/583); Decisions D-M8-J and
-D-M8-K). **Next:** the owners
+D-M8-K). **Historical next-owner instruction (2026-09-27):** the owners
 `seam_census_of_the_workspace` still prints (premises in the execution log). One owner
 per PR; each PR migrates the seam,
 keeps the race test through the hook, and adds a release-profile
@@ -933,17 +967,35 @@ owner's `field` and `statement` counts at zero; the race tests it names
 still pass; `cargo test --release -p plurxd <owner>_shipped_shape` green;
 `make unit` green.
 
+**2026-10-08 disposition:** the listed M8 source migrations and D-M8-E
+through D-M8-K choices are built and accepted under the user's delegated
+routine design authority, subject to owner reversal. The original census,
+mutants, shipped-shape receipts and scope narrowing (including D-M8-F)
+remain evidence; the historical next-owner instruction is not a fresh
+workspace-wide backlog or a claim that every later `cfg(test)` site is gone.
+No successful owner/census/release-profile test is replayed for this record.
+Current verification follows §6's amended policy; physical bars remain open.
+
 ## 6. Verification and rollout
 
-- Fast lane: `make unit` on every PR; `make validation-lint` (regression
-  coverage points name test paths); `make operations-check` when a doc
-  path changes.
+- Historical milestone receipts below used `make unit`; current ready-Rust
+  policy is [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md)'s 2026-10-07
+  amendment: all-target compilation and workspace/vendor Clippy in ready
+  Rust, with full `ci.yml` qualification manual or release-tag triggered.
+  Configured coverage independently executes workspace units on `main`
+  pushes. Retain applicable per-PR positives; execute only failed, new or
+  actually invalidated checks. This docs-only reconciliation runs no unit
+  or discovery sweep. For this architecture continuation, the coordinator
+  hands merge-ready work to the batching owner;
+  this document authorizes no worker to merge `main`.
 - Per move PR: the identity script output pasted in the PR body; the
   test-name diff (empty); the `pub(super)` list.
 - Per redesign PR: the named focused test command and its output.
 - Fleet: no rollout step for move PRs beyond the ordinary deploy; the
   binary is the same code. M4 (spawn) is the one milestone with a fleet
-  observation (§5.5). Nothing in this plan needs a setting, a metric or
+  observation (§5.5): the actual text-burn before/after child-environment
+  observation remains S-05 acceptance, not proven by source unification.
+  Nothing else in this plan needs a setting, a metric or
   a device run; if a milestone finds it does, that milestone stops and
   becomes a redesign PR with its own plan.
 - Rollback: revert the PR. Move PRs revert cleanly by construction;
@@ -953,11 +1005,18 @@ still pass; `cargo test --release -p plurxd <owner>_shipped_shape` green;
 
 1. Whether `transcode::tests` should stay `pub(crate)` after H1 or the
    four `hls.rs` callers should get their own fixture; the move keeps the
-   path, the question is for the H1 reviewer.
+   path, the question was for the H1 reviewer. **Answered by landed source,
+   re-verified 2026-10-08:** `transcode::tests` remains `pub(crate)`; this
+   reconciliation preserves the existing fixture access, not a new API.
 2. Whether the `impl TranscodeManager` section comments are complete
    enough to cut T12 into seven files without a method landing in the
    wrong owner; if not, T12 stops at `manager.rs` as one file and the
-   further cut becomes its own PR.
+   further cut becomes its own PR. **Answered by landed source, re-verified
+   2026-10-08:** the parent wires twelve manager child files via `#[path]`:
+   `cache`, `candidates`, `construct`, `control`, `create`, `describe`,
+   `maintenance`, `plan`, `produce`, `publication`, `rolling_retained` and
+   `start`. This is the actual declaration graph, not a literal `manager.rs`
+   tree or an outstanding seven-file permission question.
 3. How many of the 153 `statement` seams are pauses (hook candidates)
    versus one-shot faults (`fail` candidates). **Answered 2026-09-26
    ([#556](http://forge.lan:3000/noirr/plurx/pulls/556)).** The `syn` pass is
@@ -1016,7 +1075,23 @@ still pass; `cargo test --release -p plurxd <owner>_shipped_shape` green;
    gate change buys nothing either binary runs, so the faults stay
    `#[cfg(test)]` one-shot faults, and `dv_disk.rs` leaves M8's list.
 4. Whether Paul wants the §3.6 registry evaluation written at all this
-   quarter, or the duplication documented as intentional now.
+   quarter, or the duplication documented as intentional now. **2026-10-08
+   delegated answer:** defer the optional evaluation (§3.6), preserving all
+   prerequisites for any later unification proposal. No measured final "no",
+   module-comment source edit or performance claim is made here.
+
+**D-M7/D-M8 acceptance (2026-10-08):** retain the original delegated choices
+and their overturn instructions. D-M7 keeps projection-only typed rows and
+real production-SQL fixture agreement, not a production typed-read redesign;
+unread promotion/tombstoned dimensions remain specification checks, not
+production agreement. D-M8-E selects encoding hooks at construction sites;
+F leaves layout-neutral disk faults `cfg(test)`; G chooses control hooks at
+construction; H keeps test-driver commands gated; I uses set-once owner
+slots; J shares the route-group slot through `AppState`; K preserves the
+test/production priming distinction and existing duration delays. These
+choices need no new ratification wait under the user's delegation. They do
+not certify whole-binary identity, replay old evidence or waive S-05's
+physical observation, S-11 fidelity or any other runtime acceptance.
 
 ---
 
@@ -1082,3 +1157,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-28 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Gates | [#596](http://forge.lan:3000/noirr/plurx/pulls/596) | On lab3 in `~/work/hc4` at `5087c7128` (base `cbda012dc`), every `*.rs` under `crates/` and `vendor/` touched and `Compiling plurxd v0.3.0 (~/work/hc4/crates/plurxd)` confirmed: `cargo fmt --all -- --check` exit 0; `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; `cargo test --locked --no-fail-fast -p plurxd` exit 0 (3,071 passed, 15 ignored); `cargo test --locked -p plurx-core output_job_owned_call_sites` exit 0; the moved ignored test run with `--ignored` exit 0; `make history-check` 0, `make validation-lint` 0, validation unittests 0 (248 tests; the owner ledger and census counts read the parent through `validation/rust_modules.py` and did not change), `make operations-check` 0, `make spike-lock-check` 0; `scripts/split-identity origin/main --moves` exit 0. No fleet or device step. |
 | 2026-09-28 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #596 | [#596](http://forge.lan:3000/noirr/plurx/pulls/596) | Answers the single adversarial review ([comment 6083](http://forge.lan:3000/noirr/plurx/pulls/596#issuecomment-6083)); disposition in the PR thread. **Finding 1 (P2):** `--moves` cut each new marker block out of the parent and checked only its `#[path]` line, so code planted inside a block (the reviewer's shadowing `fn capacity_error` in `errors`, or `#[cfg(unix)]` on `mod media_origin`) reported `OK`. Each `ITEM_MOVES` row for a new child now declares its glob's visibility, and the block must be exactly `#[path = "<child>"]`, `mod <name>;` and `<visibility> use <name>::*;`. Both planted edits and a widened glob (`use http_wait::*` to `pub(crate) use`) now exit 1; the real tree still reports `OK`. The script's description now says what it proves and names what it does not (rustfmt normalisation is taken as meaning-preserving; only column-0 lines attach to an item). **Finding 2 (P2):** the M3 remainder row said no moved item is `cfg`-gated at item level; five carry `#[cfg(test)]` and kept it. The row now says no moved item is gated on `unix` or `windows` and lists the five; the PR body is reworded the same way. No shipped code changed. |
 | 2026-10-04 | claude-opus-5-5 | https://claude.ai/code/session_01ENdV5pjk5WztKEXnKHy8YT | M7 removal: learner and self-leave on the shared transition | — | `remove_learner_captured` and `leave_voter_captured` replace their hand-written proposal matches with `dispatch_removal_outcome` (renamed from `dispatch_voter_removal_outcome`), so rejected → exact-attempt rollback, accepted → finalize, ambiguous → survivor reconcile → finalize-or-retain is one state machine for all three removals. Per-path differences are parameters: the reconcile and finalize closures, and `RemovalPath::indeterminate` (learner `RemovalPending`/409; voter and self-leave `Internal`, texts unchanged) and its warn line on a committed-after-ambiguous outcome (field names and messages unchanged). The self-leave finalize keeps its `FINAL_TOMBSTONE_WAIT` bound and Ok-on-timeout through `finalize_self_leave_bounded`. `removal_transition_preserves_proposal_outcomes` now iterates the three paths; `self_leave_finalize_is_bounded_and_succeeds_on_timeout` is new. No SQL, schema, transport or HTTP mapping change. |
+| 2026-10-08 | gpt-6.1-sol | agent:/root/remaining_requirements_audit_sol61 | Source/decision record reconciliation | docs-only continuation on `8e242787c` | Re-verified all three #814 removal consumers, actual twelve manager child declarations, corrected-agreement ancestry and original one-delivery raw hashes. D-M7/D-M8 choices stand under delegated authority, subject to owner reversal; optional registry evaluation is deferred without fabricated measurements or a final measured no. Original authors/census/mutants/release receipts preserved; zero unit/discovery replay or runtime mutation. S-05 physical observation and other acceptance remain open; root hands merge-ready work to the batching coordinator. |

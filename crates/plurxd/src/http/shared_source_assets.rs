@@ -266,7 +266,7 @@ pub(crate) mod tests {
     /// A Source with one granted and one private library, one shared item
     /// whose file is numbered 0, a sealed revision key and an approved grant.
     pub(crate) async fn source_fixture() -> SourceFixture {
-        let directory = tempfile::tempdir().expect("Source fixture directory");
+        let directory = crate::test_tempdir().expect("Source fixture directory");
         let path = directory.path().join("source.sqlite");
         let store: Arc<dyn plurx_core::store::Store> =
             Arc::new(SqliteStore::open(&path).expect("Source store"));
@@ -452,7 +452,13 @@ pub(crate) mod tests {
             call(&fixture, &fixture.headers(), &vtt_suffix()).await,
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
+        let status = response.status();
+        if status != StatusCode::OK {
+            panic!(
+                "asset response {status}: {}",
+                String::from_utf8_lossy(&body(response).await)
+            );
+        }
         assert_eq!(
             response.headers()[axum::http::header::CONTENT_TYPE],
             "text/vtt; charset=utf-8"

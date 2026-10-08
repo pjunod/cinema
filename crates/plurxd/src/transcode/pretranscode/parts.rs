@@ -132,6 +132,7 @@ pub(super) struct ResumedParts {
 pub(super) async fn resume_parts(
     temp: &plurx_core::fs_secure::SecureDirectory,
     plan_digest: &str,
+    macos_completion_sha256: Option<&str>,
 ) -> Result<ResumedParts, String> {
     let mut parts = Vec::new();
     let mut receipts: Vec<crate::decoder_health::ProducerHealthReceipt> = Vec::new();
@@ -175,18 +176,23 @@ pub(super) async fn resume_parts(
         // Read after the part validates, and against the shape validation just
         // measured: a record is only evidence about the bytes that are
         // actually there.
-        receipts.push(
-            resumed_part_health(&dir, plan_digest, &shape)
-                .await
-                .unwrap_or_else(|| {
-                    crate::decoder_health::ProducerHealthReceipt::unobserved(
-                        plan_digest.to_owned(),
-                        // The disposition of the read. The receipt is
-                        // unqualified regardless of it.
-                        crate::decoder_health::ExitDisposition::CleanEnd,
-                    )
-                }),
-        );
+        let retained =
+            resumed_part_health(&dir, plan_digest, &shape, macos_completion_sha256).await;
+        if macos_completion_sha256.is_some() && retained.is_none() {
+            // Media alone cannot prove that its Mac executable survived the
+            // post-child identity fence. Failed cleanup leaves it inadmissible
+            // on every later pass, even if the configured implementation returns.
+            discard_dependent_parts(temp, parts.len(), true).await?;
+            return Ok(ResumedParts { parts, receipts });
+        }
+        receipts.push(retained.unwrap_or_else(|| {
+            crate::decoder_health::ProducerHealthReceipt::unobserved(
+                plan_digest.to_owned(),
+                // The disposition of the read. The receipt is
+                // unqualified regardless of it.
+                crate::decoder_health::ExitDisposition::CleanEnd,
+            )
+        }));
         parts.push(part);
     }
 }
@@ -297,40 +303,78 @@ pub(super) async fn retain_part_health(
     shape: &[(String, u64, i64)],
     receipt: &crate::decoder_health::ProducerHealthReceipt,
 ) {
+    if let Err(error) = retain_part_health_checked(part_dir, shape, receipt, None).await {
+        tracing::warn!(target: "plurxd::transcode", %error, "a part health record could not be retained");
+    }
+}
+
+/// The existing health seal remains intact. This additional seal records the
+/// successful Mac executable fence, independently of diagnostic qualification.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MacPartCompletion {
+    version: u32,
+    ffmpeg_sha256: String,
+    digest: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CompletedPartRecord {
+    #[serde(flatten)]
+    record: plurx_core::transcode::health::RetainedPartReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    macos_completion: Option<MacPartCompletion>,
+}
+
+fn mac_completion_digest(version: u32, ffmpeg_sha256: &str, record_digest: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"plurx-macos-part-completion\0");
+    digest.update(version.to_be_bytes());
+    digest.update(ffmpeg_sha256.as_bytes());
+    digest.update(b"\0");
+    digest.update(record_digest.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+/// Replace any old completion before a Mac child may overwrite the part.
+/// A crash, rejected child, or failed cleanup then leaves a non-admissible record.
+pub(super) async fn invalidate_mac_part_completion(
+    part_dir: &plurx_core::fs_secure::SecureDirectory,
+) -> Result<(), String> {
+    part_dir
+        .atomic_write_child(PART_HEALTH_FILE, b"{}")
+        .await
+        .map_err(|error| format!("invalidating Mac part completion: {error}"))
+}
+
+/// A Mac part may enter this pass or a resumed pass only after this durable
+/// completion write succeeds. Ordinary diagnostic retention stays best effort.
+pub(super) async fn retain_part_health_checked(
+    part_dir: &plurx_core::fs_secure::SecureDirectory,
+    shape: &[(String, u64, i64)],
+    receipt: &crate::decoder_health::ProducerHealthReceipt,
+    macos_completion_sha256: Option<&str>,
+) -> Result<(), String> {
     let part_shape = plurx_core::transcode::health::part_shape_digest(&receipt.plan_digest, shape);
-    let sealed =
-        plurx_core::transcode::health::RetainedPartReceipt::seal(part_shape, receipt.clone())
-            .and_then(|record| {
-                serde_json::to_vec(&record)
-                    .map_err(|error| format!("serializing a retained part receipt: {error}"))
-            });
-    let encoded = match sealed {
-        Ok(encoded) if encoded.len() as u64 <= MAX_PART_HEALTH_BYTES => encoded,
-        Ok(encoded) => {
-            tracing::warn!(
-                target: "plurxd::transcode",
-                bytes = encoded.len(),
-                "a part health record exceeded its bound and was not retained"
-            );
-            return;
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "plurxd::transcode",
-                %error, "a part health record could not be sealed"
-            );
-            return;
-        }
-    };
-    if let Err(error) = part_dir
+    let record =
+        plurx_core::transcode::health::RetainedPartReceipt::seal(part_shape, receipt.clone())?;
+    let macos_completion = macos_completion_sha256.map(|sha256| MacPartCompletion {
+        version: 1,
+        ffmpeg_sha256: sha256.to_owned(),
+        digest: mac_completion_digest(1, sha256, &record.record_digest),
+    });
+    let encoded = serde_json::to_vec(&CompletedPartRecord {
+        record,
+        macos_completion,
+    })
+    .map_err(|error| format!("serializing a retained part receipt: {error}"))?;
+    if encoded.len() as u64 > MAX_PART_HEALTH_BYTES {
+        return Err("a part health record exceeded its bound".to_owned());
+    }
+    part_dir
         .atomic_write_child(PART_HEALTH_FILE, &encoded)
         .await
-    {
-        tracing::warn!(
-            target: "plurxd::transcode",
-            %error, "a part health record could not be written"
-        );
-    }
+        .map_err(|error| format!("writing a retained part receipt: {error}"))
 }
 
 /// Carry forward what earlier passes observed in attempts that produced
@@ -424,13 +468,28 @@ async fn resumed_part_health(
     part_dir: &plurx_core::fs_secure::SecureDirectory,
     plan_digest: &str,
     shape: &[(String, u64, i64)],
+    macos_completion_sha256: Option<&str>,
 ) -> Option<crate::decoder_health::ProducerHealthReceipt> {
     let bytes = part_dir
         .read_bounded_child(PART_HEALTH_FILE, MAX_PART_HEALTH_BYTES)
         .await
         .ok()?;
-    let record: plurx_core::transcode::health::RetainedPartReceipt =
-        serde_json::from_slice(&bytes).ok()?;
+    let completed: CompletedPartRecord = serde_json::from_slice(&bytes).ok()?;
+    if let Some(expected_sha256) = macos_completion_sha256 {
+        let completion = completed.macos_completion.as_ref()?;
+        if completion.version != 1
+            || completion.ffmpeg_sha256 != expected_sha256
+            || completion.digest
+                != mac_completion_digest(
+                    completion.version,
+                    expected_sha256,
+                    &completed.record.record_digest,
+                )
+        {
+            return None;
+        }
+    }
+    let record = completed.record;
     let shape_digest = plurx_core::transcode::health::part_shape_digest(plan_digest, shape);
     record.opened(&shape_digest).cloned()
 }

@@ -45,14 +45,84 @@ let failures = 0, started = 0, finished = 0;
 const QUEUE = [];
 function test(name, run) { QUEUE.push({ name, run }); }
 
-test("node transcoder selector retains an unavailable saved choice and reports pending restart", () => {
+test("node transcoder selector hides unsupported backends and explains the unavailable saved choice", () => {
   const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
   const html = render({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
-  assert.match(html, /value="qsv" selected>Intel Quick Sync — not detected/);
+  assert.doesNotMatch(html, /value="qsv"/);
+  assert.match(html, /saved backend is unavailable/);
+  assert.match(html, /value="auto" selected/);
   assert.match(html, /waiting for this node to restart/);
   assert.match(html, /data-node-id="rog&quot;node"/);
   assert.match(html, /Active: <b>NVIDIA NVENC/);
   assert.doesNotMatch(html, /disabled/);
+});
+
+test("transcoder menu shows every measured speed against CPU and names Auto winner", () => {
+  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
+  const html = render({node_id:"node",hwaccel_pref:"auto",encoder_selected:"Apple VideoToolbox",encoders:{nvenc:true,videotoolbox:true},transcoder_optimization:{report:{measured_at:1,results:[
+    {backend:"software",fps:120,relative_to_cpu:1},
+    {backend:"videotoolbox",fps:480,relative_to_cpu:4}
+  ]}}});
+  assert.match(html, /Auto — Apple VideoToolbox · 480 fps · 4.00× CPU/);
+  assert.match(html, /CPU — 120 fps · 1.00× CPU/);
+  assert.match(html, /Apple VideoToolbox — 480 fps · 4.00× CPU/);
+  assert.doesNotMatch(html, /value="nvenc"/);
+  assert.match(html, />Optimize<\/button>/);
+});
+
+test("transcoder polling discards a response from before leaving and reentering System", async () => {
+  let generation=1, calls=0, resolve;
+  const original={node_id:"node",transcoder_optimization:{running:true}};
+  const data={sys:original};
+  const poll=new Function("settingsCurrent","api","SETTINGS_DATA","document","transcoderCard",`${shippedSource("pollTranscoderOptimization")}\nreturn pollTranscoderOptimization;`)(
+    expected=>generation===expected,
+    ()=>{calls++;return new Promise(done=>{resolve=done;});},data,
+    {getElementById:()=>{throw Error("stale response touched the page");}},()=>"");
+  const pending=poll("node",1);
+  generation=3; // leave System, then return to a new System render
+  resolve({node_id:"node",transcoder_optimization:{running:false}});
+  await pending;
+  assert.equal(data.sys,original);
+  await poll("node",1);
+  assert.equal(calls,1,"obsolete timer generations must not fetch");
+  assert.doesNotMatch(shippedSource("pollTranscoderOptimization"),/setTimeout|setInterval/);
+});
+
+test("Mac processing card preserves enabled choice with unavailable compatibility and names graduation evidence", () => {
+  const render=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("macosVideoProcessingCard")}\nreturn macosVideoProcessingCard;`)(
+      value=>value, title=>title, (id,label,note,on)=>`TOG:${id}:${on}`,
+      ()=>"unavailable", (waiting,destination)=>`${waiting} ${destination}`, name=>`SAVE:${name}`);
+  const html=render({macos_video_processing_enabled:true},{unavailable:"not observed"});
+  assert.match(html,/TOG:pmacosvideo:true/);
+  assert.match(html,/SAVE:saveMacosVideoProcessing/);
+  assert.match(html,/visual checks on a named display/);
+  assert.match(html,/encoded VOD pass seek\/resume/);
+  assert.match(html,/Playback → Advanced server delivery/);
+  assert.doesNotMatch(html,/ disabled(?:[=>\s]|$)/);
+});
+
+test("Mac processing save writes only the operator choice despite unavailable readiness", async () => {
+  const card={outerHTML:""}, button={disabled:false,closest:()=>card}, calls=[];
+  const save=new Function("document","api","cacheSettings","macosVideoProcessingCard","DEVELOPER_READINESS","toast",
+    `${shippedSource("saveMacosVideoProcessing")}\nreturn saveMacosVideoProcessing;`)(
+      {getElementById:id=>id==="pmacosvideo"?{checked:true}:{textContent:""}},
+      async(path,options)=>{calls.push({path,options});return {macos_video_processing_enabled:true};},
+      value=>value, settings=>`SAVED:${settings.macos_video_processing_enabled}`,
+      {unavailable:"runtime unknown"},()=>{});
+  await save(button);
+  assert.deepEqual(calls,[{path:"/settings",options:{method:"PUT",body:{macos_video_processing_enabled:true}}}]);
+  assert.equal(card.outerHTML,"SAVED:true");
+});
+
+test("Mac compatibility reprobe never sends or changes the saved switch", async () => {
+  const calls=[], button={disabled:false};
+  const reprobe=new Function("document","api","applyDeveloperReadiness","toast",
+    `${shippedSource("reprobeMacosVideoProcessing")}\nreturn reprobeMacosVideoProcessing;`)(
+      {getElementById:()=>({textContent:""})},async(path,options)=>{calls.push([path,options]);return {};},()=>{},()=>{});
+  await reprobe(button);
+  assert.deepEqual(calls,[["/developer/macos-video-processing/reprobe",{method:"POST",body:{}}],["/developer/readiness",undefined]]);
+  assert.equal(button.disabled,false);
 });
 
 test("node transcoder save binds the request to the displayed node and preserves the active backend", async () => {
@@ -537,6 +607,7 @@ function developerPanels(){
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       // D6 (2026-10-04): the network priors switch sits beside display Auto.
       shippedSource("networkPriorsCard"),
+      shippedSource("macosVideoProcessingCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
       shippedSource("rateControlCard"),

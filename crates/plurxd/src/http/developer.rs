@@ -228,6 +228,53 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
     }
 }
 
+/// `POST /api/v1/developer/macos-video-processing/reprobe` — admin, bounded,
+/// asynchronous and independent of the preference's Save operation.
+pub(crate) async fn reprobe_macos_video(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let manager = std::sync::Arc::clone(&state.transcode);
+    let cancelled = state.shutdown.clone();
+    let report = manager.macos_video_diagnostics();
+    tokio::spawn(async move {
+        manager.reprobe_macos_video(&cancelled).await;
+    });
+    (
+        axum::http::StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "accepted": true, "report": report,
+            "note": "A bounded worker-local compatibility observation is requested; saved preference and running plans are unchanged"
+        })),
+    )
+}
+
+fn macos_video_processing(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    let report = state.transcode.macos_video_report();
+    let requirement = |id, title, observation: &crate::macos_video::GraphObservation| {
+        DeveloperRequirement {
+        id, title,
+        status: match observation.availability {
+            plurx_core::transcode::MacosProcessingAvailability::Available => RequirementStatus::Met,
+            plurx_core::transcode::MacosProcessingAvailability::Pending => RequirementStatus::Unknown,
+            plurx_core::transcode::MacosProcessingAvailability::Unavailable => RequirementStatus::Unmet,
+        },
+        evidence: format!("This worker's bounded runtime observation is {} (generation {}). Compatibility requires a working /usr/bin/otool dependency inventory (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both tools, and no DYLD override. It is separate from performance, visual and client qualification.", observation.reason.as_str(), report.generation),
+    }
+    };
+    DeveloperEnableItem {
+        id: "macos_video_processing", title: "Mac video processing", enabled: Some(enabled),
+        setting: Some("macos_video_processing_enabled"),
+        requirements: vec![
+            requirement("sdr_scale", "Progressive SDR scaling", &report.sdr_scale),
+            requirement("hdr10_metal", "HDR10 to SDR processing", &report.hdr10_metal),
+            DeveloperRequirement { id: "delivery_qualification", title: "Visual and streaming qualification",
+                status: RequirementStatus::Unobservable,
+                evidence: "This daemon does not hold an exact-implementation display/client, startup, concurrency or soak qualification receipt. Normalized continuous VOD also requires platform-supported bound source and decoder planning; the production bound decoder-probe path is currently unavailable on Mac. Runtime smoke availability never claims these checks passed and never overrides the saved choice.".into() },
+        ],
+    }
+}
+
 /// `GET /api/v1/developer/readiness` — admin, read-only, advisory.
 pub(crate) async fn readiness(
     _admin: AdminUser,
@@ -369,6 +416,8 @@ pub(crate) async fn readiness(
                     DeveloperRequirement { id:"delivery",title:"Native background and notification tap qualification",status:RequirementStatus::Unobservable,evidence:"Physical visible delivery and native tap reauthentication are unverified here. Readiness is advisory; invitations never acquire control or start playback.".into() },
                 ],
             },
+            macos_video_processing(&state, plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED).map(String::as_str), false)),
             cinema_sharing(
                 &state,
                 plurx_core::store::stored_switch(

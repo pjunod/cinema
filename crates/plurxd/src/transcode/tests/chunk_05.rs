@@ -1465,8 +1465,10 @@
 
     // ---- D3 (main-merge defects 2026-10-04): retention containment --------
 
-    /// A real 12 s copy session with retention on. `readrate` 1 keeps the
-    /// producer alive through the test; 0 lets it finish and publish.
+    /// A real 12 s copy session with retention on. `readrate` 1 spaces
+    /// segment capture and reaches EOF within the 30 s publication budget.
+    /// Unpaced publication can legally refuse optional retention when a
+    /// prior capture still owns its gate.
     async fn d3_copy_session(
         readrate: &str,
         retention: bool,
@@ -1552,7 +1554,7 @@
 
     #[tokio::test]
     async fn abandon_is_a_no_op_once_published() {
-        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("0", true).await;
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", true).await;
         let production = session.rolling_provenance.as_ref().expect("production");
         let artifact = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
@@ -1613,7 +1615,7 @@
     #[tokio::test]
     async fn release_is_refused_for_a_reader_but_not_for_the_producer() {
         use crate::vodserve::retained::RetainedRelease;
-        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("0", true).await;
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", true).await;
         let production = session.rolling_provenance.as_ref().expect("production");
         let nonce = session.rolling_collection.as_ref().expect("collection").nonce_for_test();
         let reader = tokio::time::timeout(Duration::from_secs(30), async {
@@ -1646,7 +1648,7 @@
     async fn an_abandoned_artifact_does_not_block_the_queue_behind_it() {
         // In front: a published artifact a reader still holds, retired by
         // integrity refusal, so the collector cannot delete it yet.
-        let (manager, first, first_info, file_id, _media, _work) = d3_copy_session("0", true).await;
+        let (manager, first, first_info, file_id, _media, _work) = d3_copy_session("1", true).await;
         let production = first.rolling_provenance.as_ref().expect("production");
         let held = tokio::time::timeout(Duration::from_secs(30), async {
             loop {

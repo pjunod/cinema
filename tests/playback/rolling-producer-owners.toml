@@ -2784,7 +2784,20 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Cinema composition: audited exact sites, preserving production ownership.
 # Cinema remote owner adds one bounded physical-approval actor and three joined
 # race fixtures. Existing decode_facts tests add one joined probe actor.
-expected_occurrences = 887
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+expected_occurrences = 898
+# Batch001 source union: +1 main #859 namespace cancellation fixture; its
+# probe task is cancelled and awaited before checking reaped source ownership.
+# +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
+# terminal status and retains its admission guard through measurement.
+# 884 -> 885 for racing_continuous_families_have_one_exclusive_idle_owner:
+# admission.rs has one std::thread::spawn site creating two finite admission
+# racers. Both JoinHandles are joined before inspecting and dropping their
+# retained admission results; no production task or media process is added.
+# #870 adds seven reviewed owners: joined executable-path resolution; admin
+# and startup worker-local reprobes using shutdown cancellation; joined private
+# cache-directory stat; two joined late-publication fixture drivers; and a
+# joined child-cancellation fixture trigger. No rolling/media owner is added.
 # Promotion union: final count is measured after architectural conflict resolution.
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -2994,6 +3007,8 @@ expected_occurrences = 13
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Resume repair: two graceful-drain test deadlines and a bounded polling
+# wait for the retained forwarding cleanup owner add four test-only timers.
 # Shared ingress custody adds one bounded actual-driver closure wait and two
 # finite regression bounds (independent admission and real HTTP driver closure).
 # The accepted driver owns monitors through their join; no polling owner is added.
@@ -4220,7 +4235,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Cinema remote adds one peer timeout, one bounded long-poll sleep, three
 # regression deadlines and two live-fixture shutdown timers. Existing
 # decode_facts regressions add five bounded deadline/poll timers.
-expected_occurrences = 1582
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+expected_occurrences = 1606
+# Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
+# timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
+# timeout); all observe exact child/source cleanup, never authorize production.
+# +3 #861: startup calibration timeout, idle optimization playback polling and
+# overall rerun timeout. Both calibration deadlines retain previous results on
+# failure; playback preempts the rerun through its existing admission owner.
+# #870 adds eight Mac compatibility waits: preparation, identity/stat and
+# graph/stat deadlines; cooperative publication stop; two one-second cleanup
+# bounds; and two finite fixture sleeps. Subprocess cancellation retains the
+# child kill-and-reap owner; a deadline never supplies completion evidence.
 
 
 [[module_structures]]
@@ -4591,7 +4617,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # fixtures and main's admitted diagnostic children remain under their owners.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 229
+# #870 adds seven command sites: otool dependency inventory, captured FFmpeg
+# filter inventory, smoke encode/ffprobe/decode, a cancellation fixture shell, and the
+# exact frozen executable used by the pretranscode launch-fence regression.
+# Production observations use bounded_probe_command's existing owned child
+# kill-and-reap settlement; fixture children are also awaited or killed/reaped.
+expected_occurrences = 236
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5179,7 +5210,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Cinema composition: audited exact sites, preserving production ownership.
 # Cinema remote adds five HTTP response/status builder calls (remote.rs:3,
 # live_fixture.rs:1, tests.rs:1); these conservative matches launch no process.
-expected_occurrences = 721
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+expected_occurrences = 730
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5445,7 +5477,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # real Source peer publishes bounded-read readiness; no polling owner.
 # Cinema composition: audited exact sites, preserving production ownership.
 # Cinema remote adds two test-only pause-barrier wait() calls; no child reap.
-expected_occurrences = 318
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+expected_occurrences = 319
+# 316 -> 317 for the same continuous-family admission race regression:
+# its barrier.wait() synchronizes the two finite threads before acquisition.
+# This broad .wait() sentinel matches a Barrier, not a process lifecycle;
+# both racers are joined and their retained permits dropped in the test.
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5514,7 +5551,10 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Cinema composition: audited exact sites, preserving production ownership.
 # Cinema remote adds the test-only pause-barrier async fn wait declaration;
 # the conservative free/UFCS matcher finds it, not an OS wait or signal.
-expected_occurrences = 65
+# #870 adds one test-only libc::kill(pid, 0) liveness observation after its
+# owned cancelled probe has settled; it verifies ESRCH and sends no signal.
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+expected_occurrences = 66
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

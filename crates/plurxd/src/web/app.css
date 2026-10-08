@@ -3670,3 +3670,5 @@
 .cinema-owned-choice>button{display:block;width:100%;min-height:44px;margin:8px 0;text-align:left}
 #cinema-pair-dialog button{min-height:44px;margin:4px}
 #cinema-pair-dialog canvas{max-width:100%;height:auto}
+  .sharing-invitation{margin-top:20px;padding:20px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel2)}
+  .sharing-invitation textarea{display:block;width:100%;min-height:110px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);font:13px/1.5 monospace;resize:vertical;overflow-wrap:anywhere}

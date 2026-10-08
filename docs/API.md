@@ -20,7 +20,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 353 routes across the registered routers.
+plurx has 354 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -428,12 +428,14 @@ of never storing it.
 | PUT | `/api/v1/settings` | admin | Partial update; returns the new full snapshot |
 | GET | `/api/v1/system` | admin | Environment diagnostics and counters |
 | PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
+| POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
 | GET | `/api/v1/system/logs` | admin | Tail of the in-memory log ring |
 | GET | `/api/v1/system/playback-events` | admin | Node-local playback observations |
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
 | POST | `/api/v1/system/storage` | admin | Re-measures storage. Costs real I/O |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Cluster and Developer settings; never gates controls |
+| POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |
@@ -544,6 +546,22 @@ The setting is stored under `node.<node_id>.transcode.hwaccel` and overrides
 the legacy cluster preference on that node after restart. Saving does not
 change active sessions. Restart selects the encoder and probes its HDR graph
 together; unavailable preferred hardware uses the existing encoder fallback.
+
+`transcoder_optimization` contains `running`, `error`, `restart_required`, and
+`report`. A report has `measured_at` (Unix seconds) and `results`, ordered
+fastest first. Each result has `backend`, `fps`, and `relative_to_cpu` (CPU is
+1.0). Startup creates a fresh measurement after capability detection; Auto
+selects its fastest supported backend before probing the active HDR graph.
+Results are stored under `node.<node_id>.transcode.benchmark` for diagnostics;
+previous-boot measurements are never used as capability evidence.
+
+`POST /api/v1/system/transcoder` accepts `{"node_id":"…"}` and returns
+`{"running":true}`. Only an administrator may start it. A different node,
+active playback, or an already running optimization returns 409. Poll
+`GET /api/v1/system` for completion; disconnecting does not cancel the job.
+Background admission contention, playback preemption and timeouts appear in
+`error`; the last complete report remains visible. A changed Auto winner
+requires restart so the active encoder and HDR graph stay paired.
 
 Two of its sub-objects are shaped by a diagnostic argument rather than by
 convenience.

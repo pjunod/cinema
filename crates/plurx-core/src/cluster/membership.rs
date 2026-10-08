@@ -9705,9 +9705,9 @@ impl MembershipManager {
         node_id: &str,
     ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
-        require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
         let clock = self.clock_guard();
         let prepared_admission = clock.acquire();
+        require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
         self.require_learner_lifecycle_capability().await?;
         if self.maintenance_operation_pending().await? {
             return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));

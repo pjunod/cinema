@@ -2134,6 +2134,10 @@ pub mod keys {
     /// request: missing diagnostic contracts are reported as advisory facts
     /// and never override an explicit enable.
     pub const AUTOMATIC_DECODER_RECOVERY: &str = "playback.automatic_decoder_recovery";
+    /// Use this worker's compatible Mac SDR/HDR10 processing for new plans.
+    /// Missing is off. Runtime observations are advisory and never rewrite
+    /// the saved choice; incompatible inputs retain their existing renderer.
+    pub const MACOS_VIDEO_PROCESSING_ENABLED: &str = "playback.macos_video_processing_enabled";
     /// Operator override for HEVC copy without configuration/source proof.
     /// Off by default. Readiness is advisory and never prevents saving it.
     pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";

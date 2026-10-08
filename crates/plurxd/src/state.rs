@@ -106,6 +106,8 @@ pub struct SystemInfo {
     #[serde(skip)]
     pub hwaccel_override: Option<String>,
     pub encoders: EncoderCaps,
+    #[serde(skip)]
+    pub transcoder_optimization: Option<crate::transcoder_optimization::Report>,
     /// Portable video decoders reported by this exact ffmpeg at boot.
     pub decoders: Vec<String>,
     /// Which decoder that ffmpeg was measured to select for each of them.
@@ -1126,7 +1128,7 @@ impl AppState {
                 encoder_caps,
                 system.tone_map.selected(),
             )
-            .with_encoder_override(system.hwaccel_override.clone())
+            .with_encoder_override(crate::transcoder_optimization::effective_override(&system))
             .with_decoders(system.decoders.clone())
             // Cloned from the policy this process installed, which happens in
             // `probe_system` before this state is built. Handing it over makes

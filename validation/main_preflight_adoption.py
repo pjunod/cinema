@@ -491,6 +491,12 @@ def recover_preunit_upload4324(api, scope, prior, jobs):
     return main.recover_preunit_upload4324(api, scope, prior, matches[0]) is not None
 
 
+def recover_preunit4431(api, scope, prior, jobs):
+    """Share both-attempt zero-execution proof without constructing outcomes."""
+    from validation import main_unit_receipts as main
+    return main.recover_preunit4431(api, scope, prior, jobs)
+
+
 def recover_preunit(api, scope, prior, jobs, proof, reason):
     if scope != {"repository": proof["repository"], "pr": proof["pr"]} or prior["id"] != proof["run"]:
         return False
@@ -618,7 +624,8 @@ def prepare(output_key="receipt_key"):
             jobs = api.pages(f"/actions/runs/{prior['id']}/jobs")
             if (recover_preunit4294(api, scope, prior, jobs)
                     or recover_preunit4299(api, scope, prior, jobs)
-                    or recover_preunit_upload4324(api, scope, prior, jobs)):
+                    or recover_preunit_upload4324(api, scope, prior, jobs)
+                    or recover_preunit4431(api, scope, prior, jobs)):
                 authenticated_runs.add(prior["id"])
                 continue
             require_missing_journal_safe(prior, jobs, scope)

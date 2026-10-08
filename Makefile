@@ -1705,9 +1705,9 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 docker-up: ## Build + (re)start Compose after its startup budget passes
 	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
 	  && trap 'rm -f "$$hardware"' EXIT HUP INT TERM \
-	  && compose_files="$$(python3 ../scripts/docker-hardware --output "$$hardware")" \
-	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
 	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
+	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
 	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"

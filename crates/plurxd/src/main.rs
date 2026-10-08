@@ -40,6 +40,7 @@ mod library_search;
 mod live_tv;
 mod live_tv_delivery;
 mod logbuf;
+mod macos_video;
 mod manifest_cache;
 mod media_pool;
 mod media_sessions;
@@ -87,6 +88,7 @@ mod telemetry;
 mod titlestore;
 mod trakt;
 mod transcode;
+mod transcoder_optimization;
 mod version;
 mod vodencode;
 mod vodgen;
@@ -2165,6 +2167,7 @@ async fn boot_observing(
     // Recovery authorization changes no artifact identity, but it still has
     // to be published before the listener accepts the first session.
     state.transcode.publish_automatic_decoder_recovery().await;
+    state.transcode.publish_macos_video_processing().await;
     // One bounded telemetry writer owns all node-local event persistence.
     // Register it before the listener can accept the first producer.
     crate::telemetry::initialize(Arc::clone(&state.store))
@@ -2801,7 +2804,32 @@ async fn probe_system(
         .await?;
     let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
-    let probe_pref = probe_preference(&hwaccel_pref);
+    let optimization = match tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        transcoder_optimization::measure(&ffmpeg, &encoder_caps),
+    )
+    .await
+    {
+        Ok(Ok(report)) => {
+            if let Err(error) = transcoder_optimization::save(store, node_id, &report).await {
+                tracing::warn!(%error, "could not persist transcoder benchmark");
+            }
+            Some(report)
+        }
+        result => {
+            tracing::warn!(
+                ?result,
+                "transcoder benchmark unavailable; using validated encoder order"
+            );
+            None
+        }
+    };
+    let probe_pref = optimization
+        .as_ref()
+        .filter(|_| hwaccel_pref == "auto" || hwaccel_pref.is_empty())
+        .and_then(|report| report.fastest(&encoder_caps))
+        .map(|encoder| encoder.family_name().to_owned())
+        .unwrap_or_else(|| probe_preference(&hwaccel_pref));
     let encoder_selected = encoder_caps.choose(&probe_pref).label().to_owned();
     // Which tone-map graph this node may use. After encoder detection, because
     // a graph is only worth probing if it can feed the encoder that won. Costs
@@ -2861,6 +2889,7 @@ async fn probe_system(
         measured,
     );
     system.hwaccel_override = hwaccel_override;
+    system.transcoder_optimization = optimization;
     Ok((encoder_caps, system))
 }
 
@@ -2907,6 +2936,7 @@ fn system_info(
         ffprobe,
         hwaccel_pref,
         hwaccel_override: None,
+        transcoder_optimization: None,
         encoders,
         decoders: measured.decoders,
         measured_decoders: measured.measured_decoders,
@@ -3258,6 +3288,15 @@ fn spawn_background_loops(
     // become the public leader before a failover actually happens.
     tokio::spawn(crate::http::images::materialize_loop(state.clone()));
     tokio::spawn(std::sync::Arc::clone(&state.transcode).rate_control_refresh_loop());
+    // Compatibility probing stays off startup and session creation. A restart
+    // owns one generation; an explicit admin reprobe uses this same owner.
+    tokio::spawn({
+        let manager = Arc::clone(&state.transcode);
+        let cancelled = background_shutdown.clone();
+        async move {
+            manager.reprobe_macos_video(&cancelled).await;
+        }
+    });
     tokio::spawn(std::sync::Arc::clone(&state.transcode).scratch_space_loop());
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv).scratch_sweep_loop(background_shutdown.clone()),
