@@ -1319,6 +1319,8 @@ struct LiveTvSession {
     worker: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     process: tokio::sync::Mutex<Option<LiveTvProcess>>,
     decoder_unavailable: Arc<AtomicBool>,
+    /// Retained until the owned child and stderr reader have settled.
+    source_format_changed: Arc<AtomicBool>,
     encoder_diagnostic: Arc<StdMutex<Option<&'static str>>>,
     source_format: Arc<StdMutex<Option<LiveTvSourceFormat>>>,
     source_format_expires_at: Arc<AtomicI64>,
@@ -4228,6 +4230,7 @@ impl LiveTvManager {
             worker: StdMutex::new(None),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format_changed: Arc::new(AtomicBool::new(false)),
             encoder_diagnostic: Arc::new(StdMutex::new(None)),
             source_format,
             source_format_expires_at,
@@ -6542,10 +6545,27 @@ async fn run_live_session(
         .encoder_diagnostic
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let result = classify_live_source_error(
+    // A fast graph reconfiguration failure can exit before the next observer
+    // tick. Cleanup has joined the existing bounded stderr reader, so its
+    // confirmed source-change fact now takes part in terminal classification.
+    let source_changed = session.source_format_changed.load(Ordering::Acquire);
+    if source_changed {
+        if let Some(transport) = session.transport() {
+            transport.mark_source_stale();
+        }
+        if let Some(owner) = manager.upgrade() {
+            owner.forget_source_facts(&SourceFormatKey {
+                generation: config.generation,
+                device_id: session.device_id.clone(),
+                channel_id: session.channel.id.clone(),
+            });
+        }
+    }
+    let result = classify_live_terminal_error(
         result,
         session.decoder_unavailable.load(Ordering::Acquire),
         diagnostic,
+        source_changed,
     );
     {
         let error = result.as_ref().err().cloned().unwrap_or_else(|| {
@@ -6613,6 +6633,26 @@ fn classify_live_source_error(
             }
             (result, _) => result,
         }
+    }
+}
+
+fn classify_live_terminal_error(
+    result: Result<(), LiveTvError>,
+    decoder_unavailable: bool,
+    encoder_diagnostic: Option<&'static str>,
+    source_changed: bool,
+) -> Result<(), LiveTvError> {
+    let result = classify_live_source_error(result, decoder_unavailable, encoder_diagnostic);
+    if source_changed
+        && !decoder_unavailable
+        && encoder_diagnostic.is_none()
+        && matches!(result, Err(LiveTvError::StreamFailed(_)))
+    {
+        Err(LiveTvError::SourceFormatChanged(
+            "the broadcast changed format; start the channel again so a fresh delivery route can be selected".into(),
+        ))
+    } else {
+        result
     }
 }
 
@@ -6866,7 +6906,10 @@ async fn run_live_session_inner(
         let (mut child, child_job) =
             spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
         let stdin = child.stdin.take();
-        let source_format_changed = Arc::new(AtomicBool::new(false));
+        session
+            .source_format_changed
+            .store(false, Ordering::Release);
+        let source_format_changed = Arc::clone(&session.source_format_changed);
         let input_format = Arc::new(StdMutex::new(None));
         let stderr = child.stderr.take().map(|stderr| {
             tokio::spawn(capture_live_stderr(
@@ -7036,12 +7079,8 @@ async fn run_live_session_inner(
                     }
                 }
                 if source_format_changed.load(Ordering::Acquire) {
-                    // The transport's facts no longer describe the mux: the next
-                    // viewer re-probes before it plans (§2.4 D5).
-                    transport.mark_source_stale();
-                    if let Some(owner) = manager.upgrade() {
-                        owner.forget_source_facts(&facts_key);
-                    }
+                    // The terminal owner invalidates the source facts after
+                    // settling stderr, including when child exit wins this tick.
                     break Err(LiveTvError::SourceFormatChanged(
                     "the broadcast changed format; start the channel again so a fresh delivery route can be selected".into(),
                 ));
@@ -10372,6 +10411,7 @@ mod tests {
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format_changed: Arc::new(AtomicBool::new(false)),
             encoder_diagnostic: Arc::new(StdMutex::new(None)),
             source_format: Arc::new(StdMutex::new(None)),
             source_format_expires_at: Arc::new(AtomicI64::new(0)),
@@ -10465,6 +10505,7 @@ mod tests {
             worker: StdMutex::new(None),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format_changed: Arc::new(AtomicBool::new(false)),
             encoder_diagnostic: Arc::new(StdMutex::new(None)),
             source_format: Arc::new(StdMutex::new(None)),
             source_format_expires_at: Arc::new(AtomicI64::new(0)),
@@ -13388,6 +13429,115 @@ exec /bin/cat >/dev/null"#;
             ),
             Err(LiveTvError::CodecUnsupported(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fast_source_change_exit_is_classified_after_the_owned_stderr_reader_settles() {
+        let root = crate::test_tempdir().expect("source-change root");
+        let session = test_session(root.path().join("session"), 1);
+        tokio::fs::create_dir_all(&session.directory)
+            .await
+            .expect("scratch");
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "exit 178"]);
+        let (mut child, job) = crate::process_control::spawn_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::realtime("Live source-change test child"),
+        )
+        .expect("child");
+        assert!(!child.wait().await.expect("already exited").success());
+        let (release, waiting) = tokio::sync::oneshot::channel();
+        let captured = Arc::clone(&session);
+        let stderr = tokio::spawn(async move {
+            waiting.await.expect("release pending stderr");
+            let initial =
+                std::io::Cursor::new(b"Input #0, mpegts, from pipe:0:\nStream mapping:\n".to_vec());
+            let changed = std::io::Cursor::new(b"Reconfiguring filter graph because video parameters changed to yuv420p(tv, bt709), 416x234\n".to_vec());
+            capture_live_stderr(
+                tokio::io::AsyncReadExt::chain(initial, changed),
+                Arc::clone(&captured.decoder_unavailable),
+                Arc::clone(&captured.encoder_diagnostic),
+                Arc::clone(&captured.source_format),
+                Arc::clone(&captured.source_format_expires_at),
+                Arc::clone(&captured.source_format_changed),
+                Arc::new(StdMutex::new(None)),
+            )
+            .await;
+        });
+        *session.process.lock().await = Some(LiveTvProcess {
+            child,
+            _job: job,
+            _admission: None,
+            stderr: Some(stderr),
+        });
+        assert!(!session.source_format_changed.load(Ordering::Acquire));
+        let cleanup = cleanup_session(&session, false);
+        tokio::pin!(cleanup);
+        tokio::select! {
+            biased;
+            result = &mut cleanup => panic!("cleanup returned before stderr settled: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        release.send(()).expect("reader is owned by cleanup");
+        cleanup.await.expect("existing bounded cleanup");
+        assert!(session.process.lock().await.is_none());
+        assert!(matches!(
+            classify_live_terminal_error(
+                Err(LiveTvError::StreamFailed("child exited with178".into())),
+                false,
+                None,
+                session.source_format_changed.load(Ordering::Acquire),
+            ),
+            Err(LiveTvError::SourceFormatChanged(_))
+        ));
+    }
+
+    #[test]
+    fn confirmed_source_change_preserves_classified_decoder_encoder_and_owner_errors() {
+        assert!(matches!(
+            classify_live_terminal_error(
+                Err(LiveTvError::StreamFailed("exit".into())),
+                true,
+                None,
+                true,
+            ),
+            Err(LiveTvError::CodecUnsupported(_))
+        ));
+        let encoded = classify_live_terminal_error(
+            Err(LiveTvError::StreamFailed("exit".into())),
+            false,
+            Some("known encoder cause"),
+            true,
+        )
+        .expect_err("encoder cause");
+        assert_eq!(encoded.code(), "stream_failed");
+        assert!(encoded.to_string().contains("known encoder cause"));
+        for error in [
+            LiveTvError::OwnerUnavailable("fenced".into()),
+            LiveTvError::CapabilityExpired("stopped".into()),
+            LiveTvError::StartupTimeout("deadline".into()),
+        ] {
+            let expected = error.code();
+            assert_eq!(
+                classify_live_terminal_error(Err(error), false, None, true)
+                    .expect_err("retain owner reason")
+                    .code(),
+                expected
+            );
+        }
+        assert!(classify_live_terminal_error(Ok(()), false, None, true).is_ok());
+        assert_eq!(
+            classify_live_terminal_error(
+                Err(LiveTvError::StreamFailed("ordinary EOF".into())),
+                false,
+                None,
+                false,
+            )
+            .expect_err("unchanged EOF")
+            .code(),
+            "stream_failed"
+        );
     }
 
     #[tokio::test]
