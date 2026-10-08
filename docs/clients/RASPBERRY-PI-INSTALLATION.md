@@ -179,8 +179,17 @@ unexpected permission/setup errors do not silently select another backend.
 Bubblewrap creates the Pi probe's user, mount, PID, IPC, UTS and network namespaces.
 Expose only its trusted executable/runtime and held media input, give it
 private temporary storage, and keep the server's database, credentials and
-other processes outside its view. Bubblewrap executes the already-open daemon descriptor through its private
-procfs. The bootstrap verifies its running device/inode against that descriptor
+other processes outside its view. Bubblewrap creates an empty `/proc` and
+read-only binds only its own task directory at `/proc/self`, resolving the
+source after the namespace clone. It executes the already-open daemon
+descriptor through that task's FD view. Docker refused the fresh procfs mount,
+with a contemporaneous kernel `Mount too revealing` message. Locked masked
+proc children are the explanation supported by
+[Linux 6.18 mount source](https://github.com/torvalds/linux/blob/v6.18/fs/namespace.c#L5820);
+the exact kernel call
+stack has not been traced. The own-task bind keeps those masks and the
+container policy intact without exposing the container's full procfs.
+The bootstrap verifies its running device/inode against that descriptor
 before the parser starts, avoiding a per-probe copy of the large daemon. The bootstrap executes synchronously before the
 daemon runtime initializes. It installs the existing one-shot seccomp
 supervisor contract and executes the sealed parser descriptor. This preserves
@@ -190,6 +199,14 @@ The parser runs as namespace PID 1, so no unsandboxed init peer remains visible
 and the kernel kills its descendants when it exits. Bubblewrap 0.8 in the container and 0.12 on the native acceptance OS must both
 be supported; descriptor inheritance and namespace-child cleanup need direct
 evidence, not an assumption from command-line compatibility.
+
+The bound task remains the parser's PID 1 after a parser fork: `/proc/self`
+continues to identify that task, within the same untrusted parser domain.
+Its `root` link resolves inside the probe's mount namespace. Numeric process
+directories are absent; bootstrap/control descriptors close before parser
+execution. The hostile-probe regression checks private-marker access through
+the task's `root`, absent parent/PID-1 directories, exact source access through
+FD 3, and the complete inherited FD census.
 
 The Pi container's seccomp policy must retain its pinned Docker default rules
 and add only AArch64 rules needed for the nested namespace setup. The checked-in
@@ -205,7 +222,7 @@ transaction and hash receipts. No additional service or watchdog is introduced.
 |---|---|---|
 | Probe agent, Sol 6.1 | Existing Rust probe launcher, early internal bootstrap and focused Rust regressions | Non-Pi Landlock behavior retained; verified-Pi selection; exact descriptors; filesystem/process/network isolation; bounded failure and cleanup |
 | Setup agent, Sol 6.1 | Pi Bubblewrap package/image, narrow container policy and platform mount, installer ownership and focused operations regressions | Both packaged Bubblewrap versions; non-root nested operation; no broad privileges; rollback/uninstall preserve operator files |
-| Coordinator | This plan/status, integration, compiler loop, review and physical qualification | Native and Docker app-level playback; applicable evidence retained; complete cleanup; merge only after qualification |
+| Coordinator | This plan/status, integration, compiler loop, review and physical qualification | Native and Docker app-level playback; applicable evidence retained; complete cleanup; CI merge authorization is separate from physical acceptance |
 
 Compile committed source with Rust 1.97.1 on Linux before pushing. The earlier
 installer review did not cover this new security scope. Using the user's
@@ -218,3 +235,12 @@ execution, attempts to reach the server's processes/files, inherited descriptor
 identity, cancellation and descendant cleanup. Actual app playback must create
 the protected parser identity and stream on the stock Pi kernel before this
 work is considered accepted.
+
+Paul authorized merging PR #851 after its required CI gate passes while
+physical verification continues. This authorization does not establish
+default app playback: the original Docker procfs mount failed with `Operation
+not permitted`, and native session admission separately refused an eight-unit
+720p/480p/shared-AAC family against the default three-unit CPU pool. The narrow
+proc-view follow-up requires review and focused qualification. Any temporary
+pool increase used to measure the actual unchanged recipes is diagnostic
+evidence only, restored after collection, and cannot qualify the defaults.

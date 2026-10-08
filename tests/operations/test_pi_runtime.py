@@ -151,6 +151,10 @@ class PiRuntimeTests(unittest.TestCase):
         self.assertEqual(clone['args'], [{'index': 0, 'value': 0x7c020011, 'op': 'SCMP_CMP_EQ'}])
         detach = next(rule for rule in additions if rule['names'] == ['umount2'])
         self.assertEqual(detach['args'], [{'index': 1, 'value': 2, 'op': 'SCMP_CMP_EQ'}])
+        # The probe binds only its own task directory. It must not retain the
+        # obsolete permission to create a fresh procfs (NOSUID|NODEV|NOEXEC).
+        mount_args = [rule['args'] for rule in additions if rule['names'] == ['mount']]
+        self.assertNotIn([{'index': 3, 'value': 14, 'op': 'SCMP_CMP_EQ'}], mount_args)
         for name, digest in [('license', 'license_sha256'), ('notice', 'notice_sha256')]:
             self.assertEqual(hashlib.sha256((runtime.ASSETS / metadata['moby'][name]).read_bytes()).hexdigest(), metadata['moby'][digest])
         # Keep Docker's clone3 ENOSYS fallback; adding it unrestricted would

@@ -17,9 +17,32 @@ The Docker-default installation and managed browser passed physical Main/Main10
 request decoding, software-reference frame hashes, planar transfer, browser
 presentation and seeking. Actual Plurx session creation exposed a separate
 kernel prerequisite: the tested Pi kernel omits `CONFIG_SECURITY_LANDLOCK` and
-its Landlock ABI query returns `ENOSYS`. The bound FFprobe identity cannot be
-established, so server playback is blocked. No protection has been bypassed and
-PR #851 remains unmerged while the accepted Pi-only namespace backend is qualified. Landlock remains the preferred backend wherever the kernel supports it.
+its Landlock ABI query returns `ENOSYS`. The Pi-only namespace backend preserves
+the protected identity boundary and passed its focused regressions. Paul
+authorized merging PR #851 once its required CI gate passes, independently
+of continuing physical acceptance. Landlock remains the preferred backend
+wherever the kernel supports it.
+
+Actual Docker app probing then failed at Bubblewrap's fresh procfs mount:
+`Can't mount proc ... Operation not permitted`. The kernel logged `Mount too
+revealing` in the same second as both the startup failure and diagnostic replay;
+no matching AppArmor denial was found. [Linux 6.18 mount
+source](https://github.com/torvalds/linux/blob/v6.18/fs/namespace.c#L5820)
+supports locked masked proc children as the explanation, but the exact call
+stack remains inferred.
+Exact launcher replay succeeded
+with an empty `/proc` and a read-only bind of only the namespace child's task
+directory at `/proc/self`, keeping seccomp and `cap_drop: ALL` unchanged.
+The narrow follow-up applies this view and strengthens the existing hostile
+probe regression; review, focused tests and actual app acceptance remain.
+
+Native app probing reached a separate continuous-session refusal:
+`vod_family_capacity`. The actual frozen 720p video, 480p companion and shared
+AAC recipes reserve 3 + 2 + 3 CPU units against the Pi's default pool of 3.
+No admission correction has been made. A planned temporary pool of 8 in the
+isolated diagnostic app will measure these unchanged producers and seeking;
+it has not run and will not count as default playback acceptance. Restore the
+default and stop the diagnostic service after collection.
 
 Physical testing also exposed two deployment defects. Compose 2.26 lacks
 `config --environment`; hardware configuration now uses Compose's own label

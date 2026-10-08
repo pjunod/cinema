@@ -164,8 +164,14 @@ pub(super) fn configure(
             "--symlink",
             LOADER_TARGET,
             LOADER_PATH,
-            "--proc",
+            // Resolve self after bwrap's namespace clone: only its PID-1 task
+            // directory is exposed. Docker refuses the fresh procfs mount;
+            // binding the whole host procfs would expose peers.
+            "--dir",
             "/proc",
+            "--ro-bind",
+            "/proc/self",
+            "/proc/self",
             "--dev",
             "/dev",
             "--tmpfs",
@@ -258,7 +264,7 @@ fn bootstrap(arguments: Vec<OsString>) -> std::io::Result<()> {
     {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
     }
-    // Bubblewrap execs the held descriptor through private procfs directly;
+    // Bubblewrap execs the held descriptor through its own-task proc view;
     // require the running inode to be exactly the parent's held bootstrap.
     let held_bootstrap = std::fs::metadata("/proc/self/fd/5")?;
     let running_bootstrap = std::fs::metadata("/proc/self/exe")?;
@@ -286,7 +292,7 @@ fn bootstrap(arguments: Vec<OsString>) -> std::io::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
         return Err(std::io::Error::last_os_error());
     }
-    // PID/mount isolation removes peer /proc and every host path except the
+    // The own-task proc view removes peers and every host path except the
     // read-only runtime libraries; also prohibit cross-process memory APIs.
     let isolation = build_namespace_memory_seccomp()?;
     isolation.install()?;
