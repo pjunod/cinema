@@ -282,3 +282,25 @@ regular-target `is_file()` behavior is retained, including symlink following.
 No source-integrity or held-source confinement check changes. Both regression
 references resolve; compile and the normal hook pass, with no units run.
 Actual AC-4 acceptance on the repaired package remains the next requirement.
+
+### 7.5 Runtime-discovered Live terminal classification race
+
+Actual source-format transition testing on `a2ee4a221` exposed a race between
+FFmpeg exit and its existing stderr observation. The child exited with 178
+after native filter reconfiguration; the owner recorded generic stream failure
+before the source-change flag settled, leaving cached source facts intact.
+
+Repair `4be9603bcfcaf3a93cf11008e0c358155772f128` is independently accepted
+by `macos_final_review_delivery`; reviewed file blob is
+`2779bc2fff70ae68cac61678616f76f7bc4827d2`. The existing session retains
+the same source-change flag through its existing child reap and bounded
+250-millisecond stderr join. Terminal classification then invalidates source
+facts and the retained transport and refines only unclassified `StreamFailed`.
+Warm restart settles the old reader before resetting its signal. Classified
+decoder/encoder causes, cancellation, fencing and timeouts remain intact.
+No additional reader, watchdog, sleep or retry owner is introduced.
+
+Regression source covers an already-exited child whose delayed stderr settles
+during cleanup, and classification precedence. Pinned all-target compilation
+and the normal hook pass; units remain coordinator-owned. Actual daemon
+source-switch confirmation on the combined package remains required.

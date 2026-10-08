@@ -26,8 +26,8 @@ including strict P5, normalized SDR/HDR10, finite HEVC output and ordinary
 Auto preference, Live upload/BWDIF, HLG burns, bounded native parser execution
 and matched symbol packaging. Main `c746b6c9b` is integrated. All five combined-review findings have
 accepted repairs, including three terminal-NAL runtime fixtures at
-`54c3a3fe8`. The candidate is ready for final source freeze. Final daemon qualification remains
-active; source completion is not final acceptance.
+`54c3a3fe8`. Final daemon qualification remains active and has found two integration
+defects; source completion is not final acceptance.
 
 Final normal-API SDR/HDR10, finite HEVC, ordinary Auto and strict P5 delivery
 passed on the signed `a2ee4a221` package. AC-4 then exposed a real integration
@@ -35,8 +35,23 @@ defect: core scanning resolved PATH FFprobe while the packaged daemon and held
 parser used Jellyfin. Their differing facts correctly triggered source
 attestation refusal. Shared executable-resolution repair `4adb34c0` now covers scanning,
 metadata extraction and daemon processing and is independently accepted. A
-new release and actual AC-4 requalification are required before the draft PR
-can enter the merge queue.
+new signed release is built and actual AC-4 requalification is active.
+
+Normal Live TV qualification passed all twelve progressive/TFF/BFF ×
+frame/field × repeated-start cases across two retained runs, plus explicit
+EOF/reconnect lifecycle checks. A source-format transition exposed a separate
+ownership race: fast FFmpeg exit could precede the stderr source-change
+flag, yielding generic failure and leaving source facts stale. A targeted
+repair settles the existing owned stderr reader before terminal classification;
+repair `4be9603bc` is independently accepted; actual source-switch
+confirmation remains required.
+No additional watchdog, retry loop or diagnostic reader is introduced.
+
+Empty-cache reconstruction and exact corrupt-fixture repair pass. Permission
+refusal correctly returns `fixture_cache_unavailable` and no implementation
+identity; the initial external script incorrectly expected all twenty-two
+graphs even after preparation failed. That script is corrected, with its
+failed receipt retained. Permission/full-volume recovery remains in progress.
 
 No deployed FFmpeg package or live service has changed. The matching Apple
 Metal compiler component was temporarily installed for the private package
@@ -47,11 +62,11 @@ after review. Missing qualification stays explicitly open.
 |---|---|---|---|
 | Integration and status | Manager | final candidate preparation | Main `c746b6c9b` union and five review repairs integrated; all scopes accepted through terminal registration `54c3a3fe8` |
 | M0/M1 Jellyfin package and harness | Sol builders | source complete; package controls recorded | Final strict terminal-NAL package `c8c4b525…`; pinned source offer, AC-4 byte preservation and prior synthetic benefit evidence |
-| M2/M3 typed routes and observations | Sol route builder | source complete | Twenty-two supported graph classes; final embedded inventory pending |
-| Native parser and symbols | Sol native builder | resolver repair reviewed; new package building | Bounded held-descriptor WASM/JIT, signed-kernel preflight, matched dSYM packaging; final daemon build pending |
-| M4 normalized VOD | Sol native and route builders | source complete; earlier daemon delivery demonstrated | Earlier 120-second lifetime and CPU/native pixel comparison retained; final SDR/HDR10, timing and soak pending |
-| E1 strict Dolby P5 | Sol Dolby and route builders | source complete; sixty controls pass | Sixty selected-graph controls and sixteen observer mutations pass; terminal-NAL fixture registration independently accepted. Final normal-API proof pending |
-| E2–E4 HLG, burns, BWDIF, HEVC and Live | Sol builders | source complete within demonstrated scope | HLG text/bitmap controls pass; actual HDR High10 interlace decode fails and keeps incumbent. HEVC init binding fixed; final master, Auto and Live API proof pending |
+| M2/M3 typed routes and observations | Sol route builder | source complete; inventory passed | All twenty-two supported graph classes available in actual packaged-daemon reports |
+| Native parser and symbols | Sol native builder | resolver repair reviewed; signed package built | Shared bundled tool resolution; AC-4 normal-API confirmation active |
+| M4 normalized VOD | Sol native and route builders | final SDR/HDR10 delivery demonstrated | 120-second HTTP lifetime, CPU/native pixel comparison, seek/resume and cancellation pass; timing/concurrency/soak pending |
+| E1 strict Dolby P5 | Sol Dolby and route builders | source complete; sixty controls pass | Sixty selected-graph controls and sixteen observer mutations pass; terminal-NAL fixture registration independently accepted. Final normal-API strict P5 delivery passes on `a2ee4a221` |
+| E2–E4 HLG, burns, BWDIF, HEVC and Live | Sol builders | source complete within demonstrated scope | HLG text/bitmap controls pass; actual HDR High10 interlace decode fails and keeps incumbent. HEVC master/Auto pass; twelve Live cases and EOF pass. Source-change race repair and requalification active |
 | Client transport declarations | Sol Dolby builder | source complete; compilation passed | iOS/tvOS builds pass on the final Apple source; Android C1 app, instrumentation and JVM regression source compile. Physical presentation unqualified |
 | M6 acceptance and promotion | Manager and merge coordinator | active | Five review findings repaired and accepted; final daemon qualification, then coordinator-owned fast lane and merge |
 
