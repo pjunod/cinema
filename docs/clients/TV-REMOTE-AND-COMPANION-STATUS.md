@@ -1,7 +1,7 @@
 # Cinema remote status — build, review, and device evidence
 
 **Status:** foundations, desktop and Apple reviewed; end-to-end integration in progress ·
-**Updated:** 2026-10-07 · **Integration:** `effort/cinema-remotes`.
+**Updated:** 2026-10-08 · **Integration:** `effort/cinema-remotes`.
 
 [Implementation packets](TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md) define
 ownership. [Protocol](TV-REMOTE-PROTOCOL.md) defines interfaces. The parent
@@ -16,13 +16,13 @@ Main integration is handed to `01a11907-f720-71b1-8c51-89902b919e6f`.
 | B01 wire/receiver guard | PR [#864](http://192.168.4.7:3000/noirr/plurx/pulls/864), `3fa57aa1ba80` | No blocker in foundation scope | 11 focused regressions; pinned core compile/Clippy |
 | B02 web semantic router | PR [#865](http://192.168.4.7:3000/noirr/plurx/pulls/865), `502c98761f97` | No blocker in foundation scope | 22 remote + 7 existing keyboard checks; pinned daemon compile |
 | B03 Apple navigation | PR [#863](http://192.168.4.7:3000/noirr/plurx/pulls/863), `93f821c0f320` | No blocker in foundation scope | iOS/tvOS builds, 7 focused XCTest; physical walkthrough pending |
-| B04 storage/server relay | Building on reviewed B01 dependency | Pending | Exact HTTP DTOs precede client integration |
-| B05 web companion | Building against stable B04 DTOs and reviewed B02/B08 | Pending | Two-client browser evidence pending |
-| B06 Apple receiver/companion | PR [#875](http://192.168.4.7:3000/noirr/plurx/pulls/875), `7e66c85c6f98` | Pairing-lifetime correction reviewed; coordinator hold released | iOS/tvOS builds and 2 focused follow-up XCTest; earlier 19 cases passed before the narrow correction |
-| B07 Android receiver/companion | Building against stable B04 DTOs | Review in progress | Incremental Kotlin compile and focused wire checks pass; full navigation/lifecycle evidence pending |
+| B04 storage/server relay | PR [#878](http://192.168.4.7:3000/noirr/plurx/pulls/878), `5d78eee7ace4` | Released to coordinator after exact-head review and static history pass | 16 focused checks; actual two-node signed HTTP and separate three-voter storage evidence |
+| B05 web companion | Final UI and owner-replacement walkthrough | Review in progress | Actual browser/server pairing, explicit acquire, playback ACK, restricted dialogs, offline local pause and revocation pass |
+| B06 Apple receiver/companion | PR [#875](http://192.168.4.7:3000/noirr/plurx/pulls/875), `7e66c85c6f98`, composed through [#879](http://192.168.4.7:3000/noirr/plurx/pulls/879) | Reviewed and integrated into coordinator candidate | iOS/tvOS builds and 2 focused follow-up XCTest; earlier 19 cases passed before the narrow correction |
+| B07 Android receiver/companion | Receiver, companion and existing-player adapters built; final corrections running | Review in progress | APK/test APK compile, focused receiver/navigation checks and representative DTO smoke against B04 pass; device execution pending |
 | B08 desktop CEC | PR [#872](http://192.168.4.7:3000/noirr/plurx/pulls/872), `08258f51cbb4` | No blocker in standalone software packet | 16 Python + 12 Node checks and production-popup Chromium smoke with native port mocked; hardware pending |
-| B09 invitations | Waiting B04/B06/B07 | Pending | Provider and service eligibility pending |
-| B10 integration handoff | Waiting all | Pending | No ready implementation handoff yet |
+| B09 invitations | Approved server/broker contract; schema/admission build beginning | Design reviewed with explicit opt-out, dedupe, restore and resource bounds | Provider delivery and resident-service eligibility remain open |
+| B10 integration handoff | Setup/recovery guide in [#877](http://192.168.4.7:3000/noirr/plurx/pulls/877); complete feature handoff waits on remaining packets | Pending | Ready packets handed off individually; whole feature not yet complete |
 
 ## Baseline and review record
 
@@ -172,6 +172,56 @@ couch-navigation follow-up also fences delayed TV pairing-code and approval
 responses against a closed or replaced pairing surface; the released B06
 head remains frozen. Background invitations belong to B09.
 
+## Current composition and runtime acceptance
+
+The coordinator merged reviewed desktop/metadata PR #876 at
+`e457e23afbe8f31ac48f56beb9f17a860ee8ec5d`, then docs PR #877 at
+`04b6e302eddeb9c5e853feba433c4e6e7d63f66d`. Forgejo could not directly merge
+Apple PR #875, so the manager composed its frozen head on that exact candidate.
+Only `tests/client-fixes.toml` conflicted: both complete parent catalogs were
+preserved, with one exactly identical B03 row deduplicated. Apple source and
+tests remained identical to reviewed B06. No native tests were repeated for
+this metadata composition.
+
+Composition PR [#879](http://192.168.4.7:3000/noirr/plurx/pulls/879), head
+`859383df8f098993f978e54aebf9d34cce9ac964`, tree
+`d7dff0ede1d0f37fd91565e4f3b47ad5f991a788`, passed normal hooks and final
+history validation: 3361 corrective commits, 487 client anchors, 319 recognized
+landings and zero awaiting landing. The first history invocation could not
+write its receipt under the sandbox; the corrected-permission run passed.
+All fourteen B06 regression fields were preserved. The coordinator reports
+landing it into its candidate at `5458a0323bd98732c61a2cb1af21c4cfb669598f`.
+That is candidate integration, not promotion into main. Mobile version counters
+and combined gates remain coordinator-owned.
+
+B04 PR #878 is released in [parent review 105](http://192.168.4.7:3000/noirr/plurx/pulls/878#issuecomment-9252).
+Its final static history audit passes with 3350 corrective commits, 477 client
+anchors, 309 recognized landings and three source changes awaiting their
+intended landing. All twenty-two regression fields resolve. The coordinator
+received the exact frozen source and evidence and merged it into the candidate
+at `79a58a03378e0cf15f9693cd1b4eb56ab6dc4d13`, preserving all twenty-two
+fields. No independent gate was run.
+
+B04's isolated live fixture runs the actual Router and SQLite with synthetic
+accounts and generated H264/AAC media. Its production API source hash matches
+committed B04. B05's browser run exercised pairing, approval, explicit acquire,
+playback acknowledgements, restricted physical dialogs, revoked proofs and
+local pause/stop during an API outage, plus owner replacement followed by a
+fresh explicit Use action. The final 390×844 phone viewport exposes directional
+controls and Play/Pause/Stop without scrolling; secondary controls collapse. It caught and corrected a native fetch
+binding error and an empty focused label that needed to be null. Separate
+same-profile tabs transferred the exclusive receiver lock after actual focus
+changes; Playwright's built-in focus emulation was disabled for that check.
+The phone/browser counterpart uses a separate simulated device. These are
+browser/runtime checks, not physical TV/CEC or native-device evidence.
+
+Android representative item/live state and pairing/control DTOs passed against
+that same server fixture. This is a schema smoke, not proof of the actual
+Android OkHttp/UI path on a device. Ordinary navigation gaps are now explicit
+follow-up packets in implementation §11. A connected Google TV Streamer was
+found through read-only device inventory; no packet was installed or launched
+on it for physical acceptance.
+
 ## Rust cache ownership — one worktree per target
 
 During B04's normal hook, the shared Rust target exposed an incompatible
@@ -213,7 +263,7 @@ repeat the affected compile after implementing the receiver and companion.
 | Mac | Mac/OS, USB-CEC model, browser, TV/AVR, CEC offline controls | Hardware not yet established |
 | Windows | Windows build, USB adapter, browser, install/uninstall | Hardware not yet established |
 | Apple TV | tvOS/device/build, menus/grid/search/modal/mixed-input walkthrough | Hardware not yet established |
-| Android TV | Device/OS/build, D-pad + companion + foreground lifecycle | Hardware not yet established |
+| Android TV | Device/OS/build, D-pad + companion + foreground lifecycle | Google TV Streamer found; no install or walkthrough performed |
 | iPhone/iPad | Suspended app/APNs consent, delivery and stale tap | Provider/device evidence absent |
 | Android phone/tablet | FGS eligibility, Stop, Doze/OEM, permission denial | Provider/device evidence absent |
 
