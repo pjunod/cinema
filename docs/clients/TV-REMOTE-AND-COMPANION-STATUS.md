@@ -1,6 +1,6 @@
 # Cinema remote status — build, review, and device evidence
 
-**Status:** web, Apple, Android and server foundations reviewed; couch completion and invitations in progress ·
+**Status:** web, Apple and Android couch packets reviewed; invitations in progress ·
 **Updated:** 2026-10-08 · **Integration:** `effort/cinema-remotes`.
 
 [Implementation packets](TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md) define
@@ -25,6 +25,7 @@ Main integration is handed to `01a11907-f720-71b1-8c51-89902b919e6f`.
 | B09 standalone broker | PR [#896](http://forge.lan:3000/noirr/plurx/pulls/896), `ea0a86f34c54` | Released in parent review 110 | 27 focused cases including real loopback Router and executable CLI; signing/provider fixtures, physical delivery unqualified |
 | Web couch completion | PR [#890](http://forge.lan:3000/noirr/plurx/pulls/890), `18ef97705920` | Released in parent review 108; coordinator integrated | 54 focused static/web checks and 6 Chromium cases; CEC native port mocked |
 | Apple couch completion | PR [#898](http://forge.lan:3000/noirr/plurx/pulls/898), `a331f7d9b17b` | Released in parent review 111 | iOS/tvOS builds; 21 focused cases plus 2 final physical arbitration cases; physical TV/VoiceOver pending |
+| Android couch completion | PR [#902](http://forge.lan:3000/noirr/plurx/pulls/902), `8077965a4554` | Released in parent review 112; handed to coordinator | Debug APK and 46 focused production-owner/navigation cases pass; physical focus and Media3 acceptance pending |
 | Input observer fences | PR [#893](http://forge.lan:3000/noirr/plurx/pulls/893), `1a8fafef384c` | Released in parent review 109; coordinator integrated | 13 static cases, dedicated Android physical-input JVM regression and affected APK build |
 | B10 integration handoff | Setup/recovery guide in [#877](http://forge.lan:3000/noirr/plurx/pulls/877); complete feature handoff waits on remaining packets | Pending | Ready packets handed off individually; whole feature not yet complete |
 
@@ -258,15 +259,32 @@ specific checks.
 
 Web couch began from composed source `2dc75c392ded` and is now released in
 PR #890. Apple couch was reconciled onto candidate `8d8a4ab3c764` before final
-evidence; Android couch starts independently from that same candidate. Frozen
-foundation branches stay unchanged. Apple couch is now released in PR #898; Android ordinary browsing completion
-remains software work, distinct from physical acceptance. The invitation builder has a fixed native API contract and a
-verified storage slice; route/provider implementation is still in progress.
+evidence. Android couch began from the same candidate, then reconciled onto
+`05475f804c6c` before its final build and review. Frozen foundation branches stay
+unchanged. Apple couch is released in PR #898 and Android couch in PR #902;
+physical acceptance remains separate. Invitation builders have a fixed native
+API contract and reviewed storage checkpoints; home runtime and native adapters
+remain in progress.
 Its background resident polling must use no-touch authority, just like worker
 admission, so polling cannot extend a dormant phone login's lifetime.
 
 
 ## Reviewed follow-ups and remaining invitation work
+
+Android couch PR #902 is frozen at `8077965a4554c07ea6da47242fc8b6364f130b3e`.
+Parent review [112](http://forge.lan:3000/noirr/plurx/pulls/902#issuecomment-9403)
+found no remaining software blocker after corrections to original deferred
+deadlines, exact focus/owner restoration, late Shared cleanup/autoplay, physical
+versus network channel work, and pairing-code retirement. The final metadata
+commit changes only client-history mappings; source is `e9311ab776435`.
+`assembleDebug` plus `RemoteReceiverTest`, `RemoteNavigationTest`,
+`RemoteChannelAdmissionTest` and `SharedPlaybackOwnerTest` passed 46 cases.
+Normal pinned hooks and exact-head history passed. The coordinator must preserve
+all eighteen regression fields when landing. Live channel Applied means the
+incumbent tuner request was admitted, not that a first frame appeared. Shared v1
+remote seek/tracks and Live Info/More remain explicitly restricted; existing
+physical controls remain. No connected Google TV Streamer interaction occurred.
+The Android builder continues B09 in a separate branch, leaving this packet frozen.
 
 Web couch PR #890 completes its scoped detail/start-over/version, season rows,
 Live TV guide/list/fullscreen-strip and local CEC pairing paths. Review corrected
