@@ -1,6 +1,6 @@
 # Cinema remote status — build, review, and device evidence
 
-**Status:** foundations and desktop reviewed; Apple follow-up in progress; end-to-end integration in progress ·
+**Status:** foundations, desktop and Apple reviewed; end-to-end integration in progress ·
 **Updated:** 2026-10-07 · **Integration:** `effort/cinema-remotes`.
 
 [Implementation packets](TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md) define
@@ -18,7 +18,7 @@ Main integration is handed to `01a11907-f720-71b1-8c51-89902b919e6f`.
 | B03 Apple navigation | PR [#863](http://192.168.4.7:3000/noirr/plurx/pulls/863), `93f821c0f320` | No blocker in foundation scope | iOS/tvOS builds, 7 focused XCTest; physical walkthrough pending |
 | B04 storage/server relay | Building on reviewed B01 dependency | Pending | Exact HTTP DTOs precede client integration |
 | B05 web companion | Building against stable B04 DTOs and reviewed B02/B08 | Pending | Two-client browser evidence pending |
-| B06 Apple receiver/companion | PR [#875](http://192.168.4.7:3000/noirr/plurx/pulls/875), `8a6246043194` | Integration held for pairing-close lifetime correction | iOS/tvOS builds and 19 focused XCTest at reviewed head; correction validation pending |
+| B06 Apple receiver/companion | PR [#875](http://192.168.4.7:3000/noirr/plurx/pulls/875), `7e66c85c6f98` | Pairing-lifetime correction reviewed; coordinator hold released | iOS/tvOS builds and 2 focused follow-up XCTest; earlier 19 cases passed before the narrow correction |
 | B07 Android receiver/companion | Building against stable B04 DTOs | Review in progress | Incremental Kotlin compile and focused wire checks pass; full navigation/lifecycle evidence pending |
 | B08 desktop CEC | PR [#872](http://192.168.4.7:3000/noirr/plurx/pulls/872), `08258f51cbb4` | No blocker in standalone software packet | 16 Python + 12 Node checks and production-popup Chromium smoke with native port mocked; hardware pending |
 | B09 invitations | Waiting B04/B06/B07 | Pending | Provider and service eligibility pending |
@@ -57,9 +57,26 @@ stopped in history preflight: B03 lacked a required client-fix anchor. The
 combined candidate adds that metadata; `make history-check` passes, and the
 coordinator dispatched one corrected run against the frozen head. That run
 stopped before units/compile because the first failed preflight left an
-incomplete receipt. The coordinator owns supported receipt recovery; the
-coordinator has now integrated receipt recovery PR #873 and progress docs #871 into the candidate and dispatched one corrected gate. Failed attempts remain recorded; no passes were invented. Gate4397 then stopped in history validation before units: the recovery merge had class-qualified Python trailers, and four local foundation integrations lacked recognized PR subjects. The manager records exact tree/parent/title identities with the existing landing metadata, preserving original trailer checks, and two precise immutable trailer errata. Reviewed B08 is included in the corrected composition; B06 remains held for its pairing-lifetime correction. A new workflow must wait for local history validation of the committed candidate. The final combined
-Rust 1.97.1 daemon all-target check and complete web static target pass.
+incomplete receipt. The coordinator integrated receipt recovery PR #873 and progress docs #871,
+then dispatched one corrected gate. Failed attempts remain recorded; no
+passes were invented.
+
+Gate 4397 stopped in history validation before units: the recovery merge had
+class-qualified Python trailers, and four local foundation integrations
+lacked recognized PR subjects. The manager recorded exact tree, parent and
+title identities with the existing landing metadata, preserving original
+trailer checks, and two precise immutable trailer errata. Reviewed B08 is
+included in corrected composition PR
+[#876](http://192.168.4.7:3000/noirr/plurx/pulls/876), head
+`29f8603bf02284eb80c7fa494effd53ae5fb5a10`, tree
+`f141a366810603f9c6bf395c881c1db86201b388`. Its normal hook and
+committed-head history audit pass: 3356 corrective commits, 482 client
+anchors, 316 recognized landings and zero awaiting landing. The coordinator
+owns the next combined gate. B06 subsequently resolved its pairing-lifetime
+hold and was released separately for composition.
+
+The foundations' combined Rust 1.97.1 daemon all-target check and complete web
+static target pass.
 Workspace Clippy and iOS/tvOS builds passed before a web-only generated
 manifest/type-annotation correction; the relevant native sources did not
 change. The follow-up [B02 review](http://192.168.4.7:3000/noirr/plurx/pulls/865#issuecomment-9173)
@@ -133,12 +150,11 @@ license decision.
 ## Reviewed Apple packet — lifecycle and control recovery
 
 B06 PR [#875](http://192.168.4.7:3000/noirr/plurx/pulls/875) is frozen at
-`8a62460431943e0c022419ff65d4ff02663098dc`, tree
-`35955b5117234ee606e6dd4ffa50287298dccc89`.
+`7e66c85c6f98cf59d393d6b9b23f8ce4a0d1da84`, tree
+`2b5e81fd7728beb8dadb64a3934af9cb70dc62df`.
 The [parent review](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9209)
-was followed by a [pairing-lifetime finding](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9213): a late approved result could reopen a closed or replaced target. The coordinator is holding this packet for a narrow correction and repeat review. A second state-null finding was [withdrawn](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9214) after verifying that the API explicitly uses null to mean unchanged. Generic iOS/tvOS simulator
-builds and nineteen focused XCTest checks pass; final history audit and all
-normal commit hooks pass.
+was followed by a [pairing-lifetime finding](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9213): a late approved result could reopen a closed or replaced target. The correction now binds each pairing operation to its generation, receiver and target, retires it on close/switch and saves an approved proof before selection. The [release review](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9218) removes that hold. A second state-null finding was [withdrawn](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9214) after verifying that the API explicitly uses null to mean unchanged. Generic iOS/tvOS simulator
+builds and two focused pairing/null-timeout checks pass after the correction; nineteen navigation/receiver checks passed on the preceding reviewed source. Final history audit and all normal commit hooks pass on the new head.
 
 The implementation includes scoped Keychain proofs, strict nested command
 validation, local pairing approval, grant revoke/reset, companion controls,
@@ -151,8 +167,10 @@ focus; a recovered state response alone cannot authorize controller sends.
 
 Live server integration, physical tvOS focus, lazy-grid boundaries, VoiceOver
 and mixed Siri Remote/phone input remain acceptance work. Unowned native
-presentations and expanded library groups remain restricted. Background
-invitations belong to B09.
+presentations and expanded library groups remain restricted. The separate
+couch-navigation follow-up also fences delayed TV pairing-code and approval
+responses against a closed or replaced pairing surface; the released B06
+head remains frozen. Background invitations belong to B09.
 
 ## Rust cache ownership — one worktree per target
 
