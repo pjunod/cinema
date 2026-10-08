@@ -2176,7 +2176,13 @@ impl EncodedEngine {
             // loaded media libraries. Probe it for every recipe capture so a
             // newly installed font or rule cannot reuse the old URI identity,
             // then freeze what it found so the producer can see nothing else.
-            let enumeration = font_render_engine_inner(source_config, execution).await;
+            let enumeration = match font_render_engine_inner(source_config, execution, root).await {
+                Ok(enumeration) => enumeration,
+                Err(error) => {
+                    charges.flush();
+                    return Err(error);
+                }
+            };
             charges.add(
                 EngineAttestationKind::Font,
                 EngineAttestationPhase::Spawn,
@@ -2215,6 +2221,7 @@ impl EncodedEngine {
                     fonts: &enumeration.fonts,
                     versions: &versions,
                     listing: &enumeration.listing,
+                    search_path: enumeration.search_path.as_deref(),
                 },
                 execution,
             )
@@ -2330,6 +2337,12 @@ impl EncodedEngine {
             .iter()
             .flat_map(|environment| environment.child_env())
             .collect()
+    }
+
+    pub(crate) fn font_digest(&self) -> Option<&str> {
+        self.font_env
+            .as_ref()
+            .map(|environment| environment.digest())
     }
 
     #[cfg(test)]
@@ -2597,6 +2610,7 @@ async fn fragment_index_engine_with_source(
 /// `fc-list`/`fc-conflist` children and the stat loop over what they named.
 /// The caller charges each series once for the whole attestation.
 struct FontEnumeration {
+    search_path: Option<std::ffi::OsString>,
     engine: FragmentIndexEngine,
     spawn_elapsed: Duration,
     stat_elapsed: Duration,
@@ -2631,7 +2645,8 @@ pub(crate) async fn font_probe_output(
 async fn font_render_engine_inner(
     source_config: Option<&std::path::Path>,
     execution: Option<&crate::transcode::source_preparation::SourceCommandExecutor<'_>>,
-) -> FontEnumeration {
+    runtime_cache: &std::path::Path,
+) -> Result<FontEnumeration, String> {
     let probe_started = Instant::now();
     let mut digest = Sha256::new();
     digest.update(b"plurx/font-render/engine-v1\0");
@@ -2641,12 +2656,24 @@ async fn font_render_engine_inner(
     let mut rules: Vec<std::path::PathBuf> = Vec::new();
     let mut listing = String::new();
 
-    let mut font_list = tokio::process::Command::new("fc-list");
+    let live = crate::fontenv::live_config(source_config)?;
+    let list_bin = crate::fontenv::tool_bin("fc-list");
+    let conflist_bin = crate::fontenv::tool_bin("fc-conflist");
+    let mut font_list = tokio::process::Command::new(&list_bin);
     font_list.arg(crate::fontenv::FONT_LISTING_FORMAT);
-    let mut configuration = tokio::process::Command::new("fc-conflist");
-    if let Some(config) = source_config {
-        font_list.env("FONTCONFIG_FILE", config);
-        configuration.env("FONTCONFIG_FILE", config);
+    let mut configuration = tokio::process::Command::new(&conflist_bin);
+    live.apply(&mut font_list);
+    live.apply(&mut configuration);
+    if cfg!(target_os = "macos") {
+        crate::producer_spawn::configure_ffmpeg_runtime(&mut font_list, runtime_cache);
+        crate::producer_spawn::configure_ffmpeg_runtime(&mut configuration, runtime_cache);
+        // The exact bundled query implementations are part of the same font
+        // authority as the rule and face bytes, not an incidental PATH tool.
+        for bin in [&list_bin, &conflist_bin] {
+            if std::path::Path::new(bin).is_absolute() {
+                paths.push(std::path::PathBuf::from(bin));
+            }
+        }
     }
     match font_probe_output(font_list, execution).await {
         Ok(stdout) => {
@@ -2712,7 +2739,8 @@ async fn font_render_engine_inner(
         digest.update((object_digest.len() as u64).to_be_bytes());
         digest.update(object_digest);
     }
-    FontEnumeration {
+    Ok(FontEnumeration {
+        search_path: live.search,
         engine: FragmentIndexEngine {
             digest: hex::encode(digest.finalize()),
             objects: objects.into(),
@@ -2723,7 +2751,7 @@ async fn font_render_engine_inner(
         rules,
         fonts,
         listing,
-    }
+    })
 }
 
 struct FontObjectVersions {

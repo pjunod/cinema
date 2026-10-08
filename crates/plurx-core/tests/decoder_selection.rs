@@ -5075,3 +5075,49 @@ fn authorized_strict_p5_survives_rpu_only_renderer_guard_without_admitting_gener
         );
     }
 }
+
+#[test]
+fn macos_text_font_binding_changes_only_text_output_identity() {
+    let input = facts(macos_stream(false));
+    let caps = unqualified_software_capabilities("hevc");
+    let base = macos_identity("test-build");
+    let mut text_digests = Vec::new();
+    let mut bitmap_digests = Vec::new();
+    let mut plain_digests = Vec::new();
+    for font in ["a", "b"] {
+        let context = macos_context(true, MacosProcessingAvailability::Available)
+            .with_text_identity(base.clone().with_text_fonts(font.repeat(64)))
+            .with_graph(
+                MacosProcessingGraph::SdrTextBurn,
+                MacosProcessingAvailability::Available,
+            )
+            .with_graph(
+                MacosProcessingGraph::SdrBitmapBurn,
+                MacosProcessingAvailability::Available,
+            );
+        for burn in [None, Some(false), Some(true)] {
+            let mut media = options(Pipeline::Cpu);
+            media.subtitle_burn = burn.map(|bitmap| SubtitleBurn {
+                subtitle_index: 0,
+                bitmap,
+            });
+            let plan = resolve_with_options(
+                Encoder::VideoToolbox,
+                media,
+                &input,
+                &caps,
+                macos_policy(context.clone()),
+            )
+            .expect("observed complete native graph");
+            let digest = plan.plan_digest();
+            match burn {
+                None => plain_digests.push(digest),
+                Some(false) => text_digests.push(digest),
+                Some(true) => bitmap_digests.push(digest),
+            }
+        }
+    }
+    assert_ne!(text_digests[0], text_digests[1]);
+    assert_eq!(bitmap_digests[0], bitmap_digests[1]);
+    assert_eq!(plain_digests[0], plain_digests[1]);
+}

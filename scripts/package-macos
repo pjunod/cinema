@@ -33,6 +33,44 @@ def recipe():
     return module
 
 
+
+def validate_font_tools(package, facts):
+    if (not isinstance(facts, dict) or facts.get("schema_version") != 1
+            or facts.get("source_role") != "fc"
+            or facts.get("source_commit") != "6d0a98982ec351c165c9224c8b7dbdfca3010e47"
+            or facts.get("source_sha256") != "00a589ef0a455d9cf3db55a13e1aa15090a96e65b18a3fe89c182b7be277576d"):
+        raise ValueError("bundled Fontconfig source provenance does not match the pinned recipe")
+    tool = recipe()
+    binaries = facts.get("binaries")
+    if not isinstance(binaries, dict) or set(binaries) != {"fc-list", "fc-conflist"}:
+        raise ValueError("bundled Fontconfig query tools are incomplete")
+    for name, fact in binaries.items():
+        image = package / name
+        if (not image.is_file() or image.is_symlink() or not isinstance(fact, dict)
+                or image.stat().st_size != fact.get("bytes") or tool.digest(image) != fact.get("sha256")):
+            raise ValueError(f"bundled Fontconfig {name} does not match its provenance")
+    for key, directory in [("configuration", package / "fontconfig"),
+                           ("provenance_sha256", package / "provenance/font-tools")]:
+        files = facts.get(key)
+        if not isinstance(files, dict) or not files:
+            raise ValueError(f"bundled Fontconfig {key} inventory is missing")
+        if key == "configuration" and "fonts.conf" not in files:
+            raise ValueError("bundled Fontconfig root configuration is missing")
+        for relative, digest in files.items():
+            if not isinstance(relative, str):
+                raise ValueError("unsafe bundled Fontconfig inventory path")
+            path = Path(relative)
+            if (path.is_absolute() or str(path) != relative
+                    or any(part in {".", ".."} for part in path.parts) or not path.parts):
+                raise ValueError("unsafe bundled Fontconfig inventory path")
+            member = directory / path
+            if (not member.is_file() or member.is_symlink() or tool.digest(member) != digest):
+                raise ValueError(f"bundled Fontconfig {key} does not match its provenance")
+        actual = {str(item.relative_to(directory)) for item in directory.rglob("*") if item.is_file()}
+        if actual != set(files):
+            raise ValueError(f"bundled Fontconfig {key} has an unlisted or missing file")
+
+
 def validate_native_package(package):
     tool = recipe()
     parser = package / "plurx-source-parser.wasm"
@@ -71,6 +109,9 @@ def validate_native_package(package):
     if (not parser_fact or parser_fact.get("sha256") != manifest["module_sha256"]
             or parser_fact.get("parser_abi") != manifest["parser_abi"]):
         raise ValueError("native package does not attest its canonical parser companion")
+    font_tools = native_manifest.get("font_tools")
+    if font_tools is not None or any((package / name).exists() for name in ["fc-list", "fc-conflist", "fontconfig"]):
+        validate_font_tools(package, font_tools)
     return manifest
 
 

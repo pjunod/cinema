@@ -3600,13 +3600,14 @@ pub fn resolve_transcode(
     ) || (request.encoder == Encoder::VideoToolbox
         && codec_contract.codec == super::VideoCodec::Hevc)
     {
-        Some(
-            policy
-                .macos_processing()
-                .expect("selected Mac graph has context")
-                .identity()
-                .clone(),
-        )
+        let context = policy
+            .macos_processing()
+            .expect("selected Mac graph has context");
+        Some(if subtitle_rendering == SubtitleRendering::TextBurn {
+            context.text_identity().clone()
+        } else {
+            context.identity().clone()
+        })
     } else {
         if macos_processing_selection == Some(MacosProcessingSelection::Selected) {
             macos_processing_selection = Some(MacosProcessingSelection::CapabilityFallback);
