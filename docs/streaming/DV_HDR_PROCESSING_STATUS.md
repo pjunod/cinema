@@ -43,9 +43,9 @@ DV-off validation. Current playback keeps its compatible fallback.
 |---|---|---|
 | M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction, encoded-layer association, bounded VFR/seek/epochs and affine P8.1 authoring retained with replay recipes | Broader timing and metadata-reuse acceptance, general metadata adaptation, independent reference limits and full graph resource evidence |
 | M1 typed contracts | Merged in #933: 25 focused and six compatibility tests passed; production registry empty | Runtime integration and qualification in M2/M3 |
-| M2 processing and lifecycle | In progress: combined bounded P7/FEL to timestamped HDR10 helper | Actual Main10 encoder, integrated graph, bounded ownership and output evidence |
+| M2 processing and lifecycle | In progress: combined bounded P7/FEL to timestamped HDR10 helper | Persistent bounded-segment graph, producer ownership/admission and output evidence |
 | M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
-| M4 settings and HDR10-E badge | Settings built and reviewed: two default-off preferences persist independently with advisory Developer cards; receipt-backed client presentation in progress | Settings task landing; effective-generation reporting, runtime integration and route qualification |
+| M4 settings and HDR10-E badge | Settings merged in #937: two default-off preferences persist independently with advisory Developer cards; receipt-backed client presentation in progress | Effective-generation reporting, runtime integration and route qualification |
 | M5 quality and performance | Not started; M0 supplies the measurement foundation | Held-out corpus, matched bitrate, physical playback and full graph performance |
 | M6 release qualification | Not started | Exact-tree gates and separate acceptance for each proposed route |
 
@@ -325,3 +325,21 @@ The preceding reuse slice merged as PR #935 at
 `c76632e63d179da2402bf8d31c6c3eadea6503b5`. Its original approved bundle is
 unchanged; a verified prerequisite archive is additionally preserved outside
 temporary scratch in the local Codex artifact directory.
+
+
+## 11. Combined decoder-to-HDR10 execution
+
+The [combined control](DV_HDR_COMBINED_CONTROLS.md) now connects real P7
+BL/EL/RPU decoding, public reconstruction, timestamped RGB48 NUT and an actual
+Main10 HDR10 encode. Six synthetic frames preserve their timestamps and stored
+durations. Corrected execution and 17 focused checker controls passed review.
+The stricter initial numerical allowance failed and stays recorded as failure;
+post-observation diagnostic bounds do not establish a movie-quality gain.
+
+The active implementation replaces per-picture GPU initialization with a
+persistent context and bounded actual-segment input. Real producer admission,
+source/generation fencing, fallback and device acceptance remain outstanding.
+No production registry entry or route is enabled by this finite proof.
+
+Settings merged in PR #937 at `a23d550401da292c9c19c9da3e1e213603ff0b1a`,
+with all five named landing regressions retained and no broad CI dispatch.

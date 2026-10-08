@@ -1,0 +1,19 @@
+Input #0, matroska,webm, from '/work/hdr10.mkv':
+  Metadata:
+    ENCODER         : Lavf59.27.100
+  Duration: 00:00:00.25, start: 0.000000, bitrate: 281 kb/s
+  Stream #0:0: Video: hevc (Main 10), yuv420p10le(tv, bt2020nc/bt2020/smpte2084, progressive), 64x64, 24 fps, 24 tbr, 1k tbn
+    Metadata:
+      ENCODER         : Lavc59.37.100 libx265
+      DURATION        : 00:00:00.250000000
+Stream mapping:
+  Stream #0:0 -> #0:0 (hevc (native) -> rawvideo (native))
+Output #0, rawvideo, to '/work/decoded.yuv420p10le':
+  Metadata:
+    encoder         : Lavf59.27.100
+  Stream #0:0: Video: rawvideo (Y3[11][10] / 0xA0B3359), yuv420p10le(tv, bt2020nc/bt2020/smpte2084, progressive), 64x64, q=2-31, 1474 kb/s, 24 fps, 24 tbn
+    Metadata:
+      DURATION        : 00:00:00.250000000
+      encoder         : Lavc59.37.100 rawvideo
+frame=    1 fps=0.0 q=0.0 size=       0kB time=00:00:00.00 bitrate=N/A speed=   0x    frame=    6 fps=0.0 q=-0.0 Lsize=      72kB time=00:00:00.25 bitrate=2359.3kbits/s speed=94.9x    
+video:72kB audio:0kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: 0.000000%
