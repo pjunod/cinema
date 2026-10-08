@@ -555,34 +555,38 @@ def recover_inherited_pr742(api, scope, prior, jobs, marker=None, marker_raw=Non
 
 
 def zero_failure869_case():
-    """Two exact zero-unit PR869 attempts; never a general incomplete waiver."""
+    """Three exact zero-unit PR869 attempts; never a general incomplete waiver."""
     path = Path(__file__).resolve().parent / 'python-unit-zero-failure869.json'
     require(path.is_file() and not path.is_symlink(), 'Inherited failure witness unavailable')
     with path.open('rb') as source:
         raw = source.read(MAX_BYTES + 1)
     digest = hashlib.sha256(raw).hexdigest()
     require(len(raw) <= MAX_BYTES and digest ==
-            '9bb36bd540c65b3ad19aeff608dab173b99502cee8f2568a26b8b06e9486c5f8',
+            'f9d2e22c4e8095478146809c9100669d2211f832da7d59baba0851b6885ab408',
             'Unknown or corrupt inherited failure witness')
     return bounded_json(raw), digest
 
 
 def recover_zero_pr869(api, scope, prior, jobs, marker=None, marker_raw=None,
                            artifact=None, final_raw=None, journal=None):
-    """Authenticate two zero-unit failures without importing any successes."""
+    """Authenticate three zero-unit failures without importing any successes."""
     if scope != {'repository': 1, 'pr': 869, 'branch': 'codex/cinema-remotes-foundations-gate',
-                 'base': 'effort/cinema-remotes'} or prior['id'] not in (4391, 4394):
+                 'base': 'effort/cinema-remotes'} or prior['id'] not in (4391, 4394, 4397):
         return False
     proof, digest = zero_failure869_case()
     require(proof['version'] == 1 and proof['scope'] == scope
             and (proof['inherited']['run'], proof['inherited']['job'], proof['inherited']['commit']) ==
             (4391, 44632, '2b21cc0354561c737b53c73f00804337024e3c61')
             and (proof['refusal']['run'], proof['refusal']['job'], proof['refusal']['commit']) ==
-            (4394, 44658, '1041d72407d937efe265f7263926cacf332e6b22'),
+            (4394, 44658, '1041d72407d937efe265f7263926cacf332e6b22')
+            and (proof['history4397']['run'], proof['history4397']['job'],
+                 proof['history4397']['commit']) ==
+            (4397, 44684, '69f092b1e3efc43073399c1d835f87c90f796101'),
             'Inherited failure exact-case identity mismatch')
     authenticate_lost_journal(api, scope, digest)
     zero = prior['id'] == 4394
-    case = proof['refusal'] if zero else proof['inherited']
+    case = (proof['refusal'] if zero else
+            proof['history4397'] if prior['id'] == 4397 else proof['inherited'])
     lines = recovery_metadata(api, scope, prior, jobs, case, 'failure')
     log = '\n'.join(lines)
     require(not any(token in log for token in (
@@ -606,7 +610,7 @@ def recover_zero_pr869(api, scope, prior, jobs, marker=None, marker_raw=None,
             'Inherited failure requires both live start and final witnesses')
     uploads = []
     for label, item, raw, name in (
-            ('start', marker, marker_raw, key(scope) + '-start-4391'),
+            ('start', marker, marker_raw, key(scope) + f"-start-{case['run']}"),
             ('final', artifact, final_raw, key(scope))):
         expected = case['artifacts'][label]
         require(item['id'] == expected['id'] and item['run_id'] == case['run']
@@ -631,7 +635,7 @@ def recover_zero_pr869(api, scope, prior, jobs, marker=None, marker_raw=None,
             and uploads[0] < lines.index(history) < lines.index(failure) < uploads[1]
             and lines.count("Job 'Python unit receipts' failed") == 1,
             'Inherited failure history-before-units ordering mismatch')
-    print('Preserved empty incomplete journal from failed run 4391/job 44632; zero new passes')
+    print(f"Preserved empty incomplete journal from failed run {case['run']}/job {case['job']}; zero new passes")
     return True
 
 

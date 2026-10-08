@@ -22,18 +22,18 @@ def archive(journal):
 
 
 class SyntheticZeroAPI:
-    def __init__(self):
+    def __init__(self, history_run=4391):
         self.proof, self.digest = receipts.zero_failure869_case()
         self.proof = copy.deepcopy(self.proof)
         self.scope = self.proof['scope']
-        self.case = self.proof['inherited']
+        self.case = self.proof['history4397'] if history_run == 4397 else self.proof['inherited']
         self.zero = self.proof['refusal']
         self.old = {'run':3898,'commit':'1'*40}
         self.baseline = {}
         self.sources = {path: ('synthetic:' + path).encode() for path in self.case['source_hashes']}
         for case in (self.case, self.zero):
             case['source_hashes'] = {path: digest(raw) for path, raw in self.sources.items()}
-        self.start = self.journal(4391, self.case['commit'], self.baseline, False)
+        self.start = self.journal(self.case['run'], self.case['commit'], self.baseline, False)
         self.final = copy.deepcopy(self.start)
         self.raw = {}
         self.live = []
@@ -48,17 +48,17 @@ class SyntheticZeroAPI:
                  'historical regression coverage is incomplete:',
                  'make: *** [Makefile:140: history-check] Error 1', self.upload('final'),
                  "Job 'Python unit receipts' failed"]
-        self.logs = {44632: ('\n'.join(lines) + '\n').encode(),
+        self.logs = {self.case['job']: ('\n'.join(lines) + '\n').encode(),
                      44658: (self.zero['commit'] + '\n'
                          'Python receipt refusal: ReceiptError: Incomplete receipt attempt 4391; preserve artifact and recover individual evidence\n'
                          "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped\n"
                          "skipping post step for 'Publish Python attempt-start marker'; main step was skipped\n").encode()}
         self.refresh_logs()
         self.runs = [{'id': run, 'commit_sha': commit} for run, commit in (
-            (4394, self.zero['commit']), (4391, self.case['commit']), (3898, self.old['commit']))]
+            (4394, self.zero['commit']), (self.case['run'], self.case['commit']), (3898, self.old['commit']))]
         self.jobs = {run: [{'id': job, 'run_id': run, 'repo_id': 1, 'attempt': 1,
                            'name': receipts.job_name(self.scope), 'status': status}]
-                     for run, job, status in ((4394, 44658, 'failure'), (4391, 44632, 'failure'),
+                     for run, job, status in ((4394, 44658, 'failure'), (self.case['run'], self.case['job'], 'failure'),
                                               (3898, 40000, 'success'))}
         self.actual = {case['run']: {'id': case['run'], 'repository': {'id': 1},
             'commit_sha': case['commit'], 'prettyref': self.scope['branch'],
@@ -79,24 +79,25 @@ class SyntheticZeroAPI:
                 'name': receipts.key(self.scope) + (f'-start-{run}' if start else '')}
 
     def refresh_archives(self):
-        for label, aid, journal in (('start', 1781, self.start), ('final', 1784, self.final)):
+        for label, aid, journal in (('start', self.case['artifacts']['start']['id'], self.start),
+                                     ('final', self.case['artifacts']['final']['id'], self.final)):
             raw = archive(journal)
             self.case['artifacts'][label] = {'id': aid, 'size': len(raw), 'sha256': digest(raw)}
             self.raw[aid] = raw
-            metadata = self.metadata(aid, 4391, raw, label == 'start')
+            metadata = self.metadata(aid, self.case['run'], raw, label == 'start')
             if label == 'start':
-                self.markers[4391] = [metadata]
+                self.markers[self.case['run']] = [metadata]
             else:
-                self.live = [item for item in self.live if item['run_id'] != 4391] + [metadata]
+                self.live = [item for item in self.live if item['run_id'] != self.case['run']] + [metadata]
 
     def upload(self, label):
         artifact = self.case['artifacts'][label]
-        name = receipts.key(self.scope) + ('-start-4391' if label == 'start' else '')
+        name = receipts.key(self.scope) + (f"-start-{self.case['run']}" if label == 'start' else '')
         return (f"Artifact {name} has been successfully uploaded! Final size is "
                 f"{artifact['size']} bytes. Artifact ID is {artifact['id']}")
 
     def refresh_logs(self):
-        self.case['log_sha256'] = digest(self.logs[44632])
+        self.case['log_sha256'] = digest(self.logs[self.case['job']])
         self.zero['log_sha256'] = digest(self.logs[44658])
 
     def get(self, path):
@@ -171,4 +172,45 @@ class ZeroFailureRecoveryCase(unittest.TestCase):
                 if mode == 'order': api.logs[44632] = ('\n'.join(reversed(api.logs[44632].decode().splitlines()))+'\n').encode(); api.refresh_logs()
                 if mode == 'refusal_artifact': api.run_artifacts = [{'run_id':4394}]
                 if mode == 'refusal_unit': api.logs[44658] += b'pending=1\n'; api.refresh_logs()
+                with self.assertRaises(receipts.ReceiptError): self.restore(api)
+
+
+class History4397RecoveryCase(unittest.TestCase):
+    restore = ZeroFailureRecoveryCase.restore
+    def test_exact_4397_empty_history_failure_imports_no_passes(self):
+        api = SyntheticZeroAPI(4397)
+        api.runs = api.runs[:2]
+        api.live = [m for m in api.live if m['run_id'] == 4397]
+        self.assertEqual(self.restore(api), {})
+        self.assertFalse(api.start['complete'])
+        self.assertEqual(api.start, api.final)
+        self.assertFalse(receipts.recover_zero_pr869(
+            api, api.scope, {'id': 4398}, []))
+
+    def test_4397_contradictory_evidence_refuses(self):
+        for mode in ('attestation', 'old_attestation', 'reader', 'source', 'log', 'artifact',
+                     'attempt', 'fixture', 'passes', 'unit', 'order', 'commit'):
+            with self.subTest(mode=mode):
+                api = SyntheticZeroAPI(4397)
+                api.runs = api.runs[:2]
+                api.live = [m for m in api.live if m['run_id'] == 4397]
+                if mode == 'attestation': api.comments = []
+                if mode == 'old_attestation':
+                    api.comments[0]['body'] = 'Python-Journal-Recovery: ' + json.dumps({
+                        'repository': 1, 'pr': 869,
+                        'sha256': '9bb36bd540c65b3ad19aeff608dab173b99502cee8f2568a26b8b06e9486c5f8'})
+                if mode == 'reader': api.permission = 'read'
+                if mode == 'source': api.sources[next(iter(api.sources))] = b'changed'
+                if mode == 'log': api.logs[44684] += b'changed'
+                if mode == 'artifact': api.raw[1792] += b'changed'
+                if mode == 'attempt': api.jobs[4397][0]['attempt'] = 2
+                if mode == 'commit': api.actual[4397]['commit_sha'] = '0' * 40
+                if mode in ('fixture', 'passes'):
+                    if mode == 'fixture': api.start['fixture_errors'] = api.final['fixture_errors'] = ['setup']
+                    else: api.start['passes'] = api.final['passes'] = {'validation:x.C.test_x': api.old}
+                    api.refresh_archives()
+                if mode == 'unit': api.logs[44684] += b'... ok\n'; api.refresh_logs()
+                if mode == 'order':
+                    api.logs[44684] = ('\n'.join(reversed(api.logs[44684].decode().splitlines())) + '\n').encode()
+                    api.refresh_logs()
                 with self.assertRaises(receipts.ReceiptError): self.restore(api)
