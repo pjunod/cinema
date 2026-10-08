@@ -4215,14 +4215,309 @@ async fn a05_prepared_http_observation_is_optional_auth_not_capability_authority
         "expired original deadline is not renewed"
     );
     headers.remove("X-Plurx-Link-Receipt");
-    assert!(super::prepared_link::authenticate(
+    assert!(
+        super::prepared_link::authenticate(
+            &fixture.state,
+            &headers,
+            remote,
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE
+        )
+        .await
+        .is_some(),
+        "authenticated observation may register future receipts without claiming incumbent Link"
+    );
+}
+
+#[tokio::test]
+async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
+    use super::link_receipts::ClientLinkSample;
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    let dir = crate::test_tempdir().expect("source");
+    let playback = unique_playback_id("auto-receipt-bootstrap");
+    let (fixture, _, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let control = preparing_control_request(&route);
+    accepted_exchange(&fixture, &route, &control).await;
+    let user = fixture
+        .store
+        .get_user(route.principal.local_user_id().expect("local"))
+        .await
+        .expect("user query")
+        .expect("user");
+    let token = "auto-receipt-bootstrap-owned-token";
+    fixture
+        .store
+        .create_token(&plurx_core::auth::hash_token(token), user.id, None)
+        .await
+        .expect("token");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {token}").parse().expect("auth"),
+    );
+    headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
+    let remote = Some("192.0.2.8:12345".parse().expect("peer"));
+    let http = super::prepared_link::authenticate(
         &fixture.state,
         &headers,
         remote,
-        std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE
+        std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE,
     )
     .await
-    .is_none());
+    .expect("authenticated without receipt");
+    let observation = super::prepared_link::capture(
+        &fixture.state,
+        &route,
+        &control,
+        crate::playback_control::ControlDisposition::Accepted,
+        Some(http),
+    )
+    .await
+    .expect("accepted ask");
+    let file = fixture
+        .store
+        .get_file(fixture.file_id())
+        .await
+        .expect("file query")
+        .expect("file");
+    assert!(
+        observation
+            .current_link(
+                &fixture.state,
+                &file,
+                &fixture.state.node_id,
+                super::link_receipts::advisory_deadline()
+            )
+            .await
+            .is_none(),
+        "no nonce is still Unknown incumbent Link"
+    );
+    let digest = [12; 32];
+    let candidate = QualityCandidate {
+        id: CandidateId::for_recipe_digest(digest),
+        recipe_digest: digest,
+        route: CandidateRoute::Encode,
+        normalized_geometry: true,
+        width: 1280,
+        height: 720,
+        target_height: 720,
+        average_bps: Some(4_000_000),
+        peak_bps: Some(6_000_000),
+        grade: plurx_core::transcode::OutputGrade::Sdr,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    };
+    let mut request = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json)
+        .expect("recipe")
+        .request;
+    request.kind = crate::transcode::SessionKind::Transcode { height: 720 };
+    request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
+        planning_snapshot: None,
+        retained_output: None,
+        canonical_caps: None,
+        selected_candidate: candidate.clone(),
+        planning_binding: None,
+        owner_node_id: Some(fixture.state.node_id.clone()),
+        candidate_id: candidate.id,
+        recipe_digest: digest,
+        normalized_geometry: true,
+        grade: candidate.grade,
+        profile: None,
+    }));
+    assert!(
+        observation
+            .proposed_proof(
+                &fixture.state,
+                &file,
+                &mut request,
+                &candidate,
+                super::link_receipts::advisory_deadline()
+            )
+            .await
+            .is_none(),
+        "registration does not substitute for measured admission"
+    );
+    let proof = observation
+        .receipt_registration(
+            &fixture.state,
+            &file,
+            &request,
+            &candidate,
+            super::link_receipts::advisory_deadline(),
+        )
+        .await
+        .expect("own measurement binding");
+    assert!(
+        !proof.has_transition_admission(),
+        "bootstrap cannot authorize Auto upgrade"
+    );
+    let mut copy_request = request.clone();
+    copy_request.kind = crate::transcode::SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+    };
+    for route in [CandidateRoute::Original, CandidateRoute::Remux] {
+        let copy_candidate = QualityCandidate {
+            route,
+            ..candidate.clone()
+        };
+        copy_request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .selected_candidate = copy_candidate.clone();
+        assert!(
+            observation
+                .receipt_registration(
+                    &fixture.state,
+                    &file,
+                    &copy_request,
+                    &copy_candidate,
+                    super::link_receipts::advisory_deadline()
+                )
+                .await
+                .is_none(),
+            "copy/original registration retains existing measured/trial admission"
+        );
+    }
+    let mut mismatched = candidate.clone();
+    mismatched.recipe_digest = [13; 32];
+    assert!(
+        observation
+            .receipt_registration(
+                &fixture.state,
+                &file,
+                &request,
+                &mismatched,
+                super::link_receipts::advisory_deadline()
+            )
+            .await
+            .is_none(),
+        "exact recipe binding"
+    );
+    let staged = uuid::Uuid::new_v4().to_string();
+    let incarnation = uuid::Uuid::new_v4().to_string();
+    let deadline = unix_ms() + 15_000;
+    assert!(
+        observation
+            .gate
+            .stage_preparation_for_owner(
+                incarnation.clone(),
+                control.generation.clone(),
+                deadline,
+                i64::try_from(control.control_epoch).expect("epoch"),
+                Some(control.selection.desired().digest())
+            )
+            .await
+    );
+    let activation = plurx_core::domain::MediaSessionActivation {
+        incarnation_id: incarnation.clone(),
+        session_id: staged.clone(),
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
+        playback_id: playback,
+        recovery_epoch: String::new(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: "a".repeat(64),
+        owner_node_id: fixture.state.node_id.clone(),
+        recipe_json: "{}".into(),
+        response_json: "{}".into(),
+        publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: unix_ms(),
+        lease_expires_at_ms: deadline,
+        expected_desired_revision: None,
+    };
+    assert!(fixture
+        .store
+        .activate_media_session(&activation)
+        .await
+        .expect("activation")
+        .is_some());
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    proof
+        .register(
+            &fixture.state,
+            &staged,
+            &incarnation,
+            deadline,
+            cancelled.clone(),
+        )
+        .await;
+    let (nonce, eof) = fixture
+        .state
+        .link_receipts
+        .mint(&staged, "seg00002.m4s", "own-etag", 4096, Some(2000), true)
+        .expect("registered own body");
+    let sample = ClientLinkSample {
+        receipt: nonce,
+        object_name: "seg00002.m4s".into(),
+        etag: "own-etag".into(),
+        body_bytes: 4096,
+        body_duration_ms: 1000,
+        age_ms: 0,
+        network_load: Some(true),
+        from_cache: Some(false),
+        producer_paced: Some(false),
+        cause: plurx_core::domain::NetworkPriorCause::Link,
+        negative: false,
+        media_duration_ms: Some(2000),
+        presenting: true,
+        stalled: false,
+        runway_ms: 12000,
+    };
+    let mut network = crate::http::network::identity(&headers, remote).expect("network");
+    network.user_id = Some(user.id);
+    network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+        user.id,
+        user.created_at,
+        &user.password_hash,
+    ));
+    assert!(
+        fixture
+            .state
+            .link_receipts
+            .accept(&fixture.state, &network, Some(&staged), &sample)
+            .await
+            .is_none(),
+        "header alone is not completion"
+    );
+    eof(std::time::Instant::now(), unix_ms());
+    assert!(
+        fixture
+            .state
+            .link_receipts
+            .accept(&fixture.state, &network, Some(&staged), &sample)
+            .await
+            .is_some(),
+        "only this stage's authenticated EOF counts"
+    );
+    let (late_nonce, late_eof) = fixture
+        .state
+        .link_receipts
+        .mint(&staged, "seg00003.m4s", "late-etag", 4096, Some(2000), true)
+        .expect("later body");
+    late_eof(std::time::Instant::now(), unix_ms());
+    cancelled.cancel();
+    let late = ClientLinkSample {
+        receipt: late_nonce,
+        object_name: "seg00003.m4s".into(),
+        etag: "late-etag".into(),
+        ..sample
+    };
+    assert!(
+        fixture
+            .state
+            .link_receipts
+            .accept(&fixture.state, &network, Some(&staged), &late)
+            .await
+            .is_none(),
+        "cancelled stage cannot claim completed bytes"
+    );
 }
 #[tokio::test]
 async fn a05_prepared_auth_ignores_all_forwarding_headers_and_requires_ipv4_socket() {

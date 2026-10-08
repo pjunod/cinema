@@ -1579,13 +1579,30 @@ pub(super) async fn process_preparation_candidate(
             // whole proof (prior, cost, live link, source fence), not a
             // short per-read cap. A miss is Unknown and stages no proof.
             let advisory = super::link_receipts::advisory_deadline();
-            tokio::time::timeout_at(
+            let admitted = tokio::time::timeout_at(
                 advisory,
                 observation.proposed_proof(&state, source, &mut candidate, selected, advisory),
             )
             .await
             .ok()
-            .flatten()
+            .flatten();
+            if admitted.is_some() {
+                admitted
+            } else if candidate_auto && proposed.height <= delivered.height {
+                // Entering Auto from a manual session cannot already have an
+                // Auto receipt. Register this permitted stage's own bodies;
+                // do not substitute that registration for upgrade authority.
+                tokio::time::timeout_at(
+                    advisory,
+                    observation
+                        .receipt_registration(&state, source, &candidate, selected, advisory),
+                )
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -1645,7 +1662,9 @@ pub(super) async fn process_preparation_candidate(
     // cost proof. Unknown is not a feature/ordinary/manual/recovery refusal.
     let successor_owner = if candidate_auto
         && proposed.height > delivered.height
-        && prepared_proof.is_none()
+        && !prepared_proof
+            .as_ref()
+            .is_some_and(super::prepared_link::PreparedProof::has_transition_admission)
         && matches!(purpose, PreparationPurpose::SelectionChange)
     {
         None

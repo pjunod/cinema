@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub(super) struct HttpObservation {
     network: NetworkIdentity,
-    nonce: String,
+    nonce: Option<String>,
 }
 
 #[cfg(test)]
@@ -36,7 +36,9 @@ pub(super) async fn authenticate(
     if Instant::now() >= deadline {
         return None;
     }
-    let nonce = super::link_receipts::requested_receipt(headers)?.to_owned();
+    // An authenticated accepted ask may bootstrap its own measurements.
+    // An incumbent transfer remains Unknown until it supplies a real receipt.
+    let nonce = super::link_receipts::requested_receipt(headers).map(str::to_owned);
     let mut request = axum::http::Request::new(());
     *request.headers_mut() = headers.clone();
     let (mut parts, _) = request.into_parts();
@@ -129,7 +131,7 @@ impl AcceptedObservation {
                 state,
                 &self.http.network,
                 file,
-                Some(&self.http.nonce),
+                Some(self.http.nonce.as_deref()?),
                 Some(&self.playback),
                 Some(owner),
                 deadline,
@@ -155,7 +157,7 @@ impl AcceptedObservation {
         candidate: &plurx_core::playback::candidate::QualityCandidate,
         deadline: tokio::time::Instant,
     ) -> Option<PreparedProof> {
-        if request.file_id != file.id {
+        if self.http.nonce.is_none() || request.file_id != file.id {
             return None;
         }
         let context = request.candidate_context.as_ref()?;
@@ -233,6 +235,57 @@ impl AcceptedObservation {
             admission,
         })
     }
+
+    /// Bind receipts for an already-admitted non-upgrade Auto stage. This is
+    /// measurement registration only: it supplies neither incumbent Link nor
+    /// measured output cost and cannot authorize an automatic upgrade.
+    pub(super) async fn receipt_registration(
+        &self,
+        state: &AppState,
+        file: &plurx_core::domain::MediaFile,
+        request: &crate::transcode::SessionRequest,
+        candidate: &plurx_core::playback::candidate::QualityCandidate,
+        deadline: tokio::time::Instant,
+    ) -> Option<PreparedProof> {
+        if request.file_id != file.id
+            || !request.automatic
+            || request.presentation != crate::transcode::Presentation::Vod
+            || candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode
+            || !matches!(
+                request.kind,
+                crate::transcode::SessionKind::Transcode { .. }
+            )
+            || !self.gate.observation_is_current(self.fence.clone()).await
+        {
+            return None;
+        }
+        let context = request.candidate_context.as_ref()?;
+        if context.owner_node_id.as_deref() != Some(state.node_id.as_str())
+            || &context.selected_candidate != candidate
+            || context.candidate_id != candidate.id
+            || context.recipe_digest != candidate.recipe_digest
+            || context.grade != candidate.grade
+            || context.normalized_geometry != candidate.normalized_geometry
+        {
+            return None;
+        }
+        let source = super::link_receipts::binding_until(
+            &self.http.network,
+            file,
+            candidate.recipe_digest,
+            candidate.route,
+            deadline,
+        )
+        .await?;
+        if !self.gate.observation_is_current(self.fence.clone()).await {
+            return None;
+        }
+        Some(PreparedProof {
+            accepted: self.clone(),
+            source,
+            admission: PreparedAdmission::ReceiptRegistrationOnly,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -254,6 +307,8 @@ pub(super) struct PreparedProof {
 }
 
 enum PreparedAdmission {
+    // Own future EOF measurements only; never transition admission authority.
+    ReceiptRegistrationOnly,
     // Keeps the exact qualified output live across staging and dispatch.
     QualifiedOutput(crate::vodserve::retained::MeasuredCandidateCostProof),
     // Stage-owned empirical observations cannot qualify a complete output.
@@ -278,6 +333,10 @@ fn unknown_original_trial(
 }
 
 impl PreparedProof {
+    pub(super) fn has_transition_admission(&self) -> bool {
+        !matches!(self.admission, PreparedAdmission::ReceiptRegistrationOnly)
+    }
+
     pub(super) async fn register(
         &self,
         state: &AppState,
@@ -287,7 +346,9 @@ impl PreparedProof {
         cancelled: tokio_util::sync::CancellationToken,
     ) {
         let trial_deadline = match &self.admission {
-            PreparedAdmission::QualifiedOutput(_) => None,
+            PreparedAdmission::QualifiedOutput(_) | PreparedAdmission::ReceiptRegistrationOnly => {
+                None
+            }
             PreparedAdmission::UnknownOriginalTrial(deadline) => Some(*deadline),
         };
         if trial_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
