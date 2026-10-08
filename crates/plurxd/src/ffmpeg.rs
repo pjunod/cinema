@@ -6,6 +6,9 @@
 //! it in one place, once per process, is what keeps the answer consistent —
 //! and keeps a stream from failing to start because one path guessed.
 
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_dolby;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -437,6 +440,7 @@ pub(crate) struct EncodedExecutable {
     pub path: std::path::PathBuf,
     pub digest: String,
     object_version: String,
+    linux_binding: Option<plurx_core::transcode::LinuxDolbyExecutionBinding>,
 }
 
 #[derive(Default)]
@@ -499,6 +503,7 @@ impl EncodedExecutable {
             path,
             digest: hex::encode(digest),
             object_version,
+            linux_binding: None,
         };
         #[cfg(test)]
         {
@@ -511,9 +516,100 @@ impl EncodedExecutable {
     /// Validate this captured canonical launch object; do not follow the
     /// configured alias and silently substitute another executable here.
     pub(crate) async fn is_current(&self) -> bool {
-        engine_objects_are_current_batch(None, vec![self.attestation_object()].into())
-            .await
-            .0
+        engine_objects_are_current_batch_with_linux(
+            None,
+            vec![self.attestation_object()].into(),
+            self.linux_binding.clone(),
+        )
+        .await
+        .0
+    }
+
+    pub(crate) fn bind_linux_plan(
+        self,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+    ) -> Result<Self, String> {
+        let policy = plan.options().strict_dolby.as_ref();
+        if policy.is_none_or(|policy| policy.linux_identity().is_none()) {
+            return Ok(self);
+        }
+        let binding = policy
+            .and_then(|policy| policy.linux_execution_binding())
+            .cloned()
+            .ok_or(
+                "strict_dolby_implementation_changed: Linux plan has no retained execution binding",
+            )?;
+        self.bind_linux_execution(binding)
+    }
+
+    fn bind_linux_execution(
+        mut self,
+        binding: plurx_core::transcode::LinuxDolbyExecutionBinding,
+    ) -> Result<Self, String> {
+        let producer = binding
+            .objects()
+            .iter()
+            .find(|object| {
+                object.kind == plurx_core::transcode::LinuxExecutionObjectKind::ProducerExecutable
+            })
+            .ok_or("strict_dolby_implementation_changed: no retained producer object")?;
+        if producer.path != self.path
+            || producer.version.as_deref() != Some(self.object_version.as_str())
+        {
+            return Err("strict_dolby_implementation_changed: producer loader origin differs from the observed implementation".to_owned());
+        }
+        self.linux_binding = Some(binding);
+        Ok(self)
+    }
+
+    /// Finite preparation retains an already-bound Linux execution object.
+    /// Ordinary capture keeps its incumbent behavior; no active strict plan
+    /// reopens the configured pathname to acquire a newer package implicitly.
+    pub(crate) async fn capture_for_preparation(retained: &Self) -> Result<Self, String> {
+        if retained.linux_binding.is_some() {
+            Ok(retained.clone())
+        } else {
+            Self::capture().await
+        }
+    }
+
+    pub(crate) fn processing_child_env(&self) -> Vec<(&str, &std::ffi::OsStr)> {
+        self.linux_binding
+            .iter()
+            .flat_map(|binding| binding.child_env())
+            .map(|(key, value)| (key.as_str(), std::ffi::OsStr::new(value)))
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn validate_source_clock_reporter(
+        &self,
+        path: &std::path::Path,
+        digest: &str,
+    ) -> Result<Option<plurx_core::transcode::LinuxSourceClockAssociation>, String> {
+        use plurx_core::transcode::LinuxExecutionObjectKind;
+        let Some(binding) = self.linux_binding.as_ref() else {
+            return Ok(None);
+        };
+        let association = binding
+            .source_clock()
+            .ok_or("strict_dolby_clock_provenance_missing")?;
+        let matches = binding.objects().iter().any(|object| {
+            object.path == path
+                && match object.kind {
+                    LinuxExecutionObjectKind::NativeReporterExecutable => {
+                        digest == association.native_reporter_digest()
+                    }
+                    LinuxExecutionObjectKind::SealedParserExecutable => {
+                        digest == association.sealed_parser_digest()
+                    }
+                    _ => false,
+                }
+        });
+        if !matches {
+            return Err("strict_dolby_clock_reporter_implementation_mismatch".to_owned());
+        }
+        Ok(Some(association.clone()))
     }
 
     /// The `(path, version)` pair this executable attests.
@@ -2274,8 +2370,23 @@ impl EncodedEngine {
                 self.bind_clock_reporter(object).await?;
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = producer; // exact native/sealed reporter; no Mac package claim
+        #[cfg(target_os = "linux")]
+        if let Some(association) =
+            producer.validate_source_clock_reporter(&reporter.path, &reporter.digest)?
+        {
+            if !producer.is_current().await {
+                return Err("held Linux source-clock package changed".into());
+            }
+            let mut hash = Sha256::new();
+            hash.update(b"plurx/held-source-clock-linux-package/v1\0");
+            hash.update(self.digest.as_bytes());
+            hash.update(association.capsule_digest().as_bytes());
+            hash.update(association.source_digest().as_bytes());
+            hash.update(reporter.digest.as_bytes());
+            self.digest = hex::encode(hash.finalize());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let _ = producer; // exact reporter; no matched-source package claim
         Ok(())
     }
 
@@ -2479,7 +2590,11 @@ impl EncodedEngine {
     /// answer is unchanged: the batch compares versions with `all`, which
     /// short-circuits on the executable exactly as the caller's `||` did.
     pub async fn is_current_with_executable(&self, executable: &EncodedExecutable) -> bool {
-        self.is_current_charged(Some(executable.attestation_object()))
+        let object = Some(executable.attestation_object());
+        if executable.linux_binding.is_none() {
+            return self.is_current_charged(object).await.0;
+        }
+        self.is_current_charged_with_linux(object, executable.linux_binding.clone())
             .await
             .0
     }
@@ -2491,9 +2606,21 @@ impl EncodedEngine {
         &self,
         executable: Option<(std::path::PathBuf, String)>,
     ) -> (bool, EngineAttestationCharges) {
+        self.is_current_charged_with_linux(executable, None).await
+    }
+
+    async fn is_current_charged_with_linux(
+        &self,
+        executable: Option<(std::path::PathBuf, String)>,
+        linux_binding: Option<plurx_core::transcode::LinuxDolbyExecutionBinding>,
+    ) -> (bool, EngineAttestationCharges) {
         let mut charges = EngineAttestationCharges::default();
-        let (media_current, media_elapsed) =
-            engine_objects_are_current_batch(executable, Arc::clone(&self.objects)).await;
+        let (media_current, media_elapsed) = engine_objects_are_current_batch_with_linux(
+            executable,
+            Arc::clone(&self.objects),
+            linux_binding,
+        )
+        .await;
         charges.add(
             EngineAttestationKind::Media,
             EngineAttestationPhase::Stat,
@@ -2648,6 +2775,14 @@ pub(crate) async fn engine_objects_are_current_batch(
     extra: Option<(std::path::PathBuf, String)>,
     objects: Arc<[(std::path::PathBuf, String)]>,
 ) -> (bool, Duration) {
+    engine_objects_are_current_batch_with_linux(extra, objects, None).await
+}
+
+async fn engine_objects_are_current_batch_with_linux(
+    extra: Option<(std::path::PathBuf, String)>,
+    objects: Arc<[(std::path::PathBuf, String)]>,
+    linux_binding: Option<plurx_core::transcode::LinuxDolbyExecutionBinding>,
+) -> (bool, Duration) {
     let started = Instant::now();
     let current = tokio::task::spawn_blocking(move || {
         if let Some((path, expected)) = extra {
@@ -2659,10 +2794,56 @@ pub(crate) async fn engine_objects_are_current_batch(
             }
         }
         engine_objects_are_current(&objects)
+            && linux_binding.as_ref().is_none_or(|binding| {
+                binding
+                    .objects()
+                    .iter()
+                    .all(linux_execution_object_is_current)
+            })
     })
     .await
     .unwrap_or(false);
     (current, started.elapsed())
+}
+
+fn linux_execution_object_is_current(object: &plurx_core::transcode::LinuxExecutionObject) -> bool {
+    use plurx_core::transcode::LinuxExecutionObjectKind;
+    match object.kind {
+        LinuxExecutionObjectKind::AbsentLookup => std::fs::symlink_metadata(&object.path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        LinuxExecutionObjectKind::ProducerExecutable
+        | LinuxExecutionObjectKind::NativeReporterExecutable
+        | LinuxExecutionObjectKind::SealedParserExecutable
+        | LinuxExecutionObjectKind::FollowedFile => {
+            engine_path_version(&object.path).ok().as_ref() == object.version.as_ref()
+        }
+        LinuxExecutionObjectKind::ContentDigest => {
+            use std::io::Read;
+            std::fs::File::open(&object.path).ok().is_some_and(|file| {
+                let mut bytes = Vec::new();
+                file.take(256 * 1024 + 1).read_to_end(&mut bytes).is_ok()
+                    && bytes.len() <= 256 * 1024
+                    && object
+                        .version
+                        .as_ref()
+                        .is_some_and(|expected| hex::encode(Sha256::digest(&bytes)) == *expected)
+            })
+        }
+        LinuxExecutionObjectKind::LookupObject => {
+            #[cfg(unix)]
+            {
+                std::fs::symlink_metadata(&object.path)
+                    .ok()
+                    .and_then(|metadata| engine_object_version(&metadata).ok())
+                    .as_ref()
+                    == object.version.as_ref()
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
+    }
 }
 
 async fn fragment_index_engine_inner() -> FragmentIndexEngine {
@@ -5353,6 +5534,246 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_clock_pair_requires_bound_reporter_origin_and_retained_capsule() {
+        use plurx_core::transcode::{
+            LinuxDolbyExecutionBinding, LinuxExecutionObject, LinuxExecutionObjectKind,
+            LinuxSourceClockAssociation,
+        };
+        let base = crate::test_tempdir().expect("Linux clock package");
+        let producer_path = base.path().join("ffmpeg");
+        let reporter_path = base.path().join("ffprobe");
+        let parser_path = base.path().join("sealed-parser");
+        let foreign_path = base.path().join("different-origin-ffprobe");
+        let capsule = base.path().join("package.json");
+        for (path, bytes) in [
+            (&producer_path, b"producer".as_slice()),
+            (&reporter_path, b"reporter"),
+            (&parser_path, b"sealed parser"),
+            (&foreign_path, b"reporter"),
+            (&capsule, b"bound capsule"),
+        ] {
+            std::fs::write(path, bytes).expect("clock package object");
+        }
+        let producer = EncodedExecutable::capture_at(producer_path)
+            .await
+            .expect("producer capture");
+        let reporter = EncodedExecutable::capture_at(reporter_path)
+            .await
+            .expect("reporter capture");
+        let parser = EncodedExecutable::capture_at(parser_path)
+            .await
+            .expect("parser capture");
+        let foreign = EncodedExecutable::capture_at(foreign_path)
+            .await
+            .expect("foreign origin capture");
+        let (capsule_digest, capsule_version) =
+            hash_engine_object(&capsule).await.expect("capsule capture");
+        let binding = LinuxDolbyExecutionBinding::new(
+            vec![
+                LinuxExecutionObject {
+                    path: producer.path.clone(),
+                    version: Some(producer.object_version.clone()),
+                    kind: LinuxExecutionObjectKind::ProducerExecutable,
+                },
+                LinuxExecutionObject {
+                    path: reporter.path.clone(),
+                    version: Some(reporter.object_version.clone()),
+                    kind: LinuxExecutionObjectKind::NativeReporterExecutable,
+                },
+                LinuxExecutionObject {
+                    path: parser.path.clone(),
+                    version: Some(parser.object_version.clone()),
+                    kind: LinuxExecutionObjectKind::SealedParserExecutable,
+                },
+                LinuxExecutionObject {
+                    path: capsule.clone(),
+                    version: Some(capsule_version),
+                    kind: LinuxExecutionObjectKind::FollowedFile,
+                },
+            ],
+            vec![],
+        )
+        .expect("clock role binding")
+        .with_source_clock(
+            LinuxSourceClockAssociation::new(
+                hex::encode(capsule_digest),
+                "5".repeat(64),
+                reporter.digest.clone(),
+                parser.digest.clone(),
+            )
+            .expect("matched source witness"),
+        )
+        .expect("reporter roles");
+        let producer = producer
+            .bind_linux_execution(binding)
+            .expect("producer role");
+        let engine = || EncodedEngine {
+            digest: "base engine".into(),
+            process_identity: encoded_process_identity().into(),
+            objects: Arc::from([]),
+            font_objects: Arc::from([]),
+            font_env: None,
+        };
+        let mut valid = engine();
+        valid
+            .bind_clock_pair(&reporter, &producer)
+            .await
+            .expect("actual native reporter association");
+        let mut sealed = engine();
+        sealed
+            .bind_clock_pair(&parser, &producer)
+            .await
+            .expect("actual sealed reporter association");
+        assert_ne!(
+            valid.digest, sealed.digest,
+            "reporter image role remains in the clock identity"
+        );
+        assert_eq!(
+            foreign.digest, reporter.digest,
+            "same bytes are intentionally not enough"
+        );
+        assert!(
+            engine().bind_clock_pair(&foreign, &producer).await.is_err(),
+            "different loader origin cannot claim the package reporter"
+        );
+        let replacement = base.path().join("replacement.json");
+        std::fs::write(&replacement, b"different capsule").expect("changed package");
+        std::fs::rename(replacement, capsule).expect("atomic capsule replacement");
+        assert!(
+            engine()
+                .bind_clock_pair(&reporter, &producer)
+                .await
+                .is_err(),
+            "captured source-package replacement refuses association"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linux_processing_binding_fences_driver_lookup_and_package_replacement() {
+        use plurx_core::transcode::{
+            LinuxDolbyExecutionBinding, LinuxExecutionObject, LinuxExecutionObjectKind,
+        };
+        let base = crate::test_tempdir().expect("Linux processing capture");
+        let encoder = base.path().join("ffmpeg");
+        let driver = base.path().join("driver.so");
+        let alias = base.path().join("iHD_drv_video.so");
+        let shadow = base.path().join("higher-priority-driver.so");
+        std::fs::write(&encoder, b"encoder").expect("encoder bytes");
+        std::fs::write(&driver, b"driver-a").expect("driver bytes");
+        std::os::unix::fs::symlink(&driver, &alias).expect("driver alias");
+        let mut captured = EncodedExecutable::capture_at(encoder)
+            .await
+            .expect("capture encoder");
+        captured.linux_binding = Some(
+            LinuxDolbyExecutionBinding::new(
+                vec![
+                    LinuxExecutionObject {
+                        path: captured.path.clone(),
+                        version: Some(captured.object_version.clone()),
+                        kind: LinuxExecutionObjectKind::ProducerExecutable,
+                    },
+                    LinuxExecutionObject {
+                        path: driver.clone(),
+                        version: Some(engine_path_version(&driver).expect("driver version")),
+                        kind: LinuxExecutionObjectKind::FollowedFile,
+                    },
+                    LinuxExecutionObject {
+                        path: alias.clone(),
+                        version: Some(
+                            engine_object_version(
+                                &std::fs::symlink_metadata(&alias).expect("alias metadata"),
+                            )
+                            .expect("alias version"),
+                        ),
+                        kind: LinuxExecutionObjectKind::LookupObject,
+                    },
+                    LinuxExecutionObject {
+                        path: shadow.clone(),
+                        version: None,
+                        kind: LinuxExecutionObjectKind::AbsentLookup,
+                    },
+                ],
+                vec![("LIBVA_DRIVER_NAME_JELLYFIN".into(), "iHD".into())],
+            )
+            .expect("binding"),
+        );
+        assert!(captured.is_current().await);
+        assert_eq!(
+            captured.processing_child_env()[0].0,
+            "LIBVA_DRIVER_NAME_JELLYFIN"
+        );
+        std::fs::write(&shadow, b"new shadow").expect("higher-priority driver");
+        assert!(
+            !captured.is_current().await,
+            "a newly present lookup must not silently replace the observed driver"
+        );
+        std::fs::remove_file(&shadow).expect("remove shadow");
+        assert!(captured.is_current().await);
+        std::fs::remove_file(&alias).expect("remove alias");
+        std::os::unix::fs::symlink(&driver, &alias).expect("replace alias to identical target");
+        assert!(
+            !captured.is_current().await,
+            "lookup inode changes remain visible even when target content is unchanged"
+        );
+        let replacement = base.path().join("replacement");
+        std::fs::write(&replacement, b"driver-b").expect("replacement driver");
+        std::fs::rename(&replacement, &driver).expect("replace driver");
+        assert!(
+            !captured.is_current().await,
+            "retained package capture cannot recapture a changed driver"
+        );
+    }
+
+    #[tokio::test]
+    async fn linux_processing_retains_finite_preparation_and_refuses_identical_other_loader_origin()
+    {
+        use plurx_core::transcode::{
+            LinuxDolbyExecutionBinding, LinuxExecutionObject, LinuxExecutionObjectKind,
+        };
+        let base = crate::test_tempdir().expect("Linux loader origins");
+        let a = base.path().join("package-a");
+        let b = base.path().join("package-b");
+        std::fs::create_dir(&a).expect("first package");
+        std::fs::create_dir(&b).expect("second package");
+        let a = a.join("ffmpeg");
+        let b = b.join("ffmpeg");
+        std::fs::write(&a, b"identical encoder").expect("first encoder");
+        std::fs::write(&b, b"identical encoder").expect("second encoder");
+        let first = EncodedExecutable::capture_at(a)
+            .await
+            .expect("capture first");
+        let second = EncodedExecutable::capture_at(b)
+            .await
+            .expect("capture second");
+        assert_eq!(
+            first.digest, second.digest,
+            "content equality cannot prove loader-origin equality"
+        );
+        let binding = LinuxDolbyExecutionBinding::new(
+            vec![LinuxExecutionObject {
+                path: first.path.clone(),
+                version: Some(first.object_version.clone()),
+                kind: LinuxExecutionObjectKind::ProducerExecutable,
+            }],
+            vec![],
+        )
+        .expect("captured binding");
+        assert!(second.bind_linux_execution(binding.clone()).is_err());
+        let frozen = first
+            .bind_linux_execution(binding)
+            .expect("original origin");
+        let retained = EncodedExecutable::capture_for_preparation(&frozen)
+            .await
+            .expect("retain finite preparation");
+        assert_eq!(retained.path, frozen.path);
+        assert_eq!(retained.object_version, frozen.object_version);
+        assert!(retained.linux_binding.is_some());
+        assert!(retained.is_current().await);
+    }
 
     #[tokio::test]
     async fn encoded_executable_capture_shares_hash_and_rechecks_replacement() {

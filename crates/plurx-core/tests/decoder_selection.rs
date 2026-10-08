@@ -15,8 +15,9 @@ use plurx_core::transcode::{
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 use plurx_core::transcode::{
-    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
-    MacosProcessingIdentity, MacosProcessingSelection,
+    LinuxDolbyContext, LinuxDolbyIdentity, LinuxDolbyObservation, MacosProcessingAvailability,
+    MacosProcessingContext, MacosProcessingGraph, MacosProcessingIdentity,
+    MacosProcessingSelection, Rational,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -5074,6 +5075,261 @@ fn authorized_strict_p5_survives_rpu_only_renderer_guard_without_admitting_gener
             "unqualified P{profile} must not inherit strict P5"
         );
     }
+}
+
+fn linux_strict_context(driver_digest: char) -> LinuxDolbyContext {
+    linux_strict_context_for_encoder(driver_digest, Encoder::Software)
+}
+
+fn linux_strict_context_for_encoder(driver_digest: char, encoder: Encoder) -> LinuxDolbyContext {
+    let identity = LinuxDolbyIdentity::new(
+        "f".repeat(64),
+        "2".repeat(64),
+        "3".repeat(64),
+        "4".repeat(64),
+        driver_digest.to_string().repeat(64),
+        "6".repeat(64),
+        "/dev/dri/renderD128".to_owned(),
+    )
+    .expect("complete Linux package and physical environment");
+    let observations = [DecodeBackend::Vaapi, DecodeBackend::Software]
+        .into_iter()
+        .map(|decoder| {
+            LinuxDolbyObservation::new(
+                decoder,
+                encoder,
+                3840,
+                2160,
+                1920,
+                1080,
+                Rational::new(24, 1).expect("observed cadence"),
+            )
+            .expect("observed complete graph")
+        })
+        .collect();
+    LinuxDolbyContext::new(identity, observations)
+}
+
+#[test]
+fn linux_strict_qsv_encoder_is_derived_from_the_observed_decode_device() {
+    let input = facts(macos_p5_stream());
+    let caps = capabilities(vec![exact_capability(
+        DecodeBackend::Vaapi,
+        &input,
+        Pipeline::DoviStrictTonemapx,
+        Encoder::Qsv,
+        SubtitleRendering::None,
+        CapabilityStatus::Operational,
+    )]);
+    let plan = resolve(
+        Encoder::Qsv,
+        Pipeline::DoviTonemapx,
+        &input,
+        &caps,
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+            .with_linux_dolby(linux_strict_context_for_encoder('5', Encoder::Qsv)),
+    )
+    .expect("observed QSV encoder and VAAPI decoder tuple");
+    let source = execution_file("/fixture/p5.mp4");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let args = hls_args(&plan, &execution);
+    for pair in [
+        ["-init_hw_device", "vaapi=plurx_dovi_va:/dev/dri/renderD128"],
+        ["-init_hw_device", "qsv=plurx_dovi_qsv@plurx_dovi_va"],
+        ["-filter_hw_device", "plurx_dovi_qsv"],
+        ["-hwaccel_device", "/dev/dri/renderD128"],
+    ] {
+        assert!(
+            args.windows(2).any(|args| args == pair),
+            "missing retained device projection: {pair:?}"
+        );
+    }
+    assert!(!args.iter().any(|arg| arg == "qsv=hw"));
+    let filter = &args[args.iter().position(|arg| arg == "-vf").expect("filter") + 1];
+    assert!(filter.starts_with("hwdownload,format=p010le,setparams=colorspace=unknown,"));
+    assert!(filter.contains("apply_dovi=1:require_dovi=1"));
+    assert!(filter.ends_with("hwupload=extra_hw_frames=64,format=qsv"));
+}
+
+#[test]
+fn linux_strict_p5_selects_native_vaapi_without_lifting_other_dolby_software_routes() {
+    let input = facts(macos_p5_stream());
+    let caps = capabilities(vec![exact_capability(
+        DecodeBackend::Vaapi,
+        &input,
+        Pipeline::DoviStrictTonemapx,
+        Encoder::Software,
+        SubtitleRendering::None,
+        CapabilityStatus::Operational,
+    )]);
+    let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+        .with_linux_dolby(linux_strict_context('5'));
+    let plan = resolve(
+        Encoder::Software,
+        Pipeline::DoviTonemapx,
+        &input,
+        &caps,
+        policy.clone(),
+    )
+    .expect("exact observed Profile5 route");
+    assert_eq!(plan.decode().backend(), DecodeBackend::Vaapi);
+    assert_eq!(plan.options().pipeline, Pipeline::DoviStrictTonemapx);
+    assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+    assert!(plan.macos_processing_identity().is_none());
+    assert_eq!(
+        plan.captured_processing_ffmpeg_sha256(),
+        Some("f".repeat(64).as_str())
+    );
+    let source = execution_file("/fixture/p5.mp4");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let args = hls_args(&plan, &execution);
+    for pair in [
+        ["-hwaccel", "vaapi"],
+        ["-hwaccel_output_format", "vaapi"],
+        ["-hwaccel_device", "/dev/dri/renderD128"],
+        ["-strict_dovi", "1"],
+        ["-err_detect", "explode"],
+        ["-c:v", "hevc"],
+    ] {
+        assert!(args.windows(2).any(|args| args == pair));
+    }
+    assert!(args.iter().any(|arg| arg == "-xerror"));
+    assert!(!args.iter().any(|arg| arg == "+require_hardware"));
+    let filter = &args[args.iter().position(|arg| arg == "-vf").expect("filter") + 1];
+    assert!(filter
+        .starts_with("hwdownload,format=p010le,setparams=colorspace=unknown,format=yuv420p10le,"));
+    assert!(filter.contains("apply_dovi=1:require_dovi=1"));
+    for profile in [7, 8] {
+        let mut stream = macos_p5_stream();
+        stream["side_data_list"][0]["dv_profile"] = json!(profile);
+        let other = facts(stream);
+        let incumbent = resolve(
+            Encoder::Software,
+            Pipeline::DoviTonemapx,
+            &other,
+            &caps,
+            policy.clone(),
+        )
+        .expect("other Dolby profiles retain incumbent software path");
+        assert_eq!(incumbent.decode().backend(), DecodeBackend::Software);
+        assert!(incumbent.options().strict_dolby.is_none());
+    }
+}
+
+#[test]
+fn linux_strict_p5_recovery_retains_package_and_rejects_changed_driver_or_unobserved_envelope() {
+    let input = facts(macos_p5_stream());
+    let caps = capabilities(vec![exact_capability(
+        DecodeBackend::Vaapi,
+        &input,
+        Pipeline::DoviStrictTonemapx,
+        Encoder::Software,
+        SubtitleRendering::None,
+        CapabilityStatus::Operational,
+    )]);
+    let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+        .with_linux_dolby(linux_strict_context('5'));
+    let initial = resolve(
+        Encoder::Software,
+        Pipeline::DoviTonemapx,
+        &input,
+        &caps,
+        policy.clone(),
+    )
+    .expect("observed strict hardware route");
+    let mut media = initial.options().clone();
+    media.pipeline = Pipeline::Cpu;
+    let request = TranscodeRequest::new(Encoder::Software, media);
+    let recovered = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::requiring(DecodeBackend::Software),
+    )
+    .expect("observed grade-preserving strict software recovery");
+    assert_eq!(recovered.decode().backend(), DecodeBackend::Software);
+    assert_eq!(recovered.options().pipeline, Pipeline::DoviStrictTonemapx);
+    assert_eq!(
+        recovered.options().strict_dolby,
+        initial.options().strict_dolby
+    );
+    assert_eq!(
+        recovered.captured_processing_ffmpeg_sha256(),
+        initial.captured_processing_ffmpeg_sha256()
+    );
+    let pending_reprobe = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+    let retained = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &pending_reprobe,
+        &AttemptRestrictions::requiring(DecodeBackend::Software),
+    )
+    .expect("pending admin reprobe must not erase the active plan's observed software recovery");
+    assert_eq!(
+        retained.options().strict_dolby,
+        initial.options().strict_dolby
+    );
+    assert_eq!(retained.decode().backend(), DecodeBackend::Software);
+    let new_admission = resolve(
+        Encoder::Software,
+        Pipeline::DoviTonemapx,
+        &input,
+        &caps,
+        pending_reprobe,
+    )
+    .expect("ordinary incumbent admission remains independent of a pending hardware observation");
+    assert!(
+        new_admission.options().strict_dolby.is_none(),
+        "only captured active plans may retain prior qualification"
+    );
+    let changed = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+        .with_linux_dolby(linux_strict_context('7'));
+    assert_eq!(
+        resolve_transcode(
+            &request,
+            &input,
+            &caps,
+            &changed,
+            &AttemptRestrictions::requiring(DecodeBackend::Software)
+        ),
+        Err(PlanError::IncompatibleRenderer)
+    );
+    let mut faster = macos_p5_stream();
+    faster["avg_frame_rate"] = json!("60/1");
+    faster["r_frame_rate"] = json!("60/1");
+    assert!(resolve_transcode(
+        &request,
+        &facts(faster),
+        &caps,
+        &policy,
+        &AttemptRestrictions::requiring(DecodeBackend::Software)
+    )
+    .is_err());
+    let mut too_large_media = request.options().clone();
+    too_large_media.target_height = 2160;
+    let too_large = TranscodeRequest::new(Encoder::Software, too_large_media);
+    assert!(resolve_transcode(
+        &too_large,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::requiring(DecodeBackend::Software)
+    )
+    .is_err());
 }
 
 #[test]

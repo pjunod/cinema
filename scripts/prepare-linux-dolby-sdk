@@ -16,6 +16,7 @@ import re
 import shlex
 import shutil
 import struct
+import sys
 import subprocess
 import os
 import signal
@@ -104,7 +105,13 @@ def tar_members(data, allow_unresolved=False):
             elif member.issym() or member.islnk():
                 target = PurePosixPath(member.linkname)
                 if target.is_absolute():
-                    raise ValueError("external archive link")
+                    if not allow_unresolved or ".." in target.parts:
+                        raise ValueError("external archive link")
+                    # Inventory only. This target is never followed on the
+                    # host; the distribution importer may map it solely to
+                    # an authenticated regular member in its private sysroot.
+                    links[name] = str(target)
+                    continue
                 combined = target if member.islnk() else PurePosixPath(name).parent / target
                 parts = []
                 for part in combined.parts:
@@ -176,9 +183,84 @@ def control_fields(data):
     return fields
 
 
+def validate_debian_source_offer(offer, originals):
+    descriptors = [name for name in originals if name.endswith(".dsc")]
+    if len(descriptors) != 1:
+        raise ValueError("one authenticated Debian source descriptor is required")
+    text = originals[descriptors[0]].decode("utf-8")
+    if text.startswith("-----BEGIN PGP SIGNED MESSAGE-----"):
+        text = text.split("\n\n", 1)[1].split("-----BEGIN PGP SIGNATURE-----", 1)[0]
+        text = "\n".join(line[2:] if line.startswith("- ") else line for line in text.splitlines())
+    fields = control_fields(text.encode())
+    if fields.get("Source") != offer["package"] or fields.get("Version") != offer["version"]:
+        raise ValueError("source descriptor package/version differs from authenticated offer")
+    declared = {}
+    for line in fields.get("Checksums-Sha256", "").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]) or not parts[1].isdigit():
+            raise ValueError("invalid source descriptor SHA256 declaration")
+        name = member_path(parts[2])
+        if "/" in name or name in declared:
+            raise ValueError("unsafe or duplicate source descriptor member")
+        declared[name] = (parts[0], int(parts[1]))
+    actual = {name: (digest(data), len(data)) for name, data in originals.items() if name != descriptors[0]}
+    if actual != declared:
+        raise ValueError("source descriptor archive identities differ from authenticated offer")
+    original = [name for name in declared if ".orig.tar." in name and not name.endswith(".asc")]
+    patches = [name for name in declared if ".debian.tar." in name]
+    differences = [name for name in declared if name.endswith(".diff.gz")]
+    if fields.get("Format") == "1.0":
+        valid = len(original) == 1 and len(differences) == 1 and not patches
+    elif fields.get("Format") == "3.0 (quilt)":
+        valid = bool(original) and len(patches) == 1 and not differences
+    else:
+        valid = False
+    if not valid:
+        raise ValueError("unsupported or incomplete Debian source format contract")
+    return fields["Format"]
+
+
 def role_archive(directory, row):
     name = Path(row["archive"])
     return name if name.is_absolute() else Path(directory) / member_path(row["archive"])
+
+
+def materialize_distribution_aliases(sysroot, all_files, all_links, records, file_roles, link_roles):
+    unresolved, alias_witness = {}, {}
+    for name, target in sorted(all_links.items()):
+        endpoint, seen = target.lstrip("/") if target.startswith("/") else target, set()
+        while endpoint in all_links:
+            if endpoint in seen:
+                raise ValueError("cross-package relative link cycle")
+            seen.add(endpoint)
+            endpoint = all_links[endpoint]
+            if endpoint.startswith("/"):
+                endpoint = endpoint.lstrip("/")
+        if endpoint not in all_files:
+            unresolved[name] = target
+            continue  # Inventory only; never follow a host filesystem target.
+        contents = all_files[endpoint]
+        for role in file_roles[endpoint]:
+            if records[role]["consumed"][endpoint]["sha256"] != digest(contents):
+                raise ValueError("authenticated alias target content changed")
+        for role in link_roles[name]:
+            if records[role]["archive_aliases"][name] != target:
+                raise ValueError("authenticated archive alias target changed")
+        alias_witness[name] = {"archive_target": target, "regular_endpoint": endpoint,
+            "source_roles": {role: records[role]["archive_sha256"] for role in link_roles[name]},
+            "target_roles": {role: records[role]["archive_sha256"] for role in file_roles[endpoint]},
+            "content_sha256": digest(contents), "resolution": "authenticated archive namespace only"}
+        path = sysroot / name
+        if path.exists():
+            if path.read_bytes() != contents:
+                raise ValueError("alias conflicts with an imported regular file")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+            path.chmod(0o444)
+    return unresolved, alias_witness
 
 
 def stage_distribution_packages(lock, sdk, provenance, archive_directory):
@@ -186,6 +268,7 @@ def stage_distribution_packages(lock, sdk, provenance, archive_directory):
     if not isinstance(rows, dict):
         raise ValueError("invalid immutable distribution package roles")
     all_files, all_links, records, supplied = {}, {}, {}, set()
+    file_roles, link_roles = {}, {}
     for role, row in sorted(rows.items()):
         if not re.fullmatch(r"[A-Za-z0-9_.+-]+", role):
             raise ValueError("unsafe distribution role")
@@ -208,7 +291,7 @@ def stage_distribution_packages(lock, sdk, provenance, archive_directory):
         destination.mkdir(parents=True)
         (destination / "original-package.deb").write_bytes(data)
         (destination / "control").write_bytes(control["control"])
-        source_hashes = {}
+        source_hashes, original_sources = {}, {}
         for name, member in sorted(offer["files"].items()):
             name = member_path(name)
             if "/" in name:
@@ -218,13 +301,13 @@ def stage_distribution_packages(lock, sdk, provenance, archive_directory):
                 raise ValueError("source offer archive size mismatch")
             (destination / name).write_bytes(original)
             source_hashes[name] = member["sha256"]
-        if not any(name.endswith(".dsc") for name in source_hashes) or not any(".orig.tar." in name for name in source_hashes) or not any(".debian.tar." in name for name in source_hashes):
-            raise ValueError("original source, Debian patch/configuration archive and dsc all required")
+            original_sources[name] = original
+        validate_debian_source_offer(offer, original_sources)
         consumed = {}
         for name, contents in regular.items():
             header = name.startswith("usr/include/") and name.endswith((".h", ".hpp"))
             metadata = name.startswith("usr/lib/") and "/pkgconfig/" in name and name.endswith(".pc")
-            runtime = name.startswith("usr/lib/") and contents.startswith(b"\x7fELF")
+            runtime = name.startswith(("usr/lib/", "lib/")) and contents.startswith(b"\x7fELF")
             copyright_file = name.startswith("usr/share/doc/") and name.endswith("/copyright")
             if not any([header, metadata, runtime, copyright_file]):
                 continue
@@ -235,53 +318,42 @@ def stage_distribution_packages(lock, sdk, provenance, archive_directory):
             if name in all_files and all_files[name] != contents:
                 raise ValueError("distribution roles disagree on an imported file")
             all_files[name] = contents
+            file_roles.setdefault(name, []).append(role)
             consumed[name] = {"sha256": digest(contents), "bytes": len(contents), "kind": "runtime" if runtime else "header" if header else "pkg-config" if metadata else "copyright"}
         for name, target in links.items():
             # Keep only header/PC/library/copyright aliases relevant to consumed
-            # roles. Absolute/escaping links were already rejected by tar_members.
-            if name.startswith(("usr/include/", "usr/lib/", "usr/share/doc/")):
+            # roles. Absolute aliases retain their original target text; no
+            # filesystem lookup is performed outside these retained members.
+            if name.startswith(("usr/include/", "usr/lib/", "lib/", "usr/share/doc/")):
                 if name in all_links and all_links[name] != target:
                     raise ValueError("distribution roles disagree on a relative link")
                 all_links[name] = target
+                link_roles.setdefault(name, []).append(role)
         supplied.update(row.get("configure_flags", []))
         records[role] = {"archive_sha256": digest(data), "version": actual["Version"], "source_package": source_package,
                          "source_version": source_version, "source_offer_sha256": source_hashes, "control_sha256": digest(control["control"]),
-                         "consumed": consumed, "state": "actual distributed headers/pkg-config; no local generation claim"}
+                         "consumed": consumed, "archive_aliases": links,
+                         "state": "actual distributed headers/pkg-config; no local generation claim"}
     sysroot = sdk / "sysroot"
     for name, contents in sorted(all_files.items()):
         target = sysroot / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(contents)
         target.chmod(0o444)
-    unresolved = {}
-    for name, target in sorted(all_links.items()):
-        endpoint, seen = target, set()
-        while endpoint in all_links:
-            if endpoint in seen:
-                raise ValueError("cross-package relative link cycle")
-            seen.add(endpoint)
-            endpoint = all_links[endpoint]
-        if endpoint not in all_files:
-            unresolved[name] = target
-            continue  # Inventory only; never follow a host filesystem target.
-        contents = all_files[endpoint]
-        path = sysroot / name
-        if path.exists():
-            if path.read_bytes() != contents:
-                raise ValueError("alias conflicts with an imported regular file")
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(contents)
-            path.chmod(0o444)
+    unresolved, alias_witness = materialize_distribution_aliases(
+        sysroot, all_files, all_links, records, file_roles, link_roles)
     for role, row in records.items():
         copyright_path = "usr/share/doc/" + role + "/copyright"
         if not (sysroot / copyright_path).is_file():
             raise ValueError("every consumed binary role needs its authentic distributed copyright")
         row["copyright_sha256"] = digest((sysroot / copyright_path).read_bytes())
-        row["unresolved_relative_links"] = {name: target for name, target in unresolved.items() if name in rows[role].get("relative_links", {})}
+        row["unresolved_archive_aliases"] = {name: target for name, target in unresolved.items() if name in row["archive_aliases"]}
     inventory = {str(path.relative_to(sysroot)): {"sha256": digest(path.read_bytes()), "bytes": path.stat().st_size}
                  for path in sorted(sysroot.rglob("*")) if path.is_file()} if sysroot.exists() else {}
-    return {"roles": records, "sysroot_members": inventory, "unresolved_relative_links": unresolved}, supplied
+    return {"roles": records, "sysroot_members": inventory, "unresolved_relative_links":
+            {name: target for name, target in unresolved.items() if not target.startswith("/")},
+            "unresolved_absolute_aliases": {name: target for name, target in unresolved.items() if target.startswith("/")},
+            "materialized_archive_aliases": alias_witness}, supplied
 
 
 def stage_sources(lock, prefix, provenance, flags, upstream_recipe, archive_directory=None, supplied_flags=()):
@@ -374,6 +446,76 @@ def ffmpeg_owned_library(name):
     return bool(re.match(r"(?:libavcodec|libavdevice|libavfilter|libavformat|libavutil|libswresample|libswscale)\.so(?:\.|$)", Path(name).name))
 
 
+MESON_SOURCE_SHA = "ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743"
+MESON_LAUNCHER = '''#!/usr/bin/env -S /usr/bin/python3 -I -S -B
+import sys
+import sysconfig
+from pathlib import Path
+sys.path = [str(Path(__file__).resolve().parent / "source/meson-1.12.1"),
+            sysconfig.get_path("stdlib"), sysconfig.get_config_var("DESTSHARED")]
+from mesonbuild.mesonmain import main
+sys.argv[0] = str(Path(__file__).resolve())
+sys.exit(main())
+'''
+
+
+def stage_build_tools(lock, provenance, archive_directory):
+    roles = lock.get("build_tools", {})
+    if not roles:
+        return {}
+    if set(roles) != {"meson"}:
+        raise ValueError("only the consumed private Meson provider is supported")
+    row = roles["meson"]
+    if row["archive_sha256"] != MESON_SOURCE_SHA or row["version"] != "1.12.1":
+        raise ValueError("private Meson must use the pinned authentic source")
+    original = checked_bytes(role_archive(archive_directory, row), MESON_SOURCE_SHA)
+    files, links = tar_members(original)
+    if links or b"python_requires = >= 3.10" not in files["meson-1.12.1/setup.cfg"]:
+        raise ValueError("private Meson source/interpreter contract changed")
+    root = provenance / "build-tools/meson"
+    root.mkdir(parents=True)
+    (root / "original-source.tar.gz").write_bytes(original)
+    source = root / "source"
+    source.mkdir()
+    extract_role(original, source)
+    for path in source.rglob("*"):
+        if path.is_file():
+            path.chmod(0o444)
+    (root / "meson").write_text(MESON_LAUNCHER)
+    (root / "meson").chmod(0o555)
+    inventory = {str(path.relative_to(root)): digest(path.read_bytes())
+                 for path in root.rglob("*") if path.is_file()}
+    return {"meson": {"version": row["version"], "url": row["url"],
+        "archive_sha256": MESON_SOURCE_SHA, "python_requires": ">=3.10",
+        "license_member": "source/meson-1.12.1/COPYING",
+        "license_sha256": digest(files["meson-1.12.1/COPYING"]),
+        "files": inventory, "tree_sha256": digest(json.dumps(inventory, sort_keys=True,
+            separators=(",", ":")).encode()), "launcher": "provenance/build-tools/meson/meson",
+        "import_policy": "isolated interpreter; stdlib plus pinned module tree only; no site/bytecode"}}
+
+
+def verify_build_tools(root, tools):
+    for name, tool in tools.items():
+        if name != "meson" or tool["archive_sha256"] != MESON_SOURCE_SHA:
+            raise ValueError("unsupported private build-tool source")
+        base = root / "provenance/build-tools" / name
+        paths = list(base.rglob("*"))
+        if base.is_symlink() or any(path.is_symlink() for path in paths):
+            raise ValueError("private build-tool tree contains a filesystem link")
+        actual = {str(path.relative_to(base)): digest(path.read_bytes()) for path in paths if path.is_file()}
+        if actual != tool["files"]:
+            raise ValueError("private Meson source/module/launcher tree changed")
+        if digest(json.dumps(actual, sort_keys=True, separators=(",", ":")).encode()) != tool["tree_sha256"]:
+            raise ValueError("private build-tool module-tree digest mismatch")
+        original = checked_bytes(base / "original-source.tar.gz", MESON_SOURCE_SHA)
+        source, links = tar_members(original)
+        expected = {"source/" + member: digest(contents) for member, contents in source.items()}
+        expected.update({"original-source.tar.gz": MESON_SOURCE_SHA, "meson": digest(MESON_LAUNCHER.encode())})
+        if links or actual != expected:
+            raise ValueError("private Meson module bytes differ from their authentic source")
+        checked_bytes(base / tool["license_member"], tool["license_sha256"])
+
+
 def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, output, archive_directory=None):
     if not output.is_absolute() or output.exists() or any(output.is_relative_to(Path(p)) for p in
             ["/Applications", "/Library", "/System", "/usr", "/opt"]):
@@ -455,6 +597,7 @@ def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, ou
             quilt[name] = digest(contents)
         distribution, supplied_flags = stage_distribution_packages(lock, sdk, provenance, archive_directory or lock_path.parent)
         sources = stage_sources(lock, sdk, provenance, flags, source_files[recipe_names["docker-build.sh"]], archive_directory or lock_path.parent, supplied_flags)
+        build_tools = stage_build_tools(lock, provenance, archive_directory or lock_path.parent)
         (provenance / "executed-sdk-helper.py").write_bytes(Path(__file__).read_bytes())
         facts = {"helper_sha256": digest(Path(__file__).read_bytes()), "official_control_sha256": control_hashes, "schema_version": 1, "kind": "source-only-sdk", "state": "immutable-inputs-staged", "link_ready": False,
             "generated_sdk_outputs": {},
@@ -469,10 +612,11 @@ def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, ou
                  "unresolved_source_refs": {"i965": "upstream recipe clones default branch; no corresponding build commit claimed",
                       "mesa": "upstream recipe uses26.0-backport branch; no corresponding build commit claimed"}},
             "distribution_inputs": distribution,
+            "build_tools": build_tools,
             "consumed_sources": sources,
             "consumed_source_lock_sha256": lock_sha}
         facts["source_offer_digest"] = digest(json.dumps({"sources": sources, "copyright": imports,
-            "recipes": recipe_hashes, "distribution": distribution}, sort_keys=True, separators=(",", ":")).encode())
+            "recipes": recipe_hashes, "distribution": distribution, "build_tools": build_tools}, sort_keys=True, separators=(",", ":")).encode())
         facts["sdk_digest"] = digest(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode())
         (provenance / "sdk-manifest.json").write_text(json.dumps(facts, indent=2) + "\n")
         stage.rename(output)
@@ -566,7 +710,8 @@ def bounded_generator(argv, cwd, environment, log, deadline):
         child.stdout.close()
     if reader.is_alive() or overflow.is_set() or status != 0:
         raise ValueError("project generator failed or exceeded bounded log capture")
-    return {"argv": argv, "status": status, "log_sha256": digest(log.read_bytes())}
+    return {"argv": argv, "status": status, "log_name": log.name,
+            "log_sha256": digest(log.read_bytes())}
 
 
 def verified_staging(root):
@@ -593,6 +738,9 @@ def verified_staging(root):
     lock = json.loads(lock_data)
     if set(lock["sources"]) != set(facts["consumed_sources"]):
         raise ValueError("consumed role inventory changed after staging")
+    if set(lock.get("build_tools", {})) != set(facts.get("build_tools", {})):
+        raise ValueError("private build-tool role inventory changed")
+    verify_build_tools(root, facts.get("build_tools", {}))
     distribution = facts.get("distribution_inputs", {})
     for role, row in distribution.get("roles", {}).items():
         base = root / "provenance/distribution-sources" / role
@@ -616,6 +764,28 @@ def verified_staging(root):
         checked_bytes(path, row["sha256"])
     expected_sdk = {name for name in facts["imported_official"]["members"] if name.startswith("lib/")}
     expected_sdk.update("sysroot/" + name for name in distribution.get("sysroot_members", {}))
+    if facts["state"] == "project-generators-executed":
+        outputs = facts["generated_sdk_outputs"]
+        if set(facts["generation_execution"]) != set(facts["consumed_sources"]):
+            raise ValueError("generated SDK requires every consumed project's execution witness")
+        declared_outputs = {name for row in facts["consumed_sources"].values()
+                            for name in row["generator"]["outputs"]}
+        if set(outputs) != declared_outputs:
+            raise ValueError("generated SDK output inventory differs from the immutable role lock")
+        for role, execution in facts["generation_execution"].items():
+            if execution["archive_sha256"] != facts["consumed_sources"][role]["archive_sha256"]:
+                raise ValueError("generator witness used a different source archive")
+            for command in execution["commands"]:
+                if command["status"] != 0 or Path(command["log_name"]).name != command["log_name"]:
+                    raise ValueError("invalid retained generator command witness")
+                checked_bytes(root / "provenance/generation" / role / command["log_name"], command["log_sha256"])
+        for command in facts["generator_tool_versions"].values():
+            checked_bytes(root / "provenance/generation" / command["log_name"], command["log_sha256"])
+        for name, row in outputs.items():
+            checked_bytes(root / "sdk" / member_path(name), row["sha256"])
+        expected_sdk.update(outputs)
+    elif facts["state"] != "immutable-inputs-staged":
+        raise ValueError("unsupported SDK preparation state")
     actual_sdk = {str(path.relative_to(root / "sdk")) for path in (root / "sdk").rglob("*") if path.is_file()}
     if actual_sdk != expected_sdk or any(path.is_symlink() for path in (root / "sdk").rglob("*")):
         raise ValueError("unlisted or linked SDK content cannot enter generator configuration")
@@ -673,8 +843,9 @@ def generate(root, jobs, seconds):
     outputs, completed, records = {}, set(), {}
     tool_versions = {}
     try:
-        for tool in ["gcc", "g++", "cmake", "meson", "ninja", "make", "pkg-config"]:
-            located = shutil.which(tool, path=environment["PATH"])
+        for tool in ["gcc", "g++", "cmake", "meson", "ninja", "make", "pkg-config", "python3", "env"]:
+            located = (root / facts["build_tools"]["meson"]["launcher"] if tool == "meson"
+                       and "meson" in facts.get("build_tools", {}) else shutil.which(tool, path=environment["PATH"]))
             if not located:
                 raise ValueError("required Bookworm project generator tool is unavailable: " + tool)
             executable = Path(located).resolve(strict=True)
@@ -683,6 +854,12 @@ def generate(root, jobs, seconds):
         gcc_version = (execution / "gcc-version.log").read_text()
         if not re.search(r"\b12\.[0-9]+", gcc_version):
             raise ValueError("official Bookworm compiler ABI requires GCC12")
+        if sys.version_info < (3, 10):
+            raise ValueError("pinned Meson source requires Python>=3.10")
+        python_version = (execution / "python3-version.log").read_text()
+        version = re.search(r"Python (\d+)\.(\d+)", python_version)
+        if version is None or (int(version[1]), int(version[2])) < (3, 10):
+            raise ValueError("private Meson interpreter requires Python>=3.10")
         pending = dict(facts["consumed_sources"])
         while pending:
             available = [role for role, row in pending.items() if set(row["generator"].get("depends_on", [])) <= completed]
@@ -733,7 +910,10 @@ def generate(root, jobs, seconds):
                 for index, command in enumerate(row["generator"]["commands"]):
                     argv = [token.format_map(substitutions) for token in command["argv"]]
                     cwd = source if command["cwd"] == "source" else build
-                    program = (cwd / argv[0]).resolve(strict=True) if argv[0].startswith("./") else Path(shutil.which(argv[0], path=environment["PATH"]) or "")
+                    program = ((root / facts["build_tools"]["meson"]["launcher"]) if argv[0] == "meson"
+                        and "meson" in facts.get("build_tools", {}) else
+                        (cwd / argv[0]).resolve(strict=True) if argv[0].startswith("./") else
+                        Path(shutil.which(argv[0], path=environment["PATH"]) or ""))
                     if not program.is_file():
                         raise ValueError("required authentic generator tool is unavailable")
                     program = program.resolve(strict=True)
@@ -758,6 +938,7 @@ def generate(root, jobs, seconds):
                         checked_bytes(root / "sdk" / name, imported["sha256"])
         for name, generated in outputs.items():
             checked_bytes(root / "sdk" / name, generated["sha256"])
+        verify_build_tools(root, facts.get("build_tools", {}))
         expected_sdk = {name for name in facts["imported_official"]["members"] if name.startswith("lib/")}
         expected_sdk.update("sysroot/" + name for name in facts.get("distribution_inputs", {}).get("sysroot_members", {}))
         expected_sdk.update(outputs)

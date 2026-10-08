@@ -5,7 +5,7 @@
 //! Production graph spelling belongs to `Pipeline`, including processing order.
 
 mod live;
-mod p5;
+pub(crate) mod p5;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -236,6 +236,8 @@ pub(crate) struct MacosVideoProbe {
     runtime_cache: PathBuf,
     report: RwLock<Arc<MacosVideoReport>>,
     serial: tokio::sync::Mutex<()>,
+    #[cfg(target_os = "linux")]
+    linux_report: RwLock<crate::ffmpeg::linux_dolby::ReportSnapshot>,
 }
 
 impl MacosVideoProbe {
@@ -249,6 +251,65 @@ impl MacosVideoProbe {
             runtime_cache,
             report: RwLock::new(Arc::new(initial)),
             serial: tokio::sync::Mutex::new(()),
+            #[cfg(target_os = "linux")]
+            linux_report: RwLock::new(Arc::new(
+                crate::ffmpeg::linux_dolby::LinuxDolbyReport::initial(),
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn linux_snapshot(&self) -> crate::ffmpeg::linux_dolby::ReportSnapshot {
+        Arc::clone(
+            &self
+                .linux_report
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    pub(crate) fn linux_diagnostics(&self) -> Value {
+        #[cfg(target_os = "linux")]
+        {
+            self.linux_snapshot().diagnostics()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            serde_json::json!({"availability": "unavailable", "reason": "unsupported_platform", "generation": 0})
+        }
+    }
+
+    /// One serial lifecycle serves platform-specific observations. Linux is
+    /// automatic and does not consult the saved Mac processing preference.
+    pub(crate) async fn reprobe_video_processing(&self, cancelled: &CancellationToken) {
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(_serial) = self.serial.try_lock() else {
+                return;
+            };
+            let generation = self.linux_snapshot().generation.saturating_add(1);
+            *self
+                .linux_report
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Arc::new(crate::ffmpeg::linux_dolby::LinuxDolbyReport::unavailable(
+                    generation,
+                    "probe_pending",
+                ));
+            let report = crate::ffmpeg::linux_dolby::run_generation(
+                generation,
+                &self.runtime_cache,
+                cancelled,
+            )
+            .await;
+            *self
+                .linux_report
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(report);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.reprobe(cancelled).await;
         }
     }
 
@@ -937,7 +998,7 @@ async fn prepare_corpus(
 }
 
 #[cfg(unix)]
-async fn verify_private_directory(
+pub(crate) async fn verify_private_directory(
     directory: &plurx_core::fs_secure::SecureDirectory,
 ) -> Result<(), ProbeReason> {
     let directory = directory.clone();
@@ -959,7 +1020,7 @@ async fn verify_private_directory(
 }
 
 #[cfg(not(unix))]
-async fn verify_private_directory(
+pub(crate) async fn verify_private_directory(
     _directory: &plurx_core::fs_secure::SecureDirectory,
 ) -> Result<(), ProbeReason> {
     Err(ProbeReason::UnsupportedPlatform)
@@ -2938,5 +2999,37 @@ mod tests {
     #[tokio::test]
     async fn graph_cancellation_kills_and_reaps_the_owned_child() {
         killed_probe(ProbeReason::Cancelled).await;
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn neutral_linux_reprobe_reuses_serial_owner_and_keeps_mac_report_separate() {
+        let directory = crate::test_tempdir().expect("neutral probe directory");
+        let probe = MacosVideoProbe::new(directory.path().join("never-prepared"));
+        let cancelled = CancellationToken::new();
+        let serial = probe.serial.try_lock().expect("one compatibility owner");
+        probe.reprobe_video_processing(&cancelled).await;
+        assert_eq!(
+            probe.linux_snapshot().generation,
+            0,
+            "an overlapping request must not start a second generation"
+        );
+        drop(serial);
+        cancelled.cancel();
+        probe.reprobe_video_processing(&cancelled).await;
+        assert_eq!(probe.linux_snapshot().reason, "cancelled");
+        assert_eq!(probe.linux_snapshot().generation, 1);
+        assert_eq!(
+            probe.snapshot().generation,
+            0,
+            "Linux state must not be published as Mac availability"
+        );
+        assert_eq!(
+            probe.snapshot().sdr_scale.reason,
+            ProbeReason::UnsupportedPlatform
+        );
+        assert!(
+            !directory.path().join("never-prepared").exists(),
+            "cancellation must avoid package/media/device work"
+        );
     }
 }

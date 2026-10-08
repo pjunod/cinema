@@ -172,6 +172,7 @@ pub struct SystemDto {
     /// Worker-local compatibility, separate from saved preference and external
     /// visual/client qualification. Reading never launches a child process.
     pub macos_video_processing: serde_json::Value,
+    pub linux_dolby_processing: serde_json::Value,
     /// Advisory only: recent login traffic looks like an untrusted reverse
     /// proxy collapsed distinct clients onto one throttle address.
     pub login_proxy_advisory: bool,
@@ -334,6 +335,7 @@ pub async fn system_info(
         libraries: state.catalogue.list_libraries().await?.len(),
         active_transcodes: state.transcode.active_sessions().await,
         macos_video_processing: state.transcode.macos_video_diagnostics(),
+        linux_dolby_processing: state.transcode.linux_dolby_diagnostics(),
         login_proxy_advisory: state.trusted_proxies.is_empty()
             && state.login_throttle.unconfigured_proxy_advisory(),
         replication,
@@ -2075,6 +2077,7 @@ pub struct SettingsDto {
     pub macos_video_processing_enabled: bool,
     pub macos_hevc_output_enabled: bool,
     pub macos_video_processing: serde_json::Value,
+    pub linux_dolby_processing: serde_json::Value,
     /// Whether an operator has asked this node for the health-qualified
     /// artifact identity. What the node actually does with the request is
     /// `decoder_health_qualification`, below — the two are separate fields
@@ -2571,6 +2574,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             false,
         ),
         macos_video_processing: state.transcode.macos_video_diagnostics(),
+        linux_dolby_processing: state.transcode.linux_dolby_diagnostics(),
         decoder_health_qualified_artifacts: decoder_health_requested,
         hevc_unverified_copy: plurx_core::store::stored_switch(
             setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),

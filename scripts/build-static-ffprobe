@@ -4,8 +4,14 @@
 set -eu
 
 version=8.1.3
-source_sha256=7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
-source_url="https://ffmpeg.org/releases/ffmpeg-${version}.tar.xz"
+source_tag=8.1.3-1
+source_sha256=87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140
+source_url="https://codeload.github.com/jellyfin/jellyfin-ffmpeg/tar.gz/refs/tags/v${source_tag}"
+# Origin facts and the producer must use the same demux/codec implementation,
+# including Jellyfin's AC-4 timestamp patches. A matching FFmpeg version alone
+# does not establish that relation.
+recipe="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+preparer="$(dirname "$recipe")/prepare-linux-dolby-ffmpeg"
 binary=${1:?usage: build-static-ffprobe BINARY_PATH DOCUMENTATION_DIR}
 documentation=${2:?usage: build-static-ffprobe BINARY_PATH DOCUMENTATION_DIR}
 jobs=${PLURX_STATIC_PROBE_JOBS:-2}
@@ -20,7 +26,7 @@ esac
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
-archive="$work/source.tar.xz"
+archive="$work/source.tar.gz"
 if [ -n "${PLURX_STATIC_PROBE_ARCHIVE:-}" ]; then
     cp "$PLURX_STATIC_PROBE_ARCHIVE" "$archive"
 else
@@ -28,14 +34,14 @@ else
         "$source_url" -o "$archive"
 fi
 printf '%s  %s\n' "$source_sha256" "$archive" | sha256sum -c -
-mkdir "$work/source"
-tar -xJf "$archive" --strip-components=1 -C "$work/source"
-cd "$work/source"
+python3 "$preparer" --source-archive "$archive" --output "$work/prepared"
+cd "$work/prepared/source"
 
 # Static FFmpeg libraries alone are insufficient: the final executable must
 # also have no ELF interpreter or dynamic dependencies. Network and devices
 # are unnecessary for the collector's already-open, authorized source handle.
-./configure \
+./configure --extra-version=Jellyfin \
+    --enable-gpl --enable-version3 \
     --disable-shared --enable-static --disable-autodetect \
     --disable-programs --enable-ffprobe --disable-doc --disable-debug \
     --disable-network --disable-devices --disable-avdevice --disable-avfilter \
@@ -44,6 +50,7 @@ cd "$work/source"
     --enable-zlib --enable-bzlib --enable-lzma \
     --pkg-config-flags=--static --extra-ldexeflags=-static
 make -j "$jobs" ffprobe
+grep -qx '#define CONFIG_AC4_DECODER 1' config_components.h
 
 readelf -h ffprobe > "$work/elf-header"
 readelf -l ffprobe > "$work/elf-program-headers"
@@ -55,23 +62,55 @@ fi
 grep -F "ffprobe version ${version}" "$work/version"
 mkdir -p "$(dirname "$binary")" "$documentation"
 install -m 0755 ffprobe "$binary"
-cp COPYING.LGPLv2.1 COPYING.LGPLv3 LICENSE.md "$documentation/"
+cp COPYING.GPLv2 COPYING.GPLv3 COPYING.LGPLv2.1 COPYING.LGPLv3 LICENSE.md "$documentation/"
 # Retain the exact upstream source, configuration, dependency copyright and
 # binary identity with the package, so it remains inspectable/rebuildable.
 # The configuration is the resolved `config.h` and `ffbuild/config.mak`, not
 # `ffbuild/config.log`: that log dumps the shell environment (BuildKit's
 # per-build TRACEPARENT), this script's mktemp directory, configure's own
 # random scratch paths and a `mktemp -u` probe, so no two images matched.
-cp "$archive" "$documentation/ffmpeg-${version}.tar.xz"
+mkdir -p "$documentation/source-offer"
+cp -a "$work/prepared/source-offer/." "$documentation/source-offer/"
+cp "$work/prepared/prepared-source.json" "$documentation/prepared-source.json"
 cp config.h "$documentation/config.h"
+cp config_components.h "$documentation/config_components.h"
 cp ffbuild/config.mak "$documentation/config.mak"
 cp "$work/version" "$documentation/version.txt"
 {
-    printf 'source_url=%s\nsource_sha256=%s\n' "$source_url" "$source_sha256"
+    printf 'source_url=%s\nsource_sha256=%s\nsource_tag=%s\n' "$source_url" "$source_sha256" "$source_tag"
     sed -n 's/^#define FFMPEG_CONFIGURATION /configure=/p' config.h
     sha256sum "$binary"
     cat "$work/elf-header" "$work/elf-program-headers"
 } > "$documentation/build.txt"
+cp "$recipe" "$documentation/build-static-ffprobe"
+python3 - "$documentation" "$binary" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+root, binary = Path(sys.argv[1]), Path(sys.argv[2])
+source = json.loads((root / "prepared-source.json").read_text())
+quilt = source["upstream_quilt"]
+facts = {
+    "schema_version": 1,
+    "kind": "sealed-source-parser",
+    "source": {
+        "archive_sha256": source["source_sha256"],
+        "commit": source["source_commit"],
+        "local_patch_sha256": source["local_patch_sha256"],
+        "quilt_digest": hashlib.sha256(json.dumps(quilt, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest(),
+    },
+    "executable_sha256": hashlib.file_digest(binary.open("rb"), "sha256").hexdigest(),
+    "elf_policy": "no-interpreter-or-dynamic-segment",
+    "configuration_sha256": hashlib.sha256((root / "config.h").read_bytes()).hexdigest(),
+    "components_sha256": hashlib.sha256((root / "config_components.h").read_bytes()).hexdigest(),
+    "build_recipe_sha256": hashlib.sha256((root / "build-static-ffprobe").read_bytes()).hexdigest(),
+    "runtime_qualification": False,
+}
+(root / "manifest.json").write_text(json.dumps(facts, sort_keys=True, indent=2) + "\n")
+PY
 for package in zlib1g-dev libbz2-dev liblzma-dev libc6-dev; do
     if [ -f "/usr/share/doc/$package/copyright" ]; then
         cp "/usr/share/doc/$package/copyright" "$documentation/$package.copyright"

@@ -400,6 +400,10 @@ impl TranscodeManager {
         let mut policy =
             DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
                 .qualifying_artifacts(qualification);
+        #[cfg(target_os = "linux")]
+        if let Some(context) = self.macos_video_probe.linux_snapshot().context() {
+            policy = policy.with_linux_dolby(context);
+        }
         if let Some(context) = macos_context {
             policy = policy.with_macos_processing(context.clone());
         }

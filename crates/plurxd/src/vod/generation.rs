@@ -380,11 +380,17 @@ pub(super) async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
 /// What a producer for `recipe` adds to its environment: a text burn's frozen
 /// Fontconfig configuration, so the child sees the fonts the recipe captured
 /// and nothing installed since.
-pub(super) fn recipe_child_env(recipe: &Recipe) -> Vec<(&'static str, &std::ffi::OsStr)> {
+pub(super) fn recipe_child_env(recipe: &Recipe) -> Vec<(&str, &std::ffi::OsStr)> {
     recipe
         .encoding
         .as_ref()
-        .map(|encoding| encoding.engine.child_env())
+        .map(|encoding| {
+            let mut env: Vec<(&str, &std::ffi::OsStr)> = encoding.engine.child_env();
+            // The processing binding allows only loader/libVA keys, so it cannot
+            // overwrite the existing frozen Fontconfig authority.
+            env.extend(encoding.executable.processing_child_env());
+            env
+        })
         .unwrap_or_default()
 }
 

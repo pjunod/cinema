@@ -235,7 +235,10 @@ impl Pipeline {
     pub fn pairs_with(self, encoder: Encoder) -> bool {
         match self {
             Pipeline::DoviStrictTonemapx => {
-                matches!(encoder, Encoder::VideoToolbox | Encoder::Software)
+                matches!(
+                    encoder,
+                    Encoder::VideoToolbox | Encoder::Software | Encoder::Qsv | Encoder::Vaapi
+                )
             }
             Pipeline::VtDoviTonemapx | Pipeline::VtDoviMetal | Pipeline::DoviMetal => {
                 encoder == Encoder::VideoToolbox
@@ -380,7 +383,28 @@ impl Pipeline {
     /// Exact decoder enforcement shared by production recipe projection and
     /// complete-graph qualification. Only strict Profile5 variants expose it.
     pub fn strict_dolby_input_args(self) -> Option<Vec<String>> {
-        if !self.requires_strict_dovi() {
+        self.strict_dolby_input_args_for_backend(if self.requires_software_decode() {
+            super::DecodeBackend::Software
+        } else {
+            super::DecodeBackend::VideoToolbox
+        })
+    }
+
+    /// A strict CPU renderer may consume an observed native VAAPI decoder.
+    /// Selection remains in the semantic resolver; these arguments enforce the
+    /// selected backend and current-AU decoder contract without a VT-only flag.
+    pub fn strict_dolby_input_args_for_backend(
+        self,
+        backend: super::DecodeBackend,
+    ) -> Option<Vec<String>> {
+        if !self.requires_strict_dovi()
+            || !matches!(
+                backend,
+                super::DecodeBackend::Software
+                    | super::DecodeBackend::VideoToolbox
+                    | super::DecodeBackend::Vaapi
+            )
+        {
             return None;
         }
         let mut args: Vec<String> = [
@@ -394,10 +418,8 @@ impl Pipeline {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        if self.requires_software_decode() {
-            args.extend(["-hwaccel".to_owned(), "none".to_owned()]);
-        } else {
-            args.extend(self.decode_args());
+        args.extend(backend.input_args(true));
+        if backend == super::DecodeBackend::VideoToolbox {
             args.extend(["-hwaccel_flags".to_owned(), "+require_hardware".to_owned()]);
         }
         Some(args)
@@ -670,10 +692,9 @@ impl Pipeline {
         )
     }
 
-    /// Whether current production qualification requires software decode.
-    /// Dolby hardware tuples remain excluded pending per-frame metadata/PTS
-    /// transport, strict renderer consumption, seek and real-content visual
-    /// proof. Artificial-sample transport does not prove RPU pixel influence.
+    /// Conservative default for incumbent renderers. The semantic resolver
+    /// overrides strict CPU decode only for an exact observed Linux graph;
+    /// current-AU metadata enforcement and the promised grade remain required.
     pub fn requires_software_decode(self) -> bool {
         matches!(
             self,

@@ -1,0 +1,44 @@
+{
+  "analytic_helper_sha256": "a0496b42bd24f777b8befdd88c5f7dd287f459b5e657b19de08f5d1aae954d7d",
+  "cases": [
+    {
+      "affected_decode_sample": null,
+      "byte_length": 34592,
+      "id": "fresh",
+      "negative_max_frames": null,
+      "path": "p5_4k24_fresh.mp4",
+      "sha256": "21df60c4bd85bcfc9c6698c96020c2bd62acf154fddf6637020db1388857940b"
+    },
+    {
+      "affected_decode_sample": 12,
+      "byte_length": 34428,
+      "id": "missing_midstream",
+      "negative_max_frames": 10,
+      "path": "p5_4k24_missing_midstream.mp4",
+      "sha256": "869b4e79829041b8e66bca331fb7d79a268d6e260695156c40402181d39500a1"
+    }
+  ],
+  "coding": "crf=8:vbv-maxrate=20000:vbv-bufsize=20000:level-idc=5.1:no-sao=1:no-deblock=1",
+  "dolby_vision_level": 6,
+  "frame_count": 24,
+  "frame_rate": [
+    24,
+    1
+  ],
+  "generator_recipe_version": 1,
+  "generator_sha256": "9dd02b2a969ee2f7afd35e198383390236c6920b809e95ab6fc95d17c7f70cf0",
+  "license": "CC0-1.0",
+  "qualification": "generated-source-only",
+  "schema_version": 1,
+  "source_authority_sha256": "d86402326c3ef3b88c455ac089c8b94aa27fcbade48eb349499043f54ba5d062",
+  "source_recipe": "integer12x-original-analytic-IPT-P5-with-fresh-current-AU-RPU",
+  "source_sample_aspect_ratio": "1:1",
+  "source_shape": [
+    3840,
+    2160
+  ],
+  "tools": {
+    "ffmpeg_sha256": "c8c4b5259b8129d4240599e16e57e9286b2e3c0ca5076e91fa6055b5872ab4c8",
+    "ffprobe_sha256": "e81fff404fda117b1133fb539f7940339171995cc5a43a8020b6509211f7f992"
+  }
+}

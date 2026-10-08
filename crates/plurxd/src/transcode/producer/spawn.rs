@@ -414,7 +414,7 @@ pub(super) async fn capture_macos_plan_executable(
     if !executable.matches_macos_plan(plan) {
         return Err("macos_processing_implementation_changed: encoder differs from the frozen processing plan; check compatibility again".to_owned());
     }
-    Ok(Some(executable))
+    Ok(Some(executable.bind_linux_plan(plan)?))
 }
 
 #[cfg(test)]
@@ -472,6 +472,35 @@ pub(super) fn spawn_ffmpeg_at(
     descriptors: FfmpegDescriptors,
     observation: DiagnosticObservation,
 ) -> Result<ObservedFfmpeg, String> {
+    spawn_ffmpeg_at_with_env(
+        program,
+        args,
+        work,
+        encoder_label,
+        session_id,
+        progress_observer,
+        runtime_cache,
+        descriptors,
+        observation,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_ffmpeg_at_with_env(
+    program: &std::path::Path,
+    args: &[String],
+    work: crate::process_control::ChildWork,
+    encoder_label: &'static str,
+    session_id: &str,
+    progress_observer: FfmpegProgressObserver,
+    runtime_cache: &std::path::Path,
+    descriptors: FfmpegDescriptors,
+    observation: DiagnosticObservation,
+    processing_env: &[(&str, &std::ffi::OsStr)],
+) -> Result<ObservedFfmpeg, String> {
+    let mut child_env = vec![("http_proxy", std::ffi::OsStr::new(""))];
+    child_env.extend_from_slice(processing_env);
     let crate::producer_spawn::Spawned {
         child,
         child_job,
@@ -486,7 +515,7 @@ pub(super) fn spawn_ffmpeg_at(
             descriptors,
             // The muxer's uploads go to a loopback endpoint. An inherited
             // `http_proxy` would send them, token and all, to the proxy.
-            env: &[("http_proxy", std::ffi::OsStr::new(""))],
+            env: &child_env,
             work,
         },
     )?;

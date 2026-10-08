@@ -3,11 +3,13 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tarfile
 
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 def helper():
@@ -142,3 +144,113 @@ class LinuxDolbySdkCase(unittest.TestCase):
         assert links == {"usr/lib/x86_64-linux-gnu/libx264.so": "usr/lib/x86_64-linux-gnu/libx264.so.164"}
         with self.assertRaises(KeyError):
             module.resolved(next(iter(links)), regular, links)
+
+    def test_absolute_debian_alias_resolves_only_authenticated_cross_role_bytes(self):
+        module = helper()
+        endpoint = "lib/x86_64-linux-gnu/libz.so.1.2.13"
+        alias = "usr/lib/x86_64-linux-gnu/libz.so"
+        original_target = "/" + endpoint
+        contents = b"authenticated public runtime bytes"
+        files, links = {endpoint: contents}, {alias: original_target}
+        records = {
+            "zlib-dev": {"archive_sha256": "a" * 64, "archive_aliases": links},
+            "zlib-runtime": {"archive_sha256": "b" * 64, "consumed": {
+                endpoint: {"sha256": hashlib.sha256(contents).hexdigest()}}}}
+        sysroot = self.tmp_path / "namespace"
+        missing, witness = module.materialize_distribution_aliases(sysroot, files, links, records,
+            {endpoint: ["zlib-runtime"]}, {alias: ["zlib-dev"]})
+        self.assertEqual(missing, {})
+        self.assertEqual((sysroot / alias).read_bytes(), contents)
+        self.assertFalse((sysroot / alias).is_symlink())
+        self.assertEqual(witness[alias]["archive_target"], original_target)
+        self.assertEqual(witness[alias]["source_roles"], {"zlib-dev": "a" * 64})
+        self.assertEqual(witness[alias]["target_roles"], {"zlib-runtime": "b" * 64})
+        with self.assertRaisesRegex(ValueError, "content changed"):
+            module.materialize_distribution_aliases(self.tmp_path / "substitution",
+                {endpoint: b"substituted target"}, links, records,
+                {endpoint: ["zlib-runtime"]}, {alias: ["zlib-dev"]})
+        missing, witness = module.materialize_distribution_aliases(self.tmp_path / "missing", {}, links,
+            records, {}, {alias: ["zlib-dev"]})
+        self.assertEqual(missing, links)
+        self.assertEqual(witness, {})
+        self.assertFalse((self.tmp_path / "missing" / alias).exists())
+        with self.assertRaisesRegex(ValueError, "cycle"):
+            module.materialize_distribution_aliases(self.tmp_path / "cycle", {},
+                {alias: "/" + endpoint, endpoint: "/" + alias}, records, {}, {})
+
+    def test_absolute_alias_inventory_keeps_default_refusal_and_rejects_escape(self):
+        module = helper()
+        for target in ["/lib/x86_64-linux-gnu/libz.so.1", "/../../outside"]:
+            output = io.BytesIO()
+            with tarfile.open(fileobj=output, mode="w") as archive:
+                link = tarfile.TarInfo("usr/lib/x86_64-linux-gnu/libz.so")
+                link.type = tarfile.SYMTYPE
+                link.linkname = target
+                archive.addfile(link)
+            with self.assertRaisesRegex(ValueError, "external archive link"):
+                module.tar_members(output.getvalue())
+            if ".." in target:
+                with self.assertRaisesRegex(ValueError, "external archive link"):
+                    module.tar_members(output.getvalue(), allow_unresolved=True)
+            else:
+                regular, links = module.tar_members(output.getvalue(), allow_unresolved=True)
+                self.assertEqual(regular, {})
+                self.assertEqual(next(iter(links.values())), target)
+
+    def test_private_meson_provider_binds_authentic_modules_and_isolated_launcher(self):
+        module = helper()
+        original = io.BytesIO()
+        members = {"meson-1.12.1/setup.cfg": b"python_requires = >= 3.10\n",
+                   "meson-1.12.1/COPYING": b"original upstream license\n",
+                   "meson-1.12.1/mesonbuild/mesonmain.py": b"# authentic synthetic module vector\n"}
+        with tarfile.open(fileobj=original, mode="w") as archive:
+            for name, contents in members.items():
+                entry = tarfile.TarInfo(name)
+                entry.size = len(contents)
+                archive.addfile(entry, io.BytesIO(contents))
+        source = self.tmp_path / "meson-source.tar"
+        source.write_bytes(original.getvalue())
+        source_sha = hashlib.sha256(original.getvalue()).hexdigest()
+        lock = {"build_tools": {"meson": {"archive": source.name, "archive_sha256": source_sha,
+                                         "version": "1.12.1", "url": "https://example.org/source"}}}
+        root = self.tmp_path / "staged"
+        provenance = root / "provenance"
+        provenance.mkdir(parents=True)
+        with patch.object(module, "MESON_SOURCE_SHA", source_sha):
+            tools = module.stage_build_tools(lock, provenance, self.tmp_path)
+            module.verify_build_tools(root, tools)
+            self.assertIn("-I -S -B", (root / tools["meson"]["launcher"]).read_text())
+            path = provenance / "build-tools/meson/source/meson-1.12.1/mesonbuild/mesonmain.py"
+            path.chmod(0o644)
+            path.write_bytes(b"substituted host module")
+            with self.assertRaisesRegex(ValueError, "tree changed"):
+                module.verify_build_tools(root, tools)
+            # Rehashing a substituted module and the declared tree cannot
+            # replace the independently pinned original source archive.
+            tools["meson"]["files"][str(path.relative_to(provenance / "build-tools/meson"))] = module.digest(path.read_bytes())
+            tools["meson"]["tree_sha256"] = module.digest(json.dumps(tools["meson"]["files"],
+                sort_keys=True, separators=(",", ":")).encode())
+            with self.assertRaisesRegex(ValueError, "authentic source"):
+                module.verify_build_tools(root, tools)
+
+
+def test_debian_source_formats_require_descriptor_bound_archive_and_patch_identities():
+    module = helper()
+    def offer(format, patch_name):
+        objects = {"libpciaccess_0.17.orig.tar.gz": b"original", patch_name: b"patch"}
+        descriptor = "Format: " + format + "\nSource: libpciaccess\nVersion: 0.17-2\nChecksums-Sha256:\n"
+        descriptor += "".join(" " + hashlib.sha256(data).hexdigest() + " " + str(len(data)) + " " + name + "\n" for name, data in objects.items())
+        objects["libpciaccess_0.17-2.dsc"] = descriptor.encode()
+        return objects
+    facts = {"package": "libpciaccess", "version": "0.17-2"}
+    valid = offer("1.0", "libpciaccess_0.17-2.diff.gz")
+    assert module.validate_debian_source_offer(facts, valid) == "1.0"
+    quilt = offer("3.0 (quilt)", "libpciaccess_0.17-2.debian.tar.xz")
+    assert module.validate_debian_source_offer(facts, quilt) == "3.0 (quilt)"
+    for bad in [offer("3.0 (quilt)", "libpciaccess_0.17-2.diff.gz"), offer("1.0", "arbitrary.gz"), dict(valid, **{"libpciaccess_0.17-2.diff.gz": b"substitution"})]:
+        with unittest.TestCase().assertRaises(ValueError):
+            module.validate_debian_source_offer(facts, bad)
+    missing = dict(valid)
+    del missing["libpciaccess_0.17-2.diff.gz"]
+    with unittest.TestCase().assertRaises(ValueError):
+        module.validate_debian_source_offer(facts, missing)

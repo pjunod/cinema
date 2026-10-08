@@ -3294,7 +3294,7 @@ fn spawn_background_loops(
         let manager = Arc::clone(&state.transcode);
         let cancelled = background_shutdown.clone();
         async move {
-            manager.reprobe_macos_video(&cancelled).await;
+            manager.reprobe_video_processing(&cancelled).await;
         }
     });
     tokio::spawn(std::sync::Arc::clone(&state.transcode).scratch_space_loop());

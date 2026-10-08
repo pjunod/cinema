@@ -21,7 +21,7 @@ combined source `b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`.
 
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
-| F1 GPU subtitle compositing | Native builder | Compositor and packaged fonts committed; local text capture-order repair staged in the manager merge; bitmap GPU API and nonzero-entry controls pass | Updated text release API proof and complete-graph comparison |
+| F1 GPU subtitle compositing | Native builder | Compositor, packaged fonts and local text capture-order repair committed; bitmap GPU API and nonzero-entry controls pass | Updated text release API proof and complete-graph comparison |
 | F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls and portable daemon compilation pass | Exact Linux compilation, full shipping package, runtime driver/graph observation and real encoder/size/rate envelope |
 | F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser and clock repairs integrated; three normal API delivery cases pass, with the MPEG-2 initial-padding oracle corrected on retained bytes; separate release API run initializes the parser and shuts down cleanly | Final combined-source validation; physical client caption presentation remains unqualified |
 
@@ -253,6 +253,17 @@ actual Bookworm generators, unchanged full producer configure/link closure,
 sealed-parser build and Docker installation qualification. No shipping-ready
 claim follows from these source preparations.
 
+Shipping source `6cdd3755f780bfef215ebd09e190ada2504d3ef1` now connects
+ordinary amd64 `make docker` to the audited package output through a named
+BuildKit context. Installation uses a temporary Python stage and root access;
+the final image restores `USER plurx`, excludes the installer tools, and retains
+build ref, SHA and source-epoch arguments. ARM and existing default/CI targets
+retain their incumbent paths. The real package is still a build prerequisite:
+no producer image, link closure or hardware route is qualified by this source
+integration alone. The runtime source has also been ported onto `c0691d5ff`,
+preserving the same captured engine and font authority before plan selection.
+
+
 Corrected normal API caption delivery now passes on the signed debug package:
 public HEVC retains 120 due 608 and 66 valid 708 records across 120 frames;
 original MPEG-2 retains all 48 caption records; the caption-free control has
@@ -288,8 +299,8 @@ authority, diagnostic override or probe. The failed selection receipt is
 retained; bitmap qualification can proceed on the unchanged release while
 the text repair is implemented and compiled.
 
-The narrow repair `b7d21934b` is committed by its builder and staged in
-the manager’s pending integration merge: the same captured engine
+The narrow repair `b7d21934b` is integrated by manager commit
+`c0691d5ffdf34d1dc06e83089c970a1c3d89f46a`: the same captured engine
 supplies font identity to both fresh-fact and held-fact resolution, then
 remains retained for encoding. Its focused regression source covers matching,
 absent and mismatched font identities. Pinned all-target compilation and the
@@ -326,11 +337,12 @@ features will be handed off for the next batch after implementation and the
 single final adversarial review; the coordinator retains final test and
 landing ownership.
 
-The coordinator currently holds remote build windows and local compiler/hooks
-for its blocking batch repairs. Both builders' completed hooks are released;
-the manager's combined merge is prepared but its hook has not started. Source
-work continues, and no compiler, generator or performance run will start
-until the corresponding resource window is released.
+The coordinator admitted two sequential, bounded native commit hooks. The
+manager integration `c0691d5ff` passed in 186 seconds and shipping source
+`6cdd3755f` passed in 172 seconds; both compiler leases are released. Linux
+runtime changes are being combined with that shipping source before the next
+check and release build. Remote generation, GPU and performance windows remain
+held; no unit tests ran in these builder hooks.
 
 The coordinator has returned a separate earlier-batch HEVC publication
 failure for priority repair. Its hvcC parser discards `array_completeness`
@@ -342,8 +354,10 @@ found no actionable issues. Pinned all-target compilation and the normal
 commit hook passed on the preceding base; the reviewed patch and both full
 modified files remain byte-identical after the requested base port. The
 coordinator has the exact committed source archive and six focused regression
-IDs for Linux qualification. No units ran in the builder, and the native
-compiler target is released. This earlier-batch repair is separate from
+IDs for Linux qualification. All six focused controls subsequently passed
+with the coordinator, which is combining the earlier-batch blocking repairs
+under the existing PR. No units ran in the builder, and the native compiler
+target is released. This earlier-batch repair is separate from
 the follow-up candidate and does not count as its final review.
 
 The temporary Metal compiler component is tracked for exact

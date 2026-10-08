@@ -1610,6 +1610,9 @@ impl TranscodeManager {
         let executable = crate::ffmpeg::EncodedExecutable::capture()
             .await
             .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+        let executable = executable
+            .bind_linux_plan(&plan)
+            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
         if !executable.matches_macos_plan(&plan) {
             return Err(vod_refusal_error(
                 "vod_engine_unattested",

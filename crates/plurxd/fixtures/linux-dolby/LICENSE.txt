@@ -1,0 +1,7 @@
+SPDX-License-Identifier: CC0-1.0
+Synthetic HLG and Profile5 analytical media and generated RPU metadata.
+The contributors waive copyright and related rights to these generated media
+and pattern descriptions under CC0 1.0 Universal.
+https://creativecommons.org/publicdomain/zero/1.0/
+No external footage, pictures or movie metadata is incorporated. Tool code
+retains its respective repository license. Patent obligations are separate.

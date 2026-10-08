@@ -1506,6 +1506,10 @@ pub fn router(state: AppState) -> Router {
             "/developer/macos-video-processing/reprobe",
             post(developer::reprobe_macos_video),
         )
+        .route(
+            "/system/video-processing/reprobe",
+            post(developer::reprobe_video_processing),
+        )
         .merge(library_channels::collection_router())
         .nest("/library-channels", library_channels::router())
         .nest("/dvr", dvr::router())

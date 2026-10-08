@@ -333,6 +333,20 @@ impl TranscodeManager {
         Ok(())
     }
 
+    pub(crate) fn linux_dolby_diagnostics(&self) -> serde_json::Value {
+        self.macos_video_probe.linux_diagnostics()
+    }
+
+    pub(crate) async fn reprobe_video_processing(
+        &self,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) {
+        self.macos_video_probe
+            .reprobe_video_processing(cancelled)
+            .await;
+        tracing::info!(target: "plurxd::transcode", "completed node-local video processing compatibility probe");
+    }
+
     pub(crate) async fn reprobe_macos_video(
         &self,
         cancelled: &tokio_util::sync::CancellationToken,

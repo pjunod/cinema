@@ -41,7 +41,11 @@ pub use decode::{
     VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
-pub use dolby::{LinuxDolbyIdentity, StrictDolbyImplementation, StrictDolbyPolicy};
+pub use dolby::{
+    LinuxDolbyContext, LinuxDolbyExecutionBinding, LinuxDolbyIdentity, LinuxDolbyObservation,
+    LinuxExecutionObject, LinuxExecutionObjectKind, LinuxSourceClockAssociation,
+    StrictDolbyImplementation, StrictDolbyPolicy,
+};
 pub use encoder::{
     benchmark_encoder, detect_encoders, detect_video_decoders, validate_quality_rate_control,
     validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
@@ -1729,7 +1733,11 @@ fn hls_args_inner(
     if plan.is_some_and(|plan| plan.options().strict_dolby.is_some()) {
         args.push("-xerror".into());
     }
-    args.extend(opts.pipeline.device_args(encoder));
+    args.extend(
+        plan.and_then(|plan| plan.options().strict_dolby.as_ref())
+            .and_then(|policy| policy.linux_encoder_init_args(encoder))
+            .unwrap_or_else(|| opts.pipeline.device_args(encoder)),
+    );
 
     // Fast input seek for resume/session start.
     if opts.start_seconds > 0.0 {
@@ -1752,9 +1760,10 @@ fn hls_args_inner(
             (
                 plan.options()
                     .pipeline
-                    .strict_dolby_input_args()
+                    .strict_dolby_input_args_for_backend(plan.decode().backend())
                     .expect("resolved strict renderer has decoder enforcement"),
-                None,
+                (plan.decode().backend() == DecodeBackend::Vaapi)
+                    .then(|| "hwdownload,format=p010le,setparams=colorspace=unknown".to_owned()),
             )
         } else if let Some(plan) = plan {
             let decode = plan.decode();
@@ -1789,6 +1798,16 @@ fn hls_args_inner(
             (pipeline_decode, None)
         };
     args.extend(decode_args);
+    if let Some(identity) = plan
+        .filter(|plan| plan.decode().backend() == DecodeBackend::Vaapi)
+        .and_then(|plan| plan.options().strict_dolby.as_ref())
+        .and_then(StrictDolbyPolicy::linux_identity)
+    {
+        args.extend([
+            "-hwaccel_device".to_owned(),
+            identity.device_path().to_owned(),
+        ]);
+    }
     if plan.is_some_and(|plan| plan.output_contract().normalized_geometry().is_some()) {
         // Clearing the INPUT matrix prevents it surviving manual pixel rotation
         // into MP4 (output rotate tags alone do not remove this side data).
