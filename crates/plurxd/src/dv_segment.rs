@@ -706,7 +706,7 @@ mod tests {
             .expect("concrete graph admission");
         let cache = tempfile::tempdir().expect("private graph cache");
         let slot = Arc::new(ProducerSlot::new());
-        let args=["-nostdin","-v","error","-threads","1","-copyts","-i",&fd(3),"-filter_threads","1",
+        let args: Vec<String>=["-nostdin","-v","error","-threads","1","-copyts","-i",&fd(3),"-filter_threads","1",
             "-vf","zscale=matrixin=gbr:transferin=smpte2084:primariesin=2020:rangein=full:matrix=2020_ncl:transfer=smpte2084:primaries=2020:range=limited:chromal=center:filter=point,format=yuv420p10le",
             "-c:v","libx265","-threads","1","-profile:v","main10","-x265-params",
             "pools=none:frame-threads=1:qp=0:bframes=0:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited:chromaloc=1",
@@ -719,7 +719,7 @@ mod tests {
                 .expect("muxer")
                 .into(),
             encoder: "/usr/bin/ffmpeg".into(),
-            encoder_args: args,
+            encoder_args: args.clone(),
             runtime_cache: cache.path().to_owned(),
             shape: SegmentShape {
                 video_index: 0,
@@ -793,6 +793,50 @@ mod tests {
                 .is_some(),
             "confirmed graph releases concrete admission"
         );
+        let unaccepted = spawn(SegmentRequest {
+            renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
+                .expect("renderer")
+                .into(),
+            muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
+                .expect("muxer")
+                .into(),
+            encoder: "/usr/bin/ffmpeg".into(),
+            encoder_args: args,
+            runtime_cache: cache.path().to_owned(),
+            shape: SegmentShape {
+                video_index: 0,
+                max_frames: 6,
+                bl: (64, 64),
+                el: (64, 64),
+            },
+            source: source.clone(),
+            source_offsets: offsets.clone(),
+            admission: admissions
+                .try_admit_bundle(1, 3, &estimate, Priority::Live)
+                .expect("second actual graph admission"),
+            producer: slot.clone(),
+            at: 1,
+            deadline: Instant::now() + Duration::from_secs(30),
+            cancel: CancellationToken::new(),
+        })
+        .await
+        .expect("actual unaccepted encoder handoff");
+        let abandoned = unaccepted.registration.clone();
+        assert_eq!(offsets.available_permits(), 0);
+        drop(unaccepted);
+        let receipt = tokio::time::timeout(Duration::from_secs(5), abandoned.wait_confirmed_reap())
+            .await
+            .expect("dropped actual handoff retires encoder");
+        assert!(receipt.matches(&abandoned));
+        assert_eq!(
+            receipt.writers(),
+            crate::prodrun::WriterSettlement::Abandoned
+        );
+        assert_eq!(offsets.available_permits(), 1);
+        assert!(admissions
+            .try_admit_bundle(1, 3, &estimate, Priority::Live)
+            .is_some());
+        assert!(source.unchanged());
         if let Ok(path) = std::env::var("PLURX_DV_SEGMENT_ENCODED_OUTPUT") {
             std::fs::write(path, encoded).expect("save actual graph observation");
         }
