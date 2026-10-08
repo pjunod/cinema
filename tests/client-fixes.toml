@@ -4730,3 +4730,40 @@ source = "clients/desktop-remote/extension/worker.js"
 source_anchor = "pinnedDocument=result.documentId;"
 test = "clients/desktop-remote/tests/extension.test.mjs"
 test_anchor = "focus setup pins its first document and pending navigation invalidates the operation"
+
+# B05 device-local Cinema choice remains independent of the server switch.
+
+[[fixes]]
+id = "desktop.cec-cinema-device-local-choice"
+commits = ["500748f58be0a9652ae018dcf022a9d1c9a8ca7b"]
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "typeof cinemaRemoteLocalEnabled===\"function\"&&!cinemaRemoteLocalEnabled(\"cec\")"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "saved Cinema local CEC choice fences install and queued delivery independently of server"
+
+[[fixes]]
+id = "desktop.cec-cinema-disable-document"
+commits = []
+supplements = "desktop.cec-cinema-device-local-choice"
+source = "clients/desktop-remote/extension/content.js"
+source_anchor = "cinema-cec-disabled"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "fixed local disable notification unbinds the document port without accepting page actions"
+
+[[fixes]]
+id = "desktop.cec-cinema-disable-worker"
+commits = []
+supplements = "desktop.cec-cinema-device-local-choice"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "message.type===\"disabled\""
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "fixed local disable notification unbinds the document port without accepting page actions"
+
+[[fixes]]
+id = "desktop.cec-cinema-server-instance"
+commits = []
+supplements = "desktop.cec-cinema-device-local-choice"
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "SERVER?.instance_id!==instance"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "saved Cinema local CEC choice fences install and queued delivery independently of server"
