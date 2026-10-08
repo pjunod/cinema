@@ -22,6 +22,7 @@ Main integration is handed to `01a11907-f720-71b1-8c51-89902b919e6f`.
 | B07 Android receiver/companion | PR [#881](http://forge.lan:3000/noirr/plurx/pulls/881), `c3e2c6ab0f0e` | Released in parent review 106 | Both APKs compile; grouped 21 cases and final 2 correction cases pass; representative Router smoke passes, production native instrumentation unexecuted |
 | B08 desktop CEC | PR [#872](http://forge.lan:3000/noirr/plurx/pulls/872), `08258f51cbb4` | No blocker in standalone software packet | 16 Python + 12 Node checks and production-popup Chromium smoke with native port mocked; hardware pending |
 | B09 home invitations | Storage/authority/admission and cleanup through schema 4 built; home HTTP/worker and native adapters continue | Storage checkpoints reviewed; runtime release pending | Focused SQLite and actual three-voter contracts pass; no live home enrollment claim yet |
+| B09 Apple invitations | PR [#903](http://forge.lan:3000/noirr/plurx/pulls/903), `b77dcb3d9aed` | Released in parent review 113; handed to coordinator | iOS/tvOS builds and 22 unique focused cases across packet/final correction runs; actual home seam and signed physical APNs remain open |
 | B09 standalone broker | PR [#896](http://forge.lan:3000/noirr/plurx/pulls/896), `ea0a86f34c54` | Released in parent review 110 | 27 focused cases including real loopback Router and executable CLI; signing/provider fixtures, physical delivery unqualified |
 | Web couch completion | PR [#890](http://forge.lan:3000/noirr/plurx/pulls/890), `18ef97705920` | Released in parent review 108; coordinator integrated | 54 focused static/web checks and 6 Chromium cases; CEC native port mocked |
 | Apple couch completion | PR [#898](http://forge.lan:3000/noirr/plurx/pulls/898), `a331f7d9b17b` | Released in parent review 111 | iOS/tvOS builds; 21 focused cases plus 2 final physical arbitration cases; physical TV/VoiceOver pending |
@@ -270,6 +271,26 @@ admission, so polling cannot extend a dormant phone login's lifetime.
 
 
 ## Reviewed follow-ups and remaining invitation work
+
+Apple invitation PR #903 is frozen at `b77dcb3d9aeda297b33f5d955e7543d0a320a4c8`.
+Parent review [113](http://forge.lan:3000/noirr/plurx/pulls/903#issuecomment-9411)
+released explicit per-screen consent, scoped secure proof storage, actual APNs
+registration/signing, OFF/rebind and orphan-installation recovery, and authenticated
+notification handoff to ordinary remote selection. It preserves the existing
+reminder delegate and download callbacks. Review corrected original credential
+binding, automatic registration loops, stale account state, and sheet dismissal
+ordering; the final handoff checks the exact account, installation and choice intent.
+It never acquires control or starts playback.
+
+Authored Apple source is `d37f77c129242`; metadata and composition on reviewed
+`7eca7ea7136a` leave the Apple tree object unchanged at
+`33d40f0ee62544ee32c31347d08795f7e22969e6`. Both native builds passed, as did
+21 packet cases and the final two affected auth/handoff cases (22 unique cases).
+Normal hooks and exact-head history passed. Preserve all twenty-two regression
+fields on landing. Real URLSession loopback verifies duplicate broker-header
+refusal; native home/broker responses otherwise remain injected evidence. The
+parent retains actual cross-component integration validation. Signed physical
+APNs, permission UI and cold-launch device behavior are not yet qualified.
 
 Android couch PR #902 is frozen at `8077965a4554c07ea6da47242fc8b6364f130b3e`.
 Parent review [112](http://forge.lan:3000/noirr/plurx/pulls/902#issuecomment-9403)
