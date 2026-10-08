@@ -59,6 +59,9 @@ pub(crate) fn try_admit_frozen_bundle(
 pub(crate) struct Encoding {
     pub source_object_version: String,
     pub plan: ResolvedTranscode,
+    /// Worker-selected processing decision frozen with this rendition. A saved
+    /// switch or catalog DV label cannot create a selected backend plan.
+    pub dv_processing: plurx_core::transcode::dv_processing::DvSelection,
     /// A soundtrack producer owns its AAC recipe independently of video.
     pub shared_audio: Option<plurx_core::transcode::VodSharedAudioRecipe>,
     pub resources: TranscodeResourceEstimate,
@@ -274,6 +277,7 @@ impl std::fmt::Debug for Encoding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Encoding")
+            .field("dv_processing", &self.dv_processing)
             .field("decoder", &self.plan.decode().backend())
             .field("encoder", &self.plan.encoder())
             .field("resources", &self.resources())
@@ -542,6 +546,7 @@ impl Encoding {
         Arc::new(Encoding {
             source_object_version: self.source_object_version.clone(),
             plan: self.plan.clone(),
+            dv_processing: self.dv_processing.clone(),
             shared_audio: self.shared_audio.clone(),
             resources: self.resources,
             options: self.options.clone(),
@@ -928,6 +933,14 @@ impl Encoding {
         hash.update(self.ffmpeg_build.as_bytes());
         hash.update(self.executable.digest.as_bytes());
         hash.update(self.engine.digest.as_bytes());
+        if let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) =
+            &self.dv_processing
+        {
+            // Only a byte-changing qualified graph enters the output key.
+            // Disabled/unavailable preferences keep the existing cache identity.
+            hash.update(b"plurx.vod.dv-processing.v1\0");
+            hash.update(plan.semantic_digest().as_str().as_bytes());
+        }
         hash.update(
             self.shared_audio
                 .as_ref()

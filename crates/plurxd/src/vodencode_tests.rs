@@ -301,6 +301,9 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
             .expect("source identity")
             .object_version()
             .to_owned(),
+        dv_processing: plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
+            plurx_core::transcode::dv_processing::DvFallbackReason::PreferenceDisabled,
+        ),
         plan,
         resources,
         options,
@@ -1775,6 +1778,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
             .expect("new source fence")
             .object_version()
             .to_owned(),
+        dv_processing: encoding.dv_processing.clone(),
         plan: encoding.plan.clone(),
         resources: encoding.resources,
         options: encoding.options.clone(),

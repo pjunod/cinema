@@ -906,3 +906,36 @@ fn effective_report_cannot_turn_synthetic_receipt_into_hdr10_enhancement() {
         .hdr10_effective_report(&DvProductionRegistry, &plan, "invalid", &digest('c'))
         .is_err());
 }
+
+#[test]
+fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
+    let grid = super::super::VodFrameGrid::new(24_000, 1_001).expect("NTSC cadence");
+    let source: Vec<_> = (0..48)
+        .map(|ordinal| DvFrameKey {
+            absolute_video_index: 2,
+            continuity_epoch: 9,
+            pts: DvTimestamp::new((ordinal * 1_001 + 12) / 24, 1_000)
+                .expect("valid bounded clock fixture"),
+            display_ordinal: ordinal as u64,
+        })
+        .collect();
+    let mapped = dv_map_source_to_output_grid(&source, (1, 1_000), grid, 0, 48)
+        .expect("valid bounded clock fixture");
+    assert_eq!(mapped.len(), 48);
+    assert_eq!(
+        mapped[1].source.pts,
+        DvTimestamp::new(42, 1_000).expect("valid bounded clock fixture")
+    );
+    assert_eq!(
+        mapped[1].output_pts,
+        DvTimestamp::new(1_001, 24_000).expect("valid bounded clock fixture")
+    );
+    assert!(dv_map_source_to_output_grid(&source[..47], (1, 1_000), grid, 0, 48).is_err());
+    let mut dropped = source.clone();
+    dropped[24].pts = dropped[25].pts;
+    assert!(dv_map_source_to_output_grid(&dropped, (1, 1_000), grid, 0, 48).is_err());
+    let mut wrong = source.clone();
+    wrong[47].pts = DvTimestamp::new(1_970, 1_000).expect("valid bounded clock fixture");
+    assert!(dv_map_source_to_output_grid(&wrong, (1, 1_000), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&source, (1, 24), grid, 0, 48).is_err());
+}

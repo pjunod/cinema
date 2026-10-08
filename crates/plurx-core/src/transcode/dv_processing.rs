@@ -178,6 +178,7 @@ impl PartialOrd for DvTimestamp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum DvDurationProvenance {
     StoredContainer,
+    OutputFrameGrid,
     DeclaredFixtureInterval,
     DecoderInferred,
     Unknown,
@@ -237,6 +238,79 @@ pub struct DvFrameKey {
     /// Diagnostic only: never resolves equal-PTS ambiguity in the initial subset.
     pub display_ordinal: u64,
 }
+/// One source picture and its explicitly assigned output presentation. Source
+/// keys remain unchanged for BL/EL/RPU association; only encoder timing uses
+/// the output clock. This is a mapping fact, never route authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DvFrameGridMapping {
+    pub source: DvFrameKey,
+    pub output_pts: DvTimestamp,
+    pub output_duration: DvDuration,
+}
+
+/// Bind a complete coded-source trace to consecutive output frames. Container
+/// timestamp quantization may move each picture by at most one stored tick;
+/// a tick must be smaller than half an output frame so equal/ambiguous pictures
+/// cannot be rescued by rounding. Missing pictures never acquire synthetic keys.
+pub fn dv_map_source_to_output_grid(
+    source: &[DvFrameKey],
+    source_tick: (u32, u32),
+    grid: super::VodFrameGrid,
+    first_output_frame: u64,
+    expected_frames: usize,
+) -> Result<Vec<DvFrameGridMapping>, DvContractError> {
+    if source.is_empty()
+        || source.len() != expected_frames
+        || expected_frames > DV_MAX_CONTROL_FRAMES
+        || source_tick.0 == 0
+        || source_tick.1 == 0
+        || super::VodFrameGrid::new(grid.numerator, grid.denominator) != Some(grid)
+        || 2 * u128::from(source_tick.0) * u128::from(grid.numerator)
+            >= u128::from(source_tick.1) * u128::from(grid.denominator)
+    {
+        return Err(DvContractError::Invalid("source/output clock mapping"));
+    }
+    let mut mapping = Vec::with_capacity(source.len());
+    let binding = (source[0].absolute_video_index, source[0].continuity_epoch);
+    for (index, key) in source.iter().enumerate() {
+        if (key.absolute_video_index, key.continuity_epoch) != binding
+            || index > 0 && source[index - 1].pts >= key.pts
+        {
+            return Err(DvContractError::DuplicateFrame);
+        }
+        let output_frame = first_output_frame
+            .checked_add(index as u64)
+            .ok_or(DvContractError::Capacity)?;
+        let output_ticks = output_frame
+            .checked_mul(u64::from(grid.denominator))
+            .and_then(|ticks| i64::try_from(ticks).ok())
+            .ok_or(DvContractError::Capacity)?;
+        let output_pts = DvTimestamp::new(output_ticks, grid.numerator)?;
+        let error = (i128::from(key.pts.numerator) * i128::from(output_pts.denominator)
+            - i128::from(output_pts.numerator) * i128::from(key.pts.denominator))
+        .unsigned_abs();
+        if error * u128::from(source_tick.1)
+            > u128::from(source_tick.0)
+                * u128::from(key.pts.denominator)
+                * u128::from(output_pts.denominator)
+        {
+            return Err(DvContractError::Invalid(
+                "source cadence differs from output grid",
+            ));
+        }
+        mapping.push(DvFrameGridMapping {
+            source: key.clone(),
+            output_pts,
+            output_duration: DvDuration::new(
+                i64::from(grid.denominator),
+                grid.numerator,
+                DvDurationProvenance::OutputFrameGrid,
+            )?,
+        });
+    }
+    Ok(mapping)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DvSourceCoverage {
     epoch: u64,
@@ -701,6 +775,48 @@ impl DvProductionRegistry {
     }
 }
 
+/// Decide whether an existing delivery needs source/backend qualification.
+/// `None` requests that qualification; it never authorizes processing. The
+/// shipping worker can evaluate saved choices without fabricating parsed RPU,
+/// EL, decoder or backend facts merely to construct a resolution input.
+pub fn dv_processing_preflight(
+    existing_route: DvExistingRoute,
+    enhanced_encode_allowed: bool,
+    destination: DvDestination,
+    preferences: DvPreferences,
+    catalog: &DolbyVisionFacts,
+) -> Result<Option<DvFallbackReason>, DvContractError> {
+    use DvFallbackReason as R;
+    let prefs = preferences.validate()?;
+    if existing_route == DvExistingRoute::NativeDvCopy {
+        return Ok(Some(R::NativeCompatible));
+    }
+    if !enhanced_encode_allowed {
+        return Ok(Some(R::ExistingDeliveryConstraint));
+    }
+    match destination {
+        DvDestination::Hdr10 if !prefs.hdr_processing => {
+            return Ok(Some(R::PreferenceDisabled));
+        }
+        DvDestination::Profile81 if !prefs.conversion_permitted => {
+            return Ok(Some(R::ConversionForbidden));
+        }
+        DvDestination::Profile81 if !prefs.fel_reencode => {
+            return Ok(Some(R::PreferenceDisabled));
+        }
+        _ => {}
+    }
+    if catalog.profile != Some(7)
+        || !matches!(catalog.bl_compat_id, Some(1 | 6))
+        || !catalog.level.is_some_and(|level| (1..=63).contains(&level))
+        || catalog.rpu_present == Some(false)
+        || catalog.el_present == Some(false)
+    {
+        return Ok(Some(R::UnsupportedProfileOrBase));
+    }
+    Ok(None)
+}
+
 pub fn resolve_dv_processing(input: &DvResolutionInput) -> Result<DvSelection, DvContractError> {
     resolve_inner(input, false)
 }
@@ -711,32 +827,16 @@ fn resolve_inner(
     use DvFallbackReason as R;
     let unchanged = |reason| Ok(DvSelection::KeepExisting(reason));
     let prefs = input.preferences.validate()?;
-    if input.existing_route == DvExistingRoute::NativeDvCopy {
-        return unchanged(R::NativeCompatible);
-    }
-    if !input.enhanced_encode_allowed {
-        return unchanged(R::ExistingDeliveryConstraint);
-    }
-    match input.destination {
-        DvDestination::Hdr10 if !prefs.hdr_processing => return unchanged(R::PreferenceDisabled),
-        DvDestination::Profile81 if !prefs.conversion_permitted => {
-            return unchanged(R::ConversionForbidden)
-        }
-        DvDestination::Profile81 if !prefs.fel_reencode => return unchanged(R::PreferenceDisabled),
-        _ => {}
+    if let Some(reason) = dv_processing_preflight(
+        input.existing_route,
+        input.enhanced_encode_allowed,
+        input.destination,
+        prefs,
+        &input.source.catalog,
+    )? {
+        return unchanged(reason);
     }
     let source = &input.source;
-    if source.catalog.profile != Some(7)
-        || !matches!(source.catalog.bl_compat_id, Some(1 | 6))
-        || !source
-            .catalog
-            .level
-            .is_some_and(|level| (1..=63).contains(&level))
-        || source.catalog.rpu_present == Some(false)
-        || source.catalog.el_present == Some(false)
-    {
-        return unchanged(R::UnsupportedProfileOrBase);
-    }
     if source.el_kind == DvElKind::Unknown {
         return unchanged(R::UnknownElKind);
     }

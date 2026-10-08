@@ -928,6 +928,82 @@ impl TranscodeManager {
         Ok(actual)
     }
 
+    pub(crate) fn vod_dv_preferences_from_snapshot(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> plurx_core::transcode::dv_processing::DvPreferences {
+        use plurx_core::store::stored_switch;
+        plurx_core::transcode::dv_processing::DvPreferences {
+            hdr_processing: stored_switch(
+                snapshot
+                    .settings
+                    .get(keys::DV_HDR_PROCESSING)
+                    .map(String::as_str),
+                false,
+            ),
+            fel_reencode: stored_switch(
+                snapshot
+                    .settings
+                    .get(keys::DV_FEL_REENCODE)
+                    .map(String::as_str),
+                false,
+            ),
+            conversion_permitted: stored_switch(
+                snapshot.settings.get(keys::DV_CONVERT).map(String::as_str),
+                true,
+            ),
+            planning_input_generation: snapshot.generation,
+        }
+    }
+
+    pub(crate) fn vod_dv_processing_from_snapshot(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        request: &SessionRequest,
+    ) -> Result<plurx_core::transcode::dv_processing::DvSelection, String> {
+        use plurx_core::transcode::dv_processing::{
+            dv_processing_preflight, DvDestination, DvExistingRoute, DvFallbackReason, DvSelection,
+        };
+        let (existing, destination, allowed) = match request.kind {
+            SessionKind::Copy {
+                preserve_dolby_vision: true,
+                convert_dolby_vision: false,
+                ..
+            } => (
+                DvExistingRoute::NativeDvCopy,
+                DvDestination::Profile81,
+                true,
+            ),
+            SessionKind::Copy {
+                convert_dolby_vision: true,
+                ..
+            } => (
+                DvExistingRoute::P7BaseConversion,
+                DvDestination::Profile81,
+                true,
+            ),
+            SessionKind::Copy { .. } => (
+                DvExistingRoute::CompatibleBaseHdr10,
+                DvDestination::Hdr10,
+                true,
+            ),
+            SessionKind::Transcode { .. } => {
+                (DvExistingRoute::Other, DvDestination::Hdr10, request.hdr10)
+            }
+        };
+        let reason = dv_processing_preflight(
+            existing,
+            allowed && request.subtitle_burn.is_none() && request.continuous_media.is_none(),
+            destination,
+            Self::vod_dv_preferences_from_snapshot(snapshot),
+            &snapshot.file.dolby_vision,
+        )
+        .map_err(|error| vod_refusal_error("vod_dv_planning_invalid", error.to_string()))?
+        // The bounded offline tool and finite adapter do not qualify a whole
+        // source generation. Actual held-source interval and output verification
+        // must replace this arm; catalog tags and preferences cannot do so.
+        .unwrap_or(DvFallbackReason::ProductionUnqualified);
+        Ok(DvSelection::KeepExisting(reason))
+    }
+
     /// Freeze an executable encoded recipe before any rendition is named.
     /// Copy remains index-driven; selecting burn pixels requires an encoder
     /// even when the incoming request otherwise asks for source quality.
@@ -1021,6 +1097,15 @@ impl TranscodeManager {
                 Some(_) => {}
             }
         }
+        let planning = self.vod_preparation_snapshot(req, file).await?;
+        let dv_processing = Self::vod_dv_processing_from_snapshot(&planning, req)?;
+        tracing::debug!(
+            target: "plurxd::transcode",
+            file_id = file.id,
+            planning_generation = planning.generation,
+            selection = ?dv_processing,
+            "worker selected DV processing or retained existing delivery"
+        );
         let note_phase = |phase: &'static str, started: std::time::Instant| {
             tracing::debug!(
                 target: "plurxd::transcode",
@@ -1475,7 +1560,6 @@ impl TranscodeManager {
             .then(|| transcode::Rational::new(grid.numerator, grid.denominator))
             .flatten();
         let plan = plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr);
-        let planning = self.vod_preparation_snapshot(req, file).await?;
         let reorder_frames = Self::vod_reorder_from_snapshot(&planning);
         if let Some(context) = req.candidate_context.as_ref() {
             // Continuous roles verify the muxed catalog plan; every other
@@ -1552,6 +1636,7 @@ impl TranscodeManager {
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             shared_audio,
             source_object_version,
+            dv_processing,
             plan,
             resources,
             options,
