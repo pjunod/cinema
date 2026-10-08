@@ -30,12 +30,14 @@ const BURN_ASS: &[u8] = include_bytes!("../fixtures/macos-processing/burn.ass");
 const PGS_SDR: &[u8] = include_bytes!("../fixtures/macos-processing/pgs-sdr.mkv");
 const PGS_SDR10: &[u8] = include_bytes!("../fixtures/macos-processing/pgs-sdr10.mkv");
 const PGS_HDR10: &[u8] = include_bytes!("../fixtures/macos-processing/pgs-hdr10.mkv");
+const PGS_HLG: &[u8] = include_bytes!("../fixtures/macos-processing/pgs-hlg.mkv");
 const HLG: &[u8] = include_bytes!("../fixtures/macos-processing/hlg.mp4");
 const EXTENSION_MEDIA: &[(&str, &[u8])] = &[
     ("pgs_sdr", PGS_SDR),
     ("pgs_sdr10", PGS_SDR10),
     ("pgs_hdr10", PGS_HDR10),
     ("hlg", HLG),
+    ("pgs_hlg", PGS_HLG),
 ];
 const CORPUS_BUDGET: usize = 2 * 1024 * 1024;
 
@@ -370,6 +372,7 @@ fn extension_corpus() -> Result<ExtensionCorpus, ProbeReason> {
             "pgs_sdr10" => ("sdr", "bitmap_burn", "pgs-sdr10.mkv"),
             "pgs_hdr10" => ("hdr10", "bitmap_burn", "pgs-hdr10.mkv"),
             "hlg" => ("hlg", "plain", "hlg.mp4"),
+            "pgs_hlg" => ("hlg", "bitmap_burn", "pgs-hlg.mkv"),
             _ => return Err(invalid),
         };
         if fixture.id != *id
@@ -1301,12 +1304,19 @@ async fn run_generation(
         fixture.output_expectations = vec![extension.output_expectation];
         if extension.operation == "plain" {
             work.push((
+                fixture.clone(),
+                SmokeOperation::Text,
+                MacosProcessingGraph::HlgTextBurn,
+            ));
+            work.push((
                 fixture,
                 SmokeOperation::Plain,
                 MacosProcessingGraph::HlgMetal,
             ));
         } else if extension.operation == "bitmap_burn" {
-            let graph = if extension.source_class == "hdr10" {
+            let graph = if extension.source_class == "hlg" {
+                MacosProcessingGraph::HlgBitmapBurn
+            } else if extension.source_class == "hdr10" {
                 MacosProcessingGraph::Hdr10BitmapBurn
             } else {
                 MacosProcessingGraph::SdrBitmapBurn
@@ -2098,15 +2108,31 @@ mod tests {
     #[test]
     fn macos_extension_corpus_pins_original_media_and_complete_classes() {
         let corpus = extension_corpus().expect("shipped extension media integrity");
-        assert_eq!(corpus.fixtures.len(), 4);
+        assert_eq!(corpus.fixtures.len(), 5);
         assert_eq!(
-            corpus.fixtures.last().expect("HLG input").source_class,
+            corpus
+                .fixtures
+                .iter()
+                .find(|fixture| fixture.id == "hlg")
+                .expect("HLG input")
+                .source_class,
             "hlg"
         );
         assert!(corpus
             .fixtures
             .iter()
             .any(|fixture| fixture.id == "pgs_sdr10"));
+        let hlg_bitmap = corpus
+            .fixtures
+            .iter()
+            .find(|fixture| fixture.id == "pgs_hlg")
+            .expect("independent HLG bitmap source");
+        assert_eq!(hlg_bitmap.source_class, "hlg");
+        assert_eq!(hlg_bitmap.operation, "bitmap_burn");
+        assert_eq!(
+            hlg_bitmap.output_expectation.graph_id,
+            "vt_tonemap_hlg_metal"
+        );
     }
 
     fn temporary_root() -> tempfile::TempDir {

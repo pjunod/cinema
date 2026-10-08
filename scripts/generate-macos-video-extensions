@@ -101,6 +101,14 @@ def main():
                                   "gray_source_codes": [hlg_helper.codes((n,n,n), "hlg") for n in (0,1,10,100,203,400,700,1000)],
                                   "reference_white_nits": 203,
                                   "reference_white_signal": hlg_helper.hlg_oetf((203 / 1000) ** (1 / 1.2))}})
+    filename = "pgs-hlg.mkv"
+    argv = prefix + ["-i", str(args.output / "hlg.mp4"), "-itsoffset", "0.25",
+                     "-i", str(args.output / "cue.sup"), "-map", "0:v", "-map", "1:s",
+                     "-c", "copy", filename]
+    run(argv[:-1] + [str(args.output / filename)])
+    records.append({"id": "pgs_hlg", "path": filename, "source_class": "hlg",
+                    "operation": "bitmap_burn", "generation_argv": argv,
+                    "output_expectation": expectation})
     raw.unlink()
     for record in records:
         data = (args.output / record["path"]).read_bytes()
@@ -108,7 +116,7 @@ def main():
         probe = json.loads(run([args.ffprobe, "-v", "error", "-select_streams", "v:0", "-show_streams", "-show_frames", "-of", "json", str(args.output / record["path"])]))
         if len(probe["frames"]) != 12:
             raise ValueError("fixture must decode 12 frames")
-        if record["id"] == "hlg":
+        if record["source_class"] == "hlg":
             validate_hlg_square_pixels(probe)
         record["input_observed"] = {key: probe["streams"][0].get(key) for key in
                                     ["codec_name", "profile", "pix_fmt", "avg_frame_rate", "field_order", "color_range", "color_space", "color_transfer", "color_primaries", "sample_aspect_ratio"]}
