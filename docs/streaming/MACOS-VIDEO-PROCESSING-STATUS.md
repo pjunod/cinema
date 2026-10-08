@@ -64,8 +64,24 @@ ownership: a cloned blank main frame did not belong to the overlay's declared
 output pool. The repair makes active output allocation and blank clones share
 the captured main pool, retaining download validation. Error teardown then
 exposed the context's missing first-field `AVClass` slot; cleanup must not
-interpret that class pointer as an owned device reference. These new repairs
-and blank/active/EOF controls remain under qualification. Generic BGRA overlay
+interpret that class pointer as an owned device reference. The repaired animated control now passes all 24 frames with exact pixels and
+PTS, including blank→active→blank. Its first attempt exposed a separate
+clock mismatch: rounded milliseconds differed from incumbent libass's
+truncation every third frame. Both paths now share the existing conversion;
+tolerance remains unchanged. Candidate FFmpeg is
+`1657bda3830d667ad3d4cbdb57422117f3b31da297633f1d632c37e4ff2f2a2b`.
+Colored bitmap subtitles then exposed a last-row/column chroma-alpha
+mismatch (maximum error 15, luma exact). Matching the incumbent CPU boundary
+arithmetic repairs it without relaxing tolerance. The repaired 24-frame
+colored/odd case is byte-identical, and additional top-left odd-position,
+final-column and final-row controls pass. Candidate is
+`71fcb4d4bc88ffae930bf2611e6e7de3cbe623e889fec6efe854a63d621c71ba`.
+Bounded native-child seek, EOF and SIGINT controls pass frame/PTS comparison
+and cleanup. They do not establish normal-daemon cancellation or source-position
+cue correctness: input seeking resets timestamps for both CPU and GPU text
+rendering, so a matched result may still display the wrong source cue. Normal
+API confirmation and a shared timing-owner repair, if reproduced, remain
+required before seek acceptance. Production-graph checks remain open. Generic BGRA overlay
 behavior is outside the new ASS/YUVA modes and has no new qualification claim.
 
 **Caption-preserving hardware encode:** the repaired baseline binary is
@@ -99,16 +115,38 @@ not qualify production encoder graphs, 4K, AMD, CUDA, D3D or performance.
 The first AMD window was returned unused when admission found production
 FFmpeg. A later shipping-build CPU window was also returned unused because
 unrelated compiler/container jobs were active. The coordinator retains CI
-priority; no alternative host is authorized. Source integration continues
-while a fresh explicit build lease is pending. Whole-image transfer was
+priority; no alternative host is authorized. Source integration continued during that refusal. A subsequent finite
+Bookworm SDK/bootstrap lease completed with exit zero and its owned container
+stopped: GCC 12.2, glibc 2.36, all 100 official source patches plus the strict
+patch, and exact original FFmpeg/driver hashes are retained. No C compilation
+or GPU access occurred; further SDK/shipping stages require separate leases. Whole-image transfer was
 rejected by automatic approval; the successful diagnostic used only an
 explicit binary/public-dependency/original-fixture allowlist. No deployed
 service, package or host driver was changed.
 
 The rebuilt common Mac package must retain verified archive-backed source
-offers as well as Git-backed dependencies. Native owns that helper change;
-no fabricated Git metadata or stale provenance will stand in for the actual
-compiled source. The temporary Metal compiler component is tracked for exact
+offers as well as Git-backed dependencies. The helper change is integrated as `8287f734c`: future builds bind every
+archive role to its exact transformed recipe/helper, while historical builds
+retain their actual source tree and executed transformation/log closure.
+The original 54-role audit accounts for 43 changes, and a fresh preparation
+verifies 69 recipe bindings. `9211fc71f` tightens generated-file allowances
+to exact audited hashes; command text alone must not bless arbitrary changed
+source. No fabricated Git metadata or stale provenance substitutes for the
+actual compiled source. The normal API text-burn check found a provider mismatch before it could
+prove seek timing: Mac libass's automatic provider is CoreText, but the
+existing font environment freezes and verifies Fontconfig. The request
+correctly refuses an unproven font environment. Native now owns an explicit
+provider option shared by CPU and GPU rendering and the freeze probe; Plurx
+will select supported Fontconfig under its existing authority and bind that
+choice to the recipe. Standalone automatic provider selection remains
+unchanged. No trace check is bypassed and no second font authority is added.
+The explicit-provider candidate compiles and passes the same-provider
+24-frame animation/PTS comparison; actual libass logs show Fontconfig and
+the same selected face. An unsupported-provider negative refuses cleanly.
+The app projection/freeze changes still need the newly built daemon's normal
+API proof and actual source-position seek checks.
+
+The temporary Metal compiler component is tracked for exact
 removal during final cleanup. Direct experimental binaries are immutable
 snapshots, not assembled production packages.
 
