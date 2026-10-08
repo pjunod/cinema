@@ -6,7 +6,9 @@ three GPT-6.1 Sol builders · **Integration:** `effort/macos-video-processing`.
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
 the execution ledger: current work, evidence, decisions and remaining work.
-A plan or compiled change is not hardware qualification.
+A plan or compiled change is not hardware qualification. The
+[experiment evidence](MACOS-VIDEO-PROCESSING-EVIDENCE.md) retains exact
+measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
 
@@ -34,7 +36,10 @@ The SDR result establishes synthetic processing feasibility, not production
 capacity or perceptual qualification. The original HDR comparison is invalid:
 the CPU output retains stale HDR side data, while Metal tone-maps before
 scaling and therefore processes four times as many pixels. Both causes are
-being corrected explicitly before a separate revised comparison. Energy,
+corrected explicitly in a separate revised comparison: five valid paired
+HDR runs show 97.40% lower CPU cost and +2.14% median paired throughput.
+Four of five pairs meet the CPU/throughput consistency bound; the fifth
+is 5.51% slower and remains recorded. Energy,
 copy counts and P5 metadata behavior remain unmeasured.
 Small SDR/Metal outputs have factual geometry, color-signaling and ramp
 observations; these are not full visual or playback qualification.
@@ -85,8 +90,8 @@ The initial files above are committed. Current application ownership is:
 
 | Owner | Current exclusive ownership |
 |---|---|
-| Native builder | Core `transcode/{pipeline,decode,mod,vod,recipe}.rs`, associated core regressions and decoder-selection test source |
-| Harness builder | Daemon main registration, transcode manager construction/planning/recovery, metrics, settings HTTP and Developer UI integration |
+| Native builder | Core `transcode/{pipeline,decode,mod,vod,recipe}.rs`, associated core regressions and decoder-selection test source; atomic exhaustive daemon metric/count-array rows |
+| Harness builder | Daemon main registration, transcode manager construction/planning/recovery, subsequent diagnostics, settings HTTP and Developer UI integration; one stored-key constant and reprobe route registration |
 | Fixture builder | New daemon `macos_video.rs` probe module, embedded-fixture preparation and its focused test source |
 | Manager | Documentation, integration, final review coverage and validation/PR records |
 
@@ -111,7 +116,8 @@ compiler load to avoid contaminating measurements.
 ## 4. Validation and handoff ledger
 
 - Pinned compiler availability verified: Rust 1.97.1, Cargo 1.97.1.
-- First three builder commits integrated on the effort branch. Each normal
+- First three builder commits plus harness correction `308921d3f` integrated
+  on the effort branch. Each normal
   tracked hook passed catalog lint, pinned Rust format/Clippy and JavaScript
   syntax. No standalone unit suite was invoked.
 - Unit suites: not run for this effort; deferred per user direction.
@@ -153,7 +159,11 @@ compiler load to avoid contaminating measurements.
   candidate outputs pass, but throughput is approximately 19% lower by the
   median paired comparison. Neither its CPU reduction nor its throughput
   establishes an accepted HDR result. Revised scale-before-Metal graph
-  passed a three-frame correctness smoke; revised paired measurement follows.
+  passed a three-frame correctness smoke. Revised five-pair results pass
+  output contracts and meet the synthetic CPU criterion in four of five
+  pairs; the 5.51% throughput regression in pair four is retained explicitly.
+- Status/checklist and merge handoff committed as `fcbef06ac`; normal hook
+  passed. The merge coordinator owns subsequent batch validation/landing.
 - Adversarial implementation review: not started; reserved for ready main PR.
 - Main PR: not opened.
 
@@ -186,7 +196,7 @@ sections remain the detailed acceptance specifications.
 | M1-03 | Complete decode/process/encode graph and observed representations | SDR and Metal smokes observed; final HDR order is 10-bit VT scale, then Metal tone map |
 | M1-04 | Native Apple HDR color mapping alternative | Diagnostic only; no accepted production variant; execution and retagging alone are insufficient color proof |
 | M1-05 | SDR benefit at equal output and encoder controls | Five valid synthetic pairs support CPU benefit; broader workload and production evidence still owed |
-| M1-06 | HDR10 benefit with fair work ordering and correct output | Revised comparison active; initial result invalid for qualification |
+| M1-06 | HDR10 benefit with fair work ordering and correct output | Five revised pairs complete; CPU feasibility criterion met in 4/5, visual/production acceptance open; original invalid comparison retained |
 | M1-07 · design §§2, 6 | Unified-memory attribution: mapping, allocation, conversion, synchronization and copies | Awaiting instrumentation; shared physical memory does not prove zero-copy, and CPU reduction is not a measured copy count |
 | M1-08 | Actual hardware reconstruction, separate from VT surfaces/hardware encode | H.264 hardware-required encoder observed; actual HEVC hardware reconstruction remains unproved |
 | M1-09 · implementation §§1.1, 9.1 | Early P5 four-way software/hardware decode × CPU/Metal renderer experiment | Awaiting suitable RPU-positive sample and boundary/hardware evidence; still an M1 obligation, not hidden under E1 |
@@ -228,14 +238,14 @@ sections remain the detailed acceptance specifications.
 |---|---|---|
 | Q-01 · design §6.1 | Target production Mac, second Apple Silicon generation and separate Intel matrix | M3 Max experiment host observed; deployed/second-generation/Intel evidence unavailable so far |
 | Q-02 | 1080p light workload, 4K24/60, SDR8/10 and varied HDR corpus | Synthetic 4K24 and tiny probes built; rest awaiting evidence |
-| Q-03 · design §6.3 | Five paired ≥60-second source runs and precise first-use/warm labels | SDR complete; revised HDR active; no claim of cold disk cache |
+| Q-03 · design §6.3 | Five paired ≥60-second source runs and precise first-use/warm labels | SDR and revised HDR complete; no claim of cold disk cache |
 | Q-04 | One/two/four sessions, steady-window p10 and 30-minute soak | Awaiting evidence; short high-speed runs do not prove capacity |
 | Q-05 | ≥30 starts, first publishable media and first presented frame, p95 | Awaiting production/client evidence |
 | Q-06 | CPU, throughput, peak RSS/memory pressure, energy, copy/sync instrumentation | CPU/throughput measured on synthetic workload; remaining measurements unmeasured, not zero |
 | Q-07 · design §6.4 | SDR aligned quality metrics plus ringing/aliasing/banding inspection | Analytic gray smoke only; full quality acceptance awaiting evidence |
 | Q-08 | HDR blinded review on named calibrated display, highlight/shadow/gamut/temporal findings | Awaiting human/display evidence; synthetic ramp and VMAF alone are insufficient |
 | Q-09 | Real plurxd rolling/VOD playback, two-minute play, seek/resume, errors/rebuffer/A/V | Awaiting integration and client evidence |
-| Q-10 | Correctness first, then ≥20% throughput or ≥20% CPU/≥15% energy benefit within throughput bound | SDR synthetic CPU criterion met; no blanket product qualification or HDR pass |
+| Q-10 | Correctness first, then ≥20% throughput or ≥20% CPU/≥15% energy benefit within throughput bound | SDR/revised HDR synthetic CPU criterion met; visual/production correctness still unqualified |
 | M6-01 · implementation §10 | Full incumbent AC-4 and P5 package acceptance in daemon environment | Awaiting decodable lawful samples and actual environment; declarations insufficient |
 | M6-02 | Native install, runtime libraries, signing/distribution and architecture compatibility | Complete official package retained; actual install/signing workflow verification planned |
 | M6-03 | Fresh offline install, empty/corrupt/full/unwritable cache and reprobe | Runtime implementation building; release/install verification pending |
@@ -281,7 +291,7 @@ Separate scope does not imply that implementation or qualification is done.
 | R-06 | Cross-builder integration review, root causes and no watchdog/gate cruft | Planned at same review; review cannot be satisfied by isolated builder self-checks |
 | R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | Pending; no unit suites during building; coordinator retains valid evidence and reruns failed/invalidated checks only |
 | R-08 | Current-main integration, exact-tree gate/qualification receipt and regression landing lines | Merge coordinator owns queue and main landing; effort supplies reviewed code and handles behavior-changing fixes; no PR open yet |
-| R-09 | Retain reproducible sanitized receipts, exact commands, limits and autonomous decisions | Active; private raw receipts retained; durable evidence consolidation pending |
+| R-09 | Retain reproducible sanitized receipts, exact commands, limits and autonomous decisions | Initial/revised experiments retained in indexed evidence document and 1.13 MB raw archive; production evidence still pending |
 | R-10 | Remove own transient clones, benchmark media, caches and obsolete branches after retention | Pending completion; do not remove user files or useful unmerged work |
 
 ## 6. Completion accounting
