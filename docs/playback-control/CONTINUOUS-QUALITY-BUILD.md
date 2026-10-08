@@ -8965,3 +8965,41 @@ low stage inside the existing upgrade/downgrade bounds; high remains100 Mbps.
 First verify a single actual cliff after successor identity and receipt proof
 are measured. The failed236 series cannot be extended into a pass. Preserve
 all original continuity limits and unresolved physical/audio scope.
+
+
+### 10.289 Current main, successor binding and receipt bootstrap (2026-10-08)
+
+Merge main079960daebd5a1e23dff2b0e8f8506c1238bc1b0 into the independent
+acceptance branch as b234bd090. Preserve Apple version226 and resolve Android
+version to153. The merged baseline compiles with pinned Rust1.97.1 in3m16s.
+Current Apple lab239 compiles83 production Swift files and36 unit-source files
+without running tests; its signed isolated bundle installs successfully.
+Android153 app/unit-source compilation and assembly pass in57s; the verified
+APK installs only in the guarded owned emulator. Current-source runtime
+qualification is still pending. Isolated portable Chrome155.0.8059.39 extracts
+from the verified official package and reports that version; no host install
+or personal browser profile is used.
+
+Phone lab238 on71d7f2ba4 completes145 Auto diagnostic fact rows. After Auto
+entry,143 rows bind transfer metrics to the current session and142 to the
+current candidate, confirming the observer ordering repair. No SDK playback
+fault is reported.156 complete200 segment responses carry ETags but no link
+receipts. The planned cliff never fires because the diagnostic watched Auto
+create, whereas mode entry uses prepared control. Preserve this run as a
+binding/receipt diagnostic, not an actual Auto-switch pass. Backend/proxy and
+private metadata retire. The fresh diagnostic must observe accepted Auto
+control selection and successor receipts before applying its single cliff.
+
+Integrate agent repair831d85eeab as dfb9e2a03. An authenticated same/lower
+encoded Auto preparation can register for its own completed-body receipts
+without an incumbent nonce. RegistrationOnly is excluded from transition
+admission; upgrades still require measured incumbent Link/output cost. Exact
+candidate/source identity and accepted/staged route, cancellation and expiry
+fences remain. Original/remux retain existing measured/trial registration.
+Two meaningful regressions are authored and compile, but are not executed:
+chunk_06.rs::auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade
+and ::a05_prepared_http_observation_is_optional_auth_not_capability_authority.
+The agent's pinned all-target check and normal catalog/fmt/Clippy/JS hook pass.
+The parent archives the exact integrated commit for the warm Linux build;
+no .git directory or credentials are transferred. Units remain deferred to
+the batch merge session. No final review, qualification or handoff is claimed.
