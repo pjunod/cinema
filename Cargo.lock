@@ -2930,6 +2930,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "plurx-notification-broker"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "clap",
+ "futures-util",
+ "getrandom 0.2.17",
+ "hex",
+ "http-body-util",
+ "reqwest 0.12.28",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "plurx-pgs"
 version = "0.3.0"
 dependencies = [
@@ -3418,6 +3448,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",

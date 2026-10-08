@@ -51,6 +51,7 @@ Sharing activation: [Running-cluster activation and SQL transition safety](featu
 | What do I type? | [CHEATSHEET.md](CHEATSHEET.md) |
 | How is it built, and why that way? | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | What endpoint do I call, and what authorizes it? | [API.md](API.md) |
+| How do I build and operate the fixed-purpose Cinema notification broker? | [Broker README](../crates/plurx-notification-broker/README.md) — **open**; synthetic software evidence, provider/native acceptance outstanding. |
 | How does a file become a stream? | [PLAYBACK.md](PLAYBACK.md) |
 | Why is this title playing badly? | [PLAYBACK-TESTING.md](PLAYBACK-TESTING.md), then [streaming/](streaming/) |
 | Why is a Dolby Vision title arriving as HDR10? | [streaming/DV-DELIVERY-FINDINGS.md](streaming/DV-DELIVERY-FINDINGS.md) |

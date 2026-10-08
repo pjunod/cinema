@@ -52,6 +52,10 @@ unit-core: override CARGO := PLURX_EXPECT_TEST_COUNT_AT_LEAST=$${PLURX_EXPECT_TE
 unit-core: ## Run plurx-core with replicated-store tests and enforce the count floor
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib
 
+.PHONY: unit-broker
+unit-broker: test-socket-permission-check ## Run focused notification broker security and provider contracts
+	$(CARGO) test --locked -p plurx-notification-broker
+
 test: unit ## Run the fast Rust test lane
 
 test-full: test-socket-permission-check ## Run every Rust test, including replicated and daemon contracts
