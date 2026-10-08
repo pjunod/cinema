@@ -257,3 +257,19 @@ parents = ["cca4a09b997171ba91136b396f7d484097305fd0", "397dfa991fcd185d9c8199f7
 title = "fix(sharing): promote shared libraries with Source-owned playback and custody"
 pull = "828"
 reason = "Verified PR828 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All100 original trailers remain mandatory own-tree evidence; this row recognizes identity only and waives no checks."
+
+[[landings]]
+commit = "4a737e92c07c3692f607a4c6d8b08a71fc0e22ca"
+tree = "d243ca02ef6b6ed322d7d0ae35827f345b2a03b0"
+parents = ["f4eb3cb9db0757d3f6feda10dc9cb1586afaf6d0", "b6ebc3f6e7ccacf7d04efd24f0f312f81d797315"]
+title = "fix(vaapi-qualification): restore original sharp-panel diagnostic input"
+pull = "909"
+reason = "Verified Forgejo PR #909 merge identity. Its custom API title omitted the PR number, so the next recognized main landing exposed its corrective child as outside a landing. This pins the actual immutable commit, tree and ordered parents; every original Regression-Test remains mandatory against its own tree. No evidence or gate is waived."
+
+[[landings]]
+commit = "98af2eca9049c61524a013b5bd578ff79a64ed6d"
+tree = "fb7783bff20a9d695fb97e46d4334db0708c1f16"
+parents = ["4a737e92c07c3692f607a4c6d8b08a71fc0e22ca", "4e98734d17790c822aaa7afe5289d4d3e32c71ba"]
+title = "fix(sharing): compile source custody without replicated store"
+pull = "910"
+reason = "Verified Forgejo PR #910 merge identity. Its custom API title omitted the PR number, so the next recognized main landing exposed its corrective child as outside a landing. This pins the actual immutable commit, tree and ordered parents; every original Regression-Test remains mandatory against its own tree. No evidence or gate is waived."

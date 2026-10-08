@@ -110,7 +110,7 @@ The production readiness bridge keeps subscribe-before-inspect ordering. A faile
 7. Exercise cancellation and replacement while waiting. A late success/failure cannot seek or fault a different item. Preserve pause authority and the existing resume destination.
 8. Decode current status and older responses without `playlist_ready`. Count delayed status-request time toward freshness. A 4.9-second publication response retains its full 15-second item-readiness budget, subject to the cap. Positive produced media with missing `outTimeMs` and zero idle cannot extend preparation. Exercise real same-session failover and a delayed predecessor poll response.
 
-Run the focused readiness and ownership suites on tvOS and iOS, then the complete affected Apple suites and Release builds. Run the docs index, declared regression-reference checks, corrective-history audit, and normal pinned hook. The local Rust 1.97.1 compiler loop was established before changes: `cargo check --locked -p plurxd --all-targets` passed on base `f0c597df` in 2m06s. The proposed fix contains no Rust behavior change.
+Run the focused readiness and ownership suites on tvOS and iOS, then the complete affected Apple suites and Release builds. Run the docs index, declared regression-reference checks, corrective-history audit, and normal pinned hook. The local Rust 1.97.1 compiler loop was established before changes: `cargo check --locked -p plurxd --all-targets` passed on base `f0c597df` in 2m06s. The fix contains no Rust behavior change.
 
 Obtain adversarial plan review before implementation; record and address its findings here. Open the resulting PR as draft, obtain exactly one adversarial PR review, address its findings, run the current-head/base Main promotion gate, and merge with every declared `Regression-Test:` line in the landing message. A source change after validation requires the affected checks again.
 
@@ -131,9 +131,41 @@ Deterministic tests establish the repaired preparation decision and ownership be
 
 ## 7. Review and execution record
 
-Adversarial plan review found three issues, all incorporated before implementation: (P1) rebind the single status poll after same-session failover and reject delayed predecessor responses; (P2) require a known producer progress witness (`outTimeMs`) because zero idle can mean unknown; (P2) separate request-start freshness from response-observation time for the one-shot item-readiness budget. The reviewer also requested “item readiness” terminology: `.readyToPlay` is not proof of displayed video. Implementation and validation are in progress.
+Adversarial plan review found three issues, all incorporated before implementation: (P1) rebind the single status poll after same-session failover and reject delayed predecessor responses; (P2) require a known producer progress witness (`outTimeMs`) because zero idle can mean unknown; (P2) separate request-start freshness from response-observation time for the one-shot item-readiness budget. The reviewer also requested “item readiness” terminology: `.readyToPlay` is not proof of displayed video. Implementation and local Apple validation are complete; merge qualification and physical acceptance are tracked separately below.
 
 
 Implementation is PR [#914](http://192.168.4.7:3000/noirr/plurx/pulls/914), Apple build 217. The shared production waiter is exercised directly with injected monotonic time, native status, and cancellable sleep. Two controller tests additionally traverse actual growing-session attachment and same-session failover; the latter holds the predecessor HTTP result across replacement to prove it cannot populate successor evidence.
 
-Initial validation: focused readiness/ownership suites passed on tvOS (34 tests) and iOS (40 tests). The complete tvOS suite passed (866 tests). Both Debug test builds passed. The normal commit hook passed pinned Rust formatting, workspace/all-target Clippy with warnings denied, catalog validation and all 77 served JavaScript syntax checks. Full iOS, both Release builds and PR review/qualification are still in progress.
+Validation passed: focused readiness/ownership suites on tvOS (34 tests) and iOS (40 tests); complete tvOS (866 tests) and iOS (882 tests) suites, zero failures; Debug test builds and Release builds on both platforms; docs index (4 tests). The normal commit hook passed pinned Rust formatting, workspace/all-target Clippy with warnings denied, catalog validation and all 77 served JavaScript syntax checks.
+
+The single adversarial PR review examined implementation `2bc3425f5` plus the PR-specific documentation/ledger additions and found no actionable issues. It checked freshness and publication clocks, native failures, cancellation, ownership, failover polling, and whether regressions traverse the production waiter/controller. Qualification remains required before merging.
+
+The first full history audit exposed two existing unrecognized API merge subjects: PR #909 at `4a737e92c` and PR #910 at `98af2eca9`. Forgejo reports both merged; their actual ordered parents, trees and retained regression fields were verified. Two bounded `landings` identity records let the existing audit recognize them while still resolving every original field against its own immutable tree. The audit boundary, parser, runtime and requirements remain unchanged. The existing identity-mutation test checks altered parents/tree/title and missing/invalid trailers are refused.
+
+
+### Reproduce the build and focused checks
+
+From the repository root on the pinned Apple toolchain, generate the project once:
+
+```bash
+xcodegen generate --spec clients/apple/project.yml
+```
+
+For `platform=tvOS Simulator,name=Apple TV 4K (3rd generation)` use scheme `plurx-tvOS` and test target `plurx-tvOSTests`; for `platform=iOS Simulator,name=iPhone 17 Pro` use `plurx-iOS` and `plurx-iOSTests`. Run this for each pair, substituting those values:
+
+```bash
+xcodebuild -project clients/apple/plurx.xcodeproj -scheme "$scheme" \
+  -destination "$destination" -derivedDataPath /private/tmp/naked-gun-derived \
+  -only-testing:"$test_target/AppleItemReadinessTests" \
+  -only-testing:"$test_target/PlayerOperationOwnershipTests" \
+  CODE_SIGNING_ALLOWED=NO test
+# Remove both -only-testing arguments to execute the complete platform suite.
+# For Release compilation, use -configuration Release and build instead of test.
+python3 -m unittest discover -s tests/operations -p test_docs_index.py
+python3 -m validation.regression_field --body-file /private/tmp/naked-gun-pr-body.md
+make history-check
+```
+
+These commands use simulators only. Physical acceptance is a separate normal-app build 217 resume with the preceding keyframe more than 100 ms behind the selected position. Record the installed build, selection, preparation events, publication time and observed picture. A fresh start or a correction below 100 ms does not exercise the repaired branch. No physical acceptance was performed during this work.
+
+If deployment reveals a regression, restore the previously accepted normal application build and revert PR #914 through the same qualification process. Do not reduce the server's 48-second publication buffer or remove resume alignment to conceal the error. Extended preparation is limited to fresh known progress and at most 60 seconds; absent evidence retains the earlier 15-second failure bound.
