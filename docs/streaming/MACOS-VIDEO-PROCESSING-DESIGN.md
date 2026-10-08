@@ -275,8 +275,11 @@ path before concluding that QSV hardware cannot help P5. Keep decoder and
 encoder families independent. Reuse the four-way experiment and its RPU,
 frame association, pixel and actual-hardware checks, using the appropriate
 renderer instead of Metal. Do not lift restrictions for unmeasured tuples.
-This observation does not widen the Mac effort's code ownership to all
-backends; it is a separate follow-up with shared contract lessons.
+On 2026-10-08 the user authorized this investigation and implementation in
+the separate `effort/video-processing-followups` effort. Its native-decoder
+observations and strict metadata policy share the existing processing owners;
+Mac qualification remains distinct from every non-Mac tuple. See the
+[execution ledger](MACOS-VIDEO-PROCESSING-STATUS.md) for current ownership.
 
 ## 4. Proposed architecture — freeze a complete processing choice
 
@@ -521,8 +524,9 @@ output policies remain distinct; do not double the rate without updating
 its presentation contract and bitrate calculation. YADIF replacing BWDIF
 requires motion-quality acceptance, not just matching dimensions.
 
-Initially retain CPU subtitle rendering/compositing. Later benchmark an
-explicit download after GPU processing versus a qualified GPU overlay path.
+The initial implementation retains CPU subtitle rendering/compositing. The
+2026-10-08 follow-up now implements and compares an explicit download after
+GPU processing against a qualified GPU overlay path.
 Text shaping/font behavior remains libass's responsibility; GPU compositing
 does not replace it. Test colored PGS cues, ASS positioning, alpha, seeked
 cues and end-of-subtitle behavior. Compose SDR subtitle white in the SDR

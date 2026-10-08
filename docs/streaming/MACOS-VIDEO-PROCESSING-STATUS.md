@@ -23,7 +23,7 @@ combined source `b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`.
 |---|---|---|---|
 | F1 GPU subtitle compositing | Native builder | Investigating compositor and cue ownership | Preserved libass shaping/fonts and bitmap geometry; alpha/color, animation, no-cue, last-cue, seek and cancellation controls; complete-graph comparison |
 | F2 non-Mac P5 hardware decoding | Route builder | Investigating backend metadata and available hardware | Backend/build/driver-specific hardware reconstruction and current-frame Dolby metadata through rendering; loss must not become generic PQ |
-| F3 caption-bearing VOD VideoToolbox | Dolby builder | Investigating SEI parser failure | Exact failing SEI condition; bounded parser repair; captions retained in real hardware-encoded AC-4 VOD delivery |
+| F3 caption-bearing VOD VideoToolbox | Dolby builder | Captured SEI escape-counting root cause; repair in progress | Exact failing SEI condition; bounded parser repair; captions retained in real hardware-encoded AC-4 VOD delivery |
 
 Builders use separate owned clones. New native patch files have separate
 owners: `0003` for caption SEI handling and `0004` for GPU subtitle work.
@@ -36,6 +36,20 @@ The coordinator has granted the existing Mac compiler cache for pinned
 GPU experiments require a fresh host activity check and exclusive scheduling;
 non-Mac hardware reservations remain to be established. No new hardware
 result, implementation completion or final review is claimed yet.
+
+**Follow-up findings:** the caption control fails with forwarding enabled
+and succeeds for the same 24-frame hardware-encode recipe without forwarding.
+Captured Apple SEI proves encoded/unescaped byte counts are confused in the
+existing parser; the [caption repair record](VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md)
+explains the exact trigger. GPU subtitle inspection found conflicting chroma
+writes and inconsistent alpha handling in the existing Jellyfin VT overlay.
+The compositor builder is preserving libass shaping and existing cue timing
+while repairing those defects. These are findings, not completed fixes.
+
+Passive fleet inventory found Intel and AMD hardware, but the deployed
+Jellyfin binary lacks the strict decoder/renderer options required by our
+Dolby contract. A resource-limited private Linux build is authorized; deployed
+services and packages remain unchanged. No non-Mac GPU tuple is qualified yet.
 
 ### Prior contribution retained for the merge coordinator
 
