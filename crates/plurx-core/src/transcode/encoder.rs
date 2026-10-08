@@ -1124,6 +1124,72 @@ fn validation_args(
     args
 }
 
+/// Compare a fixed 240-frame 720p SDR workload using production VBR flags.
+/// Discard the warm-up and use the median of three complete encodes.
+pub async fn benchmark_encoder(
+    ffmpeg: &str,
+    encoder: Encoder,
+    force_idr: bool,
+    software_threads: u32,
+) -> Option<f64> {
+    let args = benchmark_args(encoder, force_idr, software_threads);
+    let mut times = Vec::new();
+    for pass in 0..4 {
+        let mut command = tokio::process::Command::new(ffmpeg);
+        command.args(&args).stdin(std::process::Stdio::null());
+        let start = std::time::Instant::now();
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            crate::process::output_job_owned(
+                &mut command,
+                crate::process::ChildWork::background("transcoder benchmark"),
+            ),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        if !output.status.success() || !benchmark_completed(&output.stdout) {
+            return None;
+        }
+        if pass > 0 {
+            times.push(start.elapsed().as_secs_f64());
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    Some(240.0 / times[1])
+}
+
+fn benchmark_args(encoder: Encoder, force_idr: bool, software_threads: u32) -> Vec<String> {
+    let mut args = validation_args(encoder, EffectiveRateControl::Vbr, force_idr);
+    *args
+        .iter_mut()
+        .find(|arg| arg.starts_with("testsrc="))
+        .expect("probe source") = "testsrc2=size=1280x720:rate=30:duration=8".into();
+    args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into()]);
+    if encoder == Encoder::Software {
+        let at = args
+            .iter()
+            .rposition(|arg| arg == "-f")
+            .expect("null output");
+        args.splice(
+            at..at,
+            ["-threads".into(), software_threads.max(1).to_string()],
+        );
+    }
+    args
+}
+
+fn benchmark_completed(output: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(output);
+    text.lines().any(|line| line == "progress=end")
+        && text
+            .lines()
+            .filter_map(|line| line.strip_prefix("frame="))
+            .filter_map(|value| value.trim().parse::<u32>().ok())
+            .next_back()
+            == Some(240)
+}
+
 /// What one family's probe concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Verdict {
@@ -1528,6 +1594,44 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn benchmark_uses_the_production_software_thread_allocation() {
+        let args = benchmark_args(Encoder::Software, false, 3);
+        assert!(args.windows(2).any(|pair| pair == ["-threads", "3"]));
+        let production = Encoder::Software.encode_args(
+            PROBE_BITRATE_KBPS,
+            EffectiveRateControl::Vbr,
+            false,
+            Some(3),
+        );
+        assert!(production.windows(2).any(|pair| pair == ["-threads", "3"]));
+    }
+
+    #[test]
+    fn benchmark_requires_all_frames_and_a_completed_progress_report() {
+        assert!(benchmark_completed(
+            b"frame=10\nprogress=continue\nframe=240\nprogress=end\n"
+        ));
+        for output in [
+            b"frame=0\nprogress=end\n".as_slice(),
+            b"frame=239\nprogress=end\n",
+            b"frame=240\nprogress=continue\n",
+            b"",
+            b"frame=oops\nprogress=end\n",
+        ] {
+            assert!(!benchmark_completed(output));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a real FFmpeg with libx264"]
+    async fn benchmark_real_cpu_emits_a_complete_positive_measurement() {
+        let fps = benchmark_encoder("ffmpeg", Encoder::Software, false, 3)
+            .await
+            .expect("complete CPU benchmark");
+        assert!(fps.is_finite() && fps > 0.0);
+    }
 
     #[test]
     fn decoder_inventory_advertises_only_canonical_portable_video_decoders() {

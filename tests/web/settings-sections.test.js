@@ -45,14 +45,47 @@ let failures = 0, started = 0, finished = 0;
 const QUEUE = [];
 function test(name, run) { QUEUE.push({ name, run }); }
 
-test("node transcoder selector retains an unavailable saved choice and reports pending restart", () => {
+test("node transcoder selector hides unsupported backends and explains the unavailable saved choice", () => {
   const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
   const html = render({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
-  assert.match(html, /value="qsv" selected>Intel Quick Sync — not detected/);
+  assert.doesNotMatch(html, /value="qsv"/);
+  assert.match(html, /saved backend is unavailable/);
+  assert.match(html, /value="auto" selected/);
   assert.match(html, /waiting for this node to restart/);
   assert.match(html, /data-node-id="rog&quot;node"/);
   assert.match(html, /Active: <b>NVIDIA NVENC/);
   assert.doesNotMatch(html, /disabled/);
+});
+
+test("transcoder menu shows every measured speed against CPU and names Auto winner", () => {
+  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
+  const html = render({node_id:"node",hwaccel_pref:"auto",encoder_selected:"Apple VideoToolbox",encoders:{nvenc:true,videotoolbox:true},transcoder_optimization:{report:{measured_at:1,results:[
+    {backend:"software",fps:120,relative_to_cpu:1},
+    {backend:"videotoolbox",fps:480,relative_to_cpu:4}
+  ]}}});
+  assert.match(html, /Auto — Apple VideoToolbox · 480 fps · 4.00× CPU/);
+  assert.match(html, /CPU — 120 fps · 1.00× CPU/);
+  assert.match(html, /Apple VideoToolbox — 480 fps · 4.00× CPU/);
+  assert.doesNotMatch(html, /value="nvenc"/);
+  assert.match(html, />Optimize<\/button>/);
+});
+
+test("transcoder polling discards a response from before leaving and reentering System", async () => {
+  let generation=1, calls=0, resolve;
+  const original={node_id:"node",transcoder_optimization:{running:true}};
+  const data={sys:original};
+  const poll=new Function("settingsCurrent","api","SETTINGS_DATA","document","transcoderCard",`${shippedSource("pollTranscoderOptimization")}\nreturn pollTranscoderOptimization;`)(
+    expected=>generation===expected,
+    ()=>{calls++;return new Promise(done=>{resolve=done;});},data,
+    {getElementById:()=>{throw Error("stale response touched the page");}},()=>"");
+  const pending=poll("node",1);
+  generation=3; // leave System, then return to a new System render
+  resolve({node_id:"node",transcoder_optimization:{running:false}});
+  await pending;
+  assert.equal(data.sys,original);
+  await poll("node",1);
+  assert.equal(calls,1,"obsolete timer generations must not fetch");
+  assert.doesNotMatch(shippedSource("pollTranscoderOptimization"),/setTimeout|setInterval/);
 });
 
 test("node transcoder save binds the request to the displayed node and preserves the active backend", async () => {

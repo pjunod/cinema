@@ -425,6 +425,10 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         }catch(error){ if(error&&error.status===401) throw error; }
       }
     }
+    if(tab==="system"&&SETTINGS_DATA.sys&&SETTINGS_DATA.sys.transcoder_optimization&&SETTINGS_DATA.sys.transcoder_optimization.running){
+      await pollTranscoderOptimization(SETTINGS_DATA.sys.node_id,generation);
+      if(!settingsCurrent(generation,tab)) return;
+    }
     const secondary=[];
     const auto=document.getElementById("logauto");
     if(auto&&auto.checked) secondary.push(refreshLogs());

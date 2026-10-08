@@ -154,6 +154,7 @@ pub struct SystemDto {
     pub node_id: String,
     pub hwaccel_requested: String,
     pub hwaccel_restart_required: bool,
+    pub transcoder_optimization: crate::transcoder_optimization::Status,
     pub name: String,
     pub version: &'static str,
     pub build: &'static str,
@@ -301,8 +302,10 @@ pub async fn system_info(
         .store
         .get_setting(&crate::state::node_hwaccel_key(&state.node_id))
         .await?;
-    let hwaccel_restart_required =
-        hwaccel_requested.is_some() && hwaccel_requested != state.system.hwaccel_override;
+    let optimization = crate::transcoder_optimization::status(&state.system).await;
+    let hwaccel_restart_required = (hwaccel_requested.is_some()
+        && hwaccel_requested != state.system.hwaccel_override)
+        || optimization.restart_required;
     let name = state
         .store
         .get_setting(keys::SERVER_NAME)
@@ -312,6 +315,7 @@ pub async fn system_info(
         node_id: state.node_id.clone(),
         hwaccel_requested: hwaccel_requested.unwrap_or_else(|| state.system.hwaccel_pref.clone()),
         hwaccel_restart_required,
+        transcoder_optimization: optimization,
         name,
         version: crate::version::SEMVER,
         build: crate::version::BUILD,
@@ -395,11 +399,34 @@ pub async fn update_hardware_preference(
             &request.preference,
         )
         .await?;
+    let optimization = crate::transcoder_optimization::status(&state.system).await;
     Ok(Json(serde_json::json!({
         "node_id": state.node_id,
         "preference": request.preference,
-        "restart_required": Some(request.preference.as_str()) != state.system.hwaccel_override.as_deref(),
+        "restart_required": Some(request.preference.as_str()) != state.system.hwaccel_override.as_deref()
+            || (request.preference == "auto" && optimization.restart_required),
     })))
+}
+
+#[derive(Deserialize)]
+pub struct OptimizeTranscoderRequest {
+    pub node_id: String,
+}
+
+pub async fn optimize_transcoder(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(request): Json<OptimizeTranscoderRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if request.node_id != state.node_id {
+        return Err(ApiError::Conflict(
+            "The request reached a different server node. Reload System settings.".into(),
+        ));
+    }
+    crate::transcoder_optimization::start(state)
+        .await
+        .map_err(ApiError::Conflict)?;
+    Ok(Json(serde_json::json!({"running": true})))
 }
 
 #[derive(Serialize)]

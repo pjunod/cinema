@@ -1728,7 +1728,7 @@ pub fn router(state: AppState) -> Router {
         .route("/system/storage", post(system::remeasure_storage))
         .route(
             "/system/transcoder",
-            put(system::update_hardware_preference),
+            put(system::update_hardware_preference).post(system::optimize_transcoder),
         )
         .route(
             "/system/search-index/rebuild",
@@ -11304,6 +11304,41 @@ mod tests {
             !state.transcode.dv_convert_enabled().await,
             "the transcoder reads the switch, not the value this process booted with"
         );
+    }
+
+    #[tokio::test]
+    async fn transcoder_optimization_is_admin_only_node_scoped_and_admitted() {
+        let (app, state) = test_app_with_state();
+        let request = json!({"node_id": state.node_id});
+        assert_eq!(
+            call(&app, post("/api/v1/system/transcoder", None, request))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    "/api/v1/system/transcoder",
+                    Some(&admin),
+                    json!({"node_id":"different-node"})
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        let permit = state
+            .transcode
+            .admit_transcoder_benchmark()
+            .await
+            .expect("idle admission");
+        assert!(state.transcode.admit_transcoder_benchmark().await.is_none());
+        assert!(!state.transcode.pretranscode_worker_idle());
+        drop(permit);
+        assert!(state.transcode.pretranscode_worker_idle());
     }
 
     #[tokio::test]
