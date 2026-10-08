@@ -629,7 +629,7 @@ function developerPanels(){
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"),
-      shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"), shippedSource("cinemaSharingCard"), shippedSource("cinemaRemoteCard"),
+      shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"), shippedSource("cinemaSharingCard"), shippedSource("cinemaRemoteCard"), shippedSource("cinemaRemoteInvitationsCard"),
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       // D6 (2026-10-04): the network priors switch sits beside display Auto.
       shippedSource("networkPriorsCard"),
