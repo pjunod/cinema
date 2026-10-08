@@ -9722,10 +9722,16 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         );
         let listeners = voter_listen_addrs(&launch)?;
         let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
-        let client = hiqlite::start_node(node_config(&launch)?)
-            .await
-            .context("start hiqlite voter")?;
+        let admission =
+            Arc::new(plurx_core::cluster::membership::StartupMembershipAdmission::default());
+        let client =
+            hiqlite::start_node_with_membership_admission(node_config(&launch)?, admission.clone())
+                .await
+                .context("start hiqlite voter")?;
         client.wait_until_healthy_db().await;
+        // The original membership phase starts after vendor catch-up and is
+        // retained by this same local client. Never replace it on a request.
+        admission.install_startup_deadline(TokioInstant::now() + startup_timeout)?;
         prove_listeners_bound(&listeners).await?;
         Ok::<_, anyhow::Error>(client)
     })
@@ -9928,10 +9934,14 @@ async fn handle_request(
                 replication.metrics_handle(),
                 0,
             );
-            let opened_membership =
-                membership_manager(client, replication, opened.clone(), launch).await?;
-            tokio::spawn(opened_membership.clone().offline_source_probe_loop());
-            *membership = Some(opened_membership);
+            // One local client retains one installed removal owner and probe.
+            // Reopening its store cannot rebind that owner or replenish admission.
+            if membership.is_none() {
+                let opened_membership =
+                    membership_manager(client, replication, opened.clone(), launch).await?;
+                tokio::spawn(opened_membership.clone().offline_source_probe_loop());
+                *membership = Some(opened_membership);
+            }
             *catalogue = Some(opened_catalogue);
             *catalogue_store = Some(opened_catalogue_store);
             *store = Some(opened);
@@ -9966,10 +9976,14 @@ async fn handle_request(
                 replication.metrics_handle(),
                 0,
             );
-            let opened_membership =
-                membership_manager(client, replication, opened.clone(), launch).await?;
-            tokio::spawn(opened_membership.clone().offline_source_probe_loop());
-            *membership = Some(opened_membership);
+            // One local client retains one installed removal owner and probe.
+            // Reopening its store cannot rebind that owner or replenish admission.
+            if membership.is_none() {
+                let opened_membership =
+                    membership_manager(client, replication, opened.clone(), launch).await?;
+                tokio::spawn(opened_membership.clone().offline_source_probe_loop());
+                *membership = Some(opened_membership);
+            }
             *catalogue = Some(opened_catalogue);
             *catalogue_store = Some(opened_catalogue_store);
             *store = Some(opened);

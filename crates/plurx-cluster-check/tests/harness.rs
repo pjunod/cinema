@@ -63,6 +63,35 @@ fn require_ok(response: Response, what: &str) {
         .unwrap_or_else(|error| panic!("{what} was refused: {error:#}"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_one_voter_bootstrap_and_reopen_retain_local_membership_admission() {
+    let root = tempfile::tempdir().expect("admitted harness root");
+    let (mut cluster, _) = start_cluster_with_port_retry(&harness_binary(), root.path(), 1)
+        .await
+        .expect("start real admitted voter");
+    for request in [Request::Bootstrap, Request::Open] {
+        require_ok(
+            cluster
+                .request(1, request)
+                .await
+                .expect("real membership setup"),
+            "membership manager must retain the startup admission",
+        );
+        assert!(matches!(
+            cluster
+                .request(1, Request::MembershipStatus)
+                .await
+                .expect("real membership status"),
+            Response::MembershipStatus { .. }
+        ));
+    }
+    cluster
+        .shutdown_all()
+        .await
+        .expect("join actual voter shutdown");
+    assert!(cluster.node_ids().is_empty());
+}
+
 #[test]
 fn compacted_growth_gate_rejects_uncoalesced_commit_and_byte_volume() {
     let compacted_growth_bytes = 8_194_680;
