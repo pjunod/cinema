@@ -2,7 +2,7 @@
 """Assemble a native macOS daemon candidate in a new directory; never install.
 
 Usage: package-macos --daemon BUILT_PLURXD --ffmpeg-package COMBINED_PACKAGE
-       --output NEW_DIRECTORY [--sign DEVELOPER_ID_IDENTITY]
+       --output NEW_DIRECTORY [--sign DEVELOPER_ID_IDENTITY] [--debug-symbols MATCHED_DSYM]
 The combined FFmpeg package must already contain its exact-source WASM parser
 and provenance. The daemon and both tools live together in bin/: the daemon's
 ordinary sibling resolver finds these defaults; explicit operator paths win.
@@ -16,6 +16,8 @@ import importlib.util
 import json
 from pathlib import Path
 import plistlib
+import re
+import stat
 import shutil
 import subprocess
 import sys
@@ -61,7 +63,48 @@ def validate_native_package(package):
     return manifest
 
 
-def assemble(daemon, package, output, signing_identity):
+def symbol_entries(symbols):
+    if not symbols.is_absolute() or symbols.is_symlink() or not symbols.is_dir():
+        raise ValueError("debug symbols must be an explicit regular dSYM directory")
+    entries = []
+    for item in sorted(symbols.rglob("*")):
+        mode = item.lstat().st_mode
+        if item.is_symlink() or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise ValueError("unsafe debug-symbol entry")
+        if stat.S_ISREG(mode):
+            entries.append(item)
+    dwarf = symbols / "Contents/Resources/DWARF"
+    if not dwarf.is_dir() or not any(item.parent == dwarf for item in entries):
+        raise ValueError("dSYM has no regular DWARF image")
+    return entries
+
+
+def image_uuids(image):
+    result = subprocess.run(["/usr/bin/dwarfdump", "--uuid", str(image)],
+                            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"},
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30)
+    identities = []
+    for line in result.stdout.decode("utf-8", errors="strict").splitlines():
+        match = re.fullmatch(r"UUID: ([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}) \(([^()]+)\) .+", line)
+        if match is None:
+            raise ValueError("invalid Mach-O/dSYM UUID observation")
+        identities.append((match.group(2), match.group(1).lower()))
+    if not identities or len(set(identities)) != len(identities):
+        raise ValueError("missing or duplicate Mach-O/dSYM UUID")
+    if len({architecture for architecture, _ in identities}) != len(identities):
+        raise ValueError("duplicate Mach-O/dSYM architecture")
+    return sorted(identities)
+
+
+def validate_debug_symbols(daemon, symbols):
+    symbol_entries(symbols)
+    executable_ids = image_uuids(daemon)
+    if image_uuids(symbols) != executable_ids:
+        raise ValueError("Mach-O/dSYM UUID mismatch")
+    return [{"architecture": architecture, "uuid": identity} for architecture, identity in executable_ids]
+
+
+def assemble(daemon, package, output, signing_identity, debug_symbols=None):
     tool = recipe()
     if not daemon.is_absolute() or daemon.is_symlink() or not daemon.is_file():
         raise ValueError("daemon must be an explicit regular built artifact")
@@ -69,6 +112,9 @@ def assemble(daemon, package, output, signing_identity):
         raise ValueError("output must be an absolute new package directory")
     if any(output.is_relative_to(Path(p)) for p in ["/Applications", "/Library", "/System", "/usr", "/opt"]):
         raise ValueError("package assembly cannot write an installed/global directory")
+    symbol_ids = validate_debug_symbols(daemon, debug_symbols) if debug_symbols is not None else None
+    source_symbol_files = ({str(item.relative_to(debug_symbols)): {"bytes": item.stat().st_size, "sha256": tool.digest(item)}
+                            for item in symbol_entries(debug_symbols)} if debug_symbols is not None else None)
     manifest = validate_native_package(package)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".macos-package-", dir=output.parent) as temporary:
@@ -79,6 +125,19 @@ def assemble(daemon, package, output, signing_identity):
             raise ValueError("native FFmpeg package unexpectedly contains a daemon")
         shutil.copyfile(daemon, executable)
         executable.chmod(0o755)
+        symbol_facts = {"status": "absent; candidate does not carry paired file/line symbols"}
+        if debug_symbols is not None:
+            copied_symbols = stage / "debug/plurxd.dSYM"
+            shutil.copytree(debug_symbols, copied_symbols, symlinks=True)
+            if validate_debug_symbols(executable, copied_symbols) != symbol_ids:
+                raise ValueError("copied debug symbols changed identity")
+            files = {str(item.relative_to(copied_symbols)): {"bytes": item.stat().st_size, "sha256": tool.digest(item)}
+                     for item in symbol_entries(copied_symbols)}
+            if files != source_symbol_files:
+                raise ValueError("debug symbols changed during immutable copy")
+            for item in symbol_entries(copied_symbols):
+                item.chmod(0o444)
+            symbol_facts = {"status": "matched immutable copy", "path": "debug/plurxd.dSYM", "uuid_pair": symbol_ids, "files": files}
         entitlements = Path(__file__).with_name("macos-source-parser.entitlements")
         with entitlements.open("rb") as stream:
             required = plistlib.load(stream)
@@ -115,7 +174,7 @@ def assemble(daemon, package, output, signing_identity):
                  "parser_abi": manifest["parser_abi"], "parser_sha256": manifest["module_sha256"],
                  "artifacts": {name: tool.digest(stage / "bin" / name)
                                for name in ["plurxd", "ffmpeg", "ffprobe", "plurx-source-parser.wasm"]},
-                 "signing_entitlements": required,
+                 "signing_entitlements": required, "debug_symbols": symbol_facts,
                  "qualification": "assembly/signature integrity only; no notarization or fresh-install receipt"}
         (provenance / "manifest.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
         stage.rename(output)
@@ -127,11 +186,12 @@ def main():
     parser.add_argument("--daemon", type=Path, required=True)
     parser.add_argument("--ffmpeg-package", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--debug-symbols", type=Path, help="explicit paired dSYM; UUID match and regular entries required; absence is recorded")
     parser.add_argument("--sign", default="-", help="explicit Developer ID identity; default '-' is a local ad-hoc candidate")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("native daemon signing requires macOS")
-    print(json.dumps(assemble(args.daemon, args.ffmpeg_package, args.output, args.sign), sort_keys=True))
+    print(json.dumps(assemble(args.daemon, args.ffmpeg_package, args.output, args.sign, args.debug_symbols), sort_keys=True))
 
 
 if __name__ == "__main__":
