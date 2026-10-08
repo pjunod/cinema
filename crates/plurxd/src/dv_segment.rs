@@ -418,11 +418,15 @@ async fn run(
         )
         .await;
     let watched = registration.clone();
-    let slot = request.producer;
+    // The observer must not keep the controlling slot alive after its caller
+    // disappears: ProducerSlot::drop owns actual retirement in that case.
+    let slot = Arc::downgrade(&request.producer);
     let handoff_cancel = cancel.clone();
     tokio::spawn(async move {
         tokio::select! { _ = cancel.cancelled() => {
-            let _ = slot.request_registered_retirement(&watched).await;
+            if let Some(slot) = slot.upgrade() {
+                let _ = slot.request_registered_retirement(&watched).await;
+            }
         }, _ = watched.wait_confirmed_reap() => {} }
     });
     Ok(SegmentProducer {
@@ -782,14 +786,17 @@ mod tests {
                 .is_none(),
             "exited child alone does not release writer admission"
         );
+        // Losing the actual controller must retire its child even though
+        // the cancellation observer still retains the registration receipt.
+        drop(slot);
         writers.settled();
-        slot.request_registered_retirement(&registration)
-            .await
-            .expect("retire actual encoder");
-        assert!(registration
-            .wait_confirmed_reap()
-            .await
-            .matches(&registration));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), registration.wait_confirmed_reap())
+                .await
+                .expect("dropped actual encoder controller reaps")
+                .matches(&registration)
+        );
+
         assert_eq!(offsets.available_permits(), 1);
         assert_eq!(
             (&source.handle).stream_position().expect("restored offset"),
@@ -801,6 +808,7 @@ mod tests {
                 .is_some(),
             "confirmed graph releases concrete admission"
         );
+        let slot = Arc::new(ProducerSlot::new());
         let unaccepted = spawn(SegmentRequest {
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
