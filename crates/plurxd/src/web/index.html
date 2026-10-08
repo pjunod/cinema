@@ -34,7 +34,7 @@
       <div id="live-tv-status-offers"></div>
       <button type="button" id="live-tv-status-play" onclick="resumeLiveTv()" hidden>Play live</button>
       <button type="button" id="live-tv-status-retry" onclick="retryLiveTv()" hidden>Try again</button>
-      <button type="button" onclick="stopLiveTv().catch(liveTvFailure)">Stop</button>
+      <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)">Stop</button>
     </div>
   </div>
   <div class="lth-overlay" id="live-tv-overlay"></div>
@@ -117,6 +117,8 @@
 <script src="/assets/pages/shared-artwork.js"></script>
 <script src="/assets/pages/shared-libraries.js"></script>
 <script src="/assets/pages/sharing-management.js"></script>
+<script src="/assets/core/remote-navigation.js"></script>
+<script src="/assets/core/remote-router.js"></script>
 <script src="/assets/router.js"></script>
 </body>
 </html>
