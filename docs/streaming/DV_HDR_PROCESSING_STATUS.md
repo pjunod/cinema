@@ -138,3 +138,6 @@ common gaps and explicitly leaves source completeness unverified; target
 luminance bounds reject oversized integers without float conversion. Dedicated
 regressions cover both. This review applies only to the offline comparator;
 backend probes receive their own review before integration.
+
+The reviewer verified both corrections and approved the bounded comparator
+with no remaining findings.

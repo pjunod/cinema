@@ -269,10 +269,14 @@ No new per-title modal or permission flow is required for fallback.
 ## 7. M5 — reproducible quality and performance harness
 
 Implement the benchmark design in proposal section 5 as an offline tool, not
-a per-playback quality scan. **Proposed** executable location:
-`tools/dv_quality/` with a manifest-driven `run.py`; these files do not exist
-yet. The tool validates inputs, produces immutable run directories, and refuses
-a reference-fidelity score if no independent reference is declared.
+a per-playback quality scan. M0 now supplies the bounded
+[manifest-driven comparator](../../tools/dv_quality/run.py) in
+`tools/dv_quality/`; its [implementation ledger](DV_HDR_PROCESSING_STATUS.md)
+records the tiny-frame limits and executable workflow. It validates inputs,
+retains input snapshots and leaves reference-error fields null unless an
+independent reference is declared. M5 still needs full-raster streaming,
+encoded-output adapters, SSIM, scene/corpus analysis and rate comparisons;
+the M0 comparator is not the completed benchmark.
 
 Each manifest records fixture digest/license/provenance, profile and metadata
 levels, BL/EL/RPU association, expected residual behavior, reference origin,
