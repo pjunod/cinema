@@ -20,8 +20,10 @@ Use one invitation installation UUID per saved server-instance/account, with its
 returned phone proof in existing platform secure storage. Keep invitation and remote
 receiver identities distinct. The API's 43-character invitation ID is 32 decoded bytes:
 phone UUID then random event UUID. Decode canonically; match the phone prefix only
-against locally saved authenticated installations. It never supplies an origin, login,
-grant or account switch authorization. Select the saved profile explicitly as needed,
+against locally saved authenticated installations. Store remote pairing proofs under
+canonical origin, server instance and account together; origin-less legacy proofs
+cannot be safely migrated and require pairing again. The invitation ID never supplies
+an origin, login, grant or account switch authorization. Select the saved profile explicitly as needed,
 retain the pending tap across cold launch/login, then authenticated lookup revalidates
 the entire ID. Show the returned screen through ordinary companion selection. Do not
 acquire/take over, Select, tune or start playback on a notification tap.
@@ -61,6 +63,13 @@ UIApplicationDelegate, dispatching to the invitation model with identity/generat
 fences. Register APNs only for the explicit notification opt-in flow. Configure
 documented aps-environment entitlement/signing prerequisites without pretending an
 unsigned/simulator build has a delivered provider token.
+
+APNs callbacks carry an app-installation token and no request/account identifier.
+Do not claim they can be correlated to a particular account's registration call.
+A retained current registration lifetime may observe rotations, but each enrollment
+still requires independently current explicit consent, profile/login/phone identity
+and generations. A late token alone cannot enable or enroll a replacement account;
+retired callbacks without an eligible current lifetime are discarded.
 
 Recognize only category CINEMA_REMOTE_INVITATION plus a canonical opaque invitation_id.
 Default tap may queue lookup; dismiss/custom unrelated actions must not open a remote.

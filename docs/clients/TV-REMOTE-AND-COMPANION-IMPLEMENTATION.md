@@ -641,7 +641,10 @@ current candidate. The native Sol 6.1 builder retains Apple couch and then Apple
 invitations. After Android couch freezes, its builder continues with Android
 invitation adapters in a new isolated branch/worktree. Apple and Android
 invitations then proceed in parallel, with one owner per platform and no
-concurrent Android edits. Server API/worker and manager
+concurrent Android edits. The server builder also integrates the preserved B09
+Developer card in `crates/plurxd/src/web/pages/settings-developer.js` and
+`tests/web/cinema-remote-settings.test.js` after the home runtime is ready; the
+web builder has frozen that patch. Other server API/worker and manager
 document ownership remain unchanged. The parent personally reviews each packet
 before handing it to “Coordinate PR merge batches”; that session owns shared
 qualification, counters and main promotion. No builder runs duplicate broad

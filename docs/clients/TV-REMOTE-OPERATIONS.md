@@ -80,8 +80,9 @@ page or a suspended iPhone app to poll continuously. Final background setup
 instructions must name the implemented broker, consent and permission flows
 before that packet graduates from Developer.
 
-The notification is only a generic invitation. A provider alert already sent can
-arrive after a screen's invitation choice changes. Android's offline check can
+The notification is only a generic invitation. An OFF choice saved while offline
+needs to synchronize with the home server before that server can stop new sends.
+A provider alert already sent can also arrive after the server has accepted OFF. Android's offline check can
 recognize the local installation and whether invitations are still enabled there;
 the opaque payload does not identify an individual screen's consent. A tap always
 checks the exact current screen, consent, login and pairing with the home server.
@@ -99,6 +100,7 @@ It never acquires control or starts playback automatically.
 | Controls unavailable in a modal or system screen | Use the physical remote to finish or dismiss that presentation. Read the packet's navigation inventory for unfinished ordinary browsing controls. |
 | Code expired or approval result is unknown | Close pairing, show a fresh code on the TV and pair again. Inspect the grant list before retaining obsolete grants. |
 | Saved pairing no longer works | Revoke the old grant and pair again. **Forget saved pairing** removes a local proof; it does not claim server revocation. |
+| An updated native app asks to pair again | Pairing proofs now bind the exact server origin, instance and account. Old origin-less proofs cannot safely be attributed to a server and are not reused. |
 | Selling/resetting a receiver | Remove/reset its TV registration. This revokes its paired grants. Merely closing the app does not perform this reset. |
 | Invitation transport reports `migration_remediation` after broker replacement | Restore the exact old broker origin, publisher, server identity and generation authority, then drain retained cleanup before changing scope. A compatible proof rotation can preserve that authority. If it is permanently lost, cleanup stays retained; this packet has no exceptional operator-fence command to discard it. A successful response from a new generation is not proof of old-generation revocation. |
 
