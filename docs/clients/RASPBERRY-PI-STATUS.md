@@ -1,18 +1,48 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** open — PR #851 merged; Docker entry-point integration, GPU tone
-mapping and actual application playback qualification remain in progress.
+**Status:** built — software implementation and bounded Pi physical acceptance
+complete; final candidate CI and merge pending.
 **Updated:** 2026-10-08
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
 The existing daemon and web player remain the product.
 
-[PR #832](http://forge.lan:3000/noirr/plurx/pulls/832) batches all
-implementation commits. Its checks and PR description carry the live final
-validation receipt and merge result. Physical acceptance remains separate.
+## Current acceptance — implementation complete, final CI pending
 
-## Current installation qualification blocker
+[PR #889](http://forge.lan:3000/noirr/plurx/pulls/889) holds the authoritative
+candidate, review, retained regression journals and final merge disposition.
+The Docker entry point, protected probe, exclusive idle-family admission and
+software-frame Vulkan pipeline are implemented. Physical source `a72212b5b`
+passed the bounded application checks below on the Pi 5.
+
+| Application check | Physical result |
+|---|---|
+| Automatic direct 1080p Main10 | Chromium used `V4L2VideoDecoder`; forward seek to 10 s resumed at 10.35 s, backward seek to 3 s at 3.41 s |
+| Continuous playback at default CPU pool 3 | The complete 720p/480p/shared-AAC family started with actual non-root HEVC request decoding and x264; the selected output was 1280×720; seeks resumed at 10.27 s and 3.33 s; cold start took 25.25 s |
+| Daemon-selected GPU tone mapping | 4K HDR10 to 1080p used `libplacebo_software`; picture and output tags passed; the bounded comparison measured 1.57× CPU speed |
+
+These are functional, bounded results. Sustained real-time throughput,
+concurrency/soak, HDR HDMI output and Dolby Vision HDMI qualification are not
+established. The GPU comparison does not qualify every source or long session.
+[Physical evidence](http://forge.lan:3000/attachments/221bc723-202d-4737-bd7d-6aaf01f6e8c9)
+retains the application and cleanup receipts.
+
+All task Pi containers, browsers, compiler processes, native test paths and
+test roots were removed. The user's containers were preserved. Account UID
+999 is used by the user's discovery service and was retained, together with
+only the image alias retaining the user's older image.
+
+The [main integration review and compiler receipt](http://forge.lan:3000/attachments/a79aa4b9-1169-4b69-9065-cdb035d4539f)
+describes earlier candidate `52eaf6566`; it is not an exact-source receipt for
+a later candidate. Run 4432 (display 4411) passed preflight, Rust and web on its
+candidate while Windows was pending. Main advanced, so the base guard requires
+a new candidate and final CI. No final promotion gate pass is claimed.
+
+## Historical installation blockers and their resolution
+
+The chronology below records earlier snapshots. Its pending work and failures
+are historical; current acceptance and remaining limits are recorded above.
 
 The Docker-default installation and managed browser passed physical Main/Main10
 request decoding, software-reference frame hashes, planar transfer, browser
@@ -130,8 +160,8 @@ Physical testing also exposed two deployment defects. Compose 2.26 lacks
 interpolation on that version. The isolated native service lacked writable
 temporary storage; systemd now owns a mode-0700 runtime directory and provides
 `TMPDIR` without making system files writable or hiding media under `/var/tmp`.
-Each correction has a focused regression. Live physical results, package
-changes, cleanup and CI receipts remain on PR #851.
+Each correction has a focused regression. The historical installation receipts remain on PR #851; final physical
+results, cleanup and current CI are recorded on PR #889.
 
 ## Initial implementation — PR #832 (merged)
 
@@ -249,7 +279,7 @@ Both now pass; no unit execution preceded review. The existing actor still owns
 one in-process retry; its separately budgeted classified-health wrapper does
 not introduce another attempt or a new watchdog.
 
-## Physical acceptance — 2026-10-07
+## Historical physical acceptance — 2026-10-07
 
 Paul supplied a Pi 5 for cinema testing. Tests use an independent clone and
 isolated data/browser profiles; the existing desktop and system media tools
@@ -445,13 +475,11 @@ still require their original authenticated provenance; skips are never passes.
 The live PR records final qualification and merge. No Pi process was restarted.
 
 
-## Docker-default setup — 2026-10-07
+## Historical Docker-default setup — 2026-10-07
 
-[PR #851](http://forge.lan:3000/noirr/plurx/pulls/851) is the live execution
-status for this installation effort, including its final hardware receipts,
-cleanup and merge disposition. The table below records the source-development
-snapshot; later acceptance evidence is retained on that PR without relabeling
-earlier compiler or unit results as hardware proof.
+[PR #851](http://forge.lan:3000/noirr/plurx/pulls/851) records the earlier
+installation stage. The table below preserves that historical source-development
+snapshot; its pending entries are superseded by current acceptance above.
 
 [The installation plan](RASPBERRY-PI-INSTALLATION.md) continues the work after
 PR #843 merged with every required fast-lane job green. Docker will be the

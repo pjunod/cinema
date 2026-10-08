@@ -1,14 +1,15 @@
 # Raspberry Pi installation — Docker by default, native by choice
 
-**Status:** open — installer merged; ordinary Docker entry-point integration
-and application qualification in progress · **Updated:** 2026-10-08
+**Status:** built — software implementation and bounded Pi application
+acceptance complete; final candidate CI and merge pending · **Updated:** 2026-10-08
 
 Companion to [the decoder implementation](RASPBERRY-PI-IMPLEMENTATION.md)
 and [the live status](RASPBERRY-PI-STATUS.md). This plan closes the installation
 gap: users should not assemble FFmpeg paths, device permissions, systemd
 overrides and a browser themselves. The existing server and web player remain
-the product. The commands below are the implementation contract until the
-status records their acceptance.
+the product. The commands below describe the implemented installation contract.
+[PR #889](http://forge.lan:3000/noirr/plurx/pulls/889) holds the authoritative
+final candidate, retained evidence and pending CI/merge disposition.
 
 Physical acceptance found that Raspberry Pi OS kernel
 `6.18.50+rpt-rpi-2712` omits `CONFIG_SECURITY_LANDLOCK`. The Pi-only namespace
@@ -159,6 +160,24 @@ provisioning cannot silently replace an unowned server or browser.
 
 ## 5. Verification and cleanup
 
+Bounded physical acceptance is complete on source `a72212b5b`: automatic
+1080p Main10 direct playback used `V4L2VideoDecoder` and passed tight forward
+and backward seeks. Continuous playback at the default CPU pool of 3 started
+the complete 720p/480p/shared-AAC family with non-root request decoding and
+x264, verified 1280×720 output, resumed seeks at 10.27 s and 3.33 s, and took
+25.25 s to cold-start. Daemon-selected `libplacebo_software` passed a 4K HDR10
+to 1080p picture/tag comparison at 1.57× CPU speed. These bounded checks do not
+establish sustained real-time playback, concurrency/soak or Dolby Vision HDMI.
+The [physical receipt](http://forge.lan:3000/attachments/221bc723-202d-4737-bd7d-6aaf01f6e8c9)
+and [live status](RASPBERRY-PI-STATUS.md) preserve exact results and limits.
+
+All task Pi containers, browsers, compiler processes, native test paths and
+roots were removed; user containers were preserved. UID 999 remains because
+the user's discovery service uses it. Only the image alias retaining the
+user's older image was preserved. Final CI must qualify the current candidate;
+physical acceptance does not replace that gate.
+
+
 Establish the pinned Rust compiler loop before any Rust edits. Compilation,
 source patch application and syntax checks may run during development. Defer
 unit and physical regression execution until final adversarial review, then
@@ -258,7 +277,8 @@ identity, cancellation and descendant cleanup. Actual app playback must create
 the protected parser identity and stream on the stock Pi kernel before this
 work is considered accepted.
 
-Paul authorized merging PR #851 after its required CI gate passes while
+**Historical prerequisite failures, since resolved:** Paul authorized merging
+PR #851 after its required CI gate passes while
 physical verification continues. This authorization does not establish
 default app playback: the original Docker procfs mount failed with `Operation
 not permitted`, and native session admission separately refused an eight-unit
