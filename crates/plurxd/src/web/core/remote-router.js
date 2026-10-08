@@ -72,7 +72,7 @@ function cinemaRemoteBind(){
       if(!route.startsWith("#/library/")&&!route.startsWith("#/category/")) return "unsupported";
       if(!LIB_VIEW||LIB_PER==="all"||LIB_PAGE_AT+1>=libPageCount(LIB_VIEW.shown)) return "unavailable";
       CinemaRemote.invalidate("page");libGoPage(LIB_PAGE_AT+1);cinemaRemoteBind();
-      const first=root.querySelector("[data-remote-item]");
+      const first=/** @type {HTMLElement|null} */ (root.querySelector("[data-remote-item]"));
       return first?CinemaRemote.focusById("item:"+first.dataset.remoteItem):"unavailable";
     }});
   if(vod){ cinemaRemoteBindPlayer(root,root===menu); return; }
@@ -87,12 +87,12 @@ function cinemaRemoteBind(){
     cinemaRemoteRegister(`route:${href}:${count}`,el,el.textContent.trim(),()=>cinemaRemoteGo(href));
   }
   const itemIds=new Set();
-  for(const el of root.querySelectorAll("[data-remote-item]")){
+  for(const el of /** @type {NodeListOf<HTMLElement>} */ (root.querySelectorAll("[data-remote-item]"))){
     const id=el.dataset.remoteItem;if(!/^[1-9][0-9]*$/.test(id)||itemIds.has(id))continue;
     itemIds.add(id);
     cinemaRemoteRegister("item:"+id,el,el.querySelector(".t,.eptitle")?.textContent||"Open title",()=>cinemaRemoteGo("#/item/"+id,"item:"+id));
   }
-  for(const el of root.querySelectorAll("[data-remote-page]")){
+  for(const el of /** @type {NodeListOf<HTMLElement>} */ (root.querySelectorAll("[data-remote-page]"))){
     const page=Number(el.dataset.remotePage);
     cinemaRemoteRegister("page:"+page,el,el.textContent,()=>{CinemaRemote.invalidate("page");libGoPage(page);return "applied";});
   }
@@ -107,7 +107,7 @@ function cinemaRemoteBind(){
 }
 function cinemaRemoteBindPlayer(root,isMenu){
   if(isMenu){
-    for(const el of root.querySelectorAll("[data-remote-track]")){
+    for(const el of /** @type {NodeListOf<HTMLElement>} */ (root.querySelectorAll("[data-remote-track]"))){
       const kind=root.dataset.kind,id=el.dataset.remoteTrack;
       cinemaRemoteRegister("track:"+kind+":"+id,el,el.textContent,()=>cinemaRemoteChooseTrack(kind,id));
     }
@@ -147,7 +147,7 @@ function CinemaRemoteRememberGesture(context,before){
 }
 function cinemaRemoteChooseTrack(kind,id){
   const menu=document.getElementById("pmenu");
-  if(!menu?.classList.contains("on")||menu.dataset.kind!==kind||!Array.from(menu.querySelectorAll("[data-remote-track]")).some(el=>el.dataset.remoteTrack===id)) return "stale_context";
+  if(!menu?.classList.contains("on")||menu.dataset.kind!==kind||!Array.from(/** @type {NodeListOf<HTMLElement>} */ (menu.querySelectorAll("[data-remote-track]"))).some(el=>el.dataset.remoteTrack===id)) return "stale_context";
   if(kind==="audio") switchAudio(Number(id));
   else if(kind==="subs") setSub(Number(id));
   else if(kind==="quality") setQuality(id);
