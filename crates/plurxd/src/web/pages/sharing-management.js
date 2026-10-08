@@ -50,10 +50,12 @@ function sharingEndpoint(row){
   if(!row||typeof row.ipv4!=="string")throw new Error("Invalid Tailnet endpoint");
   const p=row.ipv4.split(".");if(p.length!==4||p.some(s=>! /^(0|[1-9][0-9]{0,2})$/.test(s)||Number(s)>255)||p[0]!=="100"||Number(p[1])<64||Number(p[1])>127)throw new Error("IPv4 must be inside 100.64.0.0/10");
   sharingInteger(row.port,1n);if(row.port>65535n)throw new Error("Port must be from 1 to 65535");
-  if(typeof row.ts_fqdn!=="string"||!row.ts_fqdn.endsWith(".ts.net"))throw new Error("Use a private .ts.net FQDN");
+  if(typeof row.ts_fqdn!=="string"||!row.ts_fqdn.endsWith(".ts.net"))throw new Error("Enter the serving machine’s full Tailscale DNS name, such as cinema.tail123abc.ts.net, without a URL or port");
   const prefix=row.ts_fqdn.slice(0,-7),labels=prefix.split(".");
-  if(prefix.length>240||labels.length<2||labels.some(s=>! /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(s)))throw new Error("Invalid private Tailnet FQDN");
-  if(typeof row.spki_sha256!=="string"||! /^[0-9a-f]{64}$/.test(row.spki_sha256))throw new Error("Use the exact lowercase SHA-256 SPKI pin");
+  if(labels.length===1&&/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(prefix))throw new Error("That is the tailnet DNS name. Add the serving machine’s name before it, such as cinema."+row.ts_fqdn+". Use the Machine name from Tailscale’s Machines page followed by the Tailnet DNS name from its DNS page.");
+  if(prefix.length>240||labels.length<2||labels.some(s=>! /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(s)))throw new Error("Enter the serving machine’s full Tailscale DNS name in lowercase, such as cinema.tail123abc.ts.net, without a URL, port or trailing dot");
+  if(typeof row.spki_sha256==="string"&&row.spki_sha256.startsWith("nodekey:"))throw new Error("That is a Tailscale node key. Copy the sharing certificate’s public-key pin from the serving Cinema’s Settings → Sharing page, under Before connecting Cinemas. Removing nodekey: does not make it a Cinema pin.");
+  if(typeof row.spki_sha256!=="string"||! /^[0-9a-f]{64}$/.test(row.spki_sha256))throw new Error("Copy the sharing certificate’s 64-character lowercase public-key pin from the serving Cinema’s Settings → Sharing page, under Before connecting Cinemas");
   if(row.ipv6!=null)sharingIPv6(row.ipv6);
   return {ipv4:row.ipv4,ipv6:row.ipv6??null,ts_fqdn:row.ts_fqdn,port:row.port,spki_sha256:row.spki_sha256};
 }
@@ -174,25 +176,44 @@ function sharingManagementHTML(){
   const s=SHARING_MANAGEMENT;if(!s)return "";
   if(s.editor)return sharingRequirementsHTML(s.status)+sharingEditorHTML(s.editor);
   const disabled=s.busy;
-  return sharingRequirementsHTML(s.status)+`<h3>Connect Cinemas</h3>${sharingButton("Create invitation","sharingOpen('invite')",disabled)} ${sharingButton("Import invitation","sharingOpen('import')",disabled)} ${sharingButton("This Cinema's endpoints","sharingOpen('manifest')",disabled)} ${sharingButton("Reload","sharingReload()",disabled)}${s.error?`<p role="alert">${esc(s.error)}</p>`:""}${s.invitation?`<section><h4>Invitation</h4><p>Copy this secret invitation to the recipient. It is cleared when you leave Sharing.</p><textarea readonly autocomplete="off">${esc(s.invitation.invitation)}</textarea>${sharingButton("Cancel invitation","sharingCancelInvitation()",disabled)} ${sharingButton("Clear secret","sharingClearInvitation()",disabled)}</section>`:""}<h3>Imports</h3>${s.imports.map((row,i)=>`<section><h4>${esc(row.import.source_name||"Shared source")}</h4><p>${esc(row.import.state)} · Source ${esc(row.import.source_server_id)}</p>${sharingButton("Pairing code",`sharingOpen('code',${i})`,disabled)} ${sharingButton("Viewer assignments",`sharingOpen('matrix',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Source endpoints",`sharingOpen('endpoints',${i})`,disabled||!["claiming","pending","active"].includes(row.import.state))} ${sharingButton("Re-pair",`sharingOpen('repair',${i})`,disabled)} ${sharingButton("Rotate credential",`sharingOpen('rotate',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Disconnect",`sharingOpen('disconnect',${i})`,disabled)}</section>`).join("")||'<p class="muted">No imports.</p>'}<h3>Exports</h3>${s.exports.map((row,i)=>`<section><h4>${esc(row.recipient_name||"Recipient")}</h4><p>${esc(row.grant.state)} · Recipient ${esc(row.grant.recipient_server_id)}</p>${sharingButton("Approve pairing",`sharingOpen('approve',${i})`,disabled||row.grant.state!=="pending")} ${sharingButton("Library scope",`sharingOpen('scope',${i})`,disabled||row.grant.state!=="active")} ${sharingButton("Revoke",`sharingOpen('revoke',${i})`,disabled)}</section>`).join("")||'<p class="muted">No exports.</p>'}${s.next?sharingButton("More exports","sharingMoreExports()",disabled):""}`;
+  return sharingRequirementsHTML(s.status)+`<h3>Connect Cinemas</h3>${sharingButton("Create invitation","sharingOpen('invite')",disabled)} ${sharingButton("Import invitation","sharingOpen('import')",disabled)} ${sharingButton("This Cinema's endpoints","sharingOpen('manifest')",disabled)} ${sharingButton("Reload","sharingReload()",disabled)}${s.error?`<p role="alert">${esc(s.error)}</p>`:""}${s.invitation?`<section id="sharing-invitation-result" class="sharing-invitation" tabindex="-1"><h4>Invitation created</h4><p role="status">Your invitation is ready.</p><p>Copy the invitation below. On the other Cinema, open Settings → Sharing → Import invitation and paste it there. This secret is cleared when you leave Sharing.</p><textarea id="sharing-invitation-text" aria-label="Invitation to copy" readonly autocomplete="off" spellcheck="false" onfocus="this.select()">${esc(s.invitation.invitation)}</textarea><p role="status" aria-live="polite">${esc(s.invitationCopyNotice||"")}</p>${sharingButton("Copy invitation","sharingCopyInvitation()",disabled)} ${sharingButton("Cancel invitation","sharingCancelInvitation()",disabled)} ${sharingButton("Clear secret","sharingClearInvitation()",disabled)}</section>`:""}<h3>Imports</h3>${s.imports.map((row,i)=>`<section><h4>${esc(row.import.source_name||"Shared source")}</h4><p>${esc(row.import.state)} · Source ${esc(row.import.source_server_id)}</p>${sharingButton("Pairing code",`sharingOpen('code',${i})`,disabled)} ${sharingButton("Viewer assignments",`sharingOpen('matrix',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Source endpoints",`sharingOpen('endpoints',${i})`,disabled||!["claiming","pending","active"].includes(row.import.state))} ${sharingButton("Re-pair",`sharingOpen('repair',${i})`,disabled)} ${sharingButton("Rotate credential",`sharingOpen('rotate',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Disconnect",`sharingOpen('disconnect',${i})`,disabled)}</section>`).join("")||'<p class="muted">No imports.</p>'}<h3>Exports</h3>${s.exports.map((row,i)=>`<section><h4>${esc(row.recipient_name||"Recipient")}</h4><p>${esc(row.grant.state)} · Recipient ${esc(row.grant.recipient_server_id)}</p>${sharingButton("Approve pairing",`sharingOpen('approve',${i})`,disabled||row.grant.state!=="pending")} ${sharingButton("Library scope",`sharingOpen('scope',${i})`,disabled||row.grant.state!=="active")} ${sharingButton("Revoke",`sharingOpen('revoke',${i})`,disabled)}</section>`).join("")||'<p class="muted">No exports.</p>'}${s.next?sharingButton("More exports","sharingMoreExports()",disabled):""}`;
 }
 function sharingPaint(){if(!SHARING_MANAGEMENT||!sharingCurrent(SHARING_MANAGEMENT.capture))return;const node=document.getElementById("sharing-management");if(node)node.innerHTML=sharingManagementHTML();}
-function sharingEdit(key,value){const s=SHARING_MANAGEMENT,e=s?.editor;if(!e||e.busy||!sharingCurrent(s.capture))return;e[key]=value;e.revision++;if(key!=="confirm")e.confirm=false;}
+function sharingEdit(key,value){const s=SHARING_MANAGEMENT,e=s?.editor;if(!e||e.busy||!sharingCurrent(s.capture))return;e[key]=value;e.revision++;}
 function sharingCloseEditor(){const s=SHARING_MANAGEMENT;if(!s)return;if(s.editor?.returnInvite)return sharingReturnInvitation();s.revision++;s.editor=null;sharingPaint();}
+async function sharingCopyInvitation(){
+  const s=SHARING_MANAGEMENT,invitation=s?.invitation;if(!invitation||!sharingCurrent(s.capture))return;
+  let copied=false;
+  try{await navigator.clipboard.writeText(invitation.invitation);copied=true;}catch{}
+  if(SHARING_MANAGEMENT!==s||s.invitation!==invitation||!sharingCurrent(s.capture))return;
+  s.invitationCopyNotice=copied?"Invitation copied. Paste it into Import invitation on the other Cinema.":"Automatic copy is unavailable. Select the invitation text and copy it using your browser’s Copy command.";
+  sharingPaint();
+  if(!copied){const input=/** @type {HTMLTextAreaElement|null} */ (document.getElementById("sharing-invitation-text"));input?.focus?.();input?.select?.();}
+}
 function sharingClearInvitation(){if(SHARING_MANAGEMENT){SHARING_MANAGEMENT.invitation=null;sharingPaint();}}
-async function sharingWork(work){
+async function sharingWork(work,action=""){
   const s=SHARING_MANAGEMENT;if(!s||s.busy||!sharingCurrent(s.capture))return;
-  const e=s.editor,revision=e?e.revision:s.revision;s.requestCapture={...s.capture,work:true,state:s,stateRevision:s.revision,editor:e,editRevision:e?.revision};s.busy=true;if(e){e.busy=true;e.sent=false;}sharingPaint();
+  const e=s.editor,revision=e?e.revision:s.revision;s.requestCapture={...s.capture,work:true,state:s,stateRevision:s.revision,editor:e,editRevision:e?.revision};s.busy=true;if(e){e.busy=true;e.sent=false;e.action=action;if(action==="save")e.error="";}sharingPaint();
   const accepts=()=>SHARING_MANAGEMENT===s&&s.alive&&sharingCurrent(s.capture)&&(e?s.editor===e&&e.revision===revision:s.revision===revision);
   try{const result=await work(s,e);if(accepts())return result;}
   catch(error){if(accepts()){if(e){e.error=error.message;if(e.sent)e.ready=false;}else s.error=error.message;}}
-  finally{if(SHARING_MANAGEMENT===s&&s.alive&&sharingCurrent(s.capture)){s.busy=false;if(s.editor===e&&e)e.busy=false;sharingPaint();}}
+  finally{
+    if(SHARING_MANAGEMENT===s&&s.alive&&sharingCurrent(s.capture)){
+      s.busy=false;let focus=null;
+      if(s.editor===e&&e){
+        e.busy=false;
+        if(action==="save"&&e.mode==="invite"&&e.saved&&s.invitation){s.editor=null;s.revision++;focus="sharing-invitation-result";}
+        else if(action==="save"&&["manifest","endpoints","invite"].includes(e.mode)&&(e.saved||e.error))focus="sharing-editor-feedback";
+      }
+      sharingPaint();if(focus)document.getElementById(focus)?.focus?.();
+    }
+  }
 }
 async function sharingOpen(mode,index=0,draft=null){
   const s=SHARING_MANAGEMENT;if(!s||s.busy||!sharingCurrent(s.capture))return;
   const row=["scope","approve","revoke"].includes(mode)?s.exports[index]:s.imports[index];
   if(!["invite","import","manifest"].includes(mode)&&!row)return;
-  s.revision++;s.editor={mode,row,revision:0,ready:false,busy:false,error:"",text:"",confirm:false,selected:[],libraries:[],matrix:null,endpoints:[],manifestRevision:0n,needsEndpoints:false,returnInvite:mode==="manifest"?draft:null};
+  s.revision++;s.editor={mode,row,revision:0,ready:false,busy:false,error:"",text:"",selected:[],libraries:[],matrix:null,endpoints:[],manifestRevision:0n,needsEndpoints:false,returnInvite:mode==="manifest"?draft:null};
   if(mode==="invite"&&draft)s.editor.selected=[...draft.selected];
   if(["import","repair","approve","rotate","disconnect","revoke","code"].includes(mode)){s.editor.ready=true;sharingPaint();return;}
   await sharingEditorReload();
@@ -221,9 +242,9 @@ async function sharingEditorReload(){
       }else{if(!["claiming","pending","active"].includes(row.import.state))throw new Error("Source is not accepting endpoint edits");e.endpoints=row.import.endpoints.map(sharingEndpoint);}
     }else if(e.mode==="manifest"){
       const m=await sharingReadManifest(s.requestCapture);
-      e.manifestRevision=m?.revision??0n;e.endpoints=m?m.endpoints.map(sharingEndpoint):[sharingBlankEndpoint()];
+      e.manifestRevision=m?.revision??0n;e.endpoints=m?m.endpoints.map(sharingEndpoint):[sharingBlankEndpoint(true)];
     }
-    e.error="";e.ready=true;e.saved=false;e.confirm=false;
+    e.error="";e.ready=true;e.saved=false;
   });
 }
 async function sharingReadManifest(capture){
@@ -245,10 +266,43 @@ async function sharingReturnInvitation(){
   const s=SHARING_MANAGEMENT,e=s?.editor;if(!e?.returnInvite||e.busy||s.busy)return;
   await sharingOpen("invite",0,e.returnInvite);
 }
-function sharingBlankEndpoint(){return {ipv4:"",ipv6:null,ts_fqdn:"",port:32443n,spki_sha256:""};}
+function sharingBlankEndpoint(useServingNodePin=false){
+  const pin=SHARING_MANAGEMENT?.status?.certificate?.spki_sha256;
+  const local=useServingNodePin&&typeof pin==="string"&&/^[0-9a-f]{64}$/.test(pin);
+  return {ipv4:"",ipv6:null,ts_fqdn:"",port:32443n,spki_sha256:local?pin:"",pin_from_this_node:local};
+}
 function sharingSelect(index,checked){const e=SHARING_MANAGEMENT?.editor;if(!e||e.busy)return;const id=e.libraries[index]?.library_id;if(!id)return;const selected=new Set(e.selected);if(checked)selected.add(id);else selected.delete(id);e.selected=[...selected];e.revision++;}
-function sharingEndpointEdit(index,key,value){const e=SHARING_MANAGEMENT?.editor;if(!e||e.busy||!e.endpoints[index])return;e.endpoints[index][key]=key==="ipv6"?(value||null):value;e.confirm=false;e.revision++;}
-function sharingEndpointCount(add,index=0){const e=SHARING_MANAGEMENT?.editor;if(!e||e.busy)return;if(add&&e.endpoints.length<4)e.endpoints.push(sharingBlankEndpoint());if(!add&&e.endpoints.length>1)e.endpoints.splice(index,1);e.confirm=false;e.revision++;sharingPaint();}
+function sharingEndpointDNSParts(row){
+  if(row.dns_parts)return {...row.dns_parts};
+  const labels=row.ts_fqdn.split(".");
+  return {machine_name:labels.length>3?labels.slice(0,-3).join("."):"",tailnet_dns_name:labels.length>=3?labels.slice(-3).join("."):""};
+}
+function sharingEndpointEdit(index,key,value){
+  const e=SHARING_MANAGEMENT?.editor;if(!e||e.busy||!e.endpoints[index])return;
+  const row=e.endpoints[index];
+  if(key==="machine_name"||key==="tailnet_dns_name"){
+    const parts=sharingEndpointDNSParts(row);parts[key]=value;row.dns_parts=parts;
+    row.ts_fqdn=parts.machine_name.trim().toLowerCase()+"."+parts.tailnet_dns_name.trim().toLowerCase().replace(/\.$/,"");
+    const preview=document.getElementById("sharing-dns-preview-"+index);
+    if(preview)preview.textContent=parts.machine_name.trim()&&parts.tailnet_dns_name.trim()?row.ts_fqdn:"Enter both names above";
+  }else{row[key]=key==="ipv6"?(value||null):value;if(key==="ts_fqdn")delete row.dns_parts;if(key==="spki_sha256")row.pin_from_this_node=false;}
+  e.revision++;
+}
+function sharingEndpointFieldsHTML(row,index,busy){
+  const parts=sharingEndpointDNSParts(row);
+  const field=(key,label,hint,placeholder="")=>`<label>${label}<br><span class="hint">${esc(hint)}</span><input value="${esc(String(parts[key]??row[key]??""))}" placeholder="${esc(placeholder)}" autocomplete="off" autocapitalize="none" spellcheck="false" oninput="sharingEndpointEdit(${index},'${key}',this.value)"${busy?" disabled":""}></label>`;
+  return `<fieldset><legend>Endpoint ${index+1}</legend><h4>1. Copy these values from Tailscale</h4>`+
+    field("ipv4","Tailscale IPv4","Tailscale → Machines → select the serving machine → Tailscale IPv4.","100.64.0.1")+
+    field("ipv6","Tailscale IPv6 (optional)","Copy Tailscale IPv6 from the same machine page, or leave blank.")+
+    field("machine_name","Machine name","Tailscale → Machines → select the serving machine → Machine name. Copy just the machine name.","cinema")+
+    field("tailnet_dns_name","Tailnet DNS name","Tailscale → DNS → Tailnet DNS name. Copy the entire value ending in .ts.net.","tail123abc.ts.net")+
+    `<p>Cinema joins the two names automatically: <code>cinema</code> + <code>tail123abc.ts.net</code> → <code>cinema.tail123abc.ts.net</code>.</p><p>Full machine address: <code id="sharing-dns-preview-${index}">${esc(parts.machine_name&&parts.tailnet_dns_name?row.ts_fqdn:"Enter both names above")}</code></p><p class="hint">Enable MagicDNS in Tailscale → DNS to resolve machine names.</p><h4>2. Enter the Cinema connection port</h4>`+
+    field("port","Private connection port","Use the port configured for Tailscale TCP Serve, normally 32443. The internal Cinema TLS port is 32444.","32443")+
+    `<h4>3. Cinema certificate</h4>`+
+    field("spki_sha256","Cinema sharing certificate pin",row.pin_from_this_node?"Filled automatically from the Cinema serving this page. If you are configuring a different serving machine, replace this with the pin from that machine’s Cinema Sharing page.":"On the serving Cinema, open Settings → Sharing → Before connecting Cinemas → Sharing certificate. Copy the 64-character value after public-key pin. Tailscale’s Node key is a different key; removing nodekey: does not make it a Cinema pin.","64 characters from Cinema’s Sharing page")+
+    sharingButton("Remove",`sharingEndpointCount(false,${index})`,busy||SHARING_MANAGEMENT.editor.endpoints.length<=1)+`</fieldset>`;
+}
+function sharingEndpointCount(add,index=0){const e=SHARING_MANAGEMENT?.editor;if(!e||e.busy)return;if(add&&e.endpoints.length<4)e.endpoints.push(sharingBlankEndpoint());if(!add&&e.endpoints.length>1)e.endpoints.splice(index,1);e.revision++;sharingPaint();}
 function sharingMatrixEdit(id,checked){const e=SHARING_MANAGEMENT?.editor;if(!e||e.busy||!e.matrix)return;const user=BigInt(id),m=e.matrix;if(!m.viewers.some(v=>v.id===user)||!m.libraries.some(l=>l.library_id===e.library))return;let group=m.groups.find(g=>g.library_id===e.library);if(!group){group={library_id:e.library,user_ids:[]};m.groups.push(group);}const ids=new Set(group.user_ids);if(checked)ids.add(user);else ids.delete(user);const replacement=[...ids];if(replacement.length>256){e.error="A library may have at most 256 viewers";sharingPaint();return;}group.user_ids=replacement;e.revision++;}
 function sharingRemoveOutside(){const e=SHARING_MANAGEMENT?.editor;if(!e||e.busy||!e.matrix?.libraries.some(l=>l.library_id===e.library&&l.outside))return;e.matrix.groups=e.matrix.groups.filter(g=>g.library_id!==e.library);e.revision++;sharingPaint();}
 function sharingEditorHTML(e){
@@ -263,9 +317,14 @@ function sharingEditorHTML(e){
     const group=m.groups.find(g=>g.library_id===e.library);
     content=`<p>The complete matrix is retained. Unavailable viewers and libraries outside current Source scope remain until you explicitly remove them.</p><label>Source library<select onchange="sharingEdit('library',this.value);sharingPaint()"${e.busy?" disabled":""}>${m.libraries.map(l=>`<option value="${esc(l.library_id)}"${l.library_id===e.library?" selected":""}>${esc(l.name)}</option>`).join("")}</select></label>`+sharingInput("Find viewers","search",e.search)+sharingButton("Find","sharingPaint()",e.busy)+users.slice(0,100).map(v=>`<label><input type="checkbox" onchange="sharingMatrixEdit('${v.id}',this.checked)"${group?.user_ids.includes(v.id)?" checked":""}${e.busy?" disabled":""}>${esc(v.username)} · ${v.id}</label>`).join("")+(users.length>100?`<p>Showing 100 of ${users.length} matching viewers. Refine the search; the complete matrix is retained.</p>`:"")+(m.libraries.some(l=>l.library_id===e.library&&l.outside)?sharingButton("Remove this outside-scope group","sharingRemoveOutside()",e.busy):"");
   }else if(["manifest","endpoints"].includes(e.mode)){
-    content=`<p>Enter the private addresses of the Cinema providing the libraries. Copy the sharing certificate pin shown on that host’s Sharing page and verify it with that Cinema’s administrator. Saving addresses does not check connectivity or configure Tailscale.</p>`+e.endpoints.map((row,i)=>`<fieldset><legend>Endpoint ${i+1}</legend>${[["ipv4","Tailnet IPv4"],["ipv6","Tailnet IPv6 (optional)"],["ts_fqdn","Private .ts.net name"],["port","Private connection port"],["spki_sha256","Sharing certificate pin"]].map(([key,label])=>`<label>${label}<span class="hint">${esc({ipv4:"Copy the host’s Tailscale IPv4 address (100.64–100.127).",ipv6:"Copy its Tailscale IPv6 address if available.",ts_fqdn:"Copy its full private .ts.net name from Tailscale.",port:"Use the host’s published TCP Serve port, normally 32443; the internal TLS port is 32444.",spki_sha256:"Copy the 64-character public-key pin from that host’s Sharing page. Verify it through a trusted channel."}[key])}</span><input value="${esc(String(row[key]??""))}" autocomplete="off" autocapitalize="none" spellcheck="false" oninput="sharingEndpointEdit(${i},'${key}',this.value)"${e.busy?" disabled":""}></label>`).join("")}${sharingButton("Remove",`sharingEndpointCount(false,${i})`,e.busy||e.endpoints.length<=1)}</fieldset>`).join("")+sharingButton("Add endpoint","sharingEndpointCount(true)",e.busy||e.endpoints.length>=4)+`<label><input type="checkbox" onchange="sharingEdit('confirm',this.checked)"${e.confirm?" checked":""}${e.busy?" disabled":""}>I checked these certificate pins with the Cinema that provides the libraries.</label>`;
+    content=`<p>${e.mode==="manifest"?"Configure the machine serving this Cinema’s libraries.":"Use the details of the other Cinema providing the libraries."} The addresses come from Tailscale. ${e.mode==="manifest"?"Cinema fills in this serving node’s certificate pin for its first endpoint when available.":"Use the certificate pin from the Cinema providing the libraries."} Saving addresses does not check connectivity or configure Tailscale.</p>`+e.endpoints.map((row,i)=>sharingEndpointFieldsHTML(row,i,e.busy||e.saved)).join("")+sharingButton("Add endpoint","sharingEndpointCount(true)",e.busy||e.saved||e.endpoints.length>=4)+`<p>Saving trusts the Cinema certificate pins entered above. Check that they match the serving Cinema’s Sharing page.</p>`;
   }else if(["rotate","disconnect","revoke"].includes(e.mode))content=`<p>${e.mode==="rotate"?"Replace this Source credential?":e.mode==="disconnect"?"Disconnect this Source and stop using its shared libraries?":"Revoke this recipient's library access?"}</p>`;
-  return `<h3>${esc(titles[e.mode]||"Sharing")}</h3>${e.error?`<p role="alert">${esc(e.error)}</p>`:""}${e.saved?'<p role="status">Saved. Reload before making another change.</p>':""}${content}<p>${sharingButton(e.returnInvite?"Return to invitation":"Back","sharingCloseEditor()",e.busy)} ${!["code"].includes(e.mode)?sharingButton(e.mode==="invite"?"Create":e.mode==="approve"?"Approve":"Save","sharingSave()",e.busy||!e.ready||e.saved||(e.mode==="invite"&&e.needsEndpoints)):""} ${["invite","scope","matrix","manifest","endpoints"].includes(e.mode)?sharingButton("Reload current data","sharingEditorReload()",e.busy):""}</p>`;
+  const addresses=["manifest","endpoints"].includes(e.mode),inviting=e.mode==="invite",feedbackAtEnd=addresses||inviting,saving=e.busy&&e.action==="save";
+  const error=e.error?`<p role="alert">${addresses&&!e.saved?(e.sent?"Save not confirmed. ":"Addresses not saved. "):inviting?(e.sent?"Invitation creation not confirmed. ":"Invitation not created. "):""}${esc(e.error)}</p>`:"";
+  const status=e.saved?(addresses?"Addresses saved. Connectivity has not been tested.":"Saved. Reload before making another change."):saving?(inviting?"Creating invitation…":"Saving…"):"";
+  const feedback=`<div id="sharing-editor-feedback" tabindex="-1">${error}<p role="status" aria-live="polite">${esc(status)}</p></div>`;
+  const saveLabel=addresses?(e.saved?"Saved":saving?"Saving…":"Save"):inviting?(saving?"Creating…":"Create"):e.mode==="approve"?"Approve":"Save";
+  return `<h3>${esc(titles[e.mode]||"Sharing")}</h3>${feedbackAtEnd?"":feedback}${content}${feedbackAtEnd?feedback:""}<p>${sharingButton(e.returnInvite?"Return to invitation":"Back","sharingCloseEditor()",e.busy)} ${e.mode!=="code"?sharingButton(saveLabel,"sharingSave()",e.busy||!e.ready||e.saved||(e.mode==="invite"&&e.needsEndpoints)):""} ${["invite","scope","matrix","manifest","endpoints"].includes(e.mode)?sharingButton(addresses&&e.saved?"Edit addresses":"Reload current data","sharingEditorReload()",e.busy):""}</p>`;
 }
 async function sharingMutation(path,method,body,capture,key="updated"){const reply=await sharingRequest(path,{method,body,capture});if(reply?.[key]!==true)throw new Error("Sharing update did not return a confirmed result");return reply;}
 async function sharingSave(){
@@ -278,7 +337,7 @@ async function sharingSave(){
       if(e.needsEndpoints)throw new Error("Set up this Cinema’s private addresses, then return to this invitation. Your selected libraries are kept.");
       let r;try{r=await sharingRequest("/sharing/invitations",{method:"POST",body:{library_ids:e.selected,ttl_seconds:86400n},capture:c});}
       catch(error){if(error.status===409&&error.code==="sharing_endpoints_unavailable"){e.needsEndpoints=true;throw new Error("This Cinema’s addresses are no longer configured. Configure them, then return to this invitation. Your selected libraries are kept.");}throw error;}
-      sharingUUID(r.id);sharingInvitation(r.invitation);s.invitation=r;
+      sharingUUID(r.id);sharingInvitation(r.invitation);s.invitation=r;s.invitationCopyNotice="";
     }else if(mode==="import"||mode==="repair"){
       const path=mode==="import"?"/sharing/imports":"/sharing/imports/"+sharingUUID(e.row.import.id)+"/re-pair";
       const body={invitation:sharingInvitation(e.text)};if(mode==="repair")body.expected_lifecycle_generation=sharingInteger(e.row.import.lifecycle_generation);
@@ -294,10 +353,16 @@ async function sharingSave(){
       const m=e.matrix;sharingBoundSnapshot(m.snapshot,e.row);sharingAssignments(m.groups);
       await sharingMutation("/sharing/imports/"+sharingUUID(e.row.import.id)+"/assignments","PUT",{expected_assignment_generation:sharingInteger(m.snapshot.expected_assignment_generation),assignments:m.groups},c);
     }else if(mode==="manifest"||mode==="endpoints"){
+      e.error="";
+      for(const row of e.endpoints){
+        if(!row.dns_parts)continue;
+        const machine=row.dns_parts.machine_name.trim().toLowerCase(),tailnet=row.dns_parts.tailnet_dns_name.trim().toLowerCase().replace(/\.$/,"");
+        if(!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(machine))throw new Error("Copy just the Machine name from Tailscale → Machines, such as cinema. Put the tailnet name in the separate Tailnet DNS name field.");
+        if(!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ts\.net$/.test(tailnet))throw new Error("Copy the Tailnet DNS name from Tailscale → DNS, such as tail123abc.ts.net. Cinema adds the machine name automatically.");
+      }
       const rows=e.endpoints.map(r=>{let port=r.port;if(typeof port==="string"){if(!/^[1-9][0-9]{0,4}$/.test(port))throw new Error("Use a canonical port");port=BigInt(port);}return sharingEndpoint({...r,port});});sharingEndpoints(rows);
-      const old=mode==="manifest"?new Set():new Set(e.row.import.endpoints.map(r=>r.spki_sha256));const newPin=rows.some(r=>!old.has(r.spki_sha256));if(newPin&&!e.confirm)throw new Error("Confirm the new certificate pins before saving");
       const expected=mode==="manifest"?sharingInteger(e.manifestRevision,0n):sharingInteger(e.row.import.endpoint_generation);if(expected===9223372036854775807n)throw new Error("Endpoint generation is exhausted");
-      await sharingMutation(mode==="manifest"?"/sharing/endpoints":"/sharing/imports/"+sharingUUID(e.row.import.id)+"/endpoints","PUT",mode==="manifest"?{expected_revision:expected,endpoints:rows}:{expected_endpoint_generation:expected,endpoints:rows,confirm_new_pins:!!e.confirm},c);
+      await sharingMutation(mode==="manifest"?"/sharing/endpoints":"/sharing/imports/"+sharingUUID(e.row.import.id)+"/endpoints","PUT",mode==="manifest"?{expected_revision:expected,endpoints:rows}:{expected_endpoint_generation:expected,endpoints:rows,confirm_new_pins:true},c);
       if(mode==="manifest"){
         e.saved=true; // The PUT is confirmed, even when its follow-up read fails.
         try{await sharingReadManifest(c);}catch(error){throw new Error("Addresses were saved, but current address information could not be refreshed. Reload to check it; no save was retried.");}
@@ -308,7 +373,7 @@ async function sharingSave(){
       await sharingMutation(mode==="disconnect"?"/sharing/imports/"+sharingUUID(e.row.import.id):"/sharing/exports/"+sharingUUID(e.row.grant.id),"DELETE",null,c,mode==="disconnect"?"disabled":"revoked");
     }else throw new Error("Unsupported Sharing edit");
     e.saved=true;
-  });
+  },"save");
 }
 async function sharingReload(){await sharingWork(async(s)=>{
   const [imports,exports,status]=await Promise.all([sharingManagementRead("/sharing/imports",s.requestCapture),sharingManagementRead("/sharing/exports",s.requestCapture),sharingManagementRead("/sharing/status",s.requestCapture)]);

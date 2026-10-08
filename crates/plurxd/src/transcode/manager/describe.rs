@@ -169,6 +169,44 @@ impl TranscodeManager {
         self
     }
 
+    /// Benchmarks share the background lane and reserve the software budget so
+    /// production demand can preempt them before it waits for an encode slot.
+    pub(crate) async fn admit_transcoder_benchmark(
+        &self,
+    ) -> Option<(
+        tokio::sync::MutexGuard<'_, ()>,
+        tokio::sync::OwnedSemaphorePermit,
+        crate::admission::TranscodePermit,
+    )> {
+        if !self.pretranscode_worker_idle() {
+            return None;
+        }
+        let lane = self.background_producer.try_lock().ok()?;
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
+        let budget = self.software_budget().await;
+        let estimate = crate::admission::TranscodeResourceEstimate {
+            hardware_slot: self.caps.nvenc
+                || self.caps.qsv
+                || self.caps.vaapi
+                || self.caps.videotoolbox,
+            cpu_threads: budget.max(crate::transcoder_optimization::benchmark_threads()),
+            decoder_threads: None,
+        };
+        let permit = self.admissions.try_admit_bundle(
+            self.max_hw_sessions().await,
+            budget,
+            &estimate,
+            Priority::Background,
+        )?;
+        Some((lane, heavy, permit))
+    }
+
+    pub(crate) fn transcoder_benchmark_must_yield(&self) -> bool {
+        self.pretranscode_publication_yield_reason().is_some()
+    }
+
     /// Choose the encoder given the admin preference setting (empty = auto).
     pub(super) async fn encoder(&self) -> Encoder {
         let prefer = self

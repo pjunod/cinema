@@ -9583,7 +9583,8 @@ mod tests {
         //    migration tests in `store::hiqlite`; what matters here is that
         //    the learner is not the node that does it.
         let learner_client = learner.local_client.clone().expect("learner client");
-        let previous_schema = crate::store::AUTH_SCHEMA_VERSION - 1;
+        // 80 and 81 remain readable compatibility layouts; 79 requires migration.
+        let previous_schema = crate::store::AUTH_SCHEMA_BASELINE_VERSION - 2;
         source_client
             .execute(
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -9608,7 +9609,7 @@ mod tests {
         source_client
             .execute(
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-                hiqlite::params!(crate::store::AUTH_SCHEMA_VERSION),
+                hiqlite::params!(crate::store::AUTH_SCHEMA_BASELINE_VERSION),
             )
             .await
             .expect("restore the replicated schema marker");
@@ -9699,7 +9700,8 @@ mod tests {
 
         let current = replicated_schema_version(&client).await;
         assert_eq!(current, crate::store::AUTH_SCHEMA_BASELINE_VERSION);
-        let behind = current - 1;
+        // Both baseline 81 and sharing 80 are readable; 79 needs migration.
+        let behind = current - 2;
         client
             .execute(
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -9758,8 +9760,9 @@ mod tests {
         // The voter arm is the one that may migrate, and it opens the same
         // cluster through `open_or_migrate`.
         // Reconstruct the preceding schema, rather than rewinding only its
-        // marker: migration 70 creates these tables and must actually execute.
+        // marker: migrations 80–81 create these tables and must actually execute.
         for table in [
+            "sharing_ingress_custody",
             "sharing_delivery_grants",
             "sharing_relay_upstream",
             "sharing_endpoint_manifest",
@@ -9778,7 +9781,7 @@ mod tests {
             client
                 .execute(format!("DROP TABLE {table}"), hiqlite::params!())
                 .await
-                .expect("remove the test fixture's migration-70 tables");
+                .expect("remove the test fixture's migration-80/81 tables");
         }
         client
             .execute(
