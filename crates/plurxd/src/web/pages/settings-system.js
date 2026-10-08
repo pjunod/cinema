@@ -14,7 +14,7 @@ let USER_DRAWER=null;
 function openUserDrawer(id){
   USER_DRAWER=(USER_DRAWER===id)?null:id;
   renderSettings();
-  const first=document.querySelector(".setdrawer input"); if(first) first.focus();
+  const first=/** @type {HTMLInputElement} */(document.querySelector(".setdrawer input")); if(first) first.focus();
 }
 // The add form and the password reset are the same drawer: a password typed
 // twice. Reset used to be two prompt() dialogs; a form with a confirm field
@@ -229,14 +229,14 @@ function transcoderCard(sys){
     <button class="ghost" onclick="optimizeNodeTranscoder(this)"${optimization.running?" disabled":""}>${optimization.running?"Optimizing…":"Optimize"}</button></div>`;
 }
 async function optimizeNodeTranscoder(button){
-  const field=document.getElementById("node-hwaccel"), node_id=field.dataset.nodeId;
+  const field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")), node_id=field.dataset.nodeId;
   button.disabled=true;
   try{
     await api("/system/transcoder",{method:"POST",body:JSON.stringify({node_id})});
     if(SETTINGS_DATA.sys&&SETTINGS_DATA.sys.node_id===node_id){
       SETTINGS_DATA.sys.transcoder_optimization={...(SETTINGS_DATA.sys.transcoder_optimization||{}),running:true,error:null};
       const card=document.getElementById("transcoder-card");
-      if(card){const draft=field.value;card.outerHTML=transcoderCard(SETTINGS_DATA.sys);document.getElementById("node-hwaccel").value=draft;}
+      if(card){const draft=field.value;card.outerHTML=transcoderCard(SETTINGS_DATA.sys);/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")).value=draft;}
     }
 
   }catch(error){toast(error.message||"Could not start optimization");button.disabled=false;}
@@ -247,11 +247,11 @@ async function pollTranscoderOptimization(node_id,generation){
     const sys=await api("/system");
     if(!settingsCurrent(generation,"system")||!SETTINGS_DATA.sys||SETTINGS_DATA.sys.node_id!==node_id||sys.node_id!==node_id)return;
     SETTINGS_DATA.sys=sys;
-    const card=document.getElementById("transcoder-card"), field=document.getElementById("node-hwaccel");
+    const card=document.getElementById("transcoder-card"), field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel"));
     if(card&&field&&field.dataset.nodeId===node_id){
       const draft=field.value;
       card.outerHTML=transcoderCard(sys);
-      const next=document.getElementById("node-hwaccel");
+      const next=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel"));
       if(Array.from(next.options).some(option=>option.value===draft))next.value=draft;
     }
 
