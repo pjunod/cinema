@@ -4626,3 +4626,38 @@ source = "crates/plurxd/src/web/pages/sharing-management.js"
 source_anchor = "async function sharingConfigureAddresses()"
 test = "tests/web/sharing-management.test.js"
 test_anchor = "invitation address setup preserves selected libraries and never posts until configured"
+
+# Cinema remote task source regressions; physical acceptance is separate.
+[[fixes]]
+id = "apple.cinema-remote-restricted-navigation"
+commits = ["93f821c0f320ab091b2adb8870fd0e5b17eaa81e"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "guard !blocked else { return .restrictedSurface }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testRestrictedModalFencesAllActionsAndSensitiveState"
+
+[[fixes]]
+id = "apple.cinema-receiver-sequence-before-effect"
+commits = ["74b4bbf5980d31f9fa2d04614ec87ebbd615debd"]
+source = "clients/apple/Sources/RemoteReceiverGuard.swift"
+source_anchor = "lastSequence = command.sequence"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testSequenceConsumedBeforeSynchronousEffectAndRejectedEffectIsNotReplayed"
+
+[[fixes]]
+id = "apple.cinema-strict-nested-command"
+commits = []
+supplements = "apple.cinema-receiver-sequence-before-effect"
+source = "clients/apple/Sources/RemoteAPI.swift"
+source_anchor = "for command in commands { _ = try CinemaRemoteCommand.decode"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testCanonicalWireFixturesAndStrictNestedPollDecode"
+
+[[fixes]]
+id = "apple.cinema-physical-preview-owner"
+commits = []
+supplements = "apple.cinema-receiver-sequence-before-effect"
+source = "clients/apple/Sources/RemotePreviewOwnership.swift"
+source_anchor = "return owns(current) ? nil : current"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testPhysicalScrubSurvivesUnrelatedInputAndOnlyNetworkPreviewIsCancelled"
