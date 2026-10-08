@@ -1,6 +1,6 @@
 # Growing HLS resume — distinguish server preparation from item readiness
 
-**Status:** built; physical acceptance open · **Written:** 2026-10-08 · **Base:** `f0c597df20297fe33c8016a6f027cc06ac54b26e`
+**Status:** built; physical acceptance open · **Written:** 2026-10-08 · **Investigation base:** `f0c597df20297fe33c8016a6f027cc06ac54b26e`
 
 Companion to [APPLE-BLACK-VIDEO-IMPLEMENTATION.md](APPLE-BLACK-VIDEO-IMPLEMENTATION.md) (the separate diagnostic-process incident) and [PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md) (which owner may report a failure). This document explains Naked Gun's premature preparation error, specifies its bounded repair, and records the evidence that does and does not establish an incident resolution.
 
@@ -178,3 +178,5 @@ After the two identity records, `make history-check` passed: 3,383 corrective co
 The first candidate gate (run 4474) caught three repository-contract defects: the extra post-staged-poll continuation reused a fence name even though the census requires one case per continuation; two already-merged Pi status headers still claimed pending merge; and documentation contained machine-specific evidence names/URLs. The continuation now has its own `recoveryEvidenceAfterStagedPoll` case with the same `.open` scope, recorded in the census. Documentation uses neutral repository infrastructure names and the Pi headers record their actual PR #889 landing. No validation rule or allowlist was relaxed. All four run-4474 start/final preflight and Python journals were retained before changing the candidate; no CI attempt was rerun in place.
 
 Final corrected source verification: all 866 tvOS and 882 iOS tests passed again with zero failures, and both Release builds passed. The 33 affected repository-contract tests and four docs-index tests passed. The new fence is also included in the existing exact-scope, pause-survival and previous-title rejection tests. The normal pinned hook passed after the correction. PR #914 carries 15 checked regression references; its current qualification and immutable merge receipt are recorded in the PR. Physical acceptance remains open.
+
+Main advanced through PR #915 during qualification. The candidate integrates `a3158eadc9a4f26d2d8293b4a91f23a94c9012b6`; the Apple source tree is unchanged from the fully tested candidate. The two additive catalog conflicts preserve both contributions, including the verified historical landing identities and the already-landed errata. Qualification must run again against this current base; the earlier successful component jobs do not authorize merging a different combined tree.

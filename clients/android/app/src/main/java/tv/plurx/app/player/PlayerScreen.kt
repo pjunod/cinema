@@ -161,6 +161,7 @@ import tv.plurx.app.ui.components.sourceDynamicRange
 import tv.plurx.app.ui.components.tvFocusRing
 import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Muted
+import tv.plurx.app.ui.theme.OnBg
 import tv.plurx.app.ui.theme.Surface
 
 private data class Plan(
@@ -2137,7 +2138,7 @@ private fun PlayerSettings(
             }
         }
         Text("Audio sync", color = Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 12.dp))
-        Text(offsetLabel(offset), color = Color.White, style = MaterialTheme.typography.bodyMedium)
+        Text(offsetLabel(offset), color = OnBg, style = MaterialTheme.typography.bodyMedium)
         declaredOffsetMs?.let {
             Text("Container declares ${if (it > 0) "+" else ""}$it ms (already honored)", color = Muted, style = MaterialTheme.typography.labelMedium)
         }
@@ -3030,7 +3031,7 @@ internal fun videoHealthSummary(
 }
 
 @Composable
-private fun PlayerPanelSurface(title: String, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+internal fun PlayerPanelSurface(title: String, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
@@ -3053,7 +3054,7 @@ private fun PlayerPanelSurface(title: String, onDismiss: () -> Unit, content: @C
 }
 
 @Composable
-private fun PanelRow(
+internal fun PanelRow(
     label: String,
     selected: Boolean,
     modifier: Modifier = Modifier,
@@ -3061,7 +3062,7 @@ private fun PanelRow(
 ) {
     Text(
         (if (selected) "●  " else "    ") + label,
-        color = if (selected) Accent else Color.White,
+        color = if (selected) Accent else OnBg,
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         modifier = modifier
             .fillMaxWidth()
@@ -3072,7 +3073,7 @@ private fun PanelRow(
 }
 
 @Composable
-private fun PanelSwitch(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+internal fun PanelSwitch(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -3082,7 +3083,7 @@ private fun PanelSwitch(label: String, checked: Boolean, onCheckedChange: (Boole
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = Color.White, modifier = Modifier.weight(1f))
+        Text(label, color = OnBg, modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = null)
     }
 }

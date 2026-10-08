@@ -70,6 +70,7 @@ struct GenerationLifetime {
     writers: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     receipt: StdMutex<Option<ConfirmedProducerReap>>,
     settled: Notify,
+    retirement: tokio_util::sync::CancellationToken,
 }
 
 /// Owned only by the actual stdout/diagnostic task, so it lives and dies with
@@ -112,6 +113,12 @@ impl ConfirmedProducerReap {
     }
 }
 impl ProducerRegistration {
+    /// Stops only acquisition of new publication locks. Actual writes must
+    /// settle before the writer barrier releases this generation's resources.
+    pub(crate) fn retirement(&self) -> tokio_util::sync::CancellationToken {
+        self.0.retirement.clone()
+    }
+
     pub(crate) fn same_generation(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -182,6 +189,9 @@ fn owned_reap(
         changed: Notify::new(),
     });
     let completed = Arc::clone(&operation);
+    if let Some(generation) = generation.as_ref() {
+        generation.0.retirement.cancel();
+    }
     let _ = child.start_kill();
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(async move{
@@ -363,6 +373,7 @@ impl ProducerSlot {
             writers: Mutex::new(Some(receiver)),
             receipt: StdMutex::new(None),
             settled: Notify::new(),
+            retirement: tokio_util::sync::CancellationToken::new(),
         }));
         self.attach_resources_registered(
             child,
