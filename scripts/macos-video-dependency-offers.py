@@ -12,6 +12,160 @@ MODEL = "opus_data-a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b60
 ALIASES = {"openssl": "openssl-3.6.3", "xz": "v5.8.3", "libpng": "v1.6.58"}
 
 
+# Exact audited generated outputs of the historical reconstruction. These are
+# not a reusable exemption for arbitrary configure/autoreconf modifications.
+HISTORICAL_GENERATED = {
+    "lame/ACM/ADbg/Makefile.in": {
+        "compiled_sha256": "a3ebff443ecb118eb6c7c83bd4447b65f3e3ed3460d2ca74ce05f6179230100e",
+        "original_sha256": "6ca61ff92cddad19b968048c99988c966c77a6943dfe25b9cfdbfac6dc6d349a"
+    },
+    "lame/ACM/Makefile.in": {
+        "compiled_sha256": "447275356de270d76a148ba92ef49e235e59c395151afaa87ec7994cbc0b486c",
+        "original_sha256": "bec2d6e956aa5add44ec17de9079a5e091a0cd6e9d7768c3a070021975c2a536"
+    },
+    "lame/ACM/ddk/Makefile.in": {
+        "compiled_sha256": "c0cbb11526dfa9298f45e67afcf7d982870c5f9a2ba7d1fd2487890241071ca5",
+        "original_sha256": "111df63de7448a1ddd40b300b3d2755a276d254ce8495a1717ef0f74275277b5"
+    },
+    "lame/ACM/tinyxml/Makefile.in": {
+        "compiled_sha256": "feb252042154d590e3a5a8dad529ea4e5913c1055012f810101ce76f92dc3b47",
+        "original_sha256": "d33512187403986b5d5aaabe2e5e3057301c24a68708c3d48873d0e1612134a4"
+    },
+    "lame/Dll/Makefile.in": {
+        "compiled_sha256": "4dd8c3c0bcea082d3f0407e0fa19b86347e5ead05e8263fb6ab408d467e52927",
+        "original_sha256": "862a57a0dad5d547e7f07100895fc702ff05ae5d88c25f5e29b2c72cd8a6e109"
+    },
+    "lame/Makefile.in": {
+        "compiled_sha256": "78bb6d06ebcd0dc71d869a75e2a4aa305c75afa751ada62e3b415296d624c718",
+        "original_sha256": "f4561e3e620946605df15100cd477322f0819858dd93982731fa1e94ef77cb39"
+    },
+    "lame/aclocal.m4": {
+        "compiled_sha256": "58f65159438d2a96c50d554e5879effc67ce4f2525c21c68541cf0b364105480",
+        "original_sha256": "bb5375b9d050d63c8d6ee5f9b726a15a3a0d3d08b93c739cc0193c427d258ff7"
+    },
+    "lame/compile": {
+        "compiled_sha256": "ca2177d6b85b76639352270d694bc28b9ba348c315b2427242af886c1d9945f9",
+        "original_sha256": "c207b390aac6323062b982214a6c63448e53e6911107993abe96f35fe7a30a18"
+    },
+    "lame/config.guess": {
+        "compiled_sha256": "ac18bbd7dc3769e1646af49ebba331a391829f4a73579b735dc8d439bd1c7f07",
+        "original_sha256": "7791fa2c24a0aa966399c7ae9265b1a421b442610db487a429378b7103a6bd28"
+    },
+    "lame/config.h.in": {
+        "compiled_sha256": "98d307748dfd67aa19ab2ca74a316849295a8e507c2d93b875ad6624979fc6a7",
+        "original_sha256": "c8887db5e2b18cde3128b928b5bc3c203c7bfa407c436e3f42f98d6969d723fe"
+    },
+    "lame/config.rpath": {
+        "compiled_sha256": "46e05ef0ed1805729438662c040e85b0abdeba5fbedd448c4d79a3f0f3af6250",
+        "original_sha256": "9b98b066c0c2902f32984613cb7454b73f1cb93a83422666d73b3c08731a5c80"
+    },
+    "lame/config.sub": {
+        "compiled_sha256": "f9a31e9a3f5b7cbeb8d8c3f2015895a51e7222130114c9c363fcbccd78e4bf6b",
+        "original_sha256": "4431bef46ac3d3bee68f283f48d8b94caba57d2f566f8a72b61e92cbad2b8385"
+    },
+    "lame/configure": {
+        "compiled_sha256": "42df2e302306ded631132a7a6500888bba5d924d933d7f88fde01e1aa293e4aa",
+        "original_sha256": "c38336c09e42947f55dc2e0cd2605625074e1c69df960656f0b7175ce5471515"
+    },
+    "lame/depcomp": {
+        "compiled_sha256": "e3d3ec05f44de5e3f6100d2894c453a1254a8ad9e2ba3a3aa046476187d9179b",
+        "original_sha256": "e44b49f71b265788187993090027193a6cd2b4718f9aa7be34412f537bce6873"
+    },
+    "lame/doc/Makefile.in": {
+        "compiled_sha256": "ccc692ef5f4d35182168a8c9a8642acbbde697376c45319dfa567aae3100af92",
+        "original_sha256": "a399bd2262f0263e730e9f539f8ebf8f990a3a8fc8feba458771486c7724df14"
+    },
+    "lame/doc/html/Makefile.in": {
+        "compiled_sha256": "0906ecd4919eec2e522a6d8a22457eea4b902141e71325767c6d9992792a62ed",
+        "original_sha256": "150febc18c096328ca6819833703126bb612c7a1112f9587388d19c5a34de288"
+    },
+    "lame/doc/man/Makefile.in": {
+        "compiled_sha256": "e5e9566bf9723c9fd70cd6696ccd885602aa7b13afee5ab48f7ba1f110c214ae",
+        "original_sha256": "7ff14d3ebe1ddba4c633798a2e6d866d9f7f6bda93fab28f6ed7a3a689fcc3e2"
+    },
+    "lame/dshow/Makefile.in": {
+        "compiled_sha256": "33a3394affdb3386f6f4215a57b84940531e75227dbcc1c838d936c6abee0a2c",
+        "original_sha256": "d334247617f92f8ec9a298d144416fab4b95b51d50aee63e7218aa1c084a003e"
+    },
+    "lame/frontend/Makefile.in": {
+        "compiled_sha256": "a45bc39c755386f88b13b8dc56f583beb28086342f6b39294c78ddcb75057c14",
+        "original_sha256": "e07ccc4893d9f52f8c4c0f9ea167520123690781ba3af87a9a3988de18e8e415"
+    },
+    "lame/include/Makefile.in": {
+        "compiled_sha256": "6da9fa29dca38df02873da9b682b7f9c84750d8e2745699d11c00d2bfd53ef2c",
+        "original_sha256": "e020777f6f79478b94a48b0b98ec45f661045226a6e0ff9790219c75c91af4ea"
+    },
+    "lame/install-sh": {
+        "compiled_sha256": "776876b3909b096439109a4c7642eb0f9100f6ba3fb42fa93d05351e50a0a7ef",
+        "original_sha256": "3d7488bebd0cfc9b5c440c55d5b44f1c6e2e3d3e19894821bae4a27f9307f1d2"
+    },
+    "lame/libmp3lame/Makefile.in": {
+        "compiled_sha256": "f8940c21a4612cd1cdcb92ffcc4cf066eb6923a3ef8d3260a9a64f135f99a9e5",
+        "original_sha256": "ee3eae25ef12432eb22ef7ef3aa2e48000f3ac105d4a0f9b66cf8f2fd1e5c7f0"
+    },
+    "lame/libmp3lame/i386/Makefile.in": {
+        "compiled_sha256": "1c9721af506efe92c183ddef06ccefb8d74ca3afb3fb70aa871405c2014d5c73",
+        "original_sha256": "eeba835f7e3c78f56aa6ad4cb870bcd4d5ccf6c28bd163e1c1b986ffac0109f7"
+    },
+    "lame/libmp3lame/vector/Makefile.in": {
+        "compiled_sha256": "3c48c7689e5a5cdae983af0f8e9fe9e494b62ca621e7e07bba77a97e96e42f6b",
+        "original_sha256": "d3e7c49adfbf46bbcd22a9ab43d55aade6c4289480715551a09028c195780f19"
+    },
+    "lame/ltmain.sh": {
+        "compiled_sha256": "1473fd999be7bb9a36d9d6eeac9fbfe4ed63902fc8c0a64c722559da4a46da95",
+        "original_sha256": "30712e3401deb6e6d5255c71f7bd57f374429d220cfc199ba1f2376ab42c2e35"
+    },
+    "lame/m4/libtool.m4": {
+        "compiled_sha256": "3ab7a300db14a3aa7d1986dcec78ec21fbaaea614ca7d82c2f39a73ba0552c4a",
+        "original_sha256": "fe3baac94510d4b563ed7562035bdff366e37f9e0ac274bf10e4f22d08e8664e"
+    },
+    "lame/m4/ltoptions.m4": {
+        "compiled_sha256": "2b725d300784a63d5e71aaeac011e11b5b22f6f6017c29967085447632a7e0ae",
+        "original_sha256": "4cc29b667909fcde7a08c984367bce1a1902c860acf8774794484a2e1adeb07b"
+    },
+    "lame/m4/ltsugar.m4": {
+        "compiled_sha256": "8a19df00dbbbb911d0e633d88e53c1bdce4b722469d43a105ed2d77e8a7b4dd8",
+        "original_sha256": "0896f153a5a40546566028a4272642ae291532f3e65c25fcae950c8812b8c265"
+    },
+    "lame/m4/ltversion.m4": {
+        "compiled_sha256": "0275a2fb0b5f0cf402a9e03bfa99722da9f603ca03d81ba911ae7573558577dc",
+        "original_sha256": "40207e691ec7d3f06cedd592e50e44d7bc187b21ad791aeabdd50871b6606799"
+    },
+    "lame/m4/lt~obsolete.m4": {
+        "compiled_sha256": "e35bdbd17dcd0216a2b8a6148ffb5edb941e27f8f90eba8ba7c520043821af4e",
+        "original_sha256": "8533006830e1ea9625fc5e4c060e653eedf9d5464a9b2f5f494244ee272e2e2f"
+    },
+    "lame/mac/Makefile.in": {
+        "compiled_sha256": "44eff3f823c1a48aa74cacb81a7280e31943996b50c393e8126830cb01eef136",
+        "original_sha256": "e386775bd75cfd3dd4daebcdde46c6fbb9b98726697feeb6757252fdc9ccd654"
+    },
+    "lame/misc/Makefile.in": {
+        "compiled_sha256": "d4d4f1d712e592d315912eb04a083b782bfe0125e92e39212efbbebd77b4e4ff",
+        "original_sha256": "ba50528fe9661cc79e4165819c9feb5fa48b04a1664f01214f4c82077ab657ba"
+    },
+    "lame/missing": {
+        "compiled_sha256": "fb41d901ad637538e2a5fbaba061bf9cba408d136e35daef8552f1d1f022ec5c",
+        "original_sha256": "a9865db4f39574ff128c0312c367f070d20f81847817021ecce95fd70a610c9d"
+    },
+    "lame/mpglib/Makefile.in": {
+        "compiled_sha256": "f02edfaeb94cf386da0cca7f918a9aa7d195732c46b1c6ee34388858f2adc1c5",
+        "original_sha256": "1c74f5fc2e5d8b4914e60a51597dcd894f49e6df89dc222690a5acf72f027a08"
+    },
+    "lame/vc_solution/Makefile.in": {
+        "compiled_sha256": "108dca046d59bf4698ddd0072bfcd42cfdfa7c3c7850afd37be53a32c6513ff4",
+        "original_sha256": "0b1cd2c99bcf8e2ba5e8ab5c9949a0f2f7101edcee8d2b0322bbc881d73baee6"
+    },
+    "zlib/Makefile": {
+        "compiled_sha256": "1306b8dd6a83c94c78ae45aa022ffe3e88878d75cb2a4e110a5a83e3a5616a4b",
+        "original_sha256": "ef23b08ce01239843f1ded3f373bfc432627a477d62f945cbf63b2ac03db118a"
+    },
+    "zlib/zconf.h": {
+        "compiled_sha256": "0718a11beb3295b345fb29a63b44b654b282d82c4cd0513f6225587f2b29b8bb",
+        "original_sha256": "cb7c2c84211473b4699223edd363d3207b43b9578e739b5bf638f42204ea6e0f"
+    }
+}
+
+
 def digest(path):
     value = hashlib.sha256()
     with path.open("rb") as source:
@@ -237,6 +391,11 @@ def audit_historical_sources(root, offers, logs):
                     transform = "executed-lame-autoreconf-generated-output"
                 if role == "zlib" and member.name in {"Makefile", "zconf.h"} and "./configure" in logs:
                     transform = "executed-zlib-configure-generated-output"
+                if transform in {"executed-lame-autoreconf-generated-output", "executed-zlib-configure-generated-output"}:
+                    expected = HISTORICAL_GENERATED.get(role + "/" + member.name)
+                    observed = {"original_sha256": hashlib.sha256(original).hexdigest(), "compiled_sha256": digest(path)}
+                    if observed != expected:
+                        raise ValueError("historical generated output is not the exact audited transformation: " + role + "/" + member.name)
                 if transform is None:
                     raise ValueError("unexplained historical source difference: " + role + "/" + member.name)
                 changes.append({"role": role, "path": member.name, "transform": transform,

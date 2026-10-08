@@ -90,3 +90,18 @@ class MacosVideoDependencyOffersCase(unittest.TestCase):
         evidence.mkdir()
         with self.assertRaisesRegex(ValueError, "actual logs"):
             TOOL.retain_historical_build(self.root, evidence, lineage)
+
+    def test_logged_generation_cannot_authorize_arbitrary_generated_source(self):
+        archive = self.inputs / "lame-pinned.tar.gz"
+        original = self.root / "configure"
+        original.write_text("original generated configure\n")
+        with tarfile.open(archive, "w:gz") as output:
+            output.add(original, arcname="configure")
+        facts = {"lame": {"commit": "pinned", "kind": "git-source-archive", "sha256": TOOL.digest(archive)}}
+        self.policy.write_text(json.dumps(facts))
+        (self.inputs / "manifest.json").write_text(json.dumps(facts))
+        target = self.root / "source/builder/build/lame"
+        target.mkdir(parents=True)
+        (target / "configure").write_text("arbitrary changed generated code\n")
+        with self.assertRaisesRegex(ValueError, "exact audited transformation"):
+            TOOL.audit_historical_sources(self.root, self.inputs, "autoreconf -fi")
