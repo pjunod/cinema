@@ -459,8 +459,8 @@ impl EncodedExecutable {
         &self,
         plan: &plurx_core::transcode::ResolvedTranscode,
     ) -> bool {
-        plan.macos_processing_identity()
-            .is_none_or(|identity| identity.ffmpeg_sha256() == self.digest)
+        plan.captured_processing_ffmpeg_sha256()
+            .is_none_or(|digest| digest == self.digest)
     }
 
     pub(crate) async fn capture_program(program: &str) -> Result<Self, String> {

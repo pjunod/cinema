@@ -312,18 +312,3 @@ impl MacosProcessingSelection {
         }
     }
 }
-
-/// Captured provenance for selected strict Profile5 routes and their retries.
-/// Construction belongs to the semantic resolver; callers can only retain it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StrictDolbyPolicy {
-    identity: MacosProcessingIdentity,
-}
-impl StrictDolbyPolicy {
-    pub(crate) fn new(identity: MacosProcessingIdentity) -> Self {
-        Self { identity }
-    }
-    pub fn identity(&self) -> &MacosProcessingIdentity {
-        &self.identity
-    }
-}
