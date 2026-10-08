@@ -668,6 +668,7 @@ struct DetailView: View {
     #endif
 
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #if os(iOS)
     @Environment(\.dismiss) private var dismiss
@@ -743,6 +744,8 @@ struct DetailView: View {
             #endif
         }
         .background(Palette.bg.ignoresSafeArea())
+        .remoteRestricted(play != nil)
+        .onAppear { remoteNavigation.setOrder(scope: "item:\(itemId)", keys: ["detail:play"], columns: 1) }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
@@ -804,17 +807,21 @@ struct DetailView: View {
                            )
                        })
                 .id(ctx.id)
+                .remoteRestricted()
                 .environmentObject(model)
         }
         #if os(iOS)
+        .remoteRestricted(reader != nil || offlineReader != nil)
         .fullScreenCover(item: $reader, onDismiss: {
             Task { detail = try? await model.itemDetail(itemId) }
         }) { context in
             if context.format == "pdf" {
                 PDFReaderView(context: context)
+                    .remoteRestricted()
                     .environmentObject(model)
             } else {
                 ReaderView(context: context)
+                    .remoteRestricted()
                     .environmentObject(model)
             }
         }
@@ -825,6 +832,7 @@ struct DetailView: View {
             }
         }) { book in
             OfflineBookReaderView(book: book)
+                .remoteRestricted()
         }
         #endif
     }
@@ -1747,6 +1755,7 @@ struct DetailView: View {
                     ? "▶  Resume · \(formatTime(target.startMs))"
                     : "▶  Play episode"
             ) { play = target }
+            .remoteControl("detail:play", label: "Play episode") { play = target }
             #if os(tvOS)
             .focused($tvFocusedAction, equals: .primaryAction)
             #endif
@@ -2590,6 +2599,7 @@ struct DetailView: View {
             action: action
         )
         button.focused($tvFocusedAction, equals: .primaryAction)
+            .remoteControl("detail:play", label: canResume ? "Resume" : "Play", activate: action)
         #else
         Button(action: action) {
             HStack(spacing: 8) {
@@ -2607,6 +2617,7 @@ struct DetailView: View {
         }
         .buttonStyle(IOSDetailPrimaryActionButtonStyle())
         .accessibilityLabel(canResume ? "Resume from \(formatTime(resumeMs))" : "Play")
+        .remoteControl("detail:play", label: canResume ? "Resume" : "Play", activate: action)
         #endif
     }
 

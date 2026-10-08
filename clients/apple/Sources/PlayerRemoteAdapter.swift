@@ -130,3 +130,16 @@ extension View {
     }
 }
 #endif
+
+#if os(tvOS)
+/// Owned browsing modal Exit uses the same physical-adapter home as playback.
+struct RemoteChoiceExitAdapter: ViewModifier {
+    let navigation: RemoteNavigationCoordinator
+    func body(content: Content) -> some View {
+        content.onExitCommand {
+            navigation.physicalInput()
+            navigation.closeModal()
+        }
+    }
+}
+#endif

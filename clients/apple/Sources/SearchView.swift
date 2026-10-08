@@ -2,6 +2,8 @@ import SwiftUI
 
 struct SearchView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
+    @State private var searchNonce = UUID()
     @State private var query = ""
     @State private var results: [Item] = []
     @State private var searching = false
@@ -13,12 +15,14 @@ struct SearchView: View {
     }
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 #if os(tvOS)
                 TextField("Search movies, shows, and episodes", text: $query)
                     .padding(.horizontal, screenHPad)
                     .padding(.top, 8)
+                    .remoteControl("search:field", label: "Search") {}
                 #endif
 
                 searchContent
@@ -31,8 +35,21 @@ struct SearchView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, prompt: "Movies, shows, and episodes")
+
         #endif
+        .remoteScope("search")
+        .onAppear {
+            updateRemoteOrder()
+            remoteNavigation.setSearch(scope: "search", nonce: searchNonce) { query = $0 }
+        }
+        .onDisappear { remoteNavigation.removeSearch(scope: "search", nonce: searchNonce); searchNonce = UUID() }
+        .onChange(of: results.map(\.id)) { _, _ in updateRemoteOrder() }
+        .onChange(of: remoteNavigation.requestedFocus) { _, key in
+            guard remoteNavigation.activeScope == "search", let key, key.hasPrefix("search:item:"), let id = Int(key.dropFirst(12)) else { return }
+            proxy.scrollTo(id, anchor: .center)
+        }
         .task(id: query) { await performSearch() }
+        }
     }
 
     @ViewBuilder
@@ -74,9 +91,15 @@ struct SearchView: View {
                         )
                     }
                     .posterButtonStyle()
+                    .id(item.id)
+                    .remoteControl("search:item:\(item.id)", label: item.title) { remoteNavigation.navigate(to: .item(item.id)) }
                 }
             }
         }
+    }
+
+    private func updateRemoteOrder() {
+        remoteNavigation.setOrder(scope: "search", keys: ["search:field"] + results.map { "search:item:\($0.id)" }, columns: 1)
     }
 
     private func performSearch() async {

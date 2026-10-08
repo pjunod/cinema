@@ -56,11 +56,14 @@ struct PlurxApp: App {
     @UIApplicationDelegateAdaptor(OfflineAppDelegate.self) private var appDelegate
     #endif
     @StateObject private var model = AppModel()
+    @StateObject private var remoteNavigation = RemoteNavigationCoordinator()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                .environmentObject(remoteNavigation)
+                .background(RemotePresentationProbe(navigation: remoteNavigation))
                 .preferredColorScheme(model.appearance.preferredColorScheme)
                 .fontDesign(model.theme.fontDesign)
                 .tint(Palette.accent)
@@ -76,6 +79,7 @@ enum Route: Hashable {
 
 struct RootView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @ObservedObject private var downloads = OfflineDownloadManager.shared
@@ -154,10 +158,15 @@ struct RootView: View {
         }
         .onChange(of: model.phase) { _, phase in
             if phase != .ready {
+                remoteNavigation.resetIdentity()
                 Task { await LiveTvPlayerController.shared.stop(clearProfile: true) }
                 Task { await LibraryChannelPlayerController.shared.stop() }
             }
         }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { remoteNavigation.invalidate() }
+        }
+        .remoteRestricted(model.phase != .ready)
         #if os(iOS)
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }

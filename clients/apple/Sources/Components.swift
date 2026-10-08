@@ -542,7 +542,9 @@ private struct MediaShelf<Content: View>: View {
 
 struct MediaRow: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     let title: String
+    var remoteShelf: String? = nil
     let items: [Item]
     var style: MediaRowStyle = .poster
     var collection: LibraryCollection?
@@ -574,10 +576,12 @@ struct MediaRow: View {
                         }
                         .shelfActionButtonStyle()
                         .accessibilityIdentifier("library-open-\(destination.id)")
+                        .remoteControl("collection:" + destination.id, label: destination.title) { remoteNavigation.navigate(to: .collection(destination)) }
                     }
                 }
                 .padding(.horizontal, screenHPad)
 
+                ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     MediaShelf(spacing: shelfSpacing, itemCount: items.count) {
                         ForEach(items) { item in
@@ -589,7 +593,9 @@ struct MediaRow: View {
                                         width: model.posterSize.posterWidth
                                     )
                                 }
+                                .id(item.id)
                                 .posterButtonStyle()
+                                .modifier(RemoteShelfItemModifier(shelf: remoteShelf, item: item))
                             case .landscape:
                                 NavigationLink(value: Route.item(item.id)) {
                                     LandscapeCard(
@@ -599,7 +605,9 @@ struct MediaRow: View {
                                         copyStyle: landscapeCopyStyle
                                     )
                                 }
+                                .id(item.id)
                                 .posterButtonStyle()
+                                .modifier(RemoteShelfItemModifier(shelf: remoteShelf, item: item))
                             case .episode:
                                 EpisodeCard(
                                     item: item,
@@ -615,6 +623,12 @@ struct MediaRow: View {
                     }
                     .padding(.horizontal, screenHPad)
 
+                }
+                .onChange(of: remoteNavigation.requestedFocus) { _, key in
+                    guard let shelf = remoteShelf, let key, key.hasPrefix(shelf + ":item:"),
+                          let id = Int(key.dropFirst((shelf + ":item:").count)) else { return }
+                    proxy.scrollTo(id, anchor: .center)
+                }
                 }
             }
             .padding(.vertical, 10)
@@ -885,4 +899,16 @@ private func shortDate(_ raw: String) -> String {
     let formatter = DateFormatter()
     formatter.setLocalizedDateFormatFromTemplate("MMM d")
     return formatter.string(from: date)
+}
+
+private struct RemoteShelfItemModifier: ViewModifier {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    let shelf: String?
+    let item: Item
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let shelf {
+            content.remoteControl(shelf + ":item:\(item.id)", label: item.title) { navigation.navigate(to: .item(item.id)) }
+        } else { content }
+    }
 }
