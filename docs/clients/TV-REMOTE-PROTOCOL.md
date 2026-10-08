@@ -57,6 +57,10 @@ TV CEC -> native host -> extension -> bound Cinema tab (local only)
 ```
 
 Use `(owner_node_id, session_id, receiver_epoch)` as the complete target.
+A separate client-generated `foreground_id` UUID lasts for one actual
+foreground lifetime, including transport reconnects and owner changes. It is
+not authority; B09 uses it for durable invitation deduplication. Generate a
+new value only after a real background-to-foreground transition.
 Session and epoch are random UUIDs. Each foreground receiver holds exactly
 one active tuple. Cancel the old channel and invalidate its credits before
 activating a replacement. Duplicate tabs are separate receivers; never
@@ -90,8 +94,8 @@ thirty seconds; changing servers or auth cancels retries immediately.
 
 ## 3. Wire envelope — explicit revisions and receiver-issued credits
 
-All bodies are UTF-8 JSON, max 16 KiB except discovery/state responses at
-64 KiB. Unknown protocol versions/actions and extra action fields are
+All bodies are UTF-8 JSON, max 16 KiB except presence requests and
+discovery/state responses at 64 KiB. Unknown protocol versions/actions and extra action fields are
 rejected; no permissive fallback into keyboard events. Integers are unsigned
 and limited to `Number.MAX_SAFE_INTEGER` for identical JavaScript semantics.
 Sequence and initialized context/focus/state revisions are positive; zero is
@@ -116,7 +120,8 @@ use UUID strings, except secrets which use unpadded base64url.
 }
 ```
 
-Bearer, `X-Cinema-Receiver-Secret`, and `X-Cinema-Grant-Secret` are headers,
+Bearer, `X-Cinema-Receiver-Secret`, `X-Cinema-Grant-Secret`, and claimant
+`X-Cinema-Pairing-Secret` proofs are headers,
 not fields copied to state or logs. CSRF defenses and origin checks follow
 the native API policy; state-changing GETs are forbidden. Responses are
 `Cache-Control: no-store`; diagnostics contain only redacted IDs and reasons.
@@ -130,7 +135,8 @@ Each advertised credit is `{ "nonce": UUID, "kind": "interaction" }` or
 `playback` applies to set_playing/seek_relative/seek_absolute/stop/choose_track/
 play_item. A credit cannot authorize another class. State exposes the class,
 never the receiver's monotonic timestamp. Mint every 250 ms while an active
-controller is connected. Keep a ring of at
+controller is connected and publish the refreshed state at that cadence.
+The five-second heartbeat applies only while idle. Keep a ring of at
 most sixteen credits; replacing a context, control epoch, or foreground
 session clears it. No wall-clock timestamp crosses the wire for expiry.
 An actor also expires queued work after 500 ms of actor-local time. That is
@@ -158,7 +164,10 @@ scrubs and credits before its own action, then publishes fresh state.
 One controller holds a fifteen-second idle control lease. Acquire through
 an explicit Use as remote tap. A second controller sees who is controlling
 and must explicitly Take over; takeover creates a new random control epoch
-and clears queues, credits, dedup and pending gestures. Physical input always
+and clears queues, credits, dedup and pending gestures. Renewal requires the
+same grant and current control epoch; a phone refreshes at most every five
+seconds while its remote UI is active. Renewal never implicitly takes over.
+Physical input always
 works and does not need this network lease. Revocation or lease loss clears
 unapplied commands. Sequence begins at 1 per control epoch; duplicate/lower
 sequences never apply again. Bounded results are keyed by `(control_epoch, sequence)` and retain the
@@ -197,6 +206,14 @@ administrator screen's labels. Apply state monotonically per target/epoch;
 ignore older replies and erase state on identity change. Cap a state at 64
 KiB and labels at 256 UTF-8 bytes. Do not publish a full DOM or library dump.
 
+Playback summary carries `media`, title, desired playing state, position and
+duration in milliseconds, and bounded track choices. `media` is exactly one
+of `{ "type": "item", "item_id": <positive safe integer> }` or
+`{ "type": "live_channel", "channel_id": <nonempty string> }`. Channel IDs
+are at most 128 UTF-8 bytes; mixed, extra or unknown fields are invalid.
+Zero duration means unknown for Live TV. Advertised capabilities determine
+whether seeking is available; this does not add a play-channel command.
+
 Acknowledgements name sequence and one of `applied`, `duplicate_or_old`,
 `expired`, `stale_target`, `stale_control`, `stale_context`, `stale_focus`,
 `restricted_surface`, `unauthorized`, `unsupported`, `busy`, `unavailable`,
@@ -222,7 +239,7 @@ Internal dispatch is an explicit tagged request enum, not an arbitrary proxy.
 |---|---|---|
 | POST `/receivers` | name/platform -> receiver_id + secret | Fresh human login; capped 20 active installations per user |
 | DELETE `/receivers/{id}` | Revoke own installation and its grants, cancel its sessions; idempotent | Human auth; not a remote semantic action |
-| POST `/sessions` | receiver_id -> target | Receiver secret |
+| POST `/sessions` | receiver_id + foreground_id -> target | Receiver secret |
 | POST `/presence` | target + bounded state -> accepted | Receiver secret |
 | POST `/poll` | target + last delivery ID -> commands or empty | Receiver secret; max 20 s |
 | POST `/ack` | target + command outcomes -> accepted | Receiver secret |
@@ -233,13 +250,33 @@ Internal dispatch is an explicit tagged request enum, not an arbitrary proxy.
 | POST `/pairing/result` | pending_id + poll secret -> pending/grant | Original claimant proof; grant secret returned once |
 | GET `/grants` | Own grants, names, created time | Human auth |
 | DELETE `/grants/{id}` | Revoke own grant; idempotent | Human auth; cannot be remotely activated on receiver |
-| POST `/control` | target + acquire/takeover/release -> control epoch | Grant secret |
+| POST `/control` | target + grant + acquire/renew/takeover/release + expected control epoch -> control | Grant secret |
 | POST `/state` | target + after revision -> state/unchanged | Grant secret; max 20 s |
 | POST `/commands` | Envelope from §3 -> 202 queued or rejection | Grant secret |
+
+Owner replies carry a monotonically increasing `response_revision`, distinct
+from receiver UI revisions. It advances on credit publication, control or
+pairing changes, revocation and expiry. Receiver polls are serial. Clients
+ignore older replies and use a local request generation to discard replies
+across account/server changes. Explicit null control wakes waiting polls
+when a lease expires. Controller state carries bounded acknowledgements;
+HTTP 202 never substitutes for the receiver's outcome.
+
+Same-grant acquire preserves the current control epoch and sequence history.
+A controller must retain its sequence allocator across closing and reopening
+the remote. If its process lost that allocator, the next explicit request to
+control must establish a fresh epoch before sending. Renew/reconnect cannot
+reset sequence numbers in an existing epoch. Retiring a controller request
+generation also clears its in-flight sending state; a late response cannot
+block a new controller forever.
 
 Use an eight-digit random pairing code, keyed hash in owner memory, 120-second
 expiry, max five failed claims per challenge, and per-user throttling of ten
 claims/minute across challenges. Never permit an unbounded code lookup scan.
+Manual pairing takes the selected TV target and eight-digit code only:
+`challenge_id` may be omitted or null, selecting that target's one current
+challenge. A QR supplies the exact challenge ID; it must match. Never ask a
+viewer to transcribe a UUID.
 Pairing screen QR contains server instance ID, target and challenge ID; put
 any code in a URL fragment, remove it after parsing, and never auto-approve.
 No long-lived secret in a QR. Every claim creates a fresh random poll secret,

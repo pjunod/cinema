@@ -49,7 +49,11 @@ merge is not permission to merge the shared effort.
 
 After review and required effort checks, integrate each packet through its
 PR. Keep corrective `Regression-Test:` lines in both PR and landing message.
-Normal hooks remain enabled. Freeze the completed effort and provide a
+Native or desktop changes under `clients/` also need an accurate
+`tests/client-fixes.toml` source/test anchor for every corrective authored
+commit. That mapping does not assert a test execution. Run `make history-check`
+before push; a missing mapping stops the gate before compilation. Normal
+hooks remain enabled. Freeze the completed effort and provide a
 main-bound PR and evidence to the batching session:
 `codex://threads/01a11907-f720-71b1-8c51-89902b919e6f`.
 That session owns batch placement, shared tests and landing in main. The

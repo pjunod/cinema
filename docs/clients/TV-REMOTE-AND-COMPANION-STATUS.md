@@ -14,13 +14,13 @@ Main integration is handed to `01a11907-f720-71b1-8c51-89902b919e6f`.
 |---|---|---|---|
 | Build docs | PR [#862](http://192.168.4.7:3000/noirr/plurx/pulls/862) | Ready; handed to batch coordinator | Documentation only; no unit suite |
 | B01 wire/receiver guard | PR [#864](http://192.168.4.7:3000/noirr/plurx/pulls/864), `3fa57aa1ba80` | No blocker in foundation scope | 11 focused regressions; pinned core compile/Clippy |
-| B02 web semantic router | PR [#865](http://192.168.4.7:3000/noirr/plurx/pulls/865), `f9026e8e70e2` | No blocker in foundation scope | 22 remote + 7 existing keyboard checks; pinned daemon compile |
+| B02 web semantic router | PR [#865](http://192.168.4.7:3000/noirr/plurx/pulls/865), `502c98761f97` | No blocker in foundation scope | 22 remote + 7 existing keyboard checks; pinned daemon compile |
 | B03 Apple navigation | PR [#863](http://192.168.4.7:3000/noirr/plurx/pulls/863), `93f821c0f320` | No blocker in foundation scope | iOS/tvOS builds, 7 focused XCTest; physical walkthrough pending |
 | B04 storage/server relay | Building on reviewed B01 dependency | Pending | Exact HTTP DTOs precede client integration |
 | B05 web companion | Waiting B04 | Pending | Two-client browser evidence pending |
-| B06 Apple receiver/companion | Building local playback/menu integration; HTTP waits for B04 | Pending | Final native compile and lifecycle evidence pending |
+| B06 Apple receiver/companion | Built draft; review corrections in progress | Reopen sequence and revoke controls under correction | iOS/tvOS compile and 14 focused checks passed before corrections; device walkthrough pending |
 | B07 Android receiver/companion | Waiting B04 | Pending | APK compile + navigation/lifecycle evidence pending |
-| B08 desktop CEC | Building on reviewed B02 dependency | Pending | Distribution boundary, host/extension checks and devices pending |
+| B08 desktop CEC | Source host/extension built | Final popup/focus review in progress | 16 Python + 10 Node checks and injected-native-port Chromium smoke; hardware pending |
 | B09 invitations | Waiting B04/B06/B07 | Pending | Provider and service eligibility pending |
 | B10 integration handoff | Waiting all | Pending | No ready implementation handoff yet |
 
@@ -46,10 +46,19 @@ They retain normal commit hooks and have not merged into the effort. Parent
 reviews are recorded on the exact heads: [B01 review](http://192.168.4.7:3000/noirr/plurx/pulls/864#issuecomment-9159),
 [B02 review](http://192.168.4.7:3000/noirr/plurx/pulls/865#issuecomment-9161),
 [B03 review](http://192.168.4.7:3000/noirr/plurx/pulls/863#issuecomment-9157).
-The aggregate effort-gate scheduling is being reconciled with the batching
-coordinator: the repository instructions require that gate, while the current
-workflow runs only on manual dispatch and conservatively enables every
-platform. No gate pass is claimed and no repeated broad matrix was launched.
+Combined draft PR [#869](http://192.168.4.7:3000/noirr/plurx/pulls/869) preserves
+all three task histories at `1041d72407d937efe265f7263926cacf332e6b22`
+(tree `5cea422aacfcdb78d9385fb0451947263b1ac270`). It is frozen and handed to
+the batching coordinator for one combined Effort development gate. No gate
+pass is claimed and no repeated broad matrix was launched. The first gate
+stopped in history preflight: B03 lacked a required client-fix anchor. The
+combined candidate adds that metadata; `make history-check` passes, and the
+coordinator dispatched one corrected run against the frozen head. The final combined
+Rust 1.97.1 daemon all-target check and complete web static target pass.
+Workspace Clippy and iOS/tvOS builds passed before a web-only generated
+manifest/type-annotation correction; the relevant native sources did not
+change. The follow-up [B02 review](http://192.168.4.7:3000/noirr/plurx/pulls/865#issuecomment-9173)
+records that correction and the unchanged TypeScript diagnostic baseline.
 Dependent task branches may merge these reviewed commits locally while
 integration remains pending; this does not merge the shared effort.
 
@@ -67,7 +76,9 @@ playback owners. Live TV pauses synchronously on Stop and preserves its
 fullscreen-before-detach ordering. Its focused command is
 `node --test tests/web/cinema-remote.test.js`; the existing held-key subset,
 player-input contract and web asset/layout checks also passed. Rust 1.97.1
-all-target daemon check and Clippy passed. Authenticated admission belongs to
+all-target daemon check and Clippy passed. The combined static check found a missing generated jsconfig row and erased
+type annotations; B02 corrected them in `502c98761f97` without changing
+runtime behavior or increasing the TypeScript baseline. Authenticated admission belongs to
 B05. Native selectors, reader/photo, DVR/guide and unregistered overlays stay
 blocked; DOM fixtures are not a browser or CEC hardware walkthrough.
 
@@ -80,6 +91,24 @@ Player/Live TV menus and receiver/network integration belong to B06. Expanded
 library groups, preplay and other unregistered controls are not evidence of
 complete couch navigation. Physical tvOS focus and lazy-grid acceptance stay
 open.
+
+## Android build loop — source compilation is available
+
+Before B07, the unchanged Android app and test APK compiled locally with
+Gradle 9.7.1, installed SDK 37.0 and JetBrains Runtime 21.0.11. This is local
+compiler evidence, not the repository's JDK 25 Docker image or device evidence.
+Docker was unavailable; no CI job was used to discover compiler errors.
+The direct command was:
+
+```bash
+cd clients/android
+ANDROID_HOME=/Users/pjunod/Library/Android/sdk \
+JAVA_HOME=/Users/pjunod/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home \
+./gradlew --no-daemon assembleDebug assembleDebugAndroidTest
+```
+
+No unit suite or instrumented test was executed by that command. B07 must
+repeat the affected compile after implementing the receiver and companion.
 
 ## Physical acceptance — never infer from compilation
 
