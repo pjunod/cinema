@@ -794,14 +794,60 @@ mod finite_hevc_init_tests {
 
     #[test]
     fn finite_hevc_plan_refuses_incomplete_parameter_sets() {
-        let mut init = produced_init();
+        let init = produced_init();
         let hvcc = init
             .windows(4)
             .position(|bytes| bytes == b"hvcC")
             .expect("record");
-        // First array starts after the 23-byte configuration header. Clearing
-        // array_completeness must retain the existing hvc1 refusal.
-        init[hvcc + 4 + 23] &= 0x7f;
-        assert!(bind_hls_init_context(plan_context(), &init, "hvc1").is_err());
+        let mut at = hvcc + 4 + 23;
+        for expected_type in 32u8..=34 {
+            assert_eq!(init[at] & 0x3f, expected_type);
+            let mut partial = init.clone();
+            partial[at] &= 0x7f;
+            assert!(bind_hls_init_context(plan_context(), &partial, "hvc1").is_err());
+            let mut reader = plurx_core::fmp4::FragmentReader::new();
+            reader.push(&partial);
+            let Some(plurx_core::fmp4::Unit::Init(parsed)) =
+                reader.next_unit().expect("valid boxes")
+            else {
+                panic!("retained init must parse");
+            };
+            assert!(!plurx_core::fmp4::hevc_parameter_sets_complete(&parsed).expect("valid hvcC"));
+            assert!(plurx_core::fmp4::validate_hevc_sample_entries(&parsed).is_err());
+            let entry = partial
+                .windows(4)
+                .position(|bytes| bytes == b"hvc1")
+                .expect("entry");
+            let mut dolby_out_of_band = partial.clone();
+            dolby_out_of_band[entry..entry + 4].copy_from_slice(b"dvh1");
+            let mut reader = plurx_core::fmp4::FragmentReader::new();
+            reader.push(&dolby_out_of_band);
+            let Some(plurx_core::fmp4::Unit::Init(parsed)) =
+                reader.next_unit().expect("out-of-band boxes")
+            else {
+                panic!("out-of-band init must parse");
+            };
+            assert!(plurx_core::fmp4::validate_hevc_sample_entries(&parsed).is_err());
+            // The same partial arrays are legal for an in-band sample entry.
+            for kind in [b"hev1", b"dvhe"] {
+                let mut in_band = partial.clone();
+                in_band[entry..entry + 4].copy_from_slice(kind);
+                let mut reader = plurx_core::fmp4::FragmentReader::new();
+                reader.push(&in_band);
+                let Some(plurx_core::fmp4::Unit::Init(parsed)) =
+                    reader.next_unit().expect("in-band boxes")
+                else {
+                    panic!("in-band init must parse");
+                };
+                plurx_core::fmp4::validate_hevc_sample_entries(&parsed)
+                    .expect("in-band arrays may be partial");
+            }
+            let count = u16::from_be_bytes([init[at + 1], init[at + 2]]) as usize;
+            at += 3;
+            for _ in 0..count {
+                let length = u16::from_be_bytes([init[at], init[at + 1]]) as usize;
+                at += 2 + length;
+            }
+        }
     }
 }
