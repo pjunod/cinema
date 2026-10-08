@@ -41,7 +41,27 @@
  
      if (s->sei.common.dynamic_hdr_vivid.info) {
          if (!av_frame_side_data_add(&out->side_data, &out->nb_side_data,
-@@ -3805,7 +3820,11 @@
+@@ -3784,10 +3799,15 @@
+      * We have to do this check here an create the rpu buffer, since RPUs are appended
+      * to the end of an AU; they are the last non-EOB/EOS NAL in the AU.
+      */
+-    if (s->pkt.nb_nals > 1 && s->pkt.nals[s->pkt.nb_nals - 1].type == HEVC_NAL_UNSPEC62 &&
+-        s->pkt.nals[s->pkt.nb_nals - 1].size > 2 && !s->pkt.nals[s->pkt.nb_nals - 1].nuh_layer_id
+-        && !s->pkt.nals[s->pkt.nb_nals - 1].temporal_id) {
+-        H2645NAL *nal = &s->pkt.nals[s->pkt.nb_nals - 1];
++    int rpu_index = s->pkt.nb_nals - 1;
++    while (rpu_index >= 0 &&
++           (s->pkt.nals[rpu_index].type == HEVC_NAL_EOB_NUT ||
++            s->pkt.nals[rpu_index].type == HEVC_NAL_EOS_NUT))
++        rpu_index--;
++    if (rpu_index > 0 && s->pkt.nals[rpu_index].type == HEVC_NAL_UNSPEC62 &&
++        s->pkt.nals[rpu_index].size > 2 && !s->pkt.nals[rpu_index].nuh_layer_id
++        && !s->pkt.nals[rpu_index].temporal_id) {
++        H2645NAL *nal = &s->pkt.nals[rpu_index];
+         if (s->rpu_buf) {
+             av_buffer_unref(&s->rpu_buf);
+             av_log(s->avctx, AV_LOG_WARNING, "Multiple Dolby Vision RPUs found in one AU. Skipping previous.\n");
+@@ -3805,7 +3825,11 @@
          if (ret < 0) {
              av_buffer_unref(&s->rpu_buf);
              av_log(s->avctx, AV_LOG_WARNING, "Error parsing DOVI NAL unit.\n");
@@ -54,7 +74,7 @@
          }
      }
  
-@@ -4132,6 +4151,7 @@
+@@ -4132,6 +4156,7 @@
      if (ret < 0)
          return ret;
  
@@ -62,7 +82,7 @@
      ff_dovi_ctx_replace(&s->dovi_ctx, &s0->dovi_ctx);
  
      ret = av_buffer_replace(&s->sei.common.dynamic_hdr_vivid.info,
-@@ -4254,6 +4274,8 @@
+@@ -4254,6 +4279,8 @@
  
  static const AVOption options[] = {
      { "apply_defdispwin", "Apply default display window from VUI", OFFSET(apply_defdispwin),
