@@ -85,6 +85,22 @@ final class TvHomeLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testTheaterPlaybackSkipsUnavailableFilesAndRejectsUnavailableTitles() throws {
+        let item = Item(id: 7, kind: "movie", title: "Movie")
+        let unavailable = MediaFile(id: 41, available: false)
+        let available = MediaFile(id: 42, available: true)
+        let detail = ItemDetail(item: item, files: [unavailable, available])
+        XCTAssertEqual(TvHomeLayoutPolicy.playbackContext(detail)?.fileId, 42)
+        XCTAssertNil(TvHomeLayoutPolicy.playbackContext(
+            ItemDetail(item: item, files: [unavailable])
+        ))
+        // Older servers can omit availability; unknown is not unavailable.
+        XCTAssertEqual(TvHomeLayoutPolicy.playbackContext(
+            ItemDetail(item: item, files: [MediaFile(id: 43)])
+        )?.fileId, 43)
+    }
+
+    @MainActor
     func testTheaterPlaybackUsesFreshDetailAndSharedResumeThresholds() throws {
         var item = Item(id: 7, kind: "episode", title: "Episode", showTitle: "Series")
         item.watch = Watch(positionMs: 120_000, watched: false)

@@ -41,7 +41,7 @@ enum TvHomeLayoutPolicy {
         let item = detail.item
         guard item.isMovieOrEpisode || item.kind == "video" else { return nil }
         let position = item.watch?.positionMs ?? 0
-        guard let file = DetailView.playbackFile(in: detail, positionMs: position) else { return nil }
+        guard let file = detail.files?.first(where: { $0.available != false }) else { return nil }
         let duration = file.durationMs ?? item.runtimeMs ?? 0
         return PlayContext(
             itemId: item.id, fileId: file.id,
@@ -119,7 +119,8 @@ struct TvTheaterHero: View {
         .background {
             GeometryReader { geometry in
                 ZStack {
-                    Palette.surfaceHi
+                    Color.black
+                    Palette.accent.opacity(0.18)
                     if let backdrop = item.backdrop {
                         AuthImage(path: backdrop, targetSize: geometry.size)
                             .frame(width: geometry.size.width, height: geometry.size.height)
@@ -130,7 +131,8 @@ struct TvTheaterHero: View {
                         startPoint: .leading, endPoint: .trailing
                     )
                     LinearGradient(
-                        colors: [.clear, Palette.bg], startPoint: .center, endPoint: .bottom
+                        colors: [.clear, .black.opacity(0.65)],
+                        startPoint: .center, endPoint: .bottom
                     )
                 }
             }
@@ -169,6 +171,7 @@ struct TvTheaterHero: View {
                 subtitle: context.subtitle, year: context.year, airDate: context.airDate,
                 overview: context.overview, onPlayNext: { play = $0 }
             )
+            .id(context.id)
             .environmentObject(model)
         }
     }
