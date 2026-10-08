@@ -315,7 +315,7 @@ fn macos_video_processing(
             requirement("sdr_scale", "Progressive SDR scaling", &report.sdr_scale),
             requirement("hdr10_metal", "HDR10 to SDR processing", &report.hdr10_metal),
             graph_requirement("hlg_metal", "HLG to SDR processing", &["hlg_metal"]),
-            graph_requirement("subtitle_burns", "SDR and HDR10 subtitle burns", &["sdr_text_burn", "hdr10_text_burn", "sdr_bitmap_burn", "hdr10_bitmap_burn"]),
+            graph_requirement("subtitle_burns", "SDR, HDR10 and HLG subtitle burns", &["sdr_text_burn", "hdr10_text_burn", "hlg_text_burn", "sdr_bitmap_burn", "hdr10_bitmap_burn", "hlg_bitmap_burn"]),
             graph_requirement("deinterlace", "SDR frame and field deinterlacing", &["sdr_bwdif_frame", "sdr_bwdif_field"]),
             graph_requirement("dolby_vision", "Strict Dolby Vision profile 5", &["p5_software_cpu", "p5_vt_tonemapx", "p5_software_metal", "p5_vt_metal"]),
             graph_requirement("live_upload", "Live TV software decode and native processing", &["live_sdr_upload_scale", "live_sdr_upload_bwdif_frame", "live_sdr_upload_bwdif_field"]),

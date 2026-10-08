@@ -107,8 +107,8 @@ function macosVideoProcessingCard(settings,readiness){
     ${devReq(readiness,"macos_video_processing","sdr_scale","Progressive SDR scaling","This worker checks a small embedded 8-bit and 10-bit source corpus.")}
     ${devReq(readiness,"macos_video_processing","hdr10_metal","HDR10 to SDR processing","HDR10 is resized at 10-bit precision before mapping to SDR; each source grade has its own compatibility observation.")}
     ${devReq(readiness,"macos_video_processing","hlg_metal","HLG to SDR processing","HLG has a separate analytical reference-white and rendering check.")}
-    ${devReq(readiness,"macos_video_processing","subtitle_burns","SDR and HDR10 subtitle burns","Text and bitmap cues use their independently checked composition graphs.")}
-    ${devReq(readiness,"macos_video_processing","deinterlace","SDR frame and field deinterlacing","TFF/BFF moving-field controls verify native deinterlacing, including frame or field cadence.")}
+    ${devReq(readiness,"macos_video_processing","subtitle_burns","SDR, HDR10 and HLG subtitle burns","Text and bitmap cues use their independently checked composition graphs.")}
+    ${devReq(readiness,"macos_video_processing","deinterlace","SDR frame and field deinterlacing","TFF/BFF moving-field controls verify native SDR deinterlacing and frame or field cadence. HDR interlaced sources keep the existing processing path.")}
     ${devReq(readiness,"macos_video_processing","dolby_vision","Strict Dolby Vision profile 5","Software/VideoToolbox decode and CPU/Metal renderers have separate metadata and fail-closed observations.")}
     ${devReq(readiness,"macos_video_processing","live_upload","Live TV software decode and native processing","Known SDR sources use explicit upload, optional native deinterlacing and scaling; Live TV keeps H264 output.")}
     ${devReq(readiness,"macos_video_processing","delivery_qualification","Visual and streaming qualification","Runtime smoke checks do not approve visual quality, startup, concurrency, a sustained soak or physical clients. Normalized VOD still requires supported source facts and decoder/encoder ceilings for each source.")}

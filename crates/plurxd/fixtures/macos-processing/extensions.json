@@ -546,6 +546,124 @@
       },
       "sha256": "3f90b5f07ad5e1418eca6a9450e336c8bfeaceff813a67dbb1507ae4bee6d7e0",
       "source_class": "hlg"
+    },
+    {
+      "byte_length": 12543,
+      "generation_argv": [
+        "$FFMPEG",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        "$OUTPUT/hlg.mp4",
+        "-itsoffset",
+        "0.25",
+        "-i",
+        "$OUTPUT/cue.sup",
+        "-map",
+        "0:v",
+        "-map",
+        "1:s",
+        "-c",
+        "copy",
+        "pgs-hlg.mkv"
+      ],
+      "id": "pgs_hlg",
+      "input_observed": {
+        "avg_frame_rate": "12/1",
+        "codec_name": "hevc",
+        "color_primaries": "bt2020",
+        "color_range": "tv",
+        "color_space": "bt2020nc",
+        "color_transfer": "arib-std-b67",
+        "field_order": "progressive",
+        "pix_fmt": "yuv420p10le",
+        "profile": "Main 10",
+        "sample_aspect_ratio": "1:1"
+      },
+      "operation": "bitmap_burn",
+      "output_expectation": {
+        "expected": {
+          "avg_frame_rate": "12/1",
+          "codec_name": "h264",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "field_order": "progressive",
+          "frame_count": 12,
+          "height": 90,
+          "sample_aspect_ratio": "1:1",
+          "width": 160
+        },
+        "forbidden_side_data": [
+          "DOVI configuration record",
+          "Dolby Vision RPU Data",
+          "Mastering display metadata",
+          "Content light level metadata"
+        ],
+        "graph_id": "vt_tonemap_hlg_metal",
+        "pixels": {
+          "format": "decoded_yuv420p",
+          "minimum_black_to_peak_y_difference": 24,
+          "neutral_gray_max_chroma_distance_from_128": 12,
+          "ordered_patch_indices": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "ordering_tolerance_y": 4,
+          "patches": [
+            {
+              "x": 10,
+              "y": 30
+            },
+            {
+              "x": 30,
+              "y": 30
+            },
+            {
+              "x": 50,
+              "y": 30
+            },
+            {
+              "x": 70,
+              "y": 30
+            },
+            {
+              "x": 90,
+              "y": 30
+            },
+            {
+              "x": 110,
+              "y": 30
+            },
+            {
+              "x": 130,
+              "y": 30
+            },
+            {
+              "x": 150,
+              "y": 30
+            }
+          ],
+          "sample_radius": 2
+        },
+        "timestamps": {
+          "absolute_tolerance_seconds": 2e-05,
+          "start_seconds": 0,
+          "step_seconds": 0.08333333333333333
+        }
+      },
+      "path": "pgs-hlg.mkv",
+      "sha256": "993f8c015b662b8d08d31152509c2b71ba08394fff2c0b7b486905a9ee741983",
+      "source_class": "hlg"
     }
   ],
   "generator_recipe_version": 1,

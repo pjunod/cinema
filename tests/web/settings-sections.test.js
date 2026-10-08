@@ -1863,5 +1863,7 @@ test("Mac processing exposes every independent implemented graph while preservin
     assert.ok(requirements.some(row=>row.id===id),id);
   assert.match(graduation,/moving-field deinterlacing, strict Dolby Vision and Live TV/);
   assert.match(html,/Live TV keeps H264 output/);
+  assert.equal(requirements.find(row=>row.id==="subtitle_burns").title,"SDR, HDR10 and HLG subtitle burns");
+  assert.match(requirements.find(row=>row.id==="deinterlace").detail,/HDR interlaced sources keep the existing processing path/);
   assert.doesNotMatch(html,/Dolby Vision, HLG, burns and interlaced sources retain their existing routes/);
 });
