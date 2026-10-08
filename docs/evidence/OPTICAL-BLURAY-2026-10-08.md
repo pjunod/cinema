@@ -50,3 +50,7 @@ No fast-lane tests, adversarial merge review, release deployment, or main merge
 are implied by this source-reader investigation. The requested main-promotion
 handoff is to the user's batched-merge session only after the optical work is
 actually ready.
+
+After the run, both disposable containers, the read-only mount, temporary key
+file, lab directory and lab image were removed. The production `plurxd`
+container remained healthy and unchanged.

@@ -40,7 +40,9 @@
     isolated lab has configured the vendor's new beta key and confirmed
     <code>libmmbd.so.0</code> loads, but the inserted disc still fails AACS frame
     decryption. See the <a href="../evidence/OPTICAL-BLURAY-2026-10-08.md">October
-    reader receipt</a>. No fast-lane tests or adversarial review have run.</p>
+    reader receipt</a>. The October lab containers, mount, key file and image
+    were removed; the production service remains healthy and unchanged. No
+    fast-lane tests or adversarial review have run.</p>
   <p><strong>Latest hardening:</strong> <code>bd5280be0</code> turns every
     unsupported managed-copy recipe and missing immutable copy index into a
     typed refusal rather than a daemon panic, and advances the optical cache
