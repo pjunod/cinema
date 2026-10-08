@@ -713,6 +713,35 @@ impl TranscodeManager {
                 }
             }
         }
+        if self.macos_hevc_output_enabled() {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            if self
+                .macos_video_report()
+                .context(false)
+                .is_some_and(|context| {
+                    context.graph(MacosProcessingGraph::HevcHdr10Host)
+                        == MacosProcessingAvailability::Available
+                })
+                && !tone_map_pipelines
+                    .iter()
+                    .any(|name| name == Pipeline::Hdr10Passthrough.name())
+            {
+                tone_map_pipelines.push(Pipeline::Hdr10Passthrough.name().to_owned());
+            }
+        }
+        if self.macos_video_processing_enabled() && self.macos_hevc_output_enabled() {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            if self
+                .macos_video_report()
+                .context(true)
+                .is_some_and(|context| {
+                    context.graph(MacosProcessingGraph::HevcHdr10)
+                        == MacosProcessingAvailability::Available
+                })
+            {
+                tone_map_pipelines.push(Pipeline::VtScaleHdr10.name().to_owned());
+            }
+        }
         MediaNodeRuntime {
             scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
             scratch_target_bytes: SCRATCH_TARGET_BYTES,

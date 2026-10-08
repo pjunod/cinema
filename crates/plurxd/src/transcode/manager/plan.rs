@@ -156,6 +156,7 @@ impl TranscodeManager {
         let context = self
             .macos_video_report()
             .context(self.macos_video_processing_enabled())
+            .map(|context| context.with_hevc_output_enabled(self.macos_hevc_output_enabled()))
             .map(|context| match excluded_pipeline {
                 Some(pipeline) => context.excluding_pipeline(pipeline),
                 None => context,
@@ -235,7 +236,8 @@ impl TranscodeManager {
     ) -> Result<ResolvedTranscode, String> {
         let context = self
             .macos_video_report()
-            .context(self.macos_video_processing_enabled());
+            .context(self.macos_video_processing_enabled())
+            .map(|context| context.with_hevc_output_enabled(self.macos_hevc_output_enabled()));
         self.resolve_movie_plan_with_processing_context(
             file,
             options,
@@ -1008,6 +1010,30 @@ impl TranscodeManager {
             );
             return Ok(OutputGrade::Sdr);
         }
+        if encoder == Encoder::VideoToolbox {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            let report = self.macos_video_report();
+            let observed = report
+                .context(self.macos_video_processing_enabled())
+                .is_some_and(|context| {
+                    context.graph(MacosProcessingGraph::HevcHdr10Host)
+                        == MacosProcessingAvailability::Available
+                        || (self.macos_video_processing_enabled()
+                            && context.graph(MacosProcessingGraph::HevcHdr10)
+                                == MacosProcessingAvailability::Available)
+                });
+            return Ok(
+                if self.macos_hevc_output_enabled()
+                    && observed
+                    && route == plurx_core::playback::HdrRoute::Passthrough
+                    && transcode::routing_hdr(file) == Some("hdr10")
+                {
+                    OutputGrade::Hdr10
+                } else {
+                    OutputGrade::Sdr
+                },
+            );
+        }
         // A hardware encoder this rung has no recipe for must not silently
         // fall back to software. Plain HDR additionally has a VAAPI Main10
         // route; Dolby reshaping still supports software/QSV only. Others would
@@ -1234,7 +1260,12 @@ impl TranscodeManager {
                 Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough_qsv,
                 _ => self.hdr10_passthrough_qsv,
             };
-            if preferred == Encoder::Qsv && qsv_proved {
+            if preferred == Encoder::VideoToolbox
+                && self.macos_hevc_output_enabled()
+                && target_height == HDR10_HEIGHT
+            {
+                Encoder::VideoToolbox
+            } else if preferred == Encoder::Qsv && qsv_proved {
                 Encoder::Qsv
             } else if preferred == Encoder::Vaapi
                 && self.hdr10_passthrough_vaapi

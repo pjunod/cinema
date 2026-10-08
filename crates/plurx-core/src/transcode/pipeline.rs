@@ -43,6 +43,8 @@ pub enum Pipeline {
     /// Metal mapping → H.264 VideoToolbox encode. HDR10 and HLG require
     /// independent complete-graph observations; Dolby is excluded.
     VtToneMapMetal,
+    /// Ordinary HDR10 P010 native scale, preserving PQ and static metadata.
+    VtScaleHdr10,
     /// NVDEC → CUDA tone-map/scale → NVENC, without a system-memory handoff.
     TonemapCuda,
     /// Intel, frames never leave the GPU: `vpp_qsv` scales and tone-maps in
@@ -135,6 +137,7 @@ impl Pipeline {
         match self {
             Pipeline::VtScaleSdr => "vt_scale_sdr",
             Pipeline::VtToneMapMetal => "vt_tonemap_metal",
+            Pipeline::VtScaleHdr10 => "vt_scale_hdr10",
             Pipeline::TonemapCuda => "tonemap_cuda",
             Pipeline::VppQsv => "vpp_qsv",
             Pipeline::TonemapVaapi => "tonemap_vaapi",
@@ -155,6 +158,7 @@ impl Pipeline {
             .chain([
                 Pipeline::VtScaleSdr,
                 Pipeline::VtToneMapMetal,
+                Pipeline::VtScaleHdr10,
                 Pipeline::DoviTonemapx,
                 Pipeline::DoviPassthrough,
                 Pipeline::Hdr10Passthrough,
@@ -167,6 +171,7 @@ impl Pipeline {
         match self {
             Pipeline::VtScaleSdr => "VideoToolbox SDR scaling",
             Pipeline::VtToneMapMetal => "Metal HDR tone-map (BT.2390 / ITP)",
+            Pipeline::VtScaleHdr10 => "VideoToolbox HDR10 scaling",
             Pipeline::TonemapCuda => "GPU tone-map (CUDA)",
             Pipeline::VppQsv => "GPU tone-map (QSV)",
             Pipeline::TonemapVaapi => "GPU tone-map (VA-API)",
@@ -201,7 +206,9 @@ impl Pipeline {
     /// anyway, which is the copy this exists to remove.
     pub fn pairs_with(self, encoder: Encoder) -> bool {
         match self {
-            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal => encoder == Encoder::VideoToolbox,
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10 => {
+                encoder == Encoder::VideoToolbox
+            }
             Pipeline::TonemapCuda => encoder == Encoder::Nvenc,
             Pipeline::VppQsv => encoder == Encoder::Qsv,
             Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => encoder == Encoder::Vaapi,
@@ -229,7 +236,10 @@ impl Pipeline {
             // Plain HDR has no RPU dependency; its VAAPI P010/Main10 graph
             // has an independent boot proof and a 1080p planner ceiling.
             Pipeline::Hdr10Passthrough => {
-                matches!(encoder, Encoder::Software | Encoder::Qsv | Encoder::Vaapi)
+                matches!(
+                    encoder,
+                    Encoder::Software | Encoder::Qsv | Encoder::Vaapi | Encoder::VideoToolbox
+                )
             }
             Pipeline::Cpu => true,
         }
@@ -249,7 +259,8 @@ impl Pipeline {
         match (self, hdr_format) {
             (Pipeline::VtScaleSdr, None | Some("sdr")) => true,
             (Pipeline::VtToneMapMetal, Some("hdr10" | "hlg")) => true,
-            (Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal, _) => false,
+            (Pipeline::VtScaleHdr10, Some("hdr10")) => true,
+            (Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10, _) => false,
             (Pipeline::Cpu, _) => true,
             (Pipeline::DoviTonemapx, Some("dolby_vision")) => true,
             (Pipeline::DoviTonemapx, _) => false,
@@ -279,7 +290,7 @@ impl Pipeline {
     pub fn decode_args(self) -> Vec<String> {
         let a = |s: &str| s.to_owned();
         match self {
-            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal => vec![
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10 => vec![
                 a("-hwaccel"),
                 a("videotoolbox"),
                 a("-hwaccel_output_format"),
@@ -408,6 +419,7 @@ impl Pipeline {
         let w = width.map_or_else(|| "-1".to_owned(), |w| w.to_string());
         Some(match self {
             Pipeline::VtScaleSdr => format!("scale_vt=w={w}:h={height}:format=nv12"),
+            Pipeline::VtScaleHdr10 => format!("scale_vt=w={w}:h={height}:format=p010le"),
             Pipeline::VtToneMapMetal => format!(
                 "scale_vt=w={w}:h={height}:format=p010le,\
                  tonemap_videotoolbox=tonemap=bt2390:tonemap_mode=itp:transfer=bt709:matrix=bt709:\
@@ -539,6 +551,7 @@ impl Pipeline {
             self,
             Pipeline::VtScaleSdr
                 | Pipeline::VtToneMapMetal
+                | Pipeline::VtScaleHdr10
                 | Pipeline::TonemapCuda
                 | Pipeline::VppQsv
                 | Pipeline::TonemapVaapi
@@ -563,7 +576,9 @@ impl Pipeline {
     /// [`Pipeline::DoviPassthrough`] ends in BT.709 8-bit.
     pub fn output_grade(self) -> OutputGrade {
         match self {
-            Pipeline::DoviPassthrough | Pipeline::Hdr10Passthrough => OutputGrade::Hdr10,
+            Pipeline::DoviPassthrough | Pipeline::Hdr10Passthrough | Pipeline::VtScaleHdr10 => {
+                OutputGrade::Hdr10
+            }
             Pipeline::VtScaleSdr
             | Pipeline::VtToneMapMetal
             | Pipeline::TonemapCuda
@@ -665,7 +680,10 @@ impl Pipeline {
         if proven == Pipeline::Cpu {
             return None;
         }
-        if matches!(proven, Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal) {
+        if matches!(
+            proven,
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10
+        ) {
             return Some("macOS processing requires its resolved compatibility context");
         }
         if !heavy {
@@ -725,6 +743,7 @@ impl Pipeline {
     /// works.
     pub fn fallback(self) -> Option<Pipeline> {
         match self {
+            Pipeline::VtScaleHdr10 => Some(Pipeline::Hdr10Passthrough),
             // A Dolby renderer has nothing below it. Falling back to the
             // non-Dolby-aware CPU zscale graph would render Profile 5 as
             // garbage rather than failing, and for the passthrough rung it

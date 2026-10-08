@@ -57,7 +57,7 @@ def main():
     parser.add_argument("--ffmpeg", required=True)
     parser.add_argument("--ffprobe", required=True)
     parser.add_argument("--initial", type=Path, required=True)
-    parser.add_argument("--hlg-helper", type=Path, required=True, help="explicit analytic HLG helper source")
+    parser.add_argument("--hlg-helper", type=Path, default=Path(__file__).with_name("generate-macos-extension-fixtures"), help="analytic HLG helper source")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if not Path(args.ffmpeg).is_absolute() or not Path(args.ffprobe).is_absolute():

@@ -187,7 +187,7 @@ impl MacosVideoReport {
             "implementation": identity,
             "sdr_scale": self.sdr_scale.diagnostics(),
             "hdr10_metal": self.hdr10_metal.diagnostics(),
-            "graphs": self.graphs.iter().map(|(graph, observation)| (serde_json::to_value(graph).expect("enum serializes"), observation.diagnostics())).collect::<Vec<_>>(),
+            "graphs": self.graphs.iter().map(|(graph, observation)| (serde_json::to_value(graph).expect("enum serializes").as_str().expect("enum string").to_owned(), observation.diagnostics())).collect::<serde_json::Map<String, Value>>(),
             "qualification": "external_advisory",
             "dependency_inventory_tool": "otool",
             "supported_dependency_scope": "apple_system_only",
@@ -303,6 +303,8 @@ struct Fixture {
     available: bool,
     duration_seconds: f64,
     expected: InputFacts,
+    #[serde(default)]
+    input_pixels: Value,
     output_expectations: Vec<OutputExpectation>,
 }
 
@@ -420,6 +422,12 @@ struct OutputExpectation {
 #[derive(Debug, Clone, Deserialize)]
 struct OutputFacts {
     codec_name: String,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    pix_fmt: Option<String>,
+    #[serde(default)]
+    codec_tag_string: Option<String>,
     width: usize,
     height: usize,
     frame_count: usize,
@@ -643,6 +651,17 @@ fn observe_output(
             return Err(fail);
         }
     }
+    for (key, expected) in [
+        ("profile", e.profile.as_deref()),
+        ("pix_fmt", e.pix_fmt.as_deref()),
+        ("codec_tag_string", e.codec_tag_string.as_deref()),
+    ] {
+        if expected
+            .is_some_and(|expected| stream.get(key).and_then(Value::as_str) != Some(expected))
+        {
+            return Err(fail);
+        }
+    }
     for frame in std::iter::once(stream).chain(frames.iter()) {
         if frame.get("width").and_then(Value::as_u64) != Some(e.width as u64)
             || frame.get("height").and_then(Value::as_u64) != Some(e.height as u64)
@@ -747,7 +766,7 @@ fn observe_output(
 const PREPARATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 const IDENTITY_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 const GRAPH_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
-const ALL_GRAPHS_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+const ALL_GRAPHS_BUDGET: std::time::Duration = std::time::Duration::from_secs(210);
 const PROBE_WORK: crate::process_control::ChildWork =
     crate::process_control::ChildWork::background("Mac processing compatibility probe");
 
@@ -1212,6 +1231,37 @@ async fn run_generation(
         };
         work.push((fixture.clone(), SmokeOperation::Text, graph));
     }
+    for fixture in &corpus.fixtures {
+        let hdr = fixture.class == "hdr10";
+        for (operation, graph) in [
+            (
+                SmokeOperation::HevcNative,
+                if hdr {
+                    MacosProcessingGraph::HevcHdr10
+                } else {
+                    MacosProcessingGraph::HevcSdr
+                },
+            ),
+            (
+                SmokeOperation::HevcHostSoftware,
+                if hdr {
+                    MacosProcessingGraph::HevcHdr10Host
+                } else {
+                    MacosProcessingGraph::HevcSdrHost
+                },
+            ),
+            (
+                SmokeOperation::HevcHostVideoToolbox,
+                if hdr {
+                    MacosProcessingGraph::HevcHdr10Host
+                } else {
+                    MacosProcessingGraph::HevcSdrHost
+                },
+            ),
+        ] {
+            work.push((fixture.clone(), operation, graph));
+        }
+    }
     for extension in extensions.fixtures {
         let base = &corpus.fixtures[if extension.source_class != "sdr" {
             2
@@ -1257,7 +1307,15 @@ async fn run_generation(
         }
     }
     for (fixture, operation, graph) in work {
-        let pipeline = if fixture.class != "sdr" {
+        let pipeline = if fixture.class == "hdr10"
+            && matches!(
+                operation,
+                SmokeOperation::HevcNative
+                    | SmokeOperation::HevcHostSoftware
+                    | SmokeOperation::HevcHostVideoToolbox
+            ) {
+            plurx_core::transcode::Pipeline::VtScaleHdr10
+        } else if fixture.class != "sdr" {
             plurx_core::transcode::Pipeline::VtToneMapMetal
         } else {
             plurx_core::transcode::Pipeline::VtScaleSdr
@@ -1511,6 +1569,9 @@ enum SmokeOperation {
     Bitmap,
     BwdifFrame,
     BwdifField,
+    HevcNative,
+    HevcHostSoftware,
+    HevcHostVideoToolbox,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1529,18 +1590,38 @@ async fn run_smoke(
         return Err(ProbeReason::Cancelled);
     }
     let hdr = fixture.class != "sdr";
+    let hevc = matches!(
+        operation,
+        SmokeOperation::HevcNative
+            | SmokeOperation::HevcHostSoftware
+            | SmokeOperation::HevcHostVideoToolbox
+    );
+    let host = matches!(
+        operation,
+        SmokeOperation::HevcHostSoftware | SmokeOperation::HevcHostVideoToolbox
+    );
     let mut required: Vec<&str> = if hdr {
         vec!["scale_vt", "tonemap_videotoolbox"]
     } else {
         vec!["scale_vt"]
     };
+    if hevc {
+        required = if host {
+            vec!["scale", "format"]
+        } else {
+            vec!["scale_vt"]
+        };
+    }
     match operation {
         SmokeOperation::Text => required.extend(["hwdownload", "subtitles"]),
         SmokeOperation::Bitmap => required.extend(["hwdownload", "overlay", "scale"]),
         SmokeOperation::BwdifFrame | SmokeOperation::BwdifField => {
             required.push("bwdif_videotoolbox")
         }
-        SmokeOperation::Plain => {}
+        SmokeOperation::Plain
+        | SmokeOperation::HevcNative
+        | SmokeOperation::HevcHostSoftware
+        | SmokeOperation::HevcHostVideoToolbox => {}
     }
     if !crate::pipeprobe::declares_filters(&implementation.filters, &required) {
         return Err(ProbeReason::MissingFilter);
@@ -1552,7 +1633,7 @@ async fn run_smoke(
     {
         return Err(ProbeReason::ImplementationChanged);
     }
-    let contract = fixture
+    let mut contract = fixture
         .output_expectations
         .iter()
         .find(|e| {
@@ -1565,8 +1646,87 @@ async fn run_smoke(
                     "vt_scale_sdr"
                 }
         })
-        .ok_or(ProbeReason::InvalidEmbeddedCorpus)?;
-    let source = bounded_graph_io(deadline, cancelled, verified_source(prepared, fixture)).await?;
+        .ok_or(ProbeReason::InvalidEmbeddedCorpus)?
+        .clone();
+    if hevc {
+        contract.expected.codec_name = "hevc".to_owned();
+        contract.expected.profile = Some(if hdr { "Main 10" } else { "Main" }.to_owned());
+        contract.expected.pix_fmt = Some(if hdr { "yuv420p10le" } else { "yuv420p" }.to_owned());
+        contract.expected.codec_tag_string = Some("hvc1".to_owned());
+        if hdr {
+            contract.expected.color_primaries = fixture.expected.color_primaries.clone();
+            contract.expected.color_transfer = fixture.expected.color_transfer.clone();
+            contract.expected.color_space = fixture.expected.color_space.clone();
+            contract.forbidden_side_data.retain(|name| {
+                !matches!(
+                    name.as_str(),
+                    "Mastering display metadata" | "Content light level metadata"
+                )
+            });
+            contract.pixels.expected_y = Some(
+                fixture.input_pixels["gray_patches"]
+                    .as_array()
+                    .ok_or(ProbeReason::InvalidEmbeddedCorpus)?
+                    .iter()
+                    .map(|patch| {
+                        patch["y_code"]
+                            .as_f64()
+                            .map(|y| y / 4.0)
+                            .ok_or(ProbeReason::InvalidEmbeddedCorpus)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            contract.pixels.absolute_y_tolerance = Some(6.0);
+        }
+    }
+    let mut source =
+        bounded_graph_io(deadline, cancelled, verified_source(prepared, fixture)).await?;
+    let source_metadata = if hevc && hdr {
+        let mut probe = tokio::process::Command::new(&implementation.ffprobe.path);
+        let argument = held_file_argument(
+            &mut probe,
+            &source,
+            &prepared.path.join(format!("{}.mp4", fixture.sha256)),
+        );
+        probe
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_streams",
+                "-show_frames",
+                "-of",
+                "json",
+            ])
+            .arg(argument);
+        let document: Value = serde_json::from_slice(
+            &bounded_probe_command(probe, deadline, 512 * 1024, cancelled).await?,
+        )
+        .map_err(|_| ProbeReason::OutputContractFailed)?;
+        let sides = document["frames"][0]["side_data_list"]
+            .as_array()
+            .ok_or(ProbeReason::OutputContractFailed)?;
+        let metadata: Vec<Value> = sides
+            .iter()
+            .filter(|side| {
+                matches!(
+                    side["side_data_type"].as_str(),
+                    Some("Mastering display metadata" | "Content light level metadata")
+                )
+            })
+            .cloned()
+            .collect();
+        if metadata.len() != 2 {
+            return Err(ProbeReason::OutputContractFailed);
+        }
+        Some(metadata)
+    } else {
+        None
+    };
+    // A descriptor inherited by ffprobe may share the open-file offset.
+    // Restore the held source before constructing the encoder child.
+    std::io::Seek::rewind(&mut source).map_err(|_| ProbeReason::CacheUnavailable)?;
     let source_path = prepared.path.join(format!("{}.mp4", fixture.sha256));
     let mut encode = tokio::process::Command::new(&implementation.ffmpeg.path);
     let ass = if operation == SmokeOperation::Text {
@@ -1595,7 +1755,13 @@ async fn run_smoke(
     #[cfg(unix)]
     let _ = source_path;
     encode.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
-    encode.args(pipeline.decode_args());
+    if operation == SmokeOperation::HevcHostSoftware {
+        encode.args(["-hwaccel", "none"]);
+    } else if operation == SmokeOperation::HevcHostVideoToolbox {
+        encode.args(["-hwaccel", "videotoolbox"]);
+    } else {
+        encode.args(pipeline.decode_args());
+    }
     encode.arg("-i").arg(source_arg).args(["-an", "-sn", "-dn"]);
     if operation != SmokeOperation::Bitmap {
         encode.args(["-map", "0:v:0"]);
@@ -1603,6 +1769,12 @@ async fn run_smoke(
     let mut filter = pipeline
         .filters(Some(160), 90, hdr.then_some(fixture.class.as_str()))
         .ok_or(ProbeReason::GraphFailed)?;
+    if host {
+        filter = format!(
+            "scale=160:90,format={}",
+            if hdr { "yuv420p10le" } else { "yuv420p" }
+        );
+    }
     match operation {
         SmokeOperation::Text => {
             filter.push_str(",hwdownload,format=nv12,subtitles='/dev/fd/4'");
@@ -1625,11 +1797,29 @@ async fn run_smoke(
             );
             encode.args(["-vf", &filter]);
         }
-        SmokeOperation::Plain => {
+        SmokeOperation::Plain
+        | SmokeOperation::HevcNative
+        | SmokeOperation::HevcHostSoftware
+        | SmokeOperation::HevcHostVideoToolbox => {
             encode.args(["-vf", &filter]);
         }
     }
-    encode.args(Encoder::VideoToolbox.encode_args(500, EffectiveRateControl::Vbr, false, None));
+    encode.args(Encoder::VideoToolbox.encode_args_for_codec(
+        if hevc {
+            plurx_core::transcode::VideoCodec::Hevc
+        } else {
+            plurx_core::transcode::VideoCodec::H264
+        },
+        if hevc && hdr {
+            plurx_core::transcode::OutputGrade::Hdr10
+        } else {
+            plurx_core::transcode::OutputGrade::Sdr
+        },
+        500,
+        EffectiveRateControl::Vbr,
+        false,
+        None,
+    ));
     encode.args([
         "-allow_sw",
         "0",
@@ -1642,11 +1832,11 @@ async fn run_smoke(
             "12"
         },
         "-color_primaries",
-        "bt709",
+        contract.expected.color_primaries.as_str(),
         "-color_trc",
-        "bt709",
+        contract.expected.color_transfer.as_str(),
         "-colorspace",
-        "bt709",
+        contract.expected.color_space.as_str(),
         "-color_range",
         "tv",
         "-f",
@@ -1733,7 +1923,21 @@ async fn run_smoke(
                 "pipe:1",
             ]);
         let raw = bounded_probe_command(decode, deadline, 160 * 90 * 3 / 2 * 25, cancelled).await?;
-        observe_output(&document, &raw, contract)?;
+        observe_output(&document, &raw, &contract)?;
+        if let Some(expected) = &source_metadata {
+            let frames = document["frames"]
+                .as_array()
+                .ok_or(ProbeReason::OutputContractFailed)?;
+            for frame in std::iter::once(&document["streams"][0]).chain(frames.iter()) {
+                let sides = frame["side_data_list"]
+                    .as_array()
+                    .ok_or(ProbeReason::OutputContractFailed)?;
+                if expected.iter().any(|metadata| !sides.contains(metadata)) {
+                    return Err(ProbeReason::OutputContractFailed);
+                }
+            }
+        }
+
         if fixture.class == "hlg" {
             // Independent HLG203-nit reference-white patch under the pinned
             // BT.2390/ITP treatment. PQ interpretation of these scene-relative

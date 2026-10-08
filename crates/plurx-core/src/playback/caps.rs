@@ -252,6 +252,11 @@ pub struct DeviceCaps {
     /// `Some([])` is an explicit claim that no progressive label is admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progressive_hevc_sample_entries: Option<Vec<String>>,
+    /// HEVC sample entries proved for the actual HLS fragmented-MP4 playback
+    /// path. Absent or empty admits no newly encoded HEVC output. This claim
+    /// is independent of original progressive-file decoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hls_hevc_sample_entries: Option<Vec<String>>,
     /// Bitmap-subtitle overlay protocols this client can draw, by name —
     /// `pgs-v1` today.
     ///
@@ -402,6 +407,7 @@ impl DeviceCaps {
             containers: legacy.containers.clone(),
             transports: Vec::new(),
             progressive_hevc_sample_entries: None,
+            hls_hevc_sample_entries: None,
             dv_transport: legacy.dvhls.then(|| "hls".to_owned()),
             display: Some(DisplayCaps {
                 hdr: legacy.hdr,
@@ -434,13 +440,16 @@ impl DeviceCaps {
             && self.audio_sinks.is_empty()
             && self.containers.is_empty()
             && self.progressive_hevc_sample_entries.is_none()
+            && self.hls_hevc_sample_entries.is_none()
     }
 
-    /// Validate the bounded progressive HEVC packaging claim.
+    /// Validate bounded HEVC packaging claims at the common admission seam.
+    /// The existing caller name also validates the additive HLS claim.
     ///
     /// Syntax/type errors are rejected by Serde. This covers semantic errors
     /// that would otherwise turn a restrictive claim into a different one.
     pub fn validate_progressive_hevc_sample_entries(&self) -> Result<(), &'static str> {
+        self.validate_hls_hevc_sample_entries()?;
         let Some(entries) = self.progressive_hevc_sample_entries.as_ref() else {
             return Ok(());
         };
@@ -454,6 +463,26 @@ impl DeviceCaps {
             }
             if !seen.insert(entry.as_str()) {
                 return Err("progressive_hevc_sample_entries contains a duplicate entry");
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the separately negotiated HLS/fMP4 HEVC packaging claim.
+    pub fn validate_hls_hevc_sample_entries(&self) -> Result<(), &'static str> {
+        let Some(entries) = self.hls_hevc_sample_entries.as_ref() else {
+            return Ok(());
+        };
+        if entries.len() > 2 {
+            return Err("hls_hevc_sample_entries must contain at most 2 entries");
+        }
+        let mut seen = BTreeSet::new();
+        for entry in entries {
+            if !matches!(entry.as_str(), "hvc1" | "hev1") {
+                return Err("hls_hevc_sample_entries contains an unsupported entry");
+            }
+            if !seen.insert(entry.as_str()) {
+                return Err("hls_hevc_sample_entries contains a duplicate entry");
             }
         }
         Ok(())
