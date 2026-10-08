@@ -98,6 +98,18 @@ format start as zero; retain that source-bound default as a distinct versioned
 fact rather than rejecting valid raw inputs or confusing it with reported zero.
 Malformed, nonfinite and unrepresentable timing remains an error.
 
+The first offset-corrected audio experiment exposed a second per-input issue:
+`-noaccurate_seek` covered only video. FFmpeg's remaining automatic audio trim
+used the original container clock and discarded the corrected audio. The
+existing AudioClock already owns exact sample trimming, so both source inputs
+must disable the extra automatic trim. With that correction, a seek to three
+seconds using production preroll and a 175 ms operator audio correction
+matches an independently normalized reference exactly: 17 observed video
+PTS/checksums and 144 actual audio PTS/sample-count/checksums. The reference
+uses a 720,000-unit movie timescale to preserve both timestamp grids; the
+first reference's millisecond quantization failure is retained. These are
+bounded mechanism controls, not normal-API completion.
+
 The initial bounded shutdown also required forced termination. That failure
 is retained separately; no owned producer remains. Direct caption preservation
 is established; complete file-VOD acceptance remains open until the ordinary

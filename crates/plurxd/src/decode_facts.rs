@@ -1011,6 +1011,10 @@ impl DecodeProbeIdentity {
         &self.executable
     }
 
+    pub(crate) fn content_digest(&self) -> &str {
+        &self.file.content_digest
+    }
+
     pub(crate) fn build_digest(&self) -> &str {
         &self.build_digest
     }

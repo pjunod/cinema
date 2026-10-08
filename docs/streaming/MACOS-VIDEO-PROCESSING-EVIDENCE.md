@@ -1,7 +1,7 @@
-# macOS processing — initial experiment evidence
+# macOS processing — experiment and delivery evidence
 
-**Status:** open; feasibility evidence, not release qualification · **Observed:**
-2026-10-07 · **Scope:** M0/M1 of the
+**Status:** open; each result is bound to its stated source and workload · **Observed:**
+2026-10-07–08 · **Scope:** initial experiments, delivery and required follow-ups in the
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md).
 The [status ledger](MACOS-VIDEO-PROCESSING-STATUS.md) tracks every outstanding
 implementation, review and qualification item.
@@ -1072,3 +1072,56 @@ The successful continuation links original failed receipt SHA-256
 Source/binary identities, original driver hashes and normalized executed
 copies are retained. Media, credentials, private session URLs/configuration,
 full daemon logs and binaries are excluded.
+
+## 29. Required follow-up mechanisms — 2026-10-08
+
+These controls support the active GPU-subtitle, non-Mac P5 and caption-bearing
+VOD work. They are not final shipping-package or normal-API qualification.
+The [status ledger](MACOS-VIDEO-PROCESSING-STATUS.md) names the remaining work.
+
+| Control | Observed result | Limit |
+|---|---|---|
+| Animated ordered ASS | 24 frames, exact Y/UV and PTS, including blank transitions | Tiny analytical input; direct graph only |
+| Colored bitmap odd boundary | 24 frames, exact Y/UV and PTS after matching CPU boundary alpha arithmetic | Generic BGRA overlay is outside this new mode |
+| ASS clipping at all edges/corners | 24 frames, exact Y/UV and PTS, including negative coordinates and blank frames | Same staged Fontconfig provider; no performance claim |
+| Caption-preserving H.264 VT | Seven direct controls pass; caption-positive HEVC and MPEG-2 each retain 48 caption records | HEVC output still has no A53; actual API acceptance remains separate |
+| Original finite-VOD clock | Two decoded source frames near PTS 66,272 yield 17 scheduled observations of one picture | Confirms source-origin defect; output presence is not preservation |
+| Corrected seek/A-V clock | 17 observed video frames and 144 actual audio frames match normalized reference in timing/checksums | Direct seek3/preroll2 plus175ms correction; final API still required |
+| Intel VAAPI strict P5 | All 28 diagnostic controls pass; fresh/variable raw hardware/software pixels equal | Ubuntu diagnostic, 320×180→160×90; no Bookworm shipping, 4K, other backend or performance claim |
+
+The subtitle tolerance was declared before comparison: maximum absolute
+luma/chroma error two, with cue-free frames byte-identical. None of these
+passing cases required tolerance changes. Rejected BGRA/affine alternatives,
+initial frame-pool and class-layout errors, animation timestamp rounding and
+bitmap boundary errors remain recorded in the ledger. The three passing
+compositor receipts bind different intermediate binaries; no result is
+silently attributed to a later final package.
+
+The caption parser repair corrects logical RBSP payload counting through
+escaped EBSP and preserves the existing SEI prefix. Its direct-control binary
+is `9c9e91054999531e7543f603ca4d4a6db32a6399f92f9b283b245ae0d104c3ea`.
+The VOD-clock controls use
+`10aedbbbb73c6c4aa78a090c001620dc84f5d94c810ca5b207d1ba9aee6acd37`.
+The [caption record](VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md) explains both
+independent causes, the initially discarded audio, and the reference's
+corrected timestamp precision. The actual API's padding-heavy output and
+forced shutdown remain failures until corrected-candidate delivery proves
+otherwise. Neither frame count nor a successful child exit closes that work.
+
+The Intel diagnostic binary is
+`8baa3b11d77f469f16169de4b3d2992568c05c419a41666948507c1ed70e4d14`.
+It observes selected opaque VAAPI frames, mandatory download and effective
+current-frame Dolby metadata through the strict CPU renderer. Correct
+canonical Jellyfin driver lookup was necessary; ordinary libva overrides
+were insufficient. Changed deployment state and stale transfer preflight
+were refused before GPU access. All owned work was reaped after the window.
+
+[Follow-up mechanism evidence](evidence/macos-video-20261008/followup-mechanism-evidence.tar.gz)
+contains one curated JSON file, 3,824 compressed bytes, SHA-256
+`f242819010450715562f1a5e6d03e81925d15a207cc8a1da5c6ad1163fdc368b`.
+It retains exact tool/source hashes, private raw-receipt hashes, declared
+thresholds, per-case outcomes and canonical observation hashes. Media,
+caption text, credentials, private paths, session configuration, raw commands
+and full daemon logs are excluded. The assembler's SHA-256 is
+`d4455b56fb904a63ad805dc07d9d2b0389e836feb9b9b490a96f4a62950b19ee`;
+its raw inputs remain in the owned evidence workspace for final review.

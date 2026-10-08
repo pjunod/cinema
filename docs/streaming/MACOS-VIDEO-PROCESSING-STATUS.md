@@ -181,8 +181,11 @@ API checks can proceed independently because they do not use text rendering.
 The font-authority repair `ae9996b1e` is integrated: exact all-target
 compilation and normal hooks pass, and a prefix-hidden/system-PATH CPU control
 can query fonts and render. It binds font identity only to text plans and uses
-the existing held Source environment. Shared package validation and the
-source-clock repair are being composed before normal-API qualification.
+the existing held Source environment. The source-clock and shared package-helper union `874a5efd4` is integrated
+with reporter/origin identity, per-input normalization and existing engine
+publication fences. All-target compilation and normal hooks pass; corrected
+normal-API qualification remains next. The mechanism evidence is retained in
+[evidence §29](MACOS-VIDEO-PROCESSING-EVIDENCE.md#29-required-follow-up-mechanisms--2026-10-08).
 
 The temporary Metal compiler component is tracked for exact
 removal during final cleanup. Direct experimental binaries are immutable

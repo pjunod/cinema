@@ -220,15 +220,42 @@ impl SourceBurnArtifacts {
     }
 }
 
+/// Read timing only from this operation's held-source document. Stored scan
+/// normalization intentionally excludes reporter-dependent start timestamps.
+pub(crate) fn held_source_clock(
+    document: &str,
+) -> Result<plurx_core::transcode::VodSourceClock, String> {
+    let document: serde_json::Value = serde_json::from_str(document)
+        .map_err(|_| "held source clock document is malformed".to_owned())?;
+    let format = document
+        .get("format")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "held source clock format is missing".to_owned())?;
+    let start = match format.get("start_time") {
+        None => None,
+        Some(serde_json::Value::String(value)) => Some(value.as_str()),
+        Some(_) => return Err("held source origin is not a reporter timestamp".to_owned()),
+    };
+    plurx_core::transcode::VodSourceClock::from_probe_start_time(start).map_err(str::to_owned)
+}
+
 pub(crate) struct SourceHeldProbeEvidence {
     assignment: SourceDispatchAssignment,
     object_version: String,
     document: String,
+    source_clock: plurx_core::transcode::VodSourceClock,
+    clock_reporter: crate::ffmpeg::EncodedExecutable,
     engine: crate::ffmpeg::EncodedEngine,
     build: String,
     burn: Option<SourceBurnArtifacts>,
 }
 impl SourceHeldProbeEvidence {
+    pub(crate) fn clock_reporter(&self) -> &crate::ffmpeg::EncodedExecutable {
+        &self.clock_reporter
+    }
+    pub(crate) fn source_clock(&self) -> plurx_core::transcode::VodSourceClock {
+        self.source_clock
+    }
     pub(crate) fn burn(&self) -> Option<&SourceBurnArtifacts> {
         self.burn.as_ref()
     }
@@ -500,7 +527,13 @@ async fn run_probe(
 ) -> Result<SourceHeldProbeEvidence, String> {
     // The reporter query is physical work too. It runs under this same actual
     // permit/owner; no cold global reporter-cache call may spawn unowned work.
-    let mut reporter = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin());
+    let clock_reporter = tokio::time::timeout_at(
+        deadline.into(),
+        crate::ffmpeg::EncodedExecutable::capture_program(&crate::ffmpeg::ffprobe_bin()),
+    )
+    .await
+    .map_err(|_| "Source clock reporter capture deadline".to_owned())??;
+    let mut reporter = tokio::process::Command::new(&clock_reporter.path);
     reporter.arg("-version");
     let reporter = run_child(
         file,
@@ -521,7 +554,7 @@ async fn run_probe(
         .map(str::trim)
         .find(|line| !line.is_empty())
         .ok_or_else(|| "Source FFprobe reporter identity missing".to_owned())?;
-    let command = crate::ffmpeg::source_held_probe_command(&source.handle)?;
+    let command = crate::ffmpeg::source_held_probe_command(&source.handle, &clock_reporter.path)?;
     let raw = run_child(
         file,
         source,
@@ -560,7 +593,13 @@ async fn run_probe(
             .map(|ask| ask.runtime_dir.as_path()),
     )
     .await?;
+    if !clock_reporter.is_current().await {
+        return Err("Source clock reporter changed during its owned query".to_owned());
+    }
+    let source_clock = held_source_clock(&document)?;
     Ok(SourceHeldProbeEvidence {
+        clock_reporter,
+        source_clock,
         engine,
         build,
         assignment: proof.assignment().clone(),
@@ -738,4 +777,31 @@ async fn run_child_with(
         return Err("Source file changed during probe".into());
     }
     Ok(collected_output)
+}
+
+#[cfg(test)]
+mod source_clock_tests {
+    use super::held_source_clock;
+
+    #[test]
+    fn source_operation_clock_uses_held_format_not_stream_or_catalog_starts() {
+        let clock = held_source_clock(r#"{"format":{"start_time":"-0.021333"},"streams":[{"start_time":"0.0"},{"start_time":"0.250000"}]}"#)
+            .expect("held container origin");
+        assert_eq!(
+            clock,
+            plurx_core::transcode::VodSourceClock::ReportedOrigin(-21_333)
+        );
+        assert_eq!(
+            held_source_clock(r#"{"format":{},"streams":[{"start_time":"66271.0"}]}"#)
+                .expect("producer AV_NOPTS default"),
+            plurx_core::transcode::VodSourceClock::ProducerDefaultZero
+        );
+        for malformed in [
+            r#"{"format":{"start_time":0}}"#,
+            r#"{"format":{"start_time":"NaN"}}"#,
+            r#"{"streams":[]}"#,
+        ] {
+            assert!(held_source_clock(malformed).is_err());
+        }
+    }
 }

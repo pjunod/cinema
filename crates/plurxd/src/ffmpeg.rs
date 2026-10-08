@@ -552,19 +552,41 @@ pub async fn ffmpeg_build() -> String {
 /// `work` is the caller's: a session start that is waiting on this probe
 /// passes a realtime class, since the probe runs under a five-second bound
 /// whose miss the viewer sees as a refusal.
+#[cfg(test)]
 pub(crate) async fn held_source_probe_json(
     source: &std::fs::File,
     work: crate::process_control::ChildWork,
 ) -> Result<String, String> {
-    let document = held_source_probe_json_with_limits(
-        source,
+    let reporter = EncodedExecutable::capture_program(&ffprobe_bin()).await?;
+    held_source_probe_json_bound(source, work, &reporter).await
+}
+
+/// The legacy held probe keeps its established bounded child owner but launches
+/// the exact reporter captured before this query, rather than resolving an alias.
+pub(crate) async fn held_source_probe_json_bound(
+    source: &std::fs::File,
+    work: crate::process_control::ChildWork,
+    reporter: &EncodedExecutable,
+) -> Result<String, String> {
+    if !reporter.is_current().await {
+        return Err("held clock reporter changed before query".into());
+    }
+    let command = source_held_probe_command(source, &reporter.path)?;
+    let output = bounded_command_output_cancellable(
+        command,
         ENGINE_PROBE_TIMEOUT,
         ENGINE_PROBE_MAX_BYTES,
         "engine probe",
-        work,
         None,
+        work,
     )
     .await?;
+    if !reporter.is_current().await {
+        return Err("held clock reporter changed during query".into());
+    }
+    let document = String::from_utf8(output.stdout).map_err(|_| "held probe JSON is not UTF-8")?;
+    // The source clock is already bound to reporter bytes above. Preserve the
+    // existing document stamp solely for stored media-fact comparison.
     Ok(stamped_with_this_reporter(document).await)
 }
 
@@ -791,8 +813,9 @@ async fn read_packet_probe_pipe(
 /// caller retains child/job/pipe ownership; this function never spawns.
 pub(crate) fn source_held_probe_command(
     source: &std::fs::File,
+    executable: &std::path::Path,
 ) -> Result<tokio::process::Command, String> {
-    let mut command = tokio::process::Command::new(ffprobe_bin());
+    let mut command = tokio::process::Command::new(executable);
     #[cfg(unix)]
     {
         inherit_file_descriptors(&mut command, &[(source, 3)]);
@@ -2089,6 +2112,47 @@ struct FragmentIndexEngine {
 /// name. Within one daemon, every loaded dependency and (for text burn) every
 /// object of the recipe's frozen Fontconfig environment is still rechecked
 /// before spawning and publication.
+#[cfg(target_os = "macos")]
+async fn clock_package_bytes(
+    path: std::path::PathBuf,
+) -> Result<(Vec<u8>, EncodedExecutable), String> {
+    let metadata = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return Err("clock provenance is not a bounded regular file".into());
+    }
+    let object = EncodedExecutable::capture_at(path.clone()).await?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        let mut bytes = Vec::new();
+        file.take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() > 1024 * 1024 {
+            return Err("clock provenance exceeds its bound".to_owned());
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    if hex::encode(Sha256::digest(&bytes)) != object.digest || !object.is_current().await {
+        return Err("clock package provenance changed during capture".into());
+    }
+    Ok((bytes, object))
+}
+
+#[cfg(target_os = "macos")]
+async fn clock_package_document(
+    path: std::path::PathBuf,
+) -> Result<(serde_json::Value, EncodedExecutable), String> {
+    let (bytes, object) = clock_package_bytes(path).await?;
+    let document =
+        serde_json::from_slice(&bytes).map_err(|_| "clock package provenance malformed")?;
+    Ok((document, object))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EncodedEngine {
     pub digest: String,
@@ -2105,6 +2169,136 @@ pub(crate) struct EncodedEngine {
 }
 
 impl EncodedEngine {
+    /// A deployed Mac parser and producer share the validated package's demux
+    /// source/quilt. Legacy pairs retain their exact reporter identity without
+    /// claiming a matched-source package. This adds objects to the existing
+    /// production/publication fence, not a separate package registry.
+    pub(crate) async fn bind_clock_pair(
+        &mut self,
+        reporter: &EncodedExecutable,
+        producer: &EncodedExecutable,
+    ) -> Result<(), String> {
+        self.bind_clock_reporter(reporter).await?;
+        #[cfg(target_os = "macos")]
+        {
+            let root = producer
+                .path
+                .parent()
+                .ok_or("clock producer package parent missing")?;
+            let native_path = root.join("provenance/manifest.json");
+            let parser_path = root.join("provenance/source-parser/manifest.json");
+            if !native_path.exists() && !parser_path.exists() {
+                return Ok(()); // exact legacy reporter, no matched-source claim
+            }
+            // An official baseline with no sealed companion remains a legacy
+            // reporter tuple; a present module cannot downgrade if its manifest
+            // is removed.
+            if native_path.exists()
+                && !parser_path.exists()
+                && !root.join("plurx-source-parser.wasm").exists()
+            {
+                return Ok(());
+            }
+            let (native, native_object) = clock_package_document(native_path).await?;
+            let (parser, parser_object) = clock_package_document(parser_path).await?;
+            const SOURCE: &str = "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140";
+            const COMMIT: &str = "253db2a7b0a8045c54ce68ce33d7f601229b1822";
+            for document in [&native, &parser] {
+                if document["source_sha256"].as_str() != Some(SOURCE)
+                    || document["source_commit"].as_str() != Some(COMMIT)
+                {
+                    return Err("clock parser and producer source provenance differ".into());
+                }
+            }
+            let quilt = parser["source_patch_sha256"]
+                .as_object()
+                .ok_or("clock parser quilt provenance missing")?;
+            if quilt.len() != 100
+                || quilt.iter().any(|(name, digest)| {
+                    native["source_recipe_sha256"][format!("debian/patches/{name}")] != *digest
+                })
+            {
+                return Err("clock parser and producer quilt provenance differ".into());
+            }
+            let native_probe = EncodedExecutable::capture_at(root.join("ffprobe")).await?;
+            let module =
+                EncodedExecutable::capture_at(root.join("plurx-source-parser.wasm")).await?;
+            if native["binaries"]["ffmpeg"]["sha256"].as_str() != Some(producer.digest.as_str())
+                || native["binaries"]["ffprobe"]["sha256"].as_str()
+                    != Some(native_probe.digest.as_str())
+                || parser["module_sha256"].as_str() != Some(module.digest.as_str())
+                || native["source_parser"]["sha256"].as_str() != Some(module.digest.as_str())
+                || (reporter.digest != native_probe.digest && reporter.digest != module.digest)
+            {
+                return Err(
+                    "clock reporter/producer images differ from their matched package".into(),
+                );
+            }
+            // Local additions may alter decoding/rendering, never the demux
+            // origin semantics this package association authorizes.
+            if let Some(patches) = native["compiled_source"]["local_patches"].as_object() {
+                for (name, expected) in patches {
+                    let relative = std::path::Path::new(name);
+                    if relative.components().count() != 1 {
+                        return Err("clock package local patch name is unsafe".into());
+                    }
+                    let (patch, object) =
+                        clock_package_bytes(root.join("provenance/local-patches").join(relative))
+                            .await?;
+                    if expected.as_str() != Some(object.digest.as_str()) {
+                        return Err("clock package local patch bytes differ".into());
+                    }
+                    let text =
+                        std::str::from_utf8(&patch).map_err(|_| "clock patch is not text")?;
+                    if text
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("+++ "))
+                        .any(|path| {
+                            path != "/dev/null"
+                                && !path.strip_prefix("b/").is_some_and(|path| {
+                                    path.starts_with("libavcodec/")
+                                        || path.starts_with("libavfilter/")
+                                        || path.starts_with("libavutil/")
+                                        || path == "configure"
+                                })
+                        })
+                    {
+                        return Err(
+                            "clock local patch changes the parser/producer timing contract".into(),
+                        );
+                    }
+                    self.bind_clock_reporter(&object).await?;
+                }
+            }
+            for object in [&native_object, &parser_object, &native_probe, &module] {
+                self.bind_clock_reporter(object).await?;
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = producer; // exact native/sealed reporter; no Mac package claim
+        Ok(())
+    }
+
+    /// The held timing witness names its actual reporter, not the stored scan.
+    /// Reuse the media object fence for both native and sealed parser images.
+    pub(crate) async fn bind_clock_reporter(
+        &mut self,
+        reporter: &EncodedExecutable,
+    ) -> Result<(), String> {
+        if !reporter.is_current().await {
+            return Err("held source clock reporter changed".into());
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"plurx/held-source-clock-reporter/v1\0");
+        hash.update(self.digest.as_bytes());
+        hash.update(reporter.digest.as_bytes());
+        self.digest = hex::encode(hash.finalize());
+        let mut objects = self.objects.to_vec();
+        objects.push(reporter.attestation_object());
+        self.objects = objects.into();
+        Ok(())
+    }
+
     /// `text_burn` is the runtime cache a text burn's frozen Fontconfig
     /// environment is built under, or `None` for a recipe that burns no text.
     pub async fn capture(text_burn: Option<&std::path::Path>) -> Result<Self, String> {
@@ -3982,6 +4176,138 @@ async fn probe_burst() -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn held_clock_reporter_bytes_enter_existing_engine_identity_and_publication_fence() {
+        use super::*;
+        let directory = tempfile::tempdir().expect("reporter directory");
+        let path = directory.path().join("clock-reporter");
+        std::fs::write(&path, b"held reporter first version").expect("reporter");
+        let reporter = EncodedExecutable::capture_at(path.clone())
+            .await
+            .expect("capture");
+        let mut engine = EncodedEngine {
+            digest: "initial engine".into(),
+            process_identity: encoded_process_identity().into(),
+            objects: Arc::from([]),
+            font_objects: Arc::from([]),
+            font_env: None,
+        };
+        let before = engine.digest.clone();
+        engine
+            .bind_clock_reporter(&reporter)
+            .await
+            .expect("held reporter binding");
+        assert_ne!(engine.digest, before);
+        assert!(engine.is_current().await);
+        std::fs::write(path, b"held reporter newer version").expect("same-size replacement");
+        assert!(
+            !engine.is_current().await,
+            "old clock evidence cannot publish after its reporter changes"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn held_clock_matched_package_rejects_swapped_module_foreign_reporter_and_demux_patch() {
+        use super::*;
+        let directory = tempfile::tempdir().expect("package");
+        let root = directory.path();
+        std::fs::create_dir_all(root.join("provenance/source-parser")).expect("provenance");
+        std::fs::create_dir_all(root.join("provenance/local-patches")).expect("patch directory");
+        for (name, bytes) in [
+            ("ffmpeg", b"producer".as_slice()),
+            ("ffprobe", b"native reporter".as_slice()),
+            ("plurx-source-parser.wasm", b"sealed parser".as_slice()),
+            ("foreign", b"foreign reporter".as_slice()),
+        ] {
+            std::fs::write(root.join(name), bytes).expect("image");
+        }
+        let producer = EncodedExecutable::capture_at(root.join("ffmpeg"))
+            .await
+            .expect("producer");
+        let native = EncodedExecutable::capture_at(root.join("ffprobe"))
+            .await
+            .expect("native");
+        let module = EncodedExecutable::capture_at(root.join("plurx-source-parser.wasm"))
+            .await
+            .expect("module");
+        let foreign = EncodedExecutable::capture_at(root.join("foreign"))
+            .await
+            .expect("foreign");
+        let quilt: serde_json::Map<String, serde_json::Value> = (0..100)
+            .map(|i| {
+                (
+                    format!("{i:04}-test.patch"),
+                    serde_json::json!("a".repeat(64)),
+                )
+            })
+            .collect();
+        let recipes: serde_json::Map<String, serde_json::Value> = quilt
+            .iter()
+            .map(|(name, digest)| (format!("debian/patches/{name}"), digest.clone()))
+            .collect();
+        let source = "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140";
+        let commit = "253db2a7b0a8045c54ce68ce33d7f601229b1822";
+        let mut manifest = serde_json::json!({"source_sha256":source,"source_commit":commit,
+            "source_recipe_sha256":recipes,"binaries":{"ffmpeg":{"sha256":producer.digest},"ffprobe":{"sha256":native.digest}},
+            "source_parser":{"sha256":module.digest},"compiled_source":{"local_patches":{}}});
+        let parser = serde_json::json!({"source_sha256":source,"source_commit":commit,
+            "source_patch_sha256":quilt,"module_sha256":module.digest});
+        let native_path = root.join("provenance/manifest.json");
+        std::fs::write(&native_path, manifest.to_string()).expect("native manifest");
+        std::fs::write(
+            root.join("provenance/source-parser/manifest.json"),
+            parser.to_string(),
+        )
+        .expect("parser manifest");
+        let initial = EncodedEngine {
+            digest: "initial engine".into(),
+            process_identity: encoded_process_identity().into(),
+            objects: Arc::from([]),
+            font_objects: Arc::from([]),
+            font_env: None,
+        };
+        initial
+            .clone()
+            .bind_clock_pair(&module, &producer)
+            .await
+            .expect("matched sealed pair");
+        initial
+            .clone()
+            .bind_clock_pair(&native, &producer)
+            .await
+            .expect("matched native pair");
+        assert!(initial
+            .clone()
+            .bind_clock_pair(&foreign, &producer)
+            .await
+            .is_err());
+        std::fs::write(root.join("plurx-source-parser.wasm"), b"changed parser")
+            .expect("swap module");
+        assert!(initial
+            .clone()
+            .bind_clock_pair(&native, &producer)
+            .await
+            .is_err());
+        std::fs::write(root.join("plurx-source-parser.wasm"), b"sealed parser")
+            .expect("restore bytes");
+        let patch =
+            b"--- a/libavformat/demux.c\n+++ b/libavformat/demux.c\n@@ -1 +1 @@\n-old\n+changed\n";
+        std::fs::write(root.join("provenance/local-patches/timing.patch"), patch)
+            .expect("timing patch");
+        manifest["compiled_source"]["local_patches"]["timing.patch"] =
+            serde_json::json!(hex::encode(Sha256::digest(patch)));
+        std::fs::write(&native_path, manifest.to_string()).expect("updated provenance");
+        assert!(
+            initial
+                .clone()
+                .bind_clock_pair(&native, &producer)
+                .await
+                .is_err(),
+            "rehashed timing changes do not prove parser/producer equivalence"
+        );
+    }
 
     #[tokio::test]
     async fn engine_object_digest_is_reused_per_version_and_rehashed_on_change() {
