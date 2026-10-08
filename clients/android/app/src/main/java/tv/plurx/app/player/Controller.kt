@@ -2041,6 +2041,14 @@ class Controller internal constructor(
         )
     }
 
+    fun remoteCommandsAvailable() = playbackControlBootstrapFence.isActive()
+    var onPhysicalTransport: (() -> Unit)? = null
+    fun requestRemotePlaying(requested: Boolean): Boolean {
+        if (!playbackControlBootstrapFence.isActive()) return false
+        writeViewerPlaybackRequested(requested, remoteOwned = true)
+        return playbackIntent.playbackRequested == requested
+    }
+
     fun playPause() {
         setViewerPlaybackRequested(!playbackIntent.playbackRequested)
     }
@@ -2070,7 +2078,10 @@ class Controller internal constructor(
      * transport. The delegate follows the viewer at once on every edge; a
      * resume after a long explicit pause only arms the Auto boundary re-plan,
      * which never holds the delegate. */
-    private fun setViewerPlaybackRequested(requested: Boolean) {
+    private fun setViewerPlaybackRequested(requested: Boolean) = writeViewerPlaybackRequested(requested, remoteOwned = false)
+
+    private fun writeViewerPlaybackRequested(requested: Boolean, remoteOwned: Boolean) {
+        if (!remoteOwned) onPhysicalTransport?.invoke()
         if (!playbackControlBootstrapFence.isActive()) return
         val now = monotonicNowMs()
         val paused = explicitViewerPause

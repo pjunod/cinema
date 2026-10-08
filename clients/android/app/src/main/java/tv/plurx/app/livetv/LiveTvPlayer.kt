@@ -499,6 +499,14 @@ class LiveTvPlayer private constructor(context: Context) {
         watch(channel)
     }
 
+    fun requestRemotePlaying(requested: Boolean): Boolean {
+        val output = player ?: return false
+        if (!mutableState.value.playing || mutableState.value.busy) return false
+        if (requested) output.play() else output.pause()
+        mutableState.value = mutableState.value.copy(paused = !requested)
+        return true
+    }
+
     fun togglePause() {
         val output = player ?: return
         val paused = output.playWhenReady

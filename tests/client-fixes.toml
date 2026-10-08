@@ -4825,3 +4825,46 @@ source = "clients/apple/Sources/RemoteClientModel.swift"
 source_anchor = "guard let state else { return }"
 test = "clients/apple/Tests/RemoteReceiverTests.swift"
 test_anchor = "testNullStateTimeoutPreservesStateUntilControllerRetirement"
+
+[[fixes]]
+id = "android.cinema-remote-foreground-guard"
+commits = ["98ac181b567acfd55a2b51619b3fc4fafde8f6f1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteReceiverGuard.kt"
+source_anchor = "highWater = command.sequence"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "consumesSequenceBeforeEffectAndRetainsRejectedOutcome"
+
+[[fixes]]
+id = "android.cinema-remote-native-focus-realization"
+commits = []
+supplements = "android.cinema-remote-foreground-guard"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigation.kt"
+source_anchor = "if (requestedFocus != null || entry.identity != focusedIdentity"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "lazyFocusRequestCannotSelectUntilRealizedNativeAcknowledgement"
+
+[[fixes]]
+id = "android.cinema-remote-owned-overlay"
+commits = []
+supplements = "android.cinema-remote-foreground-guard"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemotePlaybackAdapter.kt"
+source_anchor = "if (!current.effectsEligible()) return RemoteOutcome.Restricted"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "playbackOwnerModalFenceAndOptionChangesInvalidateExactContext"
+
+[[fixes]]
+id = "android.cinema-remote-pairing-monotonic-deadline"
+commits = ["2e50aa9d9faa875e88aaf5c4578bf6590bd1af64"]
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteClientModel.kt"
+source_anchor = "withTimeout(remaining)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "monotonicPairingDeadlineRejectsSlowClaimAndLateApprovedResult"
+
+[[fixes]]
+id = "android.cinema-remote-ack-before-queued"
+commits = []
+supplements = "android.cinema-remote-pairing-monotonic-deadline"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteClientModel.kt"
+source_anchor = "commandStatus = commandResult.known(control.epoch, sequence)?.viewerMessage()"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "exactAckBefore202CannotBecomePendingOrAffectAnotherCommand"

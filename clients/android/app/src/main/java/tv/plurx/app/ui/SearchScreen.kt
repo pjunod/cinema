@@ -43,6 +43,12 @@ import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.SafeTopRow
 import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.theme.Muted
+import tv.plurx.app.remote.*
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import kotlinx.coroutines.launch
+import java.util.UUID
 
 @Composable
 fun SearchScreen(
@@ -60,6 +66,19 @@ fun SearchScreen(
     var results by remember { mutableStateOf<List<Item>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    val remoteNavigation = LocalRemoteNavigation.current
+    val remoteScope = LocalRemoteScope.current
+    val textNonce = remember(remoteScope) { UUID.randomUUID().toString() }
+    val remoteGrid = rememberLazyGridState()
+    val coroutineScope = rememberCoroutineScope()
+    DisposableEffect(remoteNavigation, remoteScope, textNonce) {
+        remoteNavigation?.search(remoteScope, textNonce) { query = it }
+        onDispose { remoteNavigation?.clearSearch(remoteScope, textNonce) }
+    }
+    RemoteOrder((listOf("search:back", "search:field", "search:clear") + results.map { "item:" + it.id }).take(16384)) { key ->
+        val index = results.indexOfFirst { "item:" + it.id == key }
+        if (index >= 0) coroutineScope.launch { remoteGrid.scrollToItem(index) }
+    }
 
     LaunchedEffect(query) {
         if (query.isBlank()) {
@@ -99,7 +118,7 @@ fun SearchScreen(
         SafeTopRow(
             Modifier.fillMaxWidth().padding(start = side - 12.dp, end = side, top = 8.dp),
         ) {
-            TvIconButton(onClick = onBack) {
+            TvIconButton(onClick = onBack, modifier = Modifier.remoteAction("search:back", "Back") { onBack(); RemoteOutcome.Applied }) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             // The TV field, not a bare OutlinedTextField: on a television a
@@ -109,9 +128,9 @@ fun SearchScreen(
             // not.
             AuthTextField(
                 value = query,
-                onValueChange = { query = it },
+                onValueChange = { remoteNavigation?.physicalInput(); query = it },
                 label = "Search",
-                modifier = Modifier.weight(1f).focusRequester(searchFieldFocus),
+                modifier = Modifier.weight(1f).remoteAction("search:field", "Search") { RemoteOutcome.Unsupported }.focusRequester(searchFieldFocus),
                 placeholder = "Search movies, shows, episodes, tags…",
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
@@ -120,7 +139,7 @@ fun SearchScreen(
             // takes Select to begin editing, so a button nested under that
             // preview handler needs two presses to answer one.
             if (query.isNotEmpty()) {
-                TvIconButton(onClick = { query = "" }) {
+                TvIconButton(onClick = { query = "" }, modifier = Modifier.remoteAction("search:clear", "Clear search") { query = ""; RemoteOutcome.Applied }) {
                     Icon(Icons.Filled.Close, contentDescription = "Clear")
                 }
             }
@@ -138,6 +157,7 @@ fun SearchScreen(
                 Text("No results for “$query”", color = Muted)
             }
             else -> LazyVerticalGrid(
+                state = remoteGrid,
                 columns = GridCells.Adaptive(posterWidth),
                 contentPadding = PaddingValues(start = side, end = side, top = 20.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),

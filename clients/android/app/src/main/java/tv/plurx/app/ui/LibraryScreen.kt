@@ -65,10 +65,12 @@ import tv.plurx.app.ui.components.PosterCard
 import tv.plurx.app.ui.components.SafeTopRow
 import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.theme.Muted
+import tv.plurx.app.remote.*
 
 internal enum class WatchFilter(val label: String) {
     Everything("Everything"), Unwatched("Unwatched"), InProgress("In progress"), Watched("Watched")
 }
+
 
 @Composable
 fun LibraryScreen(
@@ -121,6 +123,12 @@ internal fun LibraryScreen(
     val landscape = kind == "home"
     LaunchedEffect(preferences.libraryPresentation) { presentation = preferences.libraryPresentation }
     var shown by remember(pager) { mutableStateOf<List<Item>>(emptyList()) }
+    RemoteOrder((listOf("library:back", "choice:Sort", "choice:Show", "choice:View") + if (rows) groups.flatMap { group -> listOf("row:library-group:" + group.key + ":all") + group.items.map { "row:library-group:" + group.key + ":item:" + it.id } } else shown.map { "item:" + it.id }).distinct().take(16384)) { key ->
+        if (!rows) {
+            val index = shown.indexOfFirst { "item:" + it.id == key }
+            if (index >= 0) scope.launch { gridState.scrollToItem(index) }
+        }
+    }
     LaunchedEffect(pager) { pager.ensure(40) }
     LaunchedEffect(pager, gridState, rows) {
         if (rows) return@LaunchedEffect
@@ -156,7 +164,7 @@ internal fun LibraryScreen(
         SafeTopRow(
             Modifier.fillMaxWidth().padding(start = side - 12.dp, end = side, top = 8.dp),
         ) {
-            TvIconButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) {
+            TvIconButton(onClick = onBack, modifier = Modifier.remoteAction("library:back", "Back") { onBack(); RemoteOutcome.Applied }.focusRequester(backFocus)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             Column(Modifier.weight(1f)) {
@@ -233,6 +241,7 @@ internal fun LibraryScreen(
                 rowItems(groups, key = { it.key }) { group ->
                     MediaRow(
                         title = "${group.label} · ${group.items.size}${if (load.complete) "" else " loaded"}",
+                        remoteKey = "library-group:" + group.key,
                         items = group.items, posterWidth = rowWidth, landscape = landscape,
                         onViewAll = { expandedGroup = group.key }, onOpen = { onOpenItem(it.id) },
                     )
@@ -255,6 +264,7 @@ internal fun LibraryScreen(
     // so closing View all returns to the same horizontal and vertical position.
     val expanded = groups.firstOrNull { it.key == expandedGroup }
     if (expanded != null) {
+        RemoteRestricted()
         Dialog(onDismissRequest = { expandedGroup = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
             Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).navigationBarsPadding()) {
                 SafeTopRow(Modifier.fillMaxWidth().padding(horizontal = side, vertical = 8.dp)) {
