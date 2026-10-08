@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** active · **Updated:** 2026-10-08 · **Owner:** managing agent with
+**Status:** implementation complete; ready for merge handoff · **Updated:** 2026-10-08 · **Owner:** managing agent with
 three GPT-6.1 Sol builders · **Integration:** `effort/macos-video-completion`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
@@ -21,41 +21,36 @@ This is not a claim of a fully green promotion across every platform.
 This is completion of the first implementation contribution, not the full
 proposal. The user renewed the full-scope instruction on 2026-10-08.
 
-All planned production source is integrated on `effort/macos-video-completion`,
-including strict P5, normalized SDR/HDR10, finite HEVC output and ordinary
-Auto preference, Live upload/BWDIF, HLG burns, bounded native parser execution
-and matched symbol packaging. Main `c746b6c9b` is integrated. All five combined-review findings have
-accepted repairs, including three terminal-NAL runtime fixtures at
-`54c3a3fe8`. Final daemon qualification remains active and has found two integration
-defects; source completion is not final acceptance.
+All planned production source in the supported scope is built, integrated and
+independently reviewed on `effort/macos-video-completion`. Final release source
+is `1bf84609`; later commits retain documentation and evidence. The five
+original review repairs, terminal-NAL follow-up, shared Jellyfin tool resolver
+and Live terminal-classification repair are independently accepted.
 
-Final normal-API SDR/HDR10, finite HEVC, ordinary Auto and strict P5 delivery
-passed on signed `a2ee4a221` and the repaired `1bf84609` package. AC-4 then exposed a real integration
-defect: core scanning resolved PATH FFprobe while the packaged daemon and held
-parser used Jellyfin. Their differing facts correctly triggered source
-attestation refusal. Shared executable-resolution repair `4adb34c0` now covers scanning,
-metadata extraction and daemon processing and is independently accepted. A
-new signed release passes normal-API AC-4 catalog/attestation and actual
-stereo 48 kHz AAC/AVC delivery through the explicit software encoder. The
-public caption-bearing sample fails in the existing CPU/VideoToolbox
-caption-insertion path; this predeclared file-VOD limitation is retained.
+Actual final packaged-daemon SDR/HDR10, finite HEVC, ordinary Auto, strict P5
+and affected Live lifecycle checks pass. The shared resolver passes normal
+AC-4 source attestation and explicit software-encoder AAC/AVC delivery. The
+public caption-bearing sample's incumbent CPU/VideoToolbox SEI insertion
+failure remains the documented file-VOD limitation; no caption-stripping
+workaround was introduced. Empty/corrupt/permission/full-cache recovery and
+restart pass. Source-bound earlier successes and all failed controls remain
+visible in the evidence document.
 
-Normal Live TV qualification passed all twelve progressive/TFF/BFF ×
-frame/field × repeated-start cases across two retained runs, plus explicit
-EOF/reconnect lifecycle checks. A source-format transition exposed a separate
-ownership race: fast FFmpeg exit could precede the stderr source-change
-flag, yielding generic failure and leaving source facts stale. A targeted
-repair settles the existing owned stderr reader before terminal classification;
-repair `4be9603bc` is independently accepted; actual source-switch
-confirmation remains required.
-No additional watchdog, retry loop or diagnostic reader is introduced.
+Thirty CPU and thirty native uncached starts meet the p95 regression
+allowance; one/two/four independent sessions admit and publish. Four sessions
+complete a 1,800.052-second demand/control soak with 1,096 successful objects
+and no recorded control or producer failure. This is HTTP availability and
+demand evidence, not physical presentation, sustained encoder capacity or
+memory/energy/copy instrumentation. The initial soak driver used a stale
+control sequence; its failure is retained, and only the corrected soak was
+repeated.
 
-Empty-cache reconstruction and exact corrupt-fixture repair pass. Permission
-refusal correctly returns `fixture_cache_unavailable` and no implementation
-identity; the initial external script incorrectly expected all twenty-two
-graphs even after preparation failed. That script is corrected, with its
-failed receipt retained. Permission/full-volume refusal and recovery, plus restart, now pass;
-source-bound receipts and both corrected harness failures are retained.
+No further production building is assigned. The designated merge session
+owns the final fast lane and main landing of PR #904. No unit suite ran in
+this effort. Broad physical-client, calibrated-display, deployment, fleet
+upgrade and other-host qualification remains explicitly open; the Developer
+switches retain their advisory graduation status. This is not an all-device
+or all-qualification completion claim.
 
 No deployed FFmpeg package or live service has changed. The matching Apple
 Metal compiler component was temporarily installed for the private package
@@ -65,15 +60,15 @@ Missing qualification stays explicitly open.
 
 | Workstream | Owner | State | Evidence or next dependency |
 |---|---|---|---|
-| Integration and status | Manager | final candidate preparation | Main `c746b6c9b` union and five review repairs integrated; all scopes accepted through terminal registration `54c3a3fe8` |
+| Integration and status | Manager | reviewed handoff ready | Final production source1bf84609; source-equivalent docs/evidence commits; seventy regression references resolve |
 | M0/M1 Jellyfin package and harness | Sol builders | source complete; package controls recorded | Final strict terminal-NAL package `c8c4b525…`; pinned source offer, AC-4 byte preservation and prior synthetic benefit evidence |
 | M2/M3 typed routes and observations | Sol route builder | source complete; inventory passed | All twenty-two supported graph classes available in actual packaged-daemon reports |
-| Native parser and symbols | Sol native builder | final signed package and AC-4 confirmed | Shared bundled tool resolution; software-encoder normal-API AC-4 passes; incumbent VT caption limitation retained |
+| Native parser and symbols | Sol native builder | complete | Signed final package, matching dSYM, normal scanner/held-parser identity and explicit software AC-4 delivery pass |
 | M4 normalized VOD | Sol native and route builders | final SDR/HDR10 delivery demonstrated | 120-second HTTP lifetime, CPU/native pixel comparison, seek/resume and cancellation pass; timing/concurrency/soak pending |
 | E1 strict Dolby P5 | Sol Dolby and route builders | source complete; sixty controls pass | Sixty selected-graph controls and sixteen observer mutations pass; terminal-NAL fixture registration independently accepted. Final normal-API strict P5 delivery passes on `a2ee4a221` |
-| E2–E4 HLG, burns, BWDIF, HEVC and Live | Sol builders | source complete within demonstrated scope | HLG text/bitmap controls pass; actual HDR High10 interlace decode fails and keeps incumbent. HEVC master/Auto pass; twelve Live cases and EOF pass. Source-change race repair and requalification active |
+| E2–E4 HLG, burns, BWDIF, HEVC and Live | Sol builders | source complete within demonstrated scope | HLG text/bitmap controls pass; actual HDR High10 interlace decode fails and keeps incumbent. HEVC master/Auto pass; twelve Live cases and EOF pass. Source-change repair independently accepted; final actual EOF/change/reprobe/cadence checks pass |
 | Client transport declarations | Sol Dolby builder | source complete; compilation passed | iOS/tvOS builds pass on the final Apple source; Android C1 app, instrumentation and JVM regression source compile. Physical presentation unqualified |
-| M6 acceptance and promotion | Manager and merge coordinator | active | Five review findings repaired and accepted; final daemon qualification, then coordinator-owned fast lane and merge |
+| M6 acceptance and promotion | Manager and merge coordinator | implementation contribution ready | Independent reviews and available-host runtime checks complete; coordinator owns final fast lane/main landing; physical/deployment qualification remains explicit |
 
 Jellyfin FFmpeg is the required implementation baseline. Local Homebrew
 FFmpeg is not a comparison target or substitute. The official package is an
@@ -315,8 +310,8 @@ sections remain the detailed acceptance specifications.
 | Q-01 · design §6.1 | Target production Mac, second Apple Silicon generation and separate Intel matrix | M3 Max experiment host observed; deployed/second-generation/Intel evidence unavailable so far |
 | Q-02 | 1080p light workload, 4K24/60, SDR8/10 and varied HDR corpus | Synthetic 4K24 and tiny probes built; rest awaiting evidence |
 | Q-03 · design §6.3 | Five paired ≥60-second source runs and precise first-use/warm labels | SDR and revised HDR complete; no claim of cold disk cache |
-| Q-04 | One/two/four sessions, steady-window p10 and 30-minute soak | Awaiting evidence; short high-speed runs do not prove capacity |
-| Q-05 | ≥30 starts, first publishable media and first presented frame, p95 | Awaiting production/client evidence |
+| Q-04 | One/two/four sessions, steady-window p10 and 30-minute soak | One/two/four independent session admission/publication and four-session1,800.052-second demand/control soak pass. Steady-window p10 and sustained encoder capacity remain unqualified |
+| Q-05 | ≥30 starts, first publishable media and first presented frame, p95 | Thirty CPU and thirty native distinct uncached starts: HTTP-availability p95 1.242879s vs1.216253s, within1.367167s allowance. First presented frame remains unmeasured |
 | Q-06 | CPU, throughput, peak RSS/memory pressure, energy, copy/sync instrumentation | CPU/throughput measured on synthetic workload; remaining measurements unmeasured, not zero |
 | Q-07 · design §6.4 | SDR aligned quality metrics plus ringing/aliasing/banding inspection | Actual normalized 48-frame CPU/native delivery matches paired patches within one code value; whole-frame PSNR minimum 51.92 dB, mean 53.23 dB. This does not establish all-content perceptual acceptance |
 | Q-08 | HDR blinded review on named calibrated display, highlight/shadow/gamut/temporal findings | Awaiting human/display evidence; synthetic ramp and VMAF alone are insufficient |
@@ -346,7 +341,7 @@ Separate scope does not imply that implementation or qualification is done.
 | E2-02 | GPU compositing of prepared text/bitmap images | Follow-up only if beneficial; keep libass shaping/fonts and explicit alpha/color semantics |
 | E2-03 | PGS color, ASS animation/position, active-cue seek, EOF/free intervals and cancellation | Follow-up acceptance; no new HDR burn policy |
 | E3-01 · implementation §9.3 | Hardware BWDIF where supplied; separately judged YADIF alternative | Integrated pinned parameter-buffer repair and shared moving-field acceptance: eight raw CPU/native, twelve encoded positive and four old-package negative controls retained. Earlier cadence-only proof is explicitly limited |
-| E3-02 | Native Live TV plan, frame/field cadence, rational rate, bitrate and manifests | Existing Live owner delivers twelve ordinary frame/field/repeated-start cases and EOF reconnect on a2ee. Reviewed source-change classification repair4be9603 integrated; affected actual lifecycle rerun awaits final package |
+| E3-02 | Native Live TV plan, frame/field cadence, rational rate, bitrate and manifests | Existing Live owner delivers twelve ordinary frame/field/repeated-start cases and EOF reconnect on a2ee. Reviewed source-change classification repair4be9603 integrated; affected actual EOF/source-change/reprobe/cadence checks pass on final1bf |
 | E3-03 | 1080i TFF/BFF, 720p59.94, A/53, late audio, AC-4, reconnect/stop/start | Follow-up hardware/delivery matrix |
 | E3-04 | Scoped live `-a53cc 0` and caption-bearing VOD limitation | Existing scoped live behavior retained in native upload plan; no claim to repair caption-bearing file VOD |
 | E4-01 · implementation §9.4 | HEVC SDR and HDR10 Main10 output separately | Finite SDR/Main10 HDR producer, initialization and master codec assertions pass through normal API on a2ee; continuous AVC envelope remains unchanged |
@@ -365,9 +360,9 @@ Separate scope does not imply that implementation or qualification is done.
 | R-04 | Explicit adversarial coverage of harness/manager/settings builder | Final scope C accepted after Android capability repair `0d6a466cd`; prior harness and daemon repairs retained |
 | R-05 | Explicit adversarial coverage of fixture/runtime builder | B1 selected-graph observer repair `a0a3734b` accepted; terminal-NAL runtime registration `54c3a3fe8` independently accepted |
 | R-06 | Cross-builder integration review, root causes and no watchdog/gate cruft | Combined scopes A/B/C and five repairs accepted; terminal fixtures, shared resolver and Live terminal ownership follow-ons independently accepted |
-| R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | Initial batch landed; continuation PR #904 remains draft and not queued. Final qualification/review packet must precede coordinator-owned validation |
-| R-08 | Current-main integration, exact-tree gate/qualification receipt and regression landing lines | Merge coordinator owns queue and main landing; effort supplies reviewed code and handles behavior-changing fixes; initial #870 included in #882 main landing `339abbced`; continuation review/queue handoff remains pending |
-| R-09 | Retain reproducible sanitized receipts, exact commands, limits and autonomous decisions | Initial/revised experiments plus VOD/P5 diagnostics retained in indexed evidence document and 1.20 MB raw archive, including isolated settings/probe and actual SDR/HDR VOD receipts; archive and all 394 retained-file hashes verified; full production qualification pending |
+| R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | All repairs accepted; available-host final runtime qualification complete. PR904 ready for designated coordinator fast lane/regressions; none executed here |
+| R-08 | Current-main integration, exact-tree gate/qualification receipt and regression landing lines | Final signed source1bf84609 and seventy valid regression references prepared for coordinator; current-main integration, exact candidate qualification and landing remain its responsibility |
+| R-09 | Retain reproducible sanitized receipts, exact commands, limits and autonomous decisions | Sanitized source-bound receipts, original failures, exact hashes and driver copies retained in indexed evidence document; runtime, cache, Live and timing/soak archives independently hash-verified |
 | R-10 | Remove own transient clones, benchmark media, caches and obsolete branches after retention | Initial-batch builder clones, media/private daemon state and redundant sources removed after verified archive retention. Continuation clones, final package, active receipts and compiler targets remain needed; their cleanup follows final retention, queue ownership and qualification |
 
 ## 6. Completion accounting
@@ -935,3 +930,21 @@ The rebuilt package and legal trailing-NAL controls remain in progress.
   all passing on `c8c4b525…`. Existing strict-loss cases and the 210-second
   aggregate deadline remain unchanged. All five final review findings and
   their source follow-ons are accepted; final daemon qualification remains.
+
+### 9.14 Final contribution closure
+
+All supported production implementation and assigned builder repairs are
+complete. The final signed package passes available-host runtime checks;
+startup sampling and the corrected four-session demand soak complete the
+remaining local experiments. Evidence §§24–28 retain cache, compilation,
+package, Live and timing/soak results with explicit limits. Independent review
+accepts every production change, including the two runtime-discovered root
+causes. Unit execution and main landing belong to the designated merge
+coordinator. No hidden feature gate or additional watchdog was added.
+
+Task-installed MetalToolchain27A266a is removed; final runtime checks pass
+without it. All cache images, private daemons and tuner containers/listeners
+are removed. Remaining task-owned clones, targets and private experiment
+files are removed after durable handoff; PR904 records that final cleanup
+confirmation. User checkouts, credentials and the shared compiler target
+are outside cleanup scope.

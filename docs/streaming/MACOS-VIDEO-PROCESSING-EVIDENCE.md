@@ -994,3 +994,81 @@ contains thirty-three hash-verified files, 170,757 compressed bytes, SHA-256
 Original source/driver hashes, bounded errors, decoded observations and
 normalized executed drivers are included. Credentials, private sessions,
 configurations, full daemon logs, binaries and media are excluded.
+
+## 27. Final Live source-change and EOF acceptance
+
+The signed `1bf84609` package passes both affected Live lifecycle checks.
+EOF records the expected terminal `stream_failed` counter increment, ends
+normal resume, and an explicit fresh request decodes 144 progressive frames
+at 12 fps. The controlled format transition records exactly one
+`source_format_changed` counter increment after 13.39 seconds, ends the old
+resume capability, and an explicit fresh request observes 416 × 234 at
+15 fps and decodes 144 progressive frames at that cadence. The ordinary
+twelve-case frame/field matrix remains separately source-bound to `a2ee`.
+
+The final receipt links the previously failed transition, accepted repair
+commit `4be9603bc`, reviewed file blob and original transition manifest.
+Actual argv retains software decode, native upload/scale, VideoToolbox
+encoding and existing scoped Live `-a53cc 0`. The result confirms existing
+owner cleanup now settles the diagnostic before terminal classification
+and invalidates stale source facts; no new automatic retry is asserted.
+
+[Final Live lifecycle receipt](evidence/macos-video-20261008/live-api-final-evidence.tar.gz)
+contains one verified sanitized file, 3,102 compressed bytes, SHA-256
+`7efe0192f6343b8f7f79146221a2a530bd37a7d59fbca0f3d68c4f7547f1c025`.
+Private raw receipt/driver/log hashes are linked; media, capabilities,
+LAN identifiers, configuration and credentials are excluded. All task-owned
+daemons and tuner containers have settled; no owned listener remains on
+ports 80 or 5004.
+
+## 28. Startup sampling, admission and completed demand soak
+
+The signed final `1bf84609` package completes thirty CPU and thirty native
+starts, alternating order and using distinct normally scanned source identities
+and uncached candidate recipes. Timers start before normal POST creation,
+including source-fact/catalog/decision work, and end on fetched first media
+bytes. Prior daemon identity initialization, settings and library scan are
+excluded. Polling is 0.5 seconds; these are HTTP-availability upper bounds,
+not cold-disk, click-to-play or presented-frame measurements.
+
+| Route | Samples | Median seconds | Nearest-rank p95 seconds |
+|---|---|---|---|
+| CPU baseline | 30 | 1.225315 | 1.242879 |
+| Native candidate | 30 | 1.206918 | 1.216253 |
+
+The candidate satisfies the predefined p95 allowance: baseline plus the
+larger of 100 milliseconds or 10%, yielding 1.367167 seconds. These close
+upper bounds do not establish a measurable startup speedup. All starts
+remain under the separate 30-second delivery deadline.
+
+Normal admission settings change from two hardware/eight software slots to
+four hardware/thirty-two software slots for the concurrency controls. One,
+two and four distinct uncached sessions all admit and publish without errors;
+the four-session first-media bounds span 2.732–4.252 seconds. This is short
+admission/publication evidence, not advertised realtime encoder capacity.
+
+The original combined driver then fails before its soak: it reuses a global
+control sequence across four new sessions, and the existing owner correctly
+returns `409 stale_control`. The original failed receipt is preserved. A
+separate soak-only continuation uses independent client identities and
+sequences, with all four first sequence-1 exchanges accepted before starting
+the monotonic 1,800-second clock. No application patch or generic retry is
+introduced, and the valid sixty starts/admission controls are not rerun.
+
+The continuation completes 1,800.051757 seconds across four independent
+sessions, fetching 1,096 objects and 54,458,496 bytes. Per-session controls
+and producer-state checks record no failure. Shutdown exits zero and no
+matching task-owned daemon/tool process remains. All effort-owned compiler,
+archive, cleanup and competing experiment jobs are paused during measurement.
+After materialization these are repeated cached-object demand/control checks;
+they do not prove sustained encoder concurrency, actual client presentation,
+unmeasured process memory behavior, energy or physical copy counts.
+
+[Startup and final soak evidence](evidence/macos-video-20261008/timing-soak-final-evidence.tar.gz)
+contains six verified files, 140,893 compressed bytes, SHA-256
+`48b843d948a755b0e8a5aa681aeebd76bcc694cb76f4779ba120ab3970d835ae`.
+The successful continuation links original failed receipt SHA-256
+`19f4acfcd2e7b3621ab4726535f08eb095f7550dbcef9502efb733f18666c953`.
+Source/binary identities, original driver hashes and normalized executed
+copies are retained. Media, credentials, private session URLs/configuration,
+full daemon logs and binaries are excluded.

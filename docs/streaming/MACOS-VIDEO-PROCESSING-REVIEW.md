@@ -308,4 +308,6 @@ No additional reader, watchdog, sleep or retry owner is introduced.
 Regression source covers an already-exited child whose delayed stderr settles
 during cleanup, and classification precedence. Pinned all-target compilation
 and the normal hook pass; units remain coordinator-owned. Actual daemon
-source-switch confirmation on the combined package remains required.
+source-switch confirmation now passes on final `1bf84609`: typed change
+counter, ended resume, fresh source facts and changed output cadence all
+match. EOF/reconnect also passes; evidence §27 retains the final receipt.
