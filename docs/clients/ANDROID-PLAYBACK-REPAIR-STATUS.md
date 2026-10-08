@@ -1,6 +1,6 @@
 # Android playback repair — device failures and delivery progress
 
-**Status:** review addressed; final validation · **Updated:** 2026-10-08
+**Status:** review addressed; lint, syntax and web merge checks · **Updated:** 2026-10-08
 
 Companion to [Android parity](ANDROID-CLIENT-PARITY.md): repairs the native
 TCL and Lenovo playback failures and Razr video geometry and playback menus.
@@ -65,3 +65,15 @@ No full unit sweep is part of this repair. Physical-device acceptance remains
 separate from emulator evidence; no TCL or repaired Razr acceptance is claimed.
 The server change requires deployment after merge to repair existing runtime
 state; merging alone does not replace the deployed binary.
+
+
+## Final gate adjustment
+
+All eight focused regressions passed once. The first fast-lane preflight found
+two missing client-catalog mappings for this PR and two existing main commits
+without audited landing attribution. Their explicit mappings and historical
+errata are recorded; validator behavior and boundaries are unchanged.
+
+The user subsequently authorized merging when lint, syntax and web checks
+pass, without waiting on the remaining unit-test work. The PR records those
+final checks and the merge result; other sessions own unrelated unit failures.
