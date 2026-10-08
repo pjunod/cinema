@@ -1236,6 +1236,8 @@ paths = [
   "scripts/macos-source-parser.entitlements",
   "scripts/macos-source-parser-licenses/**",
   "scripts/prepare-macos-video-ffmpeg",
+  "scripts/macos-video-dependency-offers.py",
+  "scripts/macos-video-dependency-sources.json",
   "scripts/macos-video-ffmpeg-patches/**",
   "scripts/prepare-linux-dolby-ffmpeg",
   "scripts/linux-video-ffmpeg-patches/**",

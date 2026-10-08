@@ -1,0 +1,271 @@
+{
+  "Ne10": {
+    "commit": "502bbc4ab65fe83114d618363510fd4ffb7a8c46",
+    "kind": "git-source-archive",
+    "sha256": "98706ea31a077d74efab07eb21692d1c27138b79e3c82900e0d55e6dfa3ce2d8"
+  },
+  "ass": {
+    "commit": "4a05d8127f525943ebf45fdc6497c9e665947f0d",
+    "kind": "git-source-archive",
+    "sha256": "6b521f8be88dc13034b56f42a0b5a6dbb5854999318eaf1b9a60db3ccde60779"
+  },
+  "broti.tar.gz": {
+    "kind": "upstream-source-archive",
+    "sha256": "816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec"
+  },
+  "chromaprint": {
+    "commit": "6b13ce3a81ae931e7477c4856a86bece99157cd8",
+    "kind": "git-source-archive",
+    "sha256": "d6a0874c9f194a2670c3f67b4838756b83a51ba1c7b35078d63c2a5d5b32cba5"
+  },
+  "dav1d": {
+    "commit": "54706fc6bc0cdecab7e9593974a4039cc038fca7",
+    "kind": "git-source-archive",
+    "sha256": "2fd4c572d2c7f4943d501114e6d7424e97b3ee5d6588a39754a2247a94bf33f2"
+  },
+  "dav1d--subprojects--checkasm": {
+    "commit": "0df02535c7435cf3969ca141c9e3ff7b1c1e6c28",
+    "kind": "git-submodule-source-archive",
+    "sha256": "ed2388c5185bc45c93ecaca2b25f8b6a14f91ad71bdc697f7b4a59dcf461a339"
+  },
+  "fc": {
+    "commit": "6d0a98982ec351c165c9224c8b7dbdfca3010e47",
+    "kind": "git-source-archive",
+    "sha256": "00a589ef0a455d9cf3db55a13e1aa15090a96e65b18a3fe89c182b7be277576d"
+  },
+  "freetype": {
+    "commit": "1803559c4ee407d0bcbf2a67dbe96690cee869d2",
+    "kind": "git-source-archive",
+    "sha256": "d9bc9ca3703c3196a11ed487a7964fd3e0902ba47da52d42d62426038c1dc255"
+  },
+  "freetype--subprojects--dlg": {
+    "commit": "395ccad2c1e0daae535c4d20bb0a3f2424648e17",
+    "kind": "git-submodule-source-archive",
+    "sha256": "d253da512a0c60309deec1fc22639cec9369e6fa2f0e35e3d067f4896c0b4b7e"
+  },
+  "fribidi": {
+    "commit": "5c85a174650ab8ef106ce85f13bcf2950d3fc65f",
+    "kind": "git-source-archive",
+    "sha256": "9d5aa93f0b69eefe31437b7b20e9604accc5db7193ec0a66f931200c895ce711"
+  },
+  "gettext.tar.gz": {
+    "kind": "upstream-source-archive",
+    "sha256": "85d99b79c981a404874c02e0342176cf75c7698e2b51fe41031cf6526d974f1a"
+  },
+  "gmp": {
+    "commit": "9994908f090c694f8a152d660dc6852e0c48557a",
+    "kind": "git-source-archive",
+    "sha256": "8f4d233e569b04aecc725bcf40d8388dbaf9c9e27d2036c952a1c4e7e1f10b72"
+  },
+  "harfbuzz": {
+    "commit": "56feae4035bdd48f62ba2b8d8c16232d4d89b3a4",
+    "kind": "git-source-archive",
+    "sha256": "a93a479ed9db66b5d1c8f64d026d70fcae943d79442e90d757b1e1c57da74813"
+  },
+  "lame": {
+    "kind": "svn-source-archive",
+    "revision": "6531",
+    "sha256": "e9a12c30eba636984ba16231488611d3a34eb78b2cfc616ac58aa1d5cbf97ba5"
+  },
+  "libbluray": {
+    "commit": "4dfb9b0123b006ce5d66592dc8058f61e5c0cdc8",
+    "kind": "git-source-archive",
+    "sha256": "6d22ab6fea0d938ca72bb9d13189a5c79e2f3660dfa1df8d75953c6aa859e230"
+  },
+  "libpng": {
+    "commit": "3061454d980de7d53608f594194cfac722721d2a",
+    "kind": "git-source-archive",
+    "sha256": "3f31d4b1f5226f75a1b64e43883aa0bf52e9927c3cb14e752a933c3d74fcf7e6"
+  },
+  "libudfread": {
+    "commit": "139a2194525f2745b98a98e4d8fa627d07440176",
+    "kind": "git-source-archive",
+    "sha256": "e1efe080d975dd4cccf04aa1f2116290e1b9af8e761cca229d68cd11b06d3dca"
+  },
+  "libunibreak": {
+    "commit": "3ce4bfa3129ff3738046a44a6db533d2ce25af2b",
+    "kind": "git-source-archive",
+    "sha256": "147ec07d1237e6a3877b717d557d06f4074aa934502034520b2e6f4ebc4915ca"
+  },
+  "libvpx": {
+    "commit": "1024874c5919305883187e2953de8fcb4c3d7fa6",
+    "kind": "git-source-archive",
+    "sha256": "b2579012f87c3c00b1efe24201c55e0d3c483a064444c4887bec9e365fa12ed1"
+  },
+  "ogg": {
+    "commit": "06a5e0262cdc28aa4ae6797627a783b5010440f0",
+    "kind": "git-source-archive",
+    "sha256": "c822b870bd046ac4a7180476e1da88960c37c983db7566cbd3069e1d89376918"
+  },
+  "openmpt": {
+    "commit": "11363ff11ba021b1cf1533da17d9fdf20c8d883c",
+    "kind": "git-source-archive",
+    "sha256": "fa313fd72f433051be37f9fb2e3e866a2d8d6621955859df3da3fac54f949f16"
+  },
+  "openssl": {
+    "commit": "aae016bfd52fcad2bc9657c2c782cfdf73b1ed5f",
+    "kind": "git-source-archive",
+    "sha256": "d7ce8ac52671e4e09a5953a5a4764c017948c4e0c3819371173bdd6596dde958"
+  },
+  "openssl--cloudflare-quiche": {
+    "commit": "7ab6a55cfe471267d61e4d28ba43d41defcd87e0",
+    "kind": "git-submodule-source-archive",
+    "sha256": "5ca37edb6fa77d703053fde08e1bc4cff4fd879115e5418cb84b67433b8df8f2"
+  },
+  "openssl--cloudflare-quiche--quiche--deps--boringssl": {
+    "commit": "f1c75347daa2ea81a941e953f2263e0a4d970c8d",
+    "kind": "git-submodule-source-archive",
+    "sha256": "ef1926b54f856b5a867d41223ee0933680307be062f65ecf981bc7cda2876d03"
+  },
+  "openssl--fuzz--corpora": {
+    "commit": "ce771805c094d098c25a218bc8e9f7344eccbc5a",
+    "kind": "git-submodule-source-archive",
+    "sha256": "bf0314857e1fac0eb713a34fadd0bc3a4d678703f637e3adc9820448d667a4ce"
+  },
+  "openssl--gost-engine": {
+    "commit": "74b1f4fddbc2d6de969815b1992ddc1ae7c643fe",
+    "kind": "git-submodule-source-archive",
+    "sha256": "51f218ef4584da727cee75ce0aedc01b359933b69c4a748574887d782a698d70"
+  },
+  "openssl--gost-engine--libprov": {
+    "commit": "0b445c73ae1e87577430c6884cdeeca1afa36dbd",
+    "kind": "git-submodule-source-archive",
+    "sha256": "5ff1967e73ce043fe2bb04cd1a4f397c2a00b2b0925d1b83bf31d757beeb88fe"
+  },
+  "openssl--krb5": {
+    "commit": "784c38f50e70a739400cdd3f2620bac2e2788e6c",
+    "kind": "git-submodule-source-archive",
+    "sha256": "8a99aec24f9579934543bc7a37748d2a2c3a20cd638ad215596b422f6ee79f80"
+  },
+  "openssl--oqs-provider": {
+    "commit": "7bc597c04b534ddea9b6654481deb31ded8e1bbc",
+    "kind": "git-submodule-source-archive",
+    "sha256": "0fbf1b7bfda7991ff03df1e701989881977db8288ea2aa8b7ad8549787d60576"
+  },
+  "openssl--pkcs11-provider": {
+    "commit": "663dea335c80bec7fd96d544ff875af08d6461a9",
+    "kind": "git-submodule-source-archive",
+    "sha256": "85be9ffac1ae52cb4cfbdf1ad2a84f88c3886cb3667bbaaf5d5e96ad119cb5e0"
+  },
+  "openssl--pkcs11-provider--python-ecdsa": {
+    "commit": "ea9666903c109a8e88a37eb1c60d4e98f01f0299",
+    "kind": "git-submodule-source-archive",
+    "sha256": "845b841514ebd426ddf9e016ee030c5d86912a72be2ea56c7eb55d9780037961"
+  },
+  "openssl--pkcs11-provider--tlsfuzzer": {
+    "commit": "32fcb0d8e78fd9ffc4568d11ba5916936a46af8c",
+    "kind": "git-submodule-source-archive",
+    "sha256": "014ab6c00e8fcd6a3289cc4e0f17095b9505b06357b34230bac983daf75338f3"
+  },
+  "openssl--pkcs11-provider--tlslite-ng": {
+    "commit": "4e16574d7c52f17c81c3f5e0aa547776a67fdf8e",
+    "kind": "git-submodule-source-archive",
+    "sha256": "5a62fe8ec0e158581777ff34b1558bfa0101b32124a8b2d4f109982692112876"
+  },
+  "openssl--pyca-cryptography": {
+    "commit": "0e855f952693c8b730abb2fc5a84dfc69562f210",
+    "kind": "git-submodule-source-archive",
+    "sha256": "dcbbde2e09455c1e9dacd62c2cd9291fac15c0576330713f7cacafb19eb95302"
+  },
+  "openssl--python-ecdsa": {
+    "commit": "4096fa01715929e08b97e73f3173aee9d57f2a3f",
+    "kind": "git-submodule-source-archive",
+    "sha256": "7fea56fcad6543757fa482fc7c682c2fae88f66eda48e5c7062d2451b9406aaa"
+  },
+  "openssl--tlsfuzzer": {
+    "commit": "61f45d9701294fd87ef92d2a7e3dfb076653a562",
+    "kind": "git-submodule-source-archive",
+    "sha256": "20aa6ccbf69ded3bfe19409b4570829fd12dc6f9d39a66f5307aa8b1f3b64706"
+  },
+  "openssl--tlslite-ng": {
+    "commit": "77ef321dde1a9e6bcf94d73c80f8789a770d8031",
+    "kind": "git-submodule-source-archive",
+    "sha256": "c4e0ec5dbc74881b5c4f8d38df985b7be9effa68e6f38875718a5f409e371cb9"
+  },
+  "openssl--wycheproof": {
+    "commit": "aca47066256c167f0ce04d611d718cc85654341e",
+    "kind": "git-submodule-source-archive",
+    "sha256": "055ec2b4710c94dc18e80230cc4febfc789e57abf95e598f7a53885fe5fd9968"
+  },
+  "opus": {
+    "commit": "788cc89ce4f2c42025d8c70ec1b4457dc89cd50f",
+    "kind": "git-source-archive",
+    "sha256": "8d9c58f822fc4db469c94d8da21abe17b92ec80ab5ed95290cbe590cba671990"
+  },
+  "opus_data-a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e.tar.gz": {
+    "kind": "upstream-source-archive",
+    "license_notice": "opus/COPYING",
+    "origin": "https://media.xiph.org/opus/models/opus_data-a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e.tar.gz",
+    "sha256": "a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e"
+  },
+  "srt": {
+    "commit": "b6b4ae990daa8193625a4ddeaeaed03023b23125",
+    "kind": "git-source-archive",
+    "sha256": "9f673cadf27f04a4ab4208d534f9e7a5b3edb09b48bb08977f48aeecca3cc946"
+  },
+  "svtav1": {
+    "commit": "9292ec8e32bce26f781f277ec8739b53426c4300",
+    "kind": "git-source-archive",
+    "sha256": "5ea887efb65619f8d4113b882e96590b28e96af5295ae577d2cc6f7e13970736"
+  },
+  "theora": {
+    "commit": "014bc312d05241ff2d06fd52ee7cbbec3768bfd6",
+    "kind": "git-source-archive",
+    "sha256": "836b0db7173605de5b05f4619c5b5c8015b4fe3f8633ce249bb231e367955a89"
+  },
+  "vorbis": {
+    "commit": "68a7fc2246e734f1a311b06083fc1249551c4412",
+    "kind": "git-source-archive",
+    "sha256": "8af69c3c198e17cff526385b617437f08c5219ce26a80f599f605be96a8c4f88"
+  },
+  "webp": {
+    "commit": "4fa21912338357f89e4fd51cf2368325b59e9bd9",
+    "kind": "git-source-archive",
+    "sha256": "536b31d4fb0de251011a5d773d66c39d8f96bd89a0dcdcc9c784dbfd60f28cb2"
+  },
+  "x264": {
+    "commit": "0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee",
+    "kind": "git-source-archive",
+    "sha256": "be32b1e787ca8e905c10b956d2a5be0b99847deea2ff53be0cd93e488cd90323"
+  },
+  "x265": {
+    "commit": "e9b88125dc21393b3fd8d68e98083bdfb89778a8",
+    "kind": "git-source-archive",
+    "sha256": "713c961acbf76401ae749b6e9395870a8ecbc0633e337f422c8e839f5a3ab8fb"
+  },
+  "xz": {
+    "commit": "4b73f2ec19a99ef465282fbce633e8deb33691b3",
+    "kind": "git-source-archive",
+    "sha256": "17e5cca16c244c1b3f2cd38e7dc71bdab6c5cd9d202cbba05d216c925f83dbe4"
+  },
+  "zimg": {
+    "commit": "5e8c32222569edf3a712f83d7cff80ad4dd9ab6e",
+    "kind": "git-source-archive",
+    "sha256": "941df77785c83cfa4e9f31a100c17462f1fecec881ea00b000e8a19dc712ee42"
+  },
+  "zimg--graphengine": {
+    "commit": "f06d7cb4d589ea4657f01b13613efb7437c8ecda",
+    "kind": "git-submodule-source-archive",
+    "sha256": "d9f8a43481b71c2f00476a6eddddf298a7a59112049745922a531fcdf4e70499"
+  },
+  "zimg--graphengine--test--googletest": {
+    "commit": "e2239ee6043f73722e7aa812a459f54a28552929",
+    "kind": "git-submodule-source-archive",
+    "sha256": "cbdb18c07eb3af62bf57d22281248f9c1d011654b914aa6749bf96359500509c"
+  },
+  "zimg--test--extra--googletest": {
+    "commit": "6910c9d9165801d8827d628cb72eb7ea9dd538c5",
+    "kind": "git-submodule-source-archive",
+    "sha256": "910112df1c84e0d8deb825e072b19448e54b26dae2a1f9206f15d1484de37672"
+  },
+  "zlib": {
+    "commit": "f9dd6009be3ed32415edf1e89d1bc38380ecb95d",
+    "kind": "git-source-archive",
+    "sha256": "49d318f597c223d76f549cfd055c8107ac5df205654d0e5a2795c60f3e53a1d2"
+  },
+  "zvbi": {
+    "commit": "41477c97c8edf7a01f1594b2a95b94f0117eed21",
+    "kind": "git-source-archive",
+    "sha256": "addb6ed912fd46871751faaf88697b2465c79bf2b8fc58d47c552ac6a1257e89"
+  }
+}
