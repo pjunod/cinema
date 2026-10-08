@@ -391,6 +391,105 @@ fn macos_processing_rejected_decoder_and_hdr10plus_retain_incumbent() {
     assert!(plan.macos_processing_identity().is_none());
 }
 
+#[test]
+fn cpu_hdr_to_sdr_consumes_only_static_hdr_metadata_in_both_producers() {
+    use plurx_core::transcode::OutputMetadataPolicy;
+    let input = facts(macos_stream(true));
+    let plan = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &unqualified_software_capabilities("hevc"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("CPU HDR-to-SDR");
+    assert_eq!(
+        plan.output_metadata_policy(),
+        Some(OutputMetadataPolicy::ConsumedHdrStaticV1)
+    );
+    assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+    let source = execution_file("/fixture/source.mkv");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let rolling = hls_args(&plan, &execution);
+    let vod = plurx_core::transcode::vod_pipe_args(
+        &source,
+        &plan,
+        &execution,
+        plurx_core::transcode::VodFrameGrid::new(24, 1).expect("grid"),
+        12.0,
+    );
+    for args in [&rolling, &vod] {
+        let graph = &args[args.iter().position(|arg| arg == "-vf").expect("vf") + 1];
+        assert!(graph.contains("format=yuv420p,sidedata=mode=delete:type=MASTERING_DISPLAY_METADATA,sidedata=mode=delete:type=CONTENT_LIGHT_LEVEL"));
+        assert!(
+            !graph.contains("type=A53_CC"),
+            "caption data must remain available"
+        );
+        assert!(
+            !graph.contains("sidedata=mode=delete,"),
+            "never delete all side data"
+        );
+        assert!(
+            graph.find("tonemap=tonemap=hable").expect("pixel mapping")
+                < graph
+                    .find("type=MASTERING_DISPLAY_METADATA")
+                    .expect("consumed metadata")
+        );
+    }
+}
+
+#[test]
+fn consumed_hdr_metadata_policy_leaves_unaffected_routes_unchanged() {
+    let caps = unqualified_software_capabilities("hevc");
+    for (hdr, pipeline, tone_map) in [
+        (false, Pipeline::Cpu, ToneMap::Zscale),
+        (true, Pipeline::Cpu, ToneMap::None),
+        (true, Pipeline::Cpu, ToneMap::Tonemapx),
+        (true, Pipeline::Hdr10Passthrough, ToneMap::Zscale),
+    ] {
+        let input = facts(macos_stream(hdr));
+        let mut media = options(pipeline);
+        media.tone_map = tone_map;
+        let legacy = resolve_with_options(
+            Encoder::Software,
+            media.clone(),
+            &input,
+            &caps,
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("unchanged route");
+        let disabled = resolve_with_options(
+            Encoder::Software,
+            media,
+            &input,
+            &caps,
+            macos_policy(macos_context(false, MacosProcessingAvailability::Available)),
+        )
+        .expect("unchanged route with disabled context");
+        assert_eq!(legacy.output_metadata_policy(), None);
+        assert_eq!(legacy.plan_digest(), disabled.plan_digest());
+        let source = execution_file("/fixture/source.mkv");
+        let execution = TranscodeExecution::from_options(
+            &source,
+            &execution_options(),
+            Pacing::unpaced(),
+            "/fixture/out",
+        )
+        .expect("execution");
+        let args = hls_args(&legacy, &execution);
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains("sidedata=mode=delete:type=MASTERING_DISPLAY_METADATA")));
+        assert_eq!(args, hls_args(&disabled, &execution));
+    }
+}
+
 fn identity(byte: char) -> DecodeSourceIdentity {
     DecodeSourceIdentity::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
 }

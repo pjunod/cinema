@@ -45,6 +45,21 @@ pub enum Deinterlace {
     BwdifSendFrame,
 }
 
+/// Effective output signaling correction for a renderer that consumes HDR
+/// static metadata without previously removing it from its SDR output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMetadataPolicy {
+    ConsumedHdrStaticV1,
+}
+
+impl OutputMetadataPolicy {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ConsumedHdrStaticV1 => "consumed_hdr_static_v1",
+        }
+    }
+}
+
 /// Bounded content verification for a source whose container reports an
 /// interlaced field order. `NotChecked` is the neutral value for progressive
 /// and unknown sources; unavailable verification keeps the conservative flag
@@ -2532,9 +2547,14 @@ pub struct ResolvedTranscode {
     deinterlace: Deinterlace,
     macos_processing_identity: Option<MacosProcessingIdentity>,
     macos_processing_selection: Option<MacosProcessingSelection>,
+    output_metadata_policy: Option<OutputMetadataPolicy>,
 }
 
 impl ResolvedTranscode {
+    pub fn output_metadata_policy(&self) -> Option<OutputMetadataPolicy> {
+        self.output_metadata_policy
+    }
+
     pub fn macos_processing_identity(&self) -> Option<&MacosProcessingIdentity> {
         self.macos_processing_identity.as_ref()
     }
@@ -2972,6 +2992,11 @@ impl ResolvedTranscode {
         // disabled settings and unsupported inputs preserve existing hashes.
         if let Some(identity) = &self.macos_processing_identity {
             feed("macos_processing_v1", identity.digest().as_bytes());
+        }
+        if let Some(policy) = self.output_metadata_policy {
+            // A scoped signaling correction rotates only the affected output
+            // routes. Existing SDR and HDR-preserving recipes retain identity.
+            feed("output_metadata_policy", policy.name().as_bytes());
         }
         hex::encode(digest.finalize())
     }
@@ -3475,6 +3500,8 @@ pub fn resolve_transcode(
         }
         None
     };
+    let output_metadata_policy =
+        super::output_metadata_policy_for(options.pipeline, options.tone_map, facts.is_hdr());
     Ok(ResolvedTranscode {
         artifact_qualification: policy.artifact_qualification(),
         decode: ResolvedDecode {
@@ -3499,6 +3526,7 @@ pub fn resolve_transcode(
         deinterlace,
         macos_processing_identity,
         macos_processing_selection,
+        output_metadata_policy,
     })
 }
 
