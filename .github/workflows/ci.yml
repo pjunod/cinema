@@ -193,6 +193,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Audit corrective-history evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PLURX_PROMOTION_PR: ${{ inputs.promotion_pr }}
+          PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
+          PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
         run: make history-check
       - name: Check validation catalog and contract unit tests
         run: |
