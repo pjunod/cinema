@@ -462,6 +462,26 @@ impl ProducerSlot {
     pub async fn perform(&self, step: Step, touch: impl FnOnce()) -> io::Result<Performed> {
         self.perform_for_generation(None, step, touch).await
     }
+    /// Observe only this registered child without transferring its ownership.
+    /// Even after exit, admission and job custody remain until retirement and
+    /// the registered writer barrier confirm the generation is finished.
+    #[cfg(unix)]
+    pub(crate) async fn try_wait_registered(
+        &self,
+        generation: &ProducerRegistration,
+    ) -> io::Result<Option<std::process::ExitStatus>> {
+        let mut state = self.inner.lock().await;
+        if !state
+            .registration
+            .as_ref()
+            .is_some_and(|current| current.same_generation(generation))
+            || state.reaping.is_some()
+        {
+            return Err(no_child());
+        }
+        state.child.as_mut().ok_or_else(no_child)?.try_wait()
+    }
+
     /// Start exact-generation retirement without waiting for its own writers.
     /// Returns whether this call acquired the actual process for retirement.
     pub(crate) async fn request_registered_retirement(

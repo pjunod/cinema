@@ -28,6 +28,8 @@ mod decode_facts;
 mod decoder_health;
 mod delivery;
 mod dv_disk;
+#[cfg(unix)]
+mod dv_segment;
 mod dvpipe;
 mod ffmpeg;
 mod fontenv;
