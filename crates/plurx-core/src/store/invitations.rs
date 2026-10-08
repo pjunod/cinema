@@ -367,6 +367,10 @@ pub trait InvitationStore: Send + Sync {
         now: i64,
     ) -> Result<(), StoreError>;
     async fn invitation_revocations(&self) -> Result<Vec<InvitationRevocation>, StoreError>;
+    async fn invitation_revocation_page(
+        &self,
+        after: &str,
+    ) -> Result<Vec<InvitationRevocation>, StoreError>;
     async fn record_invitation_revocation(
         &self,
         id: &str,
@@ -404,6 +408,14 @@ pub trait InvitationStore: Send + Sync {
         receiver: &str,
         user: i64,
     ) -> Result<Option<InvitationScope>, StoreError>;
+    async fn invitation_retained_consents(
+        &self,
+        after: &str,
+    ) -> Result<Vec<InvitationConsent>, StoreError>;
+    async fn invitation_dispatch_candidates(
+        &self,
+        after: &str,
+    ) -> Result<Vec<InvitationScope>, StoreError>;
     async fn invitation_receiver_scopes(
         &self,
         receiver: &str,

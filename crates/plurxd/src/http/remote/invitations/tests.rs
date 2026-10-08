@@ -2,7 +2,7 @@ use super::*;
 use axum::{body::to_bytes, http::Request};
 use tower::ServiceExt;
 
-async fn call(
+pub(super) async fn call(
     app: &axum::Router,
     token: &str,
     path: &str,
@@ -11,7 +11,7 @@ async fn call(
 ) -> (u16, Value) {
     call_proofs(app, token, path, body, phone, None).await
 }
-async fn call_proofs(
+pub(super) async fn call_proofs(
     app: &axum::Router,
     token: &str,
     path: &str,
@@ -49,7 +49,7 @@ async fn call_proofs(
     assert_eq!(value["version"], "cinema.invitation.v1");
     (status, value)
 }
-async fn login(state: &AppState) -> String {
+pub(super) async fn login(state: &AppState) -> String {
     let user = state
         .store
         .create_user("invitation-test", "hash", false)
@@ -199,6 +199,52 @@ async fn phone_availability_router_does_not_refresh_native_activity() {
         .expect("invitation fixture");
     let (status,_) = call(&app,&token,&format!("phones/{id}/availability"),r#"{"version":"cinema.invitation.v1","expected_phone_generation":1,"permission_granted":true,"resident_active":true}"#,Some(proof)).await;
     assert_eq!(status, 200);
+    let register=json!({"version":"cinema.invitation.v1","installation_id":id,"platform":"android","name":"Phone"}).to_string();
+    assert_eq!(
+        call(&app, &token, "phones", &register, Some(proof)).await.0,
+        200
+    );
+    assert_eq!(
+        call(
+            &app,
+            &token,
+            "phones/list",
+            r#"{"version":"cinema.invitation.v1","after_id":null,"limit":20}"#,
+            Some(proof)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(call(&app,&token,"invitations/consents/list",&json!({"version":"cinema.invitation.v1","installation_id":id,"after_receiver_id":null,"limit":20}).to_string(),Some(proof)).await.0,200);
+    let receiver = Uuid::new_v4().to_string();
+    let grant = Uuid::new_v4().to_string();
+    let start=json!({"version":"cinema.invitation.v1","installation_id":id,"receiver_id":receiver,"grant_id":grant,"expected_phone_generation":2,"expected_consent_generation":1}).to_string();
+    assert_eq!(
+        call(
+            &app,
+            &token,
+            "invitations/transport/start",
+            &start,
+            Some(proof)
+        )
+        .await
+        .0,
+        409
+    );
+    let confirm=json!({"version":"cinema.invitation.v1","installation_id":id,"receiver_id":receiver,"ticket_id":Uuid::new_v4().to_string(),"expected_phone_generation":2,"expected_consent_generation":1,"expected_transport_generation":1}).to_string();
+    assert_eq!(
+        call(
+            &app,
+            &token,
+            "invitations/transport/confirm",
+            &confirm,
+            Some(proof)
+        )
+        .await
+        .0,
+        409
+    );
     let seen: i64 = connection
         .query_row(
             "SELECT last_seen_at FROM tokens WHERE token_hash=?1",

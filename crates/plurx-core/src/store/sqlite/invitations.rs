@@ -232,6 +232,32 @@ impl InvitationStore for SqliteStore {
         })
         .await
     }
+    async fn invitation_revocation_page(
+        &self,
+        after: &str,
+    ) -> Result<Vec<InvitationRevocation>, StoreError> {
+        if after.len() > 256 {
+            return Err(crate::error::StoreError::Database(
+                "invalid cleanup cursor".into(),
+            ));
+        }
+        let after = after.to_owned();
+        self.with_read(move |c| {
+            Ok(c.prepare(REVOKE_PAGE)?
+                .query_map(params![after], |r| {
+                    Ok(InvitationRevocation {
+                        id: r.get(0)?,
+                        user_id: r.get(1)?,
+                        enrollment_id: r.get(2)?,
+                        generation: r.get(3)?,
+                        attempts: r.get(4)?,
+                        created_at: r.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
     async fn record_invitation_revocation(
         &self,
         id: &str,
@@ -361,6 +387,36 @@ impl InvitationStore for SqliteStore {
                 c.query_row(&scope_query(true), params![phone, receiver, user], scope)
                     .optional()?,
             )
+        })
+        .await
+    }
+    async fn invitation_retained_consents(
+        &self,
+        after: &str,
+    ) -> Result<Vec<InvitationConsent>, StoreError> {
+        if !after.is_empty() {
+            validate_invitation_ids(&[after], 1)?;
+        }
+        let after = after.to_owned();
+        self.with_read(move |c| {
+            Ok(c.prepare(RETAINED_CONSENTS)?
+                .query_map(params![after], consent)?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+    async fn invitation_dispatch_candidates(
+        &self,
+        after: &str,
+    ) -> Result<Vec<InvitationScope>, StoreError> {
+        if !after.is_empty() {
+            validate_invitation_ids(&[after], 1)?;
+        }
+        let after = after.to_owned();
+        self.with_read(move |c| {
+            Ok(c.prepare(&dispatch_candidates_query())?
+                .query_map(params![after], scope)?
+                .collect::<Result<Vec<_>, _>>()?)
         })
         .await
     }

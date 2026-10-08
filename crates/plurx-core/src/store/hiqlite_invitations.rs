@@ -346,6 +346,20 @@ impl InvitationStore for HiqliteAuthStore {
             .query_consistent_map::<InvitationRevocation, _>(REVOKE_WORK, params!())
             .await?)
     }
+    async fn invitation_revocation_page(
+        &self,
+        after: &str,
+    ) -> Result<Vec<InvitationRevocation>, StoreError> {
+        if after.len() > 256 {
+            return Err(crate::error::StoreError::Database(
+                "invalid cleanup cursor".into(),
+            ));
+        }
+        Ok(self
+            .client()
+            .query_consistent_map::<InvitationRevocation, _>(REVOKE_PAGE, params!(after))
+            .await?)
+    }
     async fn record_invitation_revocation(
         &self,
         id: &str,
@@ -471,6 +485,30 @@ impl InvitationStore for HiqliteAuthStore {
             )
             .await?
             .pop())
+    }
+    async fn invitation_retained_consents(
+        &self,
+        after: &str,
+    ) -> Result<Vec<InvitationConsent>, StoreError> {
+        if !after.is_empty() {
+            validate_invitation_ids(&[after], 1)?;
+        }
+        Ok(self
+            .client()
+            .query_consistent_map::<InvitationConsent, _>(RETAINED_CONSENTS, params!(after))
+            .await?)
+    }
+    async fn invitation_dispatch_candidates(
+        &self,
+        after: &str,
+    ) -> Result<Vec<InvitationScope>, StoreError> {
+        if !after.is_empty() {
+            validate_invitation_ids(&[after], 1)?;
+        }
+        Ok(self
+            .client()
+            .query_consistent_map::<InvitationScope, _>(dispatch_candidates_query(), params!(after))
+            .await?)
     }
     async fn invitation_receiver_scopes(
         &self,

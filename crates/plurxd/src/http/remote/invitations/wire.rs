@@ -83,3 +83,57 @@ fn nonnegative_generation<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64,
     i64::try_from(value).map_err(serde::de::Error::custom)
 }
 envelope!(Consent, ConsentList);
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportStart {
+    pub version: Version,
+    pub installation_id: String,
+    pub receiver_id: String,
+    pub grant_id: String,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_phone_generation: i64,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_consent_generation: i64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportConfirm {
+    pub version: Version,
+    pub installation_id: String,
+    pub receiver_id: String,
+    pub ticket_id: String,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_phone_generation: i64,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_consent_generation: i64,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_transport_generation: i64,
+}
+
+envelope!(TransportStart, TransportConfirm);
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Poll {
+    pub version: Version,
+    pub installation_id: String,
+    #[serde(deserialize_with = "revision")]
+    pub after_revision: i64,
+    pub wait_ms: u32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lookup {
+    pub version: Version,
+    pub installation_id: String,
+    pub invitation_id: String,
+}
+envelope!(Poll, Lookup);
+fn revision<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let v = u64::deserialize(d)?;
+    if v > 9_007_199_254_740_991 {
+        return Err(serde::de::Error::custom("invalid revision"));
+    }
+    i64::try_from(v).map_err(serde::de::Error::custom)
+}

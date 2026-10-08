@@ -451,9 +451,19 @@ pub(crate) async fn internal(
         {
             return Err(fail(400, "invalid"));
         }
-        let user = authenticate_token_digest(&state, d.token_digest.clone(), TokenAudience::Native)
-            .await?;
-        if user.id != d.user_id {
+        let user_id = if matches!(d.request, Request::InvitationSessions { .. }) {
+            state
+                .store
+                .invitation_login(&d.token_digest, now_seconds()?)
+                .await?
+                .ok_or_else(|| fail(401, "unauthorized"))?
+                .user_id
+        } else {
+            authenticate_token_digest(&state, d.token_digest.clone(), TokenAudience::Native)
+                .await?
+                .id
+        };
+        if user_id != d.user_id {
             return Err(fail(403, "unauthorized"));
         }
         state.remote.perform(&state, d).await

@@ -137,8 +137,10 @@ Repeated delivery uses the same identity; native deduplicates its local visible
 notification. This endpoint is for an explicitly started Android resident
 service, not an iOS background loop.
 
-Worker traffic and resident polling use a consistent no-touch Native verdict
-at initial admission and each one-second poll refresh. They apply existing
+Worker traffic, resident polling, phone registration/retry/list, consent listing,
+availability and transport Start/Confirm reconciliation use a consistent
+no-touch Native verdict at initial admission. Resident polls refresh that verdict
+every second. These operations apply existing
 `TokenIdlePolicy` and audience rules without updating `last_seen_at`; background
 work cannot keep a dormant phone signed in. User-initiated consent and actual
 tap lookup retain ordinary human authentication activity.
@@ -152,6 +154,13 @@ revocation or ambiguous owners refuses the tap. A reconnect in the same
 foreground lifetime can resolve to its new unique target. This is a discovery
 result, never command retargeting. Native opens the remote and then uses the
 normal explicit acquire/takeover controls.
+Both global Cinema remote switches must still be enabled for poll delivery and
+notification lookup. Lookup accepts only durably attempted resident-ready,
+provider-accepted or provider-unknown events. Unknown means a generic provider
+alert may have been delivered; lookup reauthorizes discovery and never retries
+delivery. Admitted, denied, expired and cancelled events do not permit lookup.
+Resident poll exposes only attempted resident-ready outcomes and rechecks scope,
+expiry and both switches after owner collection.
 
 The visible provider/local notification uses category
 `CINEMA_REMOTE_INVITATION`, wording “A paired screen is ready”, and opaque
@@ -342,3 +351,19 @@ restored, held and queued obligations remain retained with
 `migration_remediation`; a response from a replacement broker generation
 cannot acknowledge or discard them. An exceptional recovery surface requires
 a separate reviewed design on the daemon-owned activated store.
+
+Publisher configuration and proof files are loaded once per daemon runtime.
+Changing either requires a daemon restart. A restart does not discard retained
+cleanup obligations or authorize a replacement broker scope.
+
+A successful consent generation change retires any previous broker binding and
+transfers its exact reserved identity to durable cleanup before returning.
+Concurrent replacement references are protected by the ticket and scope CAS.
+Malformed legacy references remain retained with `migration_remediation`; OFF
+can disable authority without discarding such an obligation.
+
+The worker audits retained bindings independently of the two Developer switches.
+Revoked receiver or grant authority, invalidated phone generation or permission,
+and expired or revoked Native login authority queue the exact old reference.
+Global OFF alone preserves a valid saved consent and binding while preventing
+new dispatch, resident delivery, and tap lookup.

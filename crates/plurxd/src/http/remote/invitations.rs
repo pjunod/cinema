@@ -1,5 +1,10 @@
 //! Native invitation installation lifecycle. Background verdicts never touch activity.
+mod broker_client;
+mod resident;
+mod snapshots;
+mod transport;
 mod wire;
+pub(crate) mod worker;
 use super::{bearer, error_parts, fail, now_seconds, proof, secret};
 use crate::{
     http::{error::ApiError, extract::authenticate_user_token},
@@ -28,14 +33,31 @@ use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
 use wire::*;
 pub(crate) struct Hub {
+    #[cfg(test)]
+    snapshot_gate: std::sync::Mutex<Option<Arc<snapshots::TestGate>>>,
     requests: Arc<Semaphore>,
     pub(crate) changed: Notify,
+    broker: std::sync::OnceLock<Result<Option<broker_client::Client>, broker_client::Failure>>,
+    provider_unavailable: [std::sync::atomic::AtomicBool; 2],
+    broker_remediation: std::sync::atomic::AtomicBool,
+    poll_slots: Arc<Semaphore>,
+    poll_phones: std::sync::Mutex<std::collections::HashSet<(i64, String)>>,
 }
 impl Default for Hub {
     fn default() -> Self {
+        let (poll_slots, poll_phones) = resident::pools();
         Self {
+            #[cfg(test)]
+            snapshot_gate: std::sync::Mutex::new(None),
             requests: Arc::new(Semaphore::new(32)),
+            poll_slots,
+            poll_phones,
             changed: Notify::new(),
+            broker: std::sync::OnceLock::new(),
+            broker_remediation: std::sync::atomic::AtomicBool::new(false),
+            provider_unavailable: std::array::from_fn(|_| {
+                std::sync::atomic::AtomicBool::new(false)
+            }),
         }
     }
 }
@@ -50,7 +72,14 @@ pub(crate) fn eligible(method: &Method, path: &str) -> bool {
     if *method == Method::POST
         && matches!(
             p,
-            "phones" | "phones/list" | "invitations/consent" | "invitations/consents/list"
+            "phones"
+                | "phones/list"
+                | "invitations/consent"
+                | "invitations/consents/list"
+                | "invitations/transport/start"
+                | "invitations/transport/confirm"
+                | "invitations/poll"
+                | "invitations/lookup"
         )
     {
         return true;
@@ -73,7 +102,9 @@ fn decode<T: DeserializeOwned + Envelope>(body: &[u8]) -> Result<T, ApiError> {
     Ok(value)
 }
 fn store_error(error: StoreError) -> ApiError {
-    if error.to_string().contains("migration_remediation") {
+    if error.to_string().contains("migration_remediation")
+        || error.to_string().contains("migration remediation")
+    {
         fail(503, "migration_remediation")
     } else {
         fail(503, "unavailable")
@@ -120,9 +151,12 @@ async fn perform(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Result<(u16, Value), ApiError> {
-    let _permit = state
-        .invitations
-        .requests
+    let slots = if uri.path() == "/api/remote/v1/invitations/poll" {
+        &state.invitations.poll_slots
+    } else {
+        &state.invitations.requests
+    };
+    let _permit = slots
         .clone()
         .try_acquire_owned()
         .map_err(|_| fail(429, "busy"))?;
@@ -138,8 +172,17 @@ async fn perform(
     if !eligible(&method, uri.path()) {
         return Err(fail(404, "not_found"));
     }
-    // Availability is OS/background reconciliation, not user interaction.
-    let user = if p.ends_with("/availability") {
+    // Automatic installation and provider reconciliation must not prolong login activity.
+    let user = if p.ends_with("/availability")
+        || matches!(
+            p,
+            "phones"
+                | "phones/list"
+                | "invitations/consents/list"
+                | "invitations/transport/start"
+                | "invitations/transport/confirm"
+                | "invitations/poll"
+        ) {
         state
             .store
             .invitation_login(&digest, now_seconds()?)
@@ -150,7 +193,15 @@ async fn perform(
     } else {
         authenticate_user_token(state, &token).await?.id
     };
-    let value = if p == "phones" {
+    let value = if p == "invitations/poll" {
+        resident::poll(state, headers, body, user, &digest).await?
+    } else if p == "invitations/lookup" {
+        resident::lookup(state, headers, body, user, &digest).await?
+    } else if p == "invitations/transport/start" {
+        transport::start(state, headers, body, user, &digest).await?
+    } else if p == "invitations/transport/confirm" {
+        transport::confirm(state, headers, body, user, &digest).await?
+    } else if p == "phones" {
         let r: Register = decode(body)?;
         if !valid_id(&r.installation_id)
             || r.name.is_empty()
@@ -307,6 +358,23 @@ async fn perform(
                 .map_err(store_error)?
             {
                 return Err(fail(409, "stale_generation"));
+            }
+            // A consent generation change retires the old provider binding.
+            // Transfer its already-reserved identity; exact-reference CAS leaves
+            // a concurrently installed replacement untouched.
+            if let Some(old) = prior.as_ref() {
+                if let Some(encoded) = old.broker_ticket.as_deref() {
+                    let reference =
+                        plurx_core::store::invitations::BrokerReference::decode(encoded)
+                            .map_err(|_| fail(503, "migration_remediation"))?;
+                    state
+                        .store
+                        .queue_invitation_reference(&old.id, user, reference, now_seconds()?)
+                        .await
+                        .map_err(store_error)?;
+                } else if old.broker_enrollment.is_some() {
+                    return Err(fail(503, "migration_remediation"));
+                }
             }
             state.invitations.changed.notify_waiters();
             let item = state
@@ -488,6 +556,8 @@ async fn consent_value(
         "permission_unavailable"
     } else if item.transport == "android_resident" {
         "ready"
+    } else if let Some(status) = transport::readiness(state, &item).await? {
+        status
     } else if scope
         .as_ref()
         .is_some_and(|s| item.transport_phone_generation != s.phone_generation)
@@ -506,3 +576,6 @@ async fn consent_value(
         json!({"receiver_id":item.receiver_id,"grant_id":item.grant_id,"enabled":item.enabled,"transport":item.transport,"consent_generation":item.generation,"transport_generation":item.transport_generation,"readiness":{"eligible":status=="ready","status":status,"provider_delivery_verified":false}}),
     )
 }
+
+#[cfg(test)]
+mod flow_tests;

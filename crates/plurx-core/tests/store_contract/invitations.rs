@@ -1304,3 +1304,143 @@ async fn invitations_cleanup_refuses_mismatched_legacy_held_reference() {
         .expect("no wrong tombstone")
         .is_empty());
 }
+
+#[tokio::test]
+async fn invitations_cleanup_matches_valid_reference_independent_of_json_order() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("reference-order.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let f = Fixture::new(&store).await;
+    let mut consent = f.consent(0, true);
+    consent.enable = Some((f.grant.clone(), f.ghash.clone(), InvitationTransport::Fcm));
+    assert!(store
+        .save_invitation_consent(consent)
+        .await
+        .expect("consent"));
+    let reference = BrokerReference {
+        ticket_id: id(),
+        scope_hash: "b".repeat(64),
+    };
+    let legacy = format!(
+        "{{ \"scope_hash\":\"{}\", \"ticket_id\":\"{}\" }}",
+        reference.scope_hash, reference.ticket_id
+    );
+    let raw = rusqlite::Connection::open(path).expect("legacy valid encoding");
+    raw.execute(
+        "UPDATE invitation_consents SET broker_ticket=?1,broker_enrollment=?2 WHERE id=?3",
+        rusqlite::params![legacy, reference.ticket_id, f.enrollment],
+    )
+    .expect("valid legacy order");
+    assert!(store
+        .queue_invitation_reference(&f.enrollment, f.user, reference.clone(), f.now)
+        .await
+        .expect("exact semantic CAS"));
+    let current = store
+        .invitation_consent(&f.phone, &f.receiver, f.user)
+        .await
+        .expect("consent")
+        .expect("row");
+    assert!(current.broker_ticket.is_none());
+    let work = store
+        .invitation_revocations()
+        .await
+        .expect("retained cleanup");
+    assert_eq!(work.len(), 1);
+    let retained = BrokerReference::decode(&work[0].id).expect("exact reference");
+    assert_eq!(retained.ticket_id, reference.ticket_id);
+    assert_eq!(retained.scope_hash, reference.scope_hash);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invitations_retained_audit_inventory_survives_revoked_grant_and_expired_login() {
+    for_each_backend(|store, _| async move {
+        let f = Fixture::new(store.as_ref()).await;
+        let mut consent = f.consent(0, true);
+        consent.enable = Some((f.grant.clone(), f.ghash.clone(), InvitationTransport::Fcm));
+        assert!(store
+            .save_invitation_consent(consent)
+            .await
+            .expect("consent"));
+        let reference = BrokerReference {
+            ticket_id: id(),
+            scope_hash: "b".repeat(64),
+        };
+        assert!(store
+            .start_invitation_transport(StartInvitationTransport {
+                phone_id: f.phone.clone(),
+                receiver_id: f.receiver.clone(),
+                user_id: f.user,
+                phone_hash: f.phash.clone(),
+                grant_id: f.grant.clone(),
+                grant_hash: f.ghash.clone(),
+                login_digest: f.phone_digest.clone(),
+                expected_phone_generation: 1,
+                expected_consent_generation: 1,
+                reference: reference.clone(),
+                provider_available: true,
+                now: f.now
+            })
+            .await
+            .expect("reserve known reference"));
+        store
+            .put_setting("cinema.remote_invitations", "0")
+            .await
+            .expect("global OFF");
+        store
+            .put_settings(&[
+                ("auth.token_expiry_enabled", "1"),
+                ("auth.token_idle_days", "1"),
+                ("auth.token_expiry_since", &f.now.to_string()),
+            ])
+            .await
+            .expect("idle policy");
+        let before = store.list_tokens_for_user(f.user).await.expect("tokens");
+        assert!(store
+            .invitation_login(&f.phone_digest, f.now + 86401)
+            .await
+            .expect("authoritative expiry")
+            .is_none());
+        assert_eq!(
+            before,
+            store
+                .list_tokens_for_user(f.user)
+                .await
+                .expect("no activity touch")
+        );
+        store
+            .revoke_remote_grant(&f.grant, f.user, f.now)
+            .await
+            .expect("grant revoked");
+        assert!(store
+            .invitation_dispatch_candidates("")
+            .await
+            .expect("valid-only candidates")
+            .is_empty());
+        let retained = store
+            .invitation_retained_consents("")
+            .await
+            .expect("independent retained inventory");
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, f.enrollment);
+        assert!(store
+            .invitation_retained_consents(&f.enrollment)
+            .await
+            .expect("bounded cursor")
+            .is_empty());
+        assert!(store
+            .queue_invitation_reference(&f.enrollment, f.user, reference, f.now)
+            .await
+            .expect("reserved cleanup despite invalid authority"));
+        let queued = store
+            .invitation_revocation_page("")
+            .await
+            .expect("cleanup prefix");
+        assert_eq!(queued.len(), 1);
+        assert!(store
+            .invitation_revocation_page(&queued[0].id)
+            .await
+            .expect("cleanup cursor")
+            .is_empty());
+    })
+    .await;
+}

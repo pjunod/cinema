@@ -3142,6 +3142,10 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(http::remote::invitations::worker::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(Arc::clone(&state.sharing).run(state.clone(), background_shutdown.clone()));
     tokio::spawn(Arc::clone(&state.sharing).claim_loop(state.clone(), background_shutdown.clone()));
     // Crash recovery for orphaned shared-playback receiver routes; ends on drain.

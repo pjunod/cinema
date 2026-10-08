@@ -109,6 +109,10 @@ pub fn scope_query(single: bool) -> String {
         }
     )
 }
+pub const RETAINED_CONSENTS:&str="SELECT id,phone_id,receiver_id,user_id,grant_id,enabled,transport,generation,transport_generation,broker_enrollment,broker_ticket,transport_status,transport_phone_generation FROM invitation_consents WHERE id>$1 AND (broker_ticket IS NOT NULL OR broker_enrollment IS NOT NULL) ORDER BY id LIMIT 64";
+pub fn dispatch_candidates_query() -> String {
+    format!("{SCOPE_COLUMNS} WHERE c.enabled=1 AND c.id>$1 ORDER BY c.id LIMIT 64")
+}
 pub const EVENT_COLUMNS:&str="SELECT e.id,e.user_id,e.enrollment_id,e.phone_id,e.receiver_id,e.foreground_id,e.grant_id,e.phone_generation,e.consent_generation,e.transport_generation,e.created_at,e.expires_at,e.phase,e.outcome,e.revision FROM invitation_events e";
 pub fn event_query(single: bool) -> String {
     format!("{EVENT_COLUMNS} JOIN invitation_phones p ON p.id=e.phone_id AND p.generation=e.phone_generation JOIN invitation_consents c ON c.id=e.enrollment_id AND c.enabled=1 AND c.generation=e.consent_generation AND c.transport_generation=e.transport_generation WHERE e.phone_id=$1 AND e.user_id=$2 AND e.expires_at>$3 AND e.phase IN ('admitted','attempted') {}",if single{"AND e.id=$4"}else{"AND e.revision>$4 ORDER BY e.revision LIMIT 16"})
@@ -124,6 +128,7 @@ pub fn validate_invitation_ids(ids: &[&str], user: i64) -> Result<(), StoreError
 
 pub const QUEUE_PHONE_CLEANUP:&str="WITH input AS (SELECT $1 AS id,$2 AS user_id,$3 AS created_at) INSERT INTO invitation_broker_revocations(id,user_id,enrollment_id,generation,created_at,expires_at,attempts) SELECT broker_ticket,user_id,CASE WHEN json_valid(broker_ticket) THEN json_extract(broker_ticket,'$.ticket_id') ELSE NULL END,transport_generation,$3,9223372036854775807,0 FROM invitation_consents WHERE phone_id=$1 AND user_id=$2 AND broker_ticket IS NOT NULL ON CONFLICT(id) DO NOTHING";
 pub const QUEUE_SCOPE_CLEANUP:&str="WITH input AS (SELECT $1 AS id,$2 AS user_id,$3 AS created_at) INSERT INTO invitation_broker_revocations(id,user_id,enrollment_id,generation,created_at,expires_at,attempts) SELECT broker_ticket,user_id,CASE WHEN json_valid(broker_ticket) THEN json_extract(broker_ticket,'$.ticket_id') ELSE NULL END,transport_generation,$3,9223372036854775807,0 FROM invitation_consents WHERE id=$1 AND user_id=$2 AND broker_ticket IS NOT NULL AND ((CASE WHEN broker_ticket IS NULL THEN broker_enrollment IS NULL WHEN json_valid(broker_ticket) THEN coalesce((json_type(broker_ticket)='object' AND (SELECT count(*) FROM json_each(broker_ticket))=2 AND json_type(broker_ticket,'$.ticket_id')='text' AND json_type(broker_ticket,'$.scope_hash')='text' AND length(CAST(broker_ticket AS BLOB))<=256 AND length(json_extract(broker_ticket,'$.ticket_id'))=36 AND substr(json_extract(broker_ticket,'$.ticket_id'),9,1)='-' AND substr(json_extract(broker_ticket,'$.ticket_id'),14,1)='-' AND substr(json_extract(broker_ticket,'$.ticket_id'),19,1)='-' AND substr(json_extract(broker_ticket,'$.ticket_id'),24,1)='-' AND length(replace(json_extract(broker_ticket,'$.ticket_id'),'-',''))=32 AND replace(json_extract(broker_ticket,'$.ticket_id'),'-','') NOT GLOB '*[^0-9a-f]*' AND length(json_extract(broker_ticket,'$.scope_hash'))=64 AND json_extract(broker_ticket,'$.scope_hash') NOT GLOB '*[^0-9a-f]*' AND (broker_enrollment IS NULL OR broker_enrollment=json_extract(broker_ticket,'$.ticket_id'))),0) ELSE 0 END)) ON CONFLICT(id) DO NOTHING";
+pub const REVOKE_PAGE:&str="SELECT id,user_id,enrollment_id,generation,attempts,created_at FROM invitation_broker_revocations WHERE id>$1 AND length(CAST(id AS BLOB))<=256 AND attempts<9007199254740991 ORDER BY id LIMIT 16";
 pub const REVOKE_WORK:&str="SELECT id,user_id,enrollment_id,generation,attempts,created_at FROM invitation_broker_revocations WHERE attempts<9007199254740991 ORDER BY created_at,id LIMIT 16";
 
 pub const CLEANUP_BUDGET:&str="SELECT (SELECT count(*) FROM (SELECT id FROM invitation_broker_revocations WHERE user_id=$1 UNION SELECT broker_ticket AS id FROM invitation_consents WHERE user_id=$1 AND broker_ticket IS NOT NULL)) AS budget";
@@ -225,8 +230,12 @@ pub fn cleanup_invalid_query() -> String {
     format!("SELECT count(*) AS invalid FROM invitation_consents WHERE id=$1 AND user_id=$2 AND NOT ({CLEANUP_REFERENCE_VALID})")
 }
 pub fn queue_reference_query() -> String {
-    QUEUE_SCOPE_CLEANUP.replace("AND broker_ticket IS NOT NULL", "AND broker_ticket=$4")
+    QUEUE_SCOPE_CLEANUP.replace("AND broker_ticket IS NOT NULL", &reference_match("$4"))
 }
 pub fn clear_reference_query() -> String {
-    CLEAR_QUEUED_REFERENCE.replace("AND broker_ticket IS NOT NULL", "AND broker_ticket=$3")
+    CLEAR_QUEUED_REFERENCE.replace("AND broker_ticket IS NOT NULL", &reference_match("$3"))
+}
+
+fn reference_match(parameter: &str) -> String {
+    format!("AND CASE WHEN json_valid(broker_ticket) THEN json_extract(broker_ticket,'$.ticket_id')=json_extract({parameter},'$.ticket_id') AND json_extract(broker_ticket,'$.scope_hash')=json_extract({parameter},'$.scope_hash') ELSE 0 END")
 }
