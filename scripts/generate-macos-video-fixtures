@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+"""Generate or verify the distributable Mac compressed runtime smoke corpus.
+
+No installed FFmpeg is discovered implicitly. Example (in a new directory):
+  scripts/generate-macos-video-fixtures generate --ffmpeg /path/to/ffmpeg \
+      --ffprobe /path/to/ffprobe --output /path/to/new-corpus
+  scripts/generate-macos-video-fixtures verify --ffmpeg /path/to/ffmpeg \
+      --ffprobe /path/to/ffprobe --manifest /path/to/corpus/manifest.json
+
+Encoding is offline only. The daemon embeds these files; it must never invoke
+this generator at startup. Source-byte hashes pin the shipped artifacts, not
+hardware-encoded output. Generator/encoder changes may change compressed bytes.
+"""
+
+from __future__ import annotations
+
+import argparse
+from array import array
+from fractions import Fraction
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+
+WIDTH, HEIGHT, FRAME_COUNT, FPS = 320, 180, 12, 12
+BUDGET = 2 * 1024 * 1024
+RECIPE_VERSION = 1
+IDS = ("sdr8", "sdr10", "hdr10")
+GRAY_NITS = {
+    "sdr": (0, 1, 5, 10, 25, 50, 100, 100),
+    "hdr10": (0, 1, 10, 100, 203, 400, 1000, 1000),
+}
+LICENSE = """Synthetic macOS processing smoke media and pattern descriptions
+
+To the extent possible under law, the plurx contributors have waived all
+copyright and related or neighboring rights to the synthetic media files
+and their algorithmic pattern descriptions under CC0 1.0 Universal.
+SPDX-License-Identifier: CC0-1.0
+https://creativecommons.org/publicdomain/zero/1.0/
+
+These files contain only algorithmically generated RGB patches, with no
+external pictures, footage, music, fonts or private movie bytes. The script
+itself retains the repository's source-code license. FFmpeg and x265 are
+generation tools; their executable code is not incorporated into the media.
+Codec patent obligations, if applicable, are separate from these content
+redistribution terms. These patterns contain no Dolby Vision RPU or Dolby
+Vision mastering and must not be relabeled to claim Profile 5 coverage.
+"""
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def executable(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute() or not path.is_file():
+        raise ValueError("an explicit absolute executable file path is required")
+    return path.resolve()
+
+
+def run(argv: list[str], timeout: int = 30) -> bytes:
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=timeout, check=False)
+    if result.returncode:
+        # Diagnostic paths stay local; no raw process logs are committed.
+        raise ValueError(f"{Path(argv[0]).name} exited {result.returncode}: "
+                         + result.stderr[-4096:].decode(errors="replace"))
+    return result.stdout
+
+
+def transfer(nits: float, family: str) -> float:
+    if family == "hdr10":
+        # SMPTE ST 2084 absolute EOTF inverse, with 10,000 cd/m2 normalization.
+        m1, m2 = 2610 / 16384, 2523 / 32
+        c1, c2, c3 = 3424 / 4096, 2413 / 128, 2392 / 128
+        power = (nits / 10000) ** m1
+        return ((c1 + c2 * power) / (1 + c3 * power)) ** m2
+    # BT.709 OETF; SDR diffuse white is 100 cd/m2 for this pattern only.
+    linear = nits / 100
+    return 4.5 * linear if linear < 0.018 else 1.099 * linear ** 0.45 - 0.099
+
+
+def rgb_to_yuv(rgb_nits: tuple[float, float, float], family: str,
+               bits: int) -> tuple[int, int, int]:
+    rgb = tuple(transfer(nits, family) for nits in rgb_nits)
+    kr, kb = (0.2627, 0.0593) if family == "hdr10" else (0.2126, 0.0722)
+    y = kr * rgb[0] + (1 - kr - kb) * rgb[1] + kb * rgb[2]
+    cb, cr = (rgb[2] - y) / (2 * (1 - kb)), (rgb[0] - y) / (2 * (1 - kr))
+    scale = 1 << (bits - 8)
+    return tuple(round(value * scale) for value in
+                 (16 + 219 * y, 128 + 224 * cb, 128 + 224 * cr))
+
+
+def pattern(family: str, bits: int, frame: int) -> bytes:
+    gray = GRAY_NITS[family]
+    peak = 400 if family == "hdr10" else 100
+    colors = ((peak, 0, 0), (0, peak, 0), (0, 0, peak), (peak, peak, 0),
+              (0, peak, peak), (peak, 0, peak), (0, 0, 0), (peak, peak, peak))
+    patches = [rgb_to_yuv((n, n, n), family, bits) for n in gray]
+    colors = [rgb_to_yuv(rgb, family, bits) for rgb in colors]
+    planes = [[], [], []]
+    marker_x = 8 + 24 * frame
+    marker = rgb_to_yuv((peak, peak, peak), family, bits)
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            pixel = (patches if y < 120 else colors)[x // 40]
+            if 156 <= y < 172 and marker_x <= x < marker_x + 16:
+                pixel = marker
+            planes[0].append(pixel[0])
+            # Every patch and moving rectangle aligns to 2x2 chroma blocks.
+            if x % 2 == 0 and y % 2 == 0:
+                planes[1].append(pixel[1])
+                planes[2].append(pixel[2])
+    samples = planes[0] + planes[1] + planes[2]
+    if bits == 8:
+        return bytes(samples)
+    words = array("H", samples)
+    if sys.byteorder != "little":
+        words.byteswap()
+    return words.tobytes()
+
+
+def fixture_spec(identity: str) -> dict:
+    bits = 8 if identity == "sdr8" else 10
+    family = "hdr10" if identity == "hdr10" else "sdr"
+    expected = {
+        "codec_name": "hevc", "profile": "Main" if bits == 8 else "Main 10",
+        "pix_fmt": "yuv420p" if bits == 8 else "yuv420p10le",
+        "width": WIDTH, "height": HEIGHT, "frame_count": FRAME_COUNT,
+        "avg_frame_rate": f"{FPS}/1", "sample_aspect_ratio": "1:1",
+        "field_order": "progressive", "color_range": "tv",
+        "color_primaries": "bt2020" if family == "hdr10" else "bt709",
+        "color_transfer": "smpte2084" if family == "hdr10" else "bt709",
+        "color_space": "bt2020nc" if family == "hdr10" else "bt709",
+    }
+    patches = [{"x": 20 + 40 * i, "y": 60, "nits": n,
+                "y_code": rgb_to_yuv((n, n, n), family, bits)[0]}
+               for i, n in enumerate(GRAY_NITS[family])]
+    graphs = ("vt_tonemap_native", "vt_tonemap_metal") if family == "hdr10" else ("vt_scale_sdr",)
+    outputs = []
+    for graph in graphs:
+        output = {
+            "graph_id": graph,
+            "expected": {"codec_name": "h264", "width": 160, "height": 90,
+                         "frame_count": FRAME_COUNT, "avg_frame_rate": f"{FPS}/1",
+                         "color_primaries": "bt709", "color_transfer": "bt709",
+                         "color_space": "bt709", "color_range": "tv",
+                         "sample_aspect_ratio": "1:1", "field_order": "progressive"},
+            "timestamps": {"start_seconds": 0, "step_seconds": 1 / FPS,
+                           "absolute_tolerance_seconds": 0.00002},
+            "pixels": {"format": "decoded_yuv420p", "sample_radius": 2,
+                       "neutral_gray_max_chroma_distance_from_128": 12,
+                       "patches": [{"x": p["x"] // 2, "y": p["y"] // 2}
+                                   for p in patches]},
+            "forbidden_side_data": ["DOVI configuration record", "Dolby Vision RPU Data",
+                                    "Mastering display metadata", "Content light level metadata"],
+        }
+        if family == "sdr":
+            output["pixels"].update({"expected_y": [round((p["y_code"] / (1 << (bits - 8))))
+                                                      for p in patches],
+                                      "absolute_y_tolerance": 12})
+        else:
+            output["pixels"].update({"ordered_patch_indices": list(range(7)),
+                                      "ordering_tolerance_y": 4,
+                                      "minimum_black_to_peak_y_difference": 24})
+        outputs.append(output)
+    return {
+        "id": identity, "path": identity + ".mp4", "class": family,
+        "role": "smoke", "available": True, "duration_seconds": FRAME_COUNT / FPS,
+        "expected": expected,
+        "input_pixels": {"format": expected["pix_fmt"], "gray_patches": patches,
+                         "absolute_y_tolerance": 3 if bits == 8 else 12,
+                         "neutral_chroma_code": 128 << (bits - 8),
+                         "absolute_chroma_tolerance": 3 if bits == 8 else 12},
+        "provenance": {
+            "source": "Algorithmic RGB patches and moving white rectangle; no external media",
+            "license": "CC0-1.0", "license_file": "LICENSE.txt",
+            "generator": "scripts/generate-macos-video-fixtures",
+            "generator_recipe_version": RECIPE_VERSION,
+            "pattern": "Eight 40-pixel columns; gray rows 0..119; RGB/CMY/black/white rows 120..179; 16x16 white rectangle at x=8+24*frame,y=156",
+            "gray_patch_nits": list(GRAY_NITS[family]),
+            "color_patch_peak_nits": 400 if family == "hdr10" else 100,
+            "transfer": "analytic ST 2084 inverse EOTF" if family == "hdr10" else "BT.709 OETF with 100-nit white",
+            "matrix": expected["color_space"], "chroma_subsampling": "2x2 aligned constant patches",
+        },
+        "output_expectations": outputs,
+    }
+
+
+def encode_args(ffmpeg: str, raw: str, output: str, fixture: dict) -> list[str]:
+    e = fixture["expected"]
+    params = ("pools=none:frame-threads=1:wpp=0:keyint=12:min-keyint=12:scenecut=0:"
+              "bframes=2:repeat-headers=1:info=0")
+    # Pin codec VUI as well as the container; generator raw frames have no tags.
+    params += (f":colorprim={e['color_primaries']}:transfer={e['color_transfer']}:"
+               f"colormatrix={e['color_space']}:range=limited")
+    if fixture["class"] == "hdr10":
+        params += (":hdr10=1:hdr10-opt=0:master-display="
+                   "G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,1):"
+                   "max-cll=1000,400")
+    return [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-threads", "1", "-f", "rawvideo", "-pixel_format", e["pix_fmt"],
+            "-video_size", f"{WIDTH}x{HEIGHT}", "-framerate", str(FPS), "-i", raw,
+            "-map", "0:v:0", "-an", "-frames:v", str(FRAME_COUNT),
+            "-vf", "setsar=1", "-c:v", "libx265", "-preset", "medium", "-crf", "12",
+            "-profile:v", "main" if fixture["id"] == "sdr8" else "main10",
+            "-x265-params", params, "-pix_fmt", e["pix_fmt"],
+            "-color_primaries", e["color_primaries"], "-color_trc", e["color_transfer"],
+            "-colorspace", e["color_space"], "-color_range", "tv",
+            "-tag:v", "hvc1", "-map_metadata", "-1", "-fflags", "+bitexact",
+            "-flags:v", "+bitexact", "-movflags", "+faststart", output]
+
+
+def validate_manifest(manifest: dict, directory: Path) -> None:
+    if (type(manifest.get("schema_version")) is not int or manifest.get("schema_version") != 1
+            or type(manifest.get("corpus_version")) is not int or manifest.get("corpus_version") != 1
+            or manifest.get("generator_recipe_version") != RECIPE_VERSION):
+        raise ValueError("unsupported fixture manifest version")
+    fixtures = manifest.get("fixtures", [])
+    if [f.get("id") for f in fixtures] != list(IDS):
+        raise ValueError("initial corpus must include exactly sdr8, sdr10, hdr10")
+    total = 0
+    for fixture in fixtures:
+        spec = fixture_spec(fixture["id"])
+        for key in ("path", "class", "role", "available", "duration_seconds", "expected",
+                    "input_pixels", "provenance", "output_expectations"):
+            if fixture.get(key) != spec[key]:
+                raise ValueError(f"{fixture['id']}: inconsistent {key}")
+        path = directory / fixture["path"]
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"{fixture['id']}: missing or symlinked fixture")
+        length = path.stat().st_size
+        if not 0 < length <= BUDGET or fixture.get("byte_length") != length:
+            raise ValueError(f"{fixture['id']}: invalid byte length")
+        digest = fixture.get("sha256", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest) or sha256(path) != digest:
+            raise ValueError(f"{fixture['id']}: SHA-256 mismatch")
+        total += length
+    # The budget includes the embedded manifest itself, as well as compressed media.
+    if total + len(json_bytes(manifest)) > BUDGET or manifest.get("size_budget_bytes") != BUDGET:
+        raise ValueError("initial embedded corpus exceeds 2 MiB")
+    if manifest.get("aggregate_media_bytes") != total:
+        raise ValueError("aggregate media length mismatch")
+    if (directory / "LICENSE.txt").read_text() != LICENSE:
+        raise ValueError("missing or altered CC0 content license")
+
+
+def probe_fixture(ffmpeg: Path, ffprobe: Path, path: Path, fixture: dict) -> dict:
+    e = fixture["expected"]
+    probe = json.loads(run([str(ffprobe), "-v", "error", "-select_streams", "v:0",
+                            "-show_streams", "-show_frames", "-of", "json", str(path)]))
+    streams, frames = probe.get("streams", []), probe.get("frames", [])
+    if len(streams) != 1 or len(frames) != e["frame_count"]:
+        raise ValueError(f"{fixture['id']}: wrong decoded stream/frame count")
+    stream = streams[0]
+    for key, expected in e.items():
+        if key != "frame_count" and stream.get(key) != expected:
+            raise ValueError(f"{fixture['id']}: {key}: {stream.get(key)!r} != {expected!r}")
+    timestamps = []
+    for index, frame in enumerate(frames):
+        if frame.get("width") != WIDTH or frame.get("height") != HEIGHT or frame.get("interlaced_frame") != 0:
+            raise ValueError(f"{fixture['id']}: wrong decoded frame geometry/scan")
+        pts = float(frame["best_effort_timestamp_time"])
+        if not math.isfinite(pts) or abs(pts - float(Fraction(index, FPS))) > 0.00002:
+            raise ValueError(f"{fixture['id']}: unexpected decoded timestamp")
+        timestamps.append(pts)
+        for key in ("color_primaries", "color_transfer", "color_space", "color_range", "pix_fmt"):
+            if frame.get(key) != e[key]:
+                raise ValueError(f"{fixture['id']}: decoded frame {key} differs")
+    raw = run([str(ffmpeg), "-v", "error", "-nostdin", "-threads", "1", "-i", str(path),
+               "-map", "0:v:0", "-an", "-frames:v", str(FRAME_COUNT + 1), "-fps_mode", "passthrough",
+               "-pix_fmt", e["pix_fmt"], "-f", "rawvideo", "pipe:1"])
+    bits = 8 if fixture["id"] == "sdr8" else 10
+    frame_samples = WIDTH * HEIGHT * 3 // 2
+    if len(raw) != frame_samples * FRAME_COUNT * (1 if bits == 8 else 2):
+        raise ValueError(f"{fixture['id']}: incomplete or extra decoded frames")
+    pixels = fixture["input_pixels"]
+    if bits == 8:
+        samples = raw
+    else:
+        samples = array("H")
+        samples.frombytes(raw)
+        if sys.byteorder != "little":
+            samples.byteswap()
+    for index in range(FRAME_COUNT):
+        start = index * frame_samples
+        for patch in pixels["gray_patches"]:
+            pos = start + patch["y"] * WIDTH + patch["x"]
+            if abs(samples[pos] - patch["y_code"]) > pixels["absolute_y_tolerance"]:
+                raise ValueError(f"{fixture['id']}: decoded gray patch exceeds Y tolerance")
+            chroma_pos = patch["y"] // 2 * (WIDTH // 2) + patch["x"] // 2
+            for plane in (0, 1):
+                pos = start + WIDTH * HEIGHT + plane * WIDTH * HEIGHT // 4 + chroma_pos
+                if abs(samples[pos] - pixels["neutral_chroma_code"]) > pixels["absolute_chroma_tolerance"]:
+                    raise ValueError(f"{fixture['id']}: decoded gray patch is not neutral")
+    side_data = {side["side_data_type"] for frame in frames for side in frame.get("side_data_list", [])}
+    hdr_metadata = {"Mastering display metadata", "Content light level metadata"}
+    if fixture["class"] == "hdr10" and not hdr_metadata.issubset(side_data):
+        raise ValueError("HDR10 source lacks encoded static HDR metadata")
+    if fixture["class"] == "sdr" and hdr_metadata.intersection(side_data):
+        raise ValueError("SDR source carries stale HDR metadata")
+    if any("dovi" in side.lower() or "dolby" in side.lower() for side in side_data):
+        raise ValueError("initial corpus must not contain Dolby Vision metadata")
+    return {"id": fixture["id"], "sha256": fixture["sha256"], "byte_length": len(path.read_bytes()),
+            "decoded_frame_count": len(frames), "first_pts_seconds": timestamps[0],
+            "last_pts_seconds": timestamps[-1], "source_patch_pixels": "passed",
+            "side_data_types": sorted(side_data)}
+
+
+def json_bytes(value: dict) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+def manifest_schema() -> dict:
+    """Portable shape for consumers; validate_manifest also pins recipe facts."""
+    color = {"type": "string", "enum": ["bt709", "bt2020", "bt2020nc", "smpte2084", "tv"]}
+    expected = {
+        "type": "object",
+        "required": ["codec_name", "profile", "pix_fmt", "width", "height", "frame_count",
+                     "avg_frame_rate", "sample_aspect_ratio", "field_order", "color_primaries",
+                     "color_transfer", "color_space", "color_range"],
+        "properties": {
+            "codec_name": {"const": "hevc"}, "profile": {"enum": ["Main", "Main 10"]},
+            "pix_fmt": {"enum": ["yuv420p", "yuv420p10le"]},
+            "width": {"const": WIDTH}, "height": {"const": HEIGHT},
+            "frame_count": {"const": FRAME_COUNT}, "avg_frame_rate": {"const": f"{FPS}/1"},
+            "sample_aspect_ratio": {"const": "1:1"}, "field_order": {"const": "progressive"},
+            **{key: color for key in ("color_primaries", "color_transfer", "color_space", "color_range")},
+        },
+        "additionalProperties": False,
+    }
+    fixture = {
+        "type": "object",
+        "required": ["id", "path", "sha256", "byte_length", "class", "duration_seconds",
+                     "role", "available", "expected", "input_pixels", "provenance",
+                     "generation_argv", "output_expectations"],
+        "properties": {
+            "id": {"enum": list(IDS)}, "path": {"enum": [i + ".mp4" for i in IDS]},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "byte_length": {"type": "integer", "minimum": 1, "maximum": BUDGET},
+            "class": {"enum": ["sdr", "hdr10"]}, "role": {"const": "smoke"},
+            "available": {"const": True}, "duration_seconds": {"const": FRAME_COUNT / FPS},
+            "expected": expected, "input_pixels": {"type": "object"},
+            "provenance": {"type": "object", "required": ["source", "license", "license_file",
+                                                           "generator", "generator_recipe_version"],
+                           "properties": {"license": {"const": "CC0-1.0"},
+                                          "generator_recipe_version": {"const": RECIPE_VERSION}}},
+            "generation_argv": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+            "output_expectations": {"type": "array", "minItems": 1, "items": {
+                "type": "object", "required": ["graph_id", "expected", "pixels", "timestamps", "forbidden_side_data"],
+                "properties": {"graph_id": {"enum": ["vt_scale_sdr", "vt_tonemap_native", "vt_tonemap_metal"]}}}},
+        },
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "plurx initial Mac processing runtime smoke corpus v1",
+        "type": "object", "required": ["schema_version", "corpus_version", "generator_recipe_version",
+                                        "size_budget_bytes", "aggregate_media_bytes", "producer", "fixtures", "limitations"],
+        "properties": {
+            "schema_version": {"const": 1}, "corpus_version": {"const": 1},
+            "generator_recipe_version": {"const": RECIPE_VERSION}, "size_budget_bytes": {"const": BUDGET},
+            "aggregate_media_bytes": {"type": "integer", "minimum": 1, "maximum": BUDGET},
+            "producer": {"type": "object", "required": ["ffmpeg_version", "ffmpeg_sha256", "ffprobe_sha256"]},
+            "fixtures": {"type": "array", "minItems": 3, "maxItems": 3, "items": fixture},
+            "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        },
+    }
+
+
+def verify(ffmpeg: Path, ffprobe: Path, manifest_path: Path) -> dict:
+    if manifest_path.stat().st_size > 128 * 1024:
+        raise ValueError("fixture manifest is too large")
+    manifest = json.loads(manifest_path.read_bytes())
+    validate_manifest(manifest, manifest_path.parent)
+    if manifest["aggregate_media_bytes"] + manifest_path.stat().st_size > BUDGET:
+        raise ValueError("embedded media and actual manifest exceed 2 MiB")
+    return {"schema_version": 1, "result": "verified_source_corpus",
+            "fixtures": [probe_fixture(ffmpeg, ffprobe, manifest_path.parent / f["path"], f)
+                         for f in manifest["fixtures"]],
+            "limitations": ["Source decode/provenance evidence only; no hardware graph or performance qualification"]}
+
+
+def verify_output(ffmpeg: Path, ffprobe: Path, manifest_path: Path, identity: str,
+                  graph_id: str, video: Path) -> dict:
+    """Observe decoded output against smoke tolerances, without claiming quality."""
+    if manifest_path.stat().st_size > 128 * 1024:
+        raise ValueError("fixture manifest is too large")
+    manifest = json.loads(manifest_path.read_bytes())
+    validate_manifest(manifest, manifest_path.parent)
+    fixture = next(f for f in manifest["fixtures"] if f["id"] == identity)
+    choices = [o for o in fixture["output_expectations"] if o["graph_id"] == graph_id]
+    if len(choices) != 1:
+        raise ValueError("graph has no output expectation for this input class")
+    contract = choices[0]
+    e = contract["expected"]
+    probe = json.loads(run([str(ffprobe), "-v", "error", "-select_streams", "v:0",
+                            "-show_streams", "-show_frames", "-of", "json", str(video)]))
+    streams, frames = probe.get("streams", []), probe.get("frames", [])
+    if len(streams) != 1 or len(frames) != e["frame_count"]:
+        raise ValueError("output has wrong stream/frame count")
+    for key, expected in e.items():
+        if key != "frame_count" and streams[0].get(key) != expected:
+            raise ValueError(f"output {key} differs: {streams[0].get(key)!r} != {expected!r}")
+    for index, frame in enumerate(frames):
+        pts = float(frame["best_effort_timestamp_time"])
+        timing = contract["timestamps"]
+        target = timing["start_seconds"] + index * timing["step_seconds"]
+        if not math.isfinite(pts) or abs(pts - target) > timing["absolute_tolerance_seconds"]:
+            raise ValueError("output timestamps differ")
+        if frame.get("interlaced_frame") != 0 or (frame.get("width"), frame.get("height")) != (e["width"], e["height"]):
+            raise ValueError("output frame geometry/scan differs")
+        for key in ("color_primaries", "color_transfer", "color_space", "color_range"):
+            if frame.get(key) != e[key]:
+                raise ValueError(f"output frame {key} differs")
+    side_data = [s.get("side_data_type", "") for item in streams + frames for s in item.get("side_data_list", [])]
+    if set(contract["forbidden_side_data"]).intersection(side_data):
+        raise ValueError("output has stale HDR/Dolby side data")
+    raw = run([str(ffmpeg), "-v", "error", "-nostdin", "-threads", "1", "-i", str(video),
+               "-map", "0:v:0", "-an", "-frames:v", str(FRAME_COUNT + 1), "-fps_mode", "passthrough",
+               "-pix_fmt", "yuv420p", "-f", "rawvideo", "pipe:1"])
+    width, height = e["width"], e["height"]
+    frame_samples = width * height * 3 // 2
+    if len(raw) != frame_samples * FRAME_COUNT:
+        raise ValueError("output has incomplete or extra decoded frames")
+    pixels = contract["pixels"]
+    observed = []
+    for index in range(FRAME_COUNT):
+        start = index * frame_samples
+        gray = []
+        for patch in pixels["patches"]:
+            radius = pixels["sample_radius"]
+            values = [raw[start + y * width + x]
+                      for y in range(patch["y"] - radius, patch["y"] + radius + 1)
+                      for x in range(patch["x"] - radius, patch["x"] + radius + 1)]
+            gray.append(sum(values) / len(values))
+            chroma_pos = patch["y"] // 2 * (width // 2) + patch["x"] // 2
+            for plane in (0, 1):
+                pos = start + width * height + plane * width * height // 4 + chroma_pos
+                if abs(raw[pos] - 128) > pixels["neutral_gray_max_chroma_distance_from_128"]:
+                    raise ValueError("output neutral patch has color cast")
+        if "expected_y" in pixels:
+            if any(abs(actual - expected) > pixels["absolute_y_tolerance"]
+                   for actual, expected in zip(gray, pixels["expected_y"])):
+                raise ValueError("output SDR gray patch exceeds Y tolerance")
+        else:
+            order = pixels["ordered_patch_indices"]
+            if any(gray[a] > gray[b] + pixels["ordering_tolerance_y"] for a, b in zip(order, order[1:])):
+                raise ValueError("output HDR gray patches reverse brightness ordering")
+            if gray[order[-1]] - gray[order[0]] < pixels["minimum_black_to_peak_y_difference"]:
+                raise ValueError("output HDR gray patches lost contrast")
+        observed.append(gray)
+    return {"schema_version": 1, "result": "verified_smoke_output", "fixture_id": identity,
+            "graph_id": graph_id, "decoded_frame_count": len(frames), "first_frame_gray_y": observed[0],
+            "limitations": ["Smoke tolerance pass only; hardware decode must be observed independently",
+                            "No sustained performance, visual quality or temporal qualification is implied"]}
+
+
+def generate(ffmpeg: Path, ffprobe: Path, output: Path) -> dict:
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
+        raise ValueError("generation requires a new or empty output directory")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="macos-fixture-", dir=output.parent) as temp:
+        stage = Path(temp)
+        fixtures = []
+        for identity in IDS:
+            fixture = fixture_spec(identity)
+            raw = stage / (identity + ".yuv")
+            bits = 8 if identity == "sdr8" else 10
+            with raw.open("wb") as file:
+                for frame in range(FRAME_COUNT):
+                    file.write(pattern(fixture["class"], bits, frame))
+            path = stage / fixture["path"]
+            run(encode_args(str(ffmpeg), str(raw), str(path), fixture))
+            raw.unlink()
+            fixture.update({"sha256": sha256(path), "byte_length": path.stat().st_size,
+                            "generation_argv": encode_args("$FFMPEG", "$RAW", "$OUTPUT", fixture)})
+            fixtures.append(fixture)
+        manifest = {
+            "schema_version": 1, "corpus_version": 1, "generator_recipe_version": RECIPE_VERSION,
+            "size_budget_bytes": BUDGET, "aggregate_media_bytes": sum(f["byte_length"] for f in fixtures),
+            "producer": {"ffmpeg_version": run([str(ffmpeg), "-version"]).decode().splitlines()[0],
+                         "ffmpeg_sha256": sha256(ffmpeg), "ffprobe_sha256": sha256(ffprobe)},
+            "fixtures": fixtures,
+            "limitations": [
+                "Synthetic one-second smoke inputs prove graph execution only; not sustained or perceptual qualification",
+                "HDR tone-map pixel checks are broad relational smoke observations, not a qualified tone curve",
+                "No Profile 5/RPU-positive source: a lawful mastered Dolby fixture is required before Dolby runtime capability claims",
+                "Initial patterns are progressive, square-pixel, CFR; no rotation, subtitle, caption, HLG or interlace coverage",
+                "Compressed bytes are pinned by SHA-256; hardware-encoded output bytes need not match bitwise",
+                "Generation requires libx265 supporting 8/10-bit HEVC; no generation tools are shipped or required at runtime",
+            ],
+        }
+        (stage / "LICENSE.txt").write_text(LICENSE)
+        (stage / "manifest.schema.json").write_bytes(json_bytes(manifest_schema()))
+        (stage / "manifest.json").write_bytes(json_bytes(manifest))
+        report = verify(ffmpeg, ffprobe, stage / "manifest.json")
+        output.mkdir(exist_ok=True)
+        for path in stage.iterdir():
+            path.replace(output / path.name)
+    return report
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("generate", "verify", "verify-output"):
+        child = commands.add_parser(name)
+        child.add_argument("--ffmpeg", required=True)
+        child.add_argument("--ffprobe", required=True)
+        child.add_argument("--output" if name == "generate" else "--manifest", type=Path, required=True)
+        if name == "verify-output":
+            child.add_argument("--fixture-id", choices=IDS, required=True)
+            child.add_argument("--graph-id", required=True)
+            child.add_argument("--video", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        ffmpeg, ffprobe = executable(args.ffmpeg), executable(args.ffprobe)
+        if args.command == "generate":
+            report = generate(ffmpeg, ffprobe, args.output)
+        elif args.command == "verify":
+            report = verify(ffmpeg, ffprobe, args.manifest)
+        else:
+            report = verify_output(ffmpeg, ffprobe, args.manifest, args.fixture_id, args.graph_id, args.video)
+    except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
+        print(json.dumps({"schema_version": 1, "result": "failed", "error": str(error)}), file=sys.stderr)
+        return 1
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

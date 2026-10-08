@@ -2402,7 +2402,7 @@ scope = "test"
         temp: &plurx_core::fs_secure::SecureDirectory,
         plan_digest: &str,
     ) -> Vec<crate::decoder_health::ProducerHealthReceipt> {
-        resume_parts(temp, plan_digest)
+        resume_parts(temp, plan_digest, None)
             .await
             .expect("resume parts")
             .receipts
@@ -2446,6 +2446,61 @@ scope = "test"
         assert_eq!(inherited.len(), 1);
         assert!(!inherited[0].permits_reuse());
         assert!(!inherited[0].observation_complete);
+    }
+
+    #[tokio::test]
+    async fn macos_part_completion_allows_unqualified_health_but_requires_matching_identity() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await.expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        let dir = temp.open_child_directory(&crate::produce::part_dir(0))
+            .await.expect("part capability");
+        let shape = measured_shape(&temp, 0).await;
+        let receipt = health_receipt(crate::decoder_health::Qualification::Unqualified);
+        let sha256 = "a".repeat(64);
+        retain_part_health_checked(&dir, &shape, &receipt, Some(&sha256))
+            .await.expect("durable completed part");
+        let resumed = resume_parts(&temp, &health_plan_digest(), Some(&sha256))
+            .await.expect("matching completed part resumes");
+        assert_eq!(resumed.parts.len(), 1);
+        assert_eq!(resumed.receipts, vec![receipt]);
+        assert!(!resumed.receipts[0].permits_reuse(), "diagnostic qualification is not the completion fence");
+        let refused = resume_parts(&temp, &health_plan_digest(), Some(&"b".repeat(64)))
+            .await.expect("wrong implementation is discarded");
+        assert!(refused.parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn macos_part_resume_rejects_legacy_health_and_incomplete_completion() {
+        for legacy in [false, true] {
+            let directory = crate::test_tempdir().expect("staging");
+            let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+                .await.expect("staging capability");
+            write_health_part(&temp, 0, 1).await;
+            if legacy {
+                seal_part_health(&temp, 0, &health_receipt(crate::decoder_health::Qualification::Qualified)).await;
+            }
+            let resumed = resume_parts(&temp, &health_plan_digest(), Some(&"a".repeat(64)))
+                .await.expect("incomplete part discarded");
+            assert!(resumed.parts.is_empty(), "media and legacy health do not prove Mac completion");
+        }
+    }
+
+    #[tokio::test]
+    async fn macos_part_completion_requires_successful_invalidation_and_durable_write() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await.expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        let dir = temp.open_child_directory(&crate::produce::part_dir(0))
+            .await.expect("part capability");
+        dir.create_child_directory(PART_HEALTH_FILE).await.expect("non-replaceable receipt path");
+        assert!(invalidate_mac_part_completion(&dir).await.is_err(), "failed invalidation cannot authorize a child");
+        let shape = measured_shape(&temp, 0).await;
+        assert!(retain_part_health_checked(&dir, &shape,
+            &health_receipt(crate::decoder_health::Qualification::Unqualified), Some(&"a".repeat(64)))
+            .await.is_err(), "completion cannot be admitted without a durable write");
     }
 
     #[tokio::test]

@@ -41,6 +41,9 @@ impl TranscodeManager {
                 "could not create ffmpeg runtime cache: {err}"
             );
         }
+        let macos_video_probe = Arc::new(crate::macos_video::MacosVideoProbe::new(
+            runtime_cache.clone(),
+        ));
         TranscodeManager {
             source_workers: source_actor::SourceWorkerRegistry::default(),
             source_http_starts: crate::http::shared_source_playback::SourceStartRegistry::default(),
@@ -69,6 +72,9 @@ impl TranscodeManager {
             measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(
             ),
             automatic_decoder_recovery: AtomicBool::new(false),
+            macos_video_processing_enabled: Arc::new(AtomicBool::new(false)),
+            macos_video_preference_update: Mutex::new(()),
+            macos_video_probe,
             hooks: crate::seam_hooks::HookSlot::new(&NoopTranscodeManagerHooks),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
@@ -311,6 +317,9 @@ impl TranscodeManager {
         cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
+        self.macos_video_probe = Arc::new(crate::macos_video::MacosVideoProbe::new(
+            self.runtime_cache.clone(),
+        ));
         self.subtitle_cache = subtitle_cache;
         self.subtitle_membership = cluster_membership.clone();
         // Renditions are durable state — admitted ones are the copy cache the
@@ -446,6 +455,8 @@ impl TranscodeManager {
             decode_facts: self.decode_facts.metrics_handle(),
             caps: self.caps.clone(),
             codec_qualification: Arc::clone(&self.codec_qualification),
+            macos_video_probe: Arc::clone(&self.macos_video_probe),
+            macos_video_processing_enabled: Arc::clone(&self.macos_video_processing_enabled),
         }
     }
 
@@ -685,6 +696,21 @@ impl TranscodeManager {
         // is the best answer for.
         if self.hdr10_passthrough {
             tone_map_pipelines.push(Pipeline::Hdr10Passthrough.name().to_owned());
+        }
+        // Separate classes remain separate worker-local claims. A passing SDR
+        // scaler never advertises HDR, HLG, Dolby or HEVC output support.
+        if self.macos_video_processing_enabled() {
+            let report = self.macos_video_report();
+            for (pipeline, observation) in [
+                (Pipeline::VtScaleSdr, &report.sdr_scale),
+                (Pipeline::VtToneMapMetal, &report.hdr10_metal),
+            ] {
+                if observation.availability
+                    == plurx_core::transcode::MacosProcessingAvailability::Available
+                {
+                    tone_map_pipelines.push(pipeline.name().to_owned());
+                }
+            }
         }
         MediaNodeRuntime {
             scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),

@@ -1,0 +1,198 @@
+//! Frozen macOS processing observations and implementation identity.
+//! Runtime probes populate this context; the existing decoder resolver owns
+//! selection. Availability is compatibility evidence, not a benchmark score.
+
+use std::collections::BTreeSet;
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use super::{Pipeline, PlanError};
+
+pub const MACOS_PROCESSING_GRAPH_REVISION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacosProcessingAvailability {
+    Pending,
+    Available,
+    Unavailable,
+}
+
+/// Identity of the executable, dependencies and Apple processing environment.
+/// No node name, probe time or benchmark result belongs in output identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MacosProcessingIdentity {
+    ffmpeg_sha256: String,
+    ffprobe_sha256: String,
+    patch_digest: String,
+    linked_libraries_digest: String,
+    os_build: String,
+    architecture: String,
+    hardware_class: String,
+    graph_revision: u32,
+}
+
+impl MacosProcessingIdentity {
+    pub fn new(
+        ffmpeg_sha256: String,
+        ffprobe_sha256: String,
+        patch_digest: String,
+        linked_libraries_digest: String,
+        os_build: String,
+        architecture: String,
+        hardware_class: String,
+    ) -> Result<Self, PlanError> {
+        for value in [
+            &ffmpeg_sha256,
+            &ffprobe_sha256,
+            &patch_digest,
+            &linked_libraries_digest,
+        ] {
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(PlanError::InvalidCapabilityIdentity(
+                    "macOS implementation digest",
+                ));
+            }
+        }
+        for value in [&os_build, &hardware_class] {
+            if value.is_empty()
+                || value.len() > 128
+                || !value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b' ' | b'_' | b'-' | b'.' | b',' | b'/' | b'(' | b')')
+                })
+            {
+                return Err(PlanError::InvalidCapabilityIdentity("macOS environment"));
+            }
+        }
+        if !matches!(architecture.as_str(), "arm64" | "x86_64") {
+            return Err(PlanError::InvalidCapabilityIdentity("macOS architecture"));
+        }
+        Ok(Self {
+            ffmpeg_sha256,
+            ffprobe_sha256,
+            patch_digest,
+            linked_libraries_digest,
+            os_build,
+            architecture,
+            hardware_class,
+            graph_revision: MACOS_PROCESSING_GRAPH_REVISION,
+        })
+    }
+
+    pub fn digest(&self) -> String {
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(self).expect("identity serialization is infallible"),
+        ))
+    }
+
+    pub fn ffmpeg_sha256(&self) -> &str {
+        &self.ffmpeg_sha256
+    }
+    pub fn ffprobe_sha256(&self) -> &str {
+        &self.ffprobe_sha256
+    }
+    pub fn patch_digest(&self) -> &str {
+        &self.patch_digest
+    }
+    pub fn linked_libraries_digest(&self) -> &str {
+        &self.linked_libraries_digest
+    }
+    pub fn os_build(&self) -> &str {
+        &self.os_build
+    }
+    pub fn architecture(&self) -> &str {
+        &self.architecture
+    }
+    pub fn hardware_class(&self) -> &str {
+        &self.hardware_class
+    }
+    pub fn graph_revision(&self) -> u32 {
+        self.graph_revision
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacosProcessingContext {
+    enabled: bool,
+    identity: MacosProcessingIdentity,
+    sdr_scale: MacosProcessingAvailability,
+    hdr10_metal: MacosProcessingAvailability,
+    excluded_pipelines: BTreeSet<Pipeline>,
+}
+
+impl MacosProcessingContext {
+    pub fn new(
+        enabled: bool,
+        identity: MacosProcessingIdentity,
+        sdr_scale: MacosProcessingAvailability,
+        hdr10_metal: MacosProcessingAvailability,
+    ) -> Self {
+        Self {
+            enabled,
+            identity,
+            sdr_scale,
+            hdr10_metal,
+            excluded_pipelines: BTreeSet::new(),
+        }
+    }
+
+    /// Existing recovery owners freeze a failed renderer exclusion here.
+    /// The saved choice remains intact and no retry policy lives in core.
+    #[must_use]
+    pub fn excluding_pipeline(mut self, pipeline: Pipeline) -> Self {
+        self.excluded_pipelines.insert(pipeline);
+        self
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+    pub fn identity(&self) -> &MacosProcessingIdentity {
+        &self.identity
+    }
+    pub fn sdr_scale(&self) -> MacosProcessingAvailability {
+        self.sdr_scale
+    }
+    pub fn hdr10_metal(&self) -> MacosProcessingAvailability {
+        self.hdr10_metal
+    }
+    pub fn permits(&self, pipeline: Pipeline) -> bool {
+        !self.excluded_pipelines.contains(&pipeline)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacosProcessingSelection {
+    Disabled,
+    Selected,
+    ProbePending,
+    RuntimeProbeFailed,
+    IncompatibleInput,
+    PresentationConstraint,
+    DecoderOverride,
+    RecoveryRestriction,
+    CapabilityFallback,
+}
+
+impl MacosProcessingSelection {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Selected => "selected",
+            Self::ProbePending => "probe_pending",
+            Self::RuntimeProbeFailed => "runtime_probe_failed",
+            Self::IncompatibleInput => "incompatible_input",
+            Self::PresentationConstraint => "presentation_constraint",
+            Self::DecoderOverride => "decoder_override",
+            Self::RecoveryRestriction => "recovery_restriction",
+            Self::CapabilityFallback => "capability_fallback",
+        }
+    }
+}

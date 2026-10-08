@@ -98,6 +98,39 @@ function devStaticReq(title,status,detail,tone){
 function devGraduation(waitingOn,then){
   return `<p class="devcheck-note devgrad"><b>Leaves Developer when:</b> ${waitingOn} <b>Then:</b> ${then}</p>`;
 }
+function macosVideoProcessingCard(settings,readiness){
+  const enabled=!!settings.macos_video_processing_enabled;
+  return setCard(`${cardHead("Mac video processing","Use available Mac processing for progressive SDR resizing and HDR10 conversion in new sessions.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
+    ${togRow("pmacosvideo","Use Mac video processing","Applied to new sessions. Unsupported sources retain their existing processing.",enabled)}
+    <div class="hint">The saved choice is always accepted. Runtime compatibility and qualification below are advisory. Dependency checks require a working /usr/bin/otool (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both FFmpeg tools, and no DYLD override.</div>
+    ${devReq(readiness,"macos_video_processing","sdr_scale","Progressive SDR scaling","This worker checks a small embedded 8-bit and 10-bit source corpus.")}
+    ${devReq(readiness,"macos_video_processing","hdr10_metal","HDR10 to SDR processing","HDR is resized at 10-bit precision before mapping to SDR. Dolby Vision, HLG, burns and interlaced sources retain their existing routes.")}
+    ${devReq(readiness,"macos_video_processing","delivery_qualification","Visual and streaming qualification","Runtime smoke checks do not approve visual quality, startup, concurrency, a sustained soak or physical clients. Normalized continuous VOD also awaits supported bound source and decoder planning on Mac.")}
+    <div class="row"><button class="ghost sm" onclick="reprobeMacosVideoProcessing(this)">Check compatibility again</button></div>
+    ${devGraduation("real daemon rolling HLS and encoded VOD pass seek/resume, cancellation and recovery, cache and cluster revalidation; visual checks on a named display and target Mac/client startup, concurrency and soak evidence are recorded.","the permanent switch moves to Playback → Advanced server delivery, preserving the saved choice.")}
+    <div class="err" id="macos-video-error" role="alert"></div>${setCardFoot("saveMacosVideoProcessing")}`,{id:"macos-video-card"});
+}
+
+async function saveMacosVideoProcessing(btn){
+  const err=document.getElementById("macos-video-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{macos_video_processing_enabled:!!/** @type {HTMLInputElement} */ (document.getElementById("pmacosvideo")).checked}}));
+    const card=btn?.closest(".setcard");if(card)card.outerHTML=macosVideoProcessingCard(saved,DEVELOPER_READINESS);
+    toast("Mac video processing saved; applies to new sessions");
+  }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
+}
+
+async function reprobeMacosVideoProcessing(btn){
+  const err=document.getElementById("macos-video-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    await api("/developer/macos-video-processing/reprobe",{method:"POST",body:{}});
+    applyDeveloperReadiness(await api("/developer/readiness"));
+    toast("Compatibility check requested; refresh Settings for its result");
+  }catch(error){if(err)err.textContent=error.message||String(error);}
+  finally{if(btn)btn.disabled=false;}
+}
 function clusterTransportRecoveryCard(readiness){
   return setCard(`${cardHead("Transport recovery","Automatic recovery for interrupted cluster transfers. No enable switch is required.",`<span class="pill ok">automatic</span>`)}
       <details class="setdetails"><summary>Deployment guidance and readiness</summary><div class="setdetails-body">
@@ -540,6 +573,7 @@ function developerPanel(settings,readiness){
       ${clustered?`<div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}`:""}
       <div class="setsection"><h2>Shared libraries</h2><p>Private sharing between separate Cinemas.</p></div>${cinemaSharingCard(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
+      <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}

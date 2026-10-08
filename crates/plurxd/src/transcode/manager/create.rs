@@ -1540,6 +1540,15 @@ impl TranscodeManager {
                 "the source changed while attesting the encoded engine; rescan it before playback",
             ));
         }
+        let executable = crate::ffmpeg::EncodedExecutable::capture()
+            .await
+            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+        if !executable.matches_macos_plan(&plan) {
+            return Err(vod_refusal_error(
+                "vod_engine_unattested",
+                "the encoder differs from the frozen Mac processing plan; check compatibility again",
+            ));
+        }
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             shared_audio,
             source_object_version,
@@ -1555,9 +1564,7 @@ impl TranscodeManager {
             } else {
                 crate::ffmpeg::ffmpeg_build().await
             },
-            executable: crate::ffmpeg::EncodedExecutable::capture()
-                .await
-                .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?,
+            executable,
             engine,
             admissions: self.admissions.clone(),
             store: Arc::clone(&self.store),
