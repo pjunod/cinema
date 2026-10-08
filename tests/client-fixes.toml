@@ -4661,3 +4661,37 @@ source = "clients/apple/Sources/RemotePreviewOwnership.swift"
 source_anchor = "return owns(current) ? nil : current"
 test = "clients/apple/Tests/RemoteReceiverTests.swift"
 test_anchor = "testPhysicalScrubSurvivesUnrelatedInputAndOnlyNetworkPreviewIsCancelled"
+
+[[fixes]]
+id = "apple.cinema-control-sequence-lifetime"
+commits = ["cbb5e0925131e8eea6ea1bca9174f3d8243743a3"]
+source = "clients/apple/Sources/RemoteControlSequence.swift"
+source_anchor = "guard let previous = values[key], previous < CinemaRemoteCommand.maximumInteger"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testControlSequenceSurvivesCloseAndUnknownEpochRequiresAcquisition"
+
+[[fixes]]
+id = "apple.cinema-active-scene-effect-fence"
+commits = []
+supplements = "apple.cinema-control-sequence-lifetime"
+source = "clients/apple/Sources/RemoteSceneEligibility.swift"
+source_anchor = "eligible = active"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testInactiveSceneSuspendsEffectsWithoutRotatingForegroundIdentity"
+
+[[fixes]]
+id = "apple.cinema-conditional-own-epoch-recovery"
+commits = []
+supplements = "apple.cinema-control-sequence-lifetime"
+source = "clients/apple/Sources/RemoteControlSequence.swift"
+source_anchor = "return control.controlEpoch"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testUnknownOwnEpochRecoveryCarriesObservedEpochAndCannotTargetOtherGrant"
+
+[[fixes]]
+id = "apple.cinema-explicit-control-reacquisition"
+commits = ["42607dc16f938e11cadc76198e0a6e690f3d6781"]
+source = "clients/apple/Sources/RemoteControlSequence.swift"
+source_anchor = "func permits(_ generation: UUID) -> Bool { acquiredGeneration == generation }"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testReopenAndConnectionRecoveryRequireExplicitControlAcquisition"
