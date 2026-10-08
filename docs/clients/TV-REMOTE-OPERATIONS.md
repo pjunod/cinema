@@ -100,6 +100,7 @@ It never acquires control or starts playback automatically.
 | Code expired or approval result is unknown | Close pairing, show a fresh code on the TV and pair again. Inspect the grant list before retaining obsolete grants. |
 | Saved pairing no longer works | Revoke the old grant and pair again. **Forget saved pairing** removes a local proof; it does not claim server revocation. |
 | Selling/resetting a receiver | Remove/reset its TV registration. This revokes its paired grants. Merely closing the app does not perform this reset. |
+| Invitation transport reports `migration_remediation` after broker replacement | Restore the exact old broker origin, publisher, server identity and generation authority, then drain retained cleanup before changing scope. A compatible proof rotation can preserve that authority. If it is permanently lost, cleanup stays retained; this packet has no exceptional operator-fence command to discard it. A successful response from a new generation is not proof of old-generation revocation. |
 
 Network remote availability does not replace local playback controls. On the
 reviewed desktop path, local pause and Stop use the existing browser player

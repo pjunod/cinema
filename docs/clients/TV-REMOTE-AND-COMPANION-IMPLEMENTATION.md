@@ -589,10 +589,14 @@ A home broker reference belongs to its exact configured origin, publisher,
 server-instance and external broker-generation scope. Configuration replacement cannot send old IDs
 under a new scope and interpret that scope's successful unknown-ID tombstone
 as cleanup of the old authority. Drain held and queued old-scope references
-using the old authority before replacement. On lost authority, retain work
-and require a deliberate broker-operator generation/revocation fence; never
-silently drop it. Report the required operator action as readiness without
-changing saved consent.
+using the old authority before replacement. Restore that exact authority to
+drain cleanup; compatible publisher-proof rotation can preserve its scope.
+If the old authority is permanently lost, retain the obligations and report
+`migration_remediation` without changing saved consent. This packet does not
+implement an exceptional operator-fence command that discards those obligations.
+Such recovery needs a separate design proving external revocation and safe
+mutation of the daemon-owned replicated store. A new broker generation's
+successful response never acknowledges cleanup in the old generation.
 
 The broker reconciles ordinary compatible configuration changes separately
 from disaster restore. Adding a publisher or rotating its proof/signing key
