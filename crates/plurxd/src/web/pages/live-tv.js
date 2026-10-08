@@ -622,8 +622,8 @@ function liveTvToolbar(){
   const conflicts=LIVE_TV_DVR.schedule?LIVE_TV_DVR.schedule.conflicts||0:0;
   return `<div class="lt-head">
     <div class="lt-switch" role="group" aria-label="Live TV layout">
-      <button type="button" aria-pressed="${!recs&&view==="list"}" onclick="liveTvSetView('list')">≡ List</button>
-      <button type="button" aria-pressed="${!recs&&view==="grid"}" onclick="liveTvSetView('grid')">▦ Grid</button>
+      <button type="button" aria-pressed="${!recs&&view==="list"}" data-remote-live-view="list" onclick="liveTvSetView('list')">≡ List</button>
+      <button type="button" aria-pressed="${!recs&&view==="grid"}" data-remote-live-view="grid" onclick="liveTvSetView('grid')">▦ Grid</button>
     </div>
     <div class="lt-switch" role="group" aria-label="Recordings">
       <button type="button" aria-pressed="${recs==="library"}" onclick="liveTvSetRecordingsTab('library')">Library</button>
@@ -632,8 +632,8 @@ function liveTvToolbar(){
     </div>
     <span class="muted">${counts}${tuners}</span>
     <div class="lt-switch" role="group" aria-label="Channel filter">
-      <button type="button" aria-pressed="${liveTvFilter()==="all"}" onclick="liveTvSetFilter('all')">All</button>
-      <button type="button" aria-pressed="${liveTvFilter()==="favorites"}" onclick="liveTvSetFilter('favorites')">Favorites</button>
+      <button type="button" aria-pressed="${liveTvFilter()==="all"}" data-remote-live-filter="all" onclick="liveTvSetFilter('all')">All</button>
+      <button type="button" aria-pressed="${liveTvFilter()==="favorites"}" data-remote-live-filter="favorites" onclick="liveTvSetFilter('favorites')">Favorites</button>
     </div>
     <label class="tog" for="lt-hideprot" style="border:0;padding:0;gap:8px"><span>Hide protected</span>
       <input type="checkbox" id="lt-hideprot"${liveTvHideProtected()?" checked":""} onchange="liveTvSetHideProtected(this.checked)"></label>
@@ -663,7 +663,7 @@ function liveTvNowBar(channel){
     <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
     <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
-    <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
+    <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
     <button type="button" id="live-tv-info" data-live-info-opener onclick="openLiveTvStats()" ${transport.hidden?"disabled":""}>Playback info</button>
     <div class="lt-nowtech" data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
   </div>`;
@@ -925,8 +925,19 @@ function liveTvPopover(row,channelId){
     ${row.synopsis?`<p>${esc(row.synopsis)}</p>`:""}
     ${row.filters&&row.filters.length?`<div class="pills">${row.filters.map(f=>`<span class="pill">${esc(f)}</span>`).join("")}</div>`:""}
     ${liveTvPopoverActions(row,channelId)}
-    <div class="row"><button class="ghost sm" onclick="liveTvPopover(null)">Close</button></div>`;
+    <div class="row"><button class="ghost sm" data-remote-guide-close onclick="liveTvPopover(null)">Close</button></div>`;
   pop.hidden=false;
+  const guide=LIVE_TV.guide,serial=LIVE_TV.serial,close=()=>liveTvPopover(null),closeButton=pop.querySelector("[data-remote-guide-close]");
+  const entries=[{id:"guide:close",element:closeButton,label:"Close programme",activate:()=>{close();return "applied";}}];
+  const now=liveTvNowSeconds();
+  if(row.start<=now&&now<row.end&&channel&&!PlurxLiveTv.channelView(channel).disabled){
+    const watch=pop.querySelector(".lt-acts button");
+    if(watch)entries.push({id:`guide:watch:${channelId}:${row.start}`,element:watch,label:"Watch "+channel.guide_name,activate:()=>{
+      const current=liveTvNowSeconds();if(!(row.start<=current&&current<row.end)||!LIVE_TV.channels.includes(channel)||PlurxLiveTv.channelView(channel).disabled)return "unavailable";
+      close();liveTvSelect(channelId);return "applied";
+    }});
+  }
+  cinemaRemoteOwnPresentation(pop,"live-tv",()=>LIVE_TV.guide===guide&&LIVE_TV.serial===serial,close,entries);
   // Watch is the first button, so focusing it keeps the old one-Enter path to
   // tuning: Enter on a cell, Enter again to watch.
   const first=pop.querySelector("button");
@@ -948,7 +959,7 @@ function liveTvPaint(){
       <span class="grow"><b>${at.now?esc(at.now.title):esc(channel.guide_name)}</b> · ${esc(channel.guide_number)}</span>
       <button type="button" onclick="location.hash='#/live-tv'" title="Back to Live TV" aria-label="Back to Live TV">↩</button>
       ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture" aria-label="Picture-in-picture in the dock">⧉</button>':""}
-      <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop from the dock">■</button>`:"";
+      <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop from the dock">■</button>`:"";
   }
   const overlay=document.getElementById("live-tv-overlay");
   if(!overlay||host.dataset.mode!=="full") return;
@@ -967,9 +978,9 @@ function liveTvPaint(){
       <div class="lth-acts">
         <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
         ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()">PiP</button>':""}
-        <button type="button" onclick="liveTvGuideSheet()">Guide</button>
+        <button type="button" data-remote-live-guide onclick="liveTvGuideSheet()">Guide</button>
         <button type="button" data-live-info-opener onclick="openLiveTvStats()">Playback info</button>
-        <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" aria-label="Stop Live TV">Stop</button>
+        <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)" aria-label="Stop Live TV">Stop</button>
         <button type="button" onclick="exitLiveTvPresentation()">Exit</button>
       </div>
     </div>
@@ -981,7 +992,7 @@ function liveTvPaint(){
         const entryPct=entryAt.progress===null?0:Math.round(entryAt.progress*100);
         const on=channel&&entry.id===channel.id;
         return `<button type="button" class="lth-card${on?" on":""}${LIVE_TV.preview===entry.id&&!on?" prev":""}"
-          onclick="liveTvSelect('${esc(entry.id)}')"><b>${esc(entry.guide_number)} ${esc(entry.guide_name)}</b>
+          data-channel="${esc(entry.id)}" onclick="liveTvSelect('${esc(entry.id)}')"><b>${esc(entry.guide_number)} ${esc(entry.guide_name)}</b>
           <small>${entryAt.now?esc(entryAt.now.title):"—"}</small>
           <span class="lth-bar" style="margin:6px 0 0"><i style="width:${entryPct}%"></i></span></button>`;
       }).join("")}</div>
@@ -1004,7 +1015,7 @@ function liveTvStrip(visible,channel){
 }
 function liveTvGuideSheet(){
   const sheet=document.getElementById("live-tv-sheet"); if(!sheet) return;
-  if(!sheet.hidden){ sheet.hidden=true; return; }
+  if(!sheet.hidden){ sheet.hidden=true; CinemaRemote.invalidate("guide_closed"); return; }
   const visible=liveTvVisible(), now=liveTvNowSeconds();
   sheet.innerHTML=`<h2 class="section" style="color:#fff">On now</h2>
     ${visible.map(channel=>{
@@ -1012,10 +1023,21 @@ function liveTvGuideSheet(){
       return `<div style="display:flex;gap:12px;padding:8px 0;border-top:1px solid rgba(255,255,255,.14)">
         <b style="width:110px;flex:none">${esc(channel.guide_number)} ${esc(channel.guide_name)}</b>
         <span style="flex:1">${at.now?esc(at.now.title):"—"}</span>
-        <span style="opacity:.7">${at.now?esc(liveTvClock(at.now.end)):""}</span></div>`;
+        <span style="opacity:.7">${at.now?esc(liveTvClock(at.now.end)):""}</span>
+        <button type="button" data-remote-sheet-channel="${esc(channel.id)}"${PlurxLiveTv.channelView(channel).disabled?" disabled":""}>Watch</button></div>`;
     }).join("")}
-    <p style="opacity:.7;margin-top:14px">Press G or Escape to close. ${esc(liveTvClock(now))}</p>`;
-  sheet.hidden=false;
+    <button type="button" data-remote-sheet-close>Close guide</button><p style="opacity:.7;margin-top:14px">Press G or Escape to close. ${esc(liveTvClock(now))}</p>`;
+  const opener=/** @type {HTMLElement|null} */(document.activeElement),serial=LIVE_TV.serial;
+  const close=()=>{sheet.hidden=true;CinemaRemote.invalidate("guide_closed");if(opener?.isConnected)opener.focus({preventScroll:true});else document.getElementById("live-tv-transport")?.focus();};
+  const closeButton=/** @type {HTMLButtonElement} */(sheet.querySelector("[data-remote-sheet-close]"));closeButton.onclick=close;
+  const entries=[{id:"guide:close",element:closeButton,label:"Close guide",activate:()=>{close();return "applied";}}];
+  for(const button of /** @type {NodeListOf<HTMLButtonElement>} */(sheet.querySelectorAll("[data-remote-sheet-channel]"))){
+    const channel=visible.find(value=>String(value.id)===button.dataset.remoteSheetChannel);
+    const activate=()=>{if(!LIVE_TV.channels.includes(channel)||PlurxLiveTv.channelView(channel).disabled)return "unavailable";close();liveTvSelect(channel.id);return "applied";};
+    button.onclick=activate;entries.push({id:"guide:channel:"+channel.id,element:button,label:"Watch "+channel.guide_name,activate});
+  }
+  sheet.hidden=false;closeButton.focus();
+  cinemaRemoteOwnPresentation(sheet,"live-tv",()=>LIVE_TV.serial===serial,close,entries);
 }
 // live-tv-input-adapter:begin
 // Live TV owns the channel keys while its host is fullscreen or focused. The

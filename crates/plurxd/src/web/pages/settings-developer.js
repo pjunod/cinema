@@ -522,6 +522,41 @@ async function saveRollingRetention(btn){
     const card=document.getElementById("vod-rolling-retention-card");if(card)card.outerHTML=rollingRetentionCard(saved,DEVELOPER_READINESS);
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
+function cinemaRemoteCard(settings,readiness){
+  return setCard(`${cardHead("Cinema remote control","Pair a phone or tablet with one active Cinema screen.",'<span class="pill">Qualification pending</span>')}
+    ${togRow("cinema-remote-control","Enable companion remotes","Only explicitly approved same-account devices can control a screen. Turning this off ends network remote sessions.",!!settings.cinema_remote_control)}
+    ${devReq(readiness,"cinema_remote_control","clients","Receiver and companion qualification","Server support does not prove client or physical remote acceptance. Saving your choice always succeeds.")}
+    ${devGraduation("receiver, companion and physical remote acceptance are recorded for the composed candidate.","this switch moves to Settings → Playback as a permanent network remote preference.")}
+    <div class="err" id="cinema-remote-error" role="alert"></div>${setCardFoot("saveCinemaRemote")}`);
+}
+async function saveCinemaRemote(button){
+  const err=document.getElementById("cinema-remote-error");if(err)err.textContent="";
+  if(button)button.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{cinema_remote_control:/** @type {HTMLInputElement} */(document.getElementById("cinema-remote-control")).checked}}));
+    toast("Companion remote preference saved");if(button)setCardSaved(button);
+  }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
+}
+
+
+function cinemaRemoteInvitationsCard(settings,readiness){
+  return setCard(`${cardHead("Cinema background invitations","Let opted-in phones receive an invitation when their Cinema screen becomes available.",'<span class="pill">Qualification pending</span>')}
+    ${togRow("cinema-remote-invitations","Enable background invitations","Requires companion remotes and explicit consent on each paired phone. This choice does not change either preference.",!!settings.cinema_remote_invitations)}
+    ${devReq(readiness,"cinema_remote_invitations","broker","Notification delivery provider","Configure the broker and provider separately. Missing configuration never prevents saving this choice.")}
+    ${devReq(readiness,"cinema_remote_invitations","consent","Paired phone consent","Each same-account phone must explicitly opt in to invitations for its approved screen.")}
+    ${devReq(readiness,"cinema_remote_invitations","delivery","Physical notification and tap acceptance","Native background delivery and opening the correct screen require platform and device qualification.")}
+    ${devGraduation("provider delivery and native background notification/tap acceptance are recorded.","this permanent preference moves to Settings → Playback.")}
+    <div class="err" id="cinema-invitations-error" role="alert"></div>${setCardFoot("saveCinemaRemoteInvitations")}`);
+}
+async function saveCinemaRemoteInvitations(button){
+  const err=document.getElementById("cinema-invitations-error");if(err)err.textContent="";
+  if(button)button.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{cinema_remote_invitations:/** @type {HTMLInputElement} */(document.getElementById("cinema-remote-invitations")).checked}}));
+    toast("Background invitation preference saved");if(button)setCardSaved(button);
+  }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
+}
+
 function developerPanel(settings,readiness){
   const clustered=settingsClusterEnabled();
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
@@ -538,7 +573,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Use the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
       ${clustered?`<div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}`:""}
-      <div class="setsection"><h2>Shared libraries</h2><p>Private sharing between separate Cinemas.</p></div>${cinemaSharingCard(settings,readiness)}
+      <div class="setsection"><h2>Shared libraries</h2><p>Private sharing between separate Cinemas.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}

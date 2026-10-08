@@ -91,6 +91,7 @@ function profileMenuHtml(){
     +`<span><b>${esc(name||"—")}</b><small>${role}</small></span></div>`
     +`<button onclick="showConnectQr()">Show server QR code</button>`
     +settings
+    +`<button onclick="location.hash='#/settings/developer';closeMenus()">Device preferences</button><button onclick="location.hash='#/remote';closeMenus()">Phone remote</button>`
     +`<button onclick="logout()">Sign out</button>`;
 }
 function toggleProfileMenu(e){ if(e) e.stopPropagation(); closeMenus("profilemenu"); const m=document.getElementById("profilemenu"); if(!m) return;

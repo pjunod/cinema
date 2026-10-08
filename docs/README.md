@@ -51,6 +51,7 @@ Sharing activation: [Running-cluster activation and SQL transition safety](featu
 | What do I type? | [CHEATSHEET.md](CHEATSHEET.md) |
 | How is it built, and why that way? | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | What endpoint do I call, and what authorizes it? | [API.md](API.md) |
+| How do I build and operate the fixed-purpose Cinema notification broker? | [Broker README](../crates/plurx-notification-broker/README.md) — **open**; synthetic software evidence, provider/native acceptance outstanding. |
 | How does a file become a stream? | [PLAYBACK.md](PLAYBACK.md) |
 | Why is this title playing badly? | [PLAYBACK-TESTING.md](PLAYBACK-TESTING.md), then [streaming/](streaming/) |
 | Why is a Dolby Vision title arriving as HDR10? | [streaming/DV-DELIVERY-FINDINGS.md](streaming/DV-DELIVERY-FINDINGS.md) |
@@ -478,8 +479,12 @@ player obeys, subtitles and overlays, layouts and themes.
 | [TV-REMOTE-AND-COMPANION-PLAN.md](clients/TV-REMOTE-AND-COMPANION-PLAN.md) | TV remote and HDMI-CEC input, automatic phone/tablet remote discovery, pairing, cross-platform control, and the Linux/Pi, Mac, and Windows implementation sequence. | open |
 | [TV-REMOTE-AND-COMPANION-REVIEW.md](clients/TV-REMOTE-AND-COMPANION-REVIEW.md) | Independent adversarial review of the TV remote plan: controller authorization, command expiry, desktop CEC availability, and the tvOS feasibility gate. | open |
 | [TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md](clients/TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md) | Build-ready Sol 6.1 packets, file ownership, native/desktop/background delivery, parent review, and batched-merge handoff. | open |
+| [TV-REMOTE-NATIVE-INVITATIONS-BUILD.md](clients/TV-REMOTE-NATIVE-INVITATIONS-BUILD.md) | Native notification enrollment, cold-launch taps, existing reminder/service ownership, Android resident networking and focused acceptance. | open |
+| [TV-REMOTE-API.md](clients/TV-REMOTE-API.md) | Implemented v1 HTTP DTOs, header proofs, owner routing, pairing/control lifecycle, storage migration and limits for receiver and companion clients. | open |
+| [TV-REMOTE-INVITATIONS-API.md](clients/TV-REMOTE-INVITATIONS-API.md) | Exact opt-in phone consent, background poll/tap, broker ticket and durable invitation lifecycle contract; first storage slice implemented, transport qualification pending. | open |
 | [TV-REMOTE-PROTOCOL.md](clients/TV-REMOTE-PROTOCOL.md) | Exact remote authority, node ownership, command/state wire types, receiver freshness, pairing and endpoint contracts. | open |
 | [TV-REMOTE-AND-COMPANION-STATUS.md](clients/TV-REMOTE-AND-COMPANION-STATUS.md) | Packet progress, parent review, compilation and physical acceptance evidence, without treating docs as shipped functionality. | open |
+| [TV-REMOTE-OPERATIONS.md](clients/TV-REMOTE-OPERATIONS.md) | Set up a TV receiver and paired phone, recover control, and record physical acceptance without treating in-progress packets as shipped support. | open |
 | [JELLYFIN-SHARED-SERVICES.md](clients/JELLYFIN-SHARED-SERVICES.md) | J1 shared login/token authority, token-only revocation and complete native watch operations; remaining compatibility lifecycle work. | open |
 | [JELLYFIN-PLAY-BINDINGS.md](clients/JELLYFIN-PLAY-BINDINGS.md) | J1 bounded negotiation metadata, live source incarnations, native route references, terminal retention and remaining adapter fences. | open |
 | [JELLYFIN-COMPATIBILITY-BUILD.md](clients/JELLYFIN-COMPATIBILITY-BUILD.md) | Infuse/Android TV build contract after three reviews: protocol spike, player identity, VOD fallbacks, watch fencing and acceptance. | open |

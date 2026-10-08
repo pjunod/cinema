@@ -8,6 +8,7 @@ private enum LibraryScrollTarget: Hashable {
 
 struct LibraryView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     let collection: LibraryCollection
 
     @StateObject private var state = LibraryGridCoordinator()
@@ -17,6 +18,8 @@ struct LibraryView: View {
     @AppStorage("plurx.libraryPresentation") private var presentation = "rows"
     @State private var expandedGroup: String?
     @State private var selectedGroup: String?
+    @State private var choiceMenu: String?
+    @State private var searchNonce = UUID()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(collection: LibraryCollection) {
@@ -56,6 +59,7 @@ struct LibraryView: View {
                     .textFieldStyle(.roundedBorder)
                     #endif
                     .accessibilityLabel("Find a title in this library")
+                    .remoteControl("library:search", label: "Find a title") {}
                 if rows && !state.groups.isEmpty {
                     ScrollView(.horizontal) {
                         HStack(spacing: 8) {
@@ -95,17 +99,37 @@ struct LibraryView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar { libraryToolbar }
+            .overlay {
+                if let menu = choiceMenu {
+                    RemoteChoicePanel(scope: remoteScope + ":" + menu, title: menu.capitalized, choices: choices(for: menu))
+                }
+            }
+            .onAppear {
+                updateRemoteOrder()
+                remoteNavigation.setSearch(scope: remoteScope, nonce: searchNonce) { query = $0 }
+            }
+            .onChange(of: visibleItems.map(\.id)) { _, _ in updateRemoteOrder() }
+            .onChange(of: rows) { _, _ in updateRemoteOrder() }
+            .onChange(of: gridColumns) { _, _ in updateRemoteOrder() }
+            .onChange(of: remoteNavigation.requestedFocus) { _, key in
+                guard remoteNavigation.activeScope == remoteScope, let key, key.hasPrefix("item:"),
+                      let id = Int(key.dropFirst(5)) else { return }
+                if rows, let group = state.groups.first(where: { $0.items.contains(where: { $0.id == id }) }) {
+                    proxy.scrollTo(LibraryScrollTarget.row(group.id), anchor: .center)
+                } else { proxy.scrollTo(id, anchor: .center) }
+            }
             .task(id: loadKey) { await load() }
             .task(id: rows) { state.presentationChanged(rows: rows) }
             .task(id: query) { await state.queryChanged(query) }
             .task(id: filter) { state.filterChanged(filter) }
             .navigationDestination(item: $expandedGroup) { key in
                 LibraryGroupView(state: state, groupID: key, title: state.groups.first { $0.id == key }?.label ?? key,
-                                 landscape: collection.supportsRecordedSort, reload: load)
+                                 landscape: collection.supportsRecordedSort, parentScope: remoteScope, dismiss: { expandedGroup = nil }, reload: load)
             }
             .onDisappear {
                 if expandedGroup == nil { state.stop() }
                 visibleIndices.removeAll()
+                remoteNavigation.removeSearch(scope: remoteScope, nonce: searchNonce)
             }
         }
     }
@@ -163,7 +187,9 @@ struct LibraryView: View {
                             Spacer()
                             Button("View all") { expandedGroup = group.id }
                             .accessibilityLabel("View all \(group.label) items")
+                            .remoteControl("group:\(group.id)", label: "View all \(group.label) items") { expandedGroup = group.id }
                         }
+                        ScrollViewReader { rowProxy in
                         ScrollView(.horizontal) {
                             LazyHStack(alignment: .top, spacing: 18) {
                                 ForEach(group.items) { item in
@@ -175,11 +201,18 @@ struct LibraryView: View {
                                         }
                                     }
                                     .posterButtonStyle()
+                                    .id(item.id)
+                                    .remoteControl("item:\(item.id)", label: item.title) { remoteNavigation.navigate(to: .item(item.id)) }
                                 }
                             }
                             .padding(.vertical, 12)
                         }
                         .accessibilityIdentifier("library-row-\(group.id)")
+                        .onChange(of: remoteNavigation.requestedFocus) { _, key in
+                            guard remoteNavigation.activeScope == remoteScope, let key, key.hasPrefix("item:"), let id = Int(key.dropFirst(5)), group.items.contains(where: { $0.id == id }) else { return }
+                            rowProxy.scrollTo(id, anchor: .center)
+                        }
+                        }
                     }
                     .id(LibraryScrollTarget.row(group.id))
                 }
@@ -194,6 +227,8 @@ struct LibraryView: View {
                         )
                     }
                     .posterButtonStyle()
+                    .id(item.id)
+                    .remoteControl("item:\(item.id)", label: item.title) { remoteNavigation.navigate(to: .item(item.id)) }
                     .onAppear {
                         visibleIndices.insert(index)
                         Task { await state.fetchUntil(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: index, columns: gridColumns)) }
@@ -213,36 +248,38 @@ struct LibraryView: View {
         }
     }
 
+    private var remoteScope: String { "library:" + collection.id }
+    private var remoteKeys: [String] { ["library:view", "library:sort", "library:filter", "library:search"] + (rows ? state.groups.flatMap { ["group:\($0.id)"] + $0.items.map { "item:\($0.id)" } } : visibleItems.map { "item:\($0.id)" }) }
+    private func updateRemoteOrder() {
+        remoteNavigation.setOrder(scope: remoteScope, keys: remoteKeys, columns: rows ? 1 : gridColumns)
+    }
+    private func openChoices(_ menu: String) {
+        let scope = remoteScope + ":" + menu
+        remoteNavigation.openModal(scope: scope, opener: "library:" + menu) { choiceMenu = nil }
+        if remoteNavigation.activeScope == scope { choiceMenu = menu }
+    }
+    private func choices(for menu: String) -> [RemoteChoice] {
+        switch menu {
+        case "view": return ["rows", "grid"].map { value in
+            RemoteChoice(id: value, label: value.capitalized, selected: presentation == value) { presentation = value }
+        }
+        case "sort": return sorts.map { option in
+            RemoteChoice(id: option.rawValue, label: option.label, selected: sort == option) { sort = option }
+        }
+        default: return WatchFilter.allCases.map { option in
+            RemoteChoice(id: option.rawValue, label: option.label, selected: filter == option) { filter = option }
+        }
+        }
+    }
     @ToolbarContentBuilder
     private var libraryToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .automatic) {
-            Menu {
-                Picker("View", selection: $presentation) {
-                    Text("Rows").tag("rows")
-                    Text("Grid").tag("grid")
-                }
-            } label: {
-                Label("View", systemImage: rows ? "rectangle.grid.1x2" : "square.grid.2x2")
-            }
-            Menu {
-                Picker("Sort", selection: $sort) {
-                    ForEach(sorts) { option in
-                        Label(option.label, systemImage: option.icon).tag(option)
-                    }
-                }
-            } label: {
-                Label("Sort", systemImage: "arrow.up.arrow.down")
-            }
-
-            Menu {
-                Picker("Watch status", selection: $filter) {
-                    ForEach(WatchFilter.allCases) { option in
-                        Text(option.label).tag(option)
-                    }
-                }
-            } label: {
-                Label("Filter", systemImage: filter == .all ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
-            }
+            Button("View") { openChoices("view") }
+                .remoteControl("library:view", label: "View") { openChoices("view") }
+            Button("Sort") { openChoices("sort") }
+                .remoteControl("library:sort", label: "Sort") { openChoices("sort") }
+            Button("Filter") { openChoices("filter") }
+                .remoteControl("library:filter", label: "Filter") { openChoices("filter") }
         }
     }
 
@@ -263,39 +300,67 @@ struct LibraryView: View {
 /// Pushing a destination retains the rows' native scroll and focus state.
 private struct LibraryGroupView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     @ObservedObject var state: LibraryGridCoordinator
     let groupID: String
     let title: String
     let landscape: Bool
+    let parentScope: String
+    let dismiss: () -> Void
     let reload: () async -> Void
+    @State private var destinationToken = UUID()
+    @State private var ownsScope = false
+    private var remoteScope: String { parentScope + ":group:" + groupID }
     private var items: [Item] { state.groups.first { $0.id == groupID }?.items ?? [] }
+    private func updateOrder() {
+        navigation.setOrder(scope: remoteScope, keys: (state.error == nil ? [] : ["group:retry"]) + items.map { "item:\($0.id)" }, columns: 1)
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("\(items.count)\(state.complete ? " items" : " loaded · library still loading")")
-                    .foregroundColor(Palette.muted)
-                if let error = state.error {
-                    Text("Incomplete library: \(error)")
-                    Button("Retry") { Task { await state.retry() } }
-                }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: landscape ? model.posterSize.landscapeWidth : model.posterSize.posterWidth), spacing: 18)], spacing: 24) {
-                    ForEach(items) { item in
-                        NavigationLink(value: Route.item(item.id)) {
-                            if landscape {
-                                LandscapeCard(item: item, width: model.posterSize.landscapeWidth)
-                            } else {
-                                PosterCard(item: item, width: model.posterSize.posterWidth)
-                            }
-                        }.posterButtonStyle()
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("\(items.count)\(state.complete ? " items" : " loaded · library still loading")")
+                        .foregroundColor(Palette.muted)
+                    if let error = state.error {
+                        Text("Incomplete library: \(error)")
+                        Button("Retry") { Task { await state.retry() } }
+                            .remoteControl("group:retry", label: "Retry loading library") { Task { await state.retry() } }
+                    }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: landscape ? model.posterSize.landscapeWidth : model.posterSize.posterWidth), spacing: 18)], spacing: 24) {
+                        ForEach(items) { item in
+                            NavigationLink(value: Route.item(item.id)) {
+                                if landscape {
+                                    LandscapeCard(item: item, width: model.posterSize.landscapeWidth)
+                                } else {
+                                    PosterCard(item: item, width: model.posterSize.posterWidth)
+                                }
+                            }.posterButtonStyle()
+                                .id(item.id)
+                                .remoteControl("item:\(item.id)", label: item.title) { navigation.navigate(to: .item(item.id)) }
+                        }
                     }
                 }
+                .padding(.horizontal, screenHPad)
+                .padding(.bottom, 36)
             }
-            .padding(.horizontal, screenHPad)
-            .padding(.bottom, 36)
+            .onChange(of: navigation.requestedFocus) { _, key in
+                guard ownsScope, navigation.activeScope == remoteScope, let key,
+                      key.hasPrefix("item:"), let id = Int(key.dropFirst(5)), items.contains(where: { $0.id == id }) else { return }
+                proxy.scrollTo(id, anchor: .center)
+            }
         }
         .background(Palette.bg.ignoresSafeArea())
+        .remoteScope(remoteScope)
+        .remoteRestricted(!ownsScope)
         .navigationTitle(title)
+        .onAppear {
+            ownsScope = navigation.attachDestination(token: destinationToken, parent: parentScope, scope: remoteScope, opener: "group:" + groupID, dismiss: dismiss)
+            updateOrder()
+        }
+        .onChange(of: items.map(\.id)) { _, _ in updateOrder() }
+        .onChange(of: state.error) { _, _ in updateOrder() }
+        .onDisappear { navigation.detachDestination(token: destinationToken); ownsScope = false }
         .task { await reload() }
     }
 }

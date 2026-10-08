@@ -349,6 +349,26 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            DeveloperEnableItem {
+                id:"cinema_remote_control",title:"Cinema remote control",
+                enabled:Some(settings.get(super::remote::FEATURE_KEY).is_some_and(|v|v=="1")),
+                setting:Some("cinema_remote_control"),
+                requirements:vec![DeveloperRequirement {
+                    id:"clients",title:"Receiver and companion qualification",
+                    status:RequirementStatus::Unobservable,
+                    evidence:"The server provides authenticated pairing and node-owned control. Native/browser integration and physical remote qualification are not observable here; this advisory never rejects Save.".into(),
+                }],
+            },
+            DeveloperEnableItem {
+                id:"cinema_remote_invitations",title:"Cinema background invitations",
+                enabled:Some(settings.get("cinema.remote_invitations").is_some_and(|v|v=="1")),
+                setting:Some("cinema_remote_invitations"),
+                requirements:vec![
+                    DeveloperRequirement { id:"broker",title:"Optional notification broker",status:RequirementStatus::Unobservable,evidence:"An independently operated broker is required for visible APNs or FCM delivery. Configuration and provider availability never reject Save.".into() },
+                    DeveloperRequirement { id:"consent",title:"Explicit phone and screen consent",status:RequirementStatus::Unobservable,evidence:"Each phone must explicitly enroll a paired screen and report native permission or resident-service readiness; saved consent survives unavailable delivery.".into() },
+                    DeveloperRequirement { id:"delivery",title:"Native background and notification tap qualification",status:RequirementStatus::Unobservable,evidence:"Physical visible delivery and native tap reauthentication are unverified here. Readiness is advisory; invitations never acquire control or start playback.".into() },
+                ],
+            },
             cinema_sharing(
                 &state,
                 plurx_core::store::stored_switch(

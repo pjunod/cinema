@@ -98,7 +98,7 @@ function toggleMenu(kind,low){
   if(opener&&opener.setAttribute) opener.setAttribute("aria-expanded","true");
   m.dataset.kind=kind; m.classList.toggle("low",!!low);
   if(kind==="audio"){
-    m.innerHTML=PLAYER.audio.map((a,i)=>`<button class="${PLAYER.curAudio===i?'sel':''}" onclick="switchAudio(${i})">${esc(audioLabelMenu(a,i))}</button>`).join("");
+    m.innerHTML=PLAYER.audio.map((a,i)=>`<button class="${PLAYER.curAudio===i?'sel':''}" data-remote-track="${i}" onclick="switchAudio(${i})">${esc(audioLabelMenu(a,i))}</button>`).join("");
   } else if(kind==="settings"){
     m.innerHTML=settingsMenuHtml();
   } else if(kind==="quality"){
@@ -129,14 +129,14 @@ function toggleMenu(kind,low){
       <button onclick="forgetDecodeLimitHere()">Forget this measurement</button>`:"";
     m.innerHTML=`<div class="amsec">Quality</div>`+qualityOptions().map(([v,l])=>{
       const note=v==="auto"?" — automatic":v==="original"?" — max, no transcode":"";
-      return `<button class="${playQuality()===v?'sel':''}" onclick="setQuality('${v}')">${l}${note}</button>`;
+      return `<button class="${playQuality()===v?'sel':''}" data-remote-track="${v}" onclick="setQuality('${v}')">${l}${note}</button>`;
     }).join("")+limNote+(retainedQualityChange(PLAYER)?
       `<div class="menunote">Your preference is saved; the current stream is still playing.</div>
       <button onclick="retryQualityChange()">Retry quality change</button>
       <button onclick="applyQualityWithRestart()">Apply with restart</button>`:"");
   } else {
-    m.innerHTML=`<button class="${PLAYER.curSub<0?'sel':''}" onclick="setSub(-1)">Off</button>`+
-      PLAYER.subs.map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" onclick="setSub(${s.index})">${esc(subLabelMenu(s))}</button>`).join("");
+    m.innerHTML=`<button class="${PLAYER.curSub<0?'sel':''}" data-remote-track="-1" onclick="setSub(-1)">Off</button>`+
+      PLAYER.subs.map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" data-remote-track="${s.index}" onclick="setSub(${s.index})">${esc(subLabelMenu(s))}</button>`).join("");
   }
   m.querySelectorAll("button").forEach(button=>{
     if(!button.hasAttribute("role")) button.setAttribute("role","menuitem");

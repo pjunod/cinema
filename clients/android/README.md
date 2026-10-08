@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `150` — Shared-library playback and controls;
+> Status: **v0.3.0**, build `151` — Shared-library playback and controls;
 > not yet installed on hardware.
 > Build `149` — Live TV station logos: the list rows,
 > grid headers, programme details, picture badge and fullscreen overlay draw
@@ -565,6 +565,77 @@ Pro XL (`1344×2992`), Pixel 10 Pro Fold open (`2076×2152`), and Android TV
 1080p (`1920×1080`). The exact AVD names used locally are
 `plurx_pixel_10_pro_xl_api36`, `plurx_pixel_10_pro_fold_api36`, and
 `plurx_android_tv_1080p_api36`.
+
+## Background screen invitations — explicit choices and recovery
+
+The unfinished invitation controls live in Settings → Developer, alongside
+Cinema remotes. Register this phone, allow notifications explicitly, and save
+ON/OFF separately for each paired screen. Each screen uses one selected
+transport: Push (FCM) or Resident. Readiness is advisory; unavailable providers
+and permissions preserve the saved choice. The controls graduate to Remotes &
+devices after physical provider and background-execution qualification.
+
+**Optional FCM configuration.** The APK includes the real Firebase Messaging
+SDK. The default build has no configured Firebase app and does not claim push
+readiness. Supply your Firebase Android application's public configuration as
+Gradle properties; no Google-services JSON, broker private key, provider service
+account, or Cinema proof belongs in source or these properties:
+
+```bash
+./gradlew assembleDebug \
+  -PcinemaFirebaseProjectId=your-project \
+  -PcinemaFirebaseApplicationId=1:123456789:android:your-app-id \
+  -PcinemaFirebaseApiKey=your-public-api-key \
+  -PcinemaFirebaseSenderId=123456789
+```
+
+Use the Firebase project that matches the configured broker FCM project. Auto
+initialization is disabled; an explicit push enrollment requests the real SDK
+token. Start obtains a short-lived home ticket, sends only that ticket and the
+OS token directly to its issued HTTPS broker origin, checks the exact broker
+generation, then confirms with the home. The home never receives the OS token.
+An unknown enrollment is renewed explicitly after readiness refresh; it is
+never replayed automatically. Token rotation retains work per screen, so one
+confirmed screen cannot hide another screen's uncertain renewal.
+[Firebase setup](https://firebase.google.com/docs/android/setup) explains the
+application configuration, and
+[message handling](https://firebase.google.com/docs/cloud-messaging/android/receive-messages)
+explains why the broker uses data-only messages. Physical FCM delivery is
+unverified.
+
+**Resident alternative.** Select Resident for each intended screen, then enable
+its separate local resident choice and press Start. The visible connected-device
+service requests Wi-Fi and uses its network only for the invitation client's
+sockets and DNS. Media, downloads, reminders, and process-wide networking keep
+their existing owners. Stop in the app or persistent notification takes effect
+locally while offline and queues home availability reconciliation. Wi-Fi loss,
+logout, setup failure, or service termination releases the network callback;
+Start must be pressed again. Saved choice alone never triggers a boot, alarm,
+WorkManager, sticky-service, or fallback restart. The
+[Android connected-device service requirements](https://developer.android.com/develop/background-work/services/fgs/service-types#connected-device)
+still require physical permission and background-execution acceptance.
+
+**Tap and recovery.** Notifications contain one opaque invitation ID. Local
+admission checks the actual saved login, exact installation, permission, channel,
+proved consent, current saved choice, and bounded durable dedupe before display.
+Tap retains the ID across login and requires the matching selected profile,
+explicit foreground remote switch, and fresh authenticated lookup. It opens the
+ordinary remote; take control and playback remain separate actions. An OFF
+choice also fences previously displayed notifications before lookup selection.
+Remotes & devices keeps the bounded signed-in home installation list and explicit
+selected-installation removal available without a local phone proof or pairing
+grant. Local reset or forgetting a saved profile does not claim remote
+revocation: remove any orphan home installation while signed in there.
+
+Encrypted invitation records retain at most eight saved profiles, 160 screen
+choices/consents per profile, and 256 unexpired notification IDs. Invalid clocks,
+clock rollback, corrupted records, and saturated dedupe fail closed. Invitation
+and remote-proof preferences are excluded from cloud backup and device transfer.
+Android's older remote vault keys already included canonical origin; they did not
+retain an unambiguous origin/instance/account tuple. The new namespace does not
+import those records automatically. Pair this phone again if an old pairing is
+unavailable. Software compilation and focused JVM checks do not qualify native
+permission dialogs, Google TV hardware, FCM delivery, or resident persistence.
 
 ## Roadmap
 

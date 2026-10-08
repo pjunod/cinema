@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Cinema local CEC remote",
+  "version": "0.1.0",
+  "minimum_chrome_version": "106",
+  "description": "Bind a local TV remote to one Cinema tab. Hardware acceptance is pending.",
+  "permissions": ["nativeMessaging", "scripting", "storage", "activeTab", "webNavigation"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {"service_worker": "worker.js", "type": "module"},
+  "action": {"default_popup": "popup.html"},
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'"}
+}

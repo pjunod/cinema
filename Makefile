@@ -52,6 +52,10 @@ unit-core: override CARGO := PLURX_EXPECT_TEST_COUNT_AT_LEAST=$${PLURX_EXPECT_TE
 unit-core: ## Run plurx-core with replicated-store tests and enforce the count floor
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib
 
+.PHONY: unit-broker
+unit-broker: test-socket-permission-check ## Run focused notification broker security and provider contracts
+	$(CARGO) test --locked -p plurx-notification-broker
+
 test: unit ## Run the fast Rust test lane
 
 test-full: test-socket-permission-check ## Run every Rust test, including replicated and daemon contracts
@@ -1463,6 +1467,15 @@ ui-check: ## Sweep every layout and fail if the structural golden moved
 control-browser-check: ## Run the shipped playback-control reporter in a real browser
 	@scripts/control-reporter-browser-check
 
+# Real focus ownership uses a headed disposable Chromium. Linux lanes supply
+# Xvfb; live Router acceptance keeps its explicit synthetic-fixture requirement.
+.PHONY: cinema-remote-browser-check
+cinema-remote-browser-check: ## Run Cinema browser contracts with provisioned Playwright
+	@export PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}"; \
+		node="$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}"; \
+		if [ "$$(uname -s)" = Linux ]; then set -- xvfb-run -a "$$node"; else set -- "$$node"; fi; \
+		"$$@" --test tests/web/cinema-remote-direction.browser.cjs tests/web/cinema-remote.browser.cjs tests/web/cinema-remote-live.browser.cjs tests/web/cinema-remote-couch.browser.cjs
+
 .PHONY: library-rows-browser-check
 library-rows-browser-check: ## Test grouped library rows with the provisioned Playwright browser
 	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
@@ -1516,6 +1529,13 @@ web-check: web-unit-check ## Test playback policy, embedded JS, and every shippe
 # runs exactly this, so a web pull request executes the same tests web-check
 # does apart from the two real-browser scripts.
 web-unit-check: ## Run every Node web and playback test (no browser)
+	@node --test tests/web/cinema-remote-client.test.js
+	@node --test tests/web/cinema-remote-controller.test.js
+	@node --test tests/web/cinema-remote-guard.test.js
+	@node --test tests/web/cinema-remote-receiver.test.js
+	@node --test tests/web/cinema-remote-settings.test.js
+	@node --test tests/web/cinema-remote-ui.test.js
+	@node --test tests/web/cinema-remote.test.js
 	@node tests/playback/web-policy.test.js
 	@node --test tests/playback/web-media-recovery.test.js
 	@node tests/playback/web-control.test.js

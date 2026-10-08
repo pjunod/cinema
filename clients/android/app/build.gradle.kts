@@ -108,7 +108,7 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 150
+        versionCode = 151
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -176,6 +176,14 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    defaultConfig {
+        // Public Firebase application configuration, never provider credentials or a home proof.
+        listOf("PROJECT_ID", "APPLICATION_ID", "API_KEY", "SENDER_ID").forEach { field ->
+            val value = providers.gradleProperty("cinemaFirebase" + field.lowercase().split('_').joinToString("") { it.replaceFirstChar(Char::uppercase) }).orNull.orEmpty()
+            require(value.matches(Regex("[A-Za-z0-9_:.\\-]*"))) { "Invalid Cinema Firebase application configuration" }
+            buildConfigField("String", "CINEMA_FIREBASE_" + field, "\"" + value + "\"")
+        }
+    }
     buildFeatures {
         buildConfig = true
         compose = true
@@ -187,6 +195,7 @@ android {
         getByName("test").resources.directories.add("../../../tests/playback")
         // tests/sharing/protocol-cases.json: the Shared wire rows every port reads.
         getByName("test").resources.directories.add("../../../tests/sharing")
+        getByName("test").resources.directories.add("../../../crates/plurx-core/tests/fixtures")
     }
 }
 
@@ -200,6 +209,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(libs.firebase.messaging)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.profileinstaller)
     implementation(libs.androidx.activity.compose)
