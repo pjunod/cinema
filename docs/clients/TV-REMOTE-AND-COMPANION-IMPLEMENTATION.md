@@ -361,3 +361,102 @@ status where credentials, entitlements or physical hardware are unavailable.
 The merge coordinator receives the exact candidate, all task PRs, parent
 review verdict, evidence applicability, known blockers and smallest remaining
 qualification set. No unit suites are requested for documentation alone.
+
+## 11. Complete ordinary couch navigation after the transport packets
+
+The B02/B03/B06/B07 reviews distinguish safe transport from complete everyday
+navigation. A route intentionally fails closed until it has an owner. That
+restriction is not a substitute for implementing an ordinary browsing flow.
+Freeze reviewed transport heads, then use separate follow-up branches based
+on their reviewed dependencies. The same Sol 6.1 builders own these changes;
+the parent reviews them and the coordinator composes qualification.
+
+| Follow-up | File ownership | Concrete completion |
+|---|---|---|
+| Web couch | B02/B05 web navigation/router, item/watch/preplay and Live TV files; web regressions; synchronized shell asset metadata if needed | Start-over; app-owned preplay/version choices; episode disclosure, season and episode controls; Live TV entry, channel list/scrub and guide view/watch/close |
+| Apple couch | B03/B06 Apple navigation/views, library/detail/Home routes, pairing-surface lifetime and state publisher; Apple regressions | Expanded library groups; ordinary shared-library/Coming Soon browsing; episodes, start-over and preplay/version choices; stale TV pairing response retirement; normalized state budget and strict integer lexical consistency |
+| Android couch | B07 Android navigation/views, library/detail/Live TV and existing playback adapters; Android regressions | Expanded library dialog ownership; detail/episode/start-over/preplay choices; channel/guide navigation; complete common-screen inventory before release |
+
+An Android item may finish inside B07 before its head is frozen. The receipt
+must say which branch owns each remaining item. Do not edit a frozen packet
+silently or let parallel builders modify the same native/web file.
+
+For each new safe surface, register bounded stable keys in an owned route or
+presentation scope. Use the existing authorization, loader and player.
+Realize offscreen lazy items, wait for actual native/browser focus before
+Select, and restore the exact opener on Back. Data, route, menu and physical
+focus changes invalidate pending actions. A generic DOM click, OS key
+injection or native Picker activation is not an implementation of this
+contract. Preserve physical scrubs and accessible labels/selection traits.
+
+Unknown system, credential, administrative, sharing-management and destructive
+presentations stay restricted. Ordinary already-authorized shared-library
+browsing is distinct from managing shares. Guide navigation/watch is distinct
+from scheduling or deleting a recording. Do not expand authority merely to
+make a navigation inventory look complete.
+
+Follow-up receipts enumerate every common surface as implemented, intentionally
+restricted, or still requiring a named software task. Include focused evidence
+for route/Back ownership, stale or unrealized Select, owned choices, lazy
+boundaries and physical-input arbitration. Repeat affected compile checks on
+the final source. Physical TV, VoiceOver and mixed-device walkthroughs remain
+separate evidence; an unimplemented control is not a hardware-only limitation.
+
+
+## 12. Background invitation build decisions
+
+The parent approved B09's server/broker design on 2026-10-08. The server Sol
+builder owns the independent invitation store, home API, bounded owner worker,
+notification broker and API reference. Native adapters follow the frozen API;
+the web Developer card is assigned only after B05 freezes. Shared protocol,
+status and build instructions remain manager-owned. This extends the packet
+ownership above; it does not authorize parallel edits to another builder's
+files.
+
+Invitations default off. Save preserves the selected setting even when a
+provider, permission or native transport is unavailable. Turning consent off
+requires the current same-user Native login and phone proof, but never a
+still-valid TV grant, provider connection or enabled global feature. Lost-phone
+revocation remains available to the same user without that phone's proof.
+Enabling consent and enrolling delivery require current grant authority.
+
+Background authorization reads must not refresh a dormant login's idle expiry.
+Atomic admission rechecks phone, grant, receiver, login and consent generations,
+then admits at most one event per receiver/foreground/enrollment and one per
+receiver/phone in thirty minutes. Keep live-authority dedupe identities across
+reconnects, restarts, consent toggles, replacement grants and transport rotation.
+The approved account cap is 100000 event identities; exhaustion reports
+`retention_limit` without changing saved consent. Cleanup may remove revoked
+scopes, never quietly reset a live scope's dedupe or cooldown.
+
+Persist an attempted transition before provider I/O. Unknown outcomes consume
+that attempt; neither home nor broker silently retries an uncertain visible
+notification. Broker dedupe, tickets, revocation work and all request/reply
+bodies need explicit bounds. Reject expired invitation identities before any
+history pruning could make them replayable. Poll/list responses use bounded
+prefixes or pagination. A notification carries a locally resolvable opaque
+identity, never a bearer proof, media title or credential destination. Tap
+reauthenticates and resolves a unique live receiver; it neither acquires control
+nor starts playback.
+
+Phone registration may return existing metadata to a proved retry, but cannot
+recover a one-time plaintext secret. A lost initial response requires explicit
+revocation/re-registration. Enrollment generation changes suspend old delivery
+before network I/O. Missing provider readiness never undoes enabled consent.
+OS device tokens go directly to the configured HTTPS broker; provider keys
+remain there. The home server has only its scoped publisher credential.
+
+Restore/import disables portable invitation capabilities. Broker restore uses
+an explicit operator procedure and an external generation/key manifest;
+missing or mismatched generation fails closed. Do not claim a raw copied old
+database can detect its own rollback without independent state. Preserve the
+existing local-reminder delegate and media/download owners in native clients.
+Android resident service work must establish actual permitted connected-device
+networking, explicit user start and an ongoing Stop action. Stop cannot silently
+restart; discovery is only a hint and never authorizes a credential destination.
+
+Build the strict DTOs, schema and atomic authority/admission contracts first,
+then the worker, home routes and real APNs/FCM request formation/signing. Use
+focused SQLite and actual Hiqlite contracts plus synthetic provider transport
+evidence. Physical push delivery, entitlements, Android service eligibility on
+devices and OS notification behavior remain explicit acceptance items.
