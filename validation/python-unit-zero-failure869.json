@@ -1,0 +1,44 @@
+{
+  "inherited": {
+    "artifacts": {
+      "final": {
+        "id": 1784,
+        "sha256": "3892406dce35ef49abb1f8861647ae3ef98d8980935308fbd0a0e94df67b6c08",
+        "size": 338
+      },
+      "start": {
+        "id": 1781,
+        "sha256": "0a5b26541c05b62953bc83f326322585a4e552772e1558357e5a0a1663a4a2f8",
+        "size": 338
+      }
+    },
+    "commit": "2b21cc0354561c737b53c73f00804337024e3c61",
+    "count": 0,
+    "job": 44632,
+    "log_sha256": "007092bd12fc415c55a2fb41f53d6a2728d0f5c838880f734a8e0e558d5354eb",
+    "run": 4391,
+    "source_hashes": {
+      ".github/workflows/effort-ci.yml": "b7c05851a042afa2da9a39bcd3e4057ea4ee0d02f37bb304b6044237cf303e5d",
+      "validation/python_unit_receipts.py": "8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258"
+    },
+    "sources": []
+  },
+  "provenance": "Authenticated original API source/job/log and live ZIP witnesses; repository-writer PR869 hash attestation required; zero units and zero successes imported.",
+  "refusal": {
+    "commit": "1041d72407d937efe265f7263926cacf332e6b22",
+    "job": 44658,
+    "log_sha256": "edf2d0333c6f6d60e6218899947542a4ef2500fd63eff6082038fcc2c8bd4c98",
+    "run": 4394,
+    "source_hashes": {
+      ".github/workflows/effort-ci.yml": "b7c05851a042afa2da9a39bcd3e4057ea4ee0d02f37bb304b6044237cf303e5d",
+      "validation/python_unit_receipts.py": "8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258"
+    }
+  },
+  "scope": {
+    "base": "effort/cinema-remotes",
+    "branch": "codex/cinema-remotes-foundations-gate",
+    "pr": 869,
+    "repository": 1
+  },
+  "version": 1
+}
