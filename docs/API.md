@@ -20,6 +20,8 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
+plurx has 353 routes across the registered routers.
+
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
 build when a route registered there has no entry here, when a path named here
