@@ -392,6 +392,7 @@ Usage:
   scripts/playback-lab device-run --device UDID --target URL --public-host HOST
                               --file-id ID --network-profile PROFILE [--item-id ID]
                               [--height PIXELS] [--observe SECONDS] [--json PATH]
+                              [--bundle-id ID] [--restore-policy production|isolated-lab]
 
 Commands:
   doctor     Verify the external programs and browser automation surface.
@@ -403,6 +404,7 @@ Commands:
   normalize  Scrub a report's run-local values so two runs can be compared.
   device-proxy  Shape a real server for remotely launched physical devices.
   device-run    Launch, shape, observe, stop the owned PID, and restore Noirr Cinema.
+                Explicit isolated-lab policy skips production restore for a separate QA bundle.
                 --bundle-id selects an installed diagnostic app; --leave-running is refused.
 
 The smoke suite covers each verdict plus the high-risk 4K transport forks and
@@ -5213,6 +5215,13 @@ async function deviceRunCommand(options, dependencies = {}) {
   const observeSeconds = positiveNumberOption(options, "observe", "--observe", 180);
   const profile = parseNetworkProfile(requireTextOption(options, "network_profile", "--network-profile"));
   const bundleId = options.bundle_id && options.bundle_id !== true ? String(options.bundle_id) : "tv.plurx.app";
+  const restorePolicy = options.restore_policy === undefined ? "production" : String(options.restore_policy);
+  if (!["production", "isolated-lab"].includes(restorePolicy)) {
+    throw new Error("--restore-policy must be production or isolated-lab");
+  }
+  if (restorePolicy === "isolated-lab" && bundleId === "tv.plurx.app") {
+    throw new Error("--restore-policy isolated-lab requires an explicit separate QA --bundle-id");
+  }
   const runId = crypto.randomUUID();
   const jsonPath = path.resolve(options.json || path.join(DEFAULT_REPORT_DIR, `${runId}-apple-device-acceptance.json`));
   const leaseDirectory = dependencies.leaseDirectory || path.join(os.homedir(), ".local", "state", "plurx", "playback-lab", "device-leases");
@@ -5220,7 +5229,7 @@ async function deviceRunCommand(options, dependencies = {}) {
   const cleanupTimeoutMs = dependencies.cleanupTimeoutMs || 10000;
   const controller = new AbortController();
   const errors = [];
-  const evidence = { run_id: runId, device, bundle_id: bundleId, json_path: jsonPath,
+  const evidence = { run_id: runId, device, bundle_id: bundleId, restore_policy: restorePolicy, json_path: jsonPath,
     launch_attempted: false, owned_process: null, cleanup: { status: "not-started", owned_process_absent: false }, errors };
   const record = (phase, error) => { errors.push({ phase, message: sanitizedError(error) }); };
   const interrupt = (signal) => {
@@ -5283,9 +5292,11 @@ async function deviceRunCommand(options, dependencies = {}) {
     const app = Array.isArray(installed) && installed.filter((entry) => entry.bundleIdentifier === bundleId);
     if (!app || app.length !== 1) throw new Error("target app is not uniquely installed");
     bundleScope = deviceBundleScope(app[0].url);
-    const production = installed.filter((entry) => entry.bundleIdentifier === "tv.plurx.app");
-    if (production.length !== 1) throw new Error("production app is not uniquely installed");
-    evidence.production_executable_scope = deviceBundleScope(production[0].url);
+    if (restorePolicy === "production") {
+      const production = installed.filter((entry) => entry.bundleIdentifier === "tv.plurx.app");
+      if (production.length !== 1) throw new Error("production app is not uniquely installed");
+      evidence.production_executable_scope = deviceBundleScope(production[0].url);
+    }
     evidence.bundle_executable_scope = bundleScope;
     await fsp.mkdir(leaseDirectory, { recursive: true, mode: 0o700 });
     leasePath = path.join(leaseDirectory, `${crypto.createHash("sha256").update(evidence.canonical_device_id).digest("hex")}.json`);
@@ -5344,14 +5355,19 @@ async function deviceRunCommand(options, dependencies = {}) {
     } catch (error) { record("cleanup", error); }
     evidence.cleanup.status = evidence.cleanup.owned_process_absent ? "verified-absent" : "unresolved";
     if (evidence.launch_attempted && evidence.cleanup.owned_process_absent) {
-      try {
-        const args = ["--device", evidence.canonical_device_id, "--activate", "--", "tv.plurx.app"];
-        const reply = dependencies.restoreDevice ? await command(args, true, dependencies.restoreDevice)
-          : await command(["device", "process", "launch", ...args], true);
-        const restored = deviceProcess(resultFor(reply).process);
-        if (!restored.executable.startsWith(evidence.production_executable_scope)) throw new Error("restore returned the wrong app executable");
-        evidence.cleanup.production_restored = true;
-      } catch (error) { record("restore", error); }
+      if (restorePolicy === "isolated-lab") {
+        evidence.cleanup.production_restored = false;
+        evidence.cleanup.production_restore_skipped = "explicit-isolated-lab-policy";
+      } else {
+        try {
+          const args = ["--device", evidence.canonical_device_id, "--activate", "--", "tv.plurx.app"];
+          const reply = dependencies.restoreDevice ? await command(args, true, dependencies.restoreDevice)
+            : await command(["device", "process", "launch", ...args], true);
+          const restored = deviceProcess(resultFor(reply).process);
+          if (!restored.executable.startsWith(evidence.production_executable_scope)) throw new Error("restore returned the wrong app executable");
+          evidence.cleanup.production_restored = true;
+        } catch (error) { record("restore", error); }
+      }
     }
     if (shaper) {
       try { Object.assign(evidence, await shaper.controlSnapshot()); } catch (error) { record("snapshot", error); }
