@@ -349,6 +349,16 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            DeveloperEnableItem {
+                id:"cinema_remote_control",title:"Cinema remote control",
+                enabled:Some(settings.get(super::remote::FEATURE_KEY).is_some_and(|v|v=="1")),
+                setting:Some("cinema_remote_control"),
+                requirements:vec![DeveloperRequirement {
+                    id:"clients",title:"Receiver and companion qualification",
+                    status:RequirementStatus::Unobservable,
+                    evidence:"The server provides authenticated pairing and node-owned control. Native/browser integration and physical remote qualification are not observable here; this advisory never rejects Save.".into(),
+                }],
+            },
             cinema_sharing(
                 &state,
                 plurx_core::store::stored_switch(

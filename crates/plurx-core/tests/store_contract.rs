@@ -28,6 +28,8 @@ mod jellyfin_identity;
 mod jellyfin_login;
 #[path = "store_contract/jellyfin_play.rs"]
 mod jellyfin_play;
+#[path = "store_contract/remote.rs"]
+mod remote;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/session_principals.rs"]
 mod session_principals;
