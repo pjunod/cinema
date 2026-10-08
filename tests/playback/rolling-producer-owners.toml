@@ -2781,7 +2781,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # heartbeat loop and aborts/joins it before Store shutdown; Drop aborts on panic.
 # Fixture startup owns the existing production passive/quorum metrics sampler;
 # it is aborted and joined before its Store, with Drop cancellation on panic.
-expected_occurrences = 882
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote owner adds one bounded physical-approval actor and three joined
+# race fixtures. Existing decode_facts tests add one joined probe actor.
+expected_occurrences = 887
 # Promotion union: final count is measured after architectural conflict resolution.
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -4213,7 +4216,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +6 B known-registration coordination: one original-deadline owned mutex
 # wait in admission; five finite test waits exercise gate/monitor custody.
 # No deadline is extended and no timer or missing row supplies close proof.
-expected_occurrences = 1570
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote adds one peer timeout, one bounded long-poll sleep, three
+# regression deadlines and two live-fixture shutdown timers. Existing
+# decode_facts regressions add five bounded deadline/poll timers.
+expected_occurrences = 1582
 
 
 [[module_structures]]
@@ -5169,7 +5176,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # read the boot and current readiness values before and after disablement.
 # status() clones SharingStatus under a read lock and receiver recovery under
 # its mutex; these test-only observations launch no task, timer, or process.
-expected_occurrences = 716
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote adds five HTTP response/status builder calls (remote.rs:3,
+# live_fixture.rs:1, tests.rs:1); these conservative matches launch no process.
+expected_occurrences = 721
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5433,7 +5443,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
 # One bounded fixture wait follows actual Raft watch changes until the
 # real Source peer publishes bounded-read readiness; no polling owner.
-expected_occurrences = 316
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote adds two test-only pause-barrier wait() calls; no child reap.
+expected_occurrences = 318
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5499,7 +5511,10 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # ReapOperation are notifier waits matched by name. Test-only `libc::kill
 # (pid, 0)` probes in vod/tests/source_lifetime.rs assert the production
 # slot reaped (ESRCH) or kept its fixture child; they send no signal.
-expected_occurrences = 64
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote adds the test-only pause-barrier async fn wait declaration;
+# the conservative free/UFCS matcher finds it, not an OS wait or signal.
+expected_occurrences = 65
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
