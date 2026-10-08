@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""Bounded diagnostic: software X11 pixels, never a qualification override.
+
+Example (an owned display only; reserve the control strip outside the video):
+  playback-x11-acquisition control --display :99 --at 624,650 --seconds 30 --out NEW_CONTROL
+  playback-x11-acquisition capture --display :99 --video 624,641 --control 624,650 --seconds 30 --out NEW_CAPTURE
+Wrap each invocation in an owned external timeout (e.g. 130 seconds with a
+5-second kill grace): a hung X server can block synchronous Xlib calls.
+Run control and capture as independent processes. Run a separate control-off
+baseline with capture's --control omitted; this tool does not automate retries.
+Both receipts use host CLOCK_MONOTONIC nanoseconds. They cannot synchronize a
+browser clock, identify a physical presentation time, or prove audio continuity.
+"""
+import argparse
+import ctypes as c
+import ctypes.util
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import sys
+import time
+
+WIDTH, HEIGHT, READ_WIDTH = 672, 4, 42
+
+
+class XImage(c.Structure):
+    _fields_ = [("width", c.c_int), ("height", c.c_int), ("xoffset", c.c_int),
+                ("format", c.c_int), ("data", c.c_void_p), ("byte_order", c.c_int),
+                ("bitmap_unit", c.c_int), ("bitmap_bit_order", c.c_int),
+                ("bitmap_pad", c.c_int), ("depth", c.c_int),
+                ("bytes_per_line", c.c_int), ("bits_per_pixel", c.c_int),
+                ("red_mask", c.c_ulong), ("green_mask", c.c_ulong),
+                ("blue_mask", c.c_ulong)]
+
+
+def coord(value):
+    try:
+        pair = tuple(int(part) for part in value.split(","))
+        if len(pair) == 2 and all(0 <= n <= 16384 for n in pair):
+            return pair
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("Expected nonnegative X,Y coordinates <= 16384")
+
+
+def checksum(frame):
+    return ((frame & 255) + ((frame >> 8) & 255) * 31 + (frame >> 16) * 17 + 17) & 255
+
+
+def bits(frame):
+    return [(211 >> n) & 1 for n in range(8)] + [(frame >> n) & 1 for n in range(24)] + [(checksum(frame) >> n) & 1 for n in range(8)]
+
+
+def decode(rgb):
+    result = []
+    for cell in range(40):
+        x = 1 + cell
+        average = sum(rgb[(y * READ_WIDTH + x) * 3 + channel] for y in range(HEIGHT) for channel in range(3)) / (HEIGHT * 3)
+        result.append(0 if average <= 60 else 1 if average >= 195 else None)
+    if None in result:
+        return None
+    word = lambda start, length: sum(result[start + n] << n for n in range(length))
+    frame = word(8, 24)
+    return frame if word(0, 8) == 211 and word(32, 8) == checksum(frame) else None
+
+
+class X11:
+    def __init__(self, display_name):
+        if not sys.platform.startswith("linux"):
+            raise RuntimeError("Linux X11 only")
+        library = ctypes.util.find_library("X11")
+        if not library:
+            raise RuntimeError("libX11 unavailable")
+        self.lib = c.CDLL(library)
+        specs = {
+            "XOpenDisplay": ([c.c_char_p], c.c_void_p),
+            "XDefaultRootWindow": ([c.c_void_p], c.c_ulong),
+            "XDefaultScreen": ([c.c_void_p], c.c_int),
+            "XDefaultDepth": ([c.c_void_p, c.c_int], c.c_int),
+            "XWhitePixel": ([c.c_void_p, c.c_int], c.c_ulong),
+            "XDisplayWidth": ([c.c_void_p, c.c_int], c.c_int),
+            "XDisplayHeight": ([c.c_void_p, c.c_int], c.c_int),
+            "XGetImage": ([c.c_void_p, c.c_ulong, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_ulong, c.c_int], c.POINTER(XImage)),
+            "XDestroyImage": ([c.POINTER(XImage)], c.c_int),
+            "XCreateSimpleWindow": ([c.c_void_p, c.c_ulong, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_uint, c.c_ulong, c.c_ulong], c.c_ulong),
+            "XCreatePixmap": ([c.c_void_p, c.c_ulong, c.c_uint, c.c_uint, c.c_uint], c.c_ulong),
+            "XCreateGC": ([c.c_void_p, c.c_ulong, c.c_ulong, c.c_void_p], c.c_void_p),
+            "XSetForeground": ([c.c_void_p, c.c_void_p, c.c_ulong], c.c_int),
+            "XFillRectangle": ([c.c_void_p, c.c_ulong, c.c_void_p, c.c_int, c.c_int, c.c_uint, c.c_uint], c.c_int),
+            "XCopyArea": ([c.c_void_p, c.c_ulong, c.c_ulong, c.c_void_p, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_int, c.c_int], c.c_int),
+            "XMapRaised": ([c.c_void_p, c.c_ulong], c.c_int),
+            "XChangeWindowAttributes": ([c.c_void_p, c.c_ulong, c.c_ulong, c.c_void_p], c.c_int),
+            "XSync": ([c.c_void_p, c.c_int], c.c_int),
+            "XFreeGC": ([c.c_void_p, c.c_void_p], c.c_int),
+            "XFreePixmap": ([c.c_void_p, c.c_ulong], c.c_int),
+            "XDestroyWindow": ([c.c_void_p, c.c_ulong], c.c_int),
+            "XCloseDisplay": ([c.c_void_p], c.c_int),
+        }
+        for name, (arguments, result) in specs.items():
+            function = getattr(self.lib, name)
+            function.argtypes, function.restype = arguments, result
+        self.display = self.lib.XOpenDisplay(display_name.encode())
+        if not self.display:
+            raise RuntimeError("Cannot open requested display")
+        self.root = self.lib.XDefaultRootWindow(self.display)
+        self.screen = self.lib.XDefaultScreen(self.display)
+
+    def inside(self, x, y, width, height):
+        if x + width > self.lib.XDisplayWidth(self.display, self.screen) or y + height > self.lib.XDisplayHeight(self.display, self.screen):
+            raise RuntimeError("Capture/control rectangle is outside the display")
+
+    def close(self):
+        self.lib.XCloseDisplay(self.display)
+
+
+# XSetWindowAttributes has ABI padding between these members. Declare the full
+# prefix through override_redirect instead of guessing its byte offset.
+class WindowAttributes(c.Structure):
+    _fields_ = [("background_pixmap", c.c_ulong), ("background_pixel", c.c_ulong),
+                ("border_pixmap", c.c_ulong), ("border_pixel", c.c_ulong),
+                ("bit_gravity", c.c_int), ("win_gravity", c.c_int),
+                ("backing_store", c.c_int), ("backing_planes", c.c_ulong),
+                ("backing_pixel", c.c_ulong), ("save_under", c.c_int),
+                ("event_mask", c.c_long), ("do_not_propagate_mask", c.c_long),
+                ("override_redirect", c.c_int), ("colormap", c.c_ulong),
+                ("cursor", c.c_ulong)]
+
+
+def paced(deadline):
+    delay = (deadline - time.monotonic_ns()) / 1e9
+    if delay > 0:
+        time.sleep(delay)
+
+
+def control(x, args, emit):
+    px, py = args.at
+    x.inside(px, py, WIDTH, HEIGHT)
+    lib, display = x.lib, x.display
+    window = lib.XCreateSimpleWindow(display, x.root, px, py, WIDTH, HEIGHT, 0, 0, 0)
+    attributes = WindowAttributes(override_redirect=1)
+    lib.XChangeWindowAttributes(display, window, 1 << 9, c.byref(attributes))
+    pixmap = lib.XCreatePixmap(display, window, WIDTH, HEIGHT, lib.XDefaultDepth(display, x.screen))
+    gc = lib.XCreateGC(display, pixmap, 0, None)
+    try:
+        lib.XMapRaised(display, window)
+        lib.XSync(display, 0)
+        start = time.monotonic_ns()
+        end = start + int(args.seconds * 1e9)
+        previous = -1
+        emit({"type": "control_start", "epoch_ns": start, "window": window, "at": args.at, "rate": args.rate})
+        while time.monotonic_ns() < end:
+            frame = math.floor((time.monotonic_ns() - start) * args.rate / 1e9)
+            if frame <= previous:
+                paced(start + math.ceil((previous + 1) * 1e9 / args.rate))
+                continue
+            lib.XSetForeground(display, gc, 0)
+            lib.XFillRectangle(display, pixmap, gc, 0, 0, WIDTH, HEIGHT)
+            lib.XSetForeground(display, gc, lib.XWhitePixel(display, x.screen))
+            for cell, bit in enumerate(bits(frame)):
+                if bit:
+                    lib.XFillRectangle(display, pixmap, gc, 16 + cell * 16, 0, 16, HEIGHT)
+            # One CopyArea publishes all cells together; its receipt is still
+            # a server-command bracket, not a physical/compositor timestamp.
+            before = time.monotonic_ns()
+            lib.XCopyArea(display, pixmap, window, gc, 0, 0, WIDTH, HEIGHT, 0, 0)
+            lib.XSync(display, 0)
+            after = time.monotonic_ns()
+            emit({"type": "control_publish", "frame": frame, "request_ns": before, "reply_ns": after,
+                  "skipped_schedule_ticks": max(0, frame - previous - 1)})
+            previous = frame
+    finally:
+        lib.XFreeGC(display, gc)
+        lib.XFreePixmap(display, pixmap)
+        lib.XDestroyWindow(display, window)
+        lib.XSync(display, 0)
+
+
+def strip(image, data, offset):
+    ox, oy = offset
+    bpp = image.bits_per_pixel // 8
+    order = "little" if image.byte_order == 0 else "big"
+    masks = [image.red_mask, image.green_mask, image.blue_mask]
+    channels = []
+    for mask in masks:
+        if mask == 0:
+            raise RuntimeError("Unsupported zero RGB mask")
+        shift = (mask & -mask).bit_length() - 1
+        scale = mask >> shift
+        if scale & (scale + 1):
+            raise RuntimeError("Unsupported noncontiguous RGB mask")
+        channels.append((mask, shift, scale))
+    rgb = bytearray(READ_WIDTH * HEIGHT * 3)
+    for y in range(HEIGHT):
+        row = (oy + y) * image.bytes_per_line + ox * bpp
+        for px in range(READ_WIDTH):
+            # Preserve each original cell center, including both quiet borders.
+            index = row + (px * 16 + 8) * bpp
+            pixel = int.from_bytes(data[index:index + bpp], order)
+            for channel, (mask, shift, scale) in enumerate(channels):
+                rgb[(y * READ_WIDTH + px) * 3 + channel] = round(((pixel & mask) >> shift) * 255 / scale)
+    return bytes(rgb)
+
+
+def capture(x, args, emit, output):
+    boxes = {"video": args.video}
+    if args.control is not None:
+        boxes["control"] = args.control
+        vx, vy = args.video
+        cx, cy = args.control
+        if abs(vx - cx) < WIDTH and abs(vy - cy) < HEIGHT:
+            raise RuntimeError("Control and video strips overlap")
+    left = min(p[0] for p in boxes.values())
+    top = min(p[1] for p in boxes.values())
+    width = max(p[0] + WIDTH for p in boxes.values()) - left
+    height = max(p[1] + HEIGHT for p in boxes.values()) - top
+    if width * height > 1048576:
+        raise RuntimeError("Bounding rectangle exceeds one million pixels")
+    x.inside(left, top, width, height)
+    files = {name: (output / f"{name}.rgb").open("xb") for name in boxes}
+    hashes = {name: hashlib.sha256() for name in boxes}
+    start = time.monotonic_ns()
+    end = start + int(args.seconds * 1e9)
+    packet = 0
+    emit({"type": "capture_start", "epoch_ns": start, "end_ns": end, "bounding_rectangle": [left, top, width, height], "strips": boxes})
+    try:
+        while time.monotonic_ns() < end:
+            before = time.monotonic_ns()
+            pointer = x.lib.XGetImage(x.display, x.root, left, top, width, height, c.c_ulong(-1).value, 2)
+            after = time.monotonic_ns()
+            if not pointer:
+                raise RuntimeError("XGetImage failed")
+            try:
+                image = pointer.contents
+                if image.bits_per_pixel not in (16, 24, 32) or image.byte_order not in (0, 1) or image.xoffset != 0:
+                    raise RuntimeError("Unsupported XImage layout")
+                data = c.string_at(image.data, image.bytes_per_line * image.height)
+                row = {"type": "sample", "packet": packet, "request_ns": before, "reply_ns": after,
+                       "acquisition_ms": (after - before) / 1e6, "strips": {}}
+                for name, (px, py) in boxes.items():
+                    rgb = strip(image, data, (px - left, py - top))
+                    files[name].write(rgb)
+                    hashes[name].update(rgb)
+                    row["strips"][name] = {"frame": decode(rgb), "sha256": hashlib.sha256(rgb).hexdigest(),
+                                           "offset": packet * READ_WIDTH * HEIGHT * 3, "size": len(rgb)}
+                row["processing_complete_ns"] = time.monotonic_ns()
+                emit(row)
+                packet += 1
+            finally:
+                x.lib.XDestroyImage(pointer)
+            # Absolute schedule, no burst catch-up; skipped sample opportunities
+            # remain visible as request gaps instead of manufactured duplicate PTS.
+            next_tick = math.floor((time.monotonic_ns() - start) * args.rate / 1e9) + 1
+            paced(start + math.ceil(next_tick * 1e9 / args.rate))
+    finally:
+        for file in files.values():
+            file.close()
+        emit({"type": "capture_files", "packets": packet, "strip_width": READ_WIDTH, "strip_height": HEIGHT, "source_strip_width": WIDTH,
+              "sampled_source_x": "8+16*n for n=0..41 (cell centers only)",
+              "format": "RGB24", "sha256": {name: digest.hexdigest() for name, digest in hashes.items()}})
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for command in ("capture", "control"):
+        sub = commands.add_parser(command)
+        sub.add_argument("--display", required=True, help="Explicit owned X11 display; never inferred")
+        sub.add_argument("--out", required=True, type=Path, help="New output directory; overwrite refused")
+        sub.add_argument("--seconds", type=float, default=30)
+        sub.add_argument("--rate", type=float, default=120 if command == "capture" else 24)
+        if command == "control":
+            sub.add_argument("--at", required=True, type=coord)
+        else:
+            sub.add_argument("--video", required=True, type=coord)
+            sub.add_argument("--control", type=coord)
+    args = parser.parse_args()
+    if not math.isfinite(args.seconds) or not 0 < args.seconds <= 120 or not math.isfinite(args.rate) or not 1 <= args.rate <= (240 if args.command == "capture" else 120):
+        parser.error("Duration must be (0,120] seconds; rate 1..240 capture or 1..120 control")
+    args.out.mkdir(parents=True, exist_ok=False)
+    with (args.out / "receipt.jsonl").open("x") as receipt:
+        def emit(row):
+            receipt.write(json.dumps(row, separators=(",", ":")) + "\n")
+            receipt.flush()
+        emit({"type": "metadata", "schema_version": 1, "pid": os.getpid(), "command": args.command,
+              "display": args.display, "seconds": args.seconds, "rate": args.rate,
+              "clock": "CLOCK_MONOTONIC", "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              "scope": "software X11 acquisition diagnostic; no qualification verdict or physical/audio proof",
+              "limitations": ["Image state falls somewhere within request/reply interval, not at midpoint.",
+                              "XGetImage root pixels may differ from browser/compositor/physical display state.",
+                              "Control draws consume X11 resources; compare a separate control-off baseline.",
+                              "Processing overhead and missed sample deadlines are preserved; no threshold waiver."]})
+        x = None
+        try:
+            x = X11(args.display)
+            control(x, args, emit) if args.command == "control" else capture(x, args, emit, args.out)
+            emit({"type": "end", "status": "completed", "at_ns": time.monotonic_ns()})
+        except BaseException as error:
+            emit({"type": "end", "status": "failed", "error": str(error), "at_ns": time.monotonic_ns()})
+            raise
+        finally:
+            if x:
+                x.close()
+
+
+if __name__ == "__main__":
+    main()
