@@ -11,6 +11,42 @@ pub use priority::{ChildClass, ChildWork};
 
 use std::io;
 
+/// Shared scanner/producer resolution: explicit nonempty operator paths win;
+/// packaged macOS/Windows tools are ordinary executable siblings; an unbundled
+/// process retains PATH lookup. The optional directory makes this same policy
+/// usable by hosts with an already-resolved executable location.
+pub fn resolve_media_tool(
+    override_value: Option<String>,
+    name: &str,
+    executable_directory: Option<&std::path::Path>,
+) -> String {
+    if let Some(value) = override_value.filter(|value| !value.is_empty()) {
+        return value;
+    }
+    if let Some(directory) = executable_directory {
+        #[cfg(windows)]
+        let filename = format!("{name}.exe");
+        #[cfg(not(windows))]
+        let filename = name.to_owned();
+        let sibling = directory.join(filename);
+        if sibling.is_file() {
+            return sibling.to_string_lossy().into_owned();
+        }
+    }
+    name.to_owned()
+}
+
+/// Resolve a media tool for this process using the shared package policy.
+pub fn media_tool_bin(name: &str, override_value: Option<String>) -> String {
+    #[cfg(any(windows, target_os = "macos"))]
+    let executable = std::env::current_exe().ok();
+    #[cfg(any(windows, target_os = "macos"))]
+    let directory = executable.as_deref().and_then(std::path::Path::parent);
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let directory = None;
+    resolve_media_tool(override_value, name, directory)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessSignal {
     Suspend,
