@@ -267,8 +267,14 @@ function bootstrap() {
 }
 
 test("a refused cold start keeps its player identity and can close", async()=>{
+ for(const previouslyPlayed of [false,true]){
   const h=fullOpenHarness();
-  h.attach({fileId:null,started:false});
+  h.attach(previouslyPlayed?{fileId:8,started:true,offset:0,knownDur:600000,
+    source:{},curSub:-1,bookOffset:0}:{fileId:null,started:false});
+  if(previouslyPlayed){
+    await h.closePlayer();
+    assert.equal(h.current().started,true,'Close retains the historical started flag');
+  }
   const opening=h.play(7,'Bad Boys',0,600000,{});
   h.decisions[0].resolve({method:'transcode',source:{duration_ms:600000},
     audio:[{index:0,default:true}],subtitles:[],reasons:[]});
@@ -282,6 +288,7 @@ test("a refused cold start keeps its player identity and can close", async()=>{
   assert.equal(h.surface().at(-1).source,'owner_stopped');
   await h.closePlayer();
   assert.equal(h.isOpen(),false);
+ }
 });
 
 function snapshot(position = 1_000, render = "rendering") {

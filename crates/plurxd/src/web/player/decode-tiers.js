@@ -736,7 +736,8 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
   const libraryChannel=PENDING_LIBRARY_CHANNEL_PLAYBACK;
   PENDING_LIBRARY_CHANNEL_PLAYBACK=null;
   const openIsCurrent=()=>PLAY_OPEN_GATE.current(openAttempt);
-  const predecessor=PLAYER?.mediaPredecessor||PLAYER;
+  const predecessor=document.getElementById("modal")?.classList.contains("open")
+    ? PLAYER?.mediaPredecessor||PLAYER : null;
   play.failedPreparation=null;
   const preparation=beginPlaybackPreparation(openIsCurrent);
   const failPreparation=(error,attempt)=>{
@@ -772,7 +773,7 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
     // paused before asking for a different quality still has that stream under
     // them, and covering it because the element happens to be paused is the
     // same mistake in a quieter spelling.
-    const surfaceContext=(PLAYER&&PLAYER.started)?"change":"start";
+    const surfaceContext=predecessor?.started?"change":"start";
     // The create-retry owner (M5) stops the player and raises `exhausted`
     // itself, on the clock, at the moment the deadline passes. Raising again
     // here would put a second fault of a lower class over its prompt.
