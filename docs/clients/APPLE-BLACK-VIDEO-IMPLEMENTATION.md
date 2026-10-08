@@ -1,7 +1,10 @@
 # Apple black video — test-app interference, cleanup, and truthful frame evidence
 
 **Status:** implemented; adversarial review addressed and local validation
-passed; merge gate and physical incident acceptance remain open · **Inspected base:** `eb547f35d` · **Written:** 2026-10-08
+passed; physical incident acceptance remains open · **Inspected base:** `eb547f35d` · **Written:** 2026-10-08
+
+Current merge qualification and landing are recorded in
+[PR #888](http://192.168.4.7:3000/noirr/plurx/pulls/888).
 
 This records the physical incident and the build contract for the verified
 Apple-client detection defects that hid it.
@@ -716,6 +719,8 @@ latency. No new physical tests or installations were performed during the
 user's resumed viewing.
 
 
+## 15. Build and integration evidence
+
 **Current-base verification:** after integrating `ef54fa047`, the unchanged
 Apple suites passed again (tvOS 850; iOS 867). The expanded operations suite
 passed 821 tests with two existing skips; validation passed 334 tests with
@@ -737,9 +742,17 @@ phase. These retained results do not substitute for a current-head gate.
 **Integrated prerequisite verification:** PR 895 landed as
 `6229ff3e93fd06113491697991fc5fbe919d8b05` after run 4434 passed every
 affected check and the current-head/base promotion guard. PR 900's single
-adversarial review found no actionable issues; its current-base candidate is
-`0c25af40031408e428a11c142fee15da60758dc2`. The Apple candidate integrates
-that reviewed source locally while PR 900 completes qualification. Its tracked
+adversarial review found no actionable issues. It landed as
+`f4eb3cb9db0757d3f6feda10dc9cb1586afaf6d0` after run 4450
+([UI 4429](http://192.168.4.7:3000/noirr/plurx/actions/runs/4429)) passed
+preflight, Rust, Windows, and Main promotion on head
+`3d0f08a481d9915b31ef26e81b883e48878e783f` and base
+`eb1ef52290743e9eea1517a1579fa2c2ee840278`. All five declared regression
+references are preserved in its landing message. Authenticated live reads of
+both historical run-4431 attempt logs also matched their reviewed byte counts
+and SHA-256 hashes; the bounded proof imports no test outcomes.
+
+The Apple candidate integrates both actual prerequisite landings. Its tracked
 Apple subtree remains `33205b9aa40f8068f1dba25f2e9ced2458061169`, identical to
 the build-216 source that passed the complete 856/872 suites and Release builds.
 The integrated candidate additionally passed all 17 `AppleFrameEvidenceTests`
@@ -747,3 +760,11 @@ on each of the tvOS and iOS simulators. These checks used the commands above
 with `-only-testing:plurx-tvOSTests/AppleFrameEvidenceTests` and
 `-only-testing:plurx-iOSTests/AppleFrameEvidenceTests`, respectively.
 No physical-device action was performed.
+
+The integration of both actual landings passed the documentation index, all
+eight PR 888 regression references, and corrective history (3,380 corrective
+commits, 318 landings, 1,073 covered by landing trailers). The normal pinned
+Rust 1.97.1 hook passed formatting, workspace/all-target Clippy with warnings
+denied, catalog checks, and 77 embedded JavaScript syntax checks. These are
+current integration checks; the current-head promotion gate remains the
+merge authority recorded by PR 888.
