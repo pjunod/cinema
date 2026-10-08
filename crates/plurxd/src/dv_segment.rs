@@ -34,7 +34,7 @@ pub(crate) struct SegmentShape {
     pub(crate) el: (u32, u32),
 }
 impl SegmentShape {
-    fn validate(&self) -> Result<u64, String> {
+    fn frame_bytes(&self) -> Result<u64, String> {
         let (w, h) = self.bl;
         let (ew, eh) = self.el;
         if !(1..=64).contains(&self.max_frames)
@@ -47,7 +47,10 @@ impl SegmentShape {
         {
             return Err("unsupported bounded segment geometry or cadence".into());
         }
-        let bytes = u64::from(w) * u64::from(h) * 6 * u64::from(self.max_frames);
+        Ok(u64::from(w) * u64::from(h) * 6)
+    }
+    fn validate(&self) -> Result<u64, String> {
+        let bytes = self.frame_bytes()? * u64::from(self.max_frames);
         if bytes > SCRATCH_LIMIT {
             return Err("segment exceeds RGB scratch budget".into());
         }
@@ -114,8 +117,17 @@ pub(crate) struct SegmentProducer {
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     unaccepted_cancel: Option<CancellationToken>,
+    helper_completion: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
 }
 impl SegmentProducer {
+    /// A streaming consumer must require helper completion and encoder success
+    /// before publishing any processed interval or effective-processing report.
+    pub(crate) fn take_helper_completion(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Receiver<Result<(), String>>> {
+        self.helper_completion.take()
+    }
+
     /// Transfer into the existing producer's pipe/writer owner. Until accepted,
     /// dropping the handoff requests retirement of the actual encoder child.
     pub(crate) fn into_parts(
@@ -509,6 +521,209 @@ async fn run(
         stdout: Some(encoded.stdout),
         stderr: Some(encoded.stderr),
         unaccepted_cancel: Some(handoff_cancel),
+        helper_completion: None,
+    })
+}
+
+/// Direct timestamped NUT transport. The renderer and encoder run concurrently
+/// under one GPU slot and the sum of their concrete CPU budgets. This still
+/// requires a finite fenced segment; it does not seek or qualify a movie.
+#[cfg(target_os = "linux")]
+pub(crate) struct StreamingSegmentRequest {
+    pub(crate) request: SegmentRequest,
+    /// Renderer completion must be bounded even after encoder handoff.
+    pub(crate) renderer_deadline: Instant,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn spawn_streaming(
+    request: StreamingSegmentRequest,
+) -> Result<SegmentProducer, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let cancel = request.request.cancel.child_token();
+    let owner_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let _ = sender.send(run_streaming(request, owner_cancel).await);
+    });
+    struct CancelOnDrop(Option<CancellationToken>);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            if let Some(cancel) = &self.0 {
+                cancel.cancel();
+            }
+        }
+    }
+    let mut guard = CancelOnDrop(Some(cancel));
+    let result = receiver
+        .await
+        .map_err(|_| "streaming segment owner ended without handoff".to_owned())?;
+    guard.0.take();
+    result
+}
+
+#[cfg(target_os = "linux")]
+async fn run_streaming(
+    stream: StreamingSegmentRequest,
+    cancel: CancellationToken,
+) -> Result<SegmentProducer, String> {
+    let request = stream.request;
+    request.shape.frame_bytes()?;
+    let (hardware, cpu) = request.admission.into_parts();
+    let hardware = hardware.ok_or("streaming segment requires concrete GPU admission")?;
+    let cpu = cpu
+        .filter(|permit| permit.threads() >= 5)
+        .ok_or("concurrent renderer and encoder require at least five admitted CPU threads")?;
+    check_encoder_budget(&request.encoder_args, cpu.threads() - 2)?;
+    if !request.encoder_args.iter().any(|a| a == "-copyts")
+        || !request
+            .encoder_args
+            .windows(2)
+            .any(|p| p == ["-enc_time_base", "-1"])
+    {
+        return Err("streaming encoder must retain the actual NUT timestamp base".into());
+    }
+    let reservation = request
+        .producer
+        .try_reserve_empty()
+        .map_err(|e| e.to_string())?;
+    let lane = tokio::select! {
+        _ = cancel.cancelled() => return Err("streaming segment cancelled".into()),
+        _ = tokio::time::sleep_until(request.preparation_deadline) => return Err("streaming segment handoff deadline expired".into()),
+        lane = request.source_offsets.acquire_owned() => lane.map_err(|_| "source offset lane closed")?,
+    };
+    check_source(&request.source)?;
+    let bytes = request
+        .source
+        .handle
+        .metadata()
+        .map_err(|e| e.to_string())?
+        .len();
+    if bytes == 0 || bytes > SOURCE_LIMIT {
+        return Err("finite streaming source exceeds byte envelope".into());
+    }
+    let original_offset = (&request.source.handle)
+        .stream_position()
+        .map_err(|e| e.to_string())?;
+    let directory = tempfile::Builder::new()
+        .prefix("dv-stream-")
+        .tempdir_in(&request.runtime_cache)
+        .map_err(|e| e.to_string())?;
+    let resources = Arc::new(Resources {
+        source: request.source,
+        original_offset,
+        _offset_lane: Some(lane),
+        _hardware: hardware,
+        _cpu: cpu,
+        directory,
+    });
+    (&resources.source.handle)
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| e.to_string())?;
+    let directory =
+        plurx_core::fs_secure::open_directory_nofollow_blocking(resources.directory.path())
+            .map_err(|e| e.to_string())?;
+    let (read, write) = std::io::pipe().map_err(|e| e.to_string())?;
+    let read: std::fs::File = std::os::fd::OwnedFd::from(read).into();
+    let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
+    let mut args = request.shape.renderer_args();
+    args.push(fd(5));
+    let render = producer_spawn::spawn(
+        &request.renderer,
+        &args,
+        SpawnOptions {
+            runtime_cache: &request.runtime_cache,
+            progress: Progress::None,
+            descriptors: Descriptors::from_files(
+                Some(&resources.source.handle),
+                Some(&directory),
+                Some(&write),
+                true,
+            ),
+            env: &[],
+            work: crate::process_control::ChildWork::realtime("DV streaming reconstruction"),
+        },
+    )?;
+    drop(write); // Only the real renderer owns the writer; its exit delivers EOF.
+    let helper_cancel = cancel.child_token();
+    let stage_cancel = helper_cancel.clone();
+    let stage_resources = resources.clone();
+    let helper = tokio::spawn(async move {
+        stage(
+            render,
+            stage_resources,
+            stream.renderer_deadline,
+            &stage_cancel,
+            "streaming renderer",
+        )
+        .await
+    });
+    let encoded = check_source(&resources.source).and_then(|()| {
+        if cancel.is_cancelled() || Instant::now() >= request.preparation_deadline {
+            return Err("streaming segment cancelled before encoder".into());
+        }
+        producer_spawn::spawn(
+            &request.encoder,
+            &request.encoder_args,
+            SpawnOptions {
+                runtime_cache: &request.runtime_cache,
+                progress: Progress::Stderr,
+                descriptors: Descriptors::from_files(
+                    Some(&read),
+                    Some(&resources.source.handle),
+                    None,
+                    false,
+                ),
+                env: &[],
+                work: crate::process_control::ChildWork::realtime("DV streaming encoder"),
+            },
+        )
+    });
+    drop(read); // No parent reader can prevent SIGPIPE after encoder failure.
+    let encoded = match encoded {
+        Ok(encoded) => encoded,
+        Err(error) => {
+            helper_cancel.cancel();
+            let _ = helper.await;
+            return Err(error);
+        }
+    };
+    let (registration, writers) = reservation.attach_registered_job_owned(
+        encoded.child,
+        encoded.child_job,
+        request.at,
+        Box::new(resources),
+    );
+    let watched = registration.clone();
+    let slot = Arc::downgrade(&request.producer);
+    let handoff_cancel = cancel.clone();
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut helper = helper;
+        let helper_result = tokio::select! {
+            result = &mut helper => result.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))),
+            _ = cancel.cancelled() => { helper_cancel.cancel(); if let Some(slot) = slot.upgrade() { let _ = slot.request_registered_retirement(&watched).await; } helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
+            _ = watched.wait_confirmed_reap() => { helper_cancel.cancel(); helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
+        };
+        let failed = helper_result.is_err();
+        let _ = completed.send(helper_result);
+        if failed || cancel.is_cancelled() {
+            if let Some(slot) = slot.upgrade() {
+                let _ = slot.request_registered_retirement(&watched).await;
+            }
+        } else {
+            tokio::select! {
+                _ = cancel.cancelled() => { if let Some(slot) = slot.upgrade() { let _ = slot.request_registered_retirement(&watched).await; } },
+                _ = watched.wait_confirmed_reap() => {},
+            }
+        }
+    });
+    Ok(SegmentProducer {
+        registration,
+        writers: Some(writers),
+        stdout: Some(encoded.stdout),
+        stderr: Some(encoded.stderr),
+        unaccepted_cancel: Some(handoff_cancel),
+        helper_completion: Some(completion),
     })
 }
 
@@ -577,11 +792,28 @@ async fn stage<R: Send + Sync + 'static>(
     result
 }
 
+#[cfg(any(test, plurx_dv_segment_probe))]
+async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<SegmentProducer, String> {
+    if streaming {
+        #[cfg(target_os = "linux")]
+        return spawn_streaming(StreamingSegmentRequest {
+            request,
+            renderer_deadline: Instant::now() + Duration::from_secs(30),
+        })
+        .await;
+        #[cfg(not(target_os = "linux"))]
+        return Err("streaming physical probe requires Linux".into());
+    }
+    spawn(request).await
+}
+
 /// Explicit compile-time physical probe, never a daemon route or receipt.
 #[cfg(any(test, plurx_dv_segment_probe))]
 pub(crate) async fn physical_probe() {
     use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
     use plurx_core::domain::MediaFile;
+    let streaming = std::env::var("PLURX_DV_SEGMENT_STREAMING").is_ok_and(|v| v == "1");
+    let cpu_threads = if streaming { 5 } else { 3 };
     let source_path =
         PathBuf::from(std::env::var("PLURX_DV_SEGMENT_SOURCE").expect("actual finite source"));
     let metadata = std::fs::metadata(&source_path).expect("source metadata");
@@ -633,11 +865,11 @@ pub(crate) async fn physical_probe() {
     let admissions = Admissions::new();
     let estimate = TranscodeResourceEstimate {
         hardware_slot: true,
-        cpu_threads: 3,
+        cpu_threads,
         decoder_threads: Some(2),
     };
     let admission = admissions
-        .try_admit_bundle(1, 3, &estimate, Priority::Live)
+        .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
         .expect("concrete graph admission");
     let cache = tempfile::tempdir().expect("private graph cache");
     let slot = Arc::new(ProducerSlot::new());
@@ -645,7 +877,7 @@ pub(crate) async fn physical_probe() {
     "-vf","zscale=matrixin=gbr:transferin=smpte2084:primariesin=2020:rangein=full:matrix=2020_ncl:transfer=smpte2084:primaries=2020:range=limited:chromal=center:filter=point,format=yuv420p10le",
     "-c:v","libx265","-threads","1","-profile:v","main10","-x265-params",
     "pools=none:frame-threads=1:qp=0:bframes=0:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited:chromaloc=1",
-    "-fps_mode","passthrough","-enc_time_base","1/1000","-an","-f","matroska","pipe:1"].into_iter().map(str::to_owned).collect();
+    "-fps_mode","passthrough","-enc_time_base","-1","-an","-f","matroska","pipe:1"].into_iter().map(str::to_owned).collect();
     // A real retired predecessor with held writers must refuse a cancelled
     // successor before source/helper/encoder ownership starts.
     let predecessor = tokio::process::Command::new("/bin/sleep")
@@ -664,7 +896,64 @@ pub(crate) async fn physical_probe() {
     cancelled.cancel();
     let refused = tokio::time::timeout(
         Duration::from_millis(500),
-        spawn(SegmentRequest {
+        probe_spawn(
+            SegmentRequest {
+                renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
+                    .expect("renderer")
+                    .into(),
+                muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
+                    .expect("muxer")
+                    .into(),
+                encoder: "/usr/bin/ffmpeg".into(),
+                encoder_args: args.clone(),
+                runtime_cache: cache.path().to_owned(),
+                shape: SegmentShape {
+                    video_index: 0,
+                    max_frames: 6,
+                    bl: (64, 64),
+                    el: (64, 64),
+                },
+                source: source.clone(),
+                source_offsets: offsets.clone(),
+                admission,
+                producer: slot.clone(),
+                at: 0,
+                preparation_deadline: Instant::now() + Duration::from_secs(30),
+                cancel: cancelled,
+            },
+            streaming,
+        ),
+    )
+    .await
+    .expect("held predecessor never parks successor");
+    match refused {
+        Err(error) => assert!(error.contains("producer slot is not ready"), "{error}"),
+        Ok(_) => panic!("busy predecessor admitted successor"),
+    }
+    assert_eq!(offsets.available_permits(), 1);
+    assert_eq!(
+        (&source.handle)
+            .stream_position()
+            .expect("unborrowed offset"),
+        original
+    );
+    let admission = admissions
+        .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
+        .expect("refused successor returns real capacity");
+    old_writers.settled();
+    old.wait_confirmed_reap().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if slot.try_reserve_empty().is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("predecessor slot fully settled");
+    let mut producer = probe_spawn(
+        SegmentRequest {
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
                 .into(),
@@ -686,63 +975,13 @@ pub(crate) async fn physical_probe() {
             producer: slot.clone(),
             at: 0,
             preparation_deadline: Instant::now() + Duration::from_secs(30),
-            cancel: cancelled,
-        }),
+            cancel: CancellationToken::new(),
+        },
+        streaming,
     )
     .await
-    .expect("held predecessor never parks successor");
-    match refused {
-        Err(error) => assert!(error.contains("producer slot is not ready"), "{error}"),
-        Ok(_) => panic!("busy predecessor admitted successor"),
-    }
-    assert_eq!(offsets.available_permits(), 1);
-    assert_eq!(
-        (&source.handle)
-            .stream_position()
-            .expect("unborrowed offset"),
-        original
-    );
-    let admission = admissions
-        .try_admit_bundle(1, 3, &estimate, Priority::Live)
-        .expect("refused successor returns real capacity");
-    old_writers.settled();
-    old.wait_confirmed_reap().await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if slot.try_reserve_empty().is_ok() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("predecessor slot fully settled");
-    let producer = spawn(SegmentRequest {
-        renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
-            .expect("renderer")
-            .into(),
-        muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
-            .expect("muxer")
-            .into(),
-        encoder: "/usr/bin/ffmpeg".into(),
-        encoder_args: args.clone(),
-        runtime_cache: cache.path().to_owned(),
-        shape: SegmentShape {
-            video_index: 0,
-            max_frames: 6,
-            bl: (64, 64),
-            el: (64, 64),
-        },
-        source: source.clone(),
-        source_offsets: offsets.clone(),
-        admission,
-        producer: slot.clone(),
-        at: 0,
-        preparation_deadline: Instant::now() + Duration::from_secs(30),
-        cancel: CancellationToken::new(),
-    })
-    .await
     .expect("physical graph handoff");
+    let completion = producer.take_helper_completion();
     let (registration, writers, stdout, stderr) = producer.into_parts();
     assert_eq!(
         offsets.available_permits(),
@@ -751,7 +990,7 @@ pub(crate) async fn physical_probe() {
     );
     assert!(
         admissions
-            .try_admit_bundle(1, 3, &estimate, Priority::Live)
+            .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
             .is_none(),
         "actual graph still owns GPU and CPU"
     );
@@ -772,11 +1011,17 @@ pub(crate) async fn physical_probe() {
         "encoder: {}",
         String::from_utf8_lossy(&diagnostic)
     );
+    if let Some(completion) = completion {
+        completion
+            .await
+            .expect("streaming renderer completion")
+            .expect("streaming renderer success");
+    }
     assert!(encoded.len() > 100, "actual encoded Matroska output");
     assert!(source.unchanged(), "same source revision retained");
     assert!(
         admissions
-            .try_admit_bundle(1, 3, &estimate, Priority::Live)
+            .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
             .is_none(),
         "exited child alone does not release writer admission"
     );
@@ -798,39 +1043,43 @@ pub(crate) async fn physical_probe() {
     );
     assert!(
         admissions
-            .try_admit_bundle(1, 3, &estimate, Priority::Live)
+            .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
             .is_some(),
         "confirmed graph releases concrete admission"
     );
     let slot = Arc::new(ProducerSlot::new());
-    let unaccepted = spawn(SegmentRequest {
-        renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
-            .expect("renderer")
-            .into(),
-        muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
-            .expect("muxer")
-            .into(),
-        encoder: "/usr/bin/ffmpeg".into(),
-        encoder_args: args,
-        runtime_cache: cache.path().to_owned(),
-        shape: SegmentShape {
-            video_index: 0,
-            max_frames: 6,
-            bl: (64, 64),
-            el: (64, 64),
+    let mut unaccepted = probe_spawn(
+        SegmentRequest {
+            renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
+                .expect("renderer")
+                .into(),
+            muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
+                .expect("muxer")
+                .into(),
+            encoder: "/usr/bin/ffmpeg".into(),
+            encoder_args: args.clone(),
+            runtime_cache: cache.path().to_owned(),
+            shape: SegmentShape {
+                video_index: 0,
+                max_frames: 6,
+                bl: (64, 64),
+                el: (64, 64),
+            },
+            source: source.clone(),
+            source_offsets: offsets.clone(),
+            admission: admissions
+                .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
+                .expect("second actual graph admission"),
+            producer: slot.clone(),
+            at: 1,
+            preparation_deadline: Instant::now() + Duration::from_secs(30),
+            cancel: CancellationToken::new(),
         },
-        source: source.clone(),
-        source_offsets: offsets.clone(),
-        admission: admissions
-            .try_admit_bundle(1, 3, &estimate, Priority::Live)
-            .expect("second actual graph admission"),
-        producer: slot.clone(),
-        at: 1,
-        preparation_deadline: Instant::now() + Duration::from_secs(30),
-        cancel: CancellationToken::new(),
-    })
+        streaming,
+    )
     .await
     .expect("actual unaccepted encoder handoff");
+    let completion = unaccepted.take_helper_completion();
     let abandoned = unaccepted.registration.clone();
     assert_eq!(offsets.available_permits(), 0);
     drop(unaccepted);
@@ -838,15 +1087,75 @@ pub(crate) async fn physical_probe() {
         .await
         .expect("dropped actual handoff retires encoder");
     assert!(receipt.matches(&abandoned));
+    if let Some(completion) = completion {
+        let _ = completion.await.expect("cancelled helper owned completion");
+    }
     assert_eq!(
         receipt.writers(),
         crate::prodrun::WriterSettlement::Abandoned
     );
     assert_eq!(offsets.available_permits(), 1);
     assert!(admissions
-        .try_admit_bundle(1, 3, &estimate, Priority::Live)
+        .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
         .is_some());
     assert!(source.unchanged());
+    if streaming {
+        let slot = Arc::new(ProducerSlot::new());
+        let mut refused = probe_spawn(
+            SegmentRequest {
+                renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
+                    .expect("renderer")
+                    .into(),
+                muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
+                    .expect("muxer")
+                    .into(),
+                encoder: "/usr/bin/ffmpeg".into(),
+                encoder_args: args.clone(),
+                runtime_cache: cache.path().to_owned(),
+                shape: SegmentShape {
+                    video_index: 0,
+                    max_frames: 6,
+                    bl: (64, 64),
+                    el: (32, 32),
+                },
+                source: source.clone(),
+                source_offsets: offsets.clone(),
+                admission: admissions
+                    .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
+                    .expect("refusal graph admission"),
+                producer: slot.clone(),
+                at: 2,
+                preparation_deadline: Instant::now() + Duration::from_secs(30),
+                cancel: CancellationToken::new(),
+            },
+            true,
+        )
+        .await
+        .expect("owned graph starts before actual raster refusal");
+        let completion = refused
+            .take_helper_completion()
+            .expect("actual streaming completion");
+        assert!(tokio::time::timeout(Duration::from_secs(5), completion)
+            .await
+            .expect("refusal completion bounded")
+            .expect("refusal owner completes")
+            .is_err());
+        let registration = refused.registration.clone();
+        drop(refused);
+        tokio::time::timeout(Duration::from_secs(5), registration.wait_confirmed_reap())
+            .await
+            .expect("renderer refusal retires encoder");
+        assert_eq!(offsets.available_permits(), 1);
+        assert!(admissions
+            .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
+            .is_some());
+        assert_eq!(
+            (&source.handle)
+                .stream_position()
+                .expect("refusal source offset"),
+            original
+        );
+    }
     if let Ok(path) = std::env::var("PLURX_DV_SEGMENT_ENCODED_OUTPUT") {
         std::fs::write(path, encoded).expect("save actual graph observation");
     }
@@ -927,6 +1236,20 @@ mod tests {
         assert_eq!(
             shape.mux_args(),
             [fd(3), fd(5), fd(4), "64".into(), "64".into(), "6".into()]
+        );
+        let full_interval = SegmentShape {
+            video_index: 0,
+            max_frames: 64,
+            bl: (3840, 2160),
+            el: (1920, 1080),
+        };
+        assert_eq!(
+            full_interval.frame_bytes().expect("streaming raster"),
+            3840 * 2160 * 6
+        );
+        assert!(
+            full_interval.validate().is_err(),
+            "finite RGB scratch cap stays intact"
         );
         shape.max_frames = 0;
         assert!(shape.validate().is_err());
