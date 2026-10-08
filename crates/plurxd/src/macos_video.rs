@@ -1241,7 +1241,7 @@ mod tests {
                         "vt_scale_sdr"
                     }
             })
-            .unwrap()
+            .expect("selected graph has a smoke output contract")
     }
 
     fn decoded(contract: &OutputExpectation) -> (Value, Vec<u8>) {
@@ -1302,12 +1302,21 @@ mod tests {
                 "arm64".to_owned(),
                 "test-model".to_owned(),
             )
-            .unwrap(),
+            .expect("valid test implementation identity"),
         );
-        assert!(report.context(true).unwrap().enabled());
-        assert!(!report.context(false).unwrap().enabled());
+        assert!(report
+            .context(true)
+            .expect("identity retains enabled context")
+            .enabled());
+        assert!(!report
+            .context(false)
+            .expect("identity retains disabled context")
+            .enabled());
         assert_eq!(
-            report.context(true).unwrap().sdr_scale(),
+            report
+                .context(true)
+                .expect("identity retains unavailable context")
+                .sdr_scale(),
             MacosProcessingAvailability::Unavailable
         );
         let snapshot = Arc::new(report.clone());
@@ -1355,10 +1364,16 @@ mod tests {
             embedded_corpus(MANIFEST, SDR8, &[], HDR10),
             Err(ProbeReason::InvalidEmbeddedCorpus)
         ));
-        let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
+        let mut manifest: Value =
+            serde_json::from_slice(MANIFEST).expect("embedded manifest is JSON");
         manifest["fixtures"][0]["expected"]["color_transfer"] = json!("smpte2084");
         assert!(matches!(
-            embedded_corpus(&serde_json::to_vec(&manifest).unwrap(), SDR8, SDR10, HDR10),
+            embedded_corpus(
+                &serde_json::to_vec(&manifest).expect("serialize mutated manifest"),
+                SDR8,
+                SDR10,
+                HDR10
+            ),
             Err(ProbeReason::InvalidEmbeddedCorpus)
         ));
     }
@@ -1369,18 +1384,30 @@ mod tests {
             ("path", json!("../outside.mp4")),
             ("available", json!(false)),
         ] {
-            let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
+            let mut manifest: Value =
+                serde_json::from_slice(MANIFEST).expect("embedded manifest is JSON");
             manifest["fixtures"][0][field] = value;
             assert!(matches!(
-                embedded_corpus(&serde_json::to_vec(&manifest).unwrap(), SDR8, SDR10, HDR10),
+                embedded_corpus(
+                    &serde_json::to_vec(&manifest).expect("serialize mutated manifest"),
+                    SDR8,
+                    SDR10,
+                    HDR10
+                ),
                 Err(ProbeReason::InvalidEmbeddedCorpus)
             ));
         }
-        let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
+        let mut manifest: Value =
+            serde_json::from_slice(MANIFEST).expect("embedded manifest is JSON");
         manifest["fixtures"][0]["output_expectations"][0]["pixels"]["absolute_y_tolerance"] =
             json!(255);
         assert!(matches!(
-            embedded_corpus(&serde_json::to_vec(&manifest).unwrap(), SDR8, SDR10, HDR10),
+            embedded_corpus(
+                &serde_json::to_vec(&manifest).expect("serialize mutated manifest"),
+                SDR8,
+                SDR10,
+                HDR10
+            ),
             Err(ProbeReason::InvalidEmbeddedCorpus)
         ));
     }
@@ -1419,7 +1446,10 @@ mod tests {
             );
         }
         let mut document = original;
-        document["frames"].as_array_mut().unwrap().pop();
+        document["frames"]
+            .as_array_mut()
+            .expect("decoded fixture has a frame array")
+            .pop();
         assert_eq!(
             observe_output(&document, &raw, contract),
             Err(ProbeReason::OutputContractFailed)
@@ -1509,21 +1539,33 @@ mod tests {
         let root = temporary_root();
         let corpus = corpus();
         let token = CancellationToken::new();
-        let prepared = prepare_corpus(root.path(), &corpus, &token).await.unwrap();
-        assert_eq!(prepared.directory.child_names(8).await.unwrap().len(), 4);
+        let prepared = prepare_corpus(root.path(), &corpus, &token)
+            .await
+            .expect("prepare clean private corpus");
+        assert_eq!(
+            prepared
+                .directory
+                .child_names(8)
+                .await
+                .expect("list prepared corpus files")
+                .len(),
+            4
+        );
         let name = format!("{}.mp4", corpus.fixtures[0].sha256);
         prepared
             .directory
             .atomic_write_child(&name, b"corrupt")
             .await
-            .unwrap();
-        let repaired = prepare_corpus(root.path(), &corpus, &token).await.unwrap();
+            .expect("replace owned fixture with corrupt test bytes");
+        let repaired = prepare_corpus(root.path(), &corpus, &token)
+            .await
+            .expect("repair cached corpus from embedded bytes");
         assert_eq!(
             repaired
                 .directory
                 .read_bounded_child(&name, SDR8.len() as u64)
                 .await
-                .unwrap(),
+                .expect("read repaired SDR fixture"),
             SDR8
         );
         assert!(verified_source(&repaired, &corpus.fixtures[0])
@@ -1537,14 +1579,30 @@ mod tests {
         let root = temporary_root();
         let corpus = corpus();
         let token = CancellationToken::new();
-        let prepared = prepare_corpus(root.path(), &corpus, &token).await.unwrap();
+        let prepared = prepare_corpus(root.path(), &corpus, &token)
+            .await
+            .expect("prepare clean private corpus");
         let name = format!("{}.mp4", corpus.fixtures[0].sha256);
-        prepared.directory.unlink_child(&name).await.unwrap();
+        prepared
+            .directory
+            .unlink_child(&name)
+            .await
+            .expect("remove owned fixture before symlink injection");
         let outside = root.path().join("unrelated");
-        tokio::fs::write(&outside, b"leave alone").await.unwrap();
-        std::os::unix::fs::symlink(&outside, prepared.path.join(&name)).unwrap();
-        let repaired = prepare_corpus(root.path(), &corpus, &token).await.unwrap();
-        assert_eq!(tokio::fs::read(outside).await.unwrap(), b"leave alone");
+        tokio::fs::write(&outside, b"leave alone")
+            .await
+            .expect("write unrelated target sentinel");
+        std::os::unix::fs::symlink(&outside, prepared.path.join(&name))
+            .expect("inject symlinked cached fixture");
+        let repaired = prepare_corpus(root.path(), &corpus, &token)
+            .await
+            .expect("repair cached corpus from embedded bytes");
+        assert_eq!(
+            tokio::fs::read(outside)
+                .await
+                .expect("read unrelated target sentinel"),
+            b"leave alone"
+        );
         assert!(verified_source(&repaired, &corpus.fixtures[0])
             .await
             .is_ok());
@@ -1557,18 +1615,20 @@ mod tests {
         let root = temporary_root();
         let corpus = corpus();
         let token = CancellationToken::new();
-        prepare_corpus(root.path(), &corpus, &token).await.unwrap();
+        prepare_corpus(root.path(), &corpus, &token)
+            .await
+            .expect("prepare cache before permission refusal");
         let owner = root.path().join("macos-processing");
         tokio::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o755))
             .await
-            .unwrap();
+            .expect("inject non-private cache permissions");
         assert!(matches!(
             prepare_corpus(root.path(), &corpus, &token).await,
             Err(ProbeReason::CacheUnavailable)
         ));
         tokio::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o700))
             .await
-            .unwrap();
+            .expect("restore private cache permissions");
         assert!(prepare_corpus(root.path(), &corpus, &token).await.is_ok());
     }
 
@@ -1619,13 +1679,13 @@ mod tests {
             Err(reason)
         );
         if let Some(canceller) = canceller {
-            canceller.await.unwrap();
+            canceller.await.expect("join test cancellation trigger");
         }
         let pid: libc::pid_t = tokio::fs::read_to_string(pid_file)
             .await
-            .unwrap()
+            .expect("owned probe child published its PID")
             .parse()
-            .unwrap();
+            .expect("child PID is an integer");
         // The helper returned only after waiting for this exact child.
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(
