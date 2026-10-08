@@ -2593,6 +2593,9 @@ impl TranscodeManager {
         // Bind before reading/resuming cached parts, so the configured encoder
         // cannot enter an older Mac implementation's generation.
         let macos_executable = capture_macos_plan_executable(plan, &producer_ffmpeg_bin()).await?;
+        let macos_completion_sha256 = plan
+            .macos_processing_identity()
+            .map(|identity| identity.ffmpeg_sha256());
         let max = self.max_hw_sessions().await;
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.
@@ -2600,7 +2603,7 @@ impl TranscodeManager {
         let ResumedParts {
             mut parts,
             receipts: inherited_receipts,
-        } = resume_parts(temp, &plan_digest).await?;
+        } = resume_parts(temp, &plan_digest, macos_completion_sha256).await?;
         let mut generation_health = GenerationObservation::inheriting(
             inherited_receipts,
             carried_generation_health(temp, &plan_digest).await,
@@ -2709,6 +2712,9 @@ impl TranscodeManager {
                 .create_child_directory(&part_name)
                 .await
                 .map_err(|e| format!("creating {part_name}: {e}"))?;
+            if macos_completion_sha256.is_some() {
+                invalidate_mac_part_completion(&part_dir).await?;
+            }
             let resume_ms = crate::produce::resume_at_ms(&parts);
             let part_opts = TranscodeOptions {
                 start_seconds: resume_ms as f64 / 1000.0,
@@ -2886,7 +2892,17 @@ impl TranscodeManager {
             if produced {
                 // Sealed beside the bytes it describes, so whichever pass
                 // resumes this film does not have to call the part unobserved.
-                retain_part_health(&part_dir, &shape, &receipt).await;
+                if macos_completion_sha256.is_some() {
+                    retain_part_health_checked(
+                        &part_dir,
+                        &shape,
+                        &receipt,
+                        macos_completion_sha256,
+                    )
+                    .await?;
+                } else {
+                    retain_part_health(&part_dir, &shape, &receipt).await;
+                }
             }
             // Recorded whether or not it produced. An attempt that decoded
             // nothing and exited zero writes no segment, and that receipt is

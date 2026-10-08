@@ -4268,6 +4268,42 @@ async fn macos_launch_binds_frozen_plan_to_canonical_encoder_across_alias_retarg
         std::fs::read(&marker).expect("preserved resumed state"),
         b"do not resume or replace under B"
     );
+    // Returning the configured alias to A must not rehabilitate a part from
+    // a rejected attempt. Invalidate a real older completion, replace bytes
+    // with the identical shape, and force bounded cleanup to fail.
+    std::fs::remove_file(&alias).expect("restore configured alias");
+    symlink(&encoder_a, &alias).expect("configured alias restored to A");
+    let part_dir = output_directory.open_child_directory(&crate::produce::part_dir(0))
+        .await.expect("retained part capability");
+    part_dir.atomic_write_child("index.m3u8", b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.000,\nseg00000.ts\n#EXT-X-ENDLIST\n")
+        .await.expect("valid retained playlist");
+    part_dir.atomic_write_child("seg00000.ts", b"old A bytes")
+        .await.expect("old part bytes");
+    let shape = read_validated_part(&part_dir, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+        .await.expect("valid old part").shape;
+    let receipt = crate::decoder_health::ProducerHealthReceipt::unobserved(
+        plan.plan_digest(), crate::decoder_health::ExitDisposition::CleanEnd);
+    retain_part_health_checked(&part_dir, &shape, &receipt, Some(&captured_a.digest))
+        .await.expect("old positive completion");
+    invalidate_mac_part_completion(&part_dir).await.expect("invalidate before replacement child");
+    part_dir.atomic_write_child("seg00000.ts", b"bad B bytes")
+        .await.expect("same-shaped rejected part bytes");
+    std::fs::create_dir_all(resumed_part.join("too/deep/for/cleanup"))
+        .expect("deterministic bounded cleanup failure");
+    assert!(remove_staged_child(&output_directory, &crate::produce::part_dir(0)).await.is_err());
+    assert!(quarantine_remove_cache_tree(&output_path, 1).await.is_err());
+    assert!(output_path.is_dir(), "failed outer cleanup restores the staging name");
+    for _ in 0..2 {
+        let retained_refusal = manager.produce_into(&output_directory, "mac-portable-A", &request, None)
+            .await.expect_err("restored A cannot resume rejected bytes after failed cleanup");
+        assert!(retained_refusal.contains("removing retained directory"));
+        assert_eq!(std::fs::read(resumed_part.join("seg00000.ts")).expect("rejected bytes remain"), b"bad B bytes");
+    }
+    std::fs::remove_dir_all(resumed_part.join("too")).expect("allow normal cleanup");
+    let repaired = manager.produce_into(&output_directory, "mac-portable-A", &request, None)
+        .await.expect("owner discards incomplete bytes once cleanup succeeds");
+    assert!(matches!(repaired, ProductionProgress::Yielded("production_deadline")));
+    assert!(!resumed_part.exists(), "rejected bytes are never adopted as a completed part");
     manager.set_macos_video_processing_enabled(false);
     let ordinary = manager
         .resolve_movie_plan_with_facts(
