@@ -12,7 +12,7 @@ class Authoring(unittest.TestCase):
         helper=os.environ['P81_HELPER']; source=Path(os.environ['P81_ENCODED'])
         timing=Path(os.environ['P81_TIMING']); rpus=Path(os.environ['P81_RPUS'])
         def run(*args):
-            return subprocess.check_output(args,stderr=subprocess.DEVNULL)
+            return subprocess.check_output(args,stderr=subprocess.DEVNULL,timeout=40)
         def probe(path):
             return json.loads(run('ffprobe','-v','error','-show_streams','-show_packets','-show_data','-of','json',str(path)))
         def payload(packet):
@@ -43,11 +43,26 @@ class Authoring(unittest.TestCase):
             def decoded(path): return run('ffmpeg','-v','error','-i',str(path),'-map','0:v:0','-pix_fmt','yuv420p10le','-f','rawvideo','-')
             self.assertEqual(decoded(source),decoded(out))
             # Reuse the exact authored result as an invalid already-DV input.
-            self.assertNotEqual(subprocess.run([helper,str(out),str(timing),str(rpus),str(Path(tmp)/'bad.mkv')],capture_output=True).returncode,0)
+            def refused(arguments, reason):
+                result=subprocess.run([helper,*map(str,arguments)],capture_output=True,timeout=40)
+                self.assertEqual(result.returncode,1,result.stderr.decode())
+                self.assertIn(reason,result.stderr.decode())
+            refused([out,timing,rpus,Path(tmp)/'bad.mkv'],'no existing DV config')
             bad=Path(tmp)/'bad.tsv'; lines=timing.read_text().splitlines(True)
             bad.write_text(lines[0]+lines[0]+''.join(lines[2:]))
-            self.assertNotEqual(subprocess.run([helper,str(source),str(bad),str(rpus),str(Path(tmp)/'bad2.mkv')],capture_output=True).returncode,0)
+            refused([source,bad,rpus,Path(tmp)/'bad2.mkv'],'strict presentation order')
             missing=Path(tmp)/'missing'; missing.mkdir()
-            self.assertNotEqual(subprocess.run([helper,str(source),str(timing),str(missing),str(Path(tmp)/'bad3.mkv')],capture_output=True).returncode,0)
+            refused([source,timing,missing,Path(tmp)/'bad3.mkv'],'frame metadata exists')
+            read_fd, write_fd=os.pipe()
+            os.close(read_fd)
+            try:
+                # Python ignores SIGPIPE. Preserve that disposition to exercise
+                # checked fflush(EPIPE), rather than a signal killing the helper.
+                failed=subprocess.run([helper,str(source),str(timing),str(rpus),str(Path(tmp)/'closed-receipt.mkv')],
+                    stdout=write_fd,stderr=subprocess.PIPE,restore_signals=False,timeout=40)
+            finally:
+                os.close(write_fd)
+            self.assertEqual(failed.returncode,1,failed.stderr.decode())
+            self.assertIn('receipt stdout flush',failed.stderr.decode())
 
 if __name__=='__main__': unittest.main()
