@@ -122,7 +122,7 @@ export class DesktopWorker{
       if(this.documentPort!==port||!senderMatches(port.sender,this.binding))return;
       if(Object.keys(message||{}).join(",")!=="type")return;
       if(message.type==="tick")this.probe(binding);
-      else if(message.type==="hidden")this.unbind("receiver_unavailable");
+      else if(message.type==="hidden"||message.type==="disabled")this.unbind("receiver_unavailable");
     });
     port.onDisconnect.addListener(()=>{if(this.documentPort===port)this.unbind("receiver_unavailable");});
   }

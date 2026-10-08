@@ -17,7 +17,7 @@ test("real Chromium extension targets MAIN document and invalidates local contex
     context=await chromium.launchPersistentContext(path.join(temp,"profile"),{headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE,args:["--disable-extensions-except="+extension,"--load-extension="+extension],viewport:{width:1280,height:800}});
     const worker=context.serviceWorkers()[0]||await context.waitForEvent("serviceworker",{timeout:15000});
     const page=await context.newPage(),errors=[];page.on("pageerror",error=>errors.push(error.message));
-    await page.addInitScript(()=>{localStorage.setItem("plurx_token","fixture");localStorage.setItem("plurx_layout","ten-foot");});
+    await page.addInitScript(()=>{localStorage.setItem("plurx_token","fixture");localStorage.setItem("plurx_layout","ten-foot");localStorage.setItem("cinema.remote.preferences:"+JSON.stringify([location.origin,"desktop-smoke","1"]),JSON.stringify({cec:true}));});
     await page.route("**/*",route=>{
       const url=new URL(route.request().url()),p=url.pathname;
       if(url.hostname!=="cinema.test")return route.abort();
@@ -26,7 +26,7 @@ test("real Chromium extension targets MAIN document and invalidates local contex
         return fs.existsSync(file)?route.fulfill({contentType:p==="/"?"text/html":p.endsWith(".css")?"text/css":"text/javascript",body:fs.readFileSync(file)}):route.fulfill({status:404,body:""});
       }
       const key=p.replace("/api/v1","");let data={};
-      if(key==="/server")data={name:"Cinema",setup_required:false};
+      if(key==="/server")data={name:"Cinema",instance_id:"desktop-smoke",setup_required:false};
       if(key==="/me")data={id:1,username:"viewer",is_admin:false};
       if(key==="/libraries")data=[{id:1,name:"Movies",kind:"movies"}];
       if(key==="/home"||key==="/dvr/reminders/due")data=[];
