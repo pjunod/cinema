@@ -420,8 +420,17 @@ PLAYBACK_LAB_TEST_FILTER='device-run|device command' \
   node tests/playback/network-shaping.test.js
 ```
 
-Local validation on the current main base passed all 18 focused cleanup
-contracts, all 133 shaping contracts (`node tests/playback/network-shaping.test.js`),
+The single adversarial PR review (PR #895) found a P2 finalization race: a
+SIGINT/SIGTERM arriving during the final receipt write or lease release could
+be recorded without changing the successful verdict. The handler now records
+interruption as a failure immediately. Final receipt writes reconcile signals
+that arrive while writing, and finalization checks again after lease release
+before synchronously removing handlers. Four regressions inject both signals
+at both asynchronous boundaries and require matching failed returned/durable
+verdicts, verified diagnostic absence, and no recreated lease.
+
+Local validation on the current main base passed all 22 focused cleanup
+contracts, all 137 shaping contracts (`node tests/playback/network-shaping.test.js`),
 and all four documentation-index contracts (`python3 -m unittest discover
 -s tests/operations -p test_docs_index.py`). No physical-device run was performed.
 

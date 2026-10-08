@@ -955,6 +955,54 @@ test("device-run failed production restore fails run after confirmed diagnostic 
   });
 });
 
+for (const phase of ["final receipt", "lease release"]) {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    test(`device-run ${signal} during ${phase} fails and durably reconciles the final verdict`, async () => {
+      await withTempDir(async (directory) => {
+        const fixture = deviceRunFixture(directory);
+        const originalUnlink = fsp.unlink;
+        const originalListeners = process.listenerCount(signal);
+        let emitted = false;
+        if (phase === "final receipt") {
+          fixture.dependencies.writeReceipt = async (filename, evidence) => {
+            // Reproduce a signal after the successful verdict was serialized.
+            await lab.durableDeviceReceipt(filename, evidence);
+            if (!emitted && evidence.verdict === "passed") {
+              emitted = true;
+              process.emit(signal);
+            }
+          };
+        } else {
+          fsp.unlink = async (filename, ...args) => {
+            await originalUnlink.call(fsp, filename, ...args);
+            if (!emitted && path.dirname(filename) === fixture.dependencies.leaseDirectory
+                && filename.endsWith(".json")) {
+              emitted = true;
+              process.emit(signal);
+            }
+          };
+        }
+        try {
+          const result = await failedDeviceRun(fixture);
+          assert.equal(emitted, true, "must exercise the requested finalization await");
+          assert.equal(result.verdict, "failed");
+          assert.deepEqual(result.signals, [signal]);
+          assert.ok(result.errors.some((entry) => entry.phase === "signal" && entry.message.includes(signal)));
+          const artifact = JSON.parse(await fsp.readFile(fixture.options.json));
+          assert.equal(artifact.verdict, "failed", "durable receipt must agree with returned failure");
+          assert.deepEqual(artifact.signals, [signal]);
+          assert.deepEqual(artifact.errors, result.errors);
+          assert.equal(artifact.cleanup.owned_process_absent, true);
+          assert.equal(fixture.state.rows.has(77), false);
+          assert.equal(fixture.state.closed, true);
+          assert.deepEqual(await deviceLeases(fixture), [], "verified-absent lease is not recreated");
+          assert.equal(process.listenerCount(signal), originalListeners);
+        } finally { fsp.unlink = originalUnlink; }
+      });
+    });
+  }
+}
+
 test("device command bounds and reaps a stalled host child without device calls", async () => {
   let child;
   await assert.rejects(lab.physicalAppleDeviceCommand(["device", "info", "processes"], {

@@ -5202,7 +5202,12 @@ async function deviceRunCommand(options, dependencies = {}) {
   const record = (phase, error) => { errors.push({ phase, message: sanitizedError(error) }); };
   const interrupt = (signal) => {
     evidence.signals = [...(evidence.signals || []), signal];
-    if (!controller.signal.aborted) controller.abort(new Error(`interrupted by ${signal}`));
+    if (!controller.signal.aborted) {
+      const error = new Error(`interrupted by ${signal}`);
+      record("signal", error);
+      evidence.verdict = "failed";
+      controller.abort(error);
+    }
   };
   const onINT = () => interrupt("SIGINT");
   const onTERM = () => interrupt("SIGTERM");
@@ -5332,12 +5337,22 @@ async function deviceRunCommand(options, dependencies = {}) {
     if (controller.signal.aborted && !errors.some((entry) => entry.message.includes("interrupted by"))) record("signal", controller.signal.reason);
     evidence.verdict = errors.length ? "failed" : "passed";
     let persisted = false;
+    let persistedSignalCount = -1;
+    const persistFinal = async () => {
+      // A signal may arrive after a writer serialized the receipt but before
+      // its promise settles. Reconcile until the durable receipt includes it.
+      do {
+        const signalCount = evidence.signals?.length || 0;
+        await persist();
+        persistedSignalCount = signalCount;
+      } while (persistedSignalCount !== (evidence.signals?.length || 0));
+    };
     if (evidenceAllocated) {
-      try { await persist(); persisted = true; }
+      try { await persistFinal(); persisted = true; }
       catch (error) {
         record("artifact", error);
         evidence.verdict = "failed";
-        try { await persist(); persisted = true; } catch (retryError) { record("artifact-retry", retryError); }
+        try { await persistFinal(); persisted = true; } catch (retryError) { record("artifact-retry", retryError); }
       }
     }
     if (leaseOwned && evidence.cleanup.owned_process_absent && persisted) {
@@ -5345,10 +5360,24 @@ async function deviceRunCommand(options, dependencies = {}) {
         const lease = JSON.parse(await fsp.readFile(leasePath, "utf8"));
         if (lease.run_id !== runId) throw new Error("device lease owner changed; refusing release");
         await fsp.unlink(leasePath);
+        leaseOwned = false;
       } catch (error) {
         record("lease-release", error);
         evidence.verdict = "failed";
-        try { await persist(); } catch (writeError) { record("artifact", writeError); }
+        try { await persistFinal(); } catch (writeError) { record("artifact", writeError); }
+      }
+    }
+    // Lease release is asynchronous too. Keep handlers installed and rewrite
+    // the final receipt if interrupted there, without recreating a released
+    // lease. After this await, verdict selection and handler removal are
+    // synchronous: there is no remaining successful-finalization signal gap.
+    if (persisted && persistedSignalCount !== (evidence.signals?.length || 0)) {
+      try { await persistFinal(); }
+      catch (error) {
+        record("artifact", error);
+        evidence.verdict = "failed";
+        persisted = false;
+        try { await persistFinal(); persisted = true; } catch (retryError) { record("artifact-retry", retryError); }
       }
     }
     // The lease remains an audit fallback even if the separate artifact failed.
