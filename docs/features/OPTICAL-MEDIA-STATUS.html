@@ -25,8 +25,8 @@
   <p><strong>Commercial-media correction:</strong> ordinary retail DVD and
     Blu-ray playback is part of the required outcome. On 2026-09-29 the shipped
     Jellyfin FFmpeg and its Debian fallback both reported
-    <code>Unknown format 'dvdvideo'</code>; the host Blu-ray read still lacks a
-    usable AACS/BD+ backend. A temporary reader lab on <code>nynuc</code>
+    <code>Unknown format 'dvdvideo'</code>; the first inserted Blu-ray could not
+    be decrypted by the host's stock AACS/BD+ stack. A temporary reader lab on <code>nynuc</code>
     inspected the same inserted disc read-only and was then removed. A separate title-aware optical
     FFmpeg reports DVD-Video and Blu-ray inputs, while normal VOD keeps
     Jellyfin FFmpeg. MakeMKV 2.0.0 enumerated titles when its documented
@@ -34,8 +34,8 @@
     LibreDrive probe. LibMMBD could not decrypt in the lab because its
     evaluation was not active. The vendor's September beta key was rejected
     as expired at the UTC month boundary, and a temporary virtual-display
-    trial did not reach an activation prompt. Neither a first decoded frame nor application
-    playback has been proved. The September lab containers, images, mount and build
+    trial did not reach an activation prompt. No decoded frame from that first
+    disc was proved. The September lab containers, images, mount and build
     directory were removed; the running Plurx service is unchanged. An October
     isolated lab has configured the vendor's new beta key and confirmed
     <code>libmmbd.so.0</code> loads. A corrected offline follow-up pinned both
