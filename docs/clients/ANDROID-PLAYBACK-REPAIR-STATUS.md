@@ -1,6 +1,6 @@
 # Android playback repair — device failures and delivery progress
 
-**Status:** review addressed; lint, syntax and web merge checks · **Updated:** 2026-10-08
+**Status:** PR #915 merged; TCL follow-up validated in PR #918 · **Updated:** 2026-10-08
 
 Companion to [Android parity](ANDROID-CLIENT-PARITY.md): repairs the native
 TCL and Lenovo playback failures and Razr video geometry and playback menus.
@@ -80,7 +80,7 @@ final checks and the merge result; other sessions own unrelated unit failures.
 
 ## TCL Dolby Vision follow-up — 2026-10-08
 
-**Status:** review addressed; focused regressions and web checks passed; merge checks in progress.
+**Status:** implemented and validated; PR #918 records merge and rollout.
 
 The physical TCL 9445X runs build 153 and reports an SDR display with no
 Dolby Vision decoder. Avatar: Fire and Ash (file 6751) correctly selects an
@@ -123,3 +123,11 @@ The complete Node web suite passed across the initial run and continuation:
 the localhost-socket test was retried with permission, followed only by checks
 that had not yet run. Passing checks were not repeated. Commit lint/syntax and
 the PR description carry the final merge receipt; full unit suites are deferred.
+
+The normal commit hook passed catalog lint, Rust formatting, workspace
+Clippy with warnings denied, and syntax for all 77 served scripts. Generated
+web configuration, Player typedefs and the existing web type baseline passed.
+The branch was rebased onto the concurrent Apple-only main update and the
+pinned all-target server compiler check passed again; behavior tests were not
+repeated for that unrelated change. PR #918 is the live merge/deployment
+receipt. A server rollout and an actual TCL playback remain outstanding.
