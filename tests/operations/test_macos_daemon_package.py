@@ -62,6 +62,27 @@ class MacosDaemonPackageCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe"):
             TOOL.validate_native_package(self.package)
 
+    def test_symbol_uuid_mismatch_cannot_publish_a_candidate(self):
+        symbols = self.root / "plurxd.dSYM"
+        dwarf = symbols / "Contents/Resources/DWARF/plurxd"
+        dwarf.parent.mkdir(parents=True)
+        dwarf.write_bytes(b"debug fixture")
+        with mock.patch.object(TOOL, "image_uuids", side_effect=[[("arm64", "first")], [("arm64", "other")]]):
+            with self.assertRaisesRegex(ValueError, "UUID mismatch"):
+                TOOL.assemble(self.daemon, self.package, self.output, "-", symbols)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(dwarf.read_bytes(), b"debug fixture")
+
+    def test_symbol_symlink_cannot_copy_an_external_file(self):
+        symbols = self.root / "plurxd.dSYM"
+        dwarf = symbols / "Contents/Resources/DWARF/plurxd"
+        dwarf.parent.mkdir(parents=True)
+        dwarf.symlink_to(self.daemon)
+        with self.assertRaisesRegex(ValueError, "unsafe debug-symbol"):
+            TOOL.assemble(self.daemon, self.package, self.output, "-", symbols)
+        self.assertFalse(self.output.exists())
+        self.assertTrue(dwarf.is_symlink())
+
     def test_failed_signing_does_not_publish_or_mutate_source_artifacts(self):
         original_daemon = self.daemon.read_bytes()
         original_native = {p.relative_to(self.package): p.read_bytes()
