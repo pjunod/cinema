@@ -4,6 +4,7 @@ package tv.plurx.app.player
 
 import androidx.media3.common.Format
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.serialization.json.*
 
 /** Actual hardware frame and sink-head observations. Subscription belongs to
  * one attachment; neither a scheduled release nor the player clock is proof. */
@@ -53,4 +54,50 @@ internal class ContinuousCodecFrames {
         while (frames.size > 512) frames.remove(frames.keys.first())
     }
     fun rendered(codecTimeUs: Long, observedEpoch: Long): Frame? = if (observedEpoch == epoch) frames.remove(codecTimeUs) else null
+}
+
+/** Diagnostic snapshot of an already accepted hardware presentation. It grants
+ * no reservation or presentation authority and never mutates the ledger. */
+internal data class ContinuousAcceptedPresentation(
+    val candidateId: String, val familyId: String, val renditionId: String,
+    val artifactId: String, val transactionId: String, val revision: Long,
+    val filmTick: Long, val timescale: Long, val width: Int, val height: Int,
+    val observedAtMs: Long,
+) {
+    fun automaticDetail(): String = "mode=auto route=continuous candidate_id=$candidateId family_id=$familyId " +
+        "rendition_id=$renditionId artifact_id=$artifactId transaction_id=$transactionId " +
+        "intent_revision=$revision latest_intent_revision=$revision film_tick=$filmTick " +
+        "timescale=$timescale width=$width height=$height observed_at_ms=$observedAtMs intent_superseded=false"
+}
+
+internal fun continuousAcceptedPresentation(
+    row: JsonObject, family: JsonObject, ledger: JsonObject?, transaction: JsonObject,
+    frame: ContinuousOutputEvidence.Event.Frame, artifactId: String, filmTick: Long,
+    deliveredRevision: Long,
+): ContinuousAcceptedPresentation? {
+    val current = ledger ?: return null
+    val revision = transaction.number("intent_revision") ?: return null
+    if (revision <= deliveredRevision || revision != current.number("latest_intent_revision") ||
+        transaction["intent_superseded"]?.wireBoolean() != false ||
+        transaction.number("first_presented_tick") != filmTick ||
+        transaction.text("state") != "presented") return null
+    val candidate = row.text("candidate_id")?.takeIf { Regex("[0-9a-f]{32}").matches(it) } ?: return null
+    val familyId = family.text("family_id")?.takeIf { Regex("[0-9a-f]{64}").matches(it) } ?: return null
+    val rendition = row.text("rendition_id")?.takeIf { Regex("[0-9a-f]{64}").matches(it) } ?: return null
+    val id = transaction.text("transaction_id")?.takeIf {
+        Regex("[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}").matches(it)
+    } ?: return null
+    if (!Regex("[0-9a-f]{64}").matches(artifactId) ||
+        current.obj("attachment")?.text("family_id") != familyId ||
+        transaction.text("target_rendition_id") != rendition ||
+        (transaction["appended"] as? JsonArray)?.none { (it as? JsonObject)?.text("artifact_id") == artifactId } != false ||
+        frame.format.width !in 1..16384 || frame.format.height !in 1..16384 ||
+        frame.format.width.toLong() != row.number("width") || frame.format.height.toLong() != row.number("height")) return null
+    val timescale = row.number("timescale") ?: return null
+    if (timescale !in 1..ContinuousQualityWire.MAX_SAFE_INTEGER ||
+        filmTick !in 0..ContinuousQualityWire.MAX_SAFE_INTEGER ||
+        revision !in 0..ContinuousQualityWire.MAX_SAFE_INTEGER ||
+        frame.observedAtMs !in 0..ContinuousQualityWire.MAX_SAFE_INTEGER) return null
+    return ContinuousAcceptedPresentation(candidate, familyId, rendition, artifactId, id, revision,
+        filmTick, timescale, frame.format.width, frame.format.height, frame.observedAtMs)
 }

@@ -6,6 +6,7 @@ import androidx.media3.common.C
 import androidx.media3.common.Format
 import org.junit.Assert.*
 import org.junit.Test
+import kotlinx.serialization.json.*
 
 class ContinuousOutputEvidenceTest {
     @Test fun hardwareCallbacksUseTheirQueuedFormatAndRejectEarlierEpochs() {
@@ -84,4 +85,67 @@ class ContinuousOutputEvidenceTest {
         evidence.emit(ContinuousOutputEvidence.Event.AudioHead(300), next)
         assertEquals(listOf(ContinuousOutputEvidence.Event.AudioHead(100), ContinuousOutputEvidence.Event.AudioHead(300)), events)
     }
+    private fun acceptedJournalFixture(): Triple<JsonObject, JsonObject, JsonObject> {
+        val row = buildJsonObject {
+            put("candidate_id", "a".repeat(32)); put("rendition_id", "b".repeat(64))
+            put("width", 1280); put("height", 720); put("timescale", 24)
+        }
+        val family = buildJsonObject { put("family_id", "c".repeat(64)) }
+        val transaction = buildJsonObject {
+            put("transaction_id", "12345678-1234-1234-1234-123456789abc")
+            put("intent_revision", 2); put("intent_superseded", false); put("state", "presented")
+            put("target_rendition_id", "b".repeat(64)); put("first_presented_tick", 96)
+            put("appended", buildJsonArray { add(buildJsonObject { put("artifact_id", "d".repeat(64)) }) })
+        }
+        return Triple(row, family, transaction)
+    }
+
+    @Test fun automaticJournalRejectsStaleUnacceptedAndSupersededFrames() {
+        val (row, family, accepted) = acceptedJournalFixture()
+        fun ledger(revision: Long = 2) = buildJsonObject {
+            put("latest_intent_revision", revision)
+            put("attachment", buildJsonObject { put("family_id", "c".repeat(64)) })
+        }
+        val frame = ContinuousOutputEvidence.Event.Frame(4_000_000,
+            Format.Builder().setWidth(1280).setHeight(720).build(), 5_000)
+        fun snapshot(tx: JsonObject = accepted, current: JsonObject? = ledger(), delivered: Long = 1,
+                     observed: ContinuousOutputEvidence.Event.Frame = frame) =
+            continuousAcceptedPresentation(row, family, current, tx, observed, "d".repeat(64), 96, delivered)
+        val before = accepted.toString()
+        assertNotNull(snapshot())
+        assertNull(snapshot(current = null))
+        assertNull(snapshot(current = ledger(3)))
+        assertNull(snapshot(delivered = 2))
+        assertNull(snapshot(tx = JsonObject(accepted + ("intent_superseded" to JsonPrimitive(true)))))
+        assertNull(snapshot(tx = JsonObject(accepted - "first_presented_tick")))
+        assertNull(snapshot(tx = JsonObject(accepted + ("first_presented_tick" to JsonPrimitive(95)))))
+        assertNull(snapshot(tx = JsonObject(accepted + ("state" to JsonPrimitive("appended")))))
+        assertNull(snapshot(tx = JsonObject(accepted + ("appended" to buildJsonArray {}))))
+        assertNull(snapshot(observed = frame.copy(format = Format.Builder().setWidth(1920).setHeight(1080).build())))
+        assertEquals(before, accepted.toString())
+    }
+
+    @Test fun automaticJournalKeepsOnlyExactAcceptedBindingAndDecoderGeometry() {
+        val (row, family, tx) = acceptedJournalFixture()
+        val ledger = buildJsonObject {
+            put("latest_intent_revision", 2)
+            put("attachment", buildJsonObject { put("family_id", "c".repeat(64)) })
+        }
+        val frame = ContinuousOutputEvidence.Event.Frame(4_000_000,
+            Format.Builder().setWidth(1280).setHeight(720).build(), 5_000)
+        val journal = requireNotNull(continuousAcceptedPresentation(row, family, ledger, tx, frame,
+            "d".repeat(64), 96, 1))
+        assertEquals(96L, journal.filmTick)
+        assertEquals(24L, journal.timescale)
+        assertEquals(1280, journal.width)
+        assertEquals(720, journal.height)
+        assertEquals(2L, journal.revision)
+        assertEquals("d".repeat(64), journal.artifactId)
+        assertTrue(journal.automaticDetail().contains("mode=auto route=continuous"))
+        assertTrue(journal.automaticDetail().contains("intent_revision=2 latest_intent_revision=2"))
+        assertNull(continuousAcceptedPresentation(row, family,
+            JsonObject(ledger + ("attachment" to buildJsonObject { put("family_id", "e".repeat(64)) })),
+            tx, frame, "d".repeat(64), 96, 1))
+    }
+
 }

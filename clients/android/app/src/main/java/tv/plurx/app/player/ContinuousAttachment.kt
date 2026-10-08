@@ -25,7 +25,7 @@ internal class ContinuousAttachment(
     private val registry: ContinuousSourceRegistry,
     private val output: ContinuousOutputEvidence,
     private val transfers: AutoTransferEvidence,
-    private val presented: (JsonObject, Long) -> Unit,
+    private val presented: (JsonObject, Long, ContinuousAcceptedPresentation?) -> Unit,
     private val observationUnknown: (JsonObject) -> Unit,
     private val expectedPresentation: (JsonObject, Long, Long, Long?) -> Unit,
     /** Previous choice restored for the failed target row and its request;
@@ -273,7 +273,12 @@ internal class ContinuousAttachment(
                         accepted.number("first_presented_tick") != null && accepted["intent_superseded"]?.wireBoolean() == false) {
                         val revision = requireNotNull(accepted.number("intent_revision"))
                         if (revision > deliveredRevision) {
-                            presented(load.resource.row, revision)
+                            val journal = runCatching {
+                                continuousAcceptedPresentation(load.resource.row, start.family, protocol.ledger, accepted,
+                                    observed, load.authorized.interval.getValue("artifact_id").jsonPrimitive.content,
+                                    tick, deliveredRevision)
+                            }.getOrNull()
+                            presented(load.resource.row, revision, journal)
                             deliveredRevision = revision
                         }
                     }

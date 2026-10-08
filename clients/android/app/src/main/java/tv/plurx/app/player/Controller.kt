@@ -365,8 +365,20 @@ class Controller internal constructor(
         lateinit var attachment: ContinuousAttachment
         attachment = ContinuousAttachment(enrollment, started, continuousClientInstance,
             continuousSources, continuousOutput, continuousTransfers,
-            presented = { row, _ -> scope.launch {
+            presented = { row, _, journal -> scope.launch {
                 if (continuousAttachment === attachment && player === continuousPlayer && playbackControlBootstrapFence.isActive()) {
+                    // This diagnostic follows the attachment's accepted hardware-frame
+                    // path; failures cannot interrupt the existing presentation callback.
+                    runCatching {
+                        val controlChoice = playbackControlSelection().quality as? QualitySelection.AutoCandidate
+                        if (journal != null && playbackIntent.desiredQuality == PlaybackQuality.Auto &&
+                            controlChoice?.candidateId == journal.candidateId &&
+                            (autoDesiredCandidate?.id == null || autoDesiredCandidate?.id == journal.candidateId)) {
+                            playbackTelemetry.report(event = "continuous_auto_presented", level = "info",
+                                message = "Automatic continuous candidate presentation observed.",
+                                detail = journal.automaticDetail())
+                        }
+                    }
                     continuousQualityPresented(row)
                 }
             } },
