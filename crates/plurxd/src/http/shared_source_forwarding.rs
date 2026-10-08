@@ -478,7 +478,7 @@ impl ForwardingRegistry {
             .find(|pin| pin.principal == authority.principal && pin.request == authority.request_id)
         {
             if pin.reference != authority.reference || pin.body_hash != body_hash {
-                return Err(invalid());
+                return Err(SourceStartFailure::Conflict.response());
             }
             authority.candidate_node_id.clone_from(&pin.candidate);
             authority.expected_registry_boot = pin.registry_boot;

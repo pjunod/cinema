@@ -3409,9 +3409,10 @@ mod tests {
         // v98–v101 add Jellyfin compatibility: permanent wire identities,
         // compatibility-only logins, bounded negotiations with exact native
         // references, and manual-edit watch revisions; v102 adds quality
-        // cancellation and v103 continuous dependencies.
+        // cancellation and v103 continuous dependencies; v104–v105 add sharing
+        // authority and outer-ingress custody.
         assert_eq!(
-            version, 103,
+            version, 105,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

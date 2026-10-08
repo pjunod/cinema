@@ -69,15 +69,14 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         request_id: Some("qualification-vod-missing".into()),
         ..req.clone()
     };
-    assert!(manager.create_session(&missing, "test").await.is_err());
+    assert!(create_local_vod(&manager, &missing, "test").await.is_err());
     assert_eq!(
         manager.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
         0,
         "a VOD create that failed before reader attachment was counted"
     );
     assert_eq!(manager.codec_qualification_pipeline_count(Pipeline::Cpu), 0);
-    let start = manager
-        .create_session(&req, "test")
+    let start = create_local_vod(&manager, &req, "test")
         .await
         .expect("public encoded create");
     assert_eq!(
@@ -86,8 +85,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         "one attached encoded-VOD reader must count once"
     );
     assert_eq!(manager.codec_qualification_pipeline_count(Pipeline::Cpu), 1);
-    let replay = manager
-        .create_session(&req, "test")
+    let replay = create_local_vod(&manager, &req, "test")
         .await
         .expect("idempotent encoded create");
     assert_eq!(replay.session_id, start.session_id);
@@ -279,7 +277,7 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
             kind: SessionKind::Transcode { height: 240 },
             ..reopen_request(file_id, "eac3-atmos", "unused", "unused")
         };
-        match (manager.create_session(&request, "test").await, admitted) {
+        match (create_local_vod(&manager, &request, "test").await, admitted) {
             (Ok(start), true) => {
                 assert_eq!(start.kind, SessionKind::Transcode { height: 240 });
                 manager.stop_session(&start.session_id, "test").await;
@@ -421,7 +419,7 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
         kind: SessionKind::Transcode { height: 32 },
         ..reopen_request(file_id, "stale-probe", "unused", "unused")
     };
-    let error = match manager.create_session(&request, "test").await {
+    let error = match create_local_vod(&manager, &request, "test").await {
         Ok(_) => panic!("stale scan facts must not create a recipe"),
         Err(error) => error,
     };
@@ -931,7 +929,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         manager: &'a TranscodeManager,
         request: &'a SessionRequest,
     ) -> Boxed<'a, StartInfo> {
-        Box::pin(manager.create_session(request, "test"))
+        Box::pin(create_local_vod(manager, request, "test"))
     }
     fn prepare<'a>(
         manager: &'a TranscodeManager,
@@ -1274,8 +1272,7 @@ async fn service_vod_only_refuses_unindexed_copy_before_rolling_allocation() {
         convert_dolby_vision: false,
     };
     request.vod_only = true;
-    let error = manager
-        .create_session(&request, "test")
+    let error = create_local_vod(&manager, &request, "test")
         .await
         .err()
         .expect("unindexed VOD refusal");
@@ -1298,8 +1295,7 @@ async fn service_vod_only_refuses_unindexed_copy_before_rolling_allocation() {
     );
     request.presentation = Presentation::Live;
     request.request_id = Some("service-forbidden-live".into());
-    let error = manager
-        .create_session(&request, "test")
+    let error = create_local_vod(&manager, &request, "test")
         .await
         .err()
         .expect("explicit live also refused");
@@ -1412,4 +1408,22 @@ async fn finite_vod_bitrate_ceiling_is_shared_by_native_recipe_and_worker_identi
     assert!(!crate::media_sessions::worker_session_request_is_valid(
         &request
     ));
+}
+
+// Local VOD now requires a typed viewer demand even in process-local tests.
+async fn create_local_vod(
+    manager: &TranscodeManager,
+    request: &SessionRequest,
+    user_name: &str,
+) -> Result<StartInfo, String> {
+    let identity = SessionRecoveryIdentity {
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+        incarnation_id: uuid::Uuid::new_v4().to_string(),
+        recovery_epoch: String::new(),
+    };
+    let scope = serde_json::json!(["username", user_name]).to_string();
+    Box::pin(manager.create_session_inner(
+        request, user_name, &scope, Some(&identity), None, None, None,
+        (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
+    )).await.map(|creation| creation.info)
 }

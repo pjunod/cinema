@@ -5477,8 +5477,7 @@ pub(crate) async fn prepare_source_playback<
         store::sharing_catalogue_details::SourceDetailsRead,
     };
     let refused = |_stage: &str| {
-        #[cfg(test)]
-        eprintln!("Source preparation refused at {_stage}");
+        tracing::warn!(target: "plurxd::http::hls", stage = _stage, "Source preparation refused");
         ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
             "sharing_playback_authority_unavailable",

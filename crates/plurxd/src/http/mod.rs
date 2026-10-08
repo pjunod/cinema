@@ -4969,6 +4969,8 @@ mod tests {
         assert_exact_store_inventory(
             include_str!("images.rs"),
             &[
+                "shared_materialize_original:store.source_art_snapshot",
+                "shared_artwork_asset:store.source_art_snapshot",
                 "sweep_content_orphans:store.referenced_artwork_filenames",
                 "sweep_content_orphans:store.artwork_filename_is_referenced",
                 "sweep_content_orphans:store.prune_unreferenced_book_cover_origins",
@@ -10633,6 +10635,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "cinema_sharing",
                 // Jellyfin compatibility: one advisory row (pinned-client
                 // qualification) that never gates the switch.
                 "jellyfin_compatibility",
@@ -10727,6 +10730,7 @@ mod tests {
                         | "durable_capacity"
                         | "durable_scratch"
                         | "probe_reporter_named"
+                        | "sources_match_their_scan_whole"
                         | "stored_source_self_test"
                         | "stored_source_local_cache"
                         | "stored_source_free_space"
@@ -10806,7 +10810,6 @@ mod tests {
                 "runtime",
                 "server_preparation_is_real",
                 "source_fencing",
-                "sources_match_their_scan_whole",
                 "stored_source_producer",
                 "tuner_reserve",
                 "watch_floor"

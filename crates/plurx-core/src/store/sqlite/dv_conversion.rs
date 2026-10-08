@@ -1493,7 +1493,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 59] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 61] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1604,6 +1604,9 @@ mod tests {
             // tables (their indexes go with them) before replay.
             "CREATE TABLE IF NOT EXISTS quality_cancellation_receipts",
             "CREATE TABLE IF NOT EXISTS continuous_quality_ledgers",
+            // Both fixtures remove later sharing tables before the Jellyfin downgrade.
+            "CREATE TABLE sharing_identity",
+            "CREATE TABLE sharing_ingress_custody",
         ];
 
         assert!(

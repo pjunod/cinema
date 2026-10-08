@@ -338,6 +338,15 @@ async fn actual_nonowner_forwarding() {
     let _ = (&mut driver.0).await;
     // Actual socket closure and exact owner settlement, not row absence, allow
     // the stable retry to produce the final End receipt.
+    // Same-driver End can retain an unresolved result while the detached
+    // owner retries a close/ACK race. Only its actual settlement permits retry.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while owned.actor.settlement_status() != Some(Ok(())) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("actual retained owner settles after driver closure");
     let end = entry.end(Arc::clone(&worker.state));
     end.wait(Instant::now() + Duration::from_secs(15))
         .await

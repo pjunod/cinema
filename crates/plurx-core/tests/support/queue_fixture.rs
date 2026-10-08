@@ -538,6 +538,9 @@ impl<T: Store + ?Sized> QueueFixture for T {}
 /// database that does not already have them. Triggers go first: the watch
 /// triggers name the revision columns the last two statements drop.
 pub(crate) fn remove_jellyfin_compatibility_schema(connection: &rusqlite::Connection) {
+    // Every caller rewinds below v98, so remove the later v104–v105 sharing
+    // tables too. Leaving them behind impersonates an ambiguous private lineage.
+    remove_sharing_schema(connection);
     connection
         .execute_batch(
             "DROP TRIGGER IF EXISTS jellyfin_watch_own_insert;
@@ -587,5 +590,31 @@ pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
                 ))
                 .expect("drop common queue fixture object");
         }
+    }
+}
+
+/// Remove v104–v105 before rewinding a current SQLite test fixture.
+#[allow(dead_code)]
+pub(crate) fn remove_sharing_schema(connection: &rusqlite::Connection) {
+    for table in [
+        "sharing_ingress_custody",
+        "sharing_delivery_grants",
+        "sharing_relay_upstream",
+        "sharing_endpoint_manifest",
+        "sharing_catalogue_revisions",
+        "sharing_import_rotations",
+        "sharing_rotations",
+        "sharing_watch",
+        "sharing_assignments",
+        "sharing_viewers",
+        "sharing_imports",
+        "sharing_export_libraries",
+        "sharing_exports",
+        "sharing_invitations",
+        "sharing_identity",
+    ] {
+        connection
+            .execute_batch(&format!("DROP TABLE IF EXISTS {table};"))
+            .expect("remove sharing fixture schema");
     }
 }

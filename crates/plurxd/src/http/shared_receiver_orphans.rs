@@ -902,20 +902,33 @@ mod tests {
                 .await
                 .expect("authority")
                 .expect("authorized");
+            let attachment = ReceiverSourceAttachment {
+                owner: owner.clone(),
+                binding,
+            };
             assert_eq!(
                 f.state
                     .store
-                    .attach_receiver_source(
-                        &authority,
-                        &ReceiverSourceAttachment {
-                            owner: owner.clone(),
-                            binding
-                        }
-                    )
+                    .attach_receiver_source(&authority, &attachment)
                     .await
                     .expect("attach"),
                 ReceiverSourceWrite::Applied
             );
+            // The dead owner's empty ingress ledger has already closed. An
+            // attached orphan without this evidence is intentionally stranded
+            // before Source End, rather than entering the retry exercised here.
+            let identity = plurx_core::sharing_receiver_delivery::receiver_retained_owner_identity(
+                &activation.recipe_json,
+                &attachment,
+            )
+            .expect("retained ingress identity");
+            assert!(f
+                .state
+                .store
+                .seal_receiver_ingress_route(&outcome.route, &identity)
+                .await
+                .expect("sealed dead-owner ingress")
+                .is_some());
         }
         Route { intent, owner }
     }
