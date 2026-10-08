@@ -82,12 +82,12 @@ final class RemoteClientModel: ObservableObject {
         scene.transition(active: foreground, background: background)
         guard foreground, enabled, model.phase == .ready,
               let userID = model.userId, let instance = SettingsStore().instanceId,
-              let bearer = Session.shared.credentials.token else {
+              let bearer = Session.shared.credentials.token,
+              let nextIdentity = RemoteSecretStorage.scopedIdentity(origin: model.origin, instance: instance, userID: userID) else {
             shutdown(identityChange: false)
             status = enabled ? "Waiting for an authenticated foreground Cinema session." : "Cinema remotes are disabled on this installation."
             return
         }
-        let nextIdentity = instance + ":" + String(userID)
         let auth = Session.shared.playbackAuthorization
         if active, identity == nextIdentity, api?.generation == auth.generation { return }
         let changedAuthorization = api != nil && api?.generation != auth.generation

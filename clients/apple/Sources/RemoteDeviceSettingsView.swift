@@ -7,6 +7,7 @@ struct RemoteDeviceSettingsView: View {
     var body: some View {
         List {
             #if os(iOS)
+            InvitationSettingsSections()
             Section("This phone") {
                 Button("Open Cinema remote") { remote.remotePresented = true }
                 ForEach(remote.localGrants, id: \.id) { grant in

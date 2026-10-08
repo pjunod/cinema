@@ -112,7 +112,7 @@ final class LocalReminders: NSObject, UNUserNotificationCenterDelegate, @uncheck
     /// not running is still delivered to something that can act on it.
     func begin() {
         center.delegate = self
-        center.setNotificationCategories([UNNotificationCategory(
+        let reminderCategory = UNNotificationCategory(
             identifier: Self.category,
             actions: [
                 UNNotificationAction(identifier: Self.watchAction, title: "Watch",
@@ -122,7 +122,13 @@ final class LocalReminders: NSObject, UNUserNotificationCenterDelegate, @uncheck
             ],
             intentIdentifiers: [],
             options: []
-        )])
+        )
+        center.getNotificationCategories { [center] existing in
+            var categories = existing.filter { $0.identifier != Self.category && $0.identifier != InvitationNotificationBridge.category }
+            categories.insert(reminderCategory)
+            categories.insert(UNNotificationCategory(identifier: InvitationNotificationBridge.category, actions: [], intentIdentifiers: [], options: []))
+            center.setNotificationCategories(categories)
+        }
     }
 
     /// Asked the first time a reminder is set, and never at launch: a
@@ -202,14 +208,29 @@ final class LocalReminders: NSObject, UNUserNotificationCenterDelegate, @uncheck
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        let content = notification.request.content
+        if content.categoryIdentifier == InvitationNotificationBridge.category {
+            let visible = await InvitationNotificationBridge.shared.shouldPresent(category: content.categoryIdentifier,
+                invitationID: content.userInfo["invitation_id"] as? String)
+            return visible ? [.banner, .sound] : []
+        }
+        return [.banner, .sound]
     }
 
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        let info = response.notification.request.content.userInfo
+        let content = response.notification.request.content
+        let info = content.userInfo
+        if content.categoryIdentifier == InvitationNotificationBridge.category {
+            await MainActor.run {
+                _ = InvitationNotificationBridge.shared.acceptDefaultTap(category: content.categoryIdentifier,
+                    invitationID: info["invitation_id"] as? String,
+                    defaultAction: response.actionIdentifier == UNNotificationDefaultActionIdentifier)
+            }
+            return
+        }
         guard let channelId = info["channel_id"] as? String else { return }
         switch response.actionIdentifier {
         case Self.recordAction:

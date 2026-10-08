@@ -1,4 +1,5 @@
 //! Authenticated Cinema companion rendezvous. Owner routing never transfers queues.
+pub(crate) mod invitations;
 mod owner;
 pub(crate) mod wire;
 use super::{
@@ -307,6 +308,9 @@ pub(crate) async fn public(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if invitations::path(uri.path()) {
+        return invitations::public(&state, &uri, method, &headers, &body).await;
+    }
     match public_inner(&state, &uri, method, &headers, &body).await {
         Ok((status, value)) => response(status, value),
         Err(error) => error_response(error),
@@ -447,9 +451,19 @@ pub(crate) async fn internal(
         {
             return Err(fail(400, "invalid"));
         }
-        let user = authenticate_token_digest(&state, d.token_digest.clone(), TokenAudience::Native)
-            .await?;
-        if user.id != d.user_id {
+        let user_id = if matches!(d.request, Request::InvitationSessions { .. }) {
+            state
+                .store
+                .invitation_login(&d.token_digest, now_seconds()?)
+                .await?
+                .ok_or_else(|| fail(401, "unauthorized"))?
+                .user_id
+        } else {
+            authenticate_token_digest(&state, d.token_digest.clone(), TokenAudience::Native)
+                .await?
+                .id
+        };
+        if user_id != d.user_id {
             return Err(fail(403, "unauthorized"));
         }
         state.remote.perform(&state, d).await
@@ -485,6 +499,9 @@ pub(crate) async fn internal(
         .unwrap_or_else(|_| error_response(fail(503, "unavailable")))
 }
 pub(crate) fn eligible(method: &Method, path: &str) -> bool {
+    if invitations::eligible(method, path) {
+        return true;
+    }
     if method == Method::POST && path == INTERNAL_PATH {
         return true;
     }
@@ -534,9 +551,14 @@ pub(crate) fn router() -> axum::Router<AppState> {
         .layer(axum::middleware::from_fn(limit_response))
 }
 async fn limit_response(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let invitation = invitations::path(request.uri().path());
     let mut response = next.run(request).await;
     if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        return error_response(fail(413, "invalid"));
+        return if invitation {
+            invitations::error(fail(413, "invalid"))
+        } else {
+            error_response(fail(413, "invalid"))
+        };
     }
     response.headers_mut().insert(
         "cache-control",

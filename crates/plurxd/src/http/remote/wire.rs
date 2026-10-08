@@ -226,6 +226,7 @@ pub(crate) enum Request {
     PairApprove(PairApprove),
     PairResult(PairResult),
     ListSessions { version: Version },
+    InvitationSessions { version: Version },
 }
 impl Request {
     pub fn target(&self) -> Option<&Target> {

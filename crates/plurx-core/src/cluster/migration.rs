@@ -2178,6 +2178,7 @@ pub async fn restore_cluster_backup_archive(
             apply_restore_image_changes(&mut connection, &manifest, remaps)?;
         crate::store::sharing::fence_restored_sharing(&connection)?;
         crate::store::remote::fence_restored_remote(&connection)?;
+        crate::store::invitations::fence_restored_invitations(&connection)?;
         drop(connection);
         File::open(&database)
             .and_then(|file| file.sync_all())
