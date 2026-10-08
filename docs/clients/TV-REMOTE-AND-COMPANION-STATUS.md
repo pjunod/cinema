@@ -1,6 +1,6 @@
 # Cinema remote status — build, review, and device evidence
 
-**Status:** foundations, desktop and Apple reviewed; end-to-end integration in progress ·
+**Status:** web, Apple, Android and server foundations reviewed; couch completion and invitations in progress ·
 **Updated:** 2026-10-08 · **Integration:** `effort/cinema-remotes`.
 
 [Implementation packets](TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md) define
@@ -17,11 +17,11 @@ Main integration is handed to `01a11907-f720-71b1-8c51-89902b919e6f`.
 | B02 web semantic router | PR [#865](http://192.168.4.7:3000/noirr/plurx/pulls/865), `502c98761f97` | No blocker in foundation scope | 22 remote + 7 existing keyboard checks; pinned daemon compile |
 | B03 Apple navigation | PR [#863](http://192.168.4.7:3000/noirr/plurx/pulls/863), `93f821c0f320` | No blocker in foundation scope | iOS/tvOS builds, 7 focused XCTest; physical walkthrough pending |
 | B04 storage/server relay | PR [#878](http://192.168.4.7:3000/noirr/plurx/pulls/878), `5d78eee7ace4` | Released to coordinator after exact-head review and static history pass | 16 focused checks; actual two-node signed HTTP and separate three-voter storage evidence |
-| B05 web companion | Final UI and owner-replacement walkthrough | Review in progress | Actual browser/server pairing, explicit acquire, playback ACK, restricted dialogs, offline local pause and revocation pass |
+| B05 web companion | PR [#883](http://192.168.4.7:3000/noirr/plurx/pulls/883), `f4d8ac12b502` | Released in parent review 107 | Actual browser/server pairing, explicit acquire, playback ACK, owner replacement, offline Pause/Stop, revocation and compact phone layout pass; physical CEC remains open |
 | B06 Apple receiver/companion | PR [#875](http://192.168.4.7:3000/noirr/plurx/pulls/875), `7e66c85c6f98`, composed through [#879](http://192.168.4.7:3000/noirr/plurx/pulls/879) | Reviewed and integrated into coordinator candidate | iOS/tvOS builds and 2 focused follow-up XCTest; earlier 19 cases passed before the narrow correction |
-| B07 Android receiver/companion | Receiver, companion and existing-player adapters built; final corrections running | Review in progress | APK/test APK compile, focused receiver/navigation checks and representative DTO smoke against B04 pass; device execution pending |
+| B07 Android receiver/companion | PR [#881](http://192.168.4.7:3000/noirr/plurx/pulls/881), `c3e2c6ab0f0e` | Released in parent review 106 | Both APKs compile; grouped 21 cases and final 2 correction cases pass; representative Router smoke passes, production native instrumentation unexecuted |
 | B08 desktop CEC | PR [#872](http://192.168.4.7:3000/noirr/plurx/pulls/872), `08258f51cbb4` | No blocker in standalone software packet | 16 Python + 12 Node checks and production-popup Chromium smoke with native port mocked; hardware pending |
-| B09 invitations | Approved server/broker contract; schema/admission build beginning | Design reviewed with explicit opt-out, dedupe, restore and resource bounds | Provider delivery and resident-service eligibility remain open |
+| B09 invitations | Storage/authority/admission slice built; home routes, broker and native adapters continue | Design reviewed; early restore/transaction findings corrected | Focused SQLite and actual three-voter contracts pass; provider delivery and resident-service eligibility remain open |
 | B10 integration handoff | Setup/recovery guide in [#877](http://192.168.4.7:3000/noirr/plurx/pulls/877); complete feature handoff waits on remaining packets | Pending | Ready packets handed off individually; whole feature not yet complete |
 
 ## Baseline and review record
@@ -221,6 +221,44 @@ Android OkHttp/UI path on a device. Ordinary navigation gaps are now explicit
 follow-up packets in implementation §11. A connected Google TV Streamer was
 found through read-only device inventory; no packet was installed or launched
 on it for physical acceptance.
+
+## Released web and Android composition
+
+The parent released Android in [review 106](http://192.168.4.7:3000/noirr/plurx/pulls/881#issuecomment-9265)
+and web in [review 107](http://192.168.4.7:3000/noirr/plurx/pulls/883#issuecomment-9273),
+then handed both frozen heads to the batch coordinator. Android's final review
+corrected claim-start monotonic pairing expiry and preserved an exact command
+ACK across a later queued response. Web's final correction enabled trusted
+assistive button activation without duplicating pointer/keyboard gestures.
+No physical screen-reader qualification is inferred from that regression.
+
+Forgejo refused direct candidate merges for both PRs. On the coordinator's
+request, the manager composed them from candidate
+`207447f8960d9d50048bd73459093a898582c3e3`. Merge
+`ad74bac1932fda1e4ad7e977357cd9f5988d772d` preserves Android's thirteen
+regression fields; merge `2dc75c392ded3030e28090b43dcca1c464db854e` preserves
+web's forty-seven. Both conflicts were confined to `tests/client-fixes.toml`;
+all parent rows survive unchanged as 501 distinct entries. Android, Apple,
+web and desktop CEC source/tests compare identically to their reviewed heads.
+Normal hooks passed (2m 10s and 32.21s); no native tests were repeated for
+catalog-only integration. This is local composition, not a main landing or a
+combined gate pass. Final history and candidate handoff remain coordinator
+inputs.
+
+Android's production OkHttp/Keystore/presence instrumentation compiles but
+was not executed: isolated fresh-data TV and phone emulator attempts stayed
+offline and were stopped. The connected physical Streamer remains untouched.
+The temporary B04 live Router fixture was stopped gracefully after consumers
+finished; its browser and synthetic DTO receipts remain evidence of those
+specific checks.
+
+The web couch builder starts from composed source `2dc75c392ded`; Apple couch
+starts from current candidate `207447f8960d`. Frozen foundation branches stay
+unchanged. Ordinary browsing gaps and locally operated CEC pairing remain
+software work. The invitation builder has a fixed native API contract and a
+verified storage slice; route/provider implementation is still in progress.
+Its background resident polling must use no-touch authority, just like worker
+admission, so polling cannot extend a dormant phone login's lifetime.
 
 ## Rust cache ownership — one worktree per target
 
