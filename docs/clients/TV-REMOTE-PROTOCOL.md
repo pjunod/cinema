@@ -204,7 +204,9 @@ nonce, and optional authorized playback summary. Never include filesystem
 paths, playable stream URLs, bearer tokens, pairing code, passwords, or an
 administrator screen's labels. Apply state monotonically per target/epoch;
 ignore older replies and erase state on identity change. Cap a state at 64
-KiB and labels at 256 UTF-8 bytes. Do not publish a full DOM or library dump.
+KiB and labels at 256 UTF-8 bytes. Presence may omit optional `focused_label`,
+`text_nonce` and `playback`, or send null; server state replies normalize them
+to null. Do not publish a full DOM or library dump.
 
 Playback summary carries `media`, title, desired playing state, position and
 duration in milliseconds, and bounded track choices. `media` is exactly one
@@ -265,7 +267,13 @@ HTTP 202 never substitutes for the receiver's outcome.
 Same-grant acquire preserves the current control epoch and sequence history.
 A controller must retain its sequence allocator across closing and reopening
 the remote. If its process lost that allocator, the next explicit request to
-control must establish a fresh epoch before sending. Renew/reconnect cannot
+control must establish a fresh epoch before sending. Automatic recovery of
+an observed own-grant epoch uses conditional takeover: a nonnull
+`control_epoch` must equal the current lease epoch or the server rejects
+`stale_control`. The control request must include `control_epoch`, even when
+its value is null. Null takeover is reserved for the user's explicit Take over
+action. This prevents an intervening phone's lease from being silently
+stolen back. Renew/reconnect cannot
 reset sequence numbers in an existing epoch. Retiring a controller request
 generation also clears its in-flight sending state; a late response cannot
 block a new controller forever.
@@ -279,7 +287,14 @@ challenge. A QR supplies the exact challenge ID; it must match. Never ask a
 viewer to transcribe a UUID.
 Pairing screen QR contains server instance ID, target and challenge ID; put
 any code in a URL fragment, remove it after parsing, and never auto-approve.
-No long-lived secret in a QR. Every claim creates a fresh random poll secret,
+The URI is `cinema-remote://pair`, with query fields `server_instance_id`,
+`owner_node_id`, `session_id`, `receiver_epoch`, `challenge_id` and fragment
+`code=<eight digits>`. It identifies the already selected server; it never
+chooses a new authenticated API origin. The pairing-start response includes
+`qr_modules`: a square array of ASCII 0/1 rows, width 21–177, without a quiet
+zone, or null if encoding is unavailable. Render with a four-module quiet
+zone and retain the manual code fallback. No long-lived secret appears in a
+QR. Every claim creates a fresh random poll secret,
 held by the claimant; an account peer cannot collect another claimant's
 returned grant. Consume approved results once and erase after sixty seconds.
 If delivery is lost, pair again rather than disclose an old secret.

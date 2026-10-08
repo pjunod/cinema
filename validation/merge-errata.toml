@@ -257,3 +257,43 @@ parents = ["cca4a09b997171ba91136b396f7d484097305fd0", "397dfa991fcd185d9c8199f7
 title = "fix(sharing): promote shared libraries with Source-owned playback and custody"
 pull = "828"
 reason = "Verified PR828 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All100 original trailers remain mandatory own-tree evidence; this row recognizes identity only and waives no checks."
+
+[[landings]]
+commit = "a93ece7e37014ebfc46510f0dc3ec0c00280dd76"
+tree = "87dee4c2d0a7635a639f9e412200000cbb20d1e2"
+parents = ["f6de43cd9df10e20816f49ab83c5542e73f194ab", "3fa57aa1ba80fb2d69644e395b562842d01e66bd"]
+title = "fix(remote): integrate reviewed receiver guard foundation"
+pull = "864"
+reason = "Verified local integration of reviewed Cinema PR #864 into the foundation candidate; the immutable merge subject omitted its PR number. Exact tree and ordered parents retain authored lineage. Recognition alone does not exempt original Regression-Test fields; the separate static-manifest omission is recorded explicitly."
+
+[[landings]]
+commit = "b856d114909c24aaef04bab6b08223ae5f3ea0b4"
+tree = "5a518e9d875e20ec05f5fdec2ef8574ff803ae19"
+parents = ["a93ece7e37014ebfc46510f0dc3ec0c00280dd76", "f9026e8e70e2572b3d46fe126e313ac7e40562e8"]
+title = "fix(clients): integrate reviewed web remote foundation"
+pull = "865"
+reason = "Verified local integration of reviewed Cinema PR #865 into the foundation candidate; the immutable merge subject omitted its PR number. Exact tree and ordered parents retain authored lineage. Recognition alone does not exempt original Regression-Test fields; the separate static-manifest omission is recorded explicitly."
+
+[[landings]]
+commit = "3163341ed044328af4b1c02b42b5ab5b8cc452a3"
+tree = "cd1249685e8a6ad3de1af5e1e60027247745a36f"
+parents = ["b856d114909c24aaef04bab6b08223ae5f3ea0b4", "93f821c0f320ab091b2adb8870fd0e5b17eaa81e"]
+title = "fix(apple): integrate reviewed native navigation foundation"
+pull = "863"
+reason = "Verified local integration of reviewed Cinema PR #863 into the foundation candidate; the immutable merge subject omitted its PR number. Exact tree and ordered parents retain authored lineage. Recognition alone does not exempt original Regression-Test fields; the separate static-manifest omission is recorded explicitly."
+
+[[landings]]
+commit = "2b21cc0354561c737b53c73f00804337024e3c61"
+tree = "a3340169ece0aa093fd92323c26cf23a1ec21cc7"
+parents = ["3163341ed044328af4b1c02b42b5ab5b8cc452a3", "502c98761f97955620e4bbbf7d710c2edd2693bf"]
+title = "chore(clients): integrate Cinema static manifest correction"
+pull = "865"
+reason = "Verified local integration of reviewed Cinema PR #865 into the foundation candidate; the immutable merge subject omitted its PR number. Exact tree and ordered parents retain authored lineage. Recognition alone does not exempt original Regression-Test fields; the separate static-manifest omission is recorded explicitly."
+
+[[errata]]
+commit = "f357ce983cb7c4702025cec8df0f6af28562c432"
+reason = "PR #873 receipt recovery landed with two class-qualified Python references that do not resolve. The canonical references are tests/validation/test_python_zero_failure_recovery.py::test_exact_zero_unit_history_and_prepare_refusal_import_no_passes and tests/validation/test_python_zero_failure_recovery.py::test_corrupt_or_contradictory_evidence_refuses; both were verified against this immutable merge tree. Effort gate4397 exposed the trailer error before unit execution. This exact landing erratum preserves failed-run evidence and authored history; it imports no passes and changes no policy, boundary or runtime."
+
+[[errata]]
+commit = "2b21cc0354561c737b53c73f00804337024e3c61"
+reason = "The local follow-up integration of reviewed PR #865 used a chore subject without a PR number and omitted Regression-Test fields, despite bringing corrective source502c98761f97955620e4bbbf7d710c2edd2693bf. That source registers the remote adapters in the generated jsconfig and corrects static annotations; node tests/web/jsconfig-generated.test.js checks the generated manifest against actual served rows, and node scripts/web-jsconfig --check rejects stale output. The complete effort-web-static-check passed after this correction with unchanged TypeScript diagnostic baseline. The exact immutable merge is recognized above. This landing-specific erratum records the missing fields without rewriting history, changing the boundary, claiming a new unit pass or exempting later landings."
