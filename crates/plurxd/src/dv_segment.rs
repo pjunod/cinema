@@ -606,6 +606,7 @@ async fn run_streaming(
         .as_ref()
         .map(SegmentWindow::args)
         .transpose()?;
+    let windowed = window_args.is_some();
     let request = stream.request;
     request.shape.frame_bytes()?;
     let (hardware, cpu) = request.admission.into_parts();
