@@ -7972,3 +7972,45 @@ proof. Preserve `tv-0e778892d-prepared-failure-diagnostic2.json` and its UI
 result. Both app runners terminate their owned app; their proxy forwards
 close and private control copies retire. Continuous physical audio/display
 and a successful native quality transition remain unmeasured.
+
+### 10.262 Fragment-derived cadence and first phone SDK handoff (2026-10-08)
+
+The candidate resolves minimum video sample duration from the actual bounded
+init/fragment sample tables, including trun, tfhd and trex defaults. It
+inspects only the item's media namespace, refuses redirects/encoded path
+escapes, encrypted/discontinuous/sliding timelines and multiple master
+variants, and bounds init/fragment bytes and sample counts. Its result is
+scoped to the inspected item interval. Valid asset-track minimum duration
+remains the first source. Missing or malformed proof retains the incumbent.
+Local and Shared continue decoded alignment with this duration; Shared still
+requires its eventual rendezvous to fit the inspected interval.
+
+The ninth phone case verifies real fragment cadence but refuses when a
+rendezvous chosen after inspection lies outside that interval. Local now
+chooses one future film instant before inspection/seek; all follow-up proof
+uses that same instant. Its future lead accounts for the existing inspection
+and alignment allowances within the original overlap. The rendezvous wait
+uses only that overlap's remaining time, rather than a fresh phase deadline;
+no physical overlap extension or exposure-fence removal occurs.
+
+The tenth build-222 case completes and adopts the 1080p successor from 720p.
+Eighteen SDK probes share one viewer attempt, advance 1.17–35.57s, stay
+playing, report zero access stalls and no empty buffer. The handoff changes
+its server session as expected; the last 720p / first 1080p probe clocks are
+19.44s / 21.27s. Fragment cadence verifies and no prepared-commit failure is
+reported. This is one successful SDK handoff, not a continuous physical
+audio/display measurement or the required repeated qualification campaign.
+Preserve `ios-0e778892d-prepared-failure-diagnostic{9,10}.json`. Client build
+222 remains paired with unchanged server component `0e778892d`.
+
+Three focused regressions cover real video duration/default resolution,
+malformed/missing duration and interval refusal, and namespace escape. Their
+source compiles for tvOS; iOS production/UI source compiles and strict lab
+signatures pass. Seventeen regression fields resolve statically; unit
+execution remains deferred.
+
+The post-startup CPU split preserves the actual encoder executable and
+daemon admission. It applies only to verified owned descendants and restores
+surviving threads. The optical run still fails (341.69ms upper hold, five
+capture gaps), so it supplies no remedy or production qualification. Its
+exact daemon and virtual display retire; receipts are copied locally.

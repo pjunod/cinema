@@ -11767,22 +11767,32 @@ extension PlayerController: PreparedSuccessorHost {
               preparedCommitStillOwned(commitAttempt), wantsPlayback else {
             return preparedCommitFailure(at: "surface")
         }
-        guard let frameDurationSeconds = await awaitPreparedFrameDuration(of: item),
-              preparedItem === item, preparedPlayer === successor,
-              preparedCommitStillOwned(commitAttempt), wantsPlayback else {
-            return preparedCommitFailure(at: "frame-duration")
-        }
         let rendezvousRate = preferredRate
         guard rendezvousRate.isFinite, rendezvousRate > 0,
               preparedOverlapRemainingMs > 1_000 else {
             return preparedCommitFailure(at: "rate-or-overlap")
         }
+        // Inspection and alignment can each consume their existing bounded
+        // allowance. Pick one future instant before either suspension, rather
+        // than inspecting one fragment then moving the rendezvous beyond it.
+        let leadWallMs = min(PreparedReplacementBounds.alignmentMs * 2, preparedOverlapRemainingMs - 1_000)
         let rendezvous = PreparedCommitRendezvous.plan(
             stagedFilmPositionMs: preparedFilmPositionMs,
             incumbentFilmPositionMs: realPositionMs(),
             mediaOriginMs: action.mediaOriginMs,
-            leadMs: Int(min(16, Double(rendezvousRate)) * 1_000)
+            leadMs: Int(min(16, Double(rendezvousRate)) * Double(leadWallMs))
         )
+        guard let cadence = await awaitPreparedFrameDuration(of: item,
+                targetItemSeconds: Double(rendezvous.itemPositionMs) / 1000),
+              preparedItem === item, preparedPlayer === successor,
+              preparedCommitStillOwned(commitAttempt), wantsPlayback,
+              preferredRate == rendezvousRate else {
+            return preparedCommitFailure(at: "frame-duration")
+        }
+        let frameDurationSeconds = cadence.frameDurationSeconds
+        guard cadence.covers(itemPositionMs: rendezvous.itemPositionMs) else {
+            return preparedCommitFailure(at: "cadence-interval")
+        }
         // Bounded, because an unbounded one does not degrade the way it looks
         // as though it would. The incumbent does keep playing — but the
         // readiness monitor has already been dropped two statements above, so
@@ -12091,8 +12101,8 @@ extension PlayerController: PreparedSuccessorHost {
 
     /// Load cadence from the actual successor track, within the original
     /// overlap. Unknown cadence retains the incumbent rather than inventing fps.
-    private func awaitPreparedFrameDuration(of item: AVPlayerItem) async -> Double? {
-        await preparedDecodedFrameDuration(of: item, boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs)) { [weak self] detail in
+    private func awaitPreparedFrameDuration(of item: AVPlayerItem, targetItemSeconds: Double) async -> PreparedDecodedCadence? {
+        await preparedDecodedFrameDuration(of: item, boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs), targetItemSeconds: targetItemSeconds) { [weak self] detail in
             self?.noteSurfaceLogOnly("prepared_cadence:\(detail)")
         }
     }
@@ -12114,7 +12124,11 @@ extension PlayerController: PreparedSuccessorHost {
         frameDurationSeconds: Double, rate: Float, commit: Attempt
     ) async -> Bool {
         let began = Int(ProcessInfo.processInfo.systemUptime * 1_000)
-        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < PreparedReplacementBounds.alignmentMs,
+        // A fixed future rendezvous can be farther away when inspection/seek
+        // finish early. Spend only the original overlap's remaining time;
+        // never create a fresh preparation deadline at this suspension.
+        let remaining = preparedOverlapRemainingMs
+        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < remaining,
               preparedOverlapRemainingMs > 0 {
             guard !Task.isCancelled, preparedItem === item, preparedPlayer === successor,
                   preparedCommitStillOwned(commit), wantsPlayback, preferredRate == rate,
@@ -13049,10 +13063,13 @@ extension SharedPlayerController: PreparedSuccessorHost {
               player.currentItem != nil, let adoption = preparedAdoption,
               adoption.playback.start.response.sessionId == action.sessionId
         else { return .refused }
-        guard let frameDurationSeconds = await preparedDecodedFrameDuration(of: item, boundMs: PreparedReplacementBounds.alignmentMs),
+        guard let cadence = await preparedDecodedFrameDuration(of: item, boundMs: PreparedReplacementBounds.alignmentMs,
+                targetItemSeconds: Double(currentPositionMs()) / 1000),
               !closing, playing, preparedItem === item, preparedPlayer === successor else { return .refused }
         let rendezvous = PreparedCommitRendezvous.plan(stagedFilmPositionMs: preparedFilmPositionMs,
                                                        incumbentFilmPositionMs: currentPositionMs(), mediaOriginMs: 0)
+        guard cadence.covers(itemPositionMs: rendezvous.itemPositionMs) else { return .refused }
+        let frameDurationSeconds = cadence.frameDurationSeconds
         guard await alignPrepared(item, to: rendezvous.itemPositionMs), !closing,
               preparedItem === item, preparedPlayer === successor else {
             discardPreparedSuccessor()
@@ -13084,12 +13101,15 @@ extension SharedPlayerController: PreparedSuccessorHost {
 /// Both Local and Shared use the track's sample grid; absence never invents fps.
 @MainActor
 private func preparedDecodedFrameDuration(
-    of item: AVPlayerItem, boundMs remaining: Int,
+    of item: AVPlayerItem, boundMs remaining: Int, targetItemSeconds: Double,
     report: (@MainActor (String) -> Void)? = nil
-) async -> Double? {
+) async -> PreparedDecodedCadence? {
         guard remaining > 0 else { return nil }
-        var result: Double?
+        var result: PreparedDecodedCadence?
+        var finished = false
+        let began = ProcessInfo.processInfo.systemUptime
         let task = Task { @MainActor in
+            defer { finished = true }
             do {
                 let tracks = try await item.asset.loadTracks(withMediaType: .video)
                 guard !Task.isCancelled else { return }
@@ -13103,21 +13123,27 @@ private func preparedDecodedFrameDuration(
                 let seconds = duration?.seconds ?? 0
                 let valid = seconds.isFinite && seconds > 0 && seconds <= 1
                 report?("duration_valid=\(valid):timescale=\(duration?.timescale ?? 0):value=\(duration?.value ?? 0)")
-                result = valid ? seconds : 0
-            } catch {
-                if !Task.isCancelled {
-                    report?("metadata_error_code=\((error as NSError).code)")
-                    result = 0
+                if valid {
+                    result = PreparedDecodedCadence(frameDurationSeconds: seconds)
+                    return
                 }
+            } catch {
+                if !Task.isCancelled { report?("metadata_error_code=\((error as NSError).code)") }
             }
+            guard !Task.isCancelled, let asset = item.asset as? AVURLAsset else { return }
+            let left = remaining - Int((ProcessInfo.processInfo.systemUptime - began) * 1000)
+            let inspected = await HLSFragmentCadence.inspect(url: asset.url, itemSeconds: targetItemSeconds, boundMs: left)
+            guard !Task.isCancelled else { return }
+            result = inspected
+            report?("fragment_verified=\(inspected != nil)")
         }
         let cadence = await awaitBoundedValue(
             boundMs: remaining, pollMs: PreparedReplacementBounds.pollMs,
             now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
             sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
-            read: { result }
+            read: { finished ? (result ?? PreparedDecodedCadence(frameDurationSeconds: 0)) : nil }
         )
         task.cancel()
         if cadence == nil { report?("deadline_exhausted=true") }
-        return cadence.flatMap { $0 > 0 ? $0 : nil }
+        return cadence.flatMap { $0.frameDurationSeconds > 0 ? $0 : nil }
 }
