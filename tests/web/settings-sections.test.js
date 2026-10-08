@@ -115,6 +115,32 @@ test("Mac processing save writes only the operator choice despite unavailable re
   assert.equal(card.outerHTML,"SAVED:true");
 });
 
+test("Mac HEVC output remains enabled with unavailable compatibility and has independent graduation", () => {
+  const render=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("macosHevcOutputCard")}\nreturn macosHevcOutputCard;`)(
+      value=>value, title=>title, (id,label,note,on)=>`TOG:${id}:${on}`,
+      ()=>"unavailable", (waiting,destination)=>`${waiting} ${destination}`, name=>`SAVE:${name}`);
+  const html=render({macos_hevc_output_enabled:true,macos_video_processing_enabled:false},{unavailable:"not observed"});
+  assert.match(html,/TOG:pmacoshevc:true/);
+  assert.match(html,/SAVE:saveMacosHevcOutput/);
+  assert.match(html,/named HDR display/);
+  assert.match(html,/permanent HEVC output switch moves to Playback/);
+  assert.doesNotMatch(html,/ disabled(?:[=>\s]|$)/);
+});
+
+test("Mac HEVC output save accepts the operator choice without changing processing", async () => {
+  const card={outerHTML:""}, button={disabled:false,closest:()=>card}, calls=[];
+  const save=new Function("document","api","cacheSettings","macosHevcOutputCard","DEVELOPER_READINESS","toast",
+    `${shippedSource("saveMacosHevcOutput")}\nreturn saveMacosHevcOutput;`)(
+      {getElementById:id=>id==="pmacoshevc"?{checked:true}:{textContent:""}},
+      async(path,options)=>{calls.push({path,options});return {macos_hevc_output_enabled:true,macos_video_processing_enabled:false};},
+      value=>value, settings=>`SAVED:${settings.macos_hevc_output_enabled}:${settings.macos_video_processing_enabled}`,
+      {unavailable:"runtime unknown"},()=>{});
+  await save(button);
+  assert.deepEqual(calls,[{path:"/settings",options:{method:"PUT",body:{macos_hevc_output_enabled:true}}}]);
+  assert.equal(card.outerHTML,"SAVED:true:false");
+});
+
 test("Mac compatibility reprobe never sends or changes the saved switch", async () => {
   const calls=[], button={disabled:false};
   const reprobe=new Function("document","api","applyDeveloperReadiness","toast",
@@ -607,7 +633,7 @@ function developerPanels(){
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       // D6 (2026-10-04): the network priors switch sits beside display Auto.
       shippedSource("networkPriorsCard"),
-      shippedSource("macosVideoProcessingCard"),
+      shippedSource("macosVideoProcessingCard"), shippedSource("macosHevcOutputCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
       shippedSource("rateControlCard"),

@@ -577,6 +577,8 @@ pub struct TranscodeManager {
     /// Saved operator choice; captured with one node-local compatibility
     /// report for each new immutable plan, never used as a probe gate.
     macos_video_processing_enabled: Arc<AtomicBool>,
+    /// Independent operator choice for newly negotiated HEVC output.
+    macos_hevc_output_enabled: AtomicBool,
     /// Serialize durable preference writes and replicated reload publication;
     /// a stale read cannot overwrite a just-saved hot value.
     macos_video_preference_update: Mutex<()>,

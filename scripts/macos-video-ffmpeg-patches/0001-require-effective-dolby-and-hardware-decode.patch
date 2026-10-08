@@ -1,0 +1,235 @@
+--- a/libavcodec/avcodec.h
++++ b/libavcodec/avcodec.h
+@@ -2046,6 +2046,9 @@
+  * This will be useful for background processing without interrupting normal playback.
+  */
+ #define AV_HWACCEL_FLAG_LOW_PRIORITY (1 << 4)
++
++/** Require and verify physical hardware decoding (VideoToolbox only). */
++#define AV_HWACCEL_FLAG_REQUIRE_HARDWARE (1 << 5)
+ 
+ /**
+  * @}
+--- a/libavcodec/hevc/hevcdec.c
++++ b/libavcodec/hevc/hevcdec.c
+@@ -3176,6 +3176,17 @@
+             return ret;
+     }
+ 
++    /* Metadata belongs to the picture being initialized here, before DPB
++     * reordering. A current RPU may explicitly reuse mapping/color state;
++     * cached state without a current associated RPU is not such reuse.
++     * Header-only packets do not initialize a picture and are not rejected.
++     */
++    if (s->strict_dovi && !s->rpu_buf) {
++        av_log(s->avctx, AV_LOG_ERROR,
++               "Required current-access-unit Dolby state missing at pts %"PRId64"\n", out->pts);
++        return AVERROR_INVALIDDATA;
++    }
++
+     if (s->rpu_buf) {
+         AVFrameSideData *rpu = av_frame_new_side_data_from_buf(out, AV_FRAME_DATA_DOVI_RPU_BUFFER, s->rpu_buf);
+         if (!rpu)
+@@ -3186,6 +3197,10 @@
+ 
+     if ((ret = ff_dovi_attach_side_data(&s->dovi_ctx, out)) < 0)
+         return ret;
++    if (s->strict_dovi && !av_frame_get_side_data(out, AV_FRAME_DATA_DOVI_METADATA)) {
++        av_log(s->avctx, AV_LOG_ERROR, "Required effective Dolby mapping/color state incomplete.\n");
++        return AVERROR_INVALIDDATA;
++    }
+ 
+     if (s->sei.common.dynamic_hdr_vivid.info) {
+         if (!av_frame_side_data_add(&out->side_data, &out->nb_side_data,
+@@ -3805,7 +3820,11 @@
+         if (ret < 0) {
+             av_buffer_unref(&s->rpu_buf);
+             av_log(s->avctx, AV_LOG_WARNING, "Error parsing DOVI NAL unit.\n");
+-            /* ignore */
++            if (s->strict_dovi) {
++                ff_dovi_ctx_flush(&s->dovi_ctx);
++                goto fail;
++            }
++            /* Preserve legacy permissive decoding unless strict_dovi is selected. */
+         }
+     }
+ 
+@@ -4132,6 +4151,7 @@
+     if (ret < 0)
+         return ret;
+ 
++    s->strict_dovi = s0->strict_dovi;
+     ff_dovi_ctx_replace(&s->dovi_ctx, &s0->dovi_ctx);
+ 
+     ret = av_buffer_replace(&s->sei.common.dynamic_hdr_vivid.info,
+@@ -4254,6 +4274,8 @@
+ 
+ static const AVOption options[] = {
+     { "apply_defdispwin", "Apply default display window from VUI", OFFSET(apply_defdispwin),
++        AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
++    { "strict_dovi", "Require effective Dolby state associated with every decoded picture", OFFSET(strict_dovi),
+         AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
+     { "strict-displaywin", "strictly apply default display window size", OFFSET(apply_defdispwin),
+         AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
+--- a/libavcodec/hevc/hevcdec.h
++++ b/libavcodec/hevc/hevcdec.h
+@@ -584,6 +584,7 @@
+     int64_t pkt_dts;
+ 
+     AVBufferRef *rpu_buf;       ///< 0 or 1 Dolby Vision RPUs.
++    int strict_dovi;          ///< Require current access-unit effective Dolby state.
+     DOVIContext dovi_ctx;       ///< Dolby Vision decoding context
+ } HEVCContext;
+ 
+--- a/libavcodec/options_table.h
++++ b/libavcodec/options_table.h
+@@ -404,6 +404,7 @@
+ {"allow_profile_mismatch", "attempt to decode anyway if HW accelerated decoder's supported profiles do not exactly match the stream", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
+ {"unsafe_output", "allow potentially unsafe hwaccel frame output that might require special care to process successfully", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_UNSAFE_OUTPUT }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
+ {"low_priority", "attempt to run decode pipeline at a lower priority than is used for realtime decoding", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_LOW_PRIORITY }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
++{"require_hardware", "require verified VideoToolbox hardware decoding", 0, AV_OPT_TYPE_CONST, {.i64 = AV_HWACCEL_FLAG_REQUIRE_HARDWARE }, INT_MIN, INT_MAX, V | D, .unit = "hwaccel_flags"},
+ {"extra_hw_frames", "Number of extra hardware frames to allocate for the user", OFFSET(extra_hw_frames), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, V|D },
+ {"discard_damaged_percentage", "Percentage of damaged samples to discard a frame", OFFSET(discard_damaged_percentage), AV_OPT_TYPE_INT, {.i64 = 95 }, 0, 100, V|D },
+ {"side_data_prefer_packet", "Comma-separated list of side data types for which user-supplied (container) data is preferred over coded bytestream",
+--- a/libavcodec/videotoolbox.c
++++ b/libavcodec/videotoolbox.c
+@@ -1018,6 +1018,21 @@
+         av_log(avctx, AV_LOG_VERBOSE, "VideoToolbox reported invalid data.\n");
+         return AVERROR_INVALIDDATA;
+     case 0:
++        if (avctx->hwaccel_flags & AV_HWACCEL_FLAG_REQUIRE_HARDWARE) {
++            CFTypeRef hardware = NULL;
++            status = VTSessionCopyProperty(videotoolbox->session,
++                         kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
++                         NULL, &hardware);
++            if (status || !hardware || CFGetTypeID(hardware) != CFBooleanGetTypeID() ||
++                !CFBooleanGetValue((CFBooleanRef)hardware)) {
++                if (hardware)
++                    CFRelease(hardware);
++                av_log(avctx, AV_LOG_ERROR, "Required VideoToolbox hardware decoder was not verified.\n");
++                return AVERROR(ENOSYS);
++            }
++            CFRelease(hardware);
++            av_log(avctx, AV_LOG_VERBOSE, "VideoToolbox hardware decoder verified.\n");
++        }
+         if (avctx->skip_frame >= AVDISCARD_NONKEY) {
+             status = VTSessionSetProperty(videotoolbox->session,
+                                           kVTDecompressionPropertyKey_OnlyTheseFrames,
+--- a/libavfilter/vf_tonemap_videotoolbox.m
++++ b/libavfilter/vf_tonemap_videotoolbox.m
+@@ -24,6 +24,7 @@
+ #include "libavutil/imgutils.h"
+ #include "libavutil/mem.h"
+ #include "libavutil/opt.h"
++#include "dovi_required.h"
+ #include "libavutil/objc.h"
+ #include "libavutil/hwcontext.h"
+ 
+@@ -99,6 +100,7 @@
+     int                         tonemap_mode;
+     enum AVPixelFormat          format;
+     int                         apply_dovi;
++    int                         require_dovi;
+     double                      peak;
+     double                      src_peak;
+     double                      target_peak;
+@@ -901,6 +903,14 @@
+ 
+     if (ctx->apply_dovi)
+         dovi_sd = av_frame_get_side_data(input, AV_FRAME_DATA_DOVI_METADATA);
++
++    if (ctx->require_dovi &&
++        (err = ff_dovi_metadata_required(dovi_sd)) < 0) {
++        av_log(ctx, AV_LOG_ERROR,
++               "Required effective Dolby metadata missing or unsupported at pts %"PRId64"\n",
++               input->pts);
++        goto fail;
++    }
+ 
+     // check DOVI->HDR10/HLG
+     if (!dovi_sd) {
+@@ -1190,6 +1200,7 @@
+         { "full",          0,       0,                 AV_OPT_TYPE_CONST, { .i64 = AVCOL_RANGE_JPEG },         0, 0, FLAGS, .unit = "range" },
+     { "format",      "Output pixel format", OFFSET(format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_NONE }, AV_PIX_FMT_NONE, INT_MAX, FLAGS },
+     { "apply_dovi",  "Apply Dolby Vision metadata if possible", OFFSET(apply_dovi), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
++    { "require_dovi", "Require supported effective Dolby metadata on every rendered frame", OFFSET(require_dovi), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+     { "peak",        "Signal peak override", OFFSET(peak), AV_OPT_TYPE_DOUBLE, { .dbl = 0 }, 0, DBL_MAX, FLAGS },
+     { "param",       "Tonemap parameter",   OFFSET(param), AV_OPT_TYPE_DOUBLE, { .dbl = NAN }, DBL_MIN, DBL_MAX, FLAGS },
+     { "desat",       "Desaturation parameter",   OFFSET(desat_param), AV_OPT_TYPE_DOUBLE, { .dbl = 0 }, 0, DBL_MAX, FLAGS },
+--- a/libavfilter/vf_tonemapx.c
++++ b/libavfilter/vf_tonemapx.c
+@@ -30,6 +30,7 @@
+ #include "libavutil/mem.h"
+ #include "libavutil/mem_internal.h"
+ #include "libavutil/opt.h"
++#include "dovi_required.h"
+ #include "libavutil/cpu.h"
+ 
+ #include "vf_tonemapx.h"
+@@ -92,6 +93,7 @@
+     double peak;
+     double src_peak;
+     int apply_dovi;
++    int require_dovi;
+ 
+     const AVLumaCoefficients *coeffs, *ocoeffs;
+ 
+@@ -1514,6 +1516,14 @@
+ 
+     if (s->apply_dovi) {
+         dovi_sd = av_frame_get_side_data(in, AV_FRAME_DATA_DOVI_METADATA);
++    }
++
++    if (s->require_dovi &&
++        (ret = ff_dovi_metadata_required(dovi_sd)) < 0) {
++        av_log(s, AV_LOG_ERROR,
++               "Required effective Dolby metadata missing or unsupported at pts %"PRId64"\n",
++               in->pts);
++        goto fail;
+     }
+ 
+     /* read peak from side data if not passed in */
+@@ -1946,6 +1956,7 @@
+     { "desat",        "desaturation strength", OFFSET(desat), AV_OPT_TYPE_DOUBLE, {.dbl = 0}, 0, DBL_MAX, FLAGS },
+     { "peak",         "signal peak override", OFFSET(peak), AV_OPT_TYPE_DOUBLE, {.dbl = 0}, 0, DBL_MAX, FLAGS },
+     { "apply_dovi",  "Apply Dolby Vision metadata if possible", OFFSET(apply_dovi), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
++    { "require_dovi", "Require supported effective Dolby metadata on every rendered frame", OFFSET(require_dovi), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+     { NULL }
+ };
+ 
+--- /dev/null
++++ b/libavfilter/dovi_required.h
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later
++ * Optional renderer-boundary contract for base-layer-only Dolby processing.
++ * The decoder attaches resolved mapping/color state to the decoded frame;
++ * raw RPU presence is neither necessary nor sufficient for this contract.
++ */
++#ifndef AVFILTER_DOVI_REQUIRED_H
++#define AVFILTER_DOVI_REQUIRED_H
++#include "libavutil/dovi_meta.h"
++#include "libavutil/error.h"
++#include "libavutil/frame.h"
++
++static inline int ff_dovi_metadata_required(const AVFrameSideData *sd)
++{
++    const AVDOVIMetadata *m;
++    const AVDOVIRpuDataHeader *h;
++    if (!sd || sd->size < sizeof(AVDOVIMetadata))
++        return AVERROR_INVALIDDATA;
++    m = (const AVDOVIMetadata *)sd->data;
++#define CHECK_OFFSET(field, type) \
++    if (m->field < sizeof(*m) || m->field > sd->size || \
++        sizeof(type) > sd->size - m->field) \
++        return AVERROR_INVALIDDATA
++    CHECK_OFFSET(header_offset, AVDOVIRpuDataHeader);
++    CHECK_OFFSET(mapping_offset, AVDOVIDataMapping);
++    CHECK_OFFSET(color_offset, AVDOVIColorMetadata);
++#undef CHECK_OFFSET
++    h = av_dovi_get_header(m);
++    /* Match the CPU renderer's supported reshaping domain. */
++    if (!h->disable_residual_flag || h->vdr_rpu_profile != 0 || h->bl_bit_depth != 10)
++        return AVERROR_INVALIDDATA;
++    return 0;
++}
++#endif

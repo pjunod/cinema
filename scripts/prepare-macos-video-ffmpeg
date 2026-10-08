@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Prepare pinned Jellyfin + explicit Dolby patch in a new private directory.
+
+This prepares inspectable source and a private build entry point, not a
+qualified executable. The entry point reuses Jellyfin dependency recipes but
+skips its global Homebrew installer. No installed package is changed.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import tarfile
+
+
+def load_package_script():
+    path = Path(__file__).with_name("build-macos-video-ffmpeg")
+    loader = importlib.machinery.SourceFileLoader("mac_video_package", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def prepare(archive, output, jobs):
+    package = load_package_script()
+    if package.digest(archive) != package.SOURCE_SHA256:
+        raise ValueError("source archive checksum mismatch")
+    if not output.is_absolute() or output.exists():
+        raise ValueError("output must be an absolute new private directory")
+    repo = Path(__file__).resolve().parent.parent
+    if output.is_relative_to(repo) or any(output.is_relative_to(Path(p)) for p in
+            ["/Applications", "/Library", "/System", "/usr", "/opt"]):
+        raise ValueError("source must remain outside checkout and global paths")
+    output.mkdir(parents=True)
+    import shutil
+    shutil.copyfile(archive, output / "jellyfin-ffmpeg-source.tar.gz")
+    source = output / "source"
+    source.mkdir()
+    with tarfile.open(archive) as tar:
+        for member in tar:
+            rel = Path(*Path(member.name).parts[1:])
+            if rel.is_absolute() or ".." in rel.parts or member.issym() or member.islnk():
+                raise ValueError("unsafe source member")
+            if member.isfile():
+                target = source / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(tar.extractfile(member).read())
+                target.chmod(member.mode & 0o777)
+    patches = []
+    for line in (source / "debian/patches/series").read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            patches.append(source / "debian/patches" / line.split()[0])
+    local = sorted(Path(__file__).with_name("macos-video-ffmpeg-patches").glob("*.patch"))
+    if not local:
+        raise ValueError("no local Dolby contract patch")
+    retained = output / "local-patches"
+    retained.mkdir()
+    for patch in local:
+        shutil.copyfile(patch, retained / patch.name)
+    for patch in patches + local:
+        subprocess.run(["/usr/bin/patch", "-p1", "--batch", "--forward", "-i", str(patch.resolve())],
+                       cwd=source, check=True, stdout=subprocess.DEVNULL)
+    # Upstream setup installs/uninstalls global tools: replace only that stage.
+    # Dependency recipes still install statically into this private prefix.
+    setup = source / "builder/images/macos/00-dep.sh"
+    setup.write_text("#!/bin/bash\nffbuild_macbase() { :; }\n")
+    builder = source / "builder/buildmac.sh"
+    text = builder.read_text().replace('export FFBUILD_PREFIX="/opt/ffbuild/prefix"',
+            'export FFBUILD_PREFIX="${PLURX_BUILD_ROOT:?}/prefix"')
+    start = text.index('if [[ -f "debian/patches/series" ]]')
+    end = text.index("\n./configure", start)
+    text = text[:start] + text[end:]
+    text = text.replace("--prefix=/ffbuild/prefix", '--prefix="$FFBUILD_PREFIX"')
+    builder.write_text(text)
+    tools = output / "bin"
+    tools.mkdir()
+    for name, script in [("git-mini-clone", "git-mini-clone.sh"),
+                         ("retry-tool", "retry-tool.sh"), ("check-wget", "check-wget.sh")]:
+        p = tools / name
+        p.write_bytes((source / "builder/images/base" / script).read_bytes())
+        p.chmod(0o755)
+    (tools / "nproc").write_text(f"#!/bin/sh\nprintf '%s\\n' '{jobs}'\n")
+    (tools / "nproc").chmod(0o755)
+    entry = output / "build.sh"
+    entry.write_text('#!/bin/bash\nset -euo pipefail\nPLURX_BUILD_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexport PLURX_BUILD_ROOT\nexport PATH="$PLURX_BUILD_ROOT/bin:$PATH"\nfor tool in wget git cmake meson ninja pkg-config autoconf automake libtoolize nasm; do\n    command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }\ndone\nxcrun -sdk macosx metal -v\nexec /bin/bash "$PLURX_BUILD_ROOT/source/builder/buildmac.sh"\n')
+    entry.chmod(0o755)
+    facts = {"schema_version": 1, "source_commit": package.COMMIT,
+             "source_sha256": package.SOURCE_SHA256,
+             "local_patches": {p.name: package.digest(p) for p in local},
+             "contract": {"renderer": "require_dovi=1", "decoder": "hwaccel_flags=+require_hardware",
+                          "parse_errors": "err_detect=explode", "decode_metadata": "strict_dovi=1"},
+             "qualification": "source-prepared-only", "jobs": jobs}
+    (output / "prepared-source.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
+    return facts
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-archive", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--jobs", type=int, default=2)
+    args = parser.parse_args()
+    if not 1 <= args.jobs <= 8:
+        parser.error("jobs must be between 1 and 8")
+    print(json.dumps(prepare(args.source_archive, args.output, args.jobs), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

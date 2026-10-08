@@ -73,6 +73,7 @@ impl TranscodeManager {
             ),
             automatic_decoder_recovery: AtomicBool::new(false),
             macos_video_processing_enabled: Arc::new(AtomicBool::new(false)),
+            macos_hevc_output_enabled: AtomicBool::new(false),
             macos_video_preference_update: Mutex::new(()),
             macos_video_probe,
             hooks: crate::seam_hooks::HookSlot::new(&NoopTranscodeManagerHooks),
