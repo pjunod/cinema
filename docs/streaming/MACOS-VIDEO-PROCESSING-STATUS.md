@@ -16,8 +16,9 @@ M0–M3 implementation is integrated at `93658e211`; independent adversarial
 review found four P2 defects and one producer-identity defect. All findings are corrected and independently accepted. The complete source
 is integrated at `575a68abc`, including AR-05 launch binding and positive
 offline part completion. Draft PR #870
-is ready for the designated merge coordinator; units and main qualification
-belong to that queue. No installed packages or
+was handed to the designated merge coordinator at `aaaa2d814`; units and
+main qualification belong to that queue. Queue admission and main landing
+remain pending. No installed packages or
 live services have changed. The initial delivery remains measured SDR scaling
 and HDR10-to-SDR processing; P5 experiments occur early without prematurely
 enabling Dolby processing. Extensions retain their independent acceptance.
@@ -321,10 +322,10 @@ Separate scope does not imply that implementation or qualification is done.
 | R-04 | Explicit adversarial coverage of harness/manager/settings builder | Complete: harness/daemon candidate and AR-05 launch/receipt repairs independently accepted |
 | R-05 | Explicit adversarial coverage of fixture/runtime builder | Complete: original candidate reviewed; AR-02–AR-04 corrections independently accepted |
 | R-06 | Cross-builder integration review, root causes and no watchdog/gate cruft | Complete: all three builders and cross-builder interfaces independently reviewed; final offline completion repair accepted |
-| R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | Ready for coordinator: all findings resolved; no unit suites during building; coordinator retains valid evidence and reruns failed/invalidated checks only |
-| R-08 | Current-main integration, exact-tree gate/qualification receipt and regression landing lines | Merge coordinator owns queue and main landing; effort supplies reviewed code and handles behavior-changing fixes; reviewed draft #870 ready for queue admission; main landing not yet qualified |
-| R-09 | Retain reproducible sanitized receipts, exact commands, limits and autonomous decisions | Initial/revised experiments plus VOD/P5 diagnostics retained in indexed evidence document and 1.20 MB raw archive, including isolated settings/probe and actual SDR/HDR VOD receipts; full production qualification pending |
-| R-10 | Remove own transient clones, benchmark media, caches and obsolete branches after retention | Pending completion; do not remove user files or useful unmerged work |
+| R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | Sent to coordinator at `aaaa2d814`: all findings resolved; no unit suites during building; coordinator retains valid evidence and reruns failed/invalidated checks only |
+| R-08 | Current-main integration, exact-tree gate/qualification receipt and regression landing lines | Merge coordinator owns queue and main landing; effort supplies reviewed code and handles behavior-changing fixes; reviewed draft #870 handed off; queue admission and main landing not yet qualified |
+| R-09 | Retain reproducible sanitized receipts, exact commands, limits and autonomous decisions | Initial/revised experiments plus VOD/P5 diagnostics retained in indexed evidence document and 1.20 MB raw archive, including isolated settings/probe and actual SDR/HDR VOD receipts; archive and all 394 retained-file hashes verified; full production qualification pending |
+| R-10 | Remove own transient clones, benchmark media, caches and obsolete branches after retention | Clean builder clones, experiment media/private daemon state and redundant package/source downloads removed after verified archive retention and remote push. Manager clone, final Jellyfin package and warm compiler target retained for the coordinator; final disposal follows queue ownership/qualification |
 
 ## 6. Completion accounting
 
