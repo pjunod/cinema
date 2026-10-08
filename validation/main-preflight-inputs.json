@@ -474,6 +474,19 @@
       "reason": "Audited actual tool/corpus/import closure; synthetic receipt/probe fixtures."
     },
     {
+      "id_prefix": "operations:test_dv_quality.",
+      "inputs": [
+        "validation/__init__.py",
+        "tools/dv_quality/run.py",
+        "tools/dv_quality/metrics.py",
+        "tools/dv_quality/metric_vectors.json",
+        "tools/dv_quality/COLOUR-LICENSE",
+        "tools/dv_quality/PU21-LICENSE",
+        "tools/dv_quality/example.py"
+      ],
+      "reason": "Offline comparator/import/vector closure; generated tiny RGB frames and temporary manifests. No decoder, external renderer, network or production fixture execution."
+    },
+    {
       "id_prefix": "operations:test_codec_hdr_parent_geometry.",
       "inputs": [
         "validation/__init__.py",
