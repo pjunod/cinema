@@ -20,14 +20,19 @@ export function installBridge(epoch,workerId="development",operation=1){
   function probe(credit){
     if(!alive())return {ready:false};
     const now=performance.now();lastProbe=now;
-    for(const [nonce,deadline] of credits)if(now>=deadline)credits.delete(nonce);
+    for(const [nonce,value] of credits)if(now>=value.deadline)credits.delete(nonce);
     if(credits.size>=8)credits.delete(credits.keys().next().value);
-    credits.set(credit,now+750);return {ready:true};
+    const context=typeof CinemaRemoteLocalPhysical!=="undefined"?CinemaRemoteLocalPhysical.snapshot():CinemaRemote.snapshotPhysical?.()||CinemaRemote.snapshot();
+    credits.set(credit,{deadline:now+750,context});return {ready:true};
   }
   function input(key,credit,bindingEpoch){
     const now=performance.now();
     if(bindingEpoch!==epoch||!alive()||now-lastProbe>=1000)return "unavailable";
-    const deadline=credits.get(credit);if(deadline===undefined||now>=deadline)return "expired";
+    const offered=credits.get(credit);if(!offered||now>=offered.deadline)return "expired";
+    if(key==="select"){
+      const current=typeof CinemaRemoteLocalPhysical!=="undefined"?CinemaRemoteLocalPhysical.snapshot():CinemaRemote.snapshotPhysical?.()||CinemaRemote.snapshot();
+      if(JSON.stringify(current)!==JSON.stringify(offered.context))return "stale_focus";
+    }
     const directions=["up","down","left","right"];
     if(![...directions,"select","back","home","play","pause","play_pause","stop"].includes(key))return "invalid";
     // Local physical input retires network work, then captures its own context.
@@ -42,7 +47,9 @@ export function installBridge(epoch,workerId="development",operation=1){
       }
       action={type:"set_playing",playing};
     }
-    return CinemaRemote.dispatch(action,{...CinemaRemote.snapshot(),source:"local_cec"});
+    if(typeof CinemaRemoteLocalPhysical!=="undefined")return CinemaRemoteLocalPhysical.dispatch(action,offered.context);
+    const context={...(CinemaRemote.snapshotPhysical?.()||CinemaRemote.snapshot()),source:"local_cec"};
+    return typeof CinemaRemote.dispatchPhysical==="function"?CinemaRemote.dispatchPhysical(action,context):CinemaRemote.dispatch(action,context);
   }
   globalThis.CinemaDesktopBridge={epoch,workerId,operation,probe,input,disable};
   return {ready:true,epoch};

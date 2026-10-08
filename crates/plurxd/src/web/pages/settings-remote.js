@@ -49,16 +49,20 @@ async function cinemaRemoteRegisterScreen(event){
   if(!event?.isTrusted||!document.hasFocus())return;const identity=cinemaRemoteIdentity();if(!identity)return;
   if(!navigator.locks?.request){toast("Receiver unavailable: this browser needs Web Locks. Your saved choice is unchanged.");return;}
   const name=cinemaRemoteText((/** @type {HTMLInputElement|null} */(document.getElementById("cinema-screen-name")))?.value||"Cinema browser",80);
+  return cinemaRemoteRegisterScreenOwner(identity,name);
+}
+async function cinemaRemoteRegisterScreenOwner(identity,name,current=()=>true){
+  if(!current()||!cinemaRemoteSameIdentity(identity,cinemaRemoteIdentity())||!document.hasFocus()||!navigator.locks?.request)return;
   try{
     await navigator.locks.request("cinema.remote.receiver:"+cinemaRemoteIdentityKey(identity),{mode:"exclusive",ifAvailable:true},async lock=>{
       if(!lock){toast("Another tab owns this screen; register from that tab or return after it leaves the foreground.");return;}
-      if(!cinemaRemoteSameIdentity(identity,cinemaRemoteIdentity()))return;
+      if(!current()||!cinemaRemoteSameIdentity(identity,cinemaRemoteIdentity()))return;
       const stored=cinemaRemoteLoad(identity);if(stored.receiver&&CinemaRemoteWire.id(stored.receiver.receiver_id)&&cinemaRemoteSecret(stored.receiver.receiver_secret)){toast("This screen is already registered.");return;}
       const client=new CinemaRemoteClient(identity);
       try{
         const result=await client.request("receivers",{body:{name,platform:"web"}});
         if(!CinemaRemoteWire.id(result.receiver_id)||!cinemaRemoteSecret(result.receiver_secret))throw new Error("Invalid registration response");
-        if(!client.current()||!document.hasFocus()){if(client.current())await client.request("receivers/"+result.receiver_id,{method:"DELETE"}).catch(()=>{});throw new Error("Registration context changed; inspect Screens and grants before trying again.");}
+        if(!current()||!client.current()||!document.hasFocus()){if(client.current())await client.request("receivers/"+result.receiver_id,{method:"DELETE"}).catch(()=>{});throw new Error("Registration context changed; inspect Screens and grants before trying again.");}
         stored.receiver={receiver_id:result.receiver_id,receiver_secret:result.receiver_secret,name};
         try{cinemaRemoteSave(identity,stored);}catch(error){await client.request("receivers/"+result.receiver_id,{method:"DELETE"}).catch(()=>{});throw error;}
         toast("Screen registered. Enable receiving and show its pairing code.");

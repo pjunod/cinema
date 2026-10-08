@@ -3663,3 +3663,10 @@
 #cinema-remote-controls #cinema-remote-status,#cinema-remote-controls #cinema-remote-summary{margin:4px 0}
 #cinema-remote-controls .cinema-phone-more{margin-top:12px}
 #cinema-remote-controls .cinema-phone-more>summary{min-height:44px;padding:12px 0;cursor:pointer}
+
+/* Bounded app-owned couch choices; native select controls remain available. */
+.cinema-owned-choice,#cinema-pair-dialog{width:min(620px,calc(100vw - 32px));max-height:80vh;overflow:auto;padding:24px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);color:var(--text)}
+.cinema-owned-choice::backdrop,#cinema-pair-dialog::backdrop{background:#0009}
+.cinema-owned-choice>button{display:block;width:100%;min-height:44px;margin:8px 0;text-align:left}
+#cinema-pair-dialog button{min-height:44px;margin:4px}
+#cinema-pair-dialog canvas{max-width:100%;height:auto}

@@ -2,8 +2,11 @@
 // Pairing is a physically operated restricted surface. No semantic remote
 // action is registered for these buttons, and every approval checks trust.
 let CINEMA_PAIR_DIALOG=null,CINEMA_PAIR_FLOW=null,CINEMA_PAIR_GENERATION=0;
+let CINEMA_PAIR_CODE_ATTEMPT=0;
+let CINEMA_PAIR_LOCAL_GENERATION=0,CINEMA_PAIR_LOCAL_SIGNATURE=null,CINEMA_PAIR_OPENER=null;
 function cinemaRemoteClosePairDialog(event){
-  if(event&&!event.isTrusted)return;CINEMA_PAIR_DIALOG?.remove();CINEMA_PAIR_DIALOG=null;
+  if(event&&!event.isTrusted)return;CINEMA_PAIR_DIALOG?.remove();CINEMA_PAIR_DIALOG=null;CINEMA_PAIR_LOCAL_GENERATION++;CINEMA_PAIR_CODE_ATTEMPT++;CINEMA_PAIR_LOCAL_SIGNATURE=null;
+  if(CINEMA_PAIR_OPENER?.isConnected)CINEMA_PAIR_OPENER.focus({preventScroll:true});else document.getElementById("q")?.focus();CINEMA_PAIR_OPENER=null;
   if(CINEMA_WEB_RECEIVER)CINEMA_WEB_RECEIVER.challenge=null;CinemaRemote.invalidate("pairing_closed");
 }
 function cinemaRemoteQr(canvas,rows){
@@ -15,33 +18,47 @@ function cinemaRemoteQr(canvas,rows){
 function cinemaRemotePairDialog(receiver){
   if(CINEMA_PAIR_DIALOG)return CINEMA_PAIR_DIALOG;
   const dialog=document.createElement("dialog");dialog.id="cinema-pair-dialog";dialog.setAttribute("aria-modal","true");dialog.setAttribute("aria-label","Approve phone remote");
-  dialog.innerHTML='<h2>Pair a phone remote</h2><p>Only approve a phone you are physically pairing now.</p><div id="cinema-pair-code"></div><div id="cinema-pair-pending"></div><p id="cinema-pair-status" role="status"></p><button class="ghost" onclick="cinemaRemoteClosePairDialog(event)">Close</button>';
-  document.body.append(dialog);CINEMA_PAIR_DIALOG=dialog;dialog.addEventListener("cancel",event=>{event.preventDefault();cinemaRemoteClosePairDialog(event);});dialog.showModal();CinemaRemote.invalidate("physical_pairing");return dialog;
+  CINEMA_PAIR_OPENER=document.activeElement;CINEMA_PAIR_LOCAL_GENERATION++;
+  dialog.innerHTML='<h2>Pair a phone remote</h2><p>Only approve a phone you are physically pairing now.</p><button data-local-pair="enable" type="button">Enable receiving on this device</button><button data-local-pair="register" type="button">Register this screen</button><button data-local-pair="code" type="button">Show pairing code</button><div id="cinema-pair-code"></div><div id="cinema-pair-pending"></div><p id="cinema-pair-status" role="status"></p><button class="ghost" data-local-pair="close" onclick="cinemaRemoteClosePairDialog(event)">Close</button>';
+  document.body.append(dialog);CINEMA_PAIR_DIALOG=dialog;dialog.addEventListener("cancel",event=>{event.preventDefault();cinemaRemoteClosePairDialog(event);});(/** @type {NodeListOf<HTMLButtonElement>} */(dialog.querySelectorAll("[data-local-pair]"))).forEach(button=>{if(button.dataset.localPair!=="close")button.onclick=event=>{if(event.isTrusted)cinemaRemotePairLocalAction(button.dataset.localPair,button);};});dialog.showModal();(/** @type {HTMLButtonElement} */(dialog.querySelector('[data-local-pair="close"]'))).focus();CinemaRemote.invalidate("physical_pairing");return dialog;
 }
 async function cinemaRemoteShowPairing(event){
-  if(!event?.isTrusted||!document.hasFocus())return;const receiver=CINEMA_WEB_RECEIVER;
+  if(!event?.isTrusted||!document.hasFocus())return;return cinemaRemoteShowPairingOwner();
+}
+async function cinemaRemoteShowPairingOwner(){
+  if(!document.hasFocus())return;const receiver=CINEMA_WEB_RECEIVER;
   if(!receiver?.target||!receiver.eligible()){toast("Enable receiving and register this foreground screen first.");return;}
-  const generation=receiver.generation,targetKey=CinemaRemoteWire.targetKey(receiver.target),started=performance.now(),dialog=cinemaRemotePairDialog(receiver);
+  const generation=receiver.generation,targetKey=CinemaRemoteWire.targetKey(receiver.target),started=performance.now(),dialog=cinemaRemotePairDialog(receiver),attempt=++CINEMA_PAIR_CODE_ATTEMPT;
+  receiver.challenge=null;receiver.pairings=[];CINEMA_PAIR_LOCAL_SIGNATURE=null;CINEMA_PAIR_LOCAL_GENERATION++;CinemaRemote.invalidate("new_pairing_code");
+  document.getElementById("cinema-pair-pending").textContent="";document.getElementById("cinema-pair-code").textContent="Requesting a fresh code…";
+  (/** @type {HTMLButtonElement|null} */(dialog.querySelector('[data-local-pair="close"]')))?.focus();
   try{
     const result=await receiver.client.request("pairing/start",{body:{target:receiver.target},proof:receiver.proof()});receiver.fence(generation);
+    if(attempt!==CINEMA_PAIR_CODE_ATTEMPT)return;
     if(dialog!==CINEMA_PAIR_DIALOG||CinemaRemoteWire.targetKey(result.target)!==targetKey||!CinemaRemoteWire.id(result.challenge_id)||!/^[0-9]{8}$/.test(result.code)||!CinemaRemoteWire.positive(result.expires_in_ms)||result.expires_in_ms>120000)throw new Error("Pairing response unavailable");
     receiver.challenge={...result,deadline:started+result.expires_in_ms};
     const mount=document.getElementById("cinema-pair-code");mount.innerHTML=`<p>Choose this screen on the signed-in phone and enter <strong>${result.code}</strong>.</p><canvas id="cinema-pair-qr" aria-label="Pairing QR code"></canvas><p>Code expires in two minutes. Approval on this screen is still required.</p>`;
     const canvas=/** @type {HTMLCanvasElement} */(document.getElementById("cinema-pair-qr"));if(!cinemaRemoteQr(canvas,result.qr_modules))canvas.remove();
-  }catch(error){if(dialog===CINEMA_PAIR_DIALOG)document.getElementById("cinema-pair-status").textContent=error.message;}
+  }catch(error){if(attempt===CINEMA_PAIR_CODE_ATTEMPT&&dialog===CINEMA_PAIR_DIALOG)document.getElementById("cinema-pair-status").textContent=error.message;}
 }
 function cinemaRemotePairingPrompt(receiver){
   // A claimed code may be shown only while the physical code surface is open.
   if(!CINEMA_PAIR_DIALOG||!receiver.challenge||performance.now()>=receiver.challenge.deadline)return;
   const mount=document.getElementById("cinema-pair-pending");if(!mount)return;
-  mount.innerHTML=receiver.pairings.map(value=>`<p>${esc(value.controller_name)} <button class="primary" onclick="cinemaRemoteApprove('${value.pending_id}',true,event)">Approve</button> <button class="ghost" onclick="cinemaRemoteApprove('${value.pending_id}',false,event)">Deny</button></p>`).join("");
+  const signature=JSON.stringify(receiver.pairings.map(value=>[value.pending_id,value.controller_name]));
+  if(signature===CINEMA_PAIR_LOCAL_SIGNATURE)return;CINEMA_PAIR_LOCAL_SIGNATURE=signature;CINEMA_PAIR_LOCAL_GENERATION++;CinemaRemote.invalidate("pairing_list");
+  mount.innerHTML=receiver.pairings.map(value=>`<p>${esc(value.controller_name)} <button class="primary" data-local-pair="approve" data-local-pending="${value.pending_id}" onclick="cinemaRemoteApprove('${value.pending_id}',true,event)">Approve</button> <button class="ghost" data-local-pair="deny" data-local-pending="${value.pending_id}" onclick="cinemaRemoteApprove('${value.pending_id}',false,event)">Deny</button></p>`).join("");
 }
 async function cinemaRemoteApprove(pending,approve,event){
+  if(!event?.isTrusted)return;return cinemaRemoteApproveOwner(pending,approve);
+}
+async function cinemaRemoteApproveOwner(pending,approve){
   const receiver=CINEMA_WEB_RECEIVER;
-  if(!event?.isTrusted||!document.hasFocus()||!CINEMA_PAIR_DIALOG||!receiver?.eligible()||!receiver.challenge||performance.now()>=receiver.challenge.deadline||!receiver.pairings.some(value=>value.pending_id===pending)||typeof approve!=="boolean")return;
-  const generation=receiver.generation,dialog=CINEMA_PAIR_DIALOG;
-  try{await receiver.client.request("pairing/approve",{body:{target:receiver.target,pending_id:pending,approve},proof:receiver.proof()});receiver.fence(generation);if(dialog===CINEMA_PAIR_DIALOG){document.getElementById("cinema-pair-status").textContent=approve?"Approved. The phone must explicitly choose Use as remote.":"Denied";receiver.pairings=receiver.pairings.filter(value=>value.pending_id!==pending);cinemaRemotePairingPrompt(receiver);}}
-  catch(error){if(dialog===CINEMA_PAIR_DIALOG)document.getElementById("cinema-pair-status").textContent=error.message;}
+  if(!document.hasFocus()||!CINEMA_PAIR_DIALOG||!receiver?.eligible()||!receiver.challenge||performance.now()>=receiver.challenge.deadline||!receiver.pairings.some(value=>value.pending_id===pending)||typeof approve!=="boolean")return;
+  const generation=receiver.generation,dialog=CINEMA_PAIR_DIALOG,challenge=receiver.challenge,attempt=CINEMA_PAIR_CODE_ATTEMPT;
+  const current=()=>dialog===CINEMA_PAIR_DIALOG&&attempt===CINEMA_PAIR_CODE_ATTEMPT&&receiver.challenge===challenge&&receiver.generation===generation;
+  try{await receiver.client.request("pairing/approve",{body:{target:receiver.target,pending_id:pending,approve},proof:receiver.proof()});receiver.fence(generation);if(current()){document.getElementById("cinema-pair-status").textContent=approve?"Approved. The phone must explicitly choose Use as remote.":"Denied";receiver.pairings=receiver.pairings.filter(value=>value.pending_id!==pending);cinemaRemotePairingPrompt(receiver);}}
+  catch(error){if(current())document.getElementById("cinema-pair-status").textContent=error.message;}
 }
 function cinemaRemoteParsePairLink(text,identity=cinemaRemoteIdentity()){
   if(typeof text!=="string"||CinemaRemoteWire.bytes(text)>2048||!identity)throw new Error("Invalid pairing link");
@@ -85,3 +102,48 @@ class CinemaRemotePairFlow{
     }catch(error){if(this.alive()){this.message="Pairing outcome unavailable; show a new code and pair again.";clearTimeout(this.expiryTimer);this.pending=null;this.changed();}}
   }
 }
+
+function cinemaRemotePairLocalAction(kind,button){
+  if(!CINEMA_PAIR_DIALOG||!document.hasFocus()||document.visibilityState!=="visible"||!button?.isConnected||!CINEMA_PAIR_DIALOG.contains(button))return "unavailable";
+  const identity=cinemaRemoteIdentity();if(!identity)return "unavailable";
+  if(kind==="close"){cinemaRemoteClosePairDialog();return "applied";}
+  if(kind==="enable"){
+    try{const preferences=cinemaRemotePreferences(identity);preferences.receiver=true;localStorage.setItem("cinema.remote.preferences:"+cinemaRemoteIdentityKey(identity),JSON.stringify(preferences));cinemaRemoteReceiverSync();document.getElementById("cinema-pair-status").textContent="Receiving enabled on this device. Register this screen, then show its code. Companion remotes must also be enabled by the server administrator.";}catch(error){document.getElementById("cinema-pair-status").textContent=error.message;}return "applied";
+  }
+  if(kind==="register"){const dialog=CINEMA_PAIR_DIALOG;cinemaRemoteRegisterScreenOwner(identity,"Cinema browser",()=>CINEMA_PAIR_DIALOG===dialog);return "applied";}
+  if(kind==="code"){cinemaRemoteShowPairingOwner();return "applied";}
+  if(kind==="approve"||kind==="deny"){
+    if(document.activeElement!==button)return "stale_focus";
+    const receiver=CINEMA_WEB_RECEIVER;if(!receiver?.eligible()||!receiver.challenge||performance.now()>=receiver.challenge.deadline||!receiver.pairings.some(value=>value.pending_id===button.dataset.localPending))return "unavailable";
+    cinemaRemoteApproveOwner(button.dataset.localPending,kind==="approve");return "applied";
+  }
+  return "unsupported";
+}
+function cinemaRemoteBindLocalPairEntry(root){
+  if((location.hash||"#/")!=="#/"||!TOKEN||!ME)return;
+  let button=/** @type {HTMLButtonElement|null} */(document.getElementById("cinema-local-pair-entry"));
+  if(!button){button=document.createElement("button");button.id="cinema-local-pair-entry";button.type="button";button.className="ghost";button.textContent="Pair a phone";document.getElementById("main").prepend(button);button.onclick=event=>{if(event.isTrusted&&document.hasFocus())cinemaRemotePairDialog(CINEMA_WEB_RECEIVER);};}
+  CinemaRemote.registerAction({id:"local:pair-entry",element:button,label:"Pair a phone",localOnly:true,activate:()=>{cinemaRemotePairDialog(CINEMA_WEB_RECEIVER);return "applied";}});
+}
+const CinemaRemoteLocalPhysical={
+  snapshot(){
+    if(!CINEMA_PAIR_DIALOG)return {surface:"ordinary",...CinemaRemote.snapshotPhysical()};
+    const button=/** @type {HTMLElement|null} */(document.activeElement),receiver=CINEMA_WEB_RECEIVER;
+    return {surface:"pairing",generation:CINEMA_PAIR_LOCAL_GENERATION,action:CINEMA_PAIR_DIALOG.contains(button)?button?.dataset.localPair||null:null,pending:button?.dataset.localPending||null,target:receiver?.target?CinemaRemoteWire.targetKey(receiver.target):null,challenge:receiver?.challenge?.challenge_id||null};
+  },
+  dispatch(action,offered){
+    if(!CINEMA_PAIR_DIALOG)return CinemaRemote.dispatchPhysical(action,{...CinemaRemote.snapshotPhysical(),source:"local_cec"});
+    if(!document.hasFocus()||document.visibilityState!=="visible")return "unavailable";
+    const current=this.snapshot();
+    if(action.type==="select"){
+      if(JSON.stringify(current)!==JSON.stringify(offered))return "stale_focus";
+      return cinemaRemotePairLocalAction(current.action,document.activeElement);
+    }
+    if(action.type==="back"){cinemaRemoteClosePairDialog();return "applied";}
+    if(action.type!=="navigate")return "restricted_surface";
+    const buttons=Array.from(/** @type {NodeListOf<HTMLButtonElement>} */(CINEMA_PAIR_DIALOG.querySelectorAll("[data-local-pair]"))).filter(button=>!button.disabled&&cinemaRemoteVisible(button));
+    const index=buttons.findIndex(button=>button===document.activeElement),delta=["left","up"].includes(action.direction)?-1:1;
+    const next=index<0?buttons.find(button=>button.dataset.localPair==="close"):buttons[Math.max(0,Math.min(buttons.length-1,index+delta))];
+    if(!next)return "unavailable";next.focus();next.scrollIntoView({block:"nearest"});return "applied";
+  }
+};

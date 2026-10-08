@@ -757,7 +757,7 @@ function classicItemBody(p){
     if(playable){
       body+=`<div class="actions">
         <button class="btnplay" onclick='${playCall(p,playable,start)}'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play audiobook'}</button>
-        ${resume?`<button class="ghost" onclick='${playCall(p,p.files.find(f=>f.available),0)}'>Start over</button>`:''}
+        ${resume?`<button class="ghost" data-remote-start-over onclick='${playCall(p,p.files.find(f=>f.available),0)}'>Start over</button>`:''}
         ${watchBtn}${channelBtn}</div>`;
       const rem=resume?Math.max(0,runtime-resume):runtime, pend=endsAt(rem);
       if(rem) body+=`<div class="playinfo">${resume?fmtDur(rem)+" left":fmtDur(rem)}${pend?" · ends ~"+pend:""}</div>`;
@@ -766,7 +766,7 @@ function classicItemBody(p){
     }
     body+=d.files.map((v,i)=>{
       const miss=!v.available, part=d.files.length>1?`Part ${i+1}`:'Audiobook';
-      const head=`<div class="vh"><span class="vbadges"><span class="vt">${esc(part)}</span>${specBadges(v)}${miss?'<span class="missbadge">missing</span>':''}</span>${!miss?`<button class="ghost sm" onclick='${playCall(p,v,0)}'>▶ Play</button>`:''}</div>`;
+      const head=`<div class="vh"><span class="vbadges"><span class="vt">${esc(part)}</span>${specBadges(v)}${miss?'<span class="missbadge">missing</span>':''}</span>${!miss?`<button class="ghost sm" data-remote-file="${esc(v.id)}" data-remote-file-start="0" onclick='${playCall(p,v,0)}'>▶ Play</button>`:''}</div>`;
       return `<div class="version">${head}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}</div>`;
     }).join("");
     body+=chapterList(p);
@@ -780,7 +780,7 @@ function classicItemBody(p){
     if(playable){
       body+=`<div class="actions">
         <button class="btnplay" onclick='${playCall(p,playable,resume)}'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play'}</button>
-        ${resume?`<button class="ghost" onclick='${playCall(p,playable,0)}'>Start over</button>`:''}
+        ${resume?`<button class="ghost" data-remote-start-over onclick='${playCall(p,playable,0)}'>Start over</button>`:''}
         ${watchBtn}${channelBtn}</div>`;
       const pdur=playable.duration_ms||runtime||0, prem=resume?Math.max(0,pdur-resume):pdur, pend=endsAt(prem);
       if(prem) body+=`<div class="playinfo">${resume?fmtDur(prem)+" left":fmtDur(prem)}${pend?" · ends ~"+pend:""}</div>`;
@@ -794,7 +794,7 @@ function classicItemBody(p){
       // to tell apart, or when a file is missing. A single version is already
       // badged in the hero, so its block is just the spec detail.
       const header=(multi||miss)
-        ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='${playCall(p,v,resume)}'>▶ Play</button>`:''}</div>`
+        ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" data-remote-file="${esc(v.id)}" data-remote-file-start="resume" onclick='${playCall(p,v,resume)}'>▶ Play</button>`:''}</div>`
         : '';
       return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}${fileAdminActions(v,it.id)}</div>`;
     }).join("");

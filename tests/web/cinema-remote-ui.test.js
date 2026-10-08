@@ -68,3 +68,22 @@ test("trusted assistive directional clicks work once without duplicating pointer
   let prevented=0;listeners.keydown({isTrusted:true,key:"Enter",repeat:false,preventDefault:()=>prevented++});listeners.keydown({isTrusted:true,key:"Enter",repeat:true,preventDefault:()=>prevented++});listeners.keyup({isTrusted:true,key:"Enter",preventDefault:()=>prevented++});listeners.click({isTrusted:true,detail:0});assert.equal(actions.length,1);assert.equal(holds.length,2);assert.equal(prevented,3);
   listeners.click({isTrusted:true,detail:1});assert.equal(actions.length,2);
 });
+
+function codeHarness(){
+  const h=harness(),requests=[],nodes=new Map(),dialog={contains:()=>true,querySelector:()=>({focus:()=>{}})};
+  for(const id of ['cinema-pair-pending','cinema-pair-code','cinema-pair-status','cinema-pair-qr'])nodes.set(id,{textContent:'',innerHTML:'',remove:()=>{}});
+  h.context.document.getElementById=id=>nodes.get(id);h.context.receiver={target:wire.target,generation:1,pairings:[],challenge:null,eligible:()=>true,proof:()=>({}),fence:()=>{},client:{request:path=>{const reply=pending();requests.push({path,reply});return reply.promise;}}};
+  h.context.dialog=dialog;h.run('CINEMA_WEB_RECEIVER=receiver;CINEMA_PAIR_DIALOG=dialog;cinemaRemotePairDialog=()=>dialog');
+  const response=code=>({target:wire.target,challenge_id:wire.grant_id,code,expires_in_ms:120000,qr_modules:null});
+  return {...h,requests,nodes,response};
+}
+test('new pairing code attempt fences an older same-dialog response immediately',async()=>{
+  const h=codeHarness(),first=h.run('cinemaRemoteShowPairingOwner()');const firstGeneration=h.run('CINEMA_PAIR_LOCAL_GENERATION');const second=h.run('cinemaRemoteShowPairingOwner()');assert.ok(h.run('CINEMA_PAIR_LOCAL_GENERATION')>firstGeneration);assert.equal(h.context.receiver.challenge,null);
+  h.requests[1].reply.resolve(h.response('87654321'));await second;h.requests[0].reply.resolve(h.response('12345678'));await first;
+  assert.equal(h.context.receiver.challenge.code,'87654321');assert.match(h.nodes.get('cinema-pair-code').innerHTML,/87654321/);assert.doesNotMatch(h.nodes.get('cinema-pair-code').innerHTML,/12345678/);
+});
+test('old approval completion cannot repaint a replacement pairing challenge',async()=>{
+  const h=codeHarness();h.context.receiver.challenge={challenge_id:wire.grant_id,deadline:120000};h.context.receiver.pairings=[{pending_id:wire.grant_id}];
+  h.context.pendingId=wire.grant_id;const approval=h.run('cinemaRemoteApproveOwner(pendingId,true)'),fresh=h.run('cinemaRemoteShowPairingOwner()');h.requests[1].reply.resolve(h.response('87654321'));await fresh;h.nodes.get('cinema-pair-status').textContent='Fresh challenge';h.requests[0].reply.resolve({});await approval;
+  assert.equal(h.nodes.get('cinema-pair-status').textContent,'Fresh challenge');assert.equal(h.context.receiver.challenge.code,'87654321');
+});
