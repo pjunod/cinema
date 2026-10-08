@@ -71,7 +71,7 @@ async function stopLiveTv(){
   // then dismantle the media tree only after presentation state settles.
   // Silence the local picture now without removing the fullscreen element.
   // Fullscreen teardown and remote tuner release may both remain pending.
-  const video=document.getElementById("live-tv-video");
+  const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("live-tv-video"));
   if(video) video.pause();
   const exiting=exitLiveTvPresentation();
   const stopping=LIVE_TV_LEASE.stop().then(value=>({ok:true,value}),error=>({ok:false,error}));
