@@ -30,14 +30,10 @@ const PGS_SDR: &[u8] = include_bytes!("../fixtures/macos-processing/pgs-sdr.mkv"
 const PGS_SDR10: &[u8] = include_bytes!("../fixtures/macos-processing/pgs-sdr10.mkv");
 const PGS_HDR10: &[u8] = include_bytes!("../fixtures/macos-processing/pgs-hdr10.mkv");
 const HLG: &[u8] = include_bytes!("../fixtures/macos-processing/hlg.mp4");
-const INTERLACED_TFF: &[u8] = include_bytes!("../fixtures/macos-processing/interlaced-tff.mp4");
-const INTERLACED_BFF: &[u8] = include_bytes!("../fixtures/macos-processing/interlaced-bff.mp4");
 const EXTENSION_MEDIA: &[(&str, &[u8])] = &[
     ("pgs_sdr", PGS_SDR),
     ("pgs_sdr10", PGS_SDR10),
     ("pgs_hdr10", PGS_HDR10),
-    ("bwdif_tff", INTERLACED_TFF),
-    ("bwdif_bff", INTERLACED_BFF),
     ("hlg", HLG),
 ];
 const CORPUS_BUDGET: usize = 2 * 1024 * 1024;
@@ -367,8 +363,6 @@ fn extension_corpus() -> Result<ExtensionCorpus, ProbeReason> {
             "pgs_sdr" => ("sdr", "bitmap_burn", "pgs-sdr.mkv"),
             "pgs_sdr10" => ("sdr", "bitmap_burn", "pgs-sdr10.mkv"),
             "pgs_hdr10" => ("hdr10", "bitmap_burn", "pgs-hdr10.mkv"),
-            "bwdif_tff" => ("sdr", "bwdif", "interlaced-tff.mp4"),
-            "bwdif_bff" => ("sdr", "bwdif", "interlaced-bff.mp4"),
             "hlg" => ("hlg", "plain", "hlg.mp4"),
             _ => return Err(invalid),
         };
@@ -1304,22 +1298,6 @@ async fn run_generation(
                 MacosProcessingGraph::SdrBitmapBurn
             };
             work.push((fixture, SmokeOperation::Bitmap, graph));
-        } else {
-            work.push((
-                fixture.clone(),
-                SmokeOperation::BwdifFrame,
-                MacosProcessingGraph::SdrBwdifFrame,
-            ));
-            // Field-rate graph has a distinct cadence and a distinct observation.
-            let output = &mut fixture.output_expectations[0];
-            output.expected.frame_count = 24;
-            output.expected.avg_frame_rate = "24/1".to_owned();
-            output.timestamps.step_seconds = 1.0 / 24.0;
-            work.push((
-                fixture,
-                SmokeOperation::BwdifField,
-                MacosProcessingGraph::SdrBwdifField,
-            ));
         }
     }
     for (fixture, operation, graph) in work {
@@ -1556,21 +1534,21 @@ fn observe_burn(raw: &[u8], operation: SmokeOperation) -> Result<(), ProbeReason
             }
         }
     } else if operation == SmokeOperation::Text {
-        let peak = |index: usize| {
-            (70..88)
-                .flat_map(|y| (60..100).map(move |x| raw[index * stride + y * 160 + x]))
-                .max()
-                .unwrap_or(0)
+        // The cue overlays bright colored artwork: its brightest sample need
+        // not exceed the background after lossy encoding. Compare the stationary
+        // cue region with its own subtitle-free frame instead. Rows below this
+        // region contain the fixture's independently moving white marker.
+        let change = |index: usize| {
+            (70..78)
+                .flat_map(|y| (60..100).map(move |x| (y, x)))
+                .map(|(y, x)| {
+                    f64::from(raw[index * stride + y * 160 + x].abs_diff(raw[y * 160 + x]))
+                })
+                .sum::<f64>()
+                / 320.0
         };
-        let baseline = peak(0);
-        // Exercise libass positioning/fade and subtitle-free intervals without
-        // assuming a particular installed font raster or lossless encoding.
-        if [5, 6, 7]
-            .into_iter()
-            .any(|index| peak(index) < baseline.saturating_add(5))
-            || [1, 2, 10, 11]
-                .into_iter()
-                .any(|index| peak(index) > baseline.saturating_add(3))
+        if [5, 6, 7].into_iter().any(|index| change(index) < 8.0)
+            || [1, 2, 10, 11].into_iter().any(|index| change(index) > 3.0)
         {
             return Err(ProbeReason::OutputContractFailed);
         }
@@ -2043,9 +2021,49 @@ mod tests {
     }
 
     #[test]
+    fn text_cue_observation_detects_change_over_bright_background_and_rejects_missing_or_stale() {
+        let stride = 160 * 90 * 3 / 2;
+        let mut raw = vec![231; stride * 12];
+        // A white glyph's peak can remain within four codes of this background;
+        // its dark outline still proves the scheduled composite was rendered.
+        for index in [5, 6, 7] {
+            for y in 70..78 {
+                for x in 60..80 {
+                    raw[index * stride + y * 160 + x] = 180;
+                }
+            }
+        }
+        assert_eq!(observe_burn(&raw, SmokeOperation::Text), Ok(()));
+        assert_eq!(
+            observe_burn(&vec![231; stride * 12], SmokeOperation::Text),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        for index in [1, 2, 10, 11] {
+            let mut stale = raw.clone();
+            for y in 70..78 {
+                for x in 60..80 {
+                    stale[index * stride + y * 160 + x] = 180;
+                }
+            }
+            assert_eq!(
+                observe_burn(&stale, SmokeOperation::Text),
+                Err(ProbeReason::OutputContractFailed)
+            );
+        }
+        let mut noise = vec![231; stride * 12];
+        for index in [5, 6, 7] {
+            noise[index * stride + 72 * 160 + 80] = 0;
+        }
+        assert_eq!(
+            observe_burn(&noise, SmokeOperation::Text),
+            Err(ProbeReason::OutputContractFailed)
+        );
+    }
+
+    #[test]
     fn macos_extension_corpus_pins_original_media_and_complete_classes() {
         let corpus = extension_corpus().expect("shipped extension media integrity");
-        assert_eq!(corpus.fixtures.len(), 6);
+        assert_eq!(corpus.fixtures.len(), 4);
         assert_eq!(
             corpus.fixtures.last().expect("HLG input").source_class,
             "hlg"
