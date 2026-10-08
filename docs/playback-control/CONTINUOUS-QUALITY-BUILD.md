@@ -9234,3 +9234,57 @@ seconds. Preserve both results. A bounded same-view XML reacquisition is being
 prepared; no blind quality retries, production UI patch or switch claim.
 All37 regression references resolve statically; no units run here. Final
 adversarial review, external Fable release and ready merge handoff remain open.
+
+
+### 10.294 Cached bytes pass; retained viewer must not drive an encoder (2026-10-08)
+
+Fixed44f1cde489961328bd3d2b08ad5af902a4d31912 passes normal pinned hook and
+Linux build in2m12s. Archive SHA256
+02d5ac127bbebdd460847cc75f560dcbc72616e9338b6789868fbfcbcc8348f9;
+binary SHA256
+a668b386d2719dfa4f84d6654d1b9f5c2860537a94642462c8affb730164b548.
+The next paired campaign stops after480p: HTTP535,672 bytes exactly match
+the retained member, its UUID/digest ETag and unchanged file before/after.
+Every private matching/logical/source/audio/binding comparison is true,
+including identical81-argument production recipes. This directly confirms
+the canonical incoming-audio repair. It is a partial pass only: a new owned
+FFmpeg1540802 starts, so the strict no-new-encoder guard stops before720p
+or phone launch. Physical argument role was not recorded and is not asserted.
+
+Source inspection independently isolates a producing-reader defect. The
+factory installs verified retained output but creates an ordinary producing
+reader; rendition.kick can therefore feed driver Produce even while HTTP
+bypasses that rendition and serves the artifact. Exact retained repair copies
+existing bytes and never requires a new producer. Retained removal detaches
+the reader/rendition; it needs no later role promotion. Integrate checked
+3e9428129 ase820e7354: Session::attachment_reader preserves authority-only
+controlled children and also marks verified retained attachments. Ordinary
+readers, owner/control/lease/source/repair and admission fences remain.
+The meaningful regression retained.rs::
+cached_attachment_serves_retained_bytes_without_driver_demand uses completed
+fenced artifact acquisition on a fresh empty rendition, actual session reader
+factory and retained member/ETag; cached frontier and accidental WaitPool
+requests create no driver demands, ordinary missing reads still produce,
+and detach retires demands. Unit sources compile and normal pinned hook
+passes; no units execute. Runtime no-encoder and720p coexistence remain to
+be verified on the next exact build.
+
+The partial campaign retires within144 seconds: guard1536198, daemon1536214
+and encoder1540802 absent, runtime/private metadata removed and settings
+readback restored. Scoped evidence is preserved in the parent. QA24283
+production Swift sources remain byte-equivalent to44f and reuse its signed
+installed app; no unnecessary rebuild occurs.
+
+AndroidUI8 reaches a720 first frame in3064ms but makes no acknowledgment
+or quality tap: the helper counts four references to one immersive window
+as four windows. Full visible-window record parsing is corrected offline,
+with distinct full records still rejected. Normal Signout and exact cleanup
+pass in99.103 seconds; parent1546061/daemon1546077 and their exact runtime
+are independently absent. UI9 is the justified same-source followup, not
+a claimed pass. The XML parser retains a first malformed snapshot and permits
+only one same-view reacquisition with unchanged foreground token, no input
+or arbitrary trimming. Earlier startup cleanup is hardened in ignored guards:
+exact child/runtime ownership is persisted before startServer returns, so
+failed metadata setup cannot leave private runtime/config behind.
+All38 regression references resolve statically; units, final adversarial,
+Fable release and ready merge handoff remain deferred.
