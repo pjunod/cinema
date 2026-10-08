@@ -13,9 +13,11 @@ remaining milestones stay in the build handoff. The
 
 The reviewed proposal landed in documentation PR #919. Implementation starts
 from its merged main commit `079960daebd5a1e23dff2b0e8f8506c1238bc1b0`, with
-one task branch, `codex/dv-m0-harness`, targeting the integration branch.
-Three Sol 6.1 sessions own the renderer spike, CPU cross-check and offline
-measurement harness. Production routing, settings and badges are unchanged.
+the comparator in PR #920 and backend experiments on
+`codex/dv-m0-backends`, both targeting the integration branch. Sol 6.1 sessions
+provide the renderer, CPU/authoring and offline measurement work, with
+independent adversarial review. Production routing, settings and badges remain
+unqualified and unchanged.
 
 The first task must retain reproducible commands, source pins, actual frame
 artifacts and negative controls. Numerical agreement is evidence for the named
@@ -28,7 +30,7 @@ DV-off validation. Current playback keeps its compatible fallback.
 
 | Milestone | State | Evidence still required |
 |---|---|---|
-| M0 backend and reference spike | Active: isolated Linux renderer and CPU builds; bounded offline comparison harness | Actual reconstruction/export, association controls, independent reference limits and reproducible artifact bundle |
+| M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction and synthetic P8.1 authoring retained with replay recipes | Encoded P7 association/reorder, nonidentity authoring acceptance, independent reference limits and full graph resource evidence |
 | M1 typed contracts | Not started | Backend operation boundaries established by M0 |
 | M2 processing and lifecycle | Not started | Qualified graph, bounded ownership and timestamped adapter |
 | M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
@@ -116,7 +118,8 @@ disabled. The authored two-frame example proves harness mechanics only.
 The pinned compiler loop was established on the implementation base:
 `rustc +1.97.1 --version` reports 1.97.1, and
 `cargo +1.97.1 check -p plurx-core --lib --locked` passes with 34 existing
-warnings on the default-feature surface. No Rust source changed in M0.
+warnings on the default-feature surface. No production Rust source changed in these slices. Isolated fixture generators
+compile against their separately pinned Rust 1.97.1 source recipes.
 Focused implementation regressions apply to the new offline tools. The earlier
 request to omit unit tests covered the documentation-only PR.
 
@@ -143,8 +146,37 @@ The reviewer verified both corrections and approved the bounded comparator
 with no remaining findings.
 
 
-The first task is PR #920 into the effort. An early dispatch was invalidated
-by a documentation follow-up before unit execution. Its two empty failed
-attempts require the [exact receipt recovery](../ci/PYTHON-UNIT-PR-RECEIPTS.md#pr920--two-authenticated-empty-effort-failures).
-No successes are manufactured or imported; a fresh passing development gate
-remains required before merging the task.
+The comparator task merged as PR #920 into the effort after the current-head
+development gate passed in run 4509. Its interrupted attempts have
+[exact receipt recovery](../ci/PYTHON-UNIT-PR-RECEIPTS.md#pr920--two-authenticated-empty-effort-failures);
+all retained successes preserve their original attribution. This development
+gate is not a main-promotion or playback qualification receipt.
+
+## 5. Retained backend and authoring controls
+
+The [first backend controls](DV_HDR_BACKEND_CONTROLS.md) retain source pins,
+licenses, source-only container builds, known-answer frames and negative
+controls for libplacebo and DoViBaker. Independent review approved their final
+bundles, and fresh isolated replays passed before repository preservation.
+
+The [parsed-metadata and authoring controls](DV_HDR_AUTHORING_CONTROLS.md)
+extend that work through actual RPU parsing, four distinct encoded pictures,
+four parsed metadata identities, DV-on rendering and an HDR10 encode. Their
+combined recipe regenerates GPU outputs and checks exact frame/stage hashes.
+Chroma siting is checked with pixel-phase controls; a crash cannot count as a
+supported parser refusal. Explicit image identities replace developer-local
+image assumptions.
+
+These are bounded synthetic experiments. The first authoring fixture has
+identity reshaping; it does not prove general protection against applying a
+nonlinear curve twice. Same-renderer DV-on/off differences are not independent
+Dolby reference errors. Encoded P7 BL/EL/RPU association, decoder reordering,
+creative target mapping, general destination validity and whole-graph
+performance remain open. The next Sol experiments address nonidentity
+reshaping and actual dual-layer decoding separately; their results need review
+before entering this ledger as accepted evidence.
+
+The CPU matrix-invariance and GPU bounded-residual-clipping findings remain
+explicit unsupported-domain limits. No product route inherits capability from
+a successful build or a source library's feature list. HDR10-E is still the
+planned badge for qualified actual processing, and compatible fallbacks remain.
