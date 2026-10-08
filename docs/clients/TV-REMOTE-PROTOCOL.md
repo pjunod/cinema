@@ -95,7 +95,14 @@ thirty seconds; changing servers or auth cancels retries immediately.
 ## 3. Wire envelope — explicit revisions and receiver-issued credits
 
 All bodies are UTF-8 JSON, max 16 KiB except presence requests and
-discovery/state responses at 64 KiB. Unknown protocol versions/actions and extra action fields are
+remote responses at 64 KiB. A presence's normalized `ReceiverState` must
+serialize to at most 48 KiB, leaving response space for the target, lease and
+all 64 retained acknowledgement outcomes. Oversized state is rejected with
+413/`invalid`; the previous accepted state is preserved. Publishers bound
+optional presentation metadata before sending while retaining valid option
+identities. Poll delivery packs an ordered prefix within its response budget
+and keeps overflow queued; a smaller later command cannot overtake it.
+Unknown protocol versions/actions and extra action fields are
 rejected; no permissive fallback into keyboard events. Integers are unsigned
 and limited to `Number.MAX_SAFE_INTEGER` for identical JavaScript semantics.
 Sequence and initialized context/focus/state revisions are positive; zero is
