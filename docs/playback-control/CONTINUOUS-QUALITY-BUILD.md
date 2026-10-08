@@ -8793,3 +8793,76 @@ SDK/context and launch results; backend/proxy/guard retire and private
 configuration clears. This proves a healthy-startup normal-selection method
 path, not UI taps, fifteen/manual-five/Auto, capture or physical audio/display.
 No inference that startup alone caused the earlier decline is made.
+
+### 10.284 Exact-source rebuild and reusable QA run namespace (2026-10-08)
+
+Committed909e0c7b7 source archive SHA256 is
+b85ffc4bc03fa58de0550af88937246d25268f14fa713e476eaefa7896f2beba.
+The initial compiler setup uses an incorrect cache subpath, then an unrelated
+registry cache and a larger debug/incremental profile. Preserve those failures.
+The prior host rustup executable is installed outside default SSH PATH.
+Explicitly verify Rust1.97.1, restore the established CARGO_PROFILE_DEV_DEBUG=0
+and CARGO_INCREMENTAL=0 recipe, and remove only failed current-build artifacts
+newer than the commit plus disposable incremental cache. The cleanup frees
+3,973,903,805 file bytes and preserves prior warm dependencies/executable.
+The bounded exact-source build passes in2m23s. Restore the owned compile-loop
+helper with these explicit settings. No unit tests run and CI is not used
+as a compiler. Draft#844 is pushed at909e0c7b7 and remains draft, with23 fields.
+
+The full lab235 launch on909e0c7b7 succeeds while independently unlocked but
+issues zero quality requests. The app's existing cq-native-series-235 receipt
+folder makes its QA runner return before execution. Its copied live receipt
+still contains the earlier focused-pass timestamp, which cannot qualify this
+new run. Preserve the QA namespace-block classification and initial SDK
+observations; stop the coordinator, retire its exact backend/guard/private
+configuration, and terminate only own launched app PID7388. No full native
+product verdict is claimed.
+
+An independent Apple agent prepares lab236 source/project copies with a
+validated per-run receipt name (default fresh UUID). Existing named namespaces
+report setup failure in a fresh receipt rather than silently returning. The
+production81 Apple files remain byte-equivalent after removing only the QA
+registration/helper and read-only readiness getter. Compile/sign first;
+no production behavior, preferences, gates or thresholds change.
+
+Integrate real-caption fixture and shipped subtitle tooling4c16188fe as
+f1a71d136. Transfer only its committed tool source to a separate extraction;
+the active909 server source is unchanged. Remove only the three completed
+older tool extractions; preserve raw receipts/current source/warm target.
+The caption recipe verifies450 cues and identical43200 video/84376 audio
+packet payloads, integer timestamps and timebases. Preserve its source-packet
+proof beside the caption fixture; no subtitle playback is qualified yet.
+
+
+### 10.285 Native manual series and remaining Auto failure (2026-10-08)
+
+Signed owned lab236 launches into the fresh full20-909e0c7b7-1 namespace
+while the phone is unlocked. All15 normal-selection manual requests are
+observed after about13–15 seconds, with two fresh advancing target-height
+probes required by the helper. The coordinator records346 SDK probes,
+zero reported playback failures and17 independently accepted control sessions.
+The first Auto stage at100 Mbps remains720p for240 seconds and fails;
+zero actual Auto changes are qualified. The app reports native_failure after
+the coordinator's failed state; this classification does not establish an
+AVPlayer error. Preserve the app receipt, SDK/context and bounded wire timeline.
+The exact owned backend retires; its identity-checked guard confirms cleanup.
+Investigate Auto selection and delivered evidence offline before repeating
+any successful manual requests. Physical display/audio and menu taps remain
+unmeasured.
+
+The new909e Firefox pause diagnostic fails with one held-frame fault.
+Its End child census is0/0/0/0. Preserve the result and investigate actual
+callback registration/delivery against bracketed pixels; do not erase the
+fault or weaken thresholds. The prepared focused acquisition coordinator
+uses monotonic request/reply brackets and fresh owned display/runtime guards.
+
+Android source f1a71d136 compiles main and unit-test sources and assembles
+its signed APK without executing tests. All340 production Android files
+match67520f7a8. A fresh owned Android36 ARM64 AVD boots and installs build151;
+its Connect screen renders, then the app is stopped. The owned ADB server
+uses5041, explicit emulator-5580 and disabled mDNS auto-connect after initial
+wireless discovery; no physical-device commands are issued. This is readiness,
+not playback qualification. TV lab237 compiles/signs with read-only startup
+app/scene/audio-route metadata, preserving production controller equivalence.
+The TV is paired, connected, booted and unlocked; display/audio readiness
+and historical−66681 causality remain unmeasured. No unit tests run.
