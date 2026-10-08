@@ -1,9 +1,7 @@
 # Raspberry Pi installation — Docker by default, native by choice
 
 **Status:** built — software implementation and bounded Pi application
-acceptance complete · **Updated:** 2026-10-08
-
-Final candidate CI and merge remain pending.
+acceptance complete; merged in PR #889 · **Updated:** 2026-10-08
 
 Companion to [the decoder implementation](RASPBERRY-PI-IMPLEMENTATION.md)
 and [the live status](RASPBERRY-PI-STATUS.md). This plan closes the installation
@@ -11,7 +9,7 @@ gap: users should not assemble FFmpeg paths, device permissions, systemd
 overrides and a browser themselves. The existing server and web player remain
 the product. The commands below describe the implemented installation contract.
 [PR #889](http://forge.lan:3000/noirr/plurx/pulls/889) holds the authoritative
-final candidate, retained evidence and pending CI/merge disposition.
+final candidate, retained evidence and completed merge disposition.
 
 Physical acceptance found that Raspberry Pi OS kernel
 `6.18.50+rpt-rpi-2712` omits `CONFIG_SECURITY_LANDLOCK`. The Pi-only namespace
