@@ -77,3 +77,49 @@ errata are recorded; validator behavior and boundaries are unchanged.
 The user subsequently authorized merging when lint, syntax and web checks
 pass, without waiting on the remaining unit-test work. The PR records those
 final checks and the merge result; other sessions own unrelated unit failures.
+
+## TCL Dolby Vision follow-up — 2026-10-08
+
+**Status:** review addressed; focused regressions and web checks passed; merge checks in progress.
+
+The physical TCL 9445X runs build 153 and reports an SDR display with no
+Dolby Vision decoder. Avatar: Fire and Ash (file 6751) correctly selects an
+SDR transcode, but its continuous family bootstrap fails before Media3 opens.
+The serving node now runs the merged PR #915 revision; this is a separate
+failure from the retired-writer lock cycle.
+
+At 15:36:09 UTC, `quality-family` returned 502: “rendition does not match
+the initial continuous H.264 SDR family.” Both generated video init records
+contain AVC profile bytes `64 0c 05`; the family requires `64 00 32`.
+VAAPI interprets the decimal `5.0` argument as integer level_idc 5 instead
+of level_idc 50, and emits constrained-High flags. The shared encode builder
+must supply each encoder's level representation and normalize the two newer
+constraint bits before muxing. Existing family validation remains strict.
+The byte-producing recipe receives a new cache identity so existing invalid
+inits are not reused. No Android capability override or retry is involved.
+
+Compiler: pinned Rust 1.97.1 local loop. Review and focused emitted-byte
+regressions will run at the merge boundary, followed by lint, syntax and web
+checks under the user's current merge convention. Physical acceptance and
+server deployment are not yet claimed.
+
+History: commit `91f9d5d184` introduced the decimal level argument on September
+30; `03a4824367` reused it for the strict continuous family on October 1;
+`530c55c11` added Android enrollment on October 2. The ordinary path does not
+require this exact family record. The last successful physical TCL session
+has not been correlated, so its precise route is not claimed.
+
+The single merge-boundary review found no production blocker. Its test finding
+was addressed: emitted-byte tests use the repository's configured FFmpeg helper.
+A one-second VAAPI encode with the serving node's configured Jellyfin FFmpeg
+now emits `64 00 32` in both avcC and SPS. The initial hardware check used the
+container's unrelated default FFmpeg and is not production evidence.
+
+All four tests selected by `cargo +1.97.1 test -p plurx-core --features
+hiqlite-store --lib continuous_avc_` passed, including actual software-encoded
+init acceptance by the unchanged family verifier. The initial no-feature test
+compile hit unrelated storage test helpers; the production-feature retry passed.
+The complete Node web suite passed across the initial run and continuation:
+the localhost-socket test was retried with permission, followed only by checks
+that had not yet run. Passing checks were not repeated. Commit lint/syntax and
+the PR description carry the final merge receipt; full unit suites are deferred.
