@@ -1,7 +1,7 @@
 # macOS video processing — execution status and decisions
 
-**Status:** active · **Updated:** 2026-10-07 · **Owner:** managing agent with
-three GPT-6.1 Sol builders · **Integration:** `effort/macos-video-processing`.
+**Status:** active · **Updated:** 2026-10-08 · **Owner:** managing agent with
+three GPT-6.1 Sol builders · **Integration:** `effort/macos-video-completion`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -12,16 +12,18 @@ measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
 
-M0–M3 implementation is integrated at `93658e211`; independent adversarial
-review found four P2 defects and one producer-identity defect. All findings are corrected and independently accepted. The complete source
-is integrated at `575a68abc`, including AR-05 launch binding and positive
-offline part completion. Draft PR #870
-was handed to the designated merge coordinator at `aaaa2d814`; units and
-main qualification belong to that queue. Queue admission and main landing
-remain pending. No installed packages or
-live services have changed. The initial delivery remains measured SDR scaling
-and HDR10-to-SDR processing; P5 experiments occur early without prematurely
-enabling Dolby processing. Extensions retain their independent acceptance.
+The initial SDR/HDR10 implementation is built and independently reviewed.
+PR #870 is composed into coordinator PR #882; the coordinator reports 128
+focused checks passing, with main qualification/landing still pending.
+This is completion of the first implementation contribution, not the full
+proposal. The user renewed the full-scope instruction on 2026-10-08.
+
+Remaining work is active on `effort/macos-video-completion`, based on the
+coordinator's composed `263cbeff6` source. Three Sol builders are implementing
+Dolby/package contracts, native parser isolation, and the remaining processing
+and output routes. PR #870/#882 stay frozen under coordinator ownership.
+No installed packages or live services have changed. A missing qualification
+row stays open; it is not converted to a pass at implementation handoff.
 
 | Workstream | Owner | State | Evidence or next dependency |
 |---|---|---|---|
@@ -32,7 +34,9 @@ enabling Dolby processing. Extensions retain their independent acceptance.
 | M2 core / shared M4–M5 argv | Sol native builder | integrated, including metadata correction | `47eab3a75`: immutable optional Mac context, only demonstrated SDR/Metal graphs, pinned compile and normal hook passed |
 | M3 probes / manager / settings | Sol fixture and harness builders | integrated; independent review accepted | `532e78d5f`: bounded probe module; `93658e211`: registered all-targets compile and normal hook passed; isolated settings, repair/restart and actual SDR/HDR VOD bytes observed |
 | M6 acceptance / main promotion | Manager and builders | isolated daemon evidence recorded; full acceptance open | Reviewed source `575a68abc`; coordinator-owned validation/merge remains pending |
-| E1–E4 extensions | subsequent scoped work | not started | Separate evidence and demand; no capability inherited from an HDR10 result |
+| E1 Dolby package / proof | Sol Dolby builder | building | Strict renderer metadata and hardware-required VT decoding; positive fixture and pinned package build |
+| M4 normalized VOD | Sol native parser builder | building | Capability-limited Wasm version of pinned Jellyfin FFprobe, preserving held-source facts and bounded execution |
+| E1 HLG / E2–E4 routes | Sol route builder | building in dependency order | HLG, native processing before CPU burn, native BWDIF/Live TV, negotiated HEVC/Main10; separate runtime evidence |
 
 Jellyfin FFmpeg is the required implementation baseline. Local Homebrew
 FFmpeg is not a comparison target or substitute. The official package is an
@@ -194,10 +198,11 @@ compiler load to avoid contaminating measurements.
   ownership but no small supported equivalent for immutable parser execution
   and descendant containment. This is an explicit parser-packaging and
   confinement follow-up, not permission to bypass the source boundary.
-- Adversarial implementation review: active on `93658e211`, with independent
-  core/package, harness/daemon integration and fixture/runtime reviewers.
-- Main PR: [#870](http://192.168.4.7:3000/noirr/plurx/pulls/870), draft;
-  five confirmed findings are being corrected before queue handoff.
+- Initial adversarial implementation review: all five findings corrected and
+  independently accepted at source `575a68abc`.
+- Initial PR #870: handed off and composed into coordinator #882. The
+  coordinator reports 128 focused checks passing. Remaining implementation
+  is on a separate effort branch; final review follows its frozen candidate.
 
 Later entries will record commit IDs, root-cause observations, commands,
 accepted graphs, failed checks and their targeted reruns, qualification
@@ -407,3 +412,39 @@ child lifetime and identity. Cross-builder interfaces were traced. The review
 is complete for this source candidate: every correction was independently
 checked. Review and compilation do not substitute for coordinator-owned
 regression execution or the open M6 acceptance rows.
+
+## 9. Full-scope continuation — 2026-10-08
+
+The initial handoff did not discharge the remaining design. The user directed
+work to continue through all implementation and available acceptance work.
+Do not close this effort merely because another contribution reaches the
+merge queue. Qualification requiring unavailable samples, machines or a
+human display assessment remains explicitly open while other work proceeds.
+
+| Builder | Exclusive initial continuation ownership | Immediate acceptance |
+|---|---|---|
+| Dolby/package | Jellyfin package script, upstream patch/build helpers, Dolby/HLG experiment generators and associated operation regressions | Strict effective per-frame Dolby metadata before rendering; actual VT hardware requirement and observation; reproducible complete package |
+| Native parser | `decode_facts.rs`, associated confinement/parser module and regression source, new Wasm parser build/ABI, dependency manifest/lock | Same pinned parser semantics; only held-source read capability and bounded results; immutable module identity, bounded memory/execution and existing cancellation/cache ownership |
+| Processing routes | Core transcode/filter/decode/recipe/output contracts; daemon runtime/planning/Live TV/settings negotiation and associated regressions | Observed HLG, processing before existing CPU subtitle burn, native BWDIF cadence, negotiated HEVC SDR/HDR10 without changing promised grade |
+| Manager | Existing design/implementation/status/evidence docs, integration, workload scheduling and final review/handoff | Every scope row has evidence or a precise remaining dependency; all builders independently reviewed before queue handoff |
+
+The coordinator explicitly returned the warm compiler target to this effort.
+Only one builder owns it at a time. Heavy native builds and hardware timing
+experiments are scheduled separately. All three builders have the complete
+user constraints: own clones, no unit execution while building, normal hooks,
+Jellyfin only, no hidden enable gates, no symptom watchdogs, no confinement
+bypass, and no change to deployed packages/services. The coordinator retains
+final unit/fast-lane execution and main merge ownership.
+
+The supported native parser design is being changed at its isolation boundary,
+not by removing the existing Mac refusal. A capability-limited Wasm build of
+the same Jellyfin FFprobe is the implementation candidate: the module receives
+only explicit source-descriptor reads and bounded output, with no directory,
+network, process or descendant authority. Toolchain feasibility, parser
+parity, artifact size and startup costs must be measured before acceptance.
+The existing source snapshot, observation cache and producer contracts remain.
+
+The exact Jellyfin candidate contains `bwdif_videotoolbox`; earlier unrelated
+Homebrew inventories are not capability evidence. Filter presence alone does
+not qualify cadence, captions or performance. Hardware BWDIF and HLG/burn
+processing are being exercised before extending the runtime observations.
