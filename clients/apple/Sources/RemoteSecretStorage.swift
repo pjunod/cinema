@@ -28,5 +28,10 @@ struct RemoteSecretStorage {
         let values = grants.filter { $0.receiverID != value.receiverID } + [value]
         guard values.count <= 20, let json = String(data: try JSONEncoder().encode(values), encoding: .utf8), grantVault.write(json) else { throw CinemaRemoteOutcome.unavailable }
     }
+    func forgetGrant(_ id: UUID) throws {
+        let values = grants.filter { $0.id != id }
+        guard let json = String(data: try JSONEncoder().encode(values), encoding: .utf8), grantVault.write(json) else { throw CinemaRemoteOutcome.unavailable }
+    }
+    func clearReceiver() { receiverVault.clear() }
     func clear() { receiverVault.clear(); grantVault.clear() }
 }

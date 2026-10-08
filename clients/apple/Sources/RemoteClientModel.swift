@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import UIKit
 
 @MainActor
 final class RemoteClientModel: ObservableObject {
@@ -14,6 +15,8 @@ final class RemoteClientModel: ObservableObject {
     @Published private(set) var controllerControl: CinemaRemoteControl?
     @Published private(set) var controlling = false
     @Published private(set) var commandStatus = ""
+    @Published private(set) var pairedGrants: [CinemaRemoteGrantInfo] = []
+    @Published private(set) var managementStatus = ""
     @Published var remotePresented = false
     @Published var choosingDevice = false
     private var api: CinemaRemoteAPI?
@@ -36,14 +39,15 @@ final class RemoteClientModel: ObservableObject {
     private var controllerGeneration = UUID()
     private var active = false
     private var enabled = false
-    private var foregroundID = UUID()
-    private var foregroundWasBackground = false
+    private var scene = RemoteSceneEligibility()
     private var uiRevision: UInt64 = 1
     private var controllerRevision: UInt64 = 0
     private var nextSequence: UInt64 = 0
+    private var sequences = RemoteControlSequence()
     private var selectedGrant: RemoteSecretStorage.Grant?
     private var dismissedSuggestions: Set<UUID> = []
     private var sending = false
+    private var sendToken = UUID()
     private var identity: String?
     var serverInstanceID: String? { SettingsStore().instanceId }
 
@@ -57,12 +61,12 @@ final class RemoteClientModel: ObservableObject {
         }.id
     }
     func configure(model: AppModel, navigation: RemoteNavigationCoordinator, playback: RemotePlaybackAdapter,
-                   foreground: Bool, enabled: Bool) {
+                   foreground: Bool, background: Bool, enabled: Bool) {
         self.navigation = navigation
         self.playback = playback
         navigation.onPhysicalInput = { [weak self] in self?.guardState.invalidate(); self?.playback?.physicalInput() }
         self.enabled = enabled
-        if !foreground { foregroundWasBackground = true }
+        scene.transition(active: foreground, background: background)
         guard foreground, enabled, model.phase == .ready,
               let userID = model.userId, let instance = SettingsStore().instanceId,
               let bearer = Session.shared.credentials.token else {
@@ -76,7 +80,6 @@ final class RemoteClientModel: ObservableObject {
         let changedAuthorization = api != nil && api?.generation != auth.generation
         shutdown(identityChange: (identity != nil && identity != nextIdentity) || changedAuthorization)
         active = true
-        if foregroundWasBackground { foregroundID = UUID(); foregroundWasBackground = false }
         identity = nextIdentity
         storage = RemoteSecretStorage(identity: nextIdentity)
         api = CinemaRemoteAPI(origin: Session.canonicalOrigin(model.origin) ?? "", token: bearer, generation: auth.generation)
@@ -101,10 +104,16 @@ final class RemoteClientModel: ObservableObject {
         challenge = nil
         pairings = []
         devices = []
+        pairedGrants = []
         unavailableNodes = []
-        if identityChange { storage?.clear(); storage = nil; identity = nil; navigation?.resetIdentity() }
+        if identityChange { storage?.clear(); storage = nil; identity = nil; navigation?.resetIdentity(); sequences = RemoteControlSequence() }
     }
-    private func current(_ generation: UUID) -> Bool { active && lifecycle == generation && api?.isCurrent == true && !Task.isCancelled }
+    func sceneChanged(active: Bool, background: Bool) {
+        scene.transition(active: active, background: background)
+        if !active { guardState.invalidate(); playback?.physicalInput(); shutdown(identityChange: false) }
+    }
+    private var sceneCanAct: Bool { scene.eligible && UIApplication.shared.applicationState == .active }
+    private func current(_ generation: UUID) -> Bool { sceneCanAct && active && lifecycle == generation && api?.isCurrent == true && !Task.isCancelled }
     private func discoverLoop(_ generation: UUID) async {
         while current(generation) {
             do {
@@ -140,7 +149,7 @@ final class RemoteClientModel: ObservableObject {
                     }
                 }
                 guard let receiver else { return }
-                let session = try await api.session(receiverID: receiver.id, foregroundID: foregroundID, secret: receiver.secret)
+                let session = try await api.session(receiverID: receiver.id, foregroundID: scene.foregroundID, secret: receiver.secret)
                 guard current(generation) else { return }
                 target = session.target
                 guardState.deactivate()
@@ -245,7 +254,7 @@ final class RemoteClientModel: ObservableObject {
                      focusRevision: context?.focusRevision ?? 1, route: "restricted", capabilities: [], focusedLabel: nil, credits: [], textNonce: nil, playback: nil)
     }
     private func apply(_ command: CinemaRemoteCommand) -> CinemaRemoteOutcome {
-        guard let navigation, api?.isCurrent == true else { return .unavailable }
+        guard sceneCanAct, active, let navigation, api?.isCurrent == true else { return .unavailable }
         do { try updateGuard() } catch let outcome as CinemaRemoteOutcome { return outcome } catch { return .invalid }
         let snapshot = navigation.snapshot()
         let semantic: CinemaRemoteOutcome? = snapshot.blocked ? .restrictedSurface : nil
@@ -365,19 +374,30 @@ final class RemoteClientModel: ObservableObject {
         nextSequence = 0
         selectedDevice = nil
         selectedGrant = nil
-        sending = false
+        sending = false; sendToken = UUID()
     }
     func acquire(takeover: Bool = false) {
         guard let api, let device = selectedDevice, let target = device.target, let grant = selectedGrant else { return }
+        let recoveryEpoch = sequences.recoveryEpoch(target: target, grant: grant.id, control: controllerControl)
+        let renewUnknownEpoch = recoveryEpoch != nil
         controllerGeneration = UUID()
         controllerTask?.cancel(); renewTask?.cancel(); stopHolding()
+        controlling = false; sending = false; sendToken = UUID(); controllerState = nil
         let generation = controllerGeneration
         let life = lifecycle
         Task {
             do {
-                let reply = try await api.control(target: target, grantID: grant.id, action: takeover ? "takeover" : "acquire", epoch: nil, secret: grant.secret)
+                let requestsFreshEpoch = takeover || renewUnknownEpoch
+                var reply = try await api.control(target: target, grantID: grant.id, action: requestsFreshEpoch ? "takeover" : "acquire", epoch: takeover ? nil : recoveryEpoch, secret: grant.secret)
                 guard current(life), generation == controllerGeneration, selectedDevice?.target == target, reply.target == target else { return }
-                acceptControl(reply.control, revision: reply.responseRevision)
+                // An acquire may renew our pre-existing lease even before state
+                // polling discovers it. Explicit Use as remote permits replacing
+                // our own unknown allocator with a fresh epoch, never another grant.
+                if !requestsFreshEpoch, let expected = sequences.recoveryEpoch(target: target, grant: grant.id, control: reply.control) {
+                    reply = try await api.control(target: target, grantID: grant.id, action: "takeover", epoch: expected, secret: grant.secret)
+                    guard current(life), generation == controllerGeneration, selectedDevice?.target == target, reply.target == target else { return }
+                }
+                acceptControl(reply.control, revision: reply.responseRevision, acquired: true)
                 beginStatePoll()
                 if controlling { beginRenewal() }
             } catch {
@@ -387,12 +407,15 @@ final class RemoteClientModel: ObservableObject {
             }
         }
     }
-    private func acceptControl(_ control: CinemaRemoteControl?, revision: UInt64) {
+    private func acceptControl(_ control: CinemaRemoteControl?, revision: UInt64, acquired: Bool = false) {
         guard revision >= controllerRevision else { return }
         controllerRevision = revision
-        if control?.controlEpoch != controllerControl?.controlEpoch { nextSequence = 0; controllerState = nil; stopHolding() }
+        if control?.controlEpoch != controllerControl?.controlEpoch { nextSequence = 0; controllerState = nil; sending = false; sendToken = UUID(); stopHolding() }
         controllerControl = control
-        controlling = control?.activeGrantID == selectedGrant?.id && control != nil
+        if let control, let target = selectedDevice?.target, let grant = selectedGrant, control.activeGrantID == grant.id {
+            if acquired { sequences.acquired(target: target, grant: grant.id, epoch: control.controlEpoch) }
+            controlling = sequences.knows(target: target, grant: grant.id, epoch: control.controlEpoch)
+        } else { controlling = false }
         if !controlling { stopHolding() }
     }
     private func beginStatePoll() {
@@ -444,7 +467,7 @@ final class RemoteClientModel: ObservableObject {
         guard let api, let target = selectedDevice?.target, let grant = selectedGrant, let epoch = controllerControl?.controlEpoch else { closeController(); return }
         controllerGeneration = UUID()
         controllerTask?.cancel(); renewTask?.cancel(); stopHolding()
-        controlling = false
+        controlling = false; sending = false; sendToken = UUID()
         let generation = controllerGeneration
         let life = lifecycle
         Task {
@@ -454,29 +477,30 @@ final class RemoteClientModel: ObservableObject {
         }
     }
     func send(_ action: CinemaRemoteAction) {
-        guard !sending, controlling, let api, let target = selectedDevice?.target, let grant = selectedGrant,
+        guard sceneCanAct, active, !sending, controlling, let api, let target = selectedDevice?.target, let grant = selectedGrant,
               let control = controllerControl, let state = controllerState, state.capabilities.contains(action.type),
-              let credit = state.credits.last(where: { $0.kind == action.creditKind }), nextSequence < CinemaRemoteCommand.maximumInteger else { return }
+              let credit = state.credits.last(where: { $0.kind == action.creditKind }) else { return }
         guard (try? action.validate()) != nil else { commandStatus = "Command parameters are invalid."; return }
-        nextSequence += 1
-        let sequence = nextSequence
+        guard let sequence = sequences.next(target: target, grant: grant.id, epoch: control.controlEpoch) else { controlling = false; return }
+        nextSequence = sequence
         let command = CinemaRemoteCommand(target: target, grantID: grant.id, controlEpoch: control.controlEpoch, sequence: sequence,
                                           credit: credit.nonce, contextRevision: state.contextRevision, focusRevision: state.focusRevision, action: action)
         sending = true
+        let token = UUID(); sendToken = token
         let generation = controllerGeneration
         let life = lifecycle
         Task {
             do {
                 let reply = try await api.send(command, secret: grant.secret)
-                guard current(life), generation == controllerGeneration else { return }
+                guard current(life), generation == controllerGeneration, sendToken == token, controllerControl?.controlEpoch == control.controlEpoch else { return }
                 guard reply.queued, reply.controlEpoch == control.controlEpoch, reply.sequence == sequence else { throw CinemaRemoteOutcome.invalid }
                 commandStatus = "Sent. Waiting for the TV outcome."
             } catch {
-                guard current(life), generation == controllerGeneration else { return }
+                guard current(life), generation == controllerGeneration, sendToken == token, controllerControl?.controlEpoch == control.controlEpoch else { return }
                 stopHolding()
                 commandStatus = "Command outcome unknown; it will not be replayed."
             }
-            if generation == controllerGeneration { sending = false }
+            if generation == controllerGeneration && sendToken == token { sending = false }
         }
     }
     func beginHolding(_ direction: CinemaRemoteDirection) {
@@ -493,6 +517,53 @@ final class RemoteClientModel: ObservableObject {
         }
     }
     func stopHolding() { holdTask?.cancel(); holdTask = nil }
+    var localGrants: [RemoteSecretStorage.Grant] { storage?.grants ?? [] }
+    var localReceiverID: UUID? { receiver?.id ?? storage?.receiver?.id }
+    func refreshGrants() async {
+        guard let api else { managementStatus = "Enable Cinema remotes in Developer settings to manage pairings."; return }
+        let generation = lifecycle
+        do {
+            let result = try await api.grants()
+            guard current(generation) else { return }
+            #if os(tvOS)
+            pairedGrants = Array(result.grants.filter { $0.receiverID == localReceiverID }.prefix(20))
+            #else
+            pairedGrants = Array(result.grants.prefix(400))
+            #endif
+            managementStatus = ""
+        } catch { if current(generation) { managementStatus = "Could not refresh paired phones." } }
+    }
+    func revokeGrant(_ id: UUID) async {
+        guard let api else { return }
+        let generation = lifecycle
+        if selectedGrant?.id == id { closeController() }
+        do {
+            let result = try await api.revokeGrant(id)
+            guard current(generation), result.revoked else { return }
+            try storage?.forgetGrant(id)
+            pairedGrants.removeAll { $0.id == id }
+            if receiverControl?.activeGrantID == id { receiverControl = nil; guardState.deactivate() }
+            managementStatus = "Pairing revoked."
+        } catch { if current(generation) { managementStatus = "Revocation could not be confirmed. Retry while connected." } }
+    }
+    func forgetGrant(_ id: UUID) {
+        if selectedGrant?.id == id { releaseControl(); closeController() }
+        do { try storage?.forgetGrant(id); managementStatus = "Saved phone pairing removed. Server pairing remains until revoked." }
+        catch { managementStatus = "Could not remove saved pairing." }
+    }
+    func resetReceiver() async {
+        guard let api, let id = localReceiverID else { return }
+        let generation = lifecycle
+        do {
+            let result = try await api.unregister(id)
+            guard current(generation), result.revoked else { return }
+            receiverTask?.cancel(); receiverTask = nil
+            presenceTask?.cancel(); presenceTask = nil
+            storage?.clearReceiver(); receiver = nil; target = nil; receiverControl = nil
+            guardState.deactivate(); pairings = []; pairedGrants = []; challenge = nil
+            managementStatus = "TV registration removed. Disable and re-enable Cinema remotes to register again."
+        } catch { if current(generation) { managementStatus = "TV reset could not be confirmed. Retry while connected." } }
+    }
     var suggestionDevices: [CinemaRemoteDevice] {
         devices.filter { device in device.available && device.target != nil && storage?.grants.contains(where: { $0.receiverID == device.id }) == true }
             .filter { !dismissedSuggestions.contains($0.id) && suggestionsEnabled(for: $0.id) }

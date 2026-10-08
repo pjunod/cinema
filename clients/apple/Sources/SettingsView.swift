@@ -209,12 +209,10 @@ struct SettingsView: View {
                 }
             }
 
-            #if os(iOS)
             Section("Remotes & devices") {
-                Button("Open Cinema remote") { remoteClient.remotePresented = true }
+                NavigationLink("Manage remote pairings") { RemoteDeviceSettingsView() }
                 Text(remoteClient.status).font(.caption)
             }
-            #endif
             Section("Developer") {
                 NavigationLink("Enable Live TV and other features awaiting evidence") { LiveTvDeveloperView() }
             }

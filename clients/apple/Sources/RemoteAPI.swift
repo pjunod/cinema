@@ -99,6 +99,16 @@ struct CinemaRemoteQueued: Decodable {
     enum CodingKeys: String, CodingKey { case queued, controlEpoch = "control_epoch", sequence }
 }
 
+struct CinemaRemoteGrantInfo: Decodable, Identifiable {
+    let id: UUID
+    let receiverID: UUID
+    let name: String
+    let createdAt: UInt64
+    enum CodingKeys: String, CodingKey { case id, receiverID = "receiver_id", name, createdAt = "created_at" }
+}
+struct CinemaRemoteGrants: Decodable { let grants: [CinemaRemoteGrantInfo] }
+struct CinemaRemoteRevocation: Decodable { let revoked: Bool }
+
 struct CinemaRemoteAPI {
     enum Proof { case receiver(String), grant(String), pairing(String) }
     let origin: String
@@ -198,6 +208,9 @@ struct CinemaRemoteAPI {
         try command.validate()
         return try await request("/commands", body: Self.object(command), proof: .grant(secret))
     }
+    func grants() async throws -> CinemaRemoteGrants { try await request("/grants", method: "GET") }
+    func revokeGrant(_ id: UUID) async throws -> CinemaRemoteRevocation { try await request("/grants/" + id.uuidString, method: "DELETE") }
+    func unregister(_ id: UUID) async throws -> CinemaRemoteRevocation { try await request("/receivers/" + id.uuidString, method: "DELETE") }
     func pairingStart(target: CinemaRemoteTarget, secret: String) async throws -> CinemaRemoteChallenge {
         try await request("/pairing/start", body: ["target": Self.object(target)], proof: .receiver(secret))
     }

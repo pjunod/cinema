@@ -117,6 +117,50 @@ final class RemoteReceiverTests: XCTestCase {
         owner.claim(before: nil, after: 40_000)
         XCTAssertEqual(owner.cancel(current: 50_000), 50_000)
     }
+    func testUnknownOwnEpochRecoveryCarriesObservedEpochAndCannotTargetOtherGrant() {
+        let target = CinemaRemoteTarget(ownerNodeID: "node", sessionID: UUID(), receiverEpoch: UUID())
+        let grant = UUID(), oldEpoch = UUID(), newerEpoch = UUID()
+        var allocator = RemoteControlSequence()
+        let own = CinemaRemoteControl(controlEpoch: oldEpoch, activeGrantID: grant, controllerName: "This phone")
+        XCTAssertEqual(allocator.recoveryEpoch(target: target, grant: grant, control: own), oldEpoch)
+        let other = CinemaRemoteControl(controlEpoch: newerEpoch, activeGrantID: UUID(), controllerName: "Other phone")
+        XCTAssertNil(allocator.recoveryEpoch(target: target, grant: grant, control: other))
+        XCTAssertNil(allocator.recoveryEpoch(target: target, grant: grant, control: nil))
+        allocator.acquired(target: target, grant: grant, epoch: oldEpoch)
+        XCTAssertNil(allocator.recoveryEpoch(target: target, grant: grant, control: own))
+    }
+
+    func testInactiveSceneSuspendsEffectsWithoutRotatingForegroundIdentity() {
+        var scene = RemoteSceneEligibility()
+        scene.transition(active: true, background: false)
+        let initial = scene.foregroundID
+        XCTAssertTrue(scene.eligible)
+        scene.transition(active: false, background: false)
+        XCTAssertFalse(scene.eligible)
+        scene.transition(active: true, background: false)
+        XCTAssertEqual(scene.foregroundID, initial)
+        scene.transition(active: false, background: true)
+        XCTAssertFalse(scene.eligible)
+        scene.transition(active: false, background: false)
+        scene.transition(active: true, background: false)
+        XCTAssertNotEqual(scene.foregroundID, initial)
+    }
+
+    func testControlSequenceSurvivesCloseAndUnknownEpochRequiresAcquisition() {
+        let target = CinemaRemoteTarget(ownerNodeID: "node", sessionID: UUID(), receiverEpoch: UUID())
+        let grant = UUID(), epoch = UUID()
+        var allocator = RemoteControlSequence()
+        XCTAssertFalse(allocator.knows(target: target, grant: grant, epoch: epoch))
+        XCTAssertNil(allocator.next(target: target, grant: grant, epoch: epoch))
+        allocator.acquired(target: target, grant: grant, epoch: epoch)
+        XCTAssertEqual(allocator.next(target: target, grant: grant, epoch: epoch), 1)
+        allocator.acquired(target: target, grant: grant, epoch: epoch)
+        XCTAssertEqual(allocator.next(target: target, grant: grant, epoch: epoch), 2)
+        XCTAssertNil(allocator.next(target: target, grant: grant, epoch: UUID()))
+        let restarted = RemoteControlSequence()
+        XCTAssertFalse(restarted.knows(target: target, grant: grant, epoch: epoch))
+    }
+
     func testSafeLabelsAndQRNeverChangeServerOrTarget() throws {
         XCTAssertEqual(RemoteTextBounds.label("\n\u{0} \t"), "Untitled")
         XCTAssertEqual(RemoteTextBounds.label("  Film\n title "), "Film title")

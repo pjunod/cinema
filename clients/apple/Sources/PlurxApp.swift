@@ -177,12 +177,13 @@ struct RootView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            remoteClient.sceneChanged(active: phase == .active, background: phase == .background)
             if phase != .active { remoteNavigation.invalidate() }
         }
         .remoteRestricted(model.phase != .ready)
         .task(id: remoteLifecycleKey) {
             remoteClient.configure(model: model, navigation: remoteNavigation, playback: remotePlayback,
-                                   foreground: scenePhase != .background, enabled: remoteEnabled)
+                                   foreground: scenePhase == .active, background: scenePhase == .background, enabled: remoteEnabled)
         }
         .overlay(alignment: .topTrailing) {
             #if os(tvOS)
@@ -215,7 +216,7 @@ struct RootView: View {
     }
 
     private var remoteLifecycleKey: String {
-        "\(model.phase)|\(model.origin)|\(model.userId ?? 0)|\(scenePhase == .background)|\(remoteEnabled)"
+        "\(model.phase)|\(model.origin)|\(model.userId ?? 0)|\(scenePhase)|\(remoteEnabled)"
     }
 
     #if os(iOS)

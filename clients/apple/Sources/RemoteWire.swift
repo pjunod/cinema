@@ -7,7 +7,7 @@ enum CinemaRemoteOutcome: String, Codable, Error {
     case staleContext = "stale_context", staleFocus = "stale_focus"
     case restrictedSurface = "restricted_surface", unauthorized, unsupported, busy, unavailable, invalid
 }
-struct CinemaRemoteTarget: Codable, Equatable {
+struct CinemaRemoteTarget: Codable, Hashable {
     let ownerNodeID: String
     let sessionID: UUID
     let receiverEpoch: UUID

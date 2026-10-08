@@ -134,6 +134,8 @@ struct RemoteCompanionView: View {
             .navigationTitle("Cinema remote")
             .toolbar { Button("Close") { remote.releaseControl(); dismiss() } }
             .onDisappear { remote.stopHolding(); remote.closeController() }
+            .onChange(of: remote.selectedDevice?.target) { _, _ in challenge = ""; code = "" }
+            .onChange(of: remote.selectedDevice?.id) { _, _ in challenge = ""; code = "" }
             .onChange(of: remote.controllerState?.textNonce) { _, nonce in textNonce = nonce; searchText = "" }
             .sheet(isPresented: $scanning) {
                 QRCodeScannerView { payload in
