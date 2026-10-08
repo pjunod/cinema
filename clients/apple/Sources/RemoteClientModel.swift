@@ -9,6 +9,8 @@ final class RemoteClientModel: ObservableObject {
     @Published private(set) var unavailableNodes: [String] = []
     @Published private(set) var target: CinemaRemoteTarget?
     @Published private(set) var challenge: CinemaRemoteChallenge?
+    @Published private(set) var pairingOpening = false
+    @Published private(set) var pairingExpired = false
     @Published private(set) var pairings: [CinemaRemotePendingPairing] = []
     @Published private(set) var selectedDevice: CinemaRemoteDevice?
     @Published private(set) var controllerState: CinemaRemoteState?
@@ -28,12 +30,20 @@ final class RemoteClientModel: ObservableObject {
     private var receiver: RemoteSecretStorage.Receiver?
     private var receiverControl: CinemaRemoteControl?
     private var receiverTask: Task<Void, Never>?
+    private var deferredTask: Task<Void, Never>?
+    private var deferredExpiryTask: Task<Void, Never>?
+    private var deferredID = UUID()
     private var presenceTask: Task<Void, Never>?
     private var discoveryTask: Task<Void, Never>?
     private var controllerTask: Task<Void, Never>?
     private var renewTask: Task<Void, Never>?
     private var pairingTask: Task<Void, Never>?
     private var pairingLifetime = RemotePairingLifetime()
+    private var receiverPairingLifetime = RemotePairingLifetime()
+    private var receiverPairingTask: Task<Void, Never>?
+    private var challengeExpiryTask: Task<Void, Never>?
+    private var phonePairingExpiryTask: Task<Void, Never>?
+    private var commandResult = RemoteCommandResult()
     private var holdTask: Task<Void, Never>?
     private var authObserver: UUID?
     private var lifecycle = UUID()
@@ -53,7 +63,8 @@ final class RemoteClientModel: ObservableObject {
     private var identity: String?
     var serverInstanceID: String? { SettingsStore().instanceId }
 
-    init() {
+    init(navigation: RemoteNavigationCoordinator? = nil) {
+        self.navigation = navigation
         authObserver = Session.shared.observeAuthorizationChanges { [weak self] generation in
             Task { @MainActor in
                 guard self?.api?.generation != generation else { return }
@@ -98,7 +109,10 @@ final class RemoteClientModel: ObservableObject {
         presenceTask?.cancel(); presenceTask = nil
         discoveryTask?.cancel(); discoveryTask = nil
         pairingTask?.cancel(); pairingTask = nil
+        hidePairing()
         closeController()
+        deferredID = UUID(); deferredTask?.cancel(); deferredTask = nil
+        deferredExpiryTask?.cancel(); deferredExpiryTask = nil; playback?.physicalInput()
         guardState.deactivate()
         target = nil
         receiverControl = nil
@@ -169,6 +183,7 @@ final class RemoteClientModel: ObservableObject {
                     responseRevision = batch.responseRevision
                     pairings = Array(batch.pairings.prefix(8))
                     if receiverControl != batch.control {
+                        guardState.invalidate(); playback?.physicalInput()
                         presenceTask?.cancel()
                         receiverControl = batch.control
                         presenceTask = Task { [weak self] in await self?.presenceLoop(generation, target: capturedTarget, receiver: receiver) }
@@ -176,8 +191,9 @@ final class RemoteClientModel: ObservableObject {
                     if batch.control == nil { guardState.deactivate() }
                     var outcomes: [RemoteReceiverGuard.Acknowledgement] = []
                     for command in batch.commands {
-                        let outcome = apply(command)
-                        outcomes.append(.init(controlEpoch: command.controlEpoch, sequence: command.sequence, outcome: outcome))
+                        if let outcome = receive(command) {
+                            outcomes.append(.init(controlEpoch: command.controlEpoch, sequence: command.sequence, outcome: outcome))
+                        }
                     }
                     cursor = max(cursor, batch.deliveryID)
                     if !outcomes.isEmpty {
@@ -189,6 +205,7 @@ final class RemoteClientModel: ObservableObject {
                 guard current(generation) else { return }
                 guardState.deactivate()
                 presenceTask?.cancel(); presenceTask = nil
+                hidePairing()
                 target = nil
                 receiverControl = nil
                 challenge = nil
@@ -220,11 +237,14 @@ final class RemoteClientModel: ObservableObject {
             try? await Task.sleep(for: .milliseconds(receiverControl == nil ? 5_000 : 250))
         }
     }
-    private func makeState() -> CinemaRemoteState {
-        guard let navigation else { return restrictedState() }
-        let snapshot = navigation.snapshot()
+    private func makeState() -> CinemaRemoteState { makeState(pairingRestricted: localPairingRestricted) }
+    /// The presentation restriction is captured once for each publication.
+    func makeState(pairingRestricted: Bool) -> CinemaRemoteState {
         guard uiRevision < CinemaRemoteCommand.maximumInteger else { guardState.deactivate(); return restrictedState() }
         uiRevision += 1
+        guard let navigation else { return restrictedState() }
+        let snapshot = navigation.snapshot()
+        if pairingRestricted { guardState.invalidate(); return restrictedState() }
         if snapshot.blocked { guardState.invalidate(); return restrictedState() }
         if receiverControl != nil {
             do {
@@ -234,10 +254,11 @@ final class RemoteClientModel: ObservableObject {
             } catch { guardState.invalidate() }
         }
         var actions: [CinemaRemoteAction.Kind] = [.navigate, .select, .back, .home, .playItem]
+        if snapshot.scope.contains(":shared") { actions.removeAll { $0 == .playItem } }
         if snapshot.textNonce != nil { actions.append(.textReplace) }
         var summary: CinemaRemotePlaybackSummary?
-        if let owner = playback?.owner, snapshot.scope.hasPrefix(owner.scope) {
-            actions += owner.actions.filter { !actions.contains($0) }.sorted { $0.rawValue < $1.rawValue }
+        if let owner = playback?.owner, owner.available(), snapshot.scope.hasPrefix(owner.scope) {
+            actions += owner.actions.filter { owner.actionAvailable($0) && !actions.contains($0) }.sorted { $0.rawValue < $1.rawValue }
             summary = owner.snapshot()
         }
         let route: String
@@ -246,17 +267,60 @@ final class RemoteClientModel: ObservableObject {
         else if snapshot.scope.hasPrefix("library:") || snapshot.scope == "libraries" { route = "library" }
         else if snapshot.scope.hasPrefix("item:") { route = "details" }
         else { route = snapshot.scope == "search" ? "search" : "home" }
-        return .init(stateRevision: uiRevision, contextRevision: snapshot.context.contextRevision, focusRevision: snapshot.context.focusRevision,
+        return RemoteStateBudget.fit(.init(stateRevision: uiRevision, contextRevision: snapshot.context.contextRevision, focusRevision: snapshot.context.focusRevision,
                      route: route, capabilities: Array(actions.prefix(12)), focusedLabel: snapshot.focusedLabel,
-                     credits: guardState.currentCredits, textNonce: snapshot.textNonce, playback: summary)
+                     credits: guardState.currentCredits, textNonce: snapshot.textNonce, playback: summary))
     }
     private func restrictedState() -> CinemaRemoteState {
         let context = navigation?.context
         return .init(stateRevision: max(1, uiRevision), contextRevision: context?.contextRevision ?? 1,
                      focusRevision: context?.focusRevision ?? 1, route: "restricted", capabilities: [], focusedLabel: nil, credits: [], textNonce: nil, playback: nil)
     }
+    /// Deferred shared effects never block the serial receiver poll/control loop.
+    private func receive(_ command: CinemaRemoteCommand) -> CinemaRemoteOutcome? {
+        guard let navigation, let owner = playback?.owner, let effect = owner.deferredDispatch,
+              navigation.snapshot().scope == owner.scope, owner.actions.contains(command.action.type) else { return apply(command) }
+        guard current(lifecycle), let target, let receiver, let api else { return .unavailable }
+        if localPairingRestricted { guardState.invalidate(); return .restrictedSurface }
+        do { try updateGuard() } catch let outcome as CinemaRemoteOutcome { return outcome } catch { return .invalid }
+        if guardState.isPending(command, now: clock.milliseconds) { return nil }
+        if let known = guardState.result(controlEpoch: command.controlEpoch, sequence: command.sequence, now: clock.milliseconds) { return known.outcome }
+        let snapshot = navigation.snapshot()
+        let semantic: CinemaRemoteOutcome? = snapshot.blocked ? .restrictedSurface : (owner.available() && owner.actionAvailable(command.action.type) ? nil : .unavailable)
+        switch guardState.reserve(command, owner: owner.token, now: clock.milliseconds, semantic: semantic, replacingPending: [.stop, .back, .home].contains(command.action.type)) {
+        case .rejected(let outcome): return outcome
+        case .admitted(let permit):
+            deferredTask?.cancel(); deferredExpiryTask?.cancel()
+            if [.stop, .back, .home].contains(command.action.type) { owner.cancelNetworkGesture() }
+            let id = UUID(); deferredID = id
+            let generation = lifecycle
+            func stillOwned() -> Bool {
+                self.current(generation) && self.target == target && self.deferredID == id &&
+                self.playback?.owner?.token == owner.token && self.receiverControl?.controlEpoch == command.controlEpoch &&
+                self.receiverControl?.activeGrantID == command.grantID && navigation.snapshot().context == snapshot.context &&
+                navigation.activeScope == owner.scope && !navigation.snapshot().blocked && !self.localPairingRestricted
+            }
+            deferredExpiryTask = Task {
+                do { try await Task.sleep(for: .seconds(10)) } catch { return }
+                guard deferredID == id else { return }
+                guardState.retire(permit); deferredTask?.cancel(); owner.cancelNetworkGesture()
+            }
+            deferredTask = Task {
+                let result = await effect(command.action) {
+                    stillOwned() && self.guardState.permitsDispatch(permit, owner: owner.token, now: self.clock.milliseconds)
+                }
+                guard stillOwned(), let acknowledgement = guardState.complete(permit, owner: owner.token, now: clock.milliseconds, outcome: result) else { return }
+                deferredExpiryTask?.cancel(); deferredExpiryTask = nil
+                owner.deferredDidComplete(command.action, result)
+                _ = try? await api.ack(target: target, outcomes: [acknowledgement], secret: receiver.secret)
+                // No replay or inferred rollback after either B or ACK uncertainty.
+            }
+            return nil
+        }
+    }
     private func apply(_ command: CinemaRemoteCommand) -> CinemaRemoteOutcome {
         guard sceneCanAct, active, let navigation, api?.isCurrent == true else { return .unavailable }
+        if localPairingRestricted { guardState.invalidate(); return .restrictedSurface }
         do { try updateGuard() } catch let outcome as CinemaRemoteOutcome { return outcome } catch { return .invalid }
         let snapshot = navigation.snapshot()
         let semantic: CinemaRemoteOutcome? = snapshot.blocked ? .restrictedSurface : nil
@@ -301,47 +365,88 @@ final class RemoteClientModel: ObservableObject {
         return CinemaRemoteOutcome(rawValue: navigation.dispatch(routed, context: context).rawValue) ?? .invalid
     }
 
+    private var localPairingRestricted: Bool { pairingOpening || pairingExpired || challenge != nil || !pairings.isEmpty }
     func startPairing() {
-        guard let api, let target, let receiver else { return }
+        guard let api, let target, let receiver, current(lifecycle) else { return }
+        receiverPairingTask?.cancel(); challengeExpiryTask?.cancel()
+        let ticket = receiverPairingLifetime.begin(receiverID: receiver.id, target: target)
         let generation = lifecycle
-        Task {
+        let started = clock.milliseconds
+        challenge = nil; pairingExpired = false; pairingOpening = true; guardState.invalidate()
+        receiverPairingTask = Task {
             do {
                 let value = try await api.pairingStart(target: target, secret: receiver.secret)
-                guard current(generation), self.target == target else { return }
+                guard current(generation), receiverPairingLifetime.accepts(ticket, receiverID: self.receiver?.id, target: self.target) else { return }
+                guard value.target == target, value.expiresInMs > 0, value.expiresInMs <= 120_000 else { throw CinemaRemoteOutcome.invalid }
+                let deadline = RemotePairingDeadline(start: started, budget: value.expiresInMs)
+                pairingOpening = false
+                guard deadline.admits(clock.milliseconds) else { pairingExpired = true; return }
                 challenge = value
-            } catch { if current(generation) { status = "Pairing is unavailable." } }
+                challengeExpiryTask = Task {
+                    do { try await Task.sleep(for: .milliseconds(Int64(deadline.remaining(clock.milliseconds)))) } catch { return }
+                    guard current(generation), receiverPairingLifetime.accepts(ticket, receiverID: self.receiver?.id, target: self.target) else { return }
+                    challenge = nil; pairingExpired = true; guardState.invalidate()
+                }
+            } catch { if current(generation), receiverPairingLifetime.accepts(ticket, receiverID: self.receiver?.id, target: self.target) { pairingOpening = false; status = "Pairing is unavailable." } }
         }
     }
     func approve(_ pending: CinemaRemotePendingPairing, allow: Bool) {
-        guard let api, let target, let receiver else { return }
+        guard let api, let target, let receiver, current(lifecycle) else { return }
         let generation = lifecycle
-        Task {
+        let ticket = receiverPairingLifetime.begin(receiverID: receiver.id, target: target)
+        receiverPairingTask?.cancel(); challengeExpiryTask?.cancel(); pairingOpening = false
+        // Approval retires the advertised code. A failed approval offers a fresh
+        // challenge rather than retaining a code whose expiry timer was retired.
+        challenge = nil; pairingExpired = true; guardState.invalidate()
+        receiverPairingTask = Task {
             do {
                 _ = try await api.pairingApprove(target: target, pendingID: pending.id, approve: allow, secret: receiver.secret)
-                guard current(generation), self.target == target else { return }
-                pairings.removeAll { $0.id == pending.id }
-                challenge = nil
-            } catch { if current(generation) { status = "Pairing approval could not be confirmed." } }
+                guard current(generation), receiverPairingLifetime.accepts(ticket, receiverID: self.receiver?.id, target: self.target) else { return }
+                pairings.removeAll { $0.id == pending.id }; challenge = nil; pairingExpired = false
+            } catch { if current(generation), receiverPairingLifetime.accepts(ticket, receiverID: self.receiver?.id, target: self.target) { status = "Pairing approval could not be confirmed." } }
         }
     }
-    func hidePairing() { challenge = nil }
+    func hidePairing() {
+        receiverPairingLifetime.retire(); receiverPairingTask?.cancel(); receiverPairingTask = nil
+        challengeExpiryTask?.cancel(); challengeExpiryTask = nil
+        challenge = nil; pairingOpening = false; pairingExpired = false; guardState.invalidate()
+    }
     func pair(device: CinemaRemoteDevice, challengeID: UUID?, code: String) {
         guard let api, let target = device.target, let storage,
               selectedDevice?.id == device.id, selectedDevice?.target == target else { return }
         pairingTask?.cancel()
         let ticket = pairingLifetime.begin(receiverID: device.id, target: target)
         let generation = lifecycle
+        let deadline = RemotePairingDeadline(start: clock.milliseconds)
+        let expiredMessage = "Pairing expired. Start a new TV code and try again."
+        func stillPairing() -> Bool { current(generation) && pairingLifetime.accepts(ticket, receiverID: selectedDevice?.id, target: selectedDevice?.target) }
+        phonePairingExpiryTask?.cancel()
+        phonePairingExpiryTask = Task {
+            do { try await Task.sleep(for: .milliseconds(Int64(deadline.remaining(clock.milliseconds)))) } catch { return }
+            guard stillPairing() else { return }
+            commandStatus = expiredMessage; pairingTask?.cancel(); pairingTask = nil; pairingLifetime.retire()
+        }
         pairingTask = Task {
+            defer {
+                if pairingLifetime.accepts(ticket, receiverID: selectedDevice?.id, target: selectedDevice?.target) {
+                    phonePairingExpiryTask?.cancel(); phonePairingExpiryTask = nil
+                }
+            }
             do {
                 let claim = try await api.pairingClaim(target: target, challengeID: challengeID, code: code, name: "Cinema phone")
-                guard current(generation), pairingLifetime.accepts(ticket, receiverID: selectedDevice?.id, target: selectedDevice?.target) else { return }
+                guard stillPairing() else { return }
+                guard deadline.admits(clock.milliseconds) else { commandStatus = expiredMessage; return }
                 for _ in 0..<120 {
                     try await Task.sleep(for: .seconds(1))
+                    guard stillPairing() else { return }
+                    guard deadline.admits(clock.milliseconds) else { commandStatus = expiredMessage; return }
                     let result = try await api.pairingResult(target: target, pendingID: claim.pendingID, secret: claim.pollSecret)
-                    guard current(generation), pairingLifetime.accepts(ticket, receiverID: selectedDevice?.id, target: selectedDevice?.target) else { return }
+                    guard stillPairing() else { return }
+                    guard deadline.admits(clock.milliseconds) else { commandStatus = expiredMessage; return }
                     if result.status == "denied" { commandStatus = "Pairing was declined on the TV."; return }
                     if result.status == "approved" {
                         guard let id = result.grantID, let secret = result.grantSecret, result.receiverID == device.id else { throw CinemaRemoteOutcome.invalid }
+                        guard deadline.admits(clock.milliseconds) else { commandStatus = expiredMessage; return }
                         try storage.saveGrant(.init(receiverID: device.id, id: id, secret: secret))
                         commandStatus = "Paired. Tap Use as remote to take control."
                         pairingTask = nil
@@ -350,7 +455,7 @@ final class RemoteClientModel: ObservableObject {
                     }
                     commandStatus = "Waiting for local approval on the TV."
                 }
-                commandStatus = "Pairing expired. Start a new TV code."
+                if stillPairing() { commandStatus = expiredMessage }
             } catch { if current(generation), pairingLifetime.accepts(ticket, receiverID: selectedDevice?.id, target: selectedDevice?.target) { commandStatus = "Pairing could not finish. Start a new TV code." } }
         }
     }
@@ -370,9 +475,11 @@ final class RemoteClientModel: ObservableObject {
     var selectedIsPaired: Bool { selectedGrant != nil }
     func closeController() {
         pairingLifetime.retire()
+        phonePairingExpiryTask?.cancel(); phonePairingExpiryTask = nil
         pairingTask?.cancel(); pairingTask = nil
         controlEligibility.retire()
         controllerGeneration = UUID()
+        commandResult.retire()
         controllerTask?.cancel(); controllerTask = nil
         renewTask?.cancel(); renewTask = nil
         stopHolding()
@@ -391,6 +498,7 @@ final class RemoteClientModel: ObservableObject {
         let renewUnknownEpoch = recoveryEpoch != nil
         controlEligibility.retire()
         controllerGeneration = UUID()
+        commandResult.retire()
         controllerTask?.cancel(); renewTask?.cancel(); stopHolding()
         controlling = false; sending = false; sendToken = UUID(); controllerState = nil
         let generation = controllerGeneration
@@ -448,7 +556,7 @@ final class RemoteClientModel: ObservableObject {
                     guard reply.responseRevision >= controllerRevision else { continue }
                     acceptControl(reply.control, revision: reply.responseRevision)
                     acceptState(reply.state)
-                    if let last = reply.outcomes.last(where: { $0.controlEpoch == controllerControl?.controlEpoch && $0.sequence == nextSequence }) { commandStatus = "TV: " + last.outcome.rawValue }
+                    if let last = reply.outcomes.last(where: { $0.controlEpoch == controllerControl?.controlEpoch && $0.sequence == nextSequence }), commandResult.observe(epoch: last.controlEpoch, sequence: last.sequence, outcome: last.outcome) { commandStatus = last.outcome.viewerMessage }
                 } catch {
                     guard current(life), generation == controllerGeneration else { return }
                     controlling = false; controlEligibility.retire()
@@ -480,6 +588,7 @@ final class RemoteClientModel: ObservableObject {
         guard let api, let target = selectedDevice?.target, let grant = selectedGrant, let epoch = controllerControl?.controlEpoch else { closeController(); return }
         controlEligibility.retire()
         controllerGeneration = UUID()
+        commandResult.retire()
         controllerTask?.cancel(); renewTask?.cancel(); stopHolding()
         controlling = false; sending = false; sendToken = UUID()
         let generation = controllerGeneration
@@ -497,6 +606,7 @@ final class RemoteClientModel: ObservableObject {
         guard (try? action.validate()) != nil else { commandStatus = "Command parameters are invalid."; return }
         guard let sequence = sequences.next(target: target, grant: grant.id, epoch: control.controlEpoch) else { controlling = false; return }
         nextSequence = sequence
+        commandResult.begin(epoch: control.controlEpoch, sequence: sequence)
         let command = CinemaRemoteCommand(target: target, grantID: grant.id, controlEpoch: control.controlEpoch, sequence: sequence,
                                           credit: credit.nonce, contextRevision: state.contextRevision, focusRevision: state.focusRevision, action: action)
         sending = true
@@ -508,11 +618,11 @@ final class RemoteClientModel: ObservableObject {
                 let reply = try await api.send(command, secret: grant.secret)
                 guard current(life), generation == controllerGeneration, sendToken == token, controllerControl?.controlEpoch == control.controlEpoch else { return }
                 guard reply.queued, reply.controlEpoch == control.controlEpoch, reply.sequence == sequence else { throw CinemaRemoteOutcome.invalid }
-                commandStatus = "Sent. Waiting for the TV outcome."
+                commandStatus = commandResult.known(epoch: control.controlEpoch, sequence: sequence)?.viewerMessage ?? "Sent. Waiting for the TV outcome."
             } catch {
                 guard current(life), generation == controllerGeneration, sendToken == token, controllerControl?.controlEpoch == control.controlEpoch else { return }
                 stopHolding()
-                commandStatus = "Command outcome unknown; it will not be replayed."
+                commandStatus = commandResult.known(epoch: control.controlEpoch, sequence: sequence)?.viewerMessage ?? "Command outcome unknown; it will not be replayed."
             }
             if generation == controllerGeneration && sendToken == token { sending = false }
         }

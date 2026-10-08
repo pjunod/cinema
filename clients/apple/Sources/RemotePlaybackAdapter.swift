@@ -39,6 +39,10 @@ final class RemotePlaybackAdapter: ObservableObject {
         let snapshot: () -> CinemaRemotePlaybackSummary?
         let dispatch: (CinemaRemoteAction) -> CinemaRemoteOutcome
         let cancelNetworkGesture: () -> Void
+        var available: () -> Bool = { true }
+        var actionAvailable: (CinemaRemoteAction.Kind) -> Bool = { _ in true }
+        var deferredDidComplete: (CinemaRemoteAction, CinemaRemoteOutcome) -> Void = { _, _ in }
+        var deferredDispatch: ((CinemaRemoteAction, @escaping () -> Bool) async -> CinemaRemoteOutcome)? = nil
     }
     @Published private(set) var owner: Owner?
     func attach(_ owner: Owner) { self.owner = owner }
@@ -48,4 +52,19 @@ final class RemotePlaybackAdapter: ObservableObject {
         return owner.dispatch(action)
     }
     func physicalInput() { owner?.cancelNetworkGesture() }
+}
+
+/// Resource settlement belongs to the existing session even when a semantic
+/// operation is no longer allowed to touch its renderer or replacement owner.
+@MainActor
+struct SharedRemoteControlCompletion {
+    static func finish(cleanup: (() async -> Void)?, permit: () -> Bool,
+                       effect: () async -> CinemaRemoteOutcome) async -> CinemaRemoteOutcome {
+        if let cleanup {
+            let task = Task { await cleanup() }
+            await task.value
+        }
+        guard permit(), !Task.isCancelled else { return .unavailable }
+        return await effect()
+    }
 }

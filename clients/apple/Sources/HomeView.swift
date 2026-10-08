@@ -217,6 +217,9 @@ private struct AppDestinations: ViewModifier {
             switch route {
             case .collection(let collection): LibraryView(collection: collection).remoteScope(RemoteNavigationCoordinator.routeScope(route))
             case .item(let id): DetailView(itemId: id).remoteScope(RemoteNavigationCoordinator.routeScope(route))
+            case .sharedLibraries: SharedLibrariesView().remoteScope(RemoteNavigationCoordinator.routeScope(route))
+            case .sharedLibrary(let library, let parent, let title): SharedLibraryItemsView(library: library, parent: parent, title: title).remoteScope(RemoteNavigationCoordinator.routeScope(route))
+            case .sharedItem(let reference, let library): SharedLibraryDetailView(reference: reference, library: library).remoteScope(RemoteNavigationCoordinator.routeScope(route))
             }
         }
     }
@@ -293,7 +296,7 @@ private struct HomeDashboard: View {
         #endif
         return tabs + shelves.enumerated().flatMap { index, items in
             items.map { "shelf:\(index):item:\($0.id)" }
-        }
+        } + model.comingSoon.filter { $0.itemId != nil }.map { "shelf:3:comingsoon:" + $0.id }
     }
     private func updateRemoteOrder() { remoteNavigation.setOrder(scope: "home", keys: remoteKeys, columns: 1) }
 
@@ -356,6 +359,7 @@ private struct HomeDashboard: View {
         )
         .id("shelf:2")
         ComingSoonRow(entries: model.comingSoon)
+            .id("shelf:3")
 
         if featured == nil,
            (model.hubs.nextUp ?? []).isEmpty,
@@ -457,7 +461,7 @@ private struct LibrariesDashboard: View {
         #else
         let grouping: [String] = []
         #endif
-        remoteNavigation.setOrder(scope: "libraries", keys: grouping + model.libraryCollections().map { "collection:" + $0.id }, columns: 1)
+        remoteNavigation.setOrder(scope: "libraries", keys: grouping + ["libraries:shared"] + model.libraryCollections().map { "collection:" + $0.id }, columns: 1)
     }
     private func openGrouping() {
         remoteNavigation.openModal(scope: "libraries:grouping", opener: "libraries:grouping") { groupingMenu = false }
