@@ -147,7 +147,16 @@ pub fn vod_pipe_args(
     // Explicit film-clock trim below owns the accurate landing. Letting the
     // input seek also trim audio can discard a different partial packet on
     // each restart before its sample-clock correction sees the frame.
-    args.splice(0..0, ["-copyts".to_owned(), "-noaccurate_seek".to_owned()]);
+    let mut clock_options = vec!["-copyts".to_owned(), "-noaccurate_seek".to_owned()];
+    if !execution.source_input.is_file() {
+        // Blu-ray playlists and DVD titles can begin thousands of seconds
+        // into their transport clock. The film-global trim/fps/AAC lattice
+        // below starts at zero; otherwise it pads that entire offset before
+        // the first actual frame and may never materialize the opening VOD
+        // segment. Keep file VOD's established source-clock behavior intact.
+        clock_options.push("-start_at_zero".to_owned());
+    }
+    args.splice(0..0, clock_options);
     let has_audio = media.input_has_audio;
     let reopen_audio = has_audio && execution.source_input.is_file();
     if has_audio && !reopen_audio {
@@ -427,6 +436,40 @@ mod tests {
                 "-i",
                 "/media/Disc One"
             ]));
+        assert!(args.iter().any(|argument| argument == "-start_at_zero"));
+
+        let bluray = execution
+            .clone()
+            .with_source_input(crate::optical::ResolvedInput::Bluray {
+                path: "/media/Disc Two".into(),
+                playlist_number: 0,
+                angle: 1,
+            })
+            .expect("Blu-ray input");
+        let bluray_args = vod_pipe_args(
+            &plan,
+            &bluray,
+            VodFrameGrid::new(24, 1).expect("Blu-ray grid"),
+            12.0,
+        );
+        assert!(bluray_args
+            .iter()
+            .any(|argument| argument == "-start_at_zero"));
+
+        let file = execution
+            .with_source_input(crate::optical::ResolvedInput::File {
+                path: "/media/chaptered.mkv".into(),
+            })
+            .expect("regular file input");
+        let file_args = vod_pipe_args(
+            &plan,
+            &file,
+            VodFrameGrid::new(24, 1).expect("file grid"),
+            12.0,
+        );
+        assert!(!file_args
+            .iter()
+            .any(|argument| argument == "-start_at_zero"));
     }
 
     #[test]
