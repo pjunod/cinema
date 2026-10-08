@@ -2489,7 +2489,7 @@ impl HiqliteAuthStore {
     async fn verify_empty_import_target(&self) -> Result<(), StoreError> {
         // Device credentials are never imported: restore cannot resurrect
         // pairings. A nonempty target is refused before any import write.
-        let remote = self.client().query_consistent_map::<CountRow,_>("SELECT (SELECT count(*) FROM remote_receivers)+(SELECT count(*) FROM remote_grants) AS count",params!()).await?;
+        let remote = self.client().query_consistent_map::<CountRow,_>("SELECT (SELECT count(*) FROM remote_receivers)+(SELECT count(*) FROM remote_grants)+(SELECT count(*) FROM invitation_phones)+(SELECT count(*) FROM invitation_consents)+(SELECT count(*) FROM invitation_events) AS count",params!()).await?;
         if !matches!(remote.as_slice(),[r] if r.count==0) {
             return Err(StoreError::Migration(
                 "import target has Cinema remote credentials".into(),

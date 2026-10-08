@@ -827,6 +827,11 @@ title = "Accounts, tokens, and authorization boundaries"
 contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate; cache-only recovery authorization is published only from a current Store-backed admin read, is invalidated around credential mutations, and fails closed on every committed peer until its signed begin/end revocation fence is acknowledged or expires at the proof TTL. A closed or empty proof cache is that node's condition and never a verdict on the caller: the recovery guard answers its cached proof first and without touching the Store, and on a miss falls back to one bounded Store read, so a Store-known administrator is admitted, a Store-known non-admin is refused as forbidden, only a credential the Store has no row for is unauthorized, and a node that cannot find out answers a named service-unavailable refusal rather than a 401 that ends a working session. The one-time revocation-protocol activation names the precondition blocking it and retries on a bounded backoff."
 paths = [
   # Receiver-local remote authority/freshness/replay boundaries and shared fixtures.
+  "crates/plurx-core/src/store/invitations.rs",
+  "crates/plurx-core/src/store/invitations/**",
+  "crates/plurx-core/src/store/sqlite/invitations.rs",
+  "crates/plurx-core/src/store/hiqlite_invitations.rs",
+  "crates/plurx-core/tests/store_contract/invitations.rs",
   "crates/plurx-core/src/store/remote.rs",
   "crates/plurx-core/src/store/remote_tests.rs",
   "crates/plurx-core/src/store/sqlite/remote.rs",

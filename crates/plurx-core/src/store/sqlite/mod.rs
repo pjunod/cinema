@@ -19,6 +19,7 @@ mod file_grants;
 mod fragindex;
 mod fragment_index_cluster;
 mod housekeeping;
+mod invitations;
 mod jellyfin_catalog;
 mod jellyfin_identity;
 mod jellyfin_login;
@@ -1296,6 +1297,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::sharing_ingress_custody::SCHEMA,
     // v106: additive Cinema receiver credentials, with independent replica marker.
     REMOTE_SCHEMA,
+    // v107: separately versioned opt-in invitation consent/admission.
+    super::invitations::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
