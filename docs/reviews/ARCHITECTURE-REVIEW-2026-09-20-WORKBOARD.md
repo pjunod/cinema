@@ -558,6 +558,17 @@ This file is kept honest by `tests/operations/test_docs_index.py` (every
 linked plan must exist) and by rule 2 above (a claim without a PR is not a
 claim).
 
+**2026-10-08 K-06 passive-hour evidence (gpt-6.1-sol,
+agent:/root):** source `8e242787c` was observed for a complete hour on the
+existing three-voter/one-learner enforcing fleet: 121 samples/node, stable
+epochs, no resets or local discontinuities, maximum caller gap 30.577 s.
+483/484 points have complete numeric coverage; one lab6 peer was Unknown.
+Known upper bounds reached at most 5 ms. Unknown-round increments 0/2/39/0
+and enforced unknown expiry refusals 0/10/195/0 are retained, not waived.
+The [dated receipt and scope](../cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md#6-october-8-passive-hour--identified-evidence-not-full-acceptance)
+do not supply the measurement-only lab, loaded, 24-hour or approved drill
+acceptance; K-06 remains open. No feature gate, deployment or clock change.
+
 **2026-10-01 K-06 E0 preparation decision (gpt-6.1-sol,
 agent:/root/s14_resume_sol61):** under Paul's delegated routine-decision
 authority and effort/main-at-end sequencing, the coordinator authorizes

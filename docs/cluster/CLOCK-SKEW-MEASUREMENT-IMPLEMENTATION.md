@@ -187,3 +187,46 @@ operational acceptance remain open until actually recorded.
 |---|---|---|---|---|
 | 2026-10-01 | gpt-6.1-sol | agent:/root/s14_resume_sol61 | E0 sequencing clarification | `codex/k06-pure-clock-policy` prepares core policy only on current effort. No production consumer or measurement receipt is invented; an identified owned-lab artifact is eligible for the unchanged observation safety bar, not main/fleet qualification. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M0–M2 measurement runtime | `codex/k06-measurement-runtime`, based on effort `8a7dbf533`; exact signed exchange, core continuity/generations, roster/filter observer, passive metrics and read-only Developer facts implemented. §4.1 records focused development proofs. Sole review, release gate and identified fleet evidence remain open. |
+
+## 6. October 8 passive hour — identified evidence, not full acceptance
+
+An existing enforcing fleet was observed without settings, load, deployment
+or clock changes at source `8e242787c5112d6ba2bd66b2d30c4dd0a0bbc2a4`.
+The first complete four-node round ended at 03:04:41 UTC; final requests
+began after 04:04:41 UTC. There are 121 thirty-second samples per node,
+484 total, with stable individual container/image/start epochs, no uptime
+or cumulative-counter rollback, no local clock-discontinuity increment,
+and maximum caller gap 30.577 seconds. Each node's final request began more
+than 3,600 seconds after its initial response completed.
+
+| Node | Role | Numeric-complete samples | Maximum known peer upper bound | Unknown-round increment | Enforced unknown expiry-scan refusals |
+|---|---|---:|---:|---:|---:|
+| media1 | voter | 121/121 | 5 ms | 0 | 0 |
+| lab6 | voter | 120/121 | 5 ms | 2 | 10 |
+| lab3 | learner | 121/121 | 5 ms | 39 | 195 |
+| lab4 | voter | 121/121 | 4 ms | 0 | 0 |
+
+Lab6 sample 36 reports media1 Unknown and omits its numeric pair. Thus 483
+of 484 points have complete numeric coverage; missing bounds are not zero.
+Lab3's lifetime-counter increments also reveal unknown rounds between
+otherwise bounded samples. This is not uninterrupted peer availability.
+The five recorded playback/transcode/Live TV/recording activity indicators
+were zero at every sample, not proof that all background work was idle.
+Each node counted 1,080 inbound clock-route consistent-query call attempts;
+that is not a count of successful requests or all Store reads.
+
+The raw selected-metric receipt is 5,249,998 bytes, SHA256
+`6c84b622e1753237d98142dd687285d687c7360cd816ffc7a555eac618b1f6c6`.
+Its terminal receipt reports all workers/owned children stopped; root also
+verified the controller absent and its owned guard removed. A first
+post-hoc auditor incorrectly required every sample to be numerically
+complete; its refusal was preserved, and a same-review correction retains
+the actual unknown point rather than rerunning the hour.
+
+Chronyc was unavailable. Separate status points showed all four hosts
+NTP-synchronized with systemd-timesyncd, not continuous synchronization.
+This existing three-voter/one-learner enforcing fleet is **not** the owned
+measurement-only lab. The earlier no-fleet-receipt sentence describes the
+original release; this dated partial receipt does not satisfy the loaded
+60-second, 24-hour, drill, rollout or full K-06 acceptance bars. It does not
+change safety bounds, auth windows, switches or qualification policy.
