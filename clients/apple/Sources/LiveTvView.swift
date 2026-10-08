@@ -1648,7 +1648,7 @@ struct LiveTvGuideGrid: View {
         }
         #if os(tvOS)
         .onAppear { updateRemoteGuideOrder() }
-        .onChange(of: layout.rows.map { $0.channel.id }) { _, _ in updateRemoteGuideOrder() }
+        .onChange(of: remoteGuideKeys) { _, _ in updateRemoteGuideOrder() }
         #endif
         .coordinateSpace(name: "live-tv-guide-scroll")
         .onPreferenceChange(LiveTvGuideScrollOriginKey.self) { scrollOrigin = $0 }
@@ -1801,13 +1801,12 @@ struct LiveTvGuideGrid: View {
     /// Returns whether the press was used. `onMoveCommand` consumes every
     /// direction it is given, so anything this declines is a dead press —
     /// which is why the chips are handled here rather than left to the engine.
-    @discardableResult
+    private var remoteGuideKeys: [String] {
+        RemoteGuideOrder.keys(layout.rows.map { row in (channelID: row.channel.id, programmeStarts: row.cells.map { $0.programme.start }) })
+    }
     private func updateRemoteGuideOrder() {
         guard onRemoteProgramme != nil else { return }
-        let keys = layout.rows.flatMap { row in
-            ["live:channel:" + row.channel.id] + row.cells.map { "live:programme:" + row.channel.id + ":" + String($0.programme.start) }
-        }
-        remoteNavigation.setOrder(scope: "live-tv", keys: ["live:channels", "live:guide", "live:guide-time", "live:captions"] + keys, columns: 1)
+        remoteNavigation.setOrder(scope: "live-tv", keys: remoteGuideKeys, columns: 1)
     }
 
     private func moveFocus(_ direction: LiveTvContractInput) -> Bool {

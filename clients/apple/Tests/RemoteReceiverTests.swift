@@ -117,6 +117,25 @@ final class RemoteReceiverTests: XCTestCase {
         owner.claim(before: nil, after: 40_000)
         XCTAssertEqual(owner.cancel(current: 50_000), 50_000)
     }
+    @MainActor
+    func testGuideOrderRefreshesWhenSameChannelsHaveNewProgrammeTimes() {
+        let original = RemoteGuideOrder.keys([(channelID: "news", programmeStarts: [100, 200])])
+        let later = RemoteGuideOrder.keys([(channelID: "news", programmeStarts: [300, 400])])
+        XCTAssertNotEqual(original, later)
+        XCTAssertTrue(original.contains("live:programme:news:100"))
+        XCTAssertFalse(later.contains("live:programme:news:100"))
+        XCTAssertTrue(later.contains("live:programme:news:300"))
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        navigation.selectedTab = .liveTv
+        navigation.synchronizeRoute()
+        navigation.setOrder(scope: "live-tv", keys: original, columns: 1)
+        navigation.setOrder(scope: "live-tv", keys: later, columns: 1)
+        for _ in 0..<6 { XCTAssertEqual(navigation.dispatch(.navigate(.down), context: navigation.context), .applied) }
+        XCTAssertEqual(navigation.requestedFocus, "live:programme:news:300")
+        XCTAssertEqual(navigation.dispatch(.select, context: navigation.context), .unsupported)
+    }
+
     func testReopenAndConnectionRecoveryRequireExplicitControlAcquisition() {
         var eligibility = RemoteControlEligibility()
         let original = UUID(), reopened = UUID()
