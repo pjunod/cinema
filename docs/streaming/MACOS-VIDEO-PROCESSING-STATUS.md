@@ -270,7 +270,7 @@ sections remain the detailed acceptance specifications.
 | M4-03 | SAR, rotation, odd dimensions, VFR, interlace and burn controls | Integrated eligibility boundary; preserve incumbent semantics instead of dropping required processing |
 | M4-04 | Prepublication retry excludes failed Mac graph, new plan and asset identity | Integrated in existing retry owner; no CPU fallback immediately upgraded back to failed graph |
 | M4-05 | Postpublication replacement/error, cancellation and resource release | Awaiting production evidence; no changed bytes appended to published artifact |
-| M4-06 | Native bound-source qualification for normalized continuous VOD | Initial refusal traced to the formerly Linux-only source parser. Capability-limited Wasm Jellyfin FFprobe is now integrated with signing and packaging: final 15.31 MB SIMD module matches native on 600 decoded frames and passes representative field-marked timing controls. Interpreter rejected for exceeding the deadline. Actual signed-daemon normalized delivery remains in progress; no fixture-mode or stored-facts bypass. Prior non-normalized VOD fragments are separate evidence |
+| M4-06 | Native bound-source qualification for normalized continuous VOD | Initial refusal traced to the formerly Linux-only source parser. Capability-limited Wasm Jellyfin FFprobe is now integrated with signing and packaging: final 15.31 MB SIMD module matches native on 600 decoded frames and passes representative field-marked timing controls. Interpreter rejected for exceeding the deadline. Actual signed-daemon native normalized delivery now produced 48 frames through normal source authority; no fixture-mode or stored-facts bypass. Final-source paced/seek qualification remains in progress |
 | M5-01 · implementation §8 | HDR10 → SDR with 10-bit precision through scale and explicit BT.709 output | Core integrated from observed scale-first Metal graph; actual non-normalized VOD HDR first fragment decoded cleanly |
 | M5-02 | Consumed HDR metadata removed only after actual SDR conversion | Native output observed clean; scoped shared CPU/zscale-boundary correction integrated |
 | M5-03 | Peak provenance, missing/1000/4000-nit metadata, gamut/gradients/scenes | Awaiting broader corpus and visual evidence; do not claim CPU Hable controls applied to Metal |
@@ -287,15 +287,15 @@ sections remain the detailed acceptance specifications.
 | Q-04 | One/two/four sessions, steady-window p10 and 30-minute soak | Awaiting evidence; short high-speed runs do not prove capacity |
 | Q-05 | ≥30 starts, first publishable media and first presented frame, p95 | Awaiting production/client evidence |
 | Q-06 | CPU, throughput, peak RSS/memory pressure, energy, copy/sync instrumentation | CPU/throughput measured on synthetic workload; remaining measurements unmeasured, not zero |
-| Q-07 · design §6.4 | SDR aligned quality metrics plus ringing/aliasing/banding inspection | Analytic gray smoke only; full quality acceptance awaiting evidence |
+| Q-07 · design §6.4 | SDR aligned quality metrics plus ringing/aliasing/banding inspection | Actual normalized 48-frame CPU/native delivery matches paired patches within one code value; whole-frame PSNR minimum 51.92 dB, mean 53.23 dB. This does not establish all-content perceptual acceptance |
 | Q-08 | HDR blinded review on named calibrated display, highlight/shadow/gamut/temporal findings | Awaiting human/display evidence; synthetic ramp and VMAF alone are insufficient |
-| Q-09 | Real plurxd rolling/VOD playback, two-minute play, seek/resume, errors/rebuffer/A/V | First SDR/HDR non-normalized VOD fragments produced and decoded; two-minute client playback and the remaining delivery matrix await evidence |
+| Q-09 | Real plurxd rolling/VOD playback, two-minute play, seek/resume, errors/rebuffer/A/V | Early signed daemon completed 120-second paced HTTP demand and controls on CPU; later actual native normalized 48-frame proof passed. Final-source paced/seek/HEVC checks continue; HTTP delivery is not client presentation |
 | Q-10 | Correctness first, then ≥20% throughput or ≥20% CPU/≥15% energy benefit within throughput bound | SDR/revised HDR synthetic CPU criterion met; visual/production correctness still unqualified |
 | M6-01 · implementation §10 | Full incumbent AC-4 and P5 package acceptance in daemon environment | Public AC-4 broadcast sample locally decoded/downmixed5seconds with original Jellyfin; no media redistributed. Exact original/strict package comparison now produces byte-identical 239,999-frame stereo 48 kHz PCM. Daemon delivery and positive P5 acceptance remain open |
-| M6-02 | Native install, runtime libraries, signing/distribution and architecture compatibility | Complete official package retained; system-only runtime inventory needs functioning /usr/bin/otool (possibly Apple CLT); clean install/signing workflow verification pending |
+| M6-02 | Native install, runtime libraries, signing/distribution and architecture compatibility | Complete pinned Jellyfin package, system-only native dependency closure and signed isolated arm64 daemon exercised. Parser signing prerequisite explicit; matched dSYM packaging being integrated. Developer ID/notarization, distribution install and Intel remain unverified |
 | M6-03 | Fresh offline install, empty/corrupt/full/unwritable cache and reprobe | Isolated daemon reached both graphs Available and repaired deliberately corrupted cache; distribution install/full/unwritable cases still pending |
 | M6-04 | Upgrade/rollback while workers active, old binaries retained or workers drained | Planned; no installed package changed yet |
-| M6-05 | Switch off affects new plans, existing sessions retain captured implementation | Isolated false→true→false→true saves, explicit reprobe and restart persistence passed; live-session behavior still pending |
+| M6-05 | Switch off affects new plans, existing sessions retain captured implementation | Saved/reprobe/restart checks passed; active normalized native VOD retained its captured candidate/media after switch-off while a new disabled plan selected distinct CPU processing |
 | M6-06 | Graduate switch only with claimed workload/client evidence, preserve saved value | Planned; stays in Developer while evidence incomplete; no automatic default flip |
 
 ### 5.4 Explicit extensions and cross-platform follow-up
@@ -764,3 +764,76 @@ normal hook passed catalog, formatting, Clippy and 77 served JavaScript files
 in 1 minute 41 seconds. No unit tests ran. The supplementary combined-package
 archive retains exact positive/negative controls and selected P5 refreshes;
 actual daemon Live TV start/stop/reconnect remains separate work in progress.
+
+### 9.9 Actual delivery exposes remaining integration faults
+
+The signed `46f31ec6e` daemon completed 120.010 seconds of paced native
+normalized delivery (60 objects), plus seek/resume/cancel and active-recipe
+immutability. With the normal eight-thread CPU pool, 48-frame CPU/native
+comparisons pass: paired patch difference at most one code value and
+whole-frame PSNR minimum 51.92 dB, mean 53.23 dB. Earlier admission failures
+remain recorded as experiment configuration failures.
+
+A finite HEVC candidate produced actual `hvc1` Main 1920×1080 BT.709 media
+and 48 decoded frames, but the master endpoint returned `hls_init_invalid`.
+The cause is identified: the existing ladder codec-family helper falls back
+to `avc1` for SDR and therefore sends the HEVC initialization to the AVC
+inspector. The correction selects the family from the immutable output
+contract, then retains exact codec/profile derivation from the served init.
+Valid decoded media alone is not complete manifest acceptance. Separately,
+the older daemon's embedded HLG, SDR text-burn and ordinary BWDIF observations
+returned `output_contract_failed` with the corrected package. Final moving
+field controls may supersede the older BWDIF fixture; each remaining runtime
+failure still needs diagnosis. The HLG source is missing encoded square-pixel SAR, which the observation
+requires. Its narrowly regenerated fixture now has explicit SAR while all
+decoded planes remain unchanged; complete-graph acceptance is still being
+checked. Standalone graph success does not substitute for the embedded
+production observation. These findings remain open, and
+there is no final-candidate completion claim.
+
+### 9.10 Runtime-observation repairs and symbol packaging
+
+Matched dSYM packaging is integrated by `5b23539dc` from `ddfa81888`. The
+normal hook passed; an actual signed package preserves the daemon's UUID and
+copied symbol hashes. Mismatched UUIDs and unsafe symlink members have focused
+regression source. Unit execution remains deferred to the coordinator.
+
+A bounded Rust diagnostic parses the actual HEVC fragment successfully,
+including complete parameter sets and the single-sample-description layout.
+This confirms the master failure is codec-family dispatch, not malformed
+HEVC initialization; structural validation will remain unchanged.
+
+The regenerated HLG graph produces twelve square-pixel frames with the
+expected reference-white value 156. SDR text rendering is also present: a
+bright stationary source background masks the glyph in the old peak-only
+comparison. The repair checks cue-versus-blank change in a stationary region
+outside the moving marker, with missing/stale-cue negative controls. These source corrections are committed as `21110a5`, integrated by
+`d92700dea`. Exact all-target compilation passed in 13.37 seconds and the
+normal hook in 1 minute 34 seconds; no units ran. Actual missing/stale-cue
+negatives pass the new guard. Final combined daemon observations remain
+in progress.
+
+### 9.11 HEVC correction integrated; final declared graph gaps
+
+`ce443c20a`, integrated by `720676da5`, selects the finite HEVC codec family
+from the immutable plan, retains existing initialization/parameter-set/sample
+entry validation, and freezes actual-init HEVC facts. The actual retained
+init parses correctly; no core fMP4 parser relaxation was needed. Pinned
+daemon all-target compilation passed in 1 minute 21 seconds and the normal
+workspace hook in 1 minute 40 seconds. The focused regression source covers
+real resolved-plan/init binding and incomplete-parameter refusal; no units
+ran. Final daemon master acceptance still awaits the combined binary.
+
+The strict P5 combined source now compiles and is entering 45 bounded
+correctness controls across nine sources and five decoder/renderer/encoder
+tuples. A narrowly extended normalized source predicate will admit progressive
+HDR10 into the existing normalized 1440p SDR-AVC contract; all other geometry,
+rate, pixel and burn restrictions remain. Its final daemon proof is required.
+
+The complete graph inventory also exposed four declared but unobserved
+combinations: HLG text/bitmap burn and HDR10/HLG frame BWDIF. The fixture
+builder is completing independent observations for those combinations; a
+concrete unsupported result must retain the incumbent and be recorded, never
+be represented as an implemented available graph. The normal synthetic tuner
+protocol preflight has succeeded through the existing private-network rules;
+its temporary container and port listener were removed immediately afterward.
