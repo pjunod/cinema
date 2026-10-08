@@ -54,15 +54,24 @@ fn resolve_bin(override_value: Option<String>, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_owned())
 }
 
-fn default_bin(name: &str) -> String {
+#[cfg(any(test, windows, target_os = "macos"))]
+fn sibling_bin(name: &str, directory: &std::path::Path) -> Option<String> {
     #[cfg(windows)]
-    {
-        if let Ok(executable) = std::env::current_exe() {
-            if let Some(directory) = executable.parent() {
-                let sibling = directory.join(format!("{name}.exe"));
-                if sibling.is_file() {
-                    return sibling.to_string_lossy().into_owned();
-                }
+    let filename = format!("{name}.exe");
+    #[cfg(not(windows))]
+    let filename = name.to_owned();
+    let sibling = directory.join(filename);
+    sibling
+        .is_file()
+        .then(|| sibling.to_string_lossy().into_owned())
+}
+
+fn default_bin(name: &str) -> String {
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            if let Some(sibling) = sibling_bin(name, directory) {
+                return sibling;
             }
         }
     }
@@ -5765,6 +5774,25 @@ mod tests {
             resolve_bin(Some("/opt/jellyfin-ffmpeg/ffmpeg".to_owned()), "ffmpeg"),
             "/opt/jellyfin-ffmpeg/ffmpeg"
         );
+    }
+
+    #[test]
+    fn package_siblings_supply_defaults_without_overriding_operator_paths() {
+        let package = crate::test_tempdir().expect("package");
+        #[cfg(windows)]
+        let name = "ffprobe.exe";
+        #[cfg(not(windows))]
+        let name = "ffprobe";
+        let binary = package.path().join(name);
+        std::fs::write(&binary, b"packaged probe").expect("package artifact");
+        let bundled = sibling_bin("ffprobe", package.path()).expect("default sibling");
+        assert_eq!(bundled, binary.to_string_lossy());
+        assert_eq!(
+            resolve_bin(Some("/operator/ffprobe".into()), &bundled),
+            "/operator/ffprobe"
+        );
+        assert_eq!(resolve_bin(None, &bundled), bundled);
+        assert!(sibling_bin("ffmpeg", package.path()).is_none());
     }
 
     /// Older builds print help and listings to stderr, so a probe that read
