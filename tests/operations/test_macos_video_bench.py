@@ -117,7 +117,7 @@ class MacosVideoBenchTests(unittest.TestCase):
     def test_fixture_schema_resolves_relative_path_and_p5_missing_is_honest(self):
         fixture = BENCH["normalize_fixture"]({"id": "hdr10", "path": "hdr10.hevc",
                   "sha256": "abc", "class": "hdr10", "duration_seconds": 1}, "/tmp/corpus/manifest.json")
-        self.assertEqual(fixture["path"], "/tmp/corpus/hdr10.hevc")
+        self.assertEqual(fixture["path"], str(Path("/tmp/corpus/hdr10.hevc").resolve()))
         matrix = BENCH["p5_matrix"]([graph()], [fixture], [])
         self.assertEqual(len(matrix), 4)
         self.assertTrue(all(row["result"] == "unavailable" for row in matrix))
