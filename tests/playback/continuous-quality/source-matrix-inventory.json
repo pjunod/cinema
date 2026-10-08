@@ -1,0 +1,319 @@
+{
+  "schema_version": 1,
+  "inventory_date": "2026-10-08",
+  "candidate_head": "fe0ed00962d963691d31e5929dd96df4fd0a2b71",
+  "runtime_source": "67520f7a8",
+  "inventory_scope": "192 top-level playback-lab report JSON files plus named sidecars and build ledger \u00a78.3/\u00a710; absence means not located in this inspected set, not proof that no receipt exists elsewhere",
+  "acceptance": "incomplete",
+  "rows": [
+    {
+      "row": "Desktop Firefox / normal / 1x",
+      "classification": "current scoped pass",
+      "observed": "Source 67520f7a8: fifteen manual and five actual Auto transitions; one session/player; zero reported hitches/stalls.",
+      "remaining": "Callback/transport only; normal/fullscreen and mute state are not separately attested. Full pixel/audio acceptance remains open.",
+      "evidence": [
+        {
+          "receipt": "firefox-67520f7a8-worker-full20-quota-retry3.json",
+          "sha256": "0fcf9af189e2a58d38f076c08cbc85eea86312ce5361b31815d9e8765f821086",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "passed"
+        }
+      ]
+    },
+    {
+      "row": "Headed Firefox / capture campaign",
+      "classification": "current failed",
+      "observed": "Fifteen manual; p95 video gap 169.62 ms > 100 ms; Auto absent. Capture incomplete: 221 holes, 76 skipped counters; upper hold 299.988 ms.",
+      "remaining": "Keep failed. Browser optical session owns diagnosis; this inventory does not erase it.",
+      "evidence": [
+        {
+          "receipt": "firefox-67520f7a8-full20-optical2.json",
+          "sha256": "9f3b8b894b6e62778c880186d7844d753ed081631b518d7960841f45f42f0eb4",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "browser_playback"
+        },
+        {
+          "receipt": "firefox-67520f7a8-full20-optical2-optical.json",
+          "sha256": "2b5873b068048fabc9de6fa4e7e54b3f4a71a3c1a1c86625cf23521b5ab1f183",
+          "reported_source": null,
+          "reported_outcome": "failed"
+        }
+      ]
+    },
+    {
+      "row": "Desktop Chrome",
+      "classification": "older evidence",
+      "observed": "Earlier full campaigns described in build ledger; no 67520f7a8 Chrome report among 192 parsed playback reports.",
+      "remaining": "Current-source full campaign and independent display/audio evidence.",
+      "evidence": []
+    },
+    {
+      "row": "Fullscreen",
+      "classification": "absent explicit row",
+      "observed": "No explicit fullscreen-state continuous-quality receipt located. Headed viewport size alone does not prove fullscreen.",
+      "remaining": "Normal\u2192fullscreen\u2192normal with actual fullscreen element and same attachment; switch in each state.",
+      "evidence": []
+    },
+    {
+      "row": "Muted / unmuted",
+      "classification": "absent explicit row",
+      "observed": "Current continuous fixture has AAC, but presence of audio is not mute-state or captured-audio evidence.",
+      "remaining": "Record actual muted/volume state, switching in both states and independent audio capture for unmuted.",
+      "evidence": []
+    },
+    {
+      "row": "Subtitles",
+      "classification": "absent continuous-family row",
+      "observed": "Current MPEG4/AAC source metadata says subtitles=[]. Existing subtitle-toggle only checks selected/showing text track.",
+      "remaining": "Caption-bearing family; visible cue/time across switches; text-track showing alone cannot prove pixels.",
+      "evidence": []
+    },
+    {
+      "row": "0.5x rate",
+      "classification": "current mixed/failed",
+      "observed": "Current no-D3 short pixel capture passes 95.876 ms upper hold; same report fails one callback hitch. D3-enabled current capture fails 162.572 ms. No quality request in these windows.",
+      "remaining": "Keep every result scoped; current rate-plus-switch and audio evidence absent.",
+      "evidence": [
+        {
+          "receipt": "firefox-67520f7a8-half-speed-optical-no-d3-1.json",
+          "sha256": "829c8ac57c4b1e637c8bf2636d32f105fe9d81531c98b79adec04e6fa71edd2d",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "browser_playback"
+        },
+        {
+          "receipt": "firefox-67520f7a8-half-speed-optical-no-d3-1-optical.json",
+          "sha256": "43be34940528ab052f1304f5c4e265f68aaa61cbd75958109032a7269d963acc",
+          "reported_source": null,
+          "reported_outcome": "passed"
+        },
+        {
+          "receipt": "firefox-67520f7a8-half-speed-optical-d3-enabled2.json",
+          "sha256": "f6cbd3be93b96bbe7901bef21ac3026b41a1cfa9a7d2f3c0a11c2a908457ff7f",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "browser_playback"
+        }
+      ]
+    },
+    {
+      "row": "2x rate",
+      "classification": "older steady pass",
+      "observed": "Source eab5fceb8: measured 2.00546× over 12 s; zero reported stall/hitch/reopen.",
+      "remaining": "No quality transition in rate window; current-source rate-plus-switch evidence absent.",
+      "evidence": [
+        {
+          "receipt": "firefox-eab5fceb8-rate-windows12-first1.json",
+          "sha256": "d39cac2a7d11e202aca2b808982999665b48b1328463be0105ed3bb6b3527a9a",
+          "reported_source": "eab5fceb8",
+          "reported_outcome": "passed"
+        },
+        {
+          "receipt": "firefox-eab5fceb8-rate-windows12-first1-actions.json",
+          "sha256": "8dac49fd1b1a2dbd79a150eb83753e70406c1b96ef9e6e27ea7a2971fdc900d8",
+          "reported_source": null,
+          "reported_outcome": null
+        }
+      ]
+    },
+    {
+      "row": "Long prebuffer",
+      "classification": "older/mixed diagnostic",
+      "observed": "Older eab5fceb8/0e778892d source prebuffer diagnostics and full campaigns have buffering observations; no explicit current long-prebuffer acceptance row.",
+      "remaining": "Record retained frontier/runway, delayed target boundary and bounded physical work without treating preparation expiry as presentation expiry.",
+      "evidence": []
+    },
+    {
+      "row": "Rapid choices",
+      "classification": "current scoped pass",
+      "observed": "720\u2192480\u2192720 final 720p presents in 4,056 ms; same session/player/family; zero reported hitches/stalls.",
+      "remaining": "Focused lifecycle evidence only; no pixel/audio acceptance.",
+      "evidence": [
+        {
+          "receipt": "firefox-67520f7a8-selection-lifecycle-current1.json",
+          "sha256": "d344587a08e7d166cc897e28d930b6a48097d1583ff76a36c092986e8f3609f1",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "passed"
+        }
+      ]
+    },
+    {
+      "row": "Pause / resume",
+      "classification": "older scoped pass",
+      "observed": "Source 25ecd16f4: eight-second pause; Parsed readiness; same session/player; observed 0.999×; zero reported hitches/stalls.",
+      "remaining": "Current-source repeat and pending-switch pause/resume. Do not relabel as app background.",
+      "evidence": [
+        {
+          "receipt": "firefox-25ecd16f4-pause-fixed1.json",
+          "sha256": "eea0e44eede18d65013408fc6e8031cf753471ced5e106889c47c2e783d7101f",
+          "reported_source": "25ecd16f4",
+          "reported_outcome": "passed"
+        },
+        {
+          "receipt": "firefox-25ecd16f4-pause-fixed1-phases.json",
+          "sha256": "161e603eaf0d60995a51c57dd672068ad388acdc7570e9cd901a96fbb18301aa",
+          "reported_source": null,
+          "reported_outcome": null
+        }
+      ]
+    },
+    {
+      "row": "Seek collision",
+      "classification": "current scoped pass",
+      "observed": "Final 720p presents in 2,756 ms; same session/player/family; zero reported hitches/stalls.",
+      "remaining": "Separate receipt because harness deduplicates identical fixture/quality/operation names; no physical acceptance.",
+      "evidence": [
+        {
+          "receipt": "firefox-67520f7a8-selection-seekcollision-current1.json",
+          "sha256": "a64a0037f9a063edc8c69e1112ab6c830fd5cbfd0a75ee763b1d070c30fde793",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "passed"
+        }
+      ]
+    },
+    {
+      "row": "Background / foreground",
+      "classification": "absent actual lifecycle row",
+      "observed": "scripts/playback-lab suspend-resume calls media.pause()/play() and labels surrogate=paused-media-element.",
+      "remaining": "Actual app/tab visibility lifecycle and restored control ownership required; paused media is not background.",
+      "evidence": []
+    },
+    {
+      "row": "Explicit End",
+      "classification": "current process-scoped pass",
+      "observed": "Current full headless campaign producer_end samples have zero child FFmpeg processes at 0/1/3/5 s.",
+      "remaining": "Does not prove physical queues, all private reader leases or pending callbacks have retired.",
+      "evidence": [
+        {
+          "receipt": "firefox-67520f7a8-worker-full20-quota-retry3.json",
+          "sha256": "0fcf9af189e2a58d38f076c08cbc85eea86312ce5361b31815d9e8765f821086",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "passed"
+        }
+      ]
+    },
+    {
+      "row": "Natural end / tail switch",
+      "classification": "older scoped pass",
+      "observed": "Source 97967c6ce: start 1785 s; target 720p at 1792 s; natural EOF 1800 s; zero End producer counts.",
+      "remaining": "Current tail. Target 1792..1794 artifact was not copied, so independent target join binding absent.",
+      "evidence": [
+        {
+          "receipt": "continuous-chrome-97967c6ce-tail-one-switch.json",
+          "sha256": "83c9daf8eb7c84d406d2fff2caac5dbc962d090528295046d7561311f49c8d04",
+          "reported_source": "97967c6ce",
+          "reported_outcome": "passed"
+        },
+        {
+          "receipt": "continuous-chrome-97967c6ce-tail-copied-media-probe.json",
+          "sha256": "6aa5a6d7bcb1b4d777b32df314ed9a1387aba5d45ddf453995d4beff90f68e6b",
+          "reported_source": null,
+          "reported_outcome": null
+        }
+      ]
+    },
+    {
+      "row": "Real high-bitrate title",
+      "classification": "absent",
+      "observed": "Inspected current fixture is synthetic MPEG4/AAC 1080p, 4.2 Mb/s.",
+      "remaining": "One authorized real title with source identity, measured bitrate/decode load, compatible family and exact receipt.",
+      "evidence": []
+    },
+    {
+      "row": "Low-end device",
+      "classification": "absent qualifying physical row",
+      "observed": "No low-end-device acceptance established by inspected current desktop reports.",
+      "remaining": "Physical low-end runtime; software emulator is a separate scope. Coordinate with platform owners.",
+      "evidence": []
+    },
+    {
+      "row": "VFR / nonzero source origin",
+      "classification": "absent",
+      "observed": "Current source fixture is 24 fps CFR.",
+      "remaining": "Measured source shape and actual family eligibility; truthful unsupported result if normalization cannot satisfy invariants.",
+      "evidence": []
+    },
+    {
+      "row": "Source-copy / HDR / HEVC",
+      "classification": "absent current qualifying row",
+      "observed": "These are distinct media compatibility cases in \u00a75.1; CFR AVC passes do not transfer.",
+      "remaining": "Separate exact-family eligibility and switch/boundary results. Do not force unsafe enrollment.",
+      "evidence": []
+    },
+    {
+      "row": "Decoder-limited case",
+      "classification": "older intervention only",
+      "observed": "087e27680 explicitly co-locates source decoder and target on one CPU; incumbent retained then Retry works.",
+      "remaining": "Separate from healthy switch acceptance. Current device/decode-limited case absent; preserve foreground thread policy.",
+      "evidence": [
+        {
+          "receipt": "continuous-chrome-087e27680-targeted-target-source-load1.json",
+          "sha256": "250a7b8ad476c6000c62d2bf10880a020bfa65c9b34c16c7b79260cf5f883e01",
+          "reported_source": "087e27680",
+          "reported_outcome": "passed"
+        }
+      ]
+    },
+    {
+      "row": "Network cliff / recovery",
+      "classification": "current scoped pass",
+      "observed": "Full current Firefox campaign has five actual Auto transitions with catalog-derived shaping.",
+      "remaining": "Callback/transport evidence only; physical output and other source/device cases still open.",
+      "evidence": [
+        {
+          "receipt": "firefox-67520f7a8-worker-full20-quota-retry3.json",
+          "sha256": "0fcf9af189e2a58d38f076c08cbc85eea86312ce5361b31815d9e8765f821086",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "passed"
+        }
+      ]
+    },
+    {
+      "row": "Occupied foreground pool / Retry",
+      "classification": "older intervention pass",
+      "observed": "75c9c7ba3: two viewers; occupied 9 credits; limit lowered32\u21929; target refused safely; restoring limit permits shipped Retry.",
+      "remaining": "Current-source normal-load qualification absent. Explicit budget intervention is not physical pressure.",
+      "evidence": [
+        {
+          "receipt": "continuous-chrome-75c9c7ba3-targeted-foreground-pressure1.json",
+          "sha256": "572090e46b3bbcedd6ba8fa16c220e8b96cc07ea977b10404f61bdb32ee4a732",
+          "reported_source": "75c9c7ba3",
+          "reported_outcome": "passed"
+        }
+      ]
+    },
+    {
+      "row": "Target CPU / source-read contention",
+      "classification": "older scoped pass",
+      "observed": "087e27680: competing decode and target active on one CPU; observed read_chars; both read_bytes deltas zero.",
+      "remaining": "Current-source contention absent; no disk-pressure or shared-reader-fairness claim.",
+      "evidence": [
+        {
+          "receipt": "continuous-chrome-087e27680-targeted-target-source-load1.json",
+          "sha256": "250a7b8ad476c6000c62d2bf10880a020bfa65c9b34c16c7b79260cf5f883e01",
+          "reported_source": "087e27680",
+          "reported_outcome": "passed"
+        }
+      ]
+    },
+    {
+      "row": "Shared-reader fairness",
+      "classification": "absent",
+      "observed": "Existing two-viewer pressure pass does not measure ownership/fairness of a shared source reader.",
+      "remaining": "Concurrent reader identity, progress per consumer, cancellation of one without starvation of the other.",
+      "evidence": []
+    },
+    {
+      "row": "Physical disk pressure",
+      "classification": "absent",
+      "observed": "Retained CPU/read probe recorded zero physical read_bytes.",
+      "remaining": "Bounded owned-file I/O with actual physical read/write evidence and incumbent continuity; no user caches or global settings.",
+      "evidence": []
+    },
+    {
+      "row": "Safari / iOS / tvOS / Android matrix",
+      "classification": "separately owned/incomplete",
+      "observed": "Platform owners retain native receipts and failures; desktop evidence cannot qualify these rows.",
+      "remaining": "Obtain their source/device-specific runtime evidence through parent; full acceptance remains open.",
+      "evidence": []
+    }
+  ]
+}
