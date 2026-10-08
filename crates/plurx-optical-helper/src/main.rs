@@ -19,7 +19,7 @@ fn main() {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod linux {
 
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
     use std::fs::{self, File};
     use std::io::{Read, Seek, SeekFrom};
     use std::os::unix::ffi::OsStrExt;
@@ -251,7 +251,7 @@ mod linux {
                     .ok_or_else(|| "DVD VIDEO_TS.IFO is missing".to_owned())?;
                 let count = dvd_title_count(&ifo)?;
                 let locators = (1..=count.min(MAX_TITLES as u32))
-                    .map(|title_number| OpticalTitleLocator::Dvd { title_number })
+                    .map(|title_number| (OpticalTitleLocator::Dvd { title_number }, None))
                     .collect();
                 (OpticalFormat::Dvd, root, locators)
             }
@@ -276,8 +276,8 @@ mod linux {
             .unwrap_or_else(|| "ffprobe".into());
         let mut titles = Vec::new();
         let mut diagnostics = Vec::new();
-        for locator in locators {
-            match probe_title(&ffprobe, format, &paths, locator) {
+        for (locator, playlist_path) in locators {
+            match probe_title(&ffprobe, format, &paths, locator, playlist_path.as_deref()) {
                 Ok(title) => titles.push(title),
                 Err(error) => diagnostics.push(error),
             }
@@ -421,10 +421,12 @@ mod linux {
             .ok_or_else(|| "DVD reports no titles".into())
     }
 
-    fn bluray_playlists(bdmv: &Path) -> Result<Vec<OpticalTitleLocator>, String> {
+    fn bluray_playlists(
+        bdmv: &Path,
+    ) -> Result<Vec<(OpticalTitleLocator, Option<PathBuf>)>, String> {
         let playlist = find_case_path(bdmv, "PLAYLIST", true)?
             .ok_or_else(|| "Blu-ray PLAYLIST directory is missing".to_owned())?;
-        let mut numbers = BTreeSet::new();
+        let mut numbers = BTreeMap::new();
         for (entry_index, entry) in fs::read_dir(playlist)
             .map_err(|error| error.to_string())?
             .enumerate()
@@ -447,7 +449,15 @@ mod linux {
                 .and_then(|stem| stem.parse::<u32>().ok())
                 .filter(|number| *number <= MAX_BLURAY_PLAYLIST_NUMBER)
             {
-                numbers.insert(number);
+                if !fs::metadata(&path)
+                    .map_err(|error| error.to_string())?
+                    .is_file()
+                {
+                    return Err("Blu-ray playlist entry is not a file".into());
+                }
+                if numbers.insert(number, path).is_some() {
+                    return Err("Blu-ray playlist number is ambiguous".into());
+                }
             }
             if numbers.len() >= MAX_TITLES {
                 break;
@@ -455,8 +465,87 @@ mod linux {
         }
         Ok(numbers
             .into_iter()
-            .map(|playlist_number| OpticalTitleLocator::Bluray { playlist_number })
+            .map(|(playlist_number, path)| {
+                (OpticalTitleLocator::Bluray { playlist_number }, Some(path))
+            })
             .collect())
+    }
+
+    /// MPLS play-item IN/OUT times are 45 kHz title ticks. MPEG-TS probe
+    /// duration can instead span discontinuous clip timestamps (25 hours on
+    /// a 1h45 retail title), so never use that estimate for Blu-ray timelines.
+    fn bluray_playlist_duration_ms(path: &Path) -> Result<u64, String> {
+        let mut file = File::open(path).map_err(|_| "cannot open Blu-ray playlist")?;
+        let file_len = file
+            .metadata()
+            .map_err(|_| "cannot stat Blu-ray playlist")?
+            .len();
+        let mut header = [0_u8; 20];
+        file.read_exact(&mut header)
+            .map_err(|_| "short Blu-ray playlist header")?;
+        if &header[..4] != b"MPLS" {
+            return Err("invalid Blu-ray playlist signature".into());
+        }
+        let start = u64::from(u32::from_be_bytes([
+            header[8], header[9], header[10], header[11],
+        ]));
+        if start < header.len() as u64 || start.checked_add(10).is_none_or(|end| end > file_len) {
+            return Err("invalid Blu-ray playlist section offset".into());
+        }
+        file.seek(SeekFrom::Start(start))
+            .map_err(|_| "cannot seek Blu-ray playlist section")?;
+        let mut section_header = [0_u8; 10];
+        file.read_exact(&mut section_header)
+            .map_err(|_| "short Blu-ray playlist section")?;
+        let section_len = u64::from(u32::from_be_bytes([
+            section_header[0],
+            section_header[1],
+            section_header[2],
+            section_header[3],
+        ]));
+        let section_end = start
+            .checked_add(4)
+            .and_then(|offset| offset.checked_add(section_len))
+            .filter(|end| section_len >= 6 && *end <= file_len)
+            .ok_or("invalid Blu-ray playlist section length")?;
+        let count = usize::from(u16::from_be_bytes([section_header[6], section_header[7]]));
+        if count == 0 || count > MAX_PLAYLIST_ENTRIES {
+            return Err("Blu-ray play-item count is outside its bound".into());
+        }
+        let mut ticks = 0_u64;
+        for _ in 0..count {
+            let position = file
+                .stream_position()
+                .map_err(|_| "cannot locate Blu-ray play item")?;
+            if position.checked_add(22).is_none_or(|end| end > section_end) {
+                return Err("short Blu-ray play item".into());
+            }
+            let mut item = [0_u8; 22];
+            file.read_exact(&mut item)
+                .map_err(|_| "short Blu-ray play item")?;
+            let item_len = u64::from(u16::from_be_bytes([item[0], item[1]]));
+            let item_end = position
+                .checked_add(2)
+                .and_then(|offset| offset.checked_add(item_len))
+                .filter(|end| item_len >= 20 && *end <= section_end)
+                .ok_or("invalid Blu-ray play-item length")?;
+            let in_time = u32::from_be_bytes([item[14], item[15], item[16], item[17]]);
+            let out_time = u32::from_be_bytes([item[18], item[19], item[20], item[21]]);
+            let span = out_time
+                .checked_sub(in_time)
+                .filter(|span| *span > 0)
+                .ok_or("invalid Blu-ray play-item times")?;
+            ticks = ticks
+                .checked_add(u64::from(span))
+                .ok_or("Blu-ray playlist duration overflow")?;
+            file.seek(SeekFrom::Start(item_end))
+                .map_err(|_| "cannot seek next Blu-ray play item")?;
+        }
+        ticks
+            .checked_mul(1_000)
+            .and_then(|scaled| scaled.checked_add(22_500))
+            .map(|rounded| rounded / 45_000)
+            .ok_or_else(|| "Blu-ray playlist duration overflow".into())
     }
 
     fn navigation_files(format: OpticalFormat, root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -573,7 +662,14 @@ mod linux {
         format: OpticalFormat,
         paths: &Paths,
         locator: OpticalTitleLocator,
+        playlist_path: Option<&Path>,
     ) -> Result<InspectedTitle, String> {
+        let playlist_duration_ms = match format {
+            OpticalFormat::Bluray => Some(bluray_playlist_duration_ms(
+                playlist_path.ok_or("Blu-ray playlist path is missing")?,
+            )?),
+            OpticalFormat::Dvd => None,
+        };
         let input = match locator {
             OpticalTitleLocator::Dvd { title_number } => ResolvedInput::Dvd {
                 path: if paths.device.exists() {
@@ -647,7 +743,7 @@ mod linux {
             return Err("ffprobe title reply exceeded its byte bound".into());
         }
         let document: Value = serde_json::from_slice(&stdout).map_err(|error| error.to_string())?;
-        title_from_probe(format, locator, &document)
+        title_from_probe(format, locator, &document, playlist_duration_ms)
     }
 
     fn read_bounded_and_drain(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, String> {
@@ -739,7 +835,27 @@ mod linux {
         format: OpticalFormat,
         locator: OpticalTitleLocator,
         document: &Value,
+        playlist_duration_ms: Option<u64>,
     ) -> Result<InspectedTitle, String> {
+        let mut document = document.clone();
+        if let Some(duration_ms) = playlist_duration_ms {
+            let format_info = document
+                .as_object_mut()
+                .ok_or("ffprobe title reply is not an object")?
+                .entry("format")
+                .or_insert_with(|| serde_json::json!({}));
+            let format_info = format_info
+                .as_object_mut()
+                .ok_or("ffprobe title format is not an object")?;
+            format_info.insert(
+                "duration".into(),
+                Value::String(format!(
+                    "{}.{:03}",
+                    duration_ms / 1_000,
+                    duration_ms % 1_000
+                )),
+            );
+        }
         let streams = document
             .get("streams")
             .and_then(Value::as_array)
@@ -758,11 +874,14 @@ mod linux {
         let video = streams
             .iter()
             .find(|stream| stream.get("codec_type").and_then(Value::as_str) == Some("video"));
-        let duration_ms = seconds_ms(
-            document
-                .get("format")
-                .and_then(|format| format.get("duration")),
-        );
+        let duration_ms = match format {
+            OpticalFormat::Bluray => playlist_duration_ms,
+            OpticalFormat::Dvd => seconds_ms(
+                document
+                    .get("format")
+                    .and_then(|format| format.get("duration")),
+            ),
+        };
         let audio_streams = streams
             .iter()
             .filter(|stream| stream.get("codec_type").and_then(Value::as_str) == Some("audio"))
@@ -884,7 +1003,7 @@ mod linux {
                 source_delivery: SourceDelivery::ManagedOpticalTitle,
                 learned_limit_identity: None,
             },
-            probe_json: serde_json::to_string(document).map_err(|error| error.to_string())?,
+            probe_json: serde_json::to_string(&document).map_err(|error| error.to_string())?,
             streams: inspected_streams,
             chapters,
             suggested_feature_score: duration_ms.map(|duration| {
@@ -928,13 +1047,70 @@ mod linux {
             assert_eq!(
                 bluray_playlists(&bdmv).expect("playlists"),
                 vec![
-                    OpticalTitleLocator::Bluray { playlist_number: 0 },
-                    OpticalTitleLocator::Bluray { playlist_number: 1 },
-                    OpticalTitleLocator::Bluray {
-                        playlist_number: 800
-                    },
+                    (
+                        OpticalTitleLocator::Bluray { playlist_number: 0 },
+                        Some(playlist.join("00000.mpls")),
+                    ),
+                    (
+                        OpticalTitleLocator::Bluray { playlist_number: 1 },
+                        Some(playlist.join("00001.MPLS")),
+                    ),
+                    (
+                        OpticalTitleLocator::Bluray {
+                            playlist_number: 800
+                        },
+                        Some(playlist.join("00800.mpls")),
+                    ),
                 ]
             );
+        }
+
+        #[test]
+        fn bluray_playlist_duration_overrides_mpegts_estimate() {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let playlist = directory.path().join("00000.mpls");
+            let mut bytes = vec![0_u8; 58];
+            bytes[..4].copy_from_slice(b"MPLS");
+            bytes[4..8].copy_from_slice(b"0200");
+            bytes[8..12].copy_from_slice(&58_u32.to_be_bytes());
+            bytes.extend_from_slice(&50_u32.to_be_bytes());
+            bytes.extend_from_slice(&0_u16.to_be_bytes());
+            bytes.extend_from_slice(&2_u16.to_be_bytes());
+            bytes.extend_from_slice(&0_u16.to_be_bytes());
+            for (clip, in_time, out_time) in [
+                (b"00004", 188_910_000_u32, 472_340_625_u32),
+                (b"00000", 27_000_000_u32, 27_022_500_u32),
+            ] {
+                bytes.extend_from_slice(&20_u16.to_be_bytes());
+                bytes.extend_from_slice(clip);
+                bytes.extend_from_slice(b"M2TS");
+                bytes.extend_from_slice(&[0, 0, 0]);
+                bytes.extend_from_slice(&in_time.to_be_bytes());
+                bytes.extend_from_slice(&out_time.to_be_bytes());
+            }
+            fs::write(&playlist, &bytes).expect("playlist fixture");
+            let duration_ms = bluray_playlist_duration_ms(&playlist).expect("MPLS duration");
+            assert_eq!(duration_ms, 6_298_958);
+
+            let probe = serde_json::json!({
+                "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264"}],
+                "format": {"duration": "91846.217689"}
+            });
+            let title = title_from_probe(
+                OpticalFormat::Bluray,
+                OpticalTitleLocator::Bluray { playlist_number: 0 },
+                &probe,
+                Some(duration_ms),
+            )
+            .expect("title with navigation duration");
+            assert_eq!(title.duration_ms, Some(6_298_958));
+            assert_eq!(title.facts.duration_ms, Some(6_298_958));
+            let normalized: Value = serde_json::from_str(&title.probe_json).expect("probe JSON");
+            assert_eq!(normalized["format"]["duration"], "6298.958");
+
+            bytes[58 + 10 + 14..58 + 10 + 18].copy_from_slice(&u32::MAX.to_be_bytes());
+            fs::write(&playlist, bytes).expect("malformed play item");
+            assert!(bluray_playlist_duration_ms(&playlist).is_err());
         }
 
         #[test]
@@ -977,6 +1153,7 @@ mod linux {
                 OpticalFormat::Bluray,
                 OpticalTitleLocator::Bluray { playlist_number: 1 },
                 &missing_index,
+                None,
             )
             .is_err());
 
@@ -993,6 +1170,7 @@ mod linux {
                 OpticalFormat::Bluray,
                 OpticalTitleLocator::Bluray { playlist_number: 1 },
                 &too_many,
+                None,
             )
             .is_err());
         }
