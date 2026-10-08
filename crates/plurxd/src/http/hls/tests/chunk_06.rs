@@ -2308,6 +2308,22 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     .pairs
     .is_empty());
     let companion = candidate("one", 4, 720, 1280, 720);
+    let mut hevc = primary.clone();
+    hevc.candidate.planned_codec = Some("hevc".into());
+    assert!(
+        continuous_candidates_from_workers(&[hevc.clone(), companion.clone()])
+            .pairs
+            .is_empty(),
+        "HEVC is not offered in an AVC family"
+    );
+    let mut avc = primary.clone();
+    avc.candidate.planned_codec = Some("h264".into());
+    assert!(
+        !continuous_candidates_from_workers(&[avc, companion.clone()])
+            .pairs
+            .is_empty(),
+        "explicit AVC and legacy AVC coexist"
+    );
     let response = continuous_candidates_from_workers(&[
         primary.clone(),
         other_node,
@@ -5326,4 +5342,67 @@ fn sharing_resource_validator_accepts_actual_master_and_subtitle_generators() {
         validate_sharing_playlist(&master_resource, unsafe_uri.as_bytes()).is_err(),
         "metadata backslashes never admit a URI separator"
     );
+}
+
+#[test]
+fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    let avc = QualityCandidate {
+        id: CandidateId::for_recipe_digest([1; 32]),
+        recipe_digest: [1; 32],
+        route: CandidateRoute::Encode,
+        planned_codec: Some("h264".into()),
+        normalized_geometry: true,
+        width: 1920,
+        height: 1080,
+        target_height: 1080,
+        average_bps: Some(8_000_000),
+        peak_bps: Some(12_000_000),
+        grade: plurx_core::transcode::OutputGrade::Sdr,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: false,
+    };
+    let mut hevc = avc.clone();
+    hevc.id = CandidateId::for_recipe_digest([2; 32]);
+    hevc.recipe_digest = [2; 32];
+    hevc.planned_codec = Some("hevc".into());
+    let catalog = vec![avc.clone(), hevc.clone()];
+    assert_eq!(
+        prefer_equivalent_hevc(Some(&catalog[0]), &catalog, true).map(|row| row.id),
+        Some(hevc.id)
+    );
+    assert_eq!(
+        prefer_equivalent_hevc(Some(&catalog[0]), &catalog, false).map(|row| row.id),
+        Some(avc.id),
+        "disabled preference or explicit identity retains its row"
+    );
+    for restriction in 0..6 {
+        let mut chosen = avc.clone();
+        let mut alternative = hevc.clone();
+        match restriction {
+            0 => chosen.complete_cache = true,
+            1 => chosen.sustainable = true,
+            2 => alternative.height = 720,
+            3 => alternative.grade = plurx_core::transcode::OutputGrade::Hdr10,
+            4 => alternative.decoder_compatible = false,
+            _ => alternative.peak_bps = Some(20_000_000),
+        };
+        let rows = vec![chosen, alternative];
+        assert_eq!(
+            prefer_equivalent_hevc(Some(&rows[0]), &rows, true).map(|row| row.id),
+            Some(avc.id)
+        );
+    }
+    let mut original = avc;
+    original.route = CandidateRoute::Remux;
+    assert_eq!(
+        prefer_equivalent_hevc(Some(&original), &catalog, true).map(|row| row.id),
+        Some(original.id)
+    );
+    let mut caps: plurx_core::playback::DeviceCaps=serde_json::from_value(serde_json::json!({"v":2,"hls_hevc_sample_entries":["hvc1"],"transports":["hls"],"containers":["mp4"],"video":[{"codec":"hevc","profiles":["main"],"present":["sdr"]}]})).expect("caps");
+    assert!(explicit_hls_hevc_claim(&caps));
+    caps.hls_hevc_sample_entries = None;
+    caps.progressive_hevc_sample_entries = Some(vec!["hvc1".into()]);
+    assert!(!explicit_hls_hevc_claim(&caps));
 }

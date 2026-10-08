@@ -69,6 +69,54 @@ pub(super) fn auto_encode_fallback<'a>(
     at_or_below(catalog).or_else(|| at_or_below(unnarrowed))
 }
 
+/// Codec preference only breaks a tie after the existing finite selection
+/// policy chose its route, grade, canvas and evidence. Explicit identities and
+/// AVC continuous families never reach this preference.
+pub(super) fn prefer_equivalent_hevc<'a>(
+    picked: Option<&'a plurx_core::playback::candidate::QualityCandidate>,
+    catalog: &'a [plurx_core::playback::candidate::QualityCandidate],
+    enabled: bool,
+) -> Option<&'a plurx_core::playback::candidate::QualityCandidate> {
+    use plurx_core::playback::candidate::CandidateRoute;
+    picked.map(|chosen| {
+        if !enabled || chosen.route != CandidateRoute::Encode {
+            return chosen;
+        }
+        catalog
+            .iter()
+            .find(|other| {
+                other.identity_matches()
+                    && other.decoder_compatible
+                    && other.planned_codec.as_deref() == Some("hevc")
+                    && other.route == chosen.route
+                    && other.grade == chosen.grade
+                    && other.normalized_geometry == chosen.normalized_geometry
+                    && (other.width, other.height, other.target_height)
+                        == (chosen.width, chosen.height, chosen.target_height)
+                    && other.peak_bps == chosen.peak_bps
+                    && (!chosen.complete_cache || other.complete_cache)
+                    && (!chosen.sustainable || other.sustainable)
+            })
+            .unwrap_or(chosen)
+    })
+}
+
+/// The saved HEVC preference can enter the existing finite candidate owner
+/// without a second Developer switch. Source/graph admission still belongs to
+/// the immutable resolver; a generic HEVC or progressive claim grants nothing.
+pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -> bool {
+    caps.validate_hls_hevc_sample_entries().is_ok()
+        && caps
+            .hls_hevc_sample_entries
+            .as_ref()
+            .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1"))
+        && caps.transports.iter().any(|transport| transport == "hls")
+        && caps.containers.iter().any(|container| container == "mp4")
+        && caps.video.iter().any(|entry| {
+            entry.codec == "hevc" && !entry.profiles.is_empty() && !entry.present.is_empty()
+        })
+}
+
 /// Everything a client must say to open a stream.
 ///
 /// A body rather than a query string, and a POST rather than a GET, because
@@ -338,6 +386,11 @@ pub(super) fn continuous_candidates_from_workers(
                 && entry.candidate.decoder_compatible
                 && entry.candidate.normalized_geometry
                 && entry.candidate.grade == plurx_core::transcode::OutputGrade::Sdr
+                && entry
+                    .candidate
+                    .planned_codec
+                    .as_deref()
+                    .is_none_or(|codec| codec == "h264")
         })
         .collect();
     let mut candidates = Vec::new();
@@ -1541,7 +1594,11 @@ async fn resolve_plan_for_principal_with_local_evidence(
     }
 
     if let (Some(source), Some(caps)) = (source, body.caps.as_ref()) {
+        let prefer_hevc = continuous.is_none()
+            && state.transcode.macos_hevc_output_enabled()
+            && explicit_hls_hevc_claim(caps);
         let enabled = continuous.is_some()
+            || prefer_hevc
             || if let Some(snapshot) = snapshot {
                 snapshot
                     .settings
@@ -1743,6 +1800,8 @@ async fn resolve_plan_for_principal_with_local_evidence(
                         && candidate.decoder_compatible
                 })
             };
+            let picked =
+                prefer_equivalent_hevc(picked, &catalog, prefer_hevc && requested.is_none());
             let candidate = picked.ok_or_else(|| {
                 if !catalogue_result.complete
                     || catalogue_result
