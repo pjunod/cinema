@@ -630,6 +630,23 @@ NV12; this adds no HDR burn policy. The color oracle is fixed at maximum
 absolute error two code values, with cue-free frames byte-identical. Rejected
 BGRA/affine alternatives and the initial exact ASS result remain in the ledger.
 
+Text rendering must use the same explicit Fontconfig provider and frozen font
+environment during observation and production. Package the pinned enumeration
+tools and relocatable configuration through the existing tool resolver; retain
+explicit configuration overrides. A clean-install control must hide the owned
+build prefix and exclude host package-manager tools. Bind the font digest only
+to text-burn observations/identity, leaving unrelated scale, bitmap and Dolby
+observations unchanged. Pass the existing held Source engine's digest through
+the prepared-plan adapter and retain its existing launch/publication fence;
+do not add another font snapshot owner or filesystem scan to the async planner.
+
+The real finite-VOD clock is the seek authority. CPU/GPU equality after both
+paths render the wrong source cue is insufficient. Any source-origin repair
+must be bound to fresh held-source/producer evidence, preserve source A/V
+relative offsets, and leave already-normalized subtitle sidecars in film time.
+Cached catalog start-time fields and blanket per-stream timestamp resets do
+not satisfy that contract.
+
 **Acceptance:** colored PGS, ASS animations/positioning, transparent edges,
 subtitle-free intervals, last cue/EOF, seek into an active cue and cancellation
 pass existing burn semantics. No new HDR burn policy. Retain the faster

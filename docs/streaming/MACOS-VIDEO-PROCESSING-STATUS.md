@@ -95,12 +95,14 @@ planes are byte-identical with forwarding on/off. HEVC encoding still yields
 zero A53 records, a separately recorded pre-existing limitation. The first normal API run on the coherent new package delivers 120 video/audio
 frames and 120 caption-bearing frames, but fails the stricter source-payload
 comparison. Almost all records contain padding; only two 608 tuples and three
-valid 708 tuples remain. The shared finite-VOD clock is under investigation:
-raw broadcast timestamps may reach film-relative frame scheduling before the
-final timestamp correction. Actual source-to-picture/caption timing must
-confirm the cause; frame count alone is not acceptance.
-The private command observer also missed descriptor-based input and is being
-corrected. Bounded shutdown required forced termination; no owned child
+valid 708 tuples remain. The shared finite-VOD clock defect is now confirmed:
+the captured producer command feeds source PTS near 66,272 seconds into
+`fps` starting at zero. A bounded reproduction consumes two source frames
+while producing 17 scheduled observations with the same picture checksum.
+The repair must normalize the held source clock while preserving A/V offsets
+and already-normalized subtitle sidecars; corrected-candidate proof is pending.
+The initial command observer missed descriptor-based input; its corrected
+capture supplied the decisive graph evidence. Bounded shutdown required forced termination; no owned child
 remains, and that failure stays recorded. Normal API VOD acceptance remains
 open. The
 [caption record](VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md) explains the root cause.
@@ -129,7 +131,11 @@ priority; no alternative host is authorized. Source integration continued during
 Bookworm SDK/bootstrap lease completed with exit zero and its owned container
 stopped: GCC 12.2, glibc 2.36, all 100 official source patches plus the strict
 patch, and exact original FFmpeg/driver hashes are retained. No C compilation
-or GPU access occurred; further SDK/shipping stages require separate leases. Whole-image transfer was
+or GPU access occurred. The next public-header stage is prepared but remains
+unused: the coordinator has held further shared-host work while current-batch
+blockers are cleared, and the warm Linux compiler lane remains reserved.
+A newly observed foreign candidate has not been attributed; no alternate host
+or second cold build is authorized. Local source work continues. Whole-image transfer was
 rejected by automatic approval; the successful diagnostic used only an
 explicit binary/public-dependency/original-fixture allowlist. No deployed
 service, package or host driver was changed.
@@ -172,6 +178,11 @@ and non-Mac behavior stay supported. No global install, Homebrew dependency
 or retained temporary prefix may substitute for the repair. Qualification must
 exercise the package with the owned build prefix unavailable. Caption-only
 API checks can proceed independently because they do not use text rendering.
+The font-authority repair `ae9996b1e` is integrated: exact all-target
+compilation and normal hooks pass, and a prefix-hidden/system-PATH CPU control
+can query fonts and render. It binds font identity only to text plans and uses
+the existing held Source environment. Shared package validation and the
+source-clock repair are being composed before normal-API qualification.
 
 The temporary Metal compiler component is tracked for exact
 removal during final cleanup. Direct experimental binaries are immutable

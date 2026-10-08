@@ -1,9 +1,10 @@
 # macOS video processing — accelerate the work, measure the memory cost
 
-**Status:** proposed; one adversarial review completed, author corrections applied ·
+**Status:** design baseline; implementation and required follow-ups active ·
 **Written:** 2026-10-07 ·
-**Source inspected:** `890bca0fc186d00f7b10a379cd7dd2f1a37dc37c` ·
-**Decision owner:** Paul after review · **Runtime changes:** none.
+**Original source inspected:** `890bca0fc186d00f7b10a379cd7dd2f1a37dc37c` ·
+**Decision owner:** Paul · **Current execution:**
+[status and evidence](MACOS-VIDEO-PROCESSING-STATUS.md).
 
 This document answers which native macOS processing paths plurx should add,
 why, and what evidence would justify them. The companion
@@ -12,7 +13,9 @@ milestones, code ownership, tests and review handoff. Read both before building.
 The source locations below describe the inspected checkout; re-verify their
 symbols against the implementation base. The [review record](MACOS-VIDEO-PROCESSING-REVIEW.md)
 preserves the original request-changes verdict and the author dispositions.
-The revised documents have not received a second independent review.
+That record describes the proposal review. Implementation reviews and their
+exact source scope are recorded separately in the execution ledger; this
+design is not evidence that a route has shipped or passed qualification.
 
 ## 1. Decision proposed — optimize processing before buffer movement
 

@@ -31,6 +31,8 @@ pub struct MacosProcessingIdentity {
     architecture: String,
     hardware_class: String,
     graph_revision: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_font_digest: Option<String>,
 }
 
 impl MacosProcessingIdentity {
@@ -82,7 +84,14 @@ impl MacosProcessingIdentity {
             architecture,
             hardware_class,
             graph_revision: MACOS_PROCESSING_GRAPH_REVISION,
+            text_font_digest: None,
         })
+    }
+
+    /// Bind only a text-burn implementation to its existing frozen font authority.
+    pub fn with_text_fonts(mut self, digest: String) -> Self {
+        self.text_font_digest = Some(digest);
+        self
     }
 
     pub fn digest(&self) -> String {
@@ -190,6 +199,7 @@ pub struct MacosProcessingContext {
     enabled: bool,
     hevc_output_enabled: bool,
     identity: MacosProcessingIdentity,
+    text_identity: Option<MacosProcessingIdentity>,
     sdr_scale: MacosProcessingAvailability,
     hdr10_metal: MacosProcessingAvailability,
     excluded_pipelines: BTreeSet<Pipeline>,
@@ -207,6 +217,7 @@ impl MacosProcessingContext {
             enabled,
             hevc_output_enabled: false,
             identity,
+            text_identity: None,
             sdr_scale,
             hdr10_metal,
             excluded_pipelines: BTreeSet::new(),
@@ -269,6 +280,16 @@ impl MacosProcessingContext {
     pub fn enabled(&self) -> bool {
         self.enabled
     }
+    #[must_use]
+    pub fn with_text_identity(mut self, identity: MacosProcessingIdentity) -> Self {
+        self.text_identity = Some(identity);
+        self
+    }
+
+    pub fn text_identity(&self) -> &MacosProcessingIdentity {
+        self.text_identity.as_ref().unwrap_or(&self.identity)
+    }
+
     pub fn identity(&self) -> &MacosProcessingIdentity {
         &self.identity
     }

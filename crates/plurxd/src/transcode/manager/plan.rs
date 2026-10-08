@@ -504,6 +504,7 @@ impl TranscodeManager {
         encoder: Encoder,
         handle: Arc<std::fs::File>,
         prepared: crate::decode_facts::FreshSourceProbe,
+        font_digest: Option<&str>,
     ) -> Result<ResolvedTranscode, String> {
         let probe = self.decode_probe_identity.as_ref().ok_or_else(|| {
             vod_refusal_error(
@@ -539,10 +540,29 @@ impl TranscodeManager {
                 error.to_string(),
             ));
         }
-        BoundPlanCaller::Vod.finish(
-            self.resolve_held_movie_plan_facts(file, options, encoder, facts)
-                .await,
-        )
+        let result = match facts {
+            Ok(facts) => {
+                let context = self
+                    .macos_video_report()
+                    .context_for_fonts(self.macos_video_processing_enabled(), font_digest)
+                    .map(|context| {
+                        context.with_hevc_output_enabled(self.macos_hevc_output_enabled())
+                    });
+                self.resolve_movie_plan_with_processing_context(
+                    file,
+                    options,
+                    encoder,
+                    &facts,
+                    &AttemptRestrictions::none(),
+                    context.as_ref(),
+                )
+            }
+            Err(error) => {
+                self.resolve_held_movie_plan_facts(file, options, encoder, Err(error))
+                    .await
+            }
+        };
+        BoundPlanCaller::Vod.finish(result)
     }
 
     /// The VOD start's decoder plan, through the descriptor it holds, within

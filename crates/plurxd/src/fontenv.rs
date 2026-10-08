@@ -53,6 +53,79 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
+/// Font queries use the package's tools on macOS, matching its static library.
+/// Other platforms retain their existing PATH policy.
+pub(crate) fn tool_bin(name: &str) -> String {
+    if cfg!(target_os = "macos") {
+        plurx_core::process::media_tool_bin(name, None)
+    } else {
+        name.to_owned()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct LiveFontConfig {
+    pub(crate) file: Option<PathBuf>,
+    pub(crate) search: Option<std::ffi::OsString>,
+}
+
+impl LiveFontConfig {
+    pub(crate) fn apply(&self, command: &mut tokio::process::Command) {
+        if let Some(file) = &self.file {
+            command.env("FONTCONFIG_FILE", file);
+        }
+        if let Some(search) = &self.search {
+            command.env("FONTCONFIG_PATH", search);
+        }
+    }
+}
+
+pub(crate) fn live_config(explicit: Option<&Path>) -> Result<LiveFontConfig, String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(LiveFontConfig {
+            file: explicit.map(Path::to_path_buf),
+            search: None,
+        });
+    }
+    let ambient_file = std::env::var_os("FONTCONFIG_FILE");
+    let ambient_search = std::env::var_os("FONTCONFIG_PATH");
+    if let Some(file) = explicit
+        .map(Path::to_path_buf)
+        .or_else(|| ambient_file.map(PathBuf::from))
+    {
+        return Ok(LiveFontConfig {
+            file: Some(file),
+            search: ambient_search,
+        });
+    }
+    if ambient_search.is_some() {
+        return Ok(LiveFontConfig {
+            file: None,
+            search: ambient_search,
+        });
+    }
+    let list = PathBuf::from(tool_bin("fc-list"));
+    let conflist = PathBuf::from(tool_bin("fc-conflist"));
+    if !list.is_absolute() && !conflist.is_absolute() {
+        return Ok(LiveFontConfig::default());
+    }
+    if !list.is_absolute() || !conflist.is_absolute() || list.parent() != conflist.parent() {
+        return Err("the bundled Fontconfig query tools are incomplete".to_owned());
+    }
+    let directory = list
+        .parent()
+        .ok_or("the Fontconfig tool has no package directory")?
+        .join("fontconfig");
+    let file = directory.join("fonts.conf");
+    if !file.is_file() {
+        return Err("the bundled Fontconfig configuration is missing".to_owned());
+    }
+    Ok(LiveFontConfig {
+        file: Some(file),
+        search: Some(directory.into_os_string()),
+    })
+}
+
 /// Where frozen environments live under the runtime cache.
 pub(crate) const FONT_ENVIRONMENT_DIR: &str = "fontenv";
 
@@ -100,6 +173,7 @@ pub(crate) struct FontSources<'a> {
     pub(crate) versions: &'a HashMap<PathBuf, String>,
     /// The live `fc-list` answer in [`FONT_LISTING_FORMAT`].
     pub(crate) listing: &'a str,
+    pub(crate) search_path: Option<&'a std::ffi::OsStr>,
 }
 
 /// One frozen environment, shared by every recipe captured from the same
@@ -109,6 +183,7 @@ pub(crate) struct FontEnvironment {
     dir: PathBuf,
     root: PathBuf,
     config: PathBuf,
+    search_path: Option<std::ffi::OsString>,
     digest: String,
     objects: Arc<[(PathBuf, String)]>,
 }
@@ -117,11 +192,15 @@ impl FontEnvironment {
     /// The child-local variables a producer renders under: the sysroot, and
     /// the root configuration by its original path, which Fontconfig reads
     /// under that sysroot.
-    pub(crate) fn child_env(&self) -> [(&'static str, &std::ffi::OsStr); 2] {
-        [
+    pub(crate) fn child_env(&self) -> Vec<(&'static str, &std::ffi::OsStr)> {
+        let mut values = vec![
             ("FONTCONFIG_SYSROOT", self.root.as_os_str()),
             ("FONTCONFIG_FILE", self.config.as_os_str()),
-        ]
+        ];
+        if let Some(search) = &self.search_path {
+            values.push(("FONTCONFIG_PATH", search.as_os_str()));
+        }
+        values
     }
 
     /// The frozen digest: the live closure and the root it was loaded from.
@@ -298,6 +377,9 @@ async fn freeze_charged(
     digest.update(FROZEN_FONT_DIGEST_VERSION);
     digest.update(sources.digest.as_bytes());
     digest.update(config.as_os_str().as_encoded_bytes());
+    if let Some(search) = sources.search_path {
+        digest.update(search.as_encoded_bytes());
+    }
     let digest = hex::encode(digest.finalize());
 
     let mut registry = registry().lock().await;
@@ -344,6 +426,7 @@ async fn freeze_charged(
                 config,
                 rules,
                 fonts,
+                search_path: sources.search_path.map(std::ffi::OsStr::to_os_string),
             },
             sources,
             cost,
@@ -356,6 +439,7 @@ async fn freeze_charged(
 }
 
 struct Frozen {
+    search_path: Option<std::ffi::OsString>,
     digest: String,
     config: PathBuf,
     rules: Vec<(PathBuf, String)>,
@@ -409,6 +493,12 @@ async fn build(
         command
             .env("FONTCONFIG_SYSROOT", &layout.root)
             .env("FONTCONFIG_FILE", &frozen.config);
+        if let Some(search) = &frozen.search_path {
+            command.env("FONTCONFIG_PATH", search);
+        }
+        if cfg!(target_os = "macos") {
+            crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+        }
         command
     };
     let probe = |command: tokio::process::Command, what: &'static str| {
@@ -467,7 +557,7 @@ async fn build(
     // a closure the freeze cannot reproduce is named as such, whatever the
     // producer then made of it.
     let (loaded, elapsed) = probe(
-        command(Path::new("fc-conflist")),
+        command(Path::new(&tool_bin("fc-conflist"))),
         "listing the frozen rules",
     )
     .await;
@@ -477,7 +567,7 @@ async fn build(
         sources.rules,
         &String::from_utf8_lossy(&loaded?),
     )?;
-    let mut list = command(Path::new("fc-list"));
+    let mut list = command(Path::new(&tool_bin("fc-list")));
     list.arg(FONT_LISTING_FORMAT);
     let (listed, elapsed) = probe(list, "listing the frozen fonts").await;
     cost.spawn += elapsed;
@@ -511,6 +601,7 @@ async fn build(
         dir: owned.hand_over(),
         root,
         config: frozen.config,
+        search_path: frozen.search_path,
         digest: frozen.digest,
         objects: objects.into(),
     })

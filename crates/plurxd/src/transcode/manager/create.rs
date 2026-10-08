@@ -1440,9 +1440,18 @@ impl TranscodeManager {
             )
         })?;
         let phase_started = std::time::Instant::now();
+        let held_font_digest = source_evidence
+            .and_then(|(evidence, _)| evidence.engine().font_digest().map(str::to_owned));
         let plan = if let Some(prepared) = held_decode_facts {
-            self.resolve_vod_prepared_source(file, &options, encoder, held_plan_handle, prepared)
-                .await?
+            self.resolve_vod_prepared_source(
+                file,
+                &options,
+                encoder,
+                held_plan_handle,
+                prepared,
+                held_font_digest.as_deref(),
+            )
+            .await?
         } else {
             self.resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
                 .await?

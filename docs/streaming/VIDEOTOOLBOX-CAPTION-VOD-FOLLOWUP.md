@@ -74,14 +74,29 @@ therefore do not establish preservation.
 
 The finite VOD producer preserves source timestamps with `-copyts`, then
 applies film-relative `trim` and `fps` before its final timestamp adjustment.
-This broadcast source starts around 66,000 seconds. The current hypothesis
-is that its original clock reaches `fps` with a zero start time, duplicating
-the first picture and starving subsequent caption data. Actual descriptor-based
-input arguments and source-to-output picture/caption timing are being checked
-before changing the shared clock owner. A global timestamp reset would be
-unsafe: bitmap subtitle sidecars are already normalized to film time, and
-source audio/video offsets must remain intact. Cached catalog start times
-are not timing authority.
+This broadcast source starts at 66,271.889756 seconds. Capturing the actual
+descriptor-based producer command confirms that its original clock reaches
+`fps` with a zero start time. A bounded reproduction consumes only two source
+frames (PTS 66,271.889756 and 66,271.906444) while scheduling 17 observations
+from zero through 0.267 seconds, all with identical picture checksum
+`9D1D0B95`. This confirms first-picture duplication and explains the missing
+subsequent captions.
+
+The repair belongs in the shared finite-VOD source-clock owner. Its source
+origin must be frozen from current held-source/producer evidence and included
+in the existing rendition identity. Per-input correction must preserve source
+audio/video offsets and leave already-normalized bitmap sidecars in film time.
+A global timestamp reset and cached catalog start times are not substitutes
+for that authority. The first bounded software-decode control restores picture
+progression with a per-input offset of -66,271.889756 seconds: the unchanged
+chain has one unique output picture, while the corrected chain has 17.
+This is mechanism evidence only. Exact seek behavior, zero/negative origins,
+A/V offsets and normal-API picture/caption timing still need final-candidate
+controls. Bounded positive/negative-origin controls preserve the existing A/V
+skew, including AAC priming. The pinned FFmpeg demuxer defines an absent
+format start as zero; retain that source-bound default as a distinct versioned
+fact rather than rejecting valid raw inputs or confusing it with reported zero.
+Malformed, nonfinite and unrepresentable timing remains an error.
 
 The initial bounded shutdown also required forced termination. That failure
 is retained separately; no owned producer remains. Direct caption preservation
