@@ -583,10 +583,14 @@ impl Hub {
         // Revocation follows even an uncertain create failure. A completed
         // orphan cannot occupy the receiver's eight-grant allowance.
         if !published || result.is_err() {
-            let _ = state
-                .store
-                .revoke_remote_grant(&grant_id.to_string(), user_id, now_seconds().unwrap_or(0))
-                .await;
+            crate::store_result::observe(
+                crate::store_result::Operation::RevokeUnpublishedRemoteGrant,
+                crate::store_result::Discard::LostWork,
+                state
+                    .store
+                    .revoke_remote_grant(&grant_id.to_string(), user_id, now_seconds().unwrap_or(0))
+                    .await,
+            );
         }
         self.changed.notify_waiters();
     }
