@@ -1004,8 +1004,25 @@ async fn sharing_source_sqlite_first_activation_current_authority_and_lineage() 
         );
         let old_expiry = created.route.lease_expires_at_ms;
         activation.lease_expires_at_ms += 60000;
+        // Replay still requires a fresh operation and current authority. The
+        // earlier fault/race checks may consume their five-second lifetime.
+        let mut expired = activation.clone();
+        expired.now_ms = now_ms().expect("clock") - 5001;
+        assert!(store
+            .activate_source_media_session(&authority, &expired)
+            .await
+            .expect("expired operation refusal")
+            .is_none());
+        let SourceWriteAuthorityRead::Ready(replay_authority) = store
+            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .await
+            .expect("current replay authority")
+        else {
+            panic!("same route remains authorized")
+        };
+        activation.now_ms = now_ms().expect("clock");
         let replay = store
-            .activate_source_media_session(&authority, &activation)
+            .activate_source_media_session(&replay_authority, &activation)
             .await
             .expect("exact replay")
             .expect("same route");
