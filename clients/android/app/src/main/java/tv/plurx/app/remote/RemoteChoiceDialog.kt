@@ -24,7 +24,9 @@ internal fun RemoteChoiceDialog(title: String, choices: List<RemoteChoice>, onCl
     val navigation = LocalRemoteNavigation.current
     val scope = LocalRemoteScope.current
     val token = remember(scope) { UUID.randomUUID().toString() }
-    val keys = choices.take(128).map { "choice-menu:" + token + ":" + it.key }
+    val choiceKeys = choices.take(128).map { "choice-menu:" + token + ":" + it.key }
+    val closeKey = "choice-menu:" + token + ":close"
+    val keys = choiceKeys + closeKey
     val close by rememberUpdatedState(onClose)
     var owned by remember { mutableStateOf(false) }
     DisposableEffect(navigation, scope, token) {
@@ -52,7 +54,7 @@ internal fun RemoteChoiceDialog(title: String, choices: List<RemoteChoice>, onCl
                             .then(if (owned) Modifier.remoteAction(key, choice.label) { val result = choice.activate(); if (result == RemoteOutcome.Applied) { navigation?.closeMenu(token); close() }; result } else Modifier)
                             .then(if (index == 0) Modifier.focusRequester(first) else Modifier)) { Text(choice.label) }
                 }
-                TextButton(onClick = { navigation?.closeMenu(token); onClose() }) { Text("Close") }
+                TextButton(modifier = if (owned) Modifier.remoteAction(closeKey, "Close") { if (navigation?.menuOwned(token) != true) RemoteOutcome.StaleContext else { navigation.closeMenu(token); close(); RemoteOutcome.Applied } } else Modifier, onClick = { navigation?.physicalInput(); navigation?.closeMenu(token); onClose() }) { Text("Close") }
             }
         }
     }

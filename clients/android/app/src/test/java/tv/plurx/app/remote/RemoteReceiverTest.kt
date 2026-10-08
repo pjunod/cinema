@@ -10,6 +10,49 @@ class RemoteReceiverTest {
         RemoteWire.json.parseToJsonElement(it.readBytes().toString(Charsets.UTF_8)).jsonObject
     }
     private fun command(row: JsonObject) = RemoteWire.command(row.getValue("command").toString().toByteArray())
+    @Test fun tvChallengeUsesOriginalMonotonicDeadlineAndRejectsInvalidDuration() {
+        val expiry = RemoteChallengeExpiry(1000, 120000)
+        assertEquals(119000L, expiry.remaining(2000))
+        assertEquals(0L, expiry.remaining(121000))
+        assertEquals(0L, expiry.remaining(999))
+        assertTrue(runCatching { RemoteChallengeExpiry(1000, 120001) }.isFailure)
+        assertTrue(runCatching { RemoteChallengeExpiry(Long.MAX_VALUE, 1) }.isFailure)
+    }
+    @Test fun retiredSharedPreparationClearsOnlyItsBusyMarkerAndAutoplayCannotRestartClosedPlayer() {
+        val preparation = RemoteOwnedAttempt()
+        val old = preparation.begin()
+        preparation.retire() // physical replacement retires network publish permission
+        assertFalse(preparation.accepts(old))
+        preparation.finish(old)
+        assertFalse(preparation.busy)
+        val newer = preparation.begin()
+        preparation.finish(old)
+        assertTrue(preparation.busy)
+        assertTrue(preparation.accepts(newer))
+        preparation.finish(newer)
+        val autoplay = RemoteOwnedAttempt()
+        val endedPlayer = autoplay.begin(markBusy = false)
+        autoplay.retire() // Stop/Close/root change
+        assertFalse(autoplay.accepts(endedPlayer))
+        val replacement = autoplay.begin(markBusy = false)
+        assertFalse(autoplay.accepts(endedPlayer))
+        assertTrue(autoplay.accepts(replacement))
+    }
+    @Test fun retainedDeferredAckSurvivesOwnedTransitionButRejectsOtherGrantAndOriginalDeadline() {
+        val original = command(fixture().getValue("valid").jsonArray[1].jsonObject)
+        val guard = RemoteReceiverGuard()
+        val context = RemoteReceiverGuard.Context(original.grantId, original.target, original.controlEpoch, original.contextRevision, original.focusRevision, null)
+        guard.setContext(context)
+        val credit = guard.mint(original.action.creditKind, 100)!!
+        val offered = original.copy(credit = credit.nonce)
+        val binding = RemoteDeferredBinding("preplay", "controller", "full-reference")
+        val permit = (guard.reserve(offered, binding, 200) as RemoteReservation.Admitted).permit
+        assertEquals("applied", guard.complete(permit, binding, 4000, RemoteOutcome.Applied)?.outcome)
+        guard.setContext(context.copy(contextRevision = context.contextRevision + 1))
+        assertEquals("applied", guard.retainedResult(offered, 4001)?.outcome)
+        assertNull(guard.retainedResult(offered.copy(grantId = UUID.randomUUID().toString()), 4002))
+        assertNull(guard.retainedResult(offered, 10200))
+    }
     @Test fun canonicalWireAndStrictNestedPollCommands() {
         val fixture = fixture()
         fixture.getValue("valid").jsonArray.forEach { row ->
@@ -229,6 +272,75 @@ class RemoteReceiverTest {
         assertTrue(results.observe("epoch1", 2, RemoteOutcome.Unsupported))
         assertEquals(RemoteOutcome.Unsupported, results.known("epoch1", 2))
         results.reset(); assertNull(results.known("epoch1", 2))
+    }
+
+    @Test fun deferredPermitRetainsOriginalDeadlineConsumesSequenceAndBoundsCleanup() {
+        val original = command(fixture().getValue("valid").jsonArray[1].jsonObject)
+        val guard = RemoteReceiverGuard()
+        val context = RemoteReceiverGuard.Context(original.grantId, original.target, original.controlEpoch, original.contextRevision, original.focusRevision, null)
+        assertNull(guard.setContext(context))
+        val credit = guard.mint(original.action.creditKind, 100)!!
+        val command = original.copy(credit = credit.nonce)
+        val binding = RemoteDeferredBinding("view", "controller", "full-reference")
+        val permit = (guard.reserve(command, binding, 100) as RemoteReservation.Admitted).permit
+        assertTrue(guard.permits(permit, binding, 101))
+        assertEquals(RemoteOutcome.Duplicate, (guard.reserve(command, binding, 101) as RemoteReservation.Refused).outcome)
+        assertFalse(guard.permits(permit, binding.copy(controller = "replacement"), 101))
+        guard.retireDeferred()
+        assertFalse(guard.permits(permit, binding, 101))
+        assertEquals(RemoteOutcome.Unavailable, (guard.reserve(command.copy(sequence = command.sequence + 1), binding, 101) as RemoteReservation.Refused).outcome)
+        assertNull(guard.complete(permit, binding, 101, RemoteOutcome.Applied))
+        val next = (guard.reserve(command.copy(sequence = command.sequence + 2), binding, 101) as RemoteReservation.Admitted).permit
+        assertFalse(guard.permits(next, binding, next.deadline))
+        assertEquals(RemoteOutcome.Applied.wire, guard.complete(next, binding, next.deadline, RemoteOutcome.Applied)?.outcome)
+        assertNull(guard.result(command.controlEpoch, next.command.sequence, next.resultDeadline))
+    }
+    @Test fun deferredAckCompletesBeforeOwnerTransitionAndStaleCompletionCannotAffectReplacement() {
+        val original = command(fixture().getValue("valid").jsonArray[1].jsonObject)
+        val guard = RemoteReceiverGuard()
+        val context = RemoteReceiverGuard.Context(original.grantId, original.target, original.controlEpoch, original.contextRevision, original.focusRevision, null)
+        guard.setContext(context)
+        val command = original.copy(credit = guard.mint(original.action.creditKind, 100)!!.nonce)
+        val binding = RemoteDeferredBinding("view", "controller", "full-reference")
+        val permit = (guard.reserve(command, binding, 100) as RemoteReservation.Admitted).permit
+        assertNotNull(guard.complete(permit, binding, 101, RemoteOutcome.Applied))
+        guard.setContext(context.copy(contextRevision = context.contextRevision + 1))
+        assertEquals(RemoteOutcome.Applied.wire, guard.result(command.controlEpoch, command.sequence, 102)?.outcome)
+        val next = command.copy(sequence = command.sequence + 1, contextRevision = context.contextRevision + 1, credit = guard.mint(original.action.creditKind, 102)!!.nonce)
+        val newer = (guard.reserve(next, binding, 102) as RemoteReservation.Admitted).permit
+        assertNull(guard.complete(permit, binding, 103, RemoteOutcome.Unavailable))
+        assertTrue(guard.permits(newer, binding, 103))
+        guard.invalidate(); assertFalse(guard.permits(newer, binding, 103))
+    }
+
+    @Test fun deferredTerminalDeadlineDoesNotExtendAndGrantRetirementFencesOldWork() {
+        val original = command(fixture().getValue("valid").jsonArray[1].jsonObject)
+        val guard = RemoteReceiverGuard()
+        val context = RemoteReceiverGuard.Context(original.grantId, original.target, original.controlEpoch, original.contextRevision, original.focusRevision, null)
+        guard.setContext(context)
+        val command = original.copy(credit = guard.mint(original.action.creditKind, 100)!!.nonce)
+        val binding = RemoteDeferredBinding("view", "controller", "full-reference")
+        val permit = (guard.reserve(command, binding, 100) as RemoteReservation.Admitted).permit
+        assertEquals(10100L, permit.resultDeadline)
+        assertNull(guard.complete(permit, binding, 10100, RemoteOutcome.Applied))
+        val next = command.copy(sequence = command.sequence + 1, credit = guard.mint(original.action.creditKind, 10100)!!.nonce)
+        val pending = (guard.reserve(next, binding, 10100) as RemoteReservation.Admitted).permit
+        assertEquals(RemoteOutcome.StaleControl, guard.setContext(context.copy(grantId = UUID.randomUUID().toString())))
+        assertFalse(guard.permits(pending, binding, 10101))
+        assertNull(guard.complete(pending, binding, 10101, RemoteOutcome.Applied))
+    }
+
+    @Test fun transportAdmissionAllowsStaleWireFocusButSubsequentOwnerFocusStillFencesPermit() {
+        val original = command(fixture().getValue("valid").jsonArray[1].jsonObject)
+        val guard = RemoteReceiverGuard()
+        val context = RemoteReceiverGuard.Context(original.grantId, original.target, original.controlEpoch, original.contextRevision, original.focusRevision + 1, null)
+        guard.setContext(context)
+        val transport = original.copy(action = RemoteAction("set_playing", buildJsonObject { put("playing", true) }), credit = guard.mint(RemoteCreditKind.Playback, 100)!!.nonce)
+        val binding = RemoteDeferredBinding("view", "controller", "full-reference")
+        val permit = (guard.reserve(transport, binding, 100) as RemoteReservation.Admitted).permit
+        assertTrue(guard.permits(permit, binding, 101))
+        guard.setContext(context.copy(focusRevision = context.focusRevision + 1))
+        assertFalse(guard.permits(permit, binding, 102))
     }
 
 }

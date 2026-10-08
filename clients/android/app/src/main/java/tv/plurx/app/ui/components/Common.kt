@@ -92,12 +92,14 @@ fun NetworkImage(url: String?, modifier: Modifier = Modifier) {
  * shows "S1 E3", for everything else the year.
  */
 @Composable
-fun PosterCard(
+internal fun PosterCard(
     item: Item,
     modifier: Modifier = Modifier,
     width: Dp = 128.dp,
     resolutionPlacement: PosterResolutionPlacement = PosterResolutionPlacement.ArtworkOverlay,
     landscape: Boolean = false,
+    remoteEnabled: Boolean = true,
+    remoteActivate: (() -> RemoteOutcome)? = null,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -106,7 +108,7 @@ fun PosterCard(
 
     Column(
         modifier
-            .remoteAction(LocalRemoteItemPrefix.current + ":" + item.id, item.title) { onClick(); RemoteOutcome.Applied }
+            .remoteAction(LocalRemoteItemPrefix.current + ":" + item.id, item.title, enabled = remoteEnabled) { remoteActivate?.invoke() ?: run { onClick(); RemoteOutcome.Applied } }
             .width(width)
             .scale(scale)
             .onFocusChanged { focused = it.isFocused }

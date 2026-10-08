@@ -147,7 +147,7 @@ fun HomeScreen(
                     }
                 }
                 RemoteOrder(buildList {
-                    add("home:search"); add("home:live")
+                    add("home:search"); add("home:live"); add("home:shared")
                     listOf("Continue watching" to continueShelfItems, "Next up" to state.hubs.next_up, "Recently added" to state.hubs.recently_added).forEach { (key, items) -> items.forEach { add("row:" + key + ":item:" + it.id) } }
                     add("choice:Group by")
                     collections.forEach { collection ->

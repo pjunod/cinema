@@ -17,7 +17,7 @@ import androidx.compose.ui.platform.LocalView
 import java.util.UUID
 
 /** Only call sites with explicitly safe semantic actions attach this modifier. */
-internal fun Modifier.remoteAction(key: String, label: String, enabled: Boolean = true, activate: () -> RemoteOutcome): Modifier = composed {
+internal fun Modifier.remoteAction(key: String, label: String, enabled: Boolean = true, deferred: ((RemoteAction) -> RemoteDeferredEffect?)? = null, activate: () -> RemoteOutcome): Modifier = composed {
     val navigation = LocalRemoteNavigation.current
     val scope = LocalRemoteScope.current
     val identity = remember(scope, key) { UUID.randomUUID().toString() }
@@ -26,9 +26,10 @@ internal fun Modifier.remoteAction(key: String, label: String, enabled: Boolean 
     var nativeFocused by remember { mutableStateOf(false) }
     val callback by rememberUpdatedState(activate)
     val currentLabel by rememberUpdatedState(label)
-    DisposableEffect(navigation, scope, key, identity, enabled) {
+    val deferredCallback by rememberUpdatedState(deferred)
+    DisposableEffect(navigation, scope, key, identity, enabled, deferred != null) {
         if (navigation != null && enabled) navigation.register(scope, key, RemoteNavigationCoordinator.Entry(identity, currentLabel, Rect.Zero,
-            requestFocus = { runCatching { requester.requestFocus() } }, activate = { callback() }))
+            requestFocus = { runCatching { requester.requestFocus() } }, deferred = if (deferred != null) { action -> deferredCallback?.invoke(action) } else null, activate = { callback() }))
         onDispose { navigation?.unregister(scope, key, identity) }
     }
     SideEffect { navigation?.label(scope, key, identity, label) }
@@ -75,3 +76,24 @@ internal fun RemoteRealizer(realize: (String) -> Unit) {
     }
 }
 internal val LocalRemoteItemPrefix = staticCompositionLocalOf { "item" }
+
+/** A typed app-owned sheet, whose controls still use their native buttons. */
+@Composable
+internal fun RemoteOwnedWindow(token: String, keys: List<String>, kind: RemotePresentationKind = RemotePresentationKind.Tracks, onClose: () -> Unit): Boolean {
+    val navigation = LocalRemoteNavigation.current
+    val scope = LocalRemoteScope.current
+    val view = LocalView.current
+    val close by rememberUpdatedState(onClose)
+    var owned by remember(token) { mutableStateOf(false) }
+    val window = (view.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window?.decorView ?: view
+    DisposableEffect(navigation, scope, token) {
+        owned = navigation?.enterMenu(token, keys, kind) { close() } == true
+        onDispose { navigation?.closeMenu(token) }
+    }
+    SideEffect { if (owned) navigation?.updateMenu(token, keys) }
+    DisposableEffect(navigation, token, owned, window) {
+        if (owned) navigation?.ownedWindow(token, window)
+        onDispose { navigation?.ownedWindow(token, null) }
+    }
+    return owned
+}

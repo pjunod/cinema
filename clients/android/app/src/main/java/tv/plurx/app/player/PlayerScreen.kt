@@ -3252,16 +3252,43 @@ private fun BackChip(onExit: () -> Unit) {
 /** Explicit Shared dispatch, without a numeric Local PlanLike sentinel. Every
  * control here asks the server first; the picture moves only after B accepts. */
 @Composable
-internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, onEnded: () -> Unit = {}, onExit: () -> Unit) {
+internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, incumbent: SharedPlayerController? = null, onEnded: () -> Unit = {}, onExit: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val controller = remember(vm, plan) { SharedPlayerController(context, vm) }
+    val controller = remember(vm, plan, incumbent) { incumbent ?: SharedPlayerController(context, vm) }
+    val remoteClient = LocalRemoteClient.current
+    val remoteNavigation = LocalRemoteNavigation.current
+    val remoteToken = remember(controller) { "shared-player:" + UUID.randomUUID().toString() }
+    var remoteLive by remember(controller) { mutableStateOf(true) }
+    val currentExit by rememberUpdatedState(onExit)
+    fun remoteOwned() = remoteLive && remoteNavigation?.scope == remoteToken
+    fun exitOwned(home: Boolean): RemoteOutcome {
+        if (!remoteOwned()) return RemoteOutcome.StaleContext
+        controller.beginStop(); remoteLive = false
+        if (home) remoteNavigation?.onHome?.invoke() else currentExit()
+        return RemoteOutcome.Applied
+    }
+    DisposableEffect(remoteNavigation, remoteToken) {
+        remoteNavigation?.enter(remoteToken, "playback") { exitOwned(false); true }
+        onDispose { remoteLive = false; remoteNavigation?.releaseScope(remoteToken) }
+    }
+    SideEffect {
+        remoteClient?.playback?.attach(RemotePlaybackAdapter.Owner(remoteToken, remoteToken,
+            { setOf("set_playing", "stop", "back", "home") }, { null }, { action ->
+                when (action.type) { "stop", "back" -> exitOwned(false); "home" -> exitOwned(true); else -> RemoteOutcome.Unsupported }
+            }, controller::retireNetworkOperation, ::remoteOwned, { action ->
+                if (action.type != "set_playing") null else RemoteDeferredEffect(
+                    RemoteDeferredBinding(remoteToken, remoteToken, plan.subject.context.toString()), ::remoteOwned,
+                    { check -> controller.setPlayingRemote(action.boolean("playing") == true) { remoteOwned() && check() } })
+            }))
+    }
+    DisposableEffect(remoteClient, remoteToken) { onDispose { remoteClient?.playback?.detach(remoteToken) } }
     val starting by controller.owner.starting.collectAsStateWithLifecycle()
     val failure by controller.owner.failure.collectAsStateWithLifecycle()
     val statusSummary by controller.owner.statusSummary.collectAsStateWithLifecycle()
     val selection by controller.owner.selection.collectAsStateWithLifecycle()
     val playing by controller.playing.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    BackHandler { scope.launch { controller.stop(); onExit() } }
+    BackHandler { remoteClient?.physicalInput(); controller.beginStop(); onExit() }
     LaunchedEffect(plan) { controller.start(plan) }
     val ended by controller.ended.collectAsStateWithLifecycle()
     val finished by rememberUpdatedState(onEnded)
@@ -3281,19 +3308,19 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
         statusSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         failure?.let { Text(it) }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            androidx.compose.material3.TextButton(onClick = { controller.seekBy(-10_000) }, enabled = !starting) { Text("−10 s") }
-            androidx.compose.material3.TextButton(onClick = { controller.togglePlaying() }, enabled = !starting) { Text(if (playing) "Pause" else "Play") }
-            androidx.compose.material3.TextButton(onClick = { controller.seekBy(30_000) }, enabled = !starting) { Text("+30 s") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.seekBy(-10_000) }, enabled = !starting) { Text("−10 s") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.togglePlaying() }, enabled = !starting) { Text(if (playing) "Pause" else "Play") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.seekBy(30_000) }, enabled = !starting) { Text("+30 s") }
             selection?.let { current ->
-                SharedChoiceMenu("Quality", current.quality.label, tv.plurx.app.data.PlaybackQuality.entries.map { it.label to current.copy(quality = it) }, !starting, controller::change)
+                SharedChoiceMenu("Quality", current.quality.label, tv.plurx.app.data.PlaybackQuality.entries.map { it.label to current.copy(quality = it) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
                 val audio = plan.decision.presentation.audio
                 if (audio.size > 1) SharedChoiceMenu("Audio", audio.firstOrNull { it.index.toInt() == current.audio }?.let(::sharedTrackLabel) ?: "Default",
-                    audio.filter { it.index in 0..1024 }.map { sharedTrackLabel(it) to current.copy(audio = it.index.toInt()) }, !starting, controller::change)
+                    audio.filter { it.index in 0..1024 }.map { sharedTrackLabel(it) to current.copy(audio = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
                 val subtitles = plan.decision.presentation.subtitles.filter { it.native == true && it.index in 0..1024 }
                 if (subtitles.isNotEmpty()) SharedChoiceMenu("Subtitles", subtitles.firstOrNull { it.index.toInt() == current.subtitle }?.let { sharedTrackLabel(it.language, it.title, it.codec) } ?: "Off",
-                    listOf("Off" to current.copy(subtitle = null)) + subtitles.map { sharedTrackLabel(it.language, it.title, it.codec) to current.copy(subtitle = it.index.toInt()) }, !starting, controller::change)
+                    listOf("Off" to current.copy(subtitle = null)) + subtitles.map { sharedTrackLabel(it.language, it.title, it.codec) to current.copy(subtitle = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
             }
-            androidx.compose.material3.TextButton(onClick = { scope.launch { controller.stop(); onExit() } }) { Text("Close") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.beginStop(); onExit() }) { Text("Close") }
         }
     }
 }
@@ -3311,9 +3338,11 @@ private fun SharedChoiceMenu(
     onChoose: (tv.plurx.app.data.SharedSelection) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    val remoteClient = LocalRemoteClient.current
+    RemoteRestricted(open)
     Box {
-        androidx.compose.material3.TextButton(onClick = { open = true }, enabled = enabled) { Text("$label: $current") }
-        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+        androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); open = true }, enabled = enabled) { Text("$label: $current") }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { remoteClient?.physicalInput(); open = false }) {
             options.forEach { (text, choice) ->
                 androidx.compose.material3.DropdownMenuItem(text = { Text(text) }, onClick = { open = false; onChoose(choice) })
             }
