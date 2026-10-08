@@ -1318,6 +1318,130 @@ mod tests {
     }
 
     #[test]
+    fn continuous_avc_signaling_uses_encoder_level_units() {
+        use crate::transcode::*;
+        let (source, ordinary, execution, facts, capabilities) = encoded_recipe_fixture(false);
+        for encoder in [
+            Encoder::Software,
+            Encoder::Vaapi,
+            Encoder::Qsv,
+            Encoder::Nvenc,
+            Encoder::VideoToolbox,
+        ] {
+            let plan = resolve_transcode(
+                &TranscodeRequest::new(encoder, ordinary.options().clone())
+                    .with_continuous_avc_video(),
+                &facts,
+                &capabilities,
+                &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+                &AttemptRestrictions::none(),
+            )
+            .expect("continuous encoder plan");
+            let args = vod_pipe_args(
+                &source,
+                &plan,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("valid frame grid"),
+                1.0,
+            );
+            let level = if encoder == Encoder::Software {
+                "5.0"
+            } else {
+                "50"
+            };
+            assert!(
+                args.windows(2).any(|pair| pair == ["-level:v", level]),
+                "{encoder:?}: {args:?}"
+            );
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-bsf:v", "h264_metadata=zero_new_constraint_set_flags=1"]));
+            assert_eq!(
+                args.iter().filter(|arg| arg.as_str() == "-bsf:v").count(),
+                1
+            );
+        }
+        let ordinary_args = vod_pipe_args(
+            &source,
+            &ordinary,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("valid frame grid"),
+            1.0,
+        );
+        assert!(!ordinary_args
+            .iter()
+            .any(|arg| arg.starts_with("h264_metadata=")));
+    }
+
+    #[test]
+    fn continuous_avc_emitted_init_matches_family() {
+        use crate::fmp4::{FragmentReader, Unit};
+        use crate::transcode::*;
+        use std::process::Command;
+        let temp = tempfile::tempdir().expect("fixture directory");
+        let input = temp.path().join("source.mkv");
+        let generated = Command::new(crate::testfixtures::ffmpeg())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=green:s=640x360:r=24:d=1",
+                "-c:v",
+                "libx265",
+                "-x265-params",
+                "pools=none:frame-threads=1:log-level=error",
+            ])
+            .arg(&input)
+            .output()
+            .expect("ffmpeg fixture process");
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let (source, ordinary, mut execution, facts, capabilities) = encoded_recipe_fixture(false);
+        execution.source_path = input;
+        let plan = resolve_transcode(
+            &TranscodeRequest::new(Encoder::Software, ordinary.options().clone())
+                .with_continuous_avc_video(),
+            &facts,
+            &capabilities,
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::none(),
+        )
+        .expect("continuous plan");
+        let grid = VodFrameGrid::new(24, 1).expect("valid frame grid");
+        let output = Command::new(crate::testfixtures::ffmpeg())
+            .args(vod_pipe_args(&source, &plan, &execution, grid, 1.0))
+            .output()
+            .expect("production encoder process");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut reader = FragmentReader::new();
+        reader.push(&output.stdout);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("parse emitted init") else {
+            panic!("production output must begin with init");
+        };
+        let rung = VodVideoRung::from_verified_init(
+            &source,
+            &plan,
+            &init,
+            grid,
+            &"a".repeat(64),
+            "source-v1",
+            None,
+        )
+        .expect("actual encoder output satisfies the unchanged family verifier");
+        assert_eq!(rung.facts.codec, "avc1.640032");
+    }
+
+    #[test]
     fn encoded_vod_hevc_sample_entry_matches_the_hls_parameter_set_contract() {
         for hdr in [false, true] {
             let (source, plan, execution, _, _) = encoded_recipe_fixture(hdr);
