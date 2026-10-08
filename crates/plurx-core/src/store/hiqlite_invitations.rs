@@ -31,6 +31,7 @@ impl From<&mut Row<'_>> for InvitationConsent {
             broker_enrollment: r.get("broker_enrollment"),
             broker_ticket: r.get("broker_ticket"),
             transport_status: r.get("transport_status"),
+            transport_phone_generation: r.get("transport_phone_generation"),
         }
     }
 }
@@ -233,6 +234,7 @@ impl InvitationStore for HiqliteAuthStore {
                         r.now
                     ),
                 ),
+                (ADVANCE_REVISION, params!(r.id.clone())),
                 (COOLDOWN, params!(r.id)),
             ])
             .await?;
@@ -242,7 +244,7 @@ impl InvitationStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if results.len() != 2 {
+        if results.len() != 3 {
             return Err(StoreError::Identity(
                 "incomplete invitation transaction result".into(),
             ));

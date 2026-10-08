@@ -161,8 +161,12 @@ Android must preserve its download/media owners and user Stop behavior.
 
 ## Durable limits, restore and delivery truth
 
-SQLite migration 107 and the admitted Hiqlite Invitation adjunct install exact
-STRICT tables/indexes plus independent marker version 1 in one transaction.
+SQLite migrations 107/108 and the admitted Hiqlite Invitation adjunct install
+exact STRICT tables/indexes plus independent marker version 2. Fresh replicated
+installation is transactional; an exact version-1 image upgrades in one
+transaction. Durable phone high-water survives receiver/event cleanup and
+advances only with successful admission. Transport readiness binds the current
+phone generation.
 Source schema 81/82 and Remote schema 1 are unchanged. Missing/partial/incorrect
 markers are refused; serving and maintenance open do not repair schema.
 
@@ -213,3 +217,34 @@ Android resident eligibility requires actual qualifying work under the
 [connected-device foreground-service rules](https://developer.android.com/develop/background-work/services/fgs/service-types);
 merely declaring a permission is not evidence. Existing mDNS discovery never
 authorizes Cinema credentials at an arbitrary advertised origin.
+
+## Standalone broker contract
+
+Every top-level envelope has version:"cinema.invitation.v1". All objects reject unknown fields; UUIDs are canonical lowercase; positive generation counters <=9007199254740991. JSON request/reply ceiling 64 KiB; nested strings/arrays have explicit tighter bounds. Flat errors {version,code,message}. Credentials are headers only; no query, X-Api-Key, duplicate Authorization or lexical whitespace alternatives. Broker HTTP listener loopback by default, served through operator verified HTTPS; home/phone clients refuse redirects and arbitrary origin changes.
+
+Publisher authority: exactly one X-Cinema-Publisher-Id canonical UUID header plus Authorization: Bearer <canonical base64url 32-byte publisher proof>. External operator config maps hashed proof to publisher ID, exact server_instance_id, current startup generation and fixed platform/topic/project allowlist. The server instance is bounded 128 UTF-8 bytes/no controls. Publisher cannot enumerate another scope. Ticket claims use only Authorization Bearer ticket proof and no publisher/Cinema identity headers.
+
+POST /broker/v1/tickets request fields:
+{version,ticket_id,ticket_secret_hash,server_instance_id,installation_id,receiver_id,consent_id,phone_generation,consent_generation,transport_generation,platform}
+Home generates fresh UUID ticket_id and random 32-byte ticket_secret; sends only its lowercase 64-hex digest. Platformapple maps to fixed configured APNs topic; android maps to fixed configured FCM project. Response {version,ticket_id,expires_at,status:"pending"}. TTL 120 s from first issuance; retry only exact same binding+hash returns metadata without extending expiry. Mixed binding collision rejects. Home retains secret only for the current Start response, never recoverable later. Unknown/lost Start response requires explicit fresh Start/generation; no implicit secret rotation.
+
+POST /broker/v1/tickets/claim request {version,ticket_id,platform,device_token}, Bearer ticket_secret. Atomic single use before enrollment; expired, used, revoked, missing, wrong proof/platform IDs reject. Response {version,status:"claimed"}. Phone receives no enrollment/publisher capability. Token bound: APNs even-length ASCII hex, nonempty <=512bytes, not fixed token length; FCM nonempty <=4096bytes, no ASCII controls/whitespace. No client topic/project/URL/payload input.
+
+POST /broker/v1/tickets/status publisher request {version,ticket_id}. Response {version,ticket_id,status:"pending"|"claimed"|"revoked"|"expired",expires_at,enrollment_id:null|UUID (equal to ticket_id when claimed),server_instance_id,installation_id,receiver_id,consent_id,phone_generation,consent_generation,transport_generation,platform}. Home verifies every immutable field against its recorded ticket and current generation before marking ready. Unknown ticket returns scoped404. Missing provider configuration refuses ticket issuance (503provider_unconfigured); no fake readiness.
+
+DELETE /broker/v1/enrollments/{id}, publisher authority, empty body ->{version,status:"revoked"}. Idempotent scoped revoke; status and DELETE never reveal cross-publisher existence. Keep durable generation/revocation tombstones; no capability resurrects through reuse/pruning. Phone token rotation uses new Start/claim/confirm generation; old enrollment becomes ineligible immediately at home and receives bounded durable revoke work.
+
+POST /broker/v1/deliveries publisher request {version,enrollment_id,installation_id,phone_generation,consent_generation,transport_generation,invitation_id,expires_at}. The immutable binding must match active enrollment/current publisher generation. invitation_id canonical 43-character base64url of installation UUID 16 bytes + event UUID 16 bytes, matching installation prefix. Expiry must be future and <=120 s; reject expired IDs before pruning. Response {version,status:"accepted"|"duplicate"|"denied"|"unknown"}. accepted means provider accepted its HTTP request, never physical delivery. Persist scoped dedupe and attempted state BEFORE provider I/O; duplicate never makes a second provider request. Unknown network outcome consumes attempt. Fixed generic visible body "A paired screen is ready", category CINEMA_REMOTE_INVITATION, opaque invitation_id only; no title, URL, grant, login or OS power action. Invalid provider token revokes its enrollment.
+
+Bounds: <=64 configured publishers; <=4096 pending tickets/publisher, expired unclaimed tickets stop counting as pending but retain their ID tombstone (unknown/expired claims always deny); <=4096 active enrollments/publisher; <=100000 durable enrollment revocation identities and <=100000 delivery dedupe identities/publisher generation. No age pruning of live-generation dedupe/revocation; capacity returns 429 retention_limit. Prefix/pages for any diagnostic listing, no unbounded arrays. Global <=16 in-flight HTTP tasks/provider calls and <=4 provider calls/publisher, with immediate rejection or a bounded queue rather than unbounded semaphore waiters; one overall 5 s provider deadline includes OAuth fetch and send, provider response 64 KiB max, Google OAuth response 16 KiB max. Bounded per-publisher admission rate and per-installation 30-minute cooldown. Unknown response/restart cannot reset attempts.
+
+At-rest device tokens encrypted ChaCha20Poly1305 with independent 32-byte broker-only master key, fresh 12-byte nonce and AAD publisher+startup generation+enrollment+platform+transport generation. Provider private keys exist only in broker-only files. Existing ring primitives sign APNs ES256 (P-256 fixed 64-byte signature), FCM RS256; fixed Apple production/sandbox HTTP2 TLS hosts/topic and fixed Google OAuth+configured project HTTPv1 hosts. No general JWT-auth parser, no client-controlled host or arbitrary notification.
+
+Restore: external operator generation/key manifest is authoritative and separate from broker DB. Missing manifest/key or DB generation mismatch refuses serving. Raw old DB copy with the SAME external manifest cannot self-detect rollback: operator must rotate generation, master key and publisher secrets BEFORE restore/startup, then run explicit offline restore-fence command that clears/revokes all old ticket/enrollment/delivery capabilities and binds new marker. Normal startup must not silently repair mismatch or recreate keys over ciphertext. Document these real guarantees and the operator procedure, not magical rollback detection.
+
+Focused tests: strict duplicate/lexical proof failures; publisher scope; ticket exact retry/non-extension/single use/expired+pruned deny; bound quotas; ciphertext tamper/AAD; delivery duplicate/concurrent/crash-unknown consume; revoke/generation stale; external manifest missing/mismatch and explicit restore fence; synthetic APNs/FCM exact payload/signing/fixed-host/status formation. No real provider success claim. Provider/native physical acceptance remains unverified/advisory.
+
+
+Cleanup identity and capacity refinement: enrollment_id equals ticket_id, the fresh canonical UUID chosen by home. DELETE durably tombstones that publisher-scoped ID even if claim/issuance has not completed, preventing later claim or issuance resurrection. Claimed status remains resolvable while enrollment is live; ticket expiry only ends unclaimed admission. Keep all issued/expired/revoked IDs in the current external publisher generation's bounded 100000-identity budget; expiry may release pending capacity but cannot erase the identity and permit reuse. Every issuance reserves its eventual revoke slot. Reject new issuance at retention_limit, rather than make a later authorized revoke require new capacity.
+
+Home admission likewise reserves a single 100000/account budget covering queued revoke work plus every outstanding issued/uncertain broker reference before external issuance. OFF/rebind/DELETE moves an existing reservation into durable revoke work and can complete with the broker offline. These operations never discard unqueued capability references. If imported/legacy state violates the invariant, fence and retain it with explicit migration remediation rather than silently prune authority.

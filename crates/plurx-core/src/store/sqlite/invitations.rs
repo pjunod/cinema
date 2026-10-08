@@ -28,6 +28,7 @@ fn consent(r: &rusqlite::Row<'_>) -> rusqlite::Result<InvitationConsent> {
         broker_enrollment: r.get(9)?,
         broker_ticket: r.get(10)?,
         transport_status: r.get(11)?,
+        transport_phone_generation: r.get(12)?,
     })
 }
 #[async_trait]
@@ -235,6 +236,7 @@ impl InvitationStore for SqliteStore {
                 ],
             )? > 0;
             if admitted {
+                tx.execute(ADVANCE_REVISION, [&r.id])?;
                 tx.execute(COOLDOWN, [&r.id])?;
             }
             tx.commit()?;

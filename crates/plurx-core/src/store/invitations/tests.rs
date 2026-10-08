@@ -15,7 +15,7 @@ fn invitations_restore_clears_capabilities_with_foreign_keys_off() {
     c.execute_batch(&crate::store::remote::migration_sql())
         .expect("remote parent schema");
     c.execute_batch(SCHEMA).expect("invitations");
-    c.execute_batch("INSERT INTO remote_receivers VALUES('receiver',1,'TV','web','hash',0,NULL);INSERT INTO invitation_phones(id,user_id,name,platform,secret_hash,token_digest,generation,created_at) VALUES('phone',1,'Phone','android','phone-hash','login-digest',1,0);INSERT INTO invitation_consents(id,phone_id,receiver_id,user_id,grant_id,grant_hash,enabled,transport,generation,broker_enrollment,broker_ticket,transport_status) VALUES('consent','phone','receiver',1,'grant','grant-hash',1,'fcm',1,'broker-capability','ticket-capability','ready');INSERT INTO invitation_events VALUES('event',1,'consent','phone','receiver','foreground','grant',1,1,0,0,120,'admitted',NULL);INSERT INTO invitation_cooldowns VALUES('receiver','phone',0);INSERT INTO invitation_broker_revocations VALUES('work',1,'broker-capability',1,0,120,0);").expect("old image capabilities");
+    c.execute_batch("INSERT INTO remote_receivers VALUES('receiver',1,'TV','web','hash',0,NULL);INSERT INTO invitation_phones(id,user_id,name,platform,secret_hash,token_digest,generation,created_at) VALUES('phone',1,'Phone','android','phone-hash','login-digest',1,0);INSERT INTO invitation_consents(id,phone_id,receiver_id,user_id,grant_id,grant_hash,enabled,transport,generation,broker_enrollment,broker_ticket,transport_status) VALUES('consent','phone','receiver',1,'grant','grant-hash',1,'fcm',1,'broker-capability','ticket-capability','ready');INSERT INTO invitation_events VALUES('event',1,'consent','phone','receiver','foreground','grant',1,1,0,0,120,'admitted',NULL,1);INSERT INTO invitation_cooldowns VALUES('receiver','phone',0);INSERT INTO invitation_broker_revocations VALUES('work',1,'broker-capability',1,0,120,0);").expect("old image capabilities");
     fence_restored_invitations(&c).expect("explicit restore fence");
     for table in [
         "invitation_phones",
@@ -90,5 +90,49 @@ async fn invitations_no_touch_login_expires_at_existing_policy_boundary() {
             .last_seen_at,
         timestamp - 86400,
         "background checks never revive or refresh login"
+    );
+}
+
+#[test]
+fn invitations_v1_upgrade_matches_exact_v2_shape_and_preserves_cursor() {
+    let c = rusqlite::Connection::open_in_memory().expect("v1 image");
+    c.execute_batch("PRAGMA foreign_keys=OFF;CREATE TABLE users(id INTEGER PRIMARY KEY);")
+        .expect("fixture");
+    c.execute_batch(SCHEMA_V1).expect("v1 schema");
+    c.execute_batch("INSERT INTO invitation_phones(id,user_id,name,platform,secret_hash,token_digest,generation,created_at) VALUES('phone',1,'Phone','android','proof','login',1,0);INSERT INTO invitation_events VALUES('event',1,'consent','phone','receiver','foreground','grant',1,1,0,0,120,'admitted',NULL);").expect("old event");
+    c.execute_batch(MIGRATION_V2).expect("checked upgrade");
+    let rows = c
+        .prepare(SHAPE_SQL)
+        .expect("shape")
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("shape rows");
+    assert!(verify_shape(&rows).expect("exact v2 shape"));
+    assert_eq!(
+        c.query_row("SELECT last_revision FROM invitation_phones", [], |r| r
+            .get::<_, i64>(0))
+            .expect("migrated high water"),
+        1
+    );
+    assert_eq!(
+        c.query_row("SELECT revision FROM invitation_events", [], |r| r
+            .get::<_, i64>(0))
+            .expect("migrated event"),
+        1
+    );
+    let mut bad = rows.clone();
+    bad.iter_mut()
+        .find(|(n, _)| n == "invitation_phones")
+        .expect("phone DDL")
+        .1 = bad
+        .iter()
+        .find(|(n, _)| n == "invitation_phones")
+        .expect("DDL")
+        .1
+        .replace("'android'", "'and roid'");
+    assert!(
+        verify_shape(&bad).is_err(),
+        "quoted whitespace cannot normalize away an incompatible check"
     );
 }

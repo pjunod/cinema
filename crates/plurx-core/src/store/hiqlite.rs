@@ -3854,7 +3854,7 @@ impl HiqliteAuthStore {
         ))
     }
 
-    async fn invitation_schema_current(&self) -> Result<bool, StoreError> {
+    async fn invitation_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
             .query_consistent_map::<RemoteShapeRow, _>(super::invitations::SHAPE_SQL, params!())
@@ -3863,14 +3863,20 @@ impl HiqliteAuthStore {
             .into_iter()
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
-        if !super::invitations::verify_shape(&shape)? {
-            return Ok(false);
+        if shape.is_empty() {
+            return Ok(None);
         }
+        let version = if super::invitations::verify_shape(&shape).is_ok() {
+            2
+        } else {
+            super::invitations::verify_schema_shape(&shape, super::invitations::SCHEMA_V1)?;
+            1
+        };
         let rows = self
             .client()
             .query_consistent_map::<CountRow, _>(
-                "SELECT count(*) AS count FROM invitation_schema WHERE singleton=1 AND version=1",
-                params!(),
+                "SELECT count(*) AS count FROM invitation_schema WHERE singleton=1 AND version=$1",
+                params!(version),
             )
             .await?;
         if !matches!(rows.as_slice(),[r] if r.count==1) {
@@ -3878,7 +3884,7 @@ impl HiqliteAuthStore {
                 "incompatible Cinema invitation version".into(),
             ));
         }
-        Ok(true)
+        Ok(Some(version))
     }
 
     #[cfg(feature = "hiqlite-contract-tests")]
@@ -3901,22 +3907,33 @@ impl HiqliteAuthStore {
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
-        if self.invitation_schema_current().await? {
+        let version = self.invitation_schema_version().await?;
+        if version == Some(2) {
             return Ok(());
         }
-        let mut statements = super::invitations::objects()
-            .iter()
-            .map(|(_, sql)| (sql.to_string(), params!()))
-            .collect::<Vec<_>>();
-        statements.push((
-            "INSERT INTO invitation_schema VALUES(1,1)".into(),
-            params!(),
-        ));
+        let mut statements = if version == Some(1) {
+            super::invitations::MIGRATION_V2
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(|s| (s.to_owned(), params!()))
+                .collect::<Vec<_>>()
+        } else {
+            super::invitations::objects()
+                .iter()
+                .map(|(_, sql)| (sql.to_string(), params!()))
+                .collect::<Vec<_>>()
+        };
+        if version.is_none() {
+            statements.push((
+                "INSERT INTO invitation_schema VALUES(1,2)".into(),
+                params!(),
+            ));
+        }
         admit_schema_migration(admission)?;
         let attempt = self.schema_migration_transaction(statements).await;
         // Consistent settlement handles concurrent installs and unknown commit:
         // absence/partial shape can never be called successfully installed.
-        if self.invitation_schema_current().await? {
+        if self.invitation_schema_version().await? == Some(2) {
             return Ok(());
         }
         attempt?;

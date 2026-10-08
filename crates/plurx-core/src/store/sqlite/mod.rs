@@ -1298,7 +1298,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v106: additive Cinema receiver credentials, with independent replica marker.
     REMOTE_SCHEMA,
     // v107: separately versioned opt-in invitation consent/admission.
-    super::invitations::SCHEMA,
+    super::invitations::SCHEMA_V1,
+    // v108: durable phone revision and broker transport generation fence.
+    super::invitations::MIGRATION_V2,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
