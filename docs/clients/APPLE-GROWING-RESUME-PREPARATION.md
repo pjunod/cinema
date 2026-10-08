@@ -1,6 +1,6 @@
 # Growing HLS resume — distinguish server preparation from item readiness
 
-**Status:** built; qualification and physical acceptance open · **Written:** 2026-10-08 · **Base:** `f0c597df20297fe33c8016a6f027cc06ac54b26e`
+**Status:** built; physical acceptance open · **Written:** 2026-10-08 · **Base:** `f0c597df20297fe33c8016a6f027cc06ac54b26e`
 
 Companion to [APPLE-BLACK-VIDEO-IMPLEMENTATION.md](APPLE-BLACK-VIDEO-IMPLEMENTATION.md) (the separate diagnostic-process incident) and [PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md) (which owner may report a failure). This document explains Naked Gun's premature preparation error, specifies its bounded repair, and records the evidence that does and does not establish an incident resolution.
 
@@ -91,6 +91,7 @@ This is one ordinary main-bound fix. All changes belong to one branch and one PR
 | `clients/apple/Sources/PlayerItemReadiness.swift` | Pure preparation/item-readiness budget and exact-session status evidence |
 | `clients/apple/Sources/PlayerController.swift` | Pass readiness context, feed monotonic request-age evidence from existing status polling, and use the policy in the existing observer/timer race |
 | `clients/apple/Sources/Models.swift` | Decode the already-served optional `playlist_ready` field |
+| `PlayerAttempt.swift`, `AttemptScopesTests.swift`, `validation/attempt-census.toml` | Give the post-staged-poll continuation its own audited `.open` fence; preserve pause and reject replacement |
 | Apple readiness/ownership tests | Deterministic incident timeline, timer bounds, failures, cancellation, replacement, pause, and status decoding |
 | Apple build metadata, README, parity/status/build note and client-fix ledger | Claim the next build and record the behavioral regression |
 | This document and `docs/README.md` | Root cause, review dispositions, validation and acceptance limits |
@@ -118,7 +119,7 @@ Obtain adversarial plan review before implementation; record and address its fin
 
 Retained local evidence, available to this investigation:
 
-- `/private/tmp/avatar-naked-gun-nynuc-startup-full.log`: complete owner interval, 05:51:30–05:51:58 UTC.
+- `/private/tmp/naked-gun-owner-startup-full.log`: complete owner interval, 05:51:30–05:51:58 UTC.
 - `/private/tmp/avatar-naked-gun-m6-startup.log`: ingress interval.
 - `/private/tmp/avatar-naked-gun-recent.log`: both attempts.
 - `/private/tmp/avatar-naked-gun-surface-events.json`: server state at the premature client verdict.
@@ -134,7 +135,7 @@ Deterministic tests establish the repaired preparation decision and ownership be
 Adversarial plan review found three issues, all incorporated before implementation: (P1) rebind the single status poll after same-session failover and reject delayed predecessor responses; (P2) require a known producer progress witness (`outTimeMs`) because zero idle can mean unknown; (P2) separate request-start freshness from response-observation time for the one-shot item-readiness budget. The reviewer also requested “item readiness” terminology: `.readyToPlay` is not proof of displayed video. Implementation and local Apple validation are complete; merge qualification and physical acceptance are tracked separately below.
 
 
-Implementation is PR [#914](http://192.168.4.7:3000/noirr/plurx/pulls/914), Apple build 217. The shared production waiter is exercised directly with injected monotonic time, native status, and cancellable sleep. Two controller tests additionally traverse actual growing-session attachment and same-session failover; the latter holds the predecessor HTTP result across replacement to prove it cannot populate successor evidence.
+Implementation is PR [#914](http://forge.lan:3000/noirr/plurx/pulls/914), Apple build 217. The shared production waiter is exercised directly with injected monotonic time, native status, and cancellable sleep. Two controller tests additionally traverse actual growing-session attachment and same-session failover; the latter holds the predecessor HTTP result across replacement to prove it cannot populate successor evidence.
 
 Validation passed: focused readiness/ownership suites on tvOS (34 tests) and iOS (40 tests); complete tvOS (866 tests) and iOS (882 tests) suites, zero failures; Debug test builds and Release builds on both platforms; docs index (4 tests). The normal commit hook passed pinned Rust formatting, workspace/all-target Clippy with warnings denied, catalog validation and all 77 served JavaScript syntax checks.
 
@@ -172,3 +173,6 @@ If deployment reveals a regression, restore the previously accepted normal appli
 
 
 After the two identity records, `make history-check` passed: 3,383 corrective commits, 321 recognized landing commits, and 1,077 corrections covered by immutable landing trailers. The focused identity test passed all six variants (valid record; altered tree, parents, title; invalid or missing trailer). All five original PR #909/#910 regression fields resolve against their own landing trees. The final documentation index passed again. This record adds no runtime change after the successful Apple suites and Release builds.
+
+
+The first candidate gate (run 4474) caught three repository-contract defects: the extra post-staged-poll continuation reused a fence name even though the census requires one case per continuation; two already-merged Pi status headers still claimed pending merge; and documentation contained machine-specific evidence names/URLs. The continuation now has its own `recoveryEvidenceAfterStagedPoll` case with the same `.open` scope, recorded in the census. Documentation uses neutral repository infrastructure names and the Pi headers record their actual PR #889 landing. No validation rule or allowlist was relaxed. All four run-4474 start/final preflight and Python journals were retained before changing the candidate; no CI attempt was rerun in place.

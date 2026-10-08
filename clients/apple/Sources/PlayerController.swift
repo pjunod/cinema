@@ -6712,7 +6712,7 @@ final class PlayerController: ObservableObject {
                    let staged = self.preparedReplacement.activeAction {
                     let stagedStatus = try? await model.hlsStatus(staged.sessionId)
                     guard !Task.isCancelled, self.started,
-                          self.attemptStillCurrent(pollAttempt, fence: .recoveryEvidencePoll),
+                          self.attemptStillCurrent(pollAttempt, fence: .recoveryEvidenceAfterStagedPoll),
                           self.sessionId == polledSessionId else { return }
                     if self.preparedReplacement.activeAction?.sessionId == staged.sessionId {
                         self.autoStagedStatus = stagedStatus

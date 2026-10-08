@@ -1,14 +1,14 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
 **Status:** built — software implementation and bounded Pi physical acceptance
-complete; final candidate CI and merge pending.
+complete; merged in PR #889.
 **Updated:** 2026-10-08
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
 The existing daemon and web player remain the product.
 
-## Current acceptance — implementation complete, final CI pending
+## Current acceptance — implementation merged
 
 [PR #889](http://forge.lan:3000/noirr/plurx/pulls/889) holds the authoritative
 candidate, review, retained regression journals and final merge disposition.
