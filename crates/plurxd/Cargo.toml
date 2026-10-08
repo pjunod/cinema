@@ -72,6 +72,8 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 qrcode = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
+base64 = "0.22"
 hex = { workspace = true }
 flate2 = { workspace = true }
 crc32fast = { workspace = true }

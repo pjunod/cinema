@@ -792,6 +792,7 @@ pub struct AppState {
     /// Short-lived, revision-bound EPUB resource capabilities. Publication
     /// markup receives one of these, never the user's reusable API token.
     pub publications: Arc<crate::http::publication::PublicationSessions>,
+    pub remote: Arc<crate::http::remote::Hub>,
     pub trakt: Arc<TraktManager>,
     pub system: Arc<SystemInfo>,
     pub logs: Arc<LogBuffer>,
@@ -1228,6 +1229,7 @@ impl AppState {
             transcode,
             offline,
             publications: crate::http::publication::PublicationSessions::new(),
+            remote: Arc::new(crate::http::remote::Hub::default()),
             trakt,
             system,
             logs: logs.general,
