@@ -481,8 +481,14 @@ Apple TV, not its internal AVFoundation cause. They do not justify claiming
 that Apple universally rejects High tier, removing native subtitle groups,
 rewriting source media, or changing HDR policy. Current HDR eligibility was
 true, HDR modes included HDR10 and Dolby Vision, and enabled video/audio
-tracks produced no item error. Lower resolution is a temporary playback
-workaround to verify separately.
+tracks produced no item error. On installed build 213, the user subsequently
+restored a picture by choosing 1080p and then **Apply with restart**. Server
+receipts identify the working stream as AVC 1920×1080 SDR (BT.709), AAC 5.1,
+VOD. The failed stream was HEVC 2160p DV with E-AC-3. Multiple axes changed,
+so this does not isolate resolution as the cause. The preceding prepared
+change was rejected because the audio codec/channel shape changed and
+required a reopen; the restart action correctly recovered it. The candidate
+was built as 215 but deliberately not installed during the user’s movie.
 
 The Tom source is HDR10 Main10 Main tier level 5.0 and begins with an IDR.
 Thus Avatar's High tier, Dolby Vision conversion, and CRA resume opening do
