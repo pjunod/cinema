@@ -1,7 +1,7 @@
 # Cinema remote implementation — build packets for Sol 6.1
 
-**Status:** ready for staged implementation; hardware acceptance open ·
-**Written:** 2026-10-07 · **Source base:** `8e242787c` · **Manager/reviewer:**
+**Status:** software implemented; final integration and hardware acceptance open ·
+**Written:** 2026-10-07 · **Original source base:** `8e242787c` · **Manager/reviewer:**
 parent session · **Builders:** GPT-6.1 Sol agents.
 
 Read [the user experience](TV-REMOTE-AND-COMPANION-PLAN.md), then
@@ -334,7 +334,7 @@ Official constraints:
 
 ## 9. Review findings become concrete acceptance, not erased history
 
-| Original finding | Build decision | Evidence still required |
+| Original finding | Build decision | Acceptance check |
 |---|---|---|
 | R1 privilege escalation | Same-account grants plus semantic action allowlist; no admin routes/modals | Attempts through arrows/Select and locally opened admin modal |
 | R2 undefined expiry clock | Receiver-issued nonce credits with receiver-local monotonic deadlines | Delayed delivery cannot alter focus; clock offset irrelevant |
@@ -589,10 +589,14 @@ A home broker reference belongs to its exact configured origin, publisher,
 server-instance and external broker-generation scope. Configuration replacement cannot send old IDs
 under a new scope and interpret that scope's successful unknown-ID tombstone
 as cleanup of the old authority. Drain held and queued old-scope references
-using the old authority before replacement. On lost authority, retain work
-and require a deliberate broker-operator generation/revocation fence; never
-silently drop it. Report the required operator action as readiness without
-changing saved consent.
+using the old authority before replacement. Restore that exact authority to
+drain cleanup; compatible publisher-proof rotation can preserve its scope.
+If the old authority is permanently lost, retain the obligations and report
+`migration_remediation` without changing saved consent. This packet does not
+implement an exceptional operator-fence command that discards those obligations.
+Such recovery needs a separate design proving external revocation and safe
+mutation of the daemon-owned replicated store. A new broker generation's
+successful response never acknowledges cleanup in the old generation.
 
 The broker reconciles ordinary compatible configuration changes separately
 from disaster restore. Adding a publisher or rotating its proof/signing key
@@ -634,8 +638,13 @@ procedure, which requires external generation/key/proof rotation.
 After the standalone broker packet freezes, the desktop Sol 6.1 builder takes
 the Android couch packet in a separate branch/worktree based on the coordinator's
 current candidate. The native Sol 6.1 builder retains Apple couch and then Apple
-invitations. Android invitation adapters begin only after Android couch freezes,
-so no two builders edit Android files concurrently. Server API/worker and manager
+invitations. After Android couch freezes, its builder continues with Android
+invitation adapters in a new isolated branch/worktree. Apple and Android
+invitations then proceed in parallel, with one owner per platform and no
+concurrent Android edits. The server builder also integrates the preserved B09
+Developer card in `crates/plurxd/src/web/pages/settings-developer.js` and
+`tests/web/cinema-remote-settings.test.js` after the home runtime is ready; the
+web builder has frozen that patch. Other server API/worker and manager
 document ownership remain unchanged. The parent personally reviews each packet
 before handing it to “Coordinate PR merge batches”; that session owns shared
 qualification, counters and main promotion. No builder runs duplicate broad

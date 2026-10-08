@@ -2,11 +2,15 @@
 
 This document answers how the native B09 adapters enroll notifications, handle a
 cold-launch tap and stop resident work without taking over the existing media or
-reminder services. It is an open build contract; native invitation delivery is not yet
-qualified. Use the home B09 packet's frozen invitation API reference as the exact wire
-contract. Build after the Apple/Android couch packets freeze. Native owner owns only
-clients/apple and clients/android source/build/resources/tests; request any cross-owner
-server/API changes before editing. Parent personally reviews and releases separate PRs
+reminder services. It records the implemented contract; the
+[status ledger](TV-REMOTE-AND-COMPANION-STATUS.md) identifies reviewed source and
+remaining acceptance. Physical native invitation delivery is not yet qualified.
+Use the [home invitation API](TV-REMOTE-INVITATIONS-API.md) as the exact wire
+contract. Build each platform after its couch packet freezes. The Apple native builder
+owns clients/apple; the Android couch builder continues with clients/android invitations
+in a new isolated branch/worktree. Ownership includes each platform's source, build,
+resources and focused tests. Request cross-owner server/API changes before editing.
+Parent personally reviews and releases separate PRs
 to the batching coordinator. The batching coordinator owns release counters and shared
 gates. Physical device use requires authorization; no connected television installation
 is included in this packet. Do not claim physical provider acceptance from software
@@ -18,8 +22,10 @@ Use one invitation installation UUID per saved server-instance/account, with its
 returned phone proof in existing platform secure storage. Keep invitation and remote
 receiver identities distinct. The API's 43-character invitation ID is 32 decoded bytes:
 phone UUID then random event UUID. Decode canonically; match the phone prefix only
-against locally saved authenticated installations. It never supplies an origin, login,
-grant or account switch authorization. Select the saved profile explicitly as needed,
+against locally saved authenticated installations. Store remote pairing proofs under
+canonical origin, server instance and account together; origin-less legacy proofs
+cannot be safely migrated and require pairing again. The invitation ID never supplies
+an origin, login, grant or account switch authorization. Select the saved profile explicitly as needed,
 retain the pending tap across cold launch/login, then authenticated lookup revalidates
 the entire ID. Show the returned screen through ordinary companion selection. Do not
 acquire/take over, Select, tune or start playback on a notification tap.
@@ -32,7 +38,13 @@ notifications. Serialize phone generation, consent generation and transport gene
 changes; snapshot profile/account/phone and generation around every await, dropping
 stale completions. No recovery of a lost one-time phone proof: offer same-user
 delete/new installation. Login rebind is explicit and disables consent per API; never
-silently bind an old consent to a new login.
+silently bind an old consent to a new login. Provide the bounded same-human home
+installation list and explicit selected-installation deletion independently of local
+phone proof, pairing grants and the foreground remote switch. This recovers an orphan
+after local metadata or its one-time proof is lost. Fence list/delete replies to the
+current account; never automatically revoke unknown installations. Corrupt local
+metadata needs a separate explicit local reset whose copy explains that unreachable
+home installations remain until removed while signed in.
 
 Transport rotation: explicit Start -> direct verified HTTPS broker claim (ticket Bearer
 only) -> home Confirm. The authenticated home Start response supplies the ticket
@@ -58,7 +70,20 @@ Add didRegisterForRemoteNotifications/didFail callbacks to the existing
 UIApplicationDelegate, dispatching to the invitation model with identity/generation
 fences. Register APNs only for the explicit notification opt-in flow. Configure
 documented aps-environment entitlement/signing prerequisites without pretending an
-unsigned/simulator build has a delivered provider token.
+unsigned/simulator build has a delivered provider token. The implementation uses
+`clients/apple/iOS.entitlements` and the existing `tv.plurx.app` bundle identifier.
+The broker APNs topic must match that exact signed app identifier. Debug sets
+`APNS_ENVIRONMENT=development` and needs the broker sandbox endpoint; Release sets
+`APNS_ENVIRONMENT=production` and needs production. Use a provisioning profile with
+Push Notifications enabled. The broker README's illustrative topic is not the app's
+actual topic. No new background mode is required for visible APNs invitations.
+
+APNs callbacks carry an app-installation token and no request/account identifier.
+Do not claim they can be correlated to a particular account's registration call.
+A retained current registration lifetime may observe rotations, but each enrollment
+still requires independently current explicit consent, profile/login/phone identity
+and generations. A late token alone cannot enable or enroll a replacement account;
+retired callbacks without an eligible current lifetime are discarded.
 
 Recognize only category CINEMA_REMOTE_INVITATION plus a canonical opaque invitation_id.
 Default tap may queue lookup; dismiss/custom unrelated actions must not open a remote.

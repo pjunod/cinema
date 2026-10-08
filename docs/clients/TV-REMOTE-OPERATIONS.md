@@ -1,6 +1,6 @@
 # Cinema remotes — setup, recovery and acceptance
 
-**Status:** implementation setup guide; end-to-end and physical acceptance open ·
+**Status:** reviewed software setup; live native and physical acceptance open ·
 **Updated:** 2026-10-08.
 
 Use the [status ledger](TV-REMOTE-AND-COMPANION-STATUS.md) to identify reviewed
@@ -80,12 +80,99 @@ page or a suspended iPhone app to poll continuously. Final background setup
 instructions must name the implemented broker, consent and permission flows
 before that packet graduates from Developer.
 
-The notification is only a generic invitation. A provider alert already sent can
-arrive after a screen's invitation choice changes. Android's offline check can
+The notification is only a generic invitation. An OFF choice saved while offline
+needs to synchronize with the home server before that server can stop new sends.
+A provider alert already sent can also arrive after the server has accepted OFF. Android's offline check can
 recognize the local installation and whether invitations are still enabled there;
 the opaque payload does not identify an individual screen's consent. A tap always
 checks the exact current screen, consent, login and pairing with the home server.
 It never acquires control or starts playback automatically.
+
+## Connect home to the invitation broker
+
+This is the B09 configuration contract being integrated, not a provider-delivery
+qualification. Build and initialize the separate broker using its
+[operator guide](../../crates/plurx-notification-broker/README.md), publish its
+loopback listener through verified HTTPS, and configure only the intended home
+publisher. The home daemon never stores APNs/FCM device tokens or provider keys.
+
+Set `PLURX_INVITATION_PUBLISHER_CONFIG` in the home daemon's service environment
+to an operator-owned JSON file with this exact shape. Values below are examples;
+use the identities and generation from the actual broker manifest and home.
+
+```json
+{
+  "broker_origin": "https://broker.example.com",
+  "publisher_id": "f482d5c0-12a4-4b07-9082-7484b60d7c58",
+  "broker_generation": "a640bd62-1a69-4f06-8809-b725310bfad5",
+  "server_instance_id": "your-exact-home-instance",
+  "publisher_secret_file": "/srv/cinema/private/publisher-proof.txt"
+}
+```
+
+Use an HTTPS origin with no path, query, fragment or user information. Keep the
+publisher proof in a separate protected file, containing its canonical
+43-character unpadded base64url text. It must match the broker manifest's
+SHA-256 hash of those text bytes. Use absolute file paths. Keep this proof and
+all provider keys out of the repository and client builds. Restart the home
+daemon after changing the configuration or proof; it loads them once per run.
+A restart does not discard retained broker cleanup.
+
+Enable the independent server invitation switch in Developer and save the
+phone's per-screen invitation choice. Provider or permission readiness remains
+advisory and must not reject that saved choice. Apple signing must match the
+actual `tv.plurx.app` topic and APNs environment described in the
+[native build contract](TV-REMOTE-NATIVE-INVITATIONS-BUILD.md#apple). The phone
+claims its short-lived ticket directly with the broker; the home login and
+pairing proof never accompany that claim. Home confirmation is required before
+provider dispatch becomes eligible. A ready response means setup is eligible,
+not proof that a physical notification arrived.
+
+## Build Android push or choose the resident receiver
+
+The Android build accepts public Firebase application configuration through
+these Gradle properties. Use the values for your registered Android app;
+provider service-account credentials belong only on the broker.
+
+| Gradle property | Firebase value |
+|---|---|
+| `cinemaFirebaseProjectId` | Project ID |
+| `cinemaFirebaseApplicationId` | Firebase application ID |
+| `cinemaFirebaseApiKey` | Public application API key |
+| `cinemaFirebaseSenderId` | Messaging sender ID |
+
+Pass the properties to the normal Android build, for example from
+`clients/android`:
+
+```bash
+./gradlew :app:assembleDebug \
+  -PcinemaFirebaseProjectId=your-project \
+  -PcinemaFirebaseApplicationId=1:123456789:android:abcdef \
+  -PcinemaFirebaseApiKey=your-public-application-api-key \
+  -PcinemaFirebaseSenderId=123456789
+```
+
+The implementation initializes the Firebase messaging SDK from these values
+and leaves automatic token initialization off. An explicit push-enrollment
+request obtains the token. An incomplete configuration leaves push unavailable
+without discarding a screen's saved ON choice. It does not start a resident
+service as a fallback. Building with these public values is not proof that
+Google accepted a broker credential or delivered a notification.
+
+While Android invitation acceptance is open, registration, permissions,
+per-screen choices and push/resident controls live in **Settings → Developer
+→ Cinema remotes**. Human installation list/delete and local-record recovery
+remain in **Remotes & devices**, including when foreground remotes are OFF.
+
+For the resident alternative, choose **Resident** for each screen that should
+invite this phone and save that choice to the home. Separately enable the local
+resident receiver choice and press **Start resident receiver**. The service
+requires Wi-Fi and notification permission, shows an ongoing notification with
+**Stop**, and binds its own requests to the selected Wi-Fi network. Other app
+traffic keeps its existing routing. Stopping the service preserves per-screen
+choices and records local OFF before trying to synchronize home availability.
+The service does not restart at boot or after the app process dies; start a new
+run explicitly. A saved receiver choice does not mean a run is active.
 
 ## Recover without confusing saved pairing and current control
 
@@ -99,7 +186,9 @@ It never acquires control or starts playback automatically.
 | Controls unavailable in a modal or system screen | Use the physical remote to finish or dismiss that presentation. Read the packet's navigation inventory for unfinished ordinary browsing controls. |
 | Code expired or approval result is unknown | Close pairing, show a fresh code on the TV and pair again. Inspect the grant list before retaining obsolete grants. |
 | Saved pairing no longer works | Revoke the old grant and pair again. **Forget saved pairing** removes a local proof; it does not claim server revocation. |
+| An updated native app asks to pair again | Pair again in the current server/account. Apple no longer reuses older origin-less proofs. Android now uses an unambiguous origin/instance/account namespace; older Android records already contained an origin but are not silently migrated into the new namespace. |
 | Selling/resetting a receiver | Remove/reset its TV registration. This revokes its paired grants. Merely closing the app does not perform this reset. |
+| Invitation transport reports `migration_remediation` after broker replacement | Restore the exact old broker origin, publisher, server identity and generation authority, then drain retained cleanup before changing scope. A compatible proof rotation can preserve that authority. If it is permanently lost, cleanup stays retained; this packet has no exceptional operator-fence command to discard it. A successful response from a new generation is not proof of old-generation revocation. After repairing the exact scope, restart the home to clear its remembered generation-mismatch state; durable cleanup survives restart. |
 
 Network remote availability does not replace local playback controls. On the
 reviewed desktop path, local pause and Stop use the existing browser player
