@@ -9003,3 +9003,50 @@ The agent's pinned all-target check and normal catalog/fmt/Clippy/JS hook pass.
 The parent archives the exact integrated commit for the warm Linux build;
 no .git directory or credentials are transferred. Units remain deferred to
 the batch merge session. No final review, qualification or handoff is claimed.
+
+
+### 10.290 Receipts measured; Auto retention remains open (2026-10-08)
+
+Freeze60c0f0f00197b36c03c1ba342970776ccf16831b for the phone diagnostic.
+Its pinned Linux build passes in2m13s; archive SHA256 is
+2a96713159ff29896cd546015cea65734f26bb162a3d0cefb1d867c009f05128
+and binary SHA256 is
+e7204b619ef88db8b2c07ec58a21da26e9ea4e10fa6dd9e9f04d5710a3c7b12f.
+Draft844 is pushed/verified at that head with26 regression fields.
+
+The first fresh239 setup attempt fails before phone launch because current
+main's deviceRunCommand requires a canonical CoreDevice process reply,
+whereas the old238 helper only prepared deferred arguments. Preserve that
+setup failure. The agent verifies an empty owned-app process census,
+reconciles the exact nonce-matching unresolved lease and retires its backend.
+The next fresh239 attempt uses the direct private CoreDevice bridge and
+verifies owned PID7436. The app completes150 seconds normally, error none,
+with145 policy facts.131 facts attest completed valid link evidence, current
+installed session/candidate/origin and receipt/ETag. This directly measures
+the receipt bootstrap repair. The cliff applies after accepted Auto control,
+a fresh advancing720 successor and an eligible completed successor receipt.
+All SDK heights remain720, switch_count0, auto_preparing false. Final runway
+47.66s and link3.896Mbps do not establish a720→480 transition. Investigate
+actual policy inputs; do not force an unsafe cliff or relabel a pass.
+
+The SDK harness reports failed solely because the deliberate restore adapter
+omits production restoration. Owned PID absence is verified. Full projected
+context is incomplete because the old outer helper writes it only after a
+successful await; preserve the durable SDK/app/progress receipts and that
+gap. The shaper's captured_at field is generated locally, not supplied by
+the phone, so its event ordering uses one host clock. No physical/audio
+continuity or full twenty-switch qualification is claimed.
+
+Integrate checked tool repair3cbf860d4e as c7f9055f0: explicit
+--restore-policy isolated-lab with a separate QA bundle skips only production
+restoration, after verified owned process cleanup. Production restoration
+remains the default; exact PID/executable, lease, snapshot, proxy-close and
+signal reconciliation remain. Two meaningful regressions are authored,
+with the existing default-restoration regression included in the batch;
+none execute here. Node syntax and normal pinned hook pass. Integrate
+matrixf09bbd751 as612661b25:37 artifact references match; subtitle909 scoped
+pass and native238 diagnostic are distinguished from prerequisites.
+TV239 current83-source signed app installs successfully, but awake playback
+is unmeasured. Android153 normal Play/quality retry awaits the next source
+build and lab slot. No remote source/binary overwrite occurs during phone
+playback. No final adversarial, Fable release or merge handoff is claimed.
