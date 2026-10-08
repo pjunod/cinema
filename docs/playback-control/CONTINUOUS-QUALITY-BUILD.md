@@ -8382,3 +8382,31 @@ measure its contribution rather than speculate about it. Ordinary player
 frame probes remain; this is an observer comparison, not a fully uninstrumented
 shipping qualification. The owned virtual display and exact daemon are bounded
 and guarded. Preserve the separately named d3-stopped1 results. No units run.
+
+### 10.273 Paired observer comparison and designated merge owner (2026-10-08)
+
+The normal-producer Firefox half-speed window with D3 acquisition stopped
+passes its unchanged optical criteria: 4,586 samples over 19,112 ms, lower
+hold 87.561 ms and upper hold 95.872 ms. The matched D3-enabled comparison
+fails: 4,584 samples over 19,103 ms, lower hold 154.233 ms and upper hold
+162.572 ms. Both captures are complete with zero unknown samples, capture
+gaps, backwards frames or skipped counter values. Production source remains
+`67520f7a8`; the verifier, producers, ordinary frame probes and strict limits
+are unchanged. Preserve both separately named `d3-stopped1` and `d3-enabled2`
+report sets, raw pixels and checksums. One pair suggests an observer effect
+but does not establish causality or qualify uninstrumented shipping playback.
+
+The enabled comparison finishes before its external guard attaches. Record
+that limit honestly: a subsequent exact-command process census finds no owned
+comparison daemon or wrapper. The bounded owned virtual display then retires
+through its own stop marker. No unrelated process or host policy changes.
+
+The user explicitly designates `Coordinate PR merge batches`, session
+`01a11907-f720-71b1-8c51-89902b919e6f`, to receive the ready work. No handoff
+has been sent while qualification remains open. Finish qualification and
+fixes, obtain final adversarial review only at readiness, then stop for the
+human's external Fable reviews. After the human releases that pause, hand off
+the exact candidate and receipts to that session. It must use an independent
+clone, run the required fast-lane units once on the merging code, rerun only
+failed tests, fix failures and merge with all Regression-Test landing lines.
+No unit suite or merge runs in this continuation.
