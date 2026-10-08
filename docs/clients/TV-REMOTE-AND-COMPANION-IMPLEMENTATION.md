@@ -565,3 +565,47 @@ provider attempt deadline includes OAuth acquisition and send. Persist attempted
 before sending, refuse cross-publisher lookup, and retain uncertainty without a
 second visible delivery attempt. The broker's own README must document startup,
 provider configuration, encrypted storage and the explicit restore-fence process.
+
+
+## 14. Native invitation and broker lifecycle refinements
+
+The [native invitation build contract](TV-REMOTE-NATIVE-INVITATIONS-BUILD.md)
+provides the platform files, enrollment/tap state, notification ownership,
+resident-service networking candidate and focused acceptance for B09. The
+networking candidate requires implementation review; it is not evidence of
+physical background execution or Play distribution eligibility.
+
+Broker cleanup is globally owned durable work. A normal account, phone,
+receiver or consent deletion transfers its held ticket/enrollment reservation
+into that queue in the same transaction. Account foreign-key cascades must
+not delete the external cleanup obligation. Count held and queued references
+against both account and global bounds before issuance; deletion only moves
+an existing reservation and remains possible at capacity. Do not age-prune a
+queued revocation. Remove it only after the broker acknowledges its durable
+tombstone. Cover direct account deletion with foreign keys enabled and an
+issued-but-unclaimed ticket in the storage contract.
+
+A home broker reference belongs to its exact configured origin, publisher
+and server-instance scope. Configuration replacement cannot send old IDs
+under a new scope and interpret that scope's successful unknown-ID tombstone
+as cleanup of the old authority. Drain held and queued old-scope references
+using the old authority before replacement. On lost authority, retain work
+and require a deliberate broker-operator generation/revocation fence; never
+silently drop it. Report the required operator action as readiness without
+changing saved consent.
+
+The broker reconciles ordinary compatible configuration changes separately
+from disaster restore. Adding a publisher or rotating its proof/signing key
+within the same server/topic/project can preserve compatible enrollments.
+Removing a publisher or changing its server/topic/project revokes affected
+scopes and preserves their identity/dedupe history. Remove/re-add must never
+resurrect revoked capabilities, and a still-running instance with obsolete
+configuration must fail the durable publisher-registry check. Database
+restore still requires the separately documented external generation,
+master-key and publisher-proof rotation procedure.
+
+Provider authorization or OAuth preparation is not a visible notification.
+Recheck durable enrollment and immutable generation immediately before the
+actual APNs/FCM send. If revocation wins while authorization is pending,
+consume the admitted attempt without sending. A request already sent retains
+its honest unknown outcome and is never replayed automatically.
