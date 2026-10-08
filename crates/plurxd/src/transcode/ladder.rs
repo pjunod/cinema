@@ -115,7 +115,12 @@ pub(super) fn transcoded_hls_codecs(
     }
 }
 
-pub(super) fn transcoded_hls_codecs_for_plan(plan: &ResolvedTranscode) -> String {
+pub(crate) fn transcoded_hls_codecs_for_plan(plan: &ResolvedTranscode) -> String {
+    // Select only the sample-entry family here. The served init supplies the
+    // exact RFC 6381 profile, compatibility flags, tier and level.
+    if plan.output_contract().output_codec() == "hevc" {
+        return "hvc1,mp4a.40.2".to_owned();
+    }
     match plan.output_contract().sdr_avc() {
         Some(proof) => format!("{},mp4a.40.2", proof.codec()),
         None => transcoded_hls_codecs(
