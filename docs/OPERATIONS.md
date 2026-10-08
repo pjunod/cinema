@@ -4199,6 +4199,13 @@ ioctl, plus traversal/read access to the mount. Keep the filesystem mounted
 read-only. In Compose, pass only the selected device and bind only that mount
 with `:ro`; do not grant privileged mode. The exact native, systemd and
 container examples are in [deploy/README.md](../deploy/README.md#optical-drives-on-linux).
+For protected Blu-rays, an operator-installed LibMMBD backend must be in the
+same runtime as the optical FFmpeg, with its own service-uid-writable MakeMKV
+state directory and the exact SCSI-generic peer if the drive needs raw access.
+The published image contains no MakeMKV binaries, license or disc keys. A
+second AACS-only retail disc decoded in an isolated lab with that setup, but
+the earlier BD+ disc still did not; a title scan alone is not a playback
+receipt. See the [dated reader evidence](evidence/OPTICAL-BLURAY-2026-10-08.md).
 
 **Before enabling, read the page rather than guessing.** A usable host shows
 the configured drive, installed helper, block-device access, a matching

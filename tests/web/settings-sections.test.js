@@ -532,7 +532,7 @@ test("Optical retail protection remains advisory while the saved switch stays en
     (body) => body,
     () => "",
     (id, _label, note, checked) => `TOG:${id}:checked=${checked}:${note}`,
-    (_readiness, _item, id) => `REQ:${id}`,
+    (_readiness, _item, id, _label, description) => `REQ:${id}:${description}`,
     () => "",
   );
   const html = card({ optical_enabled: true }, { items: [{ id: "optical_media", requirements: [
@@ -540,6 +540,8 @@ test("Optical retail protection remains advisory while the saved switch stays en
   ] }] });
   assert.match(html, /TOG:optical-enabled:checked=true/);
   assert.match(html, /REQ:optical_retail_protection/);
+  assert.match(html, /valid license state writable by the service user/);
+  assert.match(html, /matching SCSI-generic device/);
   assert.match(html, /A real decoded frame is the proof; this never gates the switch/);
   assert.match(html, /every requirement below is advice, never a gate/);
 });

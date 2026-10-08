@@ -627,7 +627,15 @@ backend (or usable operator-supplied AACS keys), the Developer readiness
 section reports the protected-disc failure but never prevents saving the
 optical enable switch. [MakeMKV's LibMMBD documentation](https://www.makemkv.com/libmmbd/)
 describes the on-the-fly integration; its licensing and installation remain
-the operator's choice.
+the operator's choice. The operator-installed backend also needs a writable
+MakeMKV state directory under the **service user's** home (for the image's
+`plurx` uid, `/var/lib/plurx/.MakeMKV`) with valid license configuration.
+Do not bake a license key, downloaded disc keys, or the vendor binaries into a
+published Plurx image. In the isolated October lab, a current beta key,
+both decryptor variables, a writable state directory, the drive's `cdrom`
+group and the matching SCSI-generic device were present when an AACS-only
+retail disc decoded. A completed MakeMKV scan or a green protocol check alone
+was not sufficient proof on the separate BD+ disc.
 
 For Compose, map the stable host block device to `/dev/optical`, bind the
 mounted filesystem read-only, and add the host device's numeric group with
@@ -635,7 +643,8 @@ mounted filesystem read-only, and add the host device's numeric group with
 SCSI-generic endpoint, such as `/dev/sg1`; identify the exact peer from
 `/sys/class/block/srN/device/scsi_generic/` and map only that endpoint and
 its group. Mapping `/dev/sr0` alone did not let the 2026-09-29 lab MakeMKV
-installation discover the drive. The complete commented shape is in
+installation discover the drive. Persist the service-uid-owned MakeMKV state
+separately from the read-only disc mount. The complete commented shape is in
 [`docker-compose.override.example.yml`](docker-compose.override.example.yml).
 Set the TOML paths to the container-side paths. Do not grant broad privileged
 mode or mount `/dev` wholesale.
@@ -645,7 +654,13 @@ LibreDrive probe hung while the disc was inserted. Its documented `SDF_STOP`
 setting, scoped to that drive's ID from a bounded debug log, let the title
 scan complete without firmware access. Do not guess an ID or change drive
 firmware/region settings. A completed title scan is not decryption proof:
-the same lab has not yet produced a decoded Blu-ray frame through LibMMBD.
+the first retail disc still fails before a frame. A second, AACS-only retail
+disc did decode at the start and two seek positions through the packaged
+optical FFmpeg and a disposable LibMMBD lab image. The isolated Plurx app
+then served decodable HLS video/audio at the start and a 600-second position,
+replayed an identical request and released the drive after Stop; see the
+[reader receipt](../docs/evidence/OPTICAL-BLURAY-2026-10-08.md). That does
+not qualify the first disc's BD+ path or any browser/native client.
 
 Eject is generation- and session-checked by the API before the helper receives
 an ioctl request. Disabling optical stops observation and fences the active

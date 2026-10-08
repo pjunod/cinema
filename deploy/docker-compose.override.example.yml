@@ -60,6 +60,10 @@ services:
       # SCSI-generic /dev/sgN endpoint (find it under
       # /sys/class/block/srN/device/scsi_generic/); map only that endpoint.
       # - /mnt/optical/media-room:/mnt/optical/media-room:ro
+      # An operator-installed LibMMBD backend needs its own writable state,
+      # owned by the container's plurx uid. Keep license/key state out of the
+      # image and separate from the read-only optical media mount:
+      # - /srv/plurx-makemkv-state:/var/lib/plurx/.MakeMKV:rw
       # Optional persistent-cache and disposable-scratch roots, paired with the
       # PLURX_CACHE_DIR / PLURX_TRANSCODE_DIR block below. Create both host
       # directories owned by PUID:PGID before the first start. The scratch
