@@ -632,9 +632,10 @@ struct ApplePlaybackTTFFLog: Encodable {
         encoder: String?,
         sessionId: String?,
         attempt: String,
-        reason: String
+        reason: String,
+        evidence: String = "video-frame-ready"
     ) {
-        self.message = "first frame after \(max(0, ms)) ms"
+        self.message = "\(evidence) after \(max(0, ms)) ms"
         self.method = method
         self.title = title
         self.fileId = fileId
@@ -655,9 +656,27 @@ struct ApplePlaybackTTFFLog: Encodable {
     }
 }
 
-/// Monotonic, one-shot first-progress gate. AVPlayer readiness is not a frame,
-/// and a playing intent can still be waiting for data, so the measurement ends
-/// only when the film clock advances while AVPlayer reports actual playback.
+enum PlaybackFirstOutputEvidence {
+    case unknown, audioProgress, videoFrameReady
+
+    static func observed(hasVideoSource: Bool?, localTargetExpected: Bool, evidence: LocalVideoEvidence) -> Self {
+        switch hasVideoSource {
+        case false: return .audioProgress
+        case true: return localTargetExpected && evidence.frameReady ? .videoFrameReady : .unknown
+        case nil: return .unknown
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .unknown: return "unobserved"
+        case .audioProgress: return "audio-progress"
+        case .videoFrameReady: return "video-frame-ready"
+        }
+    }
+}
+
+/// Monotonic, one-shot observation of a local ready frame or confirmed audio progress.
 struct ApplePlaybackTTFFState: Equatable {
     private var openedAt: TimeInterval?
     private var openedPositionMs = 0
@@ -673,12 +692,17 @@ struct ApplePlaybackTTFFState: Equatable {
     mutating func observe(
         positionMs: Int,
         playing: Bool,
+        evidence: PlaybackFirstOutputEvidence,
+        seekPending: Bool = false,
         observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) -> Int? {
-        guard let openedAt,
-              playing,
-              positionMs >= openedPositionMs + 250
-        else { return nil }
+        guard let openedAt, !seekPending else { return nil }
+        switch evidence {
+        case .unknown: return nil
+        case .audioProgress:
+            guard playing, positionMs >= openedPositionMs + 250 else { return nil }
+        case .videoFrameReady: break
+        }
         self.openedAt = nil
         return max(0, Int(((observedAt - openedAt) * 1_000).rounded()))
     }
@@ -928,10 +952,11 @@ struct ApplePlaybackProbeLog: Encodable {
     let sessionId: String?
     let attempt: String
     let snapshot: ApplePlaybackDiagnosticSnapshot
+    var detail: String? = nil
     let ua = "Apple AVPlayer"
 
     enum CodingKeys: String, CodingKey {
-        case level, event, message, method, title, vcodec, height, encoder, attempt, snapshot, ua
+        case level, event, message, method, title, vcodec, height, encoder, attempt, snapshot, detail, ua
         case fileId = "file_id"
         case sessionId = "session_id"
     }
@@ -1659,52 +1684,63 @@ struct PlayerAttachmentRecoveryState: Equatable {
     }
 }
 
-/// A decoder that accepts the stream and renders nothing is invisible to every
-/// other detector here: audio advances the film clock, so both stall detectors
-/// reset on each sample, AVPlayer's stall counter never moves, and no NSError
-/// is ever produced. The one piece of evidence is `AVPlayerItem.presentationSize`,
-/// which stays `.zero` until a frame has actually been decoded. Dolby Vision
-/// Profile 5 on a device with no Profile 5 decoder fails exactly this way.
-///
-/// This deliberately does not reuse `PlayerAttachmentRecoveryState`: that gate
-/// arms after five seconds of clock progress whether or not a picture ever
-/// appeared, which is *below* this threshold, so it would disarm the watchdog
-/// before it could ever fire. A rendered frame is what establishes video here,
-/// and the first non-zero presentation size retires the watchdog for good.
-struct BlackFrameWatchdog: Equatable {
+/// Detect sustained clock progress without a ready frame on the current visible
+/// local layer. Dimensions are metadata, not decoded-frame evidence.
+struct BlackFrameWatchdog {
+    private weak var item: AVPlayerItem?
     private(set) var lastPositionMs: Int?
     private(set) var blackMs = 0
     private(set) var presentedVideo = false
     private(set) var fired = false
 
     mutating func opened() {
+        item = nil
         lastPositionMs = nil
         blackMs = 0
         presentedVideo = false
         fired = false
     }
 
-    /// True exactly once, on the sample that proves the film clock ran for
-    /// `PlayerController.blackFrameDecodeFailureMs` with nothing on screen.
-    ///
-    /// `hasVideoSource` keeps audiobooks and other audio-only playbacks out:
-    /// their presentation size is legitimately `.zero` forever.
+    mutating func bind(_ currentItem: AVPlayerItem?) {
+        guard let currentItem else { opened(); return }
+        guard item !== currentItem else { return }
+        opened()
+        item = currentItem
+    }
+
+    /// Cancellation must rearm the same unready item, not permanently latch it.
+    mutating func recoveryIsEligible(for currentItem: AVPlayerItem, frameReady: Bool, eligible: Bool) -> Bool {
+        guard item === currentItem else { return false }
+        if frameReady { presentedVideo = true }
+        guard eligible, !presentedVideo else {
+            fired = false
+            lastPositionMs = nil
+            blackMs = 0
+            return false
+        }
+        return fired
+    }
+
     @MainActor
     mutating func observe(
+        item currentItem: AVPlayerItem,
         positionMs: Int,
-        presentationSize: CGSize,
+        frameReady: Bool,
+        localTargetExpected: Bool,
         hasVideoSource: Bool,
         playing: Bool
     ) -> Bool {
-        guard !fired, !presentedVideo else { return false }
-        if presentationSize.width > 0 && presentationSize.height > 0 {
+        bind(currentItem)
+        if frameReady {
             presentedVideo = true
             lastPositionMs = nil
             blackMs = 0
             return false
         }
-        guard hasVideoSource, playing else {
+        guard !fired, !presentedVideo else { return false }
+        guard hasVideoSource, playing, localTargetExpected else {
             lastPositionMs = nil
+            blackMs = 0
             return false
         }
         guard let lastPositionMs else {
@@ -1713,9 +1749,6 @@ struct BlackFrameWatchdog: Equatable {
         }
         let delta = positionMs - lastPositionMs
         self.lastPositionMs = positionMs
-        // Only elapsed film time counts. A seek, an item replacement, or any
-        // other discontinuity larger than one sampling interval can explain is
-        // a new baseline rather than more of the same black screen.
         guard delta >= 0, delta <= PlayerController.blackFrameSampleCeilingMs else {
             blackMs = 0
             return false
@@ -2382,6 +2415,20 @@ final class PlayerController: ObservableObject {
     }
     @Published private(set) var stagedSurfacePlayer: AVPlayer?
     private weak var playbackSurface: PlayerSurfaceView?
+    #if DEBUG
+    var localVideoEvidenceForTesting: ((AVPlayer, AVPlayerItem) -> LocalVideoEvidence)?
+    func setBlackFrameWatchdogForTesting(_ watchdog: BlackFrameWatchdog) { blackFrameWatchdog = watchdog }
+    var blackFrameWatchdogForTesting: BlackFrameWatchdog { blackFrameWatchdog }
+    #endif
+
+    func currentLocalVideoEvidence() -> LocalVideoEvidence {
+        guard let item = player.currentItem else { return .unavailable }
+        #if DEBUG
+        if let read = localVideoEvidenceForTesting { return read(player, item) }
+        #endif
+        return playbackSurface?.videoEvidence(for: player, item: item) ?? .unavailable
+    }
+
     private var warmPredecessor: AVPlayer?
 
     func attachPlaybackSurface(_ surface: PlayerSurfaceView, attached: Bool) {
@@ -8122,21 +8169,17 @@ final class PlayerController: ObservableObject {
     }
 
     /// One evidence sample from the client's existing presentation proof. No
-    /// detector and no timer of its own: the periodic observer already runs,
-    /// the position delta is already computed, and the first-frame proof is
-    /// the black-frame ladder's.
-    private func sampleSurfacePresentation(at observedPosition: Int) {
+    /// detector and no timer of its own: the periodic observer supplies the
+    /// same current-layer snapshot used by TTFF and the black-frame watchdog.
+    private func sampleSurfacePresentation(at observedPosition: Int, evidence: LocalVideoEvidence) {
         // Nothing attached is nothing to prove.
         guard let attached = surface.attached else { return }
         let hasVideoSource = decision?.source?.videoCodec != nil
-        let size = presentationSize
         // Declared, not guessed: an AirPlay or PiP picture is presenting on a
         // screen this process cannot measure.
         let declared = player.isExternalPlaybackActive || pictureInPictureIsActive
-        let picture = !hasVideoSource
-            || blackFrameWatchdog.presentedVideo
-            || (size.width > 0 && size.height > 0)
-            || declared
+        let picture = (decision?.source != nil && !hasVideoSource)
+            || evidence.frameReady || declared
         let presenting = Self.surfaceIsPresenting(
             observedPosition: observedPosition,
             lastSampleMs: lastSurfaceSampleMs,
@@ -8427,7 +8470,11 @@ final class PlayerController: ObservableObject {
         let observedPlayer = player
         return { [weak self, weak observedPlayer] in
                 guard let self, self.isCurrentLifecycle(lifecycle), self.player === observedPlayer,
-                      let item = self.player.currentItem, !self.isChangingStream else { return }
+                      !self.isChangingStream else { return }
+                guard let item = self.player.currentItem else {
+                    self.blackFrameWatchdog.bind(nil)
+                    return
+                }
                 // Keep an interactive target on screen while its item is being
                 // prepared. Reading the predecessor here was the visible snap
                 // back after a progress-bar or skip-button command.
@@ -8443,18 +8490,24 @@ final class PlayerController: ObservableObject {
                 // The last rate the viewer was genuinely playing at, so a
                 // pause at 1.5× is restored as 1.5× and not as the 0 the
                 // transport reports while paused (P2-5).
+                guard self.player === observedPlayer, self.player.currentItem === item else { return }
                 let observedPosition = self.realPositionMs()
                 let isActuallyPlaying = self.player.timeControlStatus == .playing
                     && self.player.rate > 0
+                let evidence = self.currentLocalVideoEvidence()
+                let localTargetExpected = self.localVideoTargetExpected(evidence)
                 self.reportPlaybackTTFFIfNeeded(
                     at: observedPosition,
-                    playing: isActuallyPlaying
+                    playing: isActuallyPlaying,
+                    evidence: evidence
                 )
                 // Sampled outside the playing branch so a picture that arrives
                 // while paused still retires the watchdog.
                 if self.blackFrameWatchdog.observe(
+                    item: item,
                     positionMs: observedPosition,
-                    presentationSize: self.presentationSize,
+                    frameReady: localTargetExpected && evidence.frameReady,
+                    localTargetExpected: localTargetExpected,
                     hasVideoSource: self.decision?.source?.videoCodec != nil,
                     playing: isActuallyPlaying
                 ) {
@@ -8468,14 +8521,14 @@ final class PlayerController: ObservableObject {
                         guard let self, self.started,
                               self.attemptStillCurrent(attempt, fence: .blackFrameDecodeFailure),
                               self.player.currentItem === item,
-                              !self.isChangingStream else { return }
+                              self.blackFrameRecoveryIsEligible(for: item) else { return }
                         await self.handleBlackFrameDecodeFailure(at: observedPosition)
                     }
                 }
                 // The surface's evidence, taken from the samples this
                 // observer already has: the position delta, the rate, and the
                 // first-frame proof for an item that has never presented one.
-                self.sampleSurfacePresentation(at: observedPosition)
+                self.sampleSurfacePresentation(at: observedPosition, evidence: evidence)
                 // In the same turn as the evidence, never before it: AVPlayer
                 // invokes this observer when playback stops as well as while
                 // it runs, so a wait raised here is raised against a model
@@ -9071,11 +9124,31 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    private func reportPlaybackTTFFIfNeeded(at positionMs: Int, playing: Bool) {
+    private func localVideoTargetExpected(_ evidence: LocalVideoEvidence) -> Bool {
+        evidence.bindingMatches && evidence.targetVisible
+            && !player.isExternalPlaybackActive && !pictureInPictureIsActive
+            && seekState.pendingMs == nil && !isChangingStream
+    }
+
+    func blackFrameRecoveryIsEligible(for item: AVPlayerItem) -> Bool {
+        guard player.currentItem === item else { return false }
+        let evidence = currentLocalVideoEvidence()
+        let local = localVideoTargetExpected(evidence)
+        return blackFrameWatchdog.recoveryIsEligible(
+            for: item, frameReady: local && evidence.frameReady,
+            eligible: started && local && decision?.source?.videoCodec != nil
+                && player.timeControlStatus == .playing && player.rate > 0)
+    }
+
+    private func reportPlaybackTTFFIfNeeded(at positionMs: Int, playing: Bool, evidence: LocalVideoEvidence) {
         #if os(iOS)
         if offlineId != nil { return }
         #endif
-        guard let ms = ttffMeasurement.observe(positionMs: positionMs, playing: playing) else {
+        let firstOutput = PlaybackFirstOutputEvidence.observed(
+            hasVideoSource: decision?.source.map { $0.videoCodec != nil },
+            localTargetExpected: localVideoTargetExpected(evidence), evidence: evidence)
+        guard let ms = ttffMeasurement.observe(positionMs: positionMs, playing: playing,
+            evidence: firstOutput, seekPending: seekState.pendingMs != nil) else {
             return
         }
         lastTTFFMs = ms
@@ -9093,7 +9166,8 @@ final class PlayerController: ObservableObject {
             encoder: encoder,
             sessionId: sessionId,
             attempt: playbackAttemptId,
-            reason: ttffReason
+            reason: ttffReason,
+            evidence: firstOutput.label
         ))
     }
 
@@ -9114,8 +9188,19 @@ final class PlayerController: ObservableObject {
             encoder: encoder,
             sessionId: sessionId,
             attempt: playbackAttemptId,
-            snapshot: playbackDiagnosticSnapshot(at: positionMs)
+            snapshot: playbackDiagnosticSnapshot(at: positionMs),
+            detail: localVideoDiagnosticDetail()
         ))
+    }
+
+    private func localVideoDiagnosticDetail() -> String {
+        let evidence = currentLocalVideoEvidence()
+        let size = presentationSize
+        let source = decision?.source.map { $0.videoCodec == nil ? "audio" : "video" } ?? "unknown"
+        return "source=\(source) binding=\(evidence.bindingMatches) visible=\(evidence.targetVisible)"
+            + " ready=\(evidence.readyForDisplay) item=\(player.currentItem?.status.rawValue ?? -1)"
+            + " dimensions=\(size.width)x\(size.height) playing=\(player.timeControlStatus == .playing && player.rate > 0)"
+            + " external=\(player.isExternalPlaybackActive) pip=\(pictureInPictureIsActive) black_ms=\(blackFrameWatchdog.blackMs)"
     }
 
     private func reportPlaybackStall(
@@ -9676,12 +9761,13 @@ final class PlayerController: ObservableObject {
     /// so it now does what every other spent owner does — stop the player,
     /// then say so.
     private func handleBlackFrameDecodeFailure(at position: Int) async {
-        guard started, !isChangingStream, player.currentItem != nil else { return }
+        guard let decoderItem = player.currentItem,
+              blackFrameRecoveryIsEligible(for: decoderItem) else { return }
         let decoderAttempt = snapshotAttempt()
-        let decoderItem = player.currentItem
         _ = await noteAutoDecodeFailure()
         guard player.currentItem === decoderItem,
-              attemptStillCurrent(decoderAttempt, fence: .blackFrameDecoderAcknowledgement) else { return }
+              attemptStillCurrent(decoderAttempt, fence: .blackFrameDecoderAcknowledgement),
+              blackFrameRecoveryIsEligible(for: decoderItem) else { return }
         let fallback = plannedCompatibilityFallback
         guard fallback != .none else {
             stopForBlockingSurface()
