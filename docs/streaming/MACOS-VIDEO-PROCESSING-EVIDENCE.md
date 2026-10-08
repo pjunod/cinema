@@ -1170,9 +1170,9 @@ Tokio's blocking-pool shutdown waiting for startup `DecodeProbeIdentity`
 WebAssembly compilation. Parser identity had already exceeded its deadline;
 the worker continues compiling. This is separate from the completed
 VideoToolbox producers. The owned processes were terminated and reaped.
-An exact-source release-profile check is pending to distinguish debug compiler
-cost from shipping behavior; no watchdog, deadline increase or parser-capability
-bypass was added.
+The exact-source release-profile check in §31 distinguishes the debug compiler
+cost from its observed release lifecycle; no watchdog, deadline increase or
+parser-capability bypass was added.
 
 [Caption API delivery evidence](evidence/macos-video-20261008/caption-api-delivery-evidence.tar.gz)
 contains three sanitized JSON records, 2,674 compressed bytes, SHA-256
@@ -1182,3 +1182,95 @@ and qualification limits. The archive excludes media, caption text, private
 paths and raw logs. Its assembler is
 `a245edf2880a060ceccb800331eec0f1988434c07d7da07912d6a23091450131`;
 all referenced raw receipt/media hashes were checked before assembly.
+
+## 31. Release parser lifecycle and retained subtitle-driver failure — 2026-10-08
+
+Exact source `1f154545619d49e81f994983ea58dd6b6c160f5a` builds with pinned
+Rust 1.97.1 in the release profile. The first bounded window expired after
+600 seconds; no source error was reported, and the exact unfinished crate
+was not recorded. A separately authorized 1,800-second window completed in
+792.69 seconds with two compiler jobs. Both receipts remain retained.
+
+The immutable unsigned daemon is 168,070,376 bytes, SHA-256
+`a1ba7bdfb904671a77afa465c90c77db81abc89e4838c5438047d664e4610507`.
+Its arm64 UUID `D8A72604-6217-3E8D-A1F5-52E45FAEB4B6` matches the retained
+debug symbols. The signed qualification daemon is
+`42fdd61b5431fe657bfd1435497fc5dc8c11595b38cc385b86a8f3a4ac0d83cb`;
+FFmpeg, FFprobe and sealed-parser bytes remain unchanged from §30. This is
+ad hoc package qualification, not a notarized installation claim.
+
+With the owned build prefix hidden, the first normal CPU subtitle API run
+passes all 49 independent source-cue observations, has no startup parser
+identity warning and shuts down with exit zero. Its overall result remains
+**failed**: the first hold request returned 200, but the private driver then
+sent `play` for resume, which protocol v1 rejects. The valid value is `active`.
+The original receipt and executed driver are retained unchanged; the driver
+correction changes no application behavior.
+
+This result supports release parser initialization and clean shutdown for
+that case. It does not turn the three debug caption shutdown failures into
+passes, qualify GPU subtitles, or establish complete control lifecycle or
+performance. Text/bitmap API work continues separately in the status ledger.
+
+[Release parser lifecycle evidence](evidence/macos-video-20261008/release-parser-lifecycle-evidence.tar.gz)
+contains one curated JSON record, 1,359 compressed bytes, SHA-256
+`bf81a44ed7b08a1e0a0527b148ffee91cd0688c85224dba931bb4c0147d965df`.
+The assembler verifies the unsigned daemon and all symbol hashes, retains
+the original receipt hashes and failing overall result, and excludes runtime
+directories, media, credentials, paths and commands. Its SHA-256 is
+`6896e303ace63b5d8c65a0a22f74b151283f2368dc7a75d442a5d677c06a7f03`.
+
+## 32. GPU bitmap API delivery and local text authority — 2026-10-08
+
+The same signed release source and package as §31 now pass normal bitmap
+subtitle delivery with the owned build prefix hidden. The actual producer
+selects `overlay_videotoolbox=bitmap=1` and a two-second containing entry for
+a requested 3.5-second start. All 25 served frames match the independent
+source-event model described below. Hold, resume and seek-back-to-zero
+requests return 200; DELETE returns 204, and the daemon shuts down with exit
+zero with parser identity available. The build prefix is restored and all
+owned media processes are reaped. Control acceptance is not proof of a
+client-presented frame or rendered seek-back accuracy.
+
+The first GPU and incumbent CPU cases both failed the original raw-interval
+oracle on the frame at 3.750 s. Source packets and decoded sidecar timestamps
+remain 0.021, 0.521, 3.271 and 3.771 s; no 21 ms origin subtraction occurs.
+Tracing the pinned `sub2video` and frame scheduler establishes the exact
+assignment:
+
+- With pass-through EOF behavior the secondary input has `sync=0`, so the
+  main 1/12 clock determines nearest timestamp conversion.
+- A blank heartbeat at 3.270999 s precedes the active subtitle at 3.271 s.
+  Both become tick 39. The scheduler consumes one queued next event per
+  input and emits the main frame on the first tie, leaving tick 39 blank.
+  The active event takes effect before tick 40, at 3.333333 s.
+- The clear event at 3.771 s becomes tick 45 and applies to the main frame
+  at 3.750 s.
+
+The deterministic reassessment passes all 25 retained frames in both original
+CPU and GPU outputs. Their failed receipts remain unchanged. This is an
+oracle correction derived from exact event ordering, with no application
+change or tolerance increase. A separate corrected-driver GPU run then
+completed the controls that those failed runs had not reached. DELETE's 204
+is established by the executed driver's assertion and passing path, not an
+invented receipt field.
+
+The text case exposed a different, real integration defect: local resolution
+received a font digest only from shared-source evidence, while local engine
+capture happened after planning. Repair `b7d21934b` moves the same capture
+before resolution and retains that engine through encoding. Matching, absent
+and mismatched font regression sources compile. The pinned all-target check
+and normal hook pass without unit execution; updated text runtime acceptance
+is still outstanding. The bitmap runtime results above use `1f1545456` and
+must not be attributed to the later text repair.
+
+[Bitmap API and text authority evidence](evidence/macos-video-20261008/subtitle-bitmap-api-evidence.tar.gz)
+contains one curated JSON record, 3,844 compressed bytes, SHA-256
+`2a478286f56658f4916757d0092a5a01528924fb159c9eb6b56771ed89b4ec29`.
+All 33 raw allowlist entries were independently checked for hash and size
+before archiving; the archive was reopened and compared byte-for-byte. It
+includes the per-frame expectations, original failures, exact artifact and
+driver identities, and explicitly separate compile-only evidence. It excludes
+media, paths, raw commands, session identifiers, credentials and runtime state.
+The curator is
+`e04fb3b735a5c347b00ededf549f537eb2a9e41309841ecd1a634a79dfcd569d`.

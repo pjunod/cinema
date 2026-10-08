@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Stage immutable SDK source/recipe inputs and official runtime imports.
 
-No download, compilation, installation, GPU access or runtime qualification.
+Staging does not download, compile, install or qualify a runtime. The explicit
+--generate stage runs only hash-bound project generators on a private Linux SDK.
 The source lock names actual public archive inputs and exact consumed members;
 No generated headers or pkg-config substitutions are fabricated. A later bounded
 CPU generation/configure stage must hash its actual outputs before link readiness.
@@ -15,6 +16,12 @@ import re
 import shlex
 import shutil
 import struct
+import subprocess
+import os
+import signal
+import platform
+import threading
+import time
 import tarfile
 import tempfile
 from urllib.parse import urlsplit
@@ -74,7 +81,7 @@ def ar_members(data):
     return result
 
 
-def tar_members(data):
+def tar_members(data, allow_unresolved=False):
     regular, links = {}, {}
     total = 0
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
@@ -117,7 +124,7 @@ def tar_members(data):
                 raise ValueError("cyclic archive link")
             seen.add(target)
             target = links[target]
-        if target not in regular:
+        if target not in regular and not allow_unresolved:
             raise ValueError("unresolved archive link")
     return regular, links
 
@@ -129,13 +136,13 @@ def resolved(name, regular, links):
     return regular[name], name if name != original else original
 
 
-def package_members(data):
+def package_members(data, allow_unresolved=False):
     members = ar_members(data)
     names = [name for name in members if name.startswith("data.tar.")]
     controls = [name for name in members if name.startswith("control.tar.")]
     if len(names) != 1 or len(controls) != 1:
         raise ValueError("ambiguous Debian payload")
-    return tar_members(members[names[0]]), tar_members(members[controls[0]])
+    return tar_members(members[names[0]], allow_unresolved), tar_members(members[controls[0]])
 
 
 def configure_contract(text):
@@ -154,10 +161,133 @@ def configure_contract(text):
     return flags
 
 
-def stage_sources(lock, prefix, provenance, flags, upstream_recipe):
+def control_fields(data):
+    fields, previous = {}, None
+    for line in data.decode("utf-8").splitlines():
+        if line.startswith(" "):
+            if previous is None:
+                raise ValueError("invalid Debian control continuation")
+            fields[previous] += "\n" + line[1:]
+        elif line:
+            previous, value = line.split(":", 1)
+            if previous in fields:
+                raise ValueError("duplicate Debian control field")
+            fields[previous] = value.strip()
+    return fields
+
+
+def role_archive(directory, row):
+    name = Path(row["archive"])
+    return name if name.is_absolute() else Path(directory) / member_path(row["archive"])
+
+
+def stage_distribution_packages(lock, sdk, provenance, archive_directory):
+    rows = lock.get("distribution_packages", {})
+    if not isinstance(rows, dict):
+        raise ValueError("invalid immutable distribution package roles")
+    all_files, all_links, records, supplied = {}, {}, {}, set()
+    for role, row in sorted(rows.items()):
+        if not re.fullmatch(r"[A-Za-z0-9_.+-]+", role):
+            raise ValueError("unsafe distribution role")
+        data = checked_bytes(role_archive(archive_directory, row), row["archive_sha256"])
+        (regular, links), (control, control_links) = package_members(data, allow_unresolved=True)
+        if control_links or "control" not in control:
+            raise ValueError("package must retain its regular actual control metadata")
+        actual = control_fields(control["control"])
+        if actual.get("Package") != role or actual.get("Version") != row["version"] or actual.get("Architecture") not in ["amd64", "all"]:
+            raise ValueError("actual Debian package role/version/architecture mismatch")
+        source = actual.get("Source", role)
+        match = re.fullmatch(r"([^ ]+)(?: \(([^)]+)\))?", source)
+        if match is None:
+            raise ValueError("invalid actual binary/source association")
+        source_package, source_version = match[1], match[2] or actual["Version"]
+        offer = row["source_offer"]
+        if offer["package"] != source_package or offer["version"] != source_version:
+            raise ValueError("package source version differs from its immutable source offer")
+        destination = provenance / "distribution-sources" / role
+        destination.mkdir(parents=True)
+        (destination / "original-package.deb").write_bytes(data)
+        (destination / "control").write_bytes(control["control"])
+        source_hashes = {}
+        for name, member in sorted(offer["files"].items()):
+            name = member_path(name)
+            if "/" in name:
+                raise ValueError("source offer archive must use a plain filename")
+            original = checked_bytes(Path(archive_directory) / name, member["sha256"])
+            if len(original) != member["bytes"]:
+                raise ValueError("source offer archive size mismatch")
+            (destination / name).write_bytes(original)
+            source_hashes[name] = member["sha256"]
+        if not any(name.endswith(".dsc") for name in source_hashes) or not any(".orig.tar." in name for name in source_hashes) or not any(".debian.tar." in name for name in source_hashes):
+            raise ValueError("original source, Debian patch/configuration archive and dsc all required")
+        consumed = {}
+        for name, contents in regular.items():
+            header = name.startswith("usr/include/") and name.endswith((".h", ".hpp"))
+            metadata = name.startswith("usr/lib/") and "/pkgconfig/" in name and name.endswith(".pc")
+            runtime = name.startswith("usr/lib/") and contents.startswith(b"\x7fELF")
+            copyright_file = name.startswith("usr/share/doc/") and name.endswith("/copyright")
+            if not any([header, metadata, runtime, copyright_file]):
+                continue
+            if metadata and re.search(rb"@[A-Za-z_][A-Za-z0-9_]*@", contents):
+                raise ValueError("distributed pkg-config file is an unconfigured template")
+            if runtime and (len(contents) < 64 or contents[4:6] != b"\x02\x01" or struct.unpack_from("<H", contents, 18)[0] != 62):
+                raise ValueError("distribution runtime import must retain amd64 ELF ABI")
+            if name in all_files and all_files[name] != contents:
+                raise ValueError("distribution roles disagree on an imported file")
+            all_files[name] = contents
+            consumed[name] = {"sha256": digest(contents), "bytes": len(contents), "kind": "runtime" if runtime else "header" if header else "pkg-config" if metadata else "copyright"}
+        for name, target in links.items():
+            # Keep only header/PC/library/copyright aliases relevant to consumed
+            # roles. Absolute/escaping links were already rejected by tar_members.
+            if name.startswith(("usr/include/", "usr/lib/", "usr/share/doc/")):
+                if name in all_links and all_links[name] != target:
+                    raise ValueError("distribution roles disagree on a relative link")
+                all_links[name] = target
+        supplied.update(row.get("configure_flags", []))
+        records[role] = {"archive_sha256": digest(data), "version": actual["Version"], "source_package": source_package,
+                         "source_version": source_version, "source_offer_sha256": source_hashes, "control_sha256": digest(control["control"]),
+                         "consumed": consumed, "state": "actual distributed headers/pkg-config; no local generation claim"}
+    sysroot = sdk / "sysroot"
+    for name, contents in sorted(all_files.items()):
+        target = sysroot / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+        target.chmod(0o444)
+    unresolved = {}
+    for name, target in sorted(all_links.items()):
+        endpoint, seen = target, set()
+        while endpoint in all_links:
+            if endpoint in seen:
+                raise ValueError("cross-package relative link cycle")
+            seen.add(endpoint)
+            endpoint = all_links[endpoint]
+        if endpoint not in all_files:
+            unresolved[name] = target
+            continue  # Inventory only; never follow a host filesystem target.
+        contents = all_files[endpoint]
+        path = sysroot / name
+        if path.exists():
+            if path.read_bytes() != contents:
+                raise ValueError("alias conflicts with an imported regular file")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+            path.chmod(0o444)
+    for role, row in records.items():
+        copyright_path = "usr/share/doc/" + role + "/copyright"
+        if not (sysroot / copyright_path).is_file():
+            raise ValueError("every consumed binary role needs its authentic distributed copyright")
+        row["copyright_sha256"] = digest((sysroot / copyright_path).read_bytes())
+        row["unresolved_relative_links"] = {name: target for name, target in unresolved.items() if name in rows[role].get("relative_links", {})}
+    inventory = {str(path.relative_to(sysroot)): {"sha256": digest(path.read_bytes()), "bytes": path.stat().st_size}
+                 for path in sorted(sysroot.rglob("*")) if path.is_file()} if sysroot.exists() else {}
+    return {"roles": records, "sysroot_members": inventory, "unresolved_relative_links": unresolved}, supplied
+
+
+def stage_sources(lock, prefix, provenance, flags, upstream_recipe, archive_directory=None, supplied_flags=()):
     if lock.get("schema_version") != 1 or not isinstance(lock.get("sources"), dict):
         raise ValueError("missing immutable consumed-source lock")
-    supplied = set()
+    supplied = set(supplied_flags)
     records = {}
     for role, row in sorted(lock["sources"].items()):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", role):
@@ -167,7 +297,10 @@ def stage_sources(lock, prefix, provenance, flags, upstream_recipe):
             raise ValueError("public credential-free source URL/ref missing")
         if row.get("kind") == "git" and not re.fullmatch(r"[0-9a-f]{40}", row.get("commit", "")):
             raise ValueError("consumed Git source requires an immutable commit")
-        data = checked_bytes(row["archive"], row["archive_sha256"])
+        archive = Path(row["archive"])
+        if not archive.is_absolute():
+            archive = Path(archive_directory or ".") / member_path(row["archive"])
+        data = checked_bytes(archive, row["archive_sha256"])
         regular, links = tar_members(data)
         role_offer = provenance / "consumed-sources" / role
         role_offer.mkdir(parents=True)
@@ -188,8 +321,8 @@ def stage_sources(lock, prefix, provenance, flags, upstream_recipe):
         files = {}
         for destination, source in sorted(row.get("files", {}).items()):
             destination = member_path(destination)
-            if not destination.startswith(("include/", "lib/pkgconfig/")):
-                raise ValueError("SDK consumption must name headers or pkg-config")
+            if not destination.startswith(("include/", "lib/pkgconfig/", "share/vulkan/registry/")):
+                raise ValueError("SDK consumption must name headers, pkg-config or the Vulkan registry")
             contents, origin = resolved(member_path(source["member"]), regular, links)
             if digest(contents) != source["sha256"]:
                 raise ValueError("consumed source member checksum mismatch")
@@ -200,12 +333,34 @@ def stage_sources(lock, prefix, provenance, flags, upstream_recipe):
             target.write_bytes(contents)
             files[destination] = {"source_member": origin, "source_sha256": digest(contents),
                                   "state": "generation/configuration witness pending"}
+        patches = []
+        for index, patch in enumerate(row.get("patches", [])):
+            if patch["recipe_reference"].encode() not in fragment:
+                raise ValueError("source patch must be named by the actual pinned upstream recipe")
+            original = checked_bytes(role_archive(archive_directory or ".", patch), patch["sha256"])
+            (role_offer / ("patch-" + str(index) + ".patch")).write_bytes(original)
+            patches.append({"sha256": digest(original), "recipe_reference": patch["recipe_reference"]})
+        for addition in row.get("source_append", []):
+            contents, _ = resolved(member_path(addition["member"]), regular, links)
+            if digest(contents) != addition["before_sha256"] or digest(contents + addition["text"].encode()) != addition["after_sha256"]:
+                raise ValueError("upstream source-template transformation does not match authentic bytes")
+            if any(line.encode() not in fragment for line in addition["recipe_lines"]):
+                raise ValueError("template transformation must preserve the pinned recipe's literal operations")
+        for replacement in row.get("source_replace", []):
+            contents, _ = resolved(member_path(replacement["member"]), regular, links)
+            if replacement["recipe_line"].encode() not in fragment or digest(contents) != replacement["before_sha256"] or digest(contents.replace(replacement["old"].encode(), replacement["new"].encode())) != replacement["after_sha256"]:
+                raise ValueError("source replacement differs from the actual pinned recipe and authentic input")
+        for addition in row.get("output_append", {}).values():
+            if addition["recipe_line"].encode() not in fragment:
+                raise ValueError("generated-output transformation is not in the actual upstream recipe")
         records_generation = {"recipe_fragment_sha256": digest(fragment),
                               "generated_outputs": {}, "link_ready": False}
         supplied.update(row.get("configure_flags", []))
         records[role] = {"url": row["url"], "ref": row["ref"], "commit": row.get("commit"),
                          "archive_sha256": digest(data), "licenses": licenses,
-                         "files": files, "recipe_binding": binding, "generation": records_generation}
+                         "files": files, "recipe_binding": binding, "generation": records_generation,
+                         "generator": row.get("generator"), "patches": patches,
+                         "source_append": row.get("source_append", []), "source_replace": row.get("source_replace", []), "output_append": row.get("output_append", {})}
     needed = {flag for flag in flags if flag.startswith("--enable-lib")}
     needed.update(flag for flag in flags if flag in {"--enable-gmp", "--enable-gnutls",
                   "--enable-chromaprint", "--enable-opencl", "--enable-vulkan",
@@ -215,7 +370,11 @@ def stage_sources(lock, prefix, provenance, flags, upstream_recipe):
     return records
 
 
-def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, output):
+def ffmpeg_owned_library(name):
+    return bool(re.match(r"(?:libavcodec|libavdevice|libavfilter|libavformat|libavutil|libswresample|libswscale)\.so(?:\.|$)", Path(name).name))
+
+
+def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, output, archive_directory=None):
     if not output.is_absolute() or output.exists() or any(output.is_relative_to(Path(p)) for p in
             ["/Applications", "/Library", "/System", "/usr", "/opt"]):
         raise ValueError("output must be a new private absolute directory")
@@ -244,7 +403,7 @@ def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, ou
         for name in sorted(set(regular) | set(links)):
             if name.startswith(prefix):
                 relative = name[len(prefix):]
-                if Path(relative).name.startswith(("libav", "libswresample", "libswscale")):
+                if ffmpeg_owned_library(relative):
                     continue  # Modified FFmpeg owns all of its own library images.
                 contents, origin = resolved(name, regular, links)
                 if not contents.startswith(b"\x7fELF"):
@@ -266,10 +425,12 @@ def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, ou
                                  "resolved_member": origin, "kind": "copyright"}
         if not any(row["kind"] == "copyright" and "copyright" in name for name, row in imports.items()):
             raise ValueError("official distributed copyright must be retained")
+        control_hashes = {}
         for name in sorted(control):
             target = provenance / "official-control" / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(control[name])
+            control_hashes[name] = digest(control[name])
         (provenance / "original-ffmpeg-source.tar.gz").write_bytes(source_data)
         (provenance / "consumed-source-lock.json").write_bytes(lock_data)
         recipe_hashes = {}
@@ -292,8 +453,10 @@ def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, ou
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(contents)
             quilt[name] = digest(contents)
-        sources = stage_sources(lock, sdk, provenance, flags, source_files[recipe_names["docker-build.sh"]])
-        facts = {"schema_version": 1, "kind": "source-only-sdk", "state": "immutable-inputs-staged", "link_ready": False,
+        distribution, supplied_flags = stage_distribution_packages(lock, sdk, provenance, archive_directory or lock_path.parent)
+        sources = stage_sources(lock, sdk, provenance, flags, source_files[recipe_names["docker-build.sh"]], archive_directory or lock_path.parent, supplied_flags)
+        (provenance / "executed-sdk-helper.py").write_bytes(Path(__file__).read_bytes())
+        facts = {"helper_sha256": digest(Path(__file__).read_bytes()), "official_control_sha256": control_hashes, "schema_version": 1, "kind": "source-only-sdk", "state": "immutable-inputs-staged", "link_ready": False,
             "generated_sdk_outputs": {},
             "remaining": "actual bounded header/pkg-config generation and full configure/link witness",
             "qualification": "none; imported or declared dependencies do not qualify a runtime",
@@ -305,27 +468,345 @@ def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, ou
             "imported_official": {"package_sha256": OFFICIAL_SHA, "members": imports,
                  "unresolved_source_refs": {"i965": "upstream recipe clones default branch; no corresponding build commit claimed",
                       "mesa": "upstream recipe uses26.0-backport branch; no corresponding build commit claimed"}},
+            "distribution_inputs": distribution,
             "consumed_sources": sources,
             "consumed_source_lock_sha256": lock_sha}
         facts["source_offer_digest"] = digest(json.dumps({"sources": sources, "copyright": imports,
-            "recipes": recipe_hashes}, sort_keys=True, separators=(",", ":")).encode())
+            "recipes": recipe_hashes, "distribution": distribution}, sort_keys=True, separators=(",", ":")).encode())
         facts["sdk_digest"] = digest(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode())
         (provenance / "sdk-manifest.json").write_text(json.dumps(facts, indent=2) + "\n")
         stage.rename(output)
     return facts
 
 
+def validate_generator(generator):
+    if not isinstance(generator, dict) or not isinstance(generator.get("outputs"), dict) or not generator["outputs"]:
+        raise ValueError("every consumed role needs explicit authentic header/pkg-config outputs")
+    if generator["source_root"] != ".":
+        member_path(generator["source_root"])
+    if not isinstance(generator.get("commands"), list) or len(generator["commands"]) > 16:
+        raise ValueError("bounded project generator commands required")
+    for command in generator["commands"]:
+        if command.get("cwd") not in ["source", "build"] or not isinstance(command.get("argv"), list) or not command["argv"]:
+            raise ValueError("invalid generator command")
+        for token in command["argv"]:
+            if not isinstance(token, str) or not token or "\x00" in token or "\n" in token:
+                raise ValueError("generator argv must be literal tokens")
+            if token in ["install", "--install", "test", "check"]:
+                raise ValueError("header generation must not install or replace official runtime libraries")
+            if token.startswith(("--prefix=", "-DCMAKE_INSTALL_PREFIX=", "PREFIX=")) and token.split("=", 1)[1] != "{sdk}":
+                raise ValueError("project configuration prefix must be the private SDK")
+        executable = command["argv"][0]
+        if executable not in ["cmake", "meson", "ninja", "make", "autoreconf", "python3"] and not executable.startswith("./"):
+            raise ValueError("generator must invoke the actual project tool without a shell wrapper")
+        if executable.startswith("./"):
+            member_path(executable[2:])
+    for destination, row in generator["outputs"].items():
+        if not member_path(destination).startswith(("include/", "lib/pkgconfig/", "share/vulkan/registry/")):
+            raise ValueError("generated SDK output outside consumed header/pkg-config/registry roles")
+        if row.get("root") not in ["source", "build"]:
+            raise ValueError("output must come from actual project source or generator build")
+        member_path(row["path"])
+        if destination.endswith(".pc") and row["path"].endswith((".in", ".cmake", ".meson")):
+            raise ValueError("pkg-config templates are not generated outputs")
+
+
+def extract_role(data, destination):
+    regular, links = tar_members(data)  # Validate the complete archive before writing.
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+        modes = {member_path(m.name): m.mode & 0o755 for m in archive if m.isfile()}
+    for name, contents in regular.items():
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+        target.chmod(modes[name])
+    for name in links:
+        contents, _ = resolved(name, regular, links)
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)  # No uncontrolled symlink survives extraction.
+        target.chmod(0o644)
+
+
+def bounded_generator(argv, cwd, environment, log, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ValueError("SDK generation deadline exceeded")
+    child = subprocess.Popen(argv, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    overflow = threading.Event()
+    count = 0
+    def drain():
+        nonlocal count
+        with log.open("wb") as output:
+            while True:
+                block = child.stdout.read(65536)
+                if not block:
+                    return
+                count += len(block)
+                if count > 8 * 1024 * 1024:
+                    overflow.set()
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    return
+                output.write(block)
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    try:
+        try:
+            status = child.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=10)
+            raise ValueError("SDK generator exceeded finite deadline")
+    finally:
+        reader.join(timeout=3)
+        child.stdout.close()
+    if reader.is_alive() or overflow.is_set() or status != 0:
+        raise ValueError("project generator failed or exceeded bounded log capture")
+    return {"argv": argv, "status": status, "log_sha256": digest(log.read_bytes())}
+
+
+def verified_staging(root):
+    root = root.resolve(strict=True)
+    if not root.is_absolute() or any(root.is_relative_to(Path(p)) for p in ["/Applications", "/Library", "/System", "/usr", "/opt"]):
+        raise ValueError("SDK generation must remain in a private prepared directory")
+    manifest = root / "provenance/sdk-manifest.json"
+    facts = json.loads(checked_bytes(manifest, digest(manifest.read_bytes())))
+    supplied_digest = facts.pop("sdk_digest")
+    if digest(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()) != supplied_digest:
+        raise ValueError("staged SDK manifest digest mismatch")
+    facts["sdk_digest"] = supplied_digest
+    checked_bytes(root / "provenance/executed-sdk-helper.py", facts["helper_sha256"])
+    if digest(Path(__file__).read_bytes()) != facts["helper_sha256"]:
+        raise ValueError("generation must use the exact helper which staged these inputs")
+    checked_bytes(root / "provenance/original-ffmpeg-source.tar.gz", SOURCE_SHA)
+    for name, sha in facts["source"]["recipe_sha256"].items():
+        checked_bytes(root / "provenance/upstream-recipes" / name, sha)
+    for name, sha in facts["source"]["upstream_quilt"].items():
+        checked_bytes(root / "provenance/upstream-quilt" / name, sha)
+    for name, sha in facts["official_control_sha256"].items():
+        checked_bytes(root / "provenance/official-control" / name, sha)
+    lock_data = checked_bytes(root / "provenance/consumed-source-lock.json", facts["consumed_source_lock_sha256"])
+    lock = json.loads(lock_data)
+    if set(lock["sources"]) != set(facts["consumed_sources"]):
+        raise ValueError("consumed role inventory changed after staging")
+    distribution = facts.get("distribution_inputs", {})
+    for role, row in distribution.get("roles", {}).items():
+        base = root / "provenance/distribution-sources" / role
+        checked_bytes(base / "original-package.deb", row["archive_sha256"])
+        checked_bytes(base / "control", row["control_sha256"])
+        for name, sha in row["source_offer_sha256"].items():
+            checked_bytes(base / name, sha)
+    for name, row in distribution.get("sysroot_members", {}).items():
+        checked_bytes(root / "sdk/sysroot" / name, row["sha256"])
+    for role, row in facts["consumed_sources"].items():
+        checked_bytes(root / "provenance/consumed-sources" / role / "original-source.tar", row["archive_sha256"])
+        if lock["sources"][role].get("generator") != row.get("generator"):
+            raise ValueError("generator differs from immutable consumed-source lock")
+        validate_generator(row["generator"])
+        for index, patch in enumerate(row.get("patches", [])):
+            checked_bytes(root / "provenance/consumed-sources" / role / ("patch-" + str(index) + ".patch"), patch["sha256"])
+        for name, sha in row["licenses"].items():
+            checked_bytes(root / "provenance/consumed-sources" / role / "licenses" / name, sha)
+    for name, row in facts["imported_official"]["members"].items():
+        path = root / "sdk" / name if name.startswith("lib/") else root / "provenance/official-distribution" / name
+        checked_bytes(path, row["sha256"])
+    expected_sdk = {name for name in facts["imported_official"]["members"] if name.startswith("lib/")}
+    expected_sdk.update("sysroot/" + name for name in distribution.get("sysroot_members", {}))
+    actual_sdk = {str(path.relative_to(root / "sdk")) for path in (root / "sdk").rglob("*") if path.is_file()}
+    if actual_sdk != expected_sdk or any(path.is_symlink() for path in (root / "sdk").rglob("*")):
+        raise ValueError("unlisted or linked SDK content cannot enter generator configuration")
+    return facts
+
+
+def publish_generated_output(sdk, name, base, selected, addition=None):
+    name = member_path(name)
+    origin = (base / member_path(selected["path"])).resolve(strict=True)
+    if not origin.is_relative_to(base) or not origin.is_file() or origin.stat().st_size > MAX_MEMBER:
+        raise ValueError("generated output must be a bounded contained project file")
+    contents = origin.read_bytes()
+    if name.endswith(".pc") and re.search(rb"@[A-Za-z_][A-Za-z0-9_]*@", contents):
+        raise ValueError("unconfigured pkg-config template cannot enter the SDK")
+    transform = None
+    if addition:
+        # This is an exact operation from the immutable upstream recipe, after
+        # the project has generated its real .pc file; it is not a substitute.
+        if not name.endswith(".pc") or addition["text"] != "Libs.private: -lstdc++\n":
+            raise ValueError("unsupported upstream generated-output transformation")
+        before = digest(contents)
+        contents += addition["text"].encode()
+        transform = {"before_sha256": before, "after_sha256": digest(contents), "recipe_line": addition["recipe_line"]}
+    target = sdk / name
+    if target.exists() or target.is_symlink():
+        raise ValueError("generator must not replace an imported or prior SDK file")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(contents)
+    target.chmod(0o444)
+    return {"sha256": digest(contents), "bytes": len(contents), "root": selected["root"], "path": selected["path"], "upstream_transform": transform}
+
+
+def generate(root, jobs, seconds):
+    # This phase is intentionally explicit: source staging never runs it, and
+    # a host/CPU lease is an operator responsibility rather than an automatic job.
+    if platform.system() != "Linux" or platform.machine() not in ["x86_64", "amd64"]:
+        raise ValueError("official Bookworm amd64 SDK generation requires the matching Linux host")
+    release = Path("/etc/os-release").read_text()
+    if 'ID=debian' not in release or 'VERSION_ID="12"' not in release:
+        raise ValueError("generated ABI must use the official Debian12 build environment")
+    if not 1 <= jobs <= 2 or not 1 <= seconds <= 600:
+        raise ValueError("SDK generation requires a finite <=600s deadline and <=2 jobs")
+    root = root.resolve(strict=True)
+    facts = verified_staging(root)
+    if facts["state"] != "immutable-inputs-staged":
+        raise ValueError("generation must consume a fresh staged SDK; previous execution is retained")
+    execution = root / "provenance/generation"
+    execution.mkdir()  # Existing/failed attempts are never silently overwritten.
+    deadline = time.monotonic() + seconds
+    environment = {"PATH": "/usr/bin:/bin", "HOME": str(execution), "TMPDIR": str(execution),
+                   "LC_ALL": "C", "PKG_CONFIG_LIBDIR": os.pathsep.join(str(root / p) for p in ["sdk/lib/pkgconfig", "sdk/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig", "sdk/sysroot/usr/lib/pkgconfig", "sdk/sysroot/usr/share/pkgconfig"]),
+                   "PKG_CONFIG": "/usr/bin/pkg-config --define-prefix",
+                   "CFLAGS": " ".join("-I" + str(root / p) for p in ["sdk/include", "sdk/sysroot/usr/include", "sdk/sysroot/usr/include/x86_64-linux-gnu"]),
+                   "LDFLAGS": " ".join("-L" + str(root / p) for p in ["sdk/lib", "sdk/sysroot/usr/lib/x86_64-linux-gnu"]), "CC": "/usr/bin/gcc", "CXX": "/usr/bin/g++"}
+    outputs, completed, records = {}, set(), {}
+    tool_versions = {}
+    try:
+        for tool in ["gcc", "g++", "cmake", "meson", "ninja", "make", "pkg-config"]:
+            located = shutil.which(tool, path=environment["PATH"])
+            if not located:
+                raise ValueError("required Bookworm project generator tool is unavailable: " + tool)
+            executable = Path(located).resolve(strict=True)
+            tool_versions[tool] = bounded_generator([str(executable), "--version"], execution, environment, execution / (tool + "-version.log"), deadline)
+            tool_versions[tool]["sha256"] = digest(executable.read_bytes())
+        gcc_version = (execution / "gcc-version.log").read_text()
+        if not re.search(r"\b12\.[0-9]+", gcc_version):
+            raise ValueError("official Bookworm compiler ABI requires GCC12")
+        pending = dict(facts["consumed_sources"])
+        while pending:
+            available = [role for role, row in pending.items() if set(row["generator"].get("depends_on", [])) <= completed]
+            if not available:
+                raise ValueError("cyclic or missing generated SDK dependency")
+            for role in sorted(available):
+                row = pending.pop(role)
+                work = execution / role
+                unpacked, build = work / "archive", work / "build"
+                unpacked.mkdir(parents=True)
+                build.mkdir()
+                extract_role(checked_bytes(root / "provenance/consumed-sources" / role / "original-source.tar", row["archive_sha256"]), unpacked)
+                source = (unpacked / row["generator"]["source_root"]).resolve(strict=True)
+                if not source.is_relative_to(unpacked):
+                    raise ValueError("generator source root escapes its authentic archive")
+                substitutions = {"source": str(source), "build": str(build), "sdk": str(root / "sdk"), "jobs": str(jobs)}
+                commands = []
+                for index, patch in enumerate(row.get("patches", [])):
+                    path = root / "provenance/consumed-sources" / role / ("patch-" + str(index) + ".patch")
+                    result = bounded_generator(["/usr/bin/patch", "--batch", "-p1", "-i", str(path)], source, environment, work / ("patch-" + str(index) + ".log"), deadline)
+                    result["patch_sha256"] = patch["sha256"]
+                    commands.append(result)
+                transformations = []
+                for addition in row.get("source_append", []):
+                    member = PurePosixPath(addition["member"])
+                    project_path = member if row["generator"]["source_root"] == "." else member.relative_to(row["generator"]["source_root"])
+                    target = (source / str(project_path)).resolve(strict=True)
+                    if not target.is_relative_to(source):
+                        raise ValueError("source-template transformation escaped its authentic project")
+                    original = checked_bytes(target, addition["before_sha256"])
+                    result = original + addition["text"].encode()
+                    if digest(result) != addition["after_sha256"]:
+                        raise ValueError("source-template transformation changed from the pinned recipe")
+                    target.write_bytes(result)
+                    transformations.append({"member": addition["member"], "before_sha256": digest(original), "after_sha256": digest(result), "recipe_lines": addition["recipe_lines"]})
+                for replacement in row.get("source_replace", []):
+                    member = PurePosixPath(replacement["member"])
+                    project_path = member if row["generator"]["source_root"] == "." else member.relative_to(row["generator"]["source_root"])
+                    target = (source / str(project_path)).resolve(strict=True)
+                    if not target.is_relative_to(source):
+                        raise ValueError("source replacement escaped its authentic project")
+                    original = checked_bytes(target, replacement["before_sha256"])
+                    result = original.replace(replacement["old"].encode(), replacement["new"].encode())
+                    if digest(result) != replacement["after_sha256"]:
+                        raise ValueError("source replacement differs from the pinned recipe")
+                    target.write_bytes(result)
+                    transformations.append({"member": replacement["member"], "before_sha256": digest(original), "after_sha256": digest(result), "recipe_line": replacement["recipe_line"]})
+                for index, command in enumerate(row["generator"]["commands"]):
+                    argv = [token.format_map(substitutions) for token in command["argv"]]
+                    cwd = source if command["cwd"] == "source" else build
+                    program = (cwd / argv[0]).resolve(strict=True) if argv[0].startswith("./") else Path(shutil.which(argv[0], path=environment["PATH"]) or "")
+                    if not program.is_file():
+                        raise ValueError("required authentic generator tool is unavailable")
+                    program = program.resolve(strict=True)
+                    argv[0] = str(program)
+                    tool_hash = digest(program.read_bytes())
+                    result = bounded_generator(argv, cwd, environment, work / (str(index) + ".log"), deadline)
+                    if digest(program.read_bytes()) != tool_hash:
+                        raise ValueError("generator tool changed during execution")
+                    result["tool_sha256"] = tool_hash
+                    commands.append(result)
+                role_outputs = {}
+                for name, selected in row["generator"]["outputs"].items():
+                    base = source if selected["root"] == "source" else build
+                    role_outputs[name] = publish_generated_output(root / "sdk", name, base, selected, row.get("output_append", {}).get(name))
+                    outputs[name] = {"role": role, **role_outputs[name]}
+                records[role] = {"commands": commands, "outputs": role_outputs, "archive_sha256": row["archive_sha256"], "recipe_fragment_sha256": row["recipe_binding"]["sha256"], "source_transformations": transformations}
+                completed.add(role)
+                # Rebuilding an external library/driver instead of using the
+                # official bytes is forbidden, even if a project install wrote it.
+                for name, imported in facts["imported_official"]["members"].items():
+                    if name.startswith("lib/"):
+                        checked_bytes(root / "sdk" / name, imported["sha256"])
+        for name, generated in outputs.items():
+            checked_bytes(root / "sdk" / name, generated["sha256"])
+        expected_sdk = {name for name in facts["imported_official"]["members"] if name.startswith("lib/")}
+        expected_sdk.update("sysroot/" + name for name in facts.get("distribution_inputs", {}).get("sysroot_members", {}))
+        expected_sdk.update(outputs)
+        actual_sdk = {str(path.relative_to(root / "sdk")) for path in (root / "sdk").rglob("*") if path.is_file()}
+        if actual_sdk != expected_sdk or any(path.is_symlink() for path in (root / "sdk").rglob("*")):
+            raise ValueError("generator produced unlisted SDK files or filesystem links")
+        facts["state"] = "project-generators-executed"
+        facts["generated_sdk_outputs"] = outputs
+        facts["generation_execution"] = records
+        facts["generator_tool_versions"] = tool_versions
+        facts["generator_environment"] = environment
+        facts["staged_source_offer_digest"] = facts["source_offer_digest"]
+        facts["source_offer_digest"] = digest(json.dumps({"staged_sources": facts["staged_source_offer_digest"], "helper_sha256": facts["helper_sha256"], "executed_generators": records}, sort_keys=True, separators=(",", ":")).encode())
+        facts["remaining"] = "full unchanged FFmpeg configure/compiler/link/ELF closure witness"
+        # Actual generated headers are necessary but not sufficient. The final
+        # FFmpeg build owner supplies the independent configure/link witness.
+        facts["link_ready"] = False
+    except Exception as error:
+        (execution / "failure.json").write_text(json.dumps({"error": str(error), "completed_roles": sorted(completed), "records": records, "runtime_qualification": False}, indent=2) + "\n")
+        raise
+    facts.pop("sdk_digest")
+    facts["sdk_digest"] = digest(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode())
+    (root / "provenance/sdk-manifest.json").write_text(json.dumps(facts, indent=2) + "\n")
+    return facts
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-archive", type=Path, required=True)
-    parser.add_argument("--official-package", type=Path, required=True)
-    parser.add_argument("--official-buildconf", type=Path, required=True)
-    parser.add_argument("--source-lock", type=Path, required=True)
-    parser.add_argument("--source-lock-sha256", required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--generate", type=Path, help="run the staged immutable role generators (Linux amd64 only)")
+    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--deadline-seconds", type=int, default=600)
+    parser.add_argument("--source-archive", type=Path)
+    parser.add_argument("--official-package", type=Path)
+    parser.add_argument("--official-buildconf", type=Path)
+    parser.add_argument("--source-lock", type=Path)
+    parser.add_argument("--archive-directory", type=Path, help="directory containing immutable source-lock archive filenames")
+    parser.add_argument("--source-lock-sha256")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.generate:
+        if any([args.source_archive, args.official_package, args.official_buildconf, args.source_lock, args.output]):
+            parser.error("generation consumes only the previously staged, verified inputs")
+        facts = generate(args.generate, args.jobs, args.deadline_seconds)
+        print(json.dumps({"state": facts["state"], "sdk_digest": facts["sdk_digest"], "link_ready": facts["link_ready"]}))
+        return
+    if not all([args.source_archive, args.official_package, args.official_buildconf, args.source_lock, args.source_lock_sha256, args.output]):
+        parser.error("staging requires all archive, lock and output arguments")
     facts = prepare(args.source_archive, args.official_package, args.official_buildconf,
-                    args.source_lock, args.source_lock_sha256, args.output)
+                    args.source_lock, args.source_lock_sha256, args.output, args.archive_directory)
     print(json.dumps({"sdk_digest": facts["sdk_digest"], "source_offer_digest": facts["source_offer_digest"],
                       "qualification": facts["qualification"]}))
 

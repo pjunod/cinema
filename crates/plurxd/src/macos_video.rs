@@ -266,6 +266,15 @@ impl MacosVideoProbe {
     /// manager remains the sole owner of the saved processing preference.
     #[cfg(test)]
     pub(crate) fn publish_context_for_test(&self, context: &MacosProcessingContext) {
+        self.publish_context_with_fonts_for_test(context, None);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_context_with_fonts_for_test(
+        &self,
+        context: &MacosProcessingContext,
+        font_digest: Option<String>,
+    ) {
         fn observation(availability: MacosProcessingAvailability) -> GraphObservation {
             match availability {
                 MacosProcessingAvailability::Available => GraphObservation::from_result(Ok(())),
@@ -278,7 +287,7 @@ impl MacosVideoProbe {
         self.publish(MacosVideoReport {
             generation: self.snapshot().generation.saturating_add(1),
             identity: Some(context.identity().clone()),
-            text_font_digest: None,
+            text_font_digest: font_digest,
             sdr_scale: observation(context.sdr_scale()),
             hdr10_metal: observation(context.hdr10_metal()),
             graphs: context

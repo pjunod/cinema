@@ -21,14 +21,15 @@ combined source `b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`.
 
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
-| F1 GPU subtitle compositing | Native builder | Compositor, text identity and packaged font tools integrated; animated ASS and bitmap edge controls pass pixel-exactly | Prefix-hidden normal API source-time/lifecycle proof and complete-graph comparison |
+| F1 GPU subtitle compositing | Native builder | Compositor and packaged fonts committed; local text capture-order repair staged in the manager merge; bitmap GPU API and nonzero-entry controls pass | Updated text release API proof and complete-graph comparison |
 | F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls and portable daemon compilation pass | Exact Linux compilation, full shipping package, runtime driver/graph observation and real encoder/size/rate envelope |
-| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser and clock repairs integrated; three normal API delivery cases pass, with the MPEG-2 initial-padding oracle corrected on retained bytes | Release-profile parser initialization and clean shutdown; client caption presentation remains unqualified |
+| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser and clock repairs integrated; three normal API delivery cases pass, with the MPEG-2 initial-padding oracle corrected on retained bytes; separate release API run initializes the parser and shuts down cleanly | Final combined-source validation; physical client caption presentation remains unqualified |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
 integration and shared package helpers; Dolby owns `0003`, caption delivery
 and the shared finite-VOD source-clock repair;
-Routes owns Linux package/strict context and shared pipeline integration.
+Routes owns Linux runtime/strict context and shared pipeline integration.
+Dolby also owns the Linux SDK, shipping assembly and sealed-parser packaging.
 The manager owns this ledger and serializes shared file/compiler ownership.
 Accepted earlier packages and evidence remain read-only. The pinned Rust
 1.97.1 compiler lane permits two jobs with one explicit owner at a time.
@@ -92,22 +93,22 @@ MPEG-2/A53 inputs. Default H.264 VideoToolbox encoding preserves 48 caption
 records and their normalized presentation timestamps; caption-off and
 caption-free controls contain none; copy/remux retains all 48. Decoded image
 planes are byte-identical with forwarding on/off. HEVC encoding still yields
-zero A53 records, a separately recorded pre-existing limitation. The first normal API run on the coherent new package delivers 120 video/audio
-frames and 120 caption-bearing frames, but fails the stricter source-payload
-comparison. Almost all records contain padding; only two 608 tuples and three
-valid 708 tuples remain. The shared finite-VOD clock defect is now confirmed:
-the captured producer command feeds source PTS near 66,272 seconds into
+zero A53 records, a separately recorded pre-existing limitation. The first normal API run on the coherent new package delivered 120 video/audio
+frames and 120 caption-bearing frames, but failed the stricter source-payload
+comparison. Almost all records contained padding; only two 608 tuples and three
+valid 708 tuples remained. That exposed the shared finite-VOD clock defect:
+the captured producer command fed source PTS near 66,272 seconds into
 `fps` starting at zero. A bounded reproduction consumes two source frames
 while producing 17 scheduled observations with the same picture checksum.
 The integrated repair normalizes the held source clock while preserving A/V
 offsets and already-normalized subtitle sidecars. Direct controls match an
 independently normalized reference in all 17 video observations and 144 audio
 frames, including a seek and a 175 ms operator audio adjustment. Corrected
-normal-API proof is pending.
+normal-API delivery now passes the three cases detailed below.
 The initial command observer missed descriptor-based input; its corrected
 capture supplied the decisive graph evidence. Bounded shutdown required forced termination; no owned child
-remains, and that failure stays recorded. Normal API VOD acceptance remains
-open. The
+remains, and that debug failure stays recorded separately from the release
+lifecycle result below. The
 [caption record](VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md) explains the root cause.
 
 **Intel hardware P5:** deployed Jellyfin lacks the strict options, so private
@@ -175,7 +176,7 @@ checks. They are not yet a clean-install-qualified release.
 Clean-install inspection found two actual font dependencies that the current
 host could conceal: `fc-list`/`fc-conflist` are found through host `PATH`, and
 the static Fontconfig default configuration points into the build prefix.
-Native owns packaging the pinned tools and relocatable configuration through
+Native packaged the pinned tools and relocatable configuration through
 the existing tool resolver and font authority. Explicit configuration overrides
 and non-Mac behavior stay supported. No global install, Homebrew dependency
 or retained temporary prefix may substitute for the repair. Qualification must
@@ -187,7 +188,7 @@ can query fonts and render. It binds font identity only to text plans and uses
 the existing held Source environment. The source-clock and shared package-helper union `874a5efd4` is integrated
 with reporter/origin identity, per-input normalization and existing engine
 publication fences. All-target compilation and normal hooks pass; corrected
-normal-API qualification remains next. The mechanism evidence is retained in
+caption API qualification passes as recorded below. The mechanism evidence is retained in
 [evidence §29](MACOS-VIDEO-PROCESSING-EVIDENCE.md#29-required-follow-up-mechanisms--2026-10-08).
 
 The combined source `1f1545456` passes the normal pinned-toolchain hook and
@@ -195,8 +196,9 @@ produces the private qualification daemon. The assembled native package now
 contains the exact font tools, 23 relocatable configuration rules and nine
 font provenance files; its manifest is
 `74e300dd743ff74d92c29908cce567859fc5f009785a3b9f4af83efc356446d7`.
-Assembly validation is not normal-API acceptance. The daemon is a debug
-qualification build; release symbol qualification is a separate claim.
+Assembly validation is not normal-API acceptance. This first daemon was a debug
+qualification build; the later release daemon and matching symbols are recorded
+below with their separate lifecycle evidence.
 
 Linux runtime preparation now includes an original 3840×2160, 24 fps,
 24-frame P5 fixture and its missing-metadata negative. Generation and bounded
@@ -204,13 +206,52 @@ source validation pass. Neither this corpus nor the earlier small Intel
 diagnostic grants a production graph or size/rate envelope; exact shipping
 package and device-bound observations remain required.
 
+The Linux runtime source draft now connects two-phase library/device discovery,
+a retained execution binding, subsequent complete-graph qualification, bounded
+size/rate observations, and the existing resolver/startup/admin owner. Active
+plans retain their qualified context through a temporarily pending reprobe;
+positive identity changes and live object changes still refuse execution.
+Loader policy files and source-bound runtime objects are included in the
+binding. Thirteen regression references resolve statically. This draft has
+not passed Linux type checking or hardware execution and advertises no new
+available route on that basis.
+
 The SDK staging helper `5a056cd81` retains immutable source, recipe, configure,
 license and official-package member identities. It explicitly reports that
 generated headers/package metadata and link readiness are still absent.
 Dolby now owns completing that SDK preparation while Native concentrates on
-Mac delivery; Routes retains the Linux runtime, Docker and sealed-parser
-integration. Actual upstream generation and the unchanged full FFmpeg
+Mac delivery; Routes retains the Linux runtime. Docker FFmpeg and
+sealed-parser packaging now share Dolby’s shipping ownership. Actual upstream generation and the unchanged full FFmpeg
 configure/link closure are required before a shipping SDK claim.
+
+The completed static preparation now verifies 57 source roles (25 private
+dependency sources and 32 distributed Bookworm roles), 194 actual sysroot
+members and 100 unchanged official ELF imports. All 57 official configure
+tokens remain intact. The helper retains 511 expected project-generated
+output selectors, but has not generated them or claimed link readiness.
+Actual Bookworm generation and full linking await their resource window.
+
+A subsequent transitive `pkg-config` audit finds additional development
+metadata behind GnuTLS, OpenMPT and Blu-ray dependencies. The matching public
+Bookworm packages and source offers are being added. The earlier 57-role
+result establishes direct configured-role coverage and retained input
+integrity, not a completed transitive build closure. The old generation
+admission is therefore historical; execution requires freshly staged inputs
+bound to the completed helper and an updated resource grant.
+
+Fresh static preparation now covers 72 roles, 330 sysroot members and 51
+authenticated package-namespace aliases. The declared transitive `Requires`
+coverage has no missing roles; actual generated metadata and link closure
+remain unproven. Preflight also identifies a real tool-version mismatch:
+pinned Fontconfig requires Meson at least 1.6.1, while the retained Bookworm
+bootstrap has 1.0.1. A private pinned Meson 1.12.1 provider is now prepared
+without global installation; its isolated launcher and retained source tree
+have static identity evidence, but Meson has not run. Further concrete
+prerequisites bring the source lock to 75 roles; the latest executed static
+staging covered 73. The frozen shipping draft still requires a fresh stage,
+actual Bookworm generators, unchanged full producer configure/link closure,
+sealed-parser build and Docker installation qualification. No shipping-ready
+claim follows from these source preparations.
 
 Corrected normal API caption delivery now passes on the signed debug package:
 public HEVC retains 120 due 608 and 66 valid 708 records across 120 frames;
@@ -220,10 +261,90 @@ startup assignment remain recorded in [evidence §30](MACOS-VIDEO-PROCESSING-EVI
 All three debug shutdowns still exceed the settlement bound. Owned stack
 samples identify unfinished startup WebAssembly compilation, not a stuck
 VideoToolbox producer. The first release-build window expired at 600 seconds
-while optimizing `plurx-core`, without a source error. Its partial cache and
-failure receipt are retained. One 1,800-second exact-source retry is underway
-under a separate resource lease to qualify parser-dependent delivery and
-shutdown under the product profile.
+during optimization, without a source error; its exact unfinished crate was
+not recorded. Its partial cache and failure receipt are retained. The
+separately leased 1,800-second exact-source retry passed in 792.69 seconds,
+using pinned Rust 1.97.1 and two jobs. The release daemon and matching symbols
+are retained, and the compiler lease is released.
+
+The signed release bundle uses the same FFmpeg, FFprobe and sealed-parser
+bytes as the caption delivery matrix. Its first prefix-hidden CPU subtitle
+API run passes the independent source-cue oracle across 49 frames, has no
+startup parser identity warning and shuts down with exit zero. The overall
+case remains failed because its resume request used `play`, whereas protocol
+v1 requires `active`. The first hold request had already passed. The driver
+is corrected against the current protocol without changing application
+behavior; GPU text and bitmap delivery and complete control checks remain.
+This release lifecycle result is separate from the three caption payload
+matrices and does not replace their retained debug shutdown failures.
+
+The next normal local API text case exposed a production ordering error:
+the runtime report has matching available text/bitmap observations, but
+selection receives a font digest only from shared-source evidence. Local
+playback captures the same encoded engine later, after resolution, so its
+GPU text path cannot qualify. The repair moves that existing capture before
+resolution and keeps the same engine through publication. It adds no font
+authority, diagnostic override or probe. The failed selection receipt is
+retained; bitmap qualification can proceed on the unchanged release while
+the text repair is implemented and compiled.
+
+The narrow repair `b7d21934b` is committed by its builder and staged in
+the manager’s pending integration merge: the same captured engine
+supplies font identity to both fresh-fact and held-fact resolution, then
+remains retained for encoding. Its focused regression source covers matching,
+absent and mismatched font identities. Pinned all-target compilation and the
+normal hook pass; no unit tests ran. Updated release API acceptance is next.
+
+The bitmap API case selects the actual GPU graph and a nonzero producer
+trim of two seconds. Its source-time oracle fails on the last cue frame:
+the cue is visible at 3.333–3.666 seconds but absent at 3.750, while the
+source clear packet is at 3.771. Parser initialization and shutdown pass.
+The builder is tracing the normalized sidecar, decoded display/clear events
+and frame scheduling against the incumbent CPU graph before deciding whether
+the defect is in scheduling or in the oracle. The failed receipt remains
+unchanged; a graph selection alone is not subtitle acceptance.
+
+The incumbent CPU bitmap graph has the same last-frame result. Exact source
+and normalized sidecar timestamps retain the 21 ms video offset. Tracing the
+pinned frame scheduler shows its secondary clear event rescaled to the main
+1/12 time base with nearest rounding. A separate oracle reassessment must
+derive both onset and clear-event ordering; CPU/GPU equality alone cannot
+justify changing the independent timing expectation.
+
+That trace now establishes both boundaries: the blank heartbeat immediately
+before the active subtitle and the active event quantize to the same tick,
+and the scheduler emits the main frame on the first tie. The separate
+deterministic reassessment passes all 25 retained CPU and GPU frames; the
+original failures remain. A corrected-driver GPU bitmap run then passes
+all 25 frames, hold/resume/seek-back request acceptance, DELETE 204, parser
+initialization and shutdown zero. This does not claim rendered seek-back or
+client presentation. [Evidence §32](MACOS-VIDEO-PROCESSING-EVIDENCE.md#32-gpu-bitmap-api-delivery-and-local-text-authority--2026-10-08)
+records the exact scheduling model, artifacts and limits.
+
+The merge coordinator has frozen its current batch. This effort's new
+features will be handed off for the next batch after implementation and the
+single final adversarial review; the coordinator retains final test and
+landing ownership.
+
+The coordinator currently holds remote build windows and local compiler/hooks
+for its blocking batch repairs. Both builders' completed hooks are released;
+the manager's combined merge is prepared but its hook has not started. Source
+work continues, and no compiler, generator or performance run will start
+until the corresponding resource window is released.
+
+The coordinator has returned a separate earlier-batch HEVC publication
+failure for priority repair. Its hvcC parser discards `array_completeness`
+and accepts presence-only VPS/SPS/PPS arrays where `hvc1` requires complete
+ones. The narrow repair preserves the distinct `hev1`/`dvhe` contract and
+is published as [PR #938](http://192.168.4.7:3000/noirr/plurx/pulls/938),
+head `21af407bdacdbde1a39682d9d11bff1a75045182`. Its one adversarial review
+found no actionable issues. Pinned all-target compilation and the normal
+commit hook passed on the preceding base; the reviewed patch and both full
+modified files remain byte-identical after the requested base port. The
+coordinator has the exact committed source archive and six focused regression
+IDs for Linux qualification. No units ran in the builder, and the native
+compiler target is released. This earlier-batch repair is separate from
+the follow-up candidate and does not count as its final review.
 
 The temporary Metal compiler component is tracked for exact
 removal during final cleanup. Direct experimental binaries are immutable

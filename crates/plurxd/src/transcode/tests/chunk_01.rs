@@ -4322,3 +4322,49 @@ async fn macos_launch_binds_frozen_plan_to_canonical_encoder_across_alias_retarg
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn local_vod_text_plan_uses_retained_engine_font_authority() {
+    use plurx_core::transcode::{MacosProcessingAvailability as Availability,
+        MacosProcessingContext, MacosProcessingGraph, MacosProcessingIdentity, SubtitleBurn};
+    let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(store, dir.path().to_owned(), EncoderCaps {
+        videotoolbox: true, ..EncoderCaps::default()
+    }, Pipeline::Cpu).with_decoders(vec!["hevc".to_owned()]);
+    let mut file = profile5_file();
+    file.hdr = None;
+    file.hdr_format = None;
+    file.video_profile = Some("Main".into());
+    file.bit_depth = Some(8);
+    let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+        "codec_name":"hevc","profile":"Main","width":3840,"height":2160,
+        "pix_fmt":"yuv420p","color_transfer":"bt709","color_primaries":"bt709",
+        "color_space":"bt709","color_range":"tv","field_order":"progressive",
+        "sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1",
+        "disposition":{"attached_pic":0}}]});
+    let facts = DecodeFacts::from_ffprobe_json(&probe,
+        TranscodeManager::plan_source_identity(&file).expect("source")).expect("facts");
+    let identity = MacosProcessingIdentity::new("1".repeat(64),"2".repeat(64),"3".repeat(64),
+        "4".repeat(64),"test-os".into(),"arm64".into(),"Apple test SoC".into()).expect("identity");
+    let digest = "a".repeat(64);
+    let context = MacosProcessingContext::new(false, identity.clone(), Availability::Available,
+        Availability::Available).with_graph(MacosProcessingGraph::SdrTextBurn, Availability::Available);
+    manager.macos_video_probe.publish_context_with_fonts_for_test(&context, Some(digest.clone()));
+    manager.apply_macos_video_processing_setting(true).await.expect("saved preference");
+    let options = TranscodeOptions { target_height:1080, pipeline:Pipeline::Cpu,
+        subtitle_burn: Some(SubtitleBurn { subtitle_index:0, bitmap:false }),
+        subtitle_file:Some("/dev/fd/5".into()), ..Default::default() };
+    let selected = manager.resolve_held_movie_plan_facts_with_fonts(&file, &options,
+        Encoder::VideoToolbox, Ok(facts.clone()), Some(&digest)).await.expect("held font plan");
+    assert_eq!(selected.options().pipeline, Pipeline::VtScaleSdr);
+    assert_eq!(selected.macos_processing_identity(), Some(&identity.with_text_fonts(digest.clone())));
+    let frozen = selected.plan_digest();
+    for authority in [None, Some("b".repeat(64))] {
+        let refused = manager.resolve_held_movie_plan_facts_with_fonts(&file, &options,
+            Encoder::VideoToolbox, Ok(facts.clone()), authority.as_deref()).await.expect("CPU plan");
+        assert_eq!(refused.options().pipeline, Pipeline::Cpu);
+        assert_ne!(refused.plan_digest(), frozen);
+    }
+    assert_eq!(selected.plan_digest(), frozen, "new font decisions cannot mutate the retained recipe");
+}

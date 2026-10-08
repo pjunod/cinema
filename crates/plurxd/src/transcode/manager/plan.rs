@@ -574,8 +574,20 @@ impl TranscodeManager {
         encoder: Encoder,
         held_plan_handle: Arc<std::fs::File>,
     ) -> Result<ResolvedTranscode, String> {
+        self.resolve_vod_movie_plan_with_fonts(file, options, encoder, held_plan_handle, None)
+            .await
+    }
+
+    pub(super) async fn resolve_vod_movie_plan_with_fonts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        held_plan_handle: Arc<std::fs::File>,
+        font_digest: Option<&str>,
+    ) -> Result<ResolvedTranscode, String> {
         BoundPlanCaller::Vod.finish(
-            self.resolve_held_movie_plan(
+            self.resolve_held_movie_plan_with_fonts(
                 file,
                 options,
                 encoder,
@@ -583,6 +595,7 @@ impl TranscodeManager {
                     .decode_fact_source(held_plan_handle, Arc::new(tokio::sync::Semaphore::new(1))),
                 Instant::now() + DECODE_PLAN_PROBE_BUDGET,
                 None,
+                font_digest,
             )
             .await,
         )
@@ -600,6 +613,29 @@ impl TranscodeManager {
         fact_source: crate::decode_facts::DecodeFactSource,
         deadline: Instant,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<ResolvedTranscode, String> {
+        self.resolve_held_movie_plan_with_fonts(
+            file,
+            options,
+            encoder,
+            fact_source,
+            deadline,
+            cancelled,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // Existing held-source inputs plus its captured font authority.
+    async fn resolve_held_movie_plan_with_fonts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        fact_source: crate::decode_facts::DecodeFactSource,
+        deadline: Instant,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+        font_digest: Option<&str>,
     ) -> Result<ResolvedTranscode, String> {
         let Some(probe) = self.decode_probe_identity.as_ref() else {
             if options.normalized_geometry {
@@ -623,7 +659,7 @@ impl TranscodeManager {
                 cancelled,
             )
             .await;
-        self.resolve_held_movie_plan_facts(file, options, encoder, facts)
+        self.resolve_held_movie_plan_facts_with_fonts(file, options, encoder, facts, font_digest)
             .await
     }
 
@@ -634,14 +670,35 @@ impl TranscodeManager {
         encoder: Encoder,
         facts: Result<plurx_core::transcode::DecodeFacts, crate::decode_facts::DecodeFactError>,
     ) -> Result<ResolvedTranscode, String> {
+        self.resolve_held_movie_plan_facts_with_fonts(file, options, encoder, facts, None)
+            .await
+    }
+
+    pub(super) async fn resolve_held_movie_plan_facts_with_fonts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: Result<plurx_core::transcode::DecodeFacts, crate::decode_facts::DecodeFactError>,
+        font_digest: Option<&str>,
+    ) -> Result<ResolvedTranscode, String> {
         match facts {
-            Ok(facts) => self.resolve_movie_plan_with_facts(
-                file,
-                options,
-                encoder,
-                &facts,
-                &AttemptRestrictions::none(),
-            ),
+            Ok(facts) => {
+                let context = self
+                    .macos_video_report()
+                    .context_for_fonts(self.macos_video_processing_enabled(), font_digest)
+                    .map(|context| {
+                        context.with_hevc_output_enabled(self.macos_hevc_output_enabled())
+                    });
+                self.resolve_movie_plan_with_processing_context(
+                    file,
+                    options,
+                    encoder,
+                    &facts,
+                    &AttemptRestrictions::none(),
+                    context.as_ref(),
+                )
+            }
             // A probe that could not finish inside its budget, or a node with
             // no probe artifact at all, must not make the title unproducible.
             // Fall back to the same stored-probe plan live and offline already

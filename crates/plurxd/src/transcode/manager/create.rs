@@ -1486,8 +1486,24 @@ impl TranscodeManager {
             )
         })?;
         let phase_started = std::time::Instant::now();
-        let held_font_digest = source_evidence
-            .and_then(|(evidence, _)| evidence.engine().font_digest().map(str::to_owned));
+        let engine = if let Some((evidence, _)) = source_evidence {
+            evidence.engine()
+        } else {
+            crate::ffmpeg::EncodedEngine::capture(
+                options
+                    .subtitle_burn
+                    .as_ref()
+                    .is_some_and(|burn| !burn.bitmap)
+                    .then_some(self.runtime_cache.as_path()),
+            )
+            .await
+            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?
+        };
+        note_phase("encoded_engine_capture", phase_started);
+        // The engine retained by Encoding is also the font authority for this plan.
+        // Local finite VOD has no shared Source evidence, but owns the same capture.
+        let held_font_digest = engine.font_digest();
+        let phase_started = std::time::Instant::now();
         let plan = if let Some(prepared) = held_decode_facts {
             self.resolve_vod_prepared_source(
                 file,
@@ -1495,12 +1511,18 @@ impl TranscodeManager {
                 encoder,
                 held_plan_handle,
                 prepared,
-                held_font_digest.as_deref(),
+                held_font_digest,
             )
             .await?
         } else {
-            self.resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
-                .await?
+            self.resolve_vod_movie_plan_with_fonts(
+                file,
+                &options,
+                encoder,
+                held_plan_handle,
+                held_font_digest,
+            )
+            .await?
         };
         note_phase("execution_decoder_plan", phase_started);
         // Encoding retains these execution options for publication and
@@ -1579,21 +1601,6 @@ impl TranscodeManager {
         } else {
             None
         };
-        let phase_started = std::time::Instant::now();
-        let engine = if let Some((evidence, _)) = source_evidence {
-            evidence.engine()
-        } else {
-            crate::ffmpeg::EncodedEngine::capture(
-                options
-                    .subtitle_burn
-                    .as_ref()
-                    .is_some_and(|burn| !burn.bitmap)
-                    .then_some(self.runtime_cache.as_path()),
-            )
-            .await
-            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?
-        };
-        note_phase("encoded_engine_capture", phase_started);
         if !source.unchanged() {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
