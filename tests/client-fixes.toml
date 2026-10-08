@@ -4714,3 +4714,19 @@ source = "clients/desktop-remote/extension/bridge.js"
 source_anchor = "!document.hasFocus()"
 test = "clients/desktop-remote/tests/extension.test.mjs"
 test_anchor = "visible background document rejects queued MAIN input at the effect boundary"
+
+[[fixes]]
+id = "desktop.cec-popup-focus-handoff"
+commits = ["71711842c717d9b132d0a7e5923e3920450d3da2"]
+source = "clients/desktop-remote/extension/popup.js"
+source_anchor = "window.close();"
+test = "clients/desktop-remote/tests/extension.browser.cjs"
+test_anchor = "real Chromium extension targets MAIN document and invalidates local context without native hardware"
+
+[[fixes]]
+id = "desktop.cec-setup-initial-document"
+commits = ["c7d8056d578627dfc1c62596404aeb31925826ae"]
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "pinnedDocument=result.documentId;"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "focus setup pins its first document and pending navigation invalidates the operation"
