@@ -323,6 +323,7 @@ struct EpisodeCard: View {
     let item: Item
     var width: CGFloat = shelfLandscapeWidth
     var isStarting = false
+    var remoteShelf: String? = nil
     let onPlay: () -> Void
 
     var body: some View {
@@ -336,6 +337,7 @@ struct EpisodeCard: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(episodeCardPlayAccessibilityLabel(item))
         .accessibilityValue(tvEpisodeCardAccessibilityValue(item, isStarting: isStarting))
+        .modifier(RemoteEpisodePlayModifier(shelf: remoteShelf, item: item, onPlay: onPlay))
         #else
         VStack(alignment: .leading, spacing: 8) {
             Button {
@@ -616,8 +618,9 @@ struct MediaRow: View {
                                         startingEpisodeID: startingEpisodeID,
                                         itemID: item.id
                                     ),
+                                    remoteShelf: remoteShelf,
                                     onPlay: { onPlayEpisode?(item) }
-                                )
+                                ).id(item.id)
                             }
                         }
                     }
@@ -716,6 +719,7 @@ func episodeCardMeta(_ item: Item) -> String {
 
 struct ComingSoonRow: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     let entries: [ComingSoonEntry]
 
     var body: some View {
@@ -729,6 +733,7 @@ struct ComingSoonRow: View {
                     #endif
                     .foregroundColor(Palette.onBg)
                     .padding(.horizontal, screenHPad)
+                ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     MediaShelf(spacing: comingSoonSpacing, itemCount: entries.count) {
                         ForEach(entries) { entry in
@@ -737,6 +742,8 @@ struct ComingSoonRow: View {
                                     ComingSoonCard(entry: entry, width: model.posterSize.posterWidth)
                                 }
                                 .posterButtonStyle()
+                                .id(entry.id)
+                                .remoteControl("shelf:3:comingsoon:" + entry.id, label: entry.title) { navigation.navigate(to: .item(itemId)) }
                             } else {
                                 ComingSoonCard(entry: entry, width: model.posterSize.posterWidth)
                             }
@@ -744,6 +751,14 @@ struct ComingSoonRow: View {
                     }
                     .padding(.horizontal, screenHPad)
 
+                }
+                .onChange(of: navigation.requestedFocus) { _, key in
+                    let prefix = "shelf:3:comingsoon:"
+                    guard navigation.activeScope == "home", let key, key.hasPrefix(prefix) else { return }
+                    let id = String(key.dropFirst(prefix.count))
+                    guard entries.contains(where: { $0.id == id && $0.itemId != nil }) else { return }
+                    proxy.scrollTo(id, anchor: .center)
+                }
                 }
             }
             .padding(.vertical, 10)
@@ -910,5 +925,15 @@ private struct RemoteShelfItemModifier: ViewModifier {
         if let shelf {
             content.remoteControl(shelf + ":item:\(item.id)", label: item.title) { navigation.navigate(to: .item(item.id)) }
         } else { content }
+    }
+}
+
+private struct RemoteEpisodePlayModifier: ViewModifier {
+    let shelf: String?
+    let item: Item
+    let onPlay: () -> Void
+    @ViewBuilder func body(content: Content) -> some View {
+        if let shelf { content.remoteControl(shelf + ":item:\(item.id)", label: episodeCardPlayAccessibilityLabel(item), activate: onPlay) }
+        else { content }
     }
 }

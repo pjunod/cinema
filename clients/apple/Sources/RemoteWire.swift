@@ -157,12 +157,31 @@ enum RemoteStrictJSON {
                 let start = index
                 while index < bytes.count && ![9, 10, 13, 32, 44, 93, 125].contains(bytes[index]) { index += 1 }
                 let token = bytes[start..<index]
-                guard !token.contains(46), !token.contains(101), !token.contains(69) else { throw CinemaRemoteOutcome.invalid }
+                guard Array(token) != [45, 48], !token.contains(46), !token.contains(101), !token.contains(69) else { throw CinemaRemoteOutcome.invalid }
                 index -= 1
             }
             index += 1
         }
         guard stack.isEmpty else { throw CinemaRemoteOutcome.invalid }
         _ = try JSONSerialization.jsonObject(with: data)
+    }
+}
+
+extension CinemaRemoteOutcome {
+    var viewerMessage: String {
+        switch self {
+        case .applied: return "Done."
+        case .duplicateOrOld: return "Already handled."
+        case .expired: return "The TV state changed. Try again."
+        case .staleTarget: return "This TV session ended. Choose the TV again."
+        case .staleControl: return "Remote control changed. Tap Use as remote again."
+        case .staleContext, .staleFocus: return "The TV screen changed. Try again."
+        case .restrictedSurface: return "Use the TV remote to finish this screen."
+        case .unauthorized: return "Pair this phone again."
+        case .unsupported: return "This control is not available here."
+        case .busy: return "The TV is busy. Try again shortly."
+        case .unavailable: return "The TV is unavailable."
+        case .invalid: return "This control could not be used."
+        }
     }
 }

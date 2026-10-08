@@ -3673,26 +3673,83 @@ struct PlaybackStatsView: View {
 /// never a continuation of the one that ended.
 struct SharedPlayerView: View {
     let plan: SharedPlaybackPlan
+    var requiresExplicitPlay = false
     @State private var next: SharedPlaybackPlan?
     var body: some View {
         let current = next ?? plan
-        SharedPlayerSessionView(plan: current) { following in next = following }
+        SharedPlayerSessionView(plan: current, requiresExplicitPlay: next == nil && requiresExplicitPlay) { following in next = following }
             .id(current.request.requestId ?? current.request.playbackId)
     }
 }
 
 struct SharedPlayerSessionView: View {
     let plan: SharedPlaybackPlan
+    var requiresExplicitPlay = false
     let playNext: (SharedPlaybackPlan) -> Void
     @StateObject private var controller = SharedPlayerController()
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @EnvironmentObject private var remotePlayback: RemotePlaybackAdapter
+    @State private var remoteOwner = UUID()
     @Environment(\.dismiss) private var dismiss
     @State private var ended = false
     @State private var findingNext = false
+    private var remoteScope: String {
+        guard let reference = plan.subject.context.reference else { return "restricted" }
+        return "playback:shared:" + [reference.importId, reference.serverId, reference.catalogueEpoch, reference.libraryId, reference.itemId, remoteOwner.uuidString].joined(separator: "|")
+    }
+    private func startOwnedShared(permit: @escaping () -> Bool) async -> CinemaRemoteOutcome {
+        guard permit(), controller.remoteStartAvailable else { return .unavailable }
+        let selected: SharedPlaybackPlan
+        if controller.remoteRetryRequiresPreparation {
+            guard let reference = plan.subject.context.reference else { return .unavailable }
+            do {
+                selected = try await model.prepareSharedPlayback(reference: reference, fileId: plan.subject.context.sourceFileId, current: permit)
+            } catch { return .unavailable }
+            guard permit(), controller.remoteStartAvailable else { return .unavailable }
+        } else { selected = plan }
+        return await controller.startRemote(selected, permit: permit)
+    }
+    private func attachRemoteOwner() {
+        guard plan.subject.context.reference != nil else { return }
+        remotePlayback.attach(.init(token: remoteOwner, scope: remoteScope, actions: [.setPlaying, .stop, .back, .home], snapshot: { nil }, dispatch: { _ in .unsupported }, cancelNetworkGesture: { controller.cancelNetworkControl() }, available: { true }, actionAvailable: { action in
+            [.stop, .back, .home].contains(action) ? controller.remoteStopAvailable : (controller.remoteTransportAvailable || controller.remoteStartAvailable)
+        }, deferredDidComplete: { action, result in
+            if [.stop, .back, .home].contains(action.type), result == .applied, remotePlayback.owner?.token == remoteOwner {
+                navigation.detachPresentation(remoteOwner)
+                dismiss()
+                if action.type == .home { _ = navigation.dispatch(.home, context: navigation.context) }
+            }
+        }, deferredDispatch: { action, permit in
+            guard remotePlayback.owner?.token == remoteOwner, permit() else { return .unavailable }
+            if action.type == .setPlaying, let playing = action.playing {
+                if controller.remoteStartAvailable {
+                    guard playing else { return .unavailable }
+                    return await startOwnedShared(permit: permit)
+                }
+                return await controller.controlRemote(playing ? .play : .pause, permit: permit)
+            }
+            if [.stop, .back, .home].contains(action.type) {
+                guard permit() else { return .unavailable }
+                controller.beginStop() // local effect now; cleanup retains its old owner
+                return .applied
+            }
+            return .unsupported
+        }))
+        navigation.contextChanged()
+    }
     var body: some View {
         VStack(spacing: 12) {
             Text(plan.subject.title).font(.headline)
             VideoPlayer(player: controller.player).allowsHitTesting(false)
+            if requiresExplicitPlay, controller.plan == nil {
+                Text("Shared file is ready. Press Play to start.").foregroundStyle(.secondary)
+                Button("Play Shared title") {
+                    navigation.physicalInput()
+                    let identity = navigation.epoch
+                    Task { _ = await startOwnedShared(permit: { remotePlayback.owner?.token == remoteOwner && navigation.epoch == identity && navigation.activeScope == remoteScope }) }
+                }
+            }
             if controller.starting { ProgressView("Starting Shared playback") }
             if controller.isDirect {
                 Text("Shared direct play").font(.caption).foregroundStyle(.secondary)
@@ -3703,11 +3760,14 @@ struct SharedPlayerSessionView: View {
             if let failure = controller.failure { Text(failure).foregroundStyle(.secondary) }
             if findingNext { ProgressView("Finding the next episode") }
             if controller.playback != nil, let current = controller.plan { SharedPlayerControls(controller: controller, plan: current) }
-            Button("Close") { Task { await controller.stop(); dismiss() } }
+            Button("Close") { navigation.performPhysicalAction { controller.beginStop(); dismiss() } }
         }
+        .remoteScope(remoteScope)
+        .background(RemoteOwnedPresentationProbe(navigation: navigation, token: remoteOwner, scope: remoteScope))
+        .onAppear { attachRemoteOwner() }
         .task {
             controller.onNaturalEnd = { ended = true }
-            await controller.start(plan)
+            if !requiresExplicitPlay { await controller.start(plan) }
         }
         // Owned by this view: closing it cancels the lookup.
         .task(id: ended) {
@@ -3718,7 +3778,11 @@ struct SharedPlayerSessionView: View {
             guard !Task.isCancelled, let following else { return }
             playNext(following)
         }
-        .onDisappear { Task { await controller.stop() } }
+        .onDisappear {
+            controller.cancelNetworkControl()
+            remotePlayback.detach(remoteOwner); navigation.detachPresentation(remoteOwner)
+            Task { await controller.stop() }
+        }
     }
 }
 
@@ -3728,19 +3792,45 @@ struct SharedPlayerSessionView: View {
 struct SharedPlayerControls: View {
     @ObservedObject var controller: SharedPlayerController
     let plan: SharedPlaybackPlan
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @Environment(\.remoteNavigationScope) private var remoteScope
+    @State private var choiceTitle: String?
+    @State private var ownedChoices: [RemoteChoice] = []
     var body: some View {
         HStack(spacing: 16) {
             Button { seek(by: -10_000) } label: { Image(systemName: "gobackward.10") }
                 .accessibilityLabel("Back 10 seconds").accessibilityIdentifier("shared-seek-back")
             Button {
-                Task { await controller.control(controller.playing ? .pause : .play) }
+                navigation.performPhysicalAction { Task { await controller.control(controller.playing ? .pause : .play) } }
             } label: { Image(systemName: controller.playing ? "pause.fill" : "play.fill") }
                 .accessibilityLabel(controller.playing ? "Pause" : "Play").accessibilityIdentifier("shared-play-pause")
             Button { seek(by: 10_000) } label: { Image(systemName: "goforward.10") }
                 .accessibilityLabel("Forward 10 seconds").accessibilityIdentifier("shared-seek-forward")
+            #if os(tvOS)
+            Button("Quality") {
+                openChoices("Quality", choices: PlaybackQuality.allCases.map { quality in
+                    RemoteChoice(id: quality.rawValue, label: quality.label, selected: plan.rawQuality == quality) { Task { await controller.change(SharedDirectedChange(quality: quality)) } }
+                })
+            }.accessibilityIdentifier("shared-quality")
+            if let tracks = plan.decision.presentation.audio, tracks.count > 1 {
+                Button("Audio") {
+                    openChoices("Audio", choices: tracks.map { track in
+                        RemoteChoice(id: String(track.index), label: Self.label(track.title, track.language, fallback: "Track \(track.index)"), selected: (plan.rawAudioIndex ?? plan.decision.presentation.delivery?.audio) == track.index) { Task { await controller.change(SharedDirectedChange(audioIndex: .some(track.index))) } }
+                    })
+                }.accessibilityIdentifier("shared-audio")
+            }
+            let natives = (plan.decision.presentation.subtitles ?? []).filter(\.isNativeHLS)
+            if !natives.isEmpty {
+                Button("Subtitles") {
+                    openChoices("Subtitles", choices: [RemoteChoice(id: "off", label: "Off", selected: plan.rawSubtitleIndex == nil) { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) } }] + natives.map { track in
+                        RemoteChoice(id: String(track.index), label: Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"), selected: plan.rawSubtitleIndex == track.index) { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) } }
+                    })
+                }.accessibilityIdentifier("shared-subtitles")
+            }
+            #else
             Menu("Quality") {
                 ForEach(PlaybackQuality.allCases) { quality in
-                    Button { Task { await controller.change(SharedDirectedChange(quality: quality)) } } label: {
+                    Button { navigation.performPhysicalAction { Task { await controller.change(SharedDirectedChange(quality: quality)) } } } label: {
                         mark(quality.label, plan.rawQuality == quality)
                     }
                 }
@@ -3748,7 +3838,7 @@ struct SharedPlayerControls: View {
             if let tracks = plan.decision.presentation.audio, tracks.count > 1 {
                 Menu("Audio") {
                     ForEach(tracks) { track in
-                        Button { Task { await controller.change(SharedDirectedChange(audioIndex: .some(track.index))) } } label: {
+                        Button { navigation.performPhysicalAction { Task { await controller.change(SharedDirectedChange(audioIndex: .some(track.index))) } } } label: {
                             mark(Self.label(track.title, track.language, fallback: "Track \(track.index)"),
                                  (plan.rawAudioIndex ?? plan.decision.presentation.delivery?.audio) == track.index)
                         }
@@ -3758,24 +3848,45 @@ struct SharedPlayerControls: View {
             let natives = (plan.decision.presentation.subtitles ?? []).filter(\.isNativeHLS)
             if !natives.isEmpty {
                 Menu("Subtitles") {
-                    Button { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) } } label: {
+                    Button { navigation.performPhysicalAction { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) } } } label: {
                         mark("Off", plan.rawSubtitleIndex == nil)
                     }
                     ForEach(natives) { track in
-                        Button { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) } } label: {
+                        Button { navigation.performPhysicalAction { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) } } } label: {
                             mark(Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"), plan.rawSubtitleIndex == track.index)
                         }
                     }
                 }.accessibilityIdentifier("shared-subtitles")
             }
+            #endif
         }
         // A preparation waiting for B or priming its successor yields to a
         // viewer action; the switch itself and its settlement do not.
         .disabled(controller.busy && !controller.preparing)
+        #if os(tvOS)
+        .overlay(alignment: .bottom) {
+            if let choiceTitle {
+                RemoteChoicePanel(scope: remoteScope + ":physical-choices", title: choiceTitle, choices: ownedChoices)
+            }
+        }
+        // v1 intentionally exposes shared transport only. The physical owned
+        // choice surface fences network credits rather than inventing track IDs.
+        .remoteRestricted(choiceTitle != nil)
+        #endif
+    }
+    private func openChoices(_ title: String, choices: [RemoteChoice]) {
+        guard choiceTitle == nil, !navigation.hasOwnedModal else { return }
+        navigation.physicalInput()
+        ownedChoices = choices; choiceTitle = title
+        navigation.openModal(scope: remoteScope + ":physical-choices", opener: "shared:" + title.lowercased()) {
+            choiceTitle = nil; ownedChoices = []
+        }
     }
     private func seek(by deltaMs: Int) {
-        let target = max(0, controller.currentPositionMs() + deltaMs)
-        Task { await controller.control(.seek(targetMs: target)) }
+        navigation.performPhysicalAction {
+            let target = max(0, controller.currentPositionMs() + deltaMs)
+            Task { await controller.control(.seek(targetMs: target)) }
+        }
     }
     @ViewBuilder private func mark(_ text: String, _ selected: Bool) -> some View {
         if selected { Label(text, systemImage: "checkmark") } else { Text(text) }
