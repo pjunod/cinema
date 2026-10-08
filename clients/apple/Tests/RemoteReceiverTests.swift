@@ -117,6 +117,37 @@ final class RemoteReceiverTests: XCTestCase {
         owner.claim(before: nil, after: 40_000)
         XCTAssertEqual(owner.cancel(current: 50_000), 50_000)
     }
+    func testPairingCloseAndTargetSwitchRetireLateApprovedReply() {
+        let target = CinemaRemoteTarget(ownerNodeID: "node", sessionID: UUID(), receiverEpoch: UUID())
+        let receiver = UUID(), other = UUID()
+        var lifetime = RemotePairingLifetime()
+        let ticket = lifetime.begin(receiverID: receiver, target: target)
+        XCTAssertTrue(lifetime.accepts(ticket, receiverID: receiver, target: target))
+        XCTAssertFalse(lifetime.accepts(ticket, receiverID: other, target: target))
+        XCTAssertFalse(lifetime.accepts(ticket, receiverID: receiver, target: .init(ownerNodeID: "node", sessionID: UUID(), receiverEpoch: UUID())))
+        lifetime.retire() // close before result callback
+        XCTAssertFalse(lifetime.accepts(ticket, receiverID: receiver, target: target))
+        let newer = lifetime.begin(receiverID: other, target: target)
+        XCTAssertFalse(lifetime.accepts(ticket, receiverID: receiver, target: target))
+        XCTAssertTrue(lifetime.accepts(newer, receiverID: other, target: target))
+    }
+    @MainActor
+    func testNullStateTimeoutPreservesStateUntilControllerRetirement() {
+        let model = RemoteClientModel()
+        let nonce = UUID()
+        let state = CinemaRemoteState(stateRevision: 1, contextRevision: 2, focusRevision: 3, route: "search",
+                                      capabilities: [.textReplace], focusedLabel: "Search", credits: [.init(nonce: UUID(), kind: .interaction)], textNonce: nonce, playback: nil)
+        model.acceptState(state)
+        model.acceptState(nil) // B04 unchanged timeout
+        XCTAssertEqual(model.controllerState?.contextRevision, 2)
+        XCTAssertEqual(model.controllerState?.textNonce, nonce)
+        XCTAssertEqual(model.controllerState?.credits.count, 1)
+        model.closeController()
+        XCTAssertNil(model.controllerState)
+        model.acceptState(nil)
+        XCTAssertNil(model.controllerState)
+    }
+
     @MainActor
     func testGuideOrderRefreshesWhenSameChannelsHaveNewProgrammeTimes() {
         let original = RemoteGuideOrder.keys([(channelID: "news", programmeStarts: [100, 200])])

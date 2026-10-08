@@ -33,6 +33,7 @@ final class RemoteClientModel: ObservableObject {
     private var controllerTask: Task<Void, Never>?
     private var renewTask: Task<Void, Never>?
     private var pairingTask: Task<Void, Never>?
+    private var pairingLifetime = RemotePairingLifetime()
     private var holdTask: Task<Void, Never>?
     private var authObserver: UUID?
     private var lifecycle = UUID()
@@ -325,29 +326,32 @@ final class RemoteClientModel: ObservableObject {
     }
     func hidePairing() { challenge = nil }
     func pair(device: CinemaRemoteDevice, challengeID: UUID?, code: String) {
-        guard let api, let target = device.target, let storage else { return }
+        guard let api, let target = device.target, let storage,
+              selectedDevice?.id == device.id, selectedDevice?.target == target else { return }
         pairingTask?.cancel()
+        let ticket = pairingLifetime.begin(receiverID: device.id, target: target)
         let generation = lifecycle
         pairingTask = Task {
             do {
                 let claim = try await api.pairingClaim(target: target, challengeID: challengeID, code: code, name: "Cinema phone")
-                guard current(generation) else { return }
+                guard current(generation), pairingLifetime.accepts(ticket, receiverID: selectedDevice?.id, target: selectedDevice?.target) else { return }
                 for _ in 0..<120 {
                     try await Task.sleep(for: .seconds(1))
                     let result = try await api.pairingResult(target: target, pendingID: claim.pendingID, secret: claim.pollSecret)
-                    guard current(generation) else { return }
+                    guard current(generation), pairingLifetime.accepts(ticket, receiverID: selectedDevice?.id, target: selectedDevice?.target) else { return }
                     if result.status == "denied" { commandStatus = "Pairing was declined on the TV."; return }
                     if result.status == "approved" {
                         guard let id = result.grantID, let secret = result.grantSecret, result.receiverID == device.id else { throw CinemaRemoteOutcome.invalid }
                         try storage.saveGrant(.init(receiverID: device.id, id: id, secret: secret))
                         commandStatus = "Paired. Tap Use as remote to take control."
+                        pairingTask = nil
                         select(device)
                         return
                     }
                     commandStatus = "Waiting for local approval on the TV."
                 }
                 commandStatus = "Pairing expired. Start a new TV code."
-            } catch { if current(generation) { commandStatus = "Pairing could not finish. Start a new TV code." } }
+            } catch { if current(generation), pairingLifetime.accepts(ticket, receiverID: selectedDevice?.id, target: selectedDevice?.target) { commandStatus = "Pairing could not finish. Start a new TV code." } }
         }
     }
     func select(_ device: CinemaRemoteDevice) {
@@ -365,6 +369,8 @@ final class RemoteClientModel: ObservableObject {
     var controlledByOtherPhone: Bool { controllerControl != nil && controllerControl?.activeGrantID != selectedGrant?.id }
     var selectedIsPaired: Bool { selectedGrant != nil }
     func closeController() {
+        pairingLifetime.retire()
+        pairingTask?.cancel(); pairingTask = nil
         controlEligibility.retire()
         controllerGeneration = UUID()
         controllerTask?.cancel(); controllerTask = nil
@@ -423,6 +429,12 @@ final class RemoteClientModel: ObservableObject {
         } else { controlling = false }
         if !controlling { controlEligibility.retire(); stopHolding() }
     }
+    /// B04 null state means unchanged, including an empty timeout response.
+    func acceptState(_ state: CinemaRemoteState?) {
+        guard let state else { return }
+        if controllerState?.contextRevision != state.contextRevision { stopHolding() }
+        controllerState = state
+    }
     private func beginStatePoll() {
         controllerTask?.cancel()
         let generation = controllerGeneration
@@ -434,12 +446,8 @@ final class RemoteClientModel: ObservableObject {
                     let reply = try await api.state(target: target, grantID: grant.id, after: controllerRevision, secret: grant.secret)
                     guard current(life), generation == controllerGeneration, selectedDevice?.target == target, reply.target == target else { return }
                     guard reply.responseRevision >= controllerRevision else { continue }
-                    let oldContext = controllerState?.contextRevision
                     acceptControl(reply.control, revision: reply.responseRevision)
-                    if let state = reply.state {
-                        if oldContext != state.contextRevision { stopHolding() }
-                        controllerState = state
-                    }
+                    acceptState(reply.state)
                     if let last = reply.outcomes.last(where: { $0.controlEpoch == controllerControl?.controlEpoch && $0.sequence == nextSequence }) { commandStatus = "TV: " + last.outcome.rawValue }
                 } catch {
                     guard current(life), generation == controllerGeneration else { return }
