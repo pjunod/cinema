@@ -15,6 +15,7 @@ The source archive is from the pinned tag URL; its checksum is also fixed.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import re
@@ -314,9 +315,140 @@ def inventory(binary, evidence):
     return facts
 
 
+def build_font_tools(prepared, jobs):
+    """Continue the pinned FC recipe and stage its relocatable deployed authority."""
+    prefix = prepared / "prefix"
+    source = prepared / "source/builder/build/fc"
+    output = prepared / "font-tools"
+    if output.exists() or not source.is_dir():
+        raise ValueError("Fontconfig tool stage must be new and the pinned FC source completed")
+    policy_path = Path(__file__).with_name("macos-video-dependency-sources.json")
+    policy = json.loads(policy_path.read_text())["fc"]
+    prepared_facts = json.loads((prepared / "prepared-source.json").read_text())
+    if prepared_facts.get("font_tools_builder_sha256") != digest(Path(__file__)):
+        raise ValueError("prepared font tool builder differs from its source contract")
+    commands = [["meson", "configure", str(source / "build"), "-Dtools=enabled",
+                 f"-Dc_link_args=['-L{prefix / 'lib'}','-lbrotlicommon']"],
+                ["ninja", "-C", str(source / "build"), f"-j{jobs}",
+                 "fc-list/fc-list", "fc-conflist/fc-conflist"]]
+    output.mkdir()
+    (output / "bin").mkdir()
+    (output / "fontconfig/conf.d").mkdir(parents=True)
+    provenance = output / "provenance"
+    provenance.mkdir()
+    with (provenance / "build.log").open("wb") as log:
+        environment = dict(os.environ)
+        environment["PKG_CONFIG_PATH"] = str(prefix / "lib/pkgconfig")
+        for command in commands:
+            subprocess.run(command, stdin=subprocess.DEVNULL, stdout=log,
+                           stderr=subprocess.STDOUT, check=True, timeout=600, env=environment)
+    (provenance / "build-commands.json").write_text(json.dumps(commands, indent=2) + "\n")
+    shutil.copyfile(Path(__file__), provenance / "build-macos-video-ffmpeg")
+    shutil.copyfile(policy_path, provenance / policy_path.name)
+    shutil.copyfile(source / "COPYING", provenance / "COPYING-fontconfig")
+    facts = {"schema_version": 1, "source_role": "fc", "source_commit": policy["commit"],
+             "source_sha256": policy["sha256"], "binaries": {}, "configuration": {},
+             "qualification": "build/package identity only"}
+    for name in ["fc-list", "fc-conflist"]:
+        binary = output / "bin" / name
+        shutil.copy2(source / "build" / name / name, binary)
+        closure = run(["/usr/bin/otool", "-L", str(binary)])
+        libraries = re.findall(r"^\s+(\S+) \(", closure, re.MULTILINE)
+        (provenance / f"{name}-libraries.txt").write_text(closure)
+        facts["binaries"][name] = {"sha256": digest(binary), "bytes": binary.stat().st_size,
+                                  "architecture": run(["/usr/bin/lipo", "-archs", str(binary)]).strip(),
+                                  "linked_libraries": libraries}
+    config = (prefix / "etc/fonts/fonts.conf").read_text()
+    config = re.sub(r'^\s*<cachedir(?![^>]*prefix="xdg")[^>]*>[^<]*</cachedir>\s*$',
+                    '', config, flags=re.MULTILINE)
+    if str(prefix) in config:
+        raise ValueError("font config retains the private build prefix")
+    (output / "fontconfig/fonts.conf").write_text(config)
+    for rule in sorted((prefix / "etc/fonts/conf.d").iterdir()):
+        if not rule.name.endswith(".conf"):
+            continue
+        original = rule.resolve(strict=True)
+        if not original.is_relative_to(prefix.resolve()) or not original.is_file():
+            raise ValueError("font rule is outside the pinned prefix")
+        data = original.read_bytes()
+        if str(prefix).encode() in data:
+            raise ValueError("font rule retains the private build prefix")
+        (output / "fontconfig/conf.d" / rule.name).write_bytes(data)
+    facts["configuration"] = {path.relative_to(output / "fontconfig").as_posix(): digest(path)
+                              for path in (output / "fontconfig").rglob("*") if path.is_file()}
+    (provenance / "manifest.json").write_text(json.dumps(facts, sort_keys=True, indent=2) + "\n")
+    return facts
+
+
+def validate_font_tools(package, facts):
+    """Verify the deployed sibling layout against the pinned source-role policy."""
+    policy = json.loads(Path(__file__).with_name("macos-video-dependency-sources.json").read_text())["fc"]
+    if (not isinstance(facts, dict) or facts.get("schema_version") != 1
+            or facts.get("source_role") != "fc" or facts.get("source_commit") != policy["commit"]
+            or facts.get("source_sha256") != policy["sha256"]):
+        raise ValueError("Fontconfig source provenance differs from the pinned recipe")
+    if not isinstance(facts.get("binaries"), dict) or set(facts["binaries"]) != {"fc-list", "fc-conflist"}:
+        raise ValueError("Fontconfig tool binary inventory differs")
+    for name, claimed in facts["binaries"].items():
+        binary = package / name
+        if not isinstance(claimed, dict) or binary.is_symlink() or not binary.is_file() or digest(binary) != claimed.get("sha256") or binary.stat().st_size != claimed.get("bytes"):
+            raise ValueError("Fontconfig tool bytes differ from the source-bound manifest")
+        with binary.open("rb") as stream:
+            header = stream.read(32)
+        if len(header) != 32 or header[:4] != b"\xcf\xfa\xed\xfe" or int.from_bytes(header[12:16], "little") != 2:
+            raise ValueError("Fontconfig tool is not a native Mach-O executable")
+        architecture = {0x0100000C: "arm64", 0x01000007: "x86_64"}.get(int.from_bytes(header[4:8], "little"))
+        libraries = re.findall(r"^\s+(\S+) \(", run(["/usr/bin/otool", "-L", str(binary)]), re.MULTILINE)
+        if architecture != platform.machine() or architecture != claimed.get("architecture"):
+            raise ValueError("Fontconfig tool architecture differs")
+        if not libraries or libraries != claimed.get("linked_libraries") or any(not name.startswith(("/usr/lib/", "/System/Library/")) for name in libraries):
+            raise ValueError("Fontconfig tool has an undeclared or non-system dependency")
+    for directory, expected in [(package / "fontconfig", facts.get("configuration", {})),
+                                (package / "provenance/font-tools", facts.get("provenance_sha256", {}))]:
+        actual = {}
+        if not directory.is_dir() or directory.is_symlink():
+            raise ValueError("Fontconfig tool configuration/provenance is absent")
+        for path in directory.rglob("*"):
+            if path.is_symlink():
+                raise ValueError("Fontconfig tool tree contains a symlink")
+            if path.is_file():
+                actual[path.relative_to(directory).as_posix()] = digest(path)
+        if not isinstance(expected, dict) or actual != expected or not actual:
+            raise ValueError("Fontconfig tool configuration/provenance inventory differs")
+    if "fonts.conf" not in facts["configuration"]:
+        raise ValueError("Fontconfig tools have no relocatable default configuration")
+    return facts
+
+
+def attach_font_tools(prepared, stage):
+    source = prepared / "font-tools"
+    manifest = source / "provenance/manifest.json"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise ValueError("prepared subtitle build requires source-bound Fontconfig tools")
+    facts = json.loads(manifest.read_text())
+    for name in ["fc-list", "fc-conflist"]:
+        binary = source / "bin" / name
+        if binary.is_symlink() or not binary.is_file():
+            raise ValueError("prepared Fontconfig tool is not a regular executable")
+        shutil.copyfile(binary, stage / name)
+        (stage / name).chmod(0o755)
+    for relative in ["fontconfig", "provenance"]:
+        original = source / relative
+        if original.is_symlink() or any(path.is_symlink() for path in original.rglob("*")):
+            raise ValueError("prepared Fontconfig tool tree contains a symlink")
+        destination = stage / ("fontconfig" if relative == "fontconfig" else "provenance/font-tools")
+        shutil.copytree(original, destination)
+    facts["provenance_sha256"] = {
+        path.relative_to(stage / "provenance/font-tools").as_posix(): digest(path)
+        for path in (stage / "provenance/font-tools").rglob("*") if path.is_file()}
+    return validate_font_tools(stage, facts)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, required=True, help="new private package directory")
+    parser.add_argument("--output", type=Path, help="new private package directory")
+    parser.add_argument("--font-tools-build", type=Path, help="continue pinned FC tools and stage configuration")
+    parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--archive", type=Path, help="checksum-verified local official binary archive")
     parser.add_argument("--source-archive", type=Path, help="checksum-verified local pinned source archive")
     parser.add_argument("--historical-build-lineage", type=Path,
@@ -326,6 +458,13 @@ def main():
     parser.add_argument("--source-parser-package", type=Path,
                         help="explicit pinned parser package; companion is copied beside ffprobe")
     args = parser.parse_args()
+    if args.font_tools_build:
+        if not 1 <= args.jobs <= 8 or not args.font_tools_build.is_absolute():
+            parser.error("font tools require an absolute prepared root and bounded jobs")
+        print(json.dumps(build_font_tools(args.font_tools_build, args.jobs), sort_keys=True))
+        return
+    if args.output is None:
+        parser.error("package output is required")
     if args.historical_build_lineage is not None and args.prepared_build is None:
         parser.error("historical lineage requires a completed prepared build")
     if platform.system() != "Darwin" or platform.machine() not in ARCHIVES:
@@ -418,6 +557,7 @@ def main():
             verify_strict_options(stage / "ffmpeg", evidence)
             if verify_prepared_subtitle_options(stage / "ffmpeg", evidence, receipt["compiled_source"]["local_patches"]):
                 receipt["capabilities"]["filters"]["subtitles_vt_images"] = "declared"
+                receipt["font_tools"] = attach_font_tools(args.prepared_build, stage)
             receipt["patch_digest"] = hashlib.sha256(json.dumps({
                 "jellyfin": receipt["patch_digest"], "local": receipt["compiled_source"]["local_patches"]
             }, sort_keys=True).encode()).hexdigest()

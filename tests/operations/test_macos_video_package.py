@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import struct
 import unittest
 from unittest.mock import patch
 
@@ -90,6 +91,39 @@ class MacosVideoPackageCase(unittest.TestCase):
             answers["filter=subtitles"] = "Filter subtitles\n  font_provider <int>\n"
             with self.assertRaisesRegex(ValueError, "Fontconfig authority"):
                 TOOL.verify_prepared_subtitle_options(Path("ffmpeg"), self.evidence, patches)
+
+    def test_font_tools_bind_pinned_role_bytes_configuration_and_provenance(self):
+        policy = json.loads((ROOT / "scripts/macos-video-dependency-sources.json").read_text())["fc"]
+        config = self.stage / "fontconfig"
+        config.mkdir()
+        (config / "fonts.conf").write_bytes(b"relocatable configuration")
+        retained = self.evidence / "font-tools"
+        retained.mkdir()
+        (retained / "manifest.json").write_bytes(b"actual staged source facts")
+        facts = {"schema_version": 1, "source_role": "fc", "source_commit": policy["commit"], "source_sha256": policy["sha256"],
+                 "configuration": {"fonts.conf": TOOL.digest(config / "fonts.conf")},
+                 "provenance_sha256": {"manifest.json": TOOL.digest(retained / "manifest.json")}, "binaries": {}}
+        for name in ["fc-list", "fc-conflist"]:
+            (self.stage / name).write_bytes(struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0) + name.encode())
+            facts["binaries"][name] = {"sha256": TOOL.digest(self.stage / name), "bytes": (self.stage / name).stat().st_size,
+                                       "architecture": "arm64", "linked_libraries": ["/usr/lib/libSystem.B.dylib"]}
+        def query(argv):
+            return "arm64" if "-archs" in argv else "binary:\n  /usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+        with patch.object(TOOL, "run", side_effect=query), patch.object(TOOL.platform, "machine", return_value="arm64"):
+            TOOL.validate_font_tools(self.stage, facts)
+            for path in [self.stage / "fc-list", config / "fonts.conf", retained / "manifest.json"]:
+                original = path.read_bytes()
+                path.write_bytes(original + b"swapped")
+                with self.subTest(path=path.name), self.assertRaises(ValueError):
+                    TOOL.validate_font_tools(self.stage, facts)
+                path.write_bytes(original)
+            (config / "unexpected.conf").write_bytes(b"unbound")
+            with self.assertRaises(ValueError):
+                TOOL.validate_font_tools(self.stage, facts)
+            (config / "unexpected.conf").unlink()
+            facts["source_sha256"] = "0" * 64
+            with self.assertRaises(ValueError):
+                TOOL.validate_font_tools(self.stage, facts)
 
     def test_compiled_strict_options_require_decoder_and_both_renderer_boundaries(self):
         (self.evidence / "full-help.txt").write_text("     require_hardware .D.V. verified decoder")

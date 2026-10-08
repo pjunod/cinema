@@ -151,8 +151,12 @@ def prepare(archive, output, jobs, dependency_source=None):
         upstream = tools / "archive-upstream"
         upstream.write_text('#!/bin/sh\nexec python3 "${PLURX_BUILD_ROOT:?}/extraction-helpers/macos-video-dependency-offers.py" --root "$PLURX_BUILD_ROOT" --upstream "$@"\n')
         upstream.chmod(0o755)
+    retained_helpers = output / "extraction-helpers"
+    retained_helpers.mkdir(exist_ok=True)
+    for name in ("build-macos-video-ffmpeg", "macos-video-dependency-sources.json"):
+        shutil.copyfile(Path(__file__).with_name(name), retained_helpers / name)
     entry = output / "build.sh"
-    entry.write_text('#!/bin/bash\nset -euo pipefail\nPLURX_BUILD_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexport PLURX_BUILD_ROOT\nexport PATH="$PLURX_BUILD_ROOT/bin:$PATH"\nexport ACLOCAL_PATH="$PLURX_BUILD_ROOT/prefix/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"\nfor tool in wget git cmake meson ninja pkg-config autoconf automake libtoolize glibtoolize nasm timeout shuf makeinfo; do\n    command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }\ndone\nxcrun -sdk macosx metal -v\nexec /bin/bash "$PLURX_BUILD_ROOT/source/builder/buildmac.sh"\n')
+    entry.write_text('#!/bin/bash\nset -euo pipefail\nPLURX_BUILD_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexport PLURX_BUILD_ROOT\nexport PATH="$PLURX_BUILD_ROOT/bin:$PATH"\nexport ACLOCAL_PATH="$PLURX_BUILD_ROOT/prefix/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"\nfor tool in wget git cmake meson ninja pkg-config autoconf automake libtoolize glibtoolize nasm timeout shuf makeinfo; do\n    command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }\ndone\nxcrun -sdk macosx metal -v\n/bin/bash "$PLURX_BUILD_ROOT/source/builder/buildmac.sh"\npython3 "$PLURX_BUILD_ROOT/extraction-helpers/build-macos-video-ffmpeg" --font-tools-build "$PLURX_BUILD_ROOT" --jobs "$(nproc)"\n')
     entry.chmod(0o755)
     facts = {"schema_version": 1, "source_commit": package.COMMIT,
              "source_sha256": package.SOURCE_SHA256,
@@ -161,7 +165,8 @@ def prepare(archive, output, jobs, dependency_source=None):
                           "parse_errors": "err_detect=explode", "decode_metadata": "strict_dovi=1", "tool_failure": "xerror",
                           "color": "P5 IPT-PQ-C2; no generic default color",
                           "bwdif": "Metal shader parameter buffer index 0"},
-             "qualification": "source-prepared-only", "jobs": jobs}
+             "qualification": "source-prepared-only", "jobs": jobs,
+             "font_tools_builder_sha256": package.digest(retained_helpers / "build-macos-video-ffmpeg")}
     if dependency_facts is not None:
         facts["dependency_source_inputs"] = dependency_facts
     (output / "prepared-source.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")

@@ -291,6 +291,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         &crate::admission::Workload::of(&file, options.target_height),
     );
     let encoding = Arc::new(crate::vodencode::Encoding {
+        source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         shared_audio: None,
         candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
@@ -1765,6 +1766,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         .expect_err("a captured old source cannot attach a new object");
     assert!(refused.contains("source changed"), "{refused}");
     let fresh = Arc::new(crate::vodencode::Encoding {
+        source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         shared_audio: None,
         candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
@@ -2625,7 +2627,12 @@ async fn encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid() {
         original,
         "reordered bytes need their own rendition"
     );
-    Box::pin(assert_encoded_neighbor_continuity(base.path(), &file, &encoding)).await;
+    Box::pin(assert_encoded_neighbor_continuity(
+        base.path(),
+        &file,
+        &encoding,
+    ))
+    .await;
     let encoding = encoding
         .clone_with_admissions_for_test(crate::admission::Admissions::new())
         .await;

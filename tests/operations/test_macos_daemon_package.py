@@ -103,8 +103,9 @@ class MacosDaemonPackageCase(unittest.TestCase):
                  "binaries": {}, "configuration": {}, "provenance_sha256": {}}
         for name in ["fc-list", "fc-conflist"]:
             image = self.package / name
-            image.write_bytes(b"Fontconfig query image " + name.encode())
-            facts["binaries"][name] = {"sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "bytes": image.stat().st_size}
+            image.write_bytes(struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0) + name.encode())
+            facts["binaries"][name] = {"sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "bytes": image.stat().st_size,
+                                      "architecture": "arm64", "linked_libraries": ["/usr/lib/libSystem.B.dylib"]}
         for directory, key, name, content in [
                 ("fontconfig", "configuration", "fonts.conf", b"<fontconfig><include>conf.d</include></fontconfig>"),
                 ("fontconfig", "configuration", "conf.d/10-original.conf", b"<fontconfig/>"),
@@ -116,6 +117,14 @@ class MacosDaemonPackageCase(unittest.TestCase):
         self.native_manifest["font_tools"] = facts
         manifest = self.package / "provenance/manifest.json"
         manifest.write_text(json.dumps(self.native_manifest))
+        real_recipe = TOOL.recipe
+        def inspected_recipe():
+            tool = real_recipe()
+            tool.run = lambda argv: "binary:\n  /usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+            return tool
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(TOOL, "recipe", side_effect=inspected_recipe).start()
+        mock.patch("platform.machine", return_value="arm64").start()
         self.assertEqual(TOOL.validate_native_package(self.package), self.manifest)
         for relative in ["fc-list", "fc-conflist", "fontconfig/conf.d/10-original.conf", "provenance/font-tools/source.json"]:
             member = self.package / relative
@@ -126,7 +135,7 @@ class MacosDaemonPackageCase(unittest.TestCase):
             member.write_bytes(original)
         unlisted = self.package / "fontconfig/conf.d/99-unlisted.conf"
         unlisted.write_bytes(b"<fontconfig/>")
-        with self.assertRaisesRegex(ValueError, "unlisted"):
+        with self.assertRaisesRegex(ValueError, "inventory"):
             TOOL.validate_native_package(self.package)
         unlisted.unlink()
         facts["source_sha256"] = "0" * 64
