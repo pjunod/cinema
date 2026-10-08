@@ -6,12 +6,14 @@ use uuid::Uuid;
 
 pub const SCHEMA_V1: &str = include_str!("invitations/schema_v1.sql");
 pub const SCHEMA_V2: &str = include_str!("invitations/schema_v2.sql");
-pub const SCHEMA: &str = include_str!("invitations/schema_v3.sql");
+pub const SCHEMA_V3: &str = include_str!("invitations/schema_v3.sql");
+pub const SCHEMA: &str = include_str!("invitations/schema_v4.sql");
+pub const MIGRATION_V4: &str = include_str!("invitations/migration_v4.sql");
 pub const MIGRATION_V3: &str = include_str!("invitations/migration_v3.sql");
 mod runtime;
 pub use runtime::*;
 pub const MIGRATION_V2: &str = include_str!("invitations/migration_v2.sql");
-pub const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('invitation_schema','invitation_phones','invitation_phones_user','invitation_phone_rebind','invitation_consent_cleanup','invitation_consents','invitation_consents_user','invitation_events','invitation_events_revision','invitation_events_user','invitation_events_pending','invitation_cooldowns','invitation_broker_revocations') ORDER BY name";
+pub const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('invitation_schema','invitation_phones','invitation_phones_user','invitation_phone_rebind','invitation_consent_cleanup','invitation_cleanup_guard','invitation_consents','invitation_consents_user','invitation_events','invitation_events_revision','invitation_events_user','invitation_events_pending','invitation_cooldowns','invitation_broker_revocations') ORDER BY name";
 pub fn schema_statements(schema: &str) -> Vec<&str> {
     let mut statements = Vec::new();
     let mut start = 0;
@@ -45,8 +47,15 @@ pub fn migration_statements(version: i64) -> Vec<String> {
                 .map(str::to_owned),
         );
     }
+    if version < 3 {
+        out.extend(
+            schema_statements(MIGRATION_V3)
+                .into_iter()
+                .map(str::to_owned),
+        );
+    }
     out.extend(
-        schema_statements(MIGRATION_V3)
+        schema_statements(MIGRATION_V4)
             .into_iter()
             .map(str::to_owned),
     );
@@ -322,7 +331,8 @@ pub const ADMIT:&str=concat!(
 "WHERE NOT EXISTS(SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash IN (pt.token_hash,rt.token_hash)) ",
 "AND (SELECT value FROM settings WHERE key='auth.token_expiry_enabled') IS i.expiry_enabled AND (SELECT value FROM settings WHERE key='auth.token_idle_days') IS i.expiry_days AND (SELECT value FROM settings WHERE key='auth.token_expiry_since') IS i.expiry_since ",
 "AND (SELECT value FROM settings WHERE key='cinema.remote_control')='1' AND (SELECT value FROM settings WHERE key='cinema.remote_invitations')='1' ",
-"AND p.permission_granted=1 AND ((c.transport='android_resident' AND p.resident_active=1) OR (c.transport IN ('apns','fcm') AND c.transport_status='ready' AND c.transport_phone_generation=p.generation AND c.broker_enrollment IS NOT NULL)) ",
+"AND p.permission_granted=1 AND ((c.transport='android_resident' AND p.resident_active=1) OR (c.transport IN ('apns','fcm') AND c.transport_status='ready' AND c.transport_phone_generation=p.generation AND c.broker_enrollment IS NOT NULL AND json_valid(c.broker_ticket) AND CASE WHEN json_valid(c.broker_ticket) THEN json_extract(c.broker_ticket,'$.ticket_id')=c.broker_enrollment AND json_extract(c.broker_ticket,'$.scope_hash') IS NOT NULL ELSE 0 END)) ",
+"AND (CASE WHEN c.broker_ticket IS NULL THEN c.broker_enrollment IS NULL WHEN json_valid(c.broker_ticket) THEN coalesce((json_type(c.broker_ticket)='object' AND (SELECT count(*) FROM json_each(c.broker_ticket))=2 AND json_type(c.broker_ticket,'$.ticket_id')='text' AND json_type(c.broker_ticket,'$.scope_hash')='text' AND length(CAST(c.broker_ticket AS BLOB))<=256 AND length(json_extract(c.broker_ticket,'$.ticket_id'))=36 AND substr(json_extract(c.broker_ticket,'$.ticket_id'),9,1)='-' AND substr(json_extract(c.broker_ticket,'$.ticket_id'),14,1)='-' AND substr(json_extract(c.broker_ticket,'$.ticket_id'),19,1)='-' AND substr(json_extract(c.broker_ticket,'$.ticket_id'),24,1)='-' AND length(replace(json_extract(c.broker_ticket,'$.ticket_id'),'-',''))=32 AND replace(json_extract(c.broker_ticket,'$.ticket_id'),'-','') NOT GLOB '*[^0-9a-f]*' AND length(json_extract(c.broker_ticket,'$.scope_hash'))=64 AND json_extract(c.broker_ticket,'$.scope_hash') NOT GLOB '*[^0-9a-f]*' AND (c.broker_enrollment IS NULL OR c.broker_enrollment=json_extract(c.broker_ticket,'$.ticket_id'))),0) ELSE 0 END) ",
 "AND NOT EXISTS(SELECT 1 FROM invitation_cooldowns d WHERE d.receiver_id=r.id AND d.phone_id=p.id AND i.admitted_at-d.last_admitted_at<1800) ",
 "AND p.last_revision<9007199254740991 AND (SELECT count(*) FROM invitation_events WHERE user_id=i.user_id)<100000 ON CONFLICT DO NOTHING"
 );
@@ -467,6 +477,8 @@ pub fn fence_restored_invitations(c: &rusqlite::Connection) -> Result<(), StoreE
         return Ok(());
     }
     let expected_version = if verify_shape(&rows).is_ok() {
+        4
+    } else if verify_schema_shape(&rows, SCHEMA_V3).is_ok() {
         3
     } else if verify_schema_shape(&rows, SCHEMA_V2).is_ok() {
         2
@@ -487,7 +499,13 @@ pub fn fence_restored_invitations(c: &rusqlite::Connection) -> Result<(), StoreE
     let tx = c.unchecked_transaction()?;
     // Upgrade exact old shapes inside the restore transaction so cleanup is
     // globally owned even when the caller later replaces user rows.
-    if expected_version < 3 {
+    let invalid: i64 = tx.query_row(GLOBAL_CLEANUP_INVALID, [], |r| r.get(0))?;
+    if invalid > 0 {
+        return Err(StoreError::Migration(
+            "migration_remediation: restored broker reference missing or incompatible".into(),
+        ));
+    }
+    if expected_version < 4 {
         for statement in migration_statements(expected_version) {
             tx.execute_batch(&statement)?;
         }

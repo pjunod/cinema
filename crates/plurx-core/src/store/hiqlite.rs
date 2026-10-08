@@ -3867,6 +3867,10 @@ impl HiqliteAuthStore {
             return Ok(None);
         }
         let version = if super::invitations::verify_shape(&shape).is_ok() {
+            4
+        } else if super::invitations::verify_schema_shape(&shape, super::invitations::SCHEMA_V3)
+            .is_ok()
+        {
             3
         } else if super::invitations::verify_schema_shape(&shape, super::invitations::SCHEMA_V2)
             .is_ok()
@@ -3912,7 +3916,7 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.invitation_schema_version().await?;
-        if version == Some(3) {
+        if version == Some(4) {
             return Ok(());
         }
         let mut statements = if let Some(old_version) = version {
@@ -3928,7 +3932,7 @@ impl HiqliteAuthStore {
         };
         if version.is_none() {
             statements.push((
-                "INSERT INTO invitation_schema VALUES(1,3)".into(),
+                "INSERT INTO invitation_schema VALUES(1,4)".into(),
                 params!(),
             ));
         }
@@ -3936,7 +3940,7 @@ impl HiqliteAuthStore {
         let attempt = self.schema_migration_transaction(statements).await;
         // Consistent settlement handles concurrent installs and unknown commit:
         // absence/partial shape can never be called successfully installed.
-        if self.invitation_schema_version().await? == Some(3) {
+        if self.invitation_schema_version().await? == Some(4) {
             return Ok(());
         }
         attempt?;

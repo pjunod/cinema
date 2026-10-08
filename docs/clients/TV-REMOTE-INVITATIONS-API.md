@@ -110,7 +110,7 @@ until separate physical qualification; configured transport is not a delivery
 receipt. Consent ON always preserves the user's choice when permission,
 provider or global dispatch switches are unavailable.
 
-A transport ticket is `{ticket_id,ticket_secret,expires_at}` with a 120 s
+A transport ticket is `{ticket_id,ticket_secret,expires_at,broker_origin,broker_generation}` with a 120 s
 lifetime. Start first advances consent/transport generation and suspends old
 dispatch, then requests a scoped broker ticket. Missing provider configuration
 returns `ticket:null` plus advisory readiness, without undoing enabled consent.
@@ -161,8 +161,8 @@ Android must preserve its download/media owners and user Stop behavior.
 
 ## Durable limits, restore and delivery truth
 
-SQLite migrations 107/108/109 and the admitted Hiqlite Invitation adjunct install
-exact STRICT tables/indexes plus independent marker version 3. Fresh replicated
+SQLite migrations 107/108/109/110 and the admitted Hiqlite Invitation adjunct install
+exact STRICT tables/indexes plus independent marker version 4. Fresh replicated
 installation is transactional; an exact version-1 image upgrades in one
 transaction. Durable phone high-water survives receiver/event cleanup and
 advances only with successful admission. Transport readiness binds the current
@@ -298,3 +298,33 @@ proof under a new broker generation cannot acknowledge old-generation cleanup.
 Home includes `broker_generation` in its scope hash. Ordinary publisher-proof
 or provider-signing-key rotation preserves generation; operator restore or an
 explicit external generation fence changes it.
+
+
+Schema 4 adds a destructive-cleanup guard for incompatible legacy references.
+An enrollment without its ticket/scope reference, malformed reference or
+mismatched known enrollment refuses restore before mutation and refuses ordinary
+phone/receiver/account cascades transactionally with `migration_remediation`.
+The obligation remains intact; no missing old broker authority is invented.
+OFF may disable consent while retaining that reference. Valid reserved ordinary
+deletions still work at capacity with the broker offline. Exact schema 3 is
+preserved and upgrades through an additive migration.
+
+
+A nonnull home TransportStart ticket includes `broker_origin` and
+`broker_generation`. The origin comes solely from trusted validated home
+operator config, is HTTPS with no userinfo/path/query/fragment, and remains
+frozen to that ticket scope. The authenticated home Start response establishes
+this trust seam. Native claims only that exact origin, refuses redirects and
+sends only its ticket proof. It accepts a claim response only with exactly one
+canonical `X-Cinema-Broker-Generation` equal to the issued ticket generation.
+No request generation header is required for claim. Notification payloads never
+carry broker or home origins.
+
+
+Android FCM invitations use data-only `invitation_id` and the fixed category,
+HIGH priority and bounded TTL. The native app checks local consent, installation
+identity and dedupe before displaying the fixed generic local notification; it
+makes no home fetch before display. Notification-plus-data auto-display would
+bypass those local checks and is not used. APNs remains a visible alert. Already
+sent OS notifications cannot be recalled; every tap still reauthenticates and
+checks current home authority.

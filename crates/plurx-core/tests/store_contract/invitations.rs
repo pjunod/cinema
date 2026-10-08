@@ -446,7 +446,7 @@ async fn invitations_adjunct_schema_repeats_at_81_82_and_refuses_denied_partial_
         .is_err());
     client
         .execute(
-            "INSERT INTO invitation_schema VALUES(1,3)",
+            "INSERT INTO invitation_schema VALUES(1,4)",
             hiqlite::params!(),
         )
         .await

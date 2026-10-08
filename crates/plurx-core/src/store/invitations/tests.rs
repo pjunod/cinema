@@ -15,7 +15,7 @@ fn invitations_restore_clears_capabilities_with_foreign_keys_off() {
     c.execute_batch(&crate::store::remote::migration_sql())
         .expect("remote parent schema");
     c.execute_batch(SCHEMA).expect("invitations");
-    c.execute_batch("INSERT INTO remote_receivers VALUES('receiver',1,'TV','web','hash',0,NULL);INSERT INTO invitation_phones(id,user_id,name,platform,secret_hash,token_digest,generation,created_at) VALUES('phone',1,'Phone','android','phone-hash','login-digest',1,0);INSERT INTO invitation_consents(id,phone_id,receiver_id,user_id,grant_id,grant_hash,enabled,transport,generation,broker_enrollment,broker_ticket,transport_status) VALUES('consent','phone','receiver',1,'grant','grant-hash',1,'fcm',1,'broker-capability','ticket-capability','ready');INSERT INTO invitation_events VALUES('event',1,'consent','phone','receiver','foreground','grant',1,1,0,0,120,'admitted',NULL,1);INSERT INTO invitation_cooldowns VALUES('receiver','phone',0);INSERT INTO invitation_broker_revocations VALUES('work',1,'broker-capability',1,0,120,0);").expect("old image capabilities");
+    c.execute_batch("INSERT INTO remote_receivers VALUES('receiver',1,'TV','web','hash',0,NULL);INSERT INTO invitation_phones(id,user_id,name,platform,secret_hash,token_digest,generation,created_at) VALUES('phone',1,'Phone','android','phone-hash','login-digest',1,0);INSERT INTO invitation_consents(id,phone_id,receiver_id,user_id,grant_id,grant_hash,enabled,transport,generation,broker_enrollment,broker_ticket,transport_status) VALUES('consent','phone','receiver',1,'grant','grant-hash',1,'fcm',1,'00000000-0000-4000-8000-000000000001','{\"ticket_id\":\"00000000-0000-4000-8000-000000000001\",\"scope_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}','ready');INSERT INTO invitation_events VALUES('event',1,'consent','phone','receiver','foreground','grant',1,1,0,0,120,'admitted',NULL,1);INSERT INTO invitation_cooldowns VALUES('receiver','phone',0);INSERT INTO invitation_broker_revocations VALUES('work',1,'00000000-0000-4000-8000-000000000001',1,0,120,0);").expect("old image capabilities");
     fence_restored_invitations(&c).expect("explicit restore fence");
     for table in [
         "invitation_phones",
@@ -47,12 +47,12 @@ fn invitations_restore_clears_capabilities_with_foreign_keys_off() {
     );
     assert_eq!(
         c.query_row(
-            "SELECT enrollment_id FROM invitation_broker_revocations WHERE id='ticket-capability'",
+            "SELECT enrollment_id FROM invitation_broker_revocations WHERE id='{\"ticket_id\":\"00000000-0000-4000-8000-000000000001\",\"scope_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}'",
             [],
             |r| r.get::<_, String>(0)
         )
         .expect("unknown legacy ref fenced and retained"),
-        "ticket-capability"
+        "00000000-0000-4000-8000-000000000001"
     );
     c.execute("DROP INDEX invitation_events_pending", [])
         .expect("partial image");
@@ -245,19 +245,19 @@ fn invitations_account_delete_preserves_global_broker_cleanup() {
 
 #[test]
 fn invitations_restore_exact_old_schemas_retains_cleanup_only() {
-    for schema in [SCHEMA_V1, SCHEMA_V2] {
+    for schema in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3] {
         let c = rusqlite::Connection::open_in_memory().expect("raw old restore");
         c.execute_batch("PRAGMA foreign_keys=OFF;CREATE TABLE users(id INTEGER PRIMARY KEY);INSERT INTO users VALUES(1);").expect("parents");
         c.execute_batch(&crate::store::remote::migration_sql())
             .expect("remote");
         c.execute_batch(schema).expect("exact old invitations");
-        c.execute_batch("INSERT INTO remote_receivers VALUES('receiver',1,'TV','web','hash',0,NULL);INSERT INTO invitation_phones(id,user_id,name,platform,secret_hash,token_digest,generation,created_at) VALUES('phone',1,'Phone','android','phone-hash','login-digest',1,0);INSERT INTO invitation_consents(id,phone_id,receiver_id,user_id,enabled,transport,generation,broker_ticket,transport_status) VALUES('consent','phone','receiver',1,1,'fcm',1,'unknown-ticket','pending');INSERT INTO invitation_broker_revocations VALUES('old-work',1,'old-enrollment',1,0,120,0);").expect("legacy cleanup obligations");
+        c.execute_batch("INSERT INTO remote_receivers VALUES('receiver',1,'TV','web','hash',0,NULL);INSERT INTO invitation_phones(id,user_id,name,platform,secret_hash,token_digest,generation,created_at) VALUES('phone',1,'Phone','android','phone-hash','login-digest',1,0);INSERT INTO invitation_consents(id,phone_id,receiver_id,user_id,enabled,transport,generation,broker_ticket,transport_status) VALUES('consent','phone','receiver',1,1,'fcm',1,'{\"ticket_id\":\"00000000-0000-4000-8000-000000000001\",\"scope_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}','pending');INSERT INTO invitation_broker_revocations VALUES('old-work',1,'old-enrollment',1,0,120,0);").expect("legacy cleanup obligations");
         fence_restored_invitations(&c).expect("exact restore upgrade and fence");
         assert_eq!(
             c.query_row("SELECT version FROM invitation_schema", [], |r| r
                 .get::<_, i64>(0))
                 .expect("current schema"),
-            3
+            4
         );
         for table in [
             "invitation_phones",
@@ -314,4 +314,91 @@ fn invitations_restore_over_capacity_refuses_without_pruning() {
         .expect("no pruning"),
         100001
     );
+}
+
+#[test]
+fn invitations_legacy_orphan_and_mismatch_refuse_restore_and_fk_cascade() {
+    for schema in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3] {
+        for invalid in ["orphan", "mismatch", "empty_scope", "unknown_field"] {
+            let c = rusqlite::Connection::open_in_memory().expect("legacy image");
+            c.execute_batch("PRAGMA foreign_keys=OFF;CREATE TABLE users(id INTEGER PRIMARY KEY);INSERT INTO users VALUES(1);").expect("parents");
+            c.execute_batch(&crate::store::remote::migration_sql())
+                .expect("remote");
+            c.execute_batch(schema).expect("exact legacy schema");
+            c.execute_batch("INSERT INTO remote_receivers VALUES('receiver',1,'TV','web','hash',0,NULL);INSERT INTO invitation_phones(id,user_id,name,platform,secret_hash,token_digest,generation,created_at) VALUES('phone',1,'Phone','android','phone-hash','login-digest',1,0);").expect("old authority");
+            let reference = BrokerReference {
+                ticket_id: Uuid::new_v4().to_string(),
+                scope_hash: "a".repeat(64),
+            };
+            let enrollment = if invalid == "mismatch" || invalid == "orphan" {
+                Uuid::new_v4().to_string()
+            } else {
+                reference.ticket_id.clone()
+            };
+            let ticket=match invalid {
+                "orphan"=>None,
+                "empty_scope"=>Some(serde_json::json!({"ticket_id":reference.ticket_id,"scope_hash":""}).to_string()),
+                "unknown_field"=>Some(serde_json::json!({"ticket_id":reference.ticket_id,"scope_hash":reference.scope_hash,"extra":true}).to_string()),
+                _=>Some(reference.encode().expect("reference")),
+            };
+            c.execute("INSERT INTO invitation_consents(id,phone_id,receiver_id,user_id,enabled,transport,generation,broker_enrollment,broker_ticket,transport_status) VALUES('consent','phone','receiver',1,1,'fcm',1,$1,$2,'ready')",rusqlite::params![enrollment,ticket]).expect("orphan or mismatch");
+            let error = fence_restored_invitations(&c).expect_err("no destructive restore");
+            assert!(error.to_string().contains("migration_remediation"));
+            assert_eq!(
+                c.query_row(
+                    "SELECT broker_enrollment FROM invitation_consents",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .expect("obligation retained"),
+                enrollment
+            );
+            let old_version = if schema == SCHEMA_V1 {
+                1
+            } else if schema == SCHEMA_V2 {
+                2
+            } else {
+                3
+            };
+            assert_eq!(
+                c.query_row("SELECT version FROM invitation_schema", [], |r| r
+                    .get::<_, i64>(0))
+                    .expect("restore rolled back"),
+                old_version
+            );
+            for statement in migration_statements(old_version) {
+                c.execute_batch(&statement)
+                    .expect("normal exact startup upgrade");
+            }
+            c.execute_batch("PRAGMA foreign_keys=ON;")
+                .expect("normal serving FK ON");
+            assert!(c
+                .execute("DELETE FROM users WHERE id=1", [])
+                .expect_err("cascade must retain incompatible obligation")
+                .to_string()
+                .contains("migration_remediation"));
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM users", [], |r| r.get::<_, i64>(0))
+                    .expect("account rollback"),
+                1
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT broker_enrollment FROM invitation_consents",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .expect("scope remains"),
+                enrollment
+            );
+            assert!(c
+                .prepare("PRAGMA foreign_key_check")
+                .expect("FK check")
+                .query([])
+                .expect("rows")
+                .next()
+                .expect("result")
+                .is_none());
+        }
+    }
 }

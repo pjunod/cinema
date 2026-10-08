@@ -1303,6 +1303,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::invitations::MIGRATION_V2,
     // v109: explicit phone login rebind invalidates consent atomically.
     super::invitations::MIGRATION_V3,
+    // v110: refuse destructive cleanup of incompatible legacy broker references.
+    super::invitations::MIGRATION_V4,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
