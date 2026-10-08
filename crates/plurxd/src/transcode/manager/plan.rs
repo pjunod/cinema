@@ -112,13 +112,62 @@ impl TranscodeManager {
         encoder: Encoder,
         restrictions: &AttemptRestrictions,
     ) -> Result<ResolvedTranscode, String> {
+        self.resolve_movie_plan_with_processing_exclusion(
+            file,
+            options,
+            encoder,
+            restrictions,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_movie_processing_retry(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        failed_pipeline: Pipeline,
+    ) -> Result<ResolvedTranscode, String> {
+        self.resolve_movie_plan_with_processing_exclusion(
+            file,
+            options,
+            encoder,
+            &AttemptRestrictions::none(),
+            Some(failed_pipeline),
+        )
+        .await
+    }
+
+    async fn resolve_movie_plan_with_processing_exclusion(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        restrictions: &AttemptRestrictions,
+        excluded_pipeline: Option<Pipeline>,
+    ) -> Result<ResolvedTranscode, String> {
         let stored_probe = self
             .store
             .get_file_probe_json(file.id)
             .await
             .map_err(|error| format!("reading decoder planning facts: {error}"))?;
         let facts = Self::planning_facts(file, stored_probe.as_deref())?;
-        self.resolve_movie_plan_with_facts(file, options, encoder, &facts, restrictions)
+        let context = self
+            .macos_video_report()
+            .context(self.macos_video_processing_enabled())
+            .map(|context| match excluded_pipeline {
+                Some(pipeline) => context.excluding_pipeline(pipeline),
+                None => context,
+            });
+        self.resolve_movie_plan_with_processing_context(
+            file,
+            options,
+            encoder,
+            &facts,
+            restrictions,
+            context.as_ref(),
+        )
     }
 
     /// [`Self::resolve_movie_plan`] from the stored probe a caller already
@@ -184,6 +233,28 @@ impl TranscodeManager {
         facts: &DecodeFacts,
         restrictions: &AttemptRestrictions,
     ) -> Result<ResolvedTranscode, String> {
+        let context = self
+            .macos_video_report()
+            .context(self.macos_video_processing_enabled());
+        self.resolve_movie_plan_with_processing_context(
+            file,
+            options,
+            encoder,
+            facts,
+            restrictions,
+            context.as_ref(),
+        )
+    }
+
+    fn resolve_movie_plan_with_processing_context(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: &DecodeFacts,
+        restrictions: &AttemptRestrictions,
+        macos_context: Option<&plurx_core::transcode::MacosProcessingContext>,
+    ) -> Result<ResolvedTranscode, String> {
         use plurx_core::transcode::ArtifactQualification;
 
         if self.hooks.get().forces_artifact_qualification() {
@@ -194,6 +265,7 @@ impl TranscodeManager {
                 facts,
                 restrictions,
                 self.artifact_qualification(),
+                macos_context,
             );
         }
 
@@ -208,6 +280,7 @@ impl TranscodeManager {
             facts,
             restrictions,
             ArtifactQualification::Unqualified,
+            macos_context,
         )?;
         if !self.published_artifact_qualification().requested {
             return Ok(unqualified);
@@ -239,6 +312,7 @@ impl TranscodeManager {
             facts,
             restrictions,
             ArtifactQualification::HealthQualified,
+            macos_context,
         )?;
         if qualified.decode().backend() != backend
             || qualified.decode().input_codec() != Some(codec)
@@ -254,6 +328,7 @@ impl TranscodeManager {
         Ok(qualified)
     }
 
+    #[allow(clippy::too_many_arguments)] // Independent frozen source, policy and implementation inputs.
     fn resolve_movie_plan_with_qualification(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -262,6 +337,7 @@ impl TranscodeManager {
         facts: &DecodeFacts,
         restrictions: &AttemptRestrictions,
         qualification: plurx_core::transcode::ArtifactQualification,
+        macos_context: Option<&plurx_core::transcode::MacosProcessingContext>,
     ) -> Result<ResolvedTranscode, String> {
         // Recheck the same contract against the facts actually used by this
         // plan. A stale catalogue preview cannot admit a different held source
@@ -319,8 +395,12 @@ impl TranscodeManager {
         )
         .map_err(|error| format!("decoder capability snapshot is invalid: {error}"))?;
         let compatibility = std::env::var("PLURX_HWDECODE").ok();
-        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
-            .qualifying_artifacts(qualification);
+        let mut policy =
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
+                .qualifying_artifacts(qualification);
+        if let Some(context) = macos_context {
+            policy = policy.with_macos_processing(context.clone());
+        }
         let request = TranscodeRequest::new(
             encoder,
             TranscodeMediaOptions::from_options_with_facts(file, options, facts),
@@ -336,6 +416,10 @@ impl TranscodeManager {
         };
         transcode::resolve_transcode(&request, facts, &capabilities, &policy, restrictions)
             .map(|plan| {
+                if let Some(selection) = plan.macos_processing_selection() {
+                    tracing::debug!(target: "plurxd::transcode", selection = selection.name(),
+                        pipeline = plan.options().pipeline.name(), "resolved Mac processing for new movie plan");
+                }
                 let frame_rate = facts.frame_rate();
                 let cadence = (frame_rate.provenance() != transcode::FrameRateProvenance::Variable)
                     .then(|| frame_rate.value())

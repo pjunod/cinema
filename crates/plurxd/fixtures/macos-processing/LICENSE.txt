@@ -1,0 +1,15 @@
+Synthetic macOS processing smoke media and pattern descriptions
+
+To the extent possible under law, the plurx contributors have waived all
+copyright and related or neighboring rights to the synthetic media files
+and their algorithmic pattern descriptions under CC0 1.0 Universal.
+SPDX-License-Identifier: CC0-1.0
+https://creativecommons.org/publicdomain/zero/1.0/
+
+These files contain only algorithmically generated RGB patches, with no
+external pictures, footage, music, fonts or private movie bytes. The script
+itself retains the repository's source-code license. FFmpeg and x265 are
+generation tools; their executable code is not incorporated into the media.
+Codec patent obligations, if applicable, are separate from these content
+redistribution terms. These patterns contain no Dolby Vision RPU or Dolby
+Vision mastering and must not be relabeled to claim Profile 5 coverage.

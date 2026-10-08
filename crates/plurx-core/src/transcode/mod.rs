@@ -19,6 +19,7 @@ pub mod dvconvert;
 mod encoder;
 pub mod health;
 pub mod hevc_census;
+mod macos;
 pub mod manifest;
 mod pipeline;
 pub mod progress;
@@ -33,10 +34,10 @@ pub use decode::{
     DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason,
     DecodeSourceIdentity, DecodeSurfaceContract, Deinterlace, DynamicRangeClass, FrameDomain,
     FrameRate, FrameRateProvenance, InterlaceVerdict, NormalizedGeometry, OutputBandwidth,
-    OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract, Rational, ResolvedDecode,
-    ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering,
-    ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest, VideoSampleEnvelope,
-    HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
+    OutputMetadataPolicy, OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract,
+    Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
+    SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
+    VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{
@@ -44,6 +45,10 @@ pub use encoder::{
     validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
     OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
     VideoCodec,
+};
+pub use macos::{
+    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
+    MacosProcessingSelection, MACOS_PROCESSING_GRAPH_REVISION,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
@@ -1258,7 +1263,23 @@ fn video_filters_for_contract(
         chain.push("format=yuv420p".to_owned());
     }
 
+    if output_metadata_policy_for(opts.pipeline, opts.tone_map, input_is_hdr).is_some() {
+        // zscale/tonemap consume these HDR facts but preserve AVFrame/link
+        // side data. Remove only the consumed static HDR types at the actual
+        // SDR boundary; caption and unrelated presentation data remain intact.
+        chain.push("sidedata=mode=delete:type=MASTERING_DISPLAY_METADATA".to_owned());
+        chain.push("sidedata=mode=delete:type=CONTENT_LIGHT_LEVEL".to_owned());
+    }
     with_subtitles(chain, opts, source_path)
+}
+
+fn output_metadata_policy_for(
+    pipeline: Pipeline,
+    tone_map: ToneMap,
+    input_is_hdr: bool,
+) -> Option<OutputMetadataPolicy> {
+    (pipeline == Pipeline::Cpu && tone_map == ToneMap::Zscale && input_is_hdr)
+        .then_some(OutputMetadataPolicy::ConsumedHdrStaticV1)
 }
 
 /// Subtitle burn-in, last, so subs render at output resolution in the output
@@ -1693,11 +1714,13 @@ fn hls_args_inner(
     let (decode_args, hwdownload) = if let Some(plan) = plan {
         let decode = plan.decode();
         let mut args = decode.backend().input_args(
-            decode.surface().decode_domain() == FrameDomain::Cuda
-                || matches!(
-                    decode.backend(),
-                    DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request
-                ),
+            matches!(
+                decode.surface().decode_domain(),
+                FrameDomain::Cuda | FrameDomain::VideoToolbox
+            ) || matches!(
+                decode.backend(),
+                DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request
+            ),
         );
         if decode.backend() == DecodeBackend::Software {
             if let Some(implementation) = decode.software_decoder() {
@@ -1904,6 +1927,22 @@ fn hls_args_inner(
         opts.force_idr,
         opts.software_threads,
     ));
+    if plan.is_some_and(|plan| plan.macos_processing_identity().is_some()) {
+        // The processing contract ends in hardware H.264 and explicit SDR
+        // signaling. Both rolling and immutable VOD consume this same recipe.
+        args.extend([
+            "-allow_sw".into(),
+            "0".into(),
+            "-color_primaries".into(),
+            "bt709".into(),
+            "-color_trc".into(),
+            "bt709".into(),
+            "-colorspace".into(),
+            "bt709".into(),
+            "-color_range".into(),
+            "tv".into(),
+        ]);
+    }
     if let Some(proof) = plan.and_then(|plan| plan.output_contract().sdr_avc()) {
         args.extend(proof.flags());
     }
