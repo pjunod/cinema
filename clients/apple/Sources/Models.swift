@@ -969,6 +969,7 @@ struct PlaybackSessionStatus: Codable {
     var speed: Double?
     var recentSpeed: Double?
     var outTimeMs: Int?
+    var playlistReady: Bool?
     var progressIdleMs: Int?
     var startupState: String?
     var startupRemainingMs: Int?

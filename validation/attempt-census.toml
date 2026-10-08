@@ -114,6 +114,7 @@ autoBoundaryReplanCurrent = { function = "tickDisplayAwareAuto", scopes = ["life
 nativeSeekCompletion = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
 nativeSeekAfterSelection = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
 recoveryEvidencePoll = { function = "startRecoveryEvidencePoll", scopes = ["open"] }
+recoveryEvidenceAfterStagedPoll = { function = "startRecoveryEvidencePoll", scopes = ["open"] }
 autoInitialLayout = { function = "load", scopes = ["initialDecision"] }
 autoCatalogRefresh = { function = "refreshAutoCatalogForViewerRecipe", scopes = ["lifecycle", "viewerAction"] }
 autoQualityOffer = { function = "tickDisplayAwareAuto", scopes = ["lifecycle", "viewerAction"] }

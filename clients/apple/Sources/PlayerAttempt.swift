@@ -181,6 +181,8 @@ enum AttemptFence: String, CaseIterable, Sendable {
     /// `startRecoveryEvidencePoll`: one attachment's status stream. A viewer
     /// Pause does not end the poll; session identity is checked beside it.
     case recoveryEvidencePoll = "recovery_evidence_poll"
+    /// Recheck the same open after awaiting optional staged-session telemetry.
+    case recoveryEvidenceAfterStagedPoll = "recovery_evidence_after_staged_poll"
     /// A mounted display may arrive while the initial decision is waiting.
     case autoInitialLayout = "auto_initial_layout"
     /// A catalog refresh belongs to this title and viewer's recipe choice.
@@ -221,6 +223,7 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .nativeSeekCompletion: return [.open, .viewerAction, .seek]
         case .nativeSeekAfterSelection: return [.open, .viewerAction, .seek]
         case .recoveryEvidencePoll: return [.open]
+        case .recoveryEvidenceAfterStagedPoll: return [.open]
         case .autoInitialLayout: return [.initialDecision]
         case .autoCatalogRefresh: return [.lifecycle, .viewerAction]
         case .autoQualityOffer: return [.lifecycle, .viewerAction]
