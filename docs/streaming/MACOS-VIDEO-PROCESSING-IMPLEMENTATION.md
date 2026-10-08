@@ -1,6 +1,6 @@
 # macOS video processing implementation — experiments, contracts and delivery
 
-**Status:** proposed; adversarial review corrections applied, Opus review pending · **Written:**
+**Status:** implementation active; see the [execution ledger](MACOS-VIDEO-PROCESSING-STATUS.md) · **Written:**
 2026-10-07 · **Executes:**
 [the macOS processing proposal](MACOS-VIDEO-PROCESSING-DESIGN.md) ·
 **Source inspected:** `890bca0fc186d00f7b10a379cd7dd2f1a37dc37c`.
@@ -15,11 +15,24 @@ ownership, or change source files to simplify an accelerated graph.
 
 ## 1. Execution order and integration ownership
 
+**Execution amendment, 2026-10-07:** the user has authorized a managed,
+parallel implementation in separate task-owned clones. The
+[status page](MACOS-VIDEO-PROCESSING-STATUS.md#2-user-directed-workflow-and-file-ownership)
+records ownership and the current instruction: proper commits integrated on
+one effort branch, batched main-bound PRs, one adversarial review when a PR
+is ready, then fast-lane validation after addressing findings. Unit suites
+are not run during building; compile/lint and feasibility experiments remain
+available. Retain valid passing checks and rerun failures rather than repeating
+all suites. This amendment supersedes conflicting per-task PR/test/review
+wording below and the earlier instruction against parallel agents. It changes
+execution, not color correctness, metadata, runtime compatibility or evidence
+requirements. Never use the user's checkouts for this work.
+
 Use one `effort/macos-video-processing` integration branch created from the
-current intended main base, with sequential `codex/macos-video-*` task
-branches targeting it. These tasks share planner and argv files; the
-disjoint-file exception does not apply. Do not create or merge branches as
-part of reviewing this document.
+current intended main base, with `codex/macos-video-*` builder branches.
+Parallel work has explicit disjoint file ownership; shared planner and argv
+changes integrate sequentially through the manager. The effort remains the
+integration point; this does not invoke the direct-to-main exception.
 
 Follow [AGENTS.md](../../AGENTS.md) and the current
 [development pipeline](../DEVELOPMENT_PIPELINE.md). Establish the pinned
@@ -47,10 +60,9 @@ release. Do not silently widen the initial scope to get a feature count.
 | E3 | Interlace and Live TV | Live plan/argv/delivery and field/caption tests | M4; independently measured |
 | E4 | HEVC/Main10 output | Encoder, presentation/manifest/cache/cluster contracts and clients | M5; independently measured |
 
-Each implementation task records the actual touched files in its PR. Rebase
-its task branch on the current effort before claiming verification. Changes
-to shared files are integrated sequentially. This plan does not request
-parallel agents.
+Each builder reports actual touched files and commits to the manager.
+Integrate against the current effort before claiming verification. The manager
+records those changes in the batched PR and keeps ownership on the status page.
 
 ### 1.1 Start with experiments, then ship SDR and HDR10
 
