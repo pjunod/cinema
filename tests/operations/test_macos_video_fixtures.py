@@ -42,6 +42,15 @@ class MacosVideoFixturesCase(unittest.TestCase):
             self.assertNotIn("/private/", " ".join(fixture["generation_argv"]))
         self.assertEqual(TOOL["manifest_schema"](), json.loads((CORPUS / "manifest.schema.json").read_text()))
 
+    def test_shared_content_license_is_pinned_and_tampering_is_rejected(self):
+        license_path = self.directory / "LICENSE.txt"
+        self.assertEqual(TOOL["LICENSE"], license_path.read_text())
+        self.assertIn("original algorithmically generated Profile 5 RPU", TOOL["LICENSE"])
+        self.validate()
+        license_path.write_text(license_path.read_text().replace("CC0-1.0", "All rights reserved"))
+        with self.assertRaisesRegex(ValueError, "missing or altered CC0 content license"):
+            self.validate()
+
     def test_corrupt_same_length_fixture_fails_hash_verification(self):
         path = self.directory / "sdr8.mp4"
         data = bytearray(path.read_bytes())
