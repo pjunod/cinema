@@ -35,7 +35,11 @@ delete/new installation. Login rebind is explicit and disables consent per API; 
 silently bind an old consent to a new login.
 
 Transport rotation: explicit Start -> direct verified HTTPS broker claim (ticket Bearer
-only) -> home Confirm. No Cinema credential may go to the broker, no redirects,
+only) -> home Confirm. The authenticated home Start response supplies the ticket
+`broker_origin` and `broker_generation` from trusted operator configuration. Require
+an HTTPS origin without userinfo, path, query or fragment, freeze it with the ticket,
+and verify the single canonical `X-Cinema-Broker-Generation` response header before
+accepting the claim. A push never supplies either trust decision. No Cinema credential may go to the broker, no redirects,
 arbitrary origin from a push or extra payload fields. The OS token never goes to home.
 Missing/unknown issuance does not cause automatic repeated visible notification or
 leaked stale ticket. Token callback can schedule consent-preserving transport renewal
@@ -78,7 +82,14 @@ boot/alarm/WorkManager/START_STICKY restart.
 FCM is independently optional. Add real token rotation/message adapters with a
 documented project/app configuration seam, no checked-in provider secrets or made-up
 credentials. Builds without a configured Firebase app remain usable and show
-provider-unconfigured readiness; no fake ready state. Duplicate opaque IDs must not
+provider-unconfigured readiness; no fake ready state. FCM uses a data-only message
+with HIGH Android priority and bounded TTL, containing only the invitation ID and
+CINEMA_REMOTE_INVITATION category. The native messaging adapter checks the local
+installation, consent, permission and dedupe, then immediately renders a generic
+“A paired screen is ready” notification. Do not add an FCM notification block that
+bypasses these local checks, or await home lookup before displaying it. APNs visible
+alerts already sent to the OS cannot be recalled; taps still reauthenticate.
+Duplicate opaque IDs must not
 create repeated visible notifications. Persist bounded dedupe/cursor per installation,
 advance only through actually processed poll prefix, and fence late messages after
 logout/revocation.
@@ -116,9 +127,11 @@ durable local dedupe survive restart. Build iOS/tvOS and Android production/test
 and run focused cases only. Record provider token, push delivery, Doze/OEM and physical
 notification behavior as unverified until actually exercised.
 
-Official sources checked 2026-10-08: -
-https://developer.android.com/develop/background-work/services/fgs/service-types#connected-device
--
-https://developer.android.com/reference/android/net/ConnectivityManager#requestNetwork(android.net.NetworkRequest,%20android.net.ConnectivityManager.NetworkCallback)
-- https://developer.android.com/reference/android/net/Network#getSocketFactory() -
-https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns
+Official sources checked 2026-10-08:
+
+- https://developer.android.com/develop/background-work/services/fgs/service-types#connected-device
+- https://developer.android.com/reference/android/net/ConnectivityManager#requestNetwork(android.net.NetworkRequest,%20android.net.ConnectivityManager.NetworkCallback)
+- https://developer.android.com/reference/android/net/Network#getSocketFactory()
+- https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns
+- https://firebase.google.com/docs/cloud-messaging/android/receive-messages
+- https://firebase.google.com/docs/cloud-messaging/android-message-priority
