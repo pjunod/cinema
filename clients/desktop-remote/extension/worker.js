@@ -42,10 +42,18 @@ export class DesktopWorker{
       if(!/^https?:\/\//.test(origin))throw new Error("unsupported_origin");
       const allowed=await this.browser.permissions.contains({origins:[origin+"/*"]});fence();
       if(!allowed)throw new Error("origin_not_granted");
-      const results=await this.browser.scripting.executeScript({target:{tabId:tab.id,frameIds:[0]},world:"MAIN",func:installBridge,args:[epoch,this.workerId,generation]});
-      const result=results.find(value=>value.frameId===0);
-      if(result?.documentId)binding={origin,tabId:tab.id,windowId:tab.windowId,documentId:result.documentId,epoch};
-      fence();
+      // An explicit popup Bind closes the popup. Give focus restoration a
+      // bounded setup window; no input or automatic rebind exists in this state.
+      const focusDeadline=this.clock()+500;
+      let result;
+      for(let attempt=0;attempt<11;attempt++){
+        const results=await this.browser.scripting.executeScript({target:{tabId:tab.id,frameIds:[0]},world:"MAIN",func:installBridge,args:[epoch,this.workerId,generation]});
+        result=results.find(value=>value.frameId===0);
+        if(result?.documentId)binding={origin,tabId:tab.id,windowId:tab.windowId,documentId:result.documentId,epoch};
+        fence();
+        if(!result?.result?.focus_pending||this.clock()>=focusDeadline||attempt===10)break;
+        await new Promise(resolve=>setTimeout(resolve,50));fence();
+      }
       if(!result?.result?.ready||result.result.epoch!==epoch||!binding)throw new Error("receiver_unavailable");
       this.binding=binding;
       await this.browser.storage.local.set({origin});fence();

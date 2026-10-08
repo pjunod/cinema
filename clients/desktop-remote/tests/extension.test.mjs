@@ -84,3 +84,13 @@ test("visible background document rejects queued MAIN input at the effect bounda
   assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"unavailable");assert.deepEqual(calls,[]);
   assert.equal(c.CinemaDesktopBridge.probe(credit).ready,false);assert.equal(invoke().ready,false);
 });
+
+test("explicit popup setup waits for focus and remains cancellable without opening native host",async()=>{
+  const f=bindFixture(),original=f.w.browser.scripting.executeScript;let focusCalls=0;
+  f.w.browser.scripting.executeScript=async value=>{
+    if(value.func===installBridge&&++focusCalls===1)return [{frameId:0,documentId:"document-1",result:{ready:false,focus_pending:true}}];
+    return original(value);
+  };
+  const pending=f.w.bind(tab(1)).catch(e=>e.message);await settle();f.permissions[0].resolve(true);await settle();assert.equal(f.ports.length,0);
+  await f.w.unbind();assert.equal(await pending,"binding_superseded");assert.equal(f.ports.length,0);assert.equal(f.w.binding,null);
+});

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // These fixed functions run in MAIN. No string evaluation or page-to-host API.
 export function installBridge(epoch,workerId="development",operation=1){
-  if(document.visibilityState!=="visible"||!document.hasFocus())return {ready:false};
+  if(document.visibilityState!=="visible")return {ready:false};
+  if(!document.hasFocus())return {ready:false,focus_pending:true};
   if(typeof CinemaRemote==="undefined"||typeof TOKEN==="undefined"||!TOKEN||typeof ME==="undefined"||!ME)return {ready:false};
   const previous=globalThis.CinemaDesktopBridge;
   if(previous?.workerId===workerId&&previous.operation>operation)return {ready:false};

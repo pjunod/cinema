@@ -10,7 +10,10 @@ document.getElementById("bind").addEventListener("click",async()=>{
     if(!await chrome.permissions.request({origins:[origin+"/*"]}))throw new Error("Origin permission was declined.");
     const old=await chrome.storage.local.get("origin");
     if(old.origin&&old.origin!==origin)await chrome.permissions.remove({origins:[old.origin+"/*"]});
-    paint(await chrome.runtime.sendMessage({type:"bind"}));
+    // Closing the action popup returns actual document focus to Cinema.
+    // The worker keeps setup alive; reopen this popup to inspect its result.
+    chrome.runtime.sendMessage({type:"bind"}).catch(()=>{});
+    window.close();
   }catch(error){state.textContent=error.message;}
 });
 chrome.runtime.sendMessage({type:"status"}).then(paint);

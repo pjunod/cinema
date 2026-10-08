@@ -11,7 +11,7 @@ test("real Chromium extension targets MAIN document and invalidates local contex
   const manifest=JSON.parse(fs.readFileSync(path.join(extension,"manifest.json")));manifest.host_permissions=["http://cinema.test/*"];
   fs.writeFileSync(path.join(extension,"manifest.json"),JSON.stringify(manifest));
   const workerFile=path.join(extension,"worker.js");
-  fs.writeFileSync(workerFile,fs.readFileSync(workerFile,"utf8").replace('if(typeof chrome!=="undefined")new DesktopWorker(chrome).start();',"globalThis.SmokeDesktopWorker=DesktopWorker;"));
+  fs.writeFileSync(workerFile,fs.readFileSync(workerFile,"utf8").replace('if(typeof chrome!=="undefined")new DesktopWorker(chrome).start();',"globalThis.smokeWorker=new DesktopWorker(chrome);smokeWorker.start();"));
   let context;
   try{
     context=await chromium.launchPersistentContext(path.join(temp,"profile"),{headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE,args:["--disable-extensions-except="+extension,"--load-extension="+extension],viewport:{width:1280,height:800}});
@@ -33,25 +33,48 @@ test("real Chromium extension targets MAIN document and invalidates local contex
       return route.fulfill({contentType:"application/json",body:JSON.stringify(data)});
     });
     await page.goto("http://cinema.test/#/");await page.bringToFront();await page.waitForFunction(()=>typeof CinemaRemote!=="undefined"&&ME&&document.getElementById("main")?.dataset.phase==="settled");
-    const outcome=await worker.evaluate(async()=>{
-      const DesktopWorker=globalThis.SmokeDesktopWorker;
-      const listeners=[],posts=[];
-      const fake={postMessage:message=>posts.push(message),disconnect:()=>{},onMessage:{addListener:fn=>listeners.push(fn)},onDisconnect:{addListener:()=>{}}};
-      const browser={...chrome,runtime:{...chrome.runtime,connectNative:()=>fake}};
-      const w=new DesktopWorker(browser);await chrome.storage.local.set({enabled:true});w.start();await Promise.resolve();w.enabled=true;
-      const tabs=await chrome.tabs.query({url:"http://cinema.test/*"});await w.bind(tabs[0]);
-      globalThis.smokeWorker=w;globalThis.smokePosts=posts;
-      return {bound:!!w.binding,documentId:w.binding.documentId,credit:posts.findLast(m=>m.type==="heartbeat")?.credit,epoch:w.binding.epoch};
+    await worker.evaluate(()=>{
+      globalThis.smokePosts=[];globalThis.smokeNativeListeners=[];
+      chrome.runtime.connectNative=()=>({postMessage:message=>smokePosts.push(message),disconnect:()=>{},onMessage:{addListener:fn=>smokeNativeListeners.push(fn)},onDisconnect:{addListener:()=>{}}});
     });
+    // Exercise the production action popup. Playwright does not expose this
+    // popup as a Page; use its actual CDP target, with native port mocked only.
+    await worker.evaluate(()=>chrome.action.openPopup());
+    const cdp=await context.newCDPSession(page);
+    const targets=await cdp.send("Target.getTargets"),popup=targets.targetInfos.find(t=>t.url.endsWith("/popup.html"));assert.ok(popup);
+    const {sessionId}=await cdp.send("Target.attachToTarget",{targetId:popup.targetId,flatten:false});
+    let command=0;
+    async function popupCall(method,params){
+      const id=++command;
+      const result=new Promise((resolve,reject)=>{
+        const listener=event=>{if(event.sessionId!==sessionId)return;const message=JSON.parse(event.message);if(message.id!==id)return;cdp.off("Target.receivedMessageFromTarget",listener);message.error?reject(new Error(message.error.message)):resolve(message.result);};
+        cdp.on("Target.receivedMessageFromTarget",listener);
+      });
+      await cdp.send("Target.sendMessageToTarget",{sessionId,message:JSON.stringify({id,method,params})});return result;
+    }
+    async function popupClick(id){
+      const rect=await popupCall("Runtime.evaluate",{expression:`(()=>{const r=document.getElementById(${JSON.stringify(id)}).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`,returnByValue:true});
+      const {x,y}=rect.result.value;
+      await popupCall("Input.dispatchMouseEvent",{type:"mousePressed",x,y,button:"left",clickCount:1});
+      // Popup may close after release; this dispatch acknowledges independently.
+      await popupCall("Input.dispatchMouseEvent",{type:"mouseReleased",x,y,button:"left",clickCount:1});
+    }
+    await popupClick("enabled");
+    for(let i=0;i<20&&!await worker.evaluate(()=>smokeWorker.enabled);i++)await page.waitForTimeout(25);
+    assert.equal(await worker.evaluate(()=>smokeWorker.enabled),true);
+    await popupClick("bind");
+    for(let i=0;i<40&&!await worker.evaluate(()=>!!smokeWorker.binding);i++)await page.waitForTimeout(25);
+    const outcome=await worker.evaluate(()=>({bound:!!smokeWorker.binding,documentId:smokeWorker.binding?.documentId,credit:smokePosts.findLast(m=>m.type==="heartbeat")?.credit,epoch:smokeWorker.binding?.epoch}));
+    assert.equal(await page.evaluate(()=>document.hasFocus()),true,"popup closure restores actual Cinema focus");
     assert.equal(outcome.bound,true);assert.ok(outcome.documentId);assert.ok(outcome.credit);
     await page.waitForFunction(()=>globalThis.CinemaDesktopBridge?.epoch);
     const before=await page.evaluate(()=>CinemaRemote.snapshot().context_revision);
-    await worker.evaluate(({credit,epoch})=>smokeWorker.receive({type:"input",key:"right",credit,epoch,sequence:1}),outcome);
+    await worker.evaluate(({credit,epoch})=>smokeNativeListeners[0]({type:"input",key:"right",credit,epoch,sequence:1}),outcome);
     await page.waitForFunction(before=>CinemaRemote.snapshot().context_revision>before,before);
     assert.equal(await worker.evaluate(()=>smokeWorker.lastOutcome),"applied");
     await page.reload();for(let i=0;i<30&&await worker.evaluate(()=>!!smokeWorker.binding);i++)await page.waitForTimeout(100);assert.equal(await worker.evaluate(()=>smokeWorker.binding),null);
     assert.equal(await page.evaluate(()=>!!globalThis.CinemaDesktopBridge),false);
     assert.deepEqual(errors,[]);
-    console.log("real extension/MAIN/document lifecycle PASS; native port injected; fixture permission pregranted");
+    console.log("real production popup/MAIN/document lifecycle PASS; native port injected; fixture permission pregranted");
   }finally{if(context)await context.close();fs.rmSync(temp,{recursive:true,force:true});}
 });
