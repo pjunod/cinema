@@ -77,7 +77,7 @@ class PiRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             prefix = Path(temporary)
             destination = prefix / runtime.RUNTIME_NAME
-            paths = [destination / "bin/ffmpeg", destination / "bin/ffprobe", destination / "lib/libplacebo.so.349"]
+            paths = [destination / "bin/ffmpeg", destination / "bin/ffprobe", destination / "lib/libplacebo.so.360"]
             for path in paths:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("original runtime artifact")

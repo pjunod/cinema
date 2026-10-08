@@ -28,9 +28,9 @@ RUN printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian
        libdrm-amdgpu1=2.4.123-1~bpo12+1 libdrm-common=2.4.123-1~bpo12+1 libvulkan1 \
     && chmod 0755 /usr/bin/bwrap \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=pi-ffmpeg-build /opt/plurx-runtime/ffmpeg-8.1.3-pi-640f29a74af4d121 /opt/plurx-runtime/ffmpeg-8.1.3-pi-640f29a74af4d121
-ENV PLURX_FFMPEG=/opt/plurx-runtime/ffmpeg-8.1.3-pi-640f29a74af4d121/bin/ffmpeg \
-    PLURX_FFPROBE=/opt/plurx-runtime/ffmpeg-8.1.3-pi-640f29a74af4d121/bin/ffprobe \
+COPY --from=pi-ffmpeg-build /opt/plurx-runtime/ffmpeg-8.1.3-pi-a1ee2f3e25c8801b /opt/plurx-runtime/ffmpeg-8.1.3-pi-a1ee2f3e25c8801b
+ENV PLURX_FFMPEG=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a1ee2f3e25c8801b/bin/ffmpeg \
+    PLURX_FFPROBE=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a1ee2f3e25c8801b/bin/ffprobe \
     VK_DRIVER_FILES=/usr/share/vulkan/icd.d/broadcom_icd.json
 COPY deploy/pi-runtime-assets/MOBY-LICENSE deploy/pi-runtime-assets/MOBY-NOTICE /usr/share/doc/plurx-pi-sandbox/
 USER plurx
