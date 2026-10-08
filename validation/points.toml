@@ -890,6 +890,7 @@ paths = [
   "scripts/playback-lab",
   "scripts/playback-frame-clock.js",
   "scripts/continuous-quality-qualification",
+  "scripts/continuous-quality-lifecycle",
   "scripts/continuous-quality-lab.mjs",
   "scripts/audio-downmix-qualification/**",
   "tests/fixtures/audio-downmix/**",
