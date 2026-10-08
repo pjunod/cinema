@@ -54,6 +54,66 @@ struct LogicalProduction {
 }
 
 impl LogicalOutput {
+    /// Debug-only equality projection. Never expose paths, encoder arguments,
+    /// source identities or audio claims from this private matching contract.
+    pub(super) fn comparison(&self, requested: &Self) -> serde_json::Value {
+        let mut fields = serde_json::Map::new();
+        macro_rules! compare {
+            ($($field:ident),+ $(,)?) => {$(
+                fields.insert(stringify!($field).into(), (self.$field == requested.$field).into());
+            )+};
+        }
+        compare!(
+            version,
+            file_id,
+            kind,
+            audio_index,
+            audio_offset_ms,
+            subtitle_burn,
+            hdr10,
+            copy_video_args,
+            audio_claim,
+            audio_delivery,
+            candidate,
+            owner_node_id,
+            production
+        );
+        if let Some((actual, requested)) = self.candidate.as_ref().zip(requested.candidate.as_ref())
+        {
+            fields.insert(
+                "candidate_fields".into(),
+                serde_json::json!({
+                    "id": actual.id == requested.id,
+                    "digest": actual.digest == requested.digest,
+                    "geometry": actual.geometry == requested.geometry,
+                    "grade": actual.grade == requested.grade,
+                    "profile": actual.profile == requested.profile,
+                }),
+            );
+        }
+        if let Some((actual, requested)) =
+            self.production.as_ref().zip(requested.production.as_ref())
+        {
+            let differing_positions: Vec<usize> = (0..actual.args.len().max(requested.args.len()))
+                .filter(|&index| actual.args.get(index) != requested.args.get(index))
+                .take(32)
+                .collect();
+            fields.insert(
+                "production_fields".into(),
+                serde_json::json!({
+                    "plan": actual.plan == requested.plan,
+                    "executable": actual.executable == requested.executable,
+                    "build": actual.build == requested.build,
+                    "subtitle": actual.subtitle == requested.subtitle,
+                    "args": actual.args == requested.args,
+                    "actual_arg_count": actual.args.len(),
+                    "requested_arg_count": requested.args.len(),
+                    "differing_arg_positions_first32": differing_positions,
+                }),
+            );
+        }
+        serde_json::Value::Object(fields)
+    }
     pub(super) fn resolve(
         request: &SessionRequest,
         encoding: Option<&crate::vodencode::Encoding>,

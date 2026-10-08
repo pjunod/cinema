@@ -995,6 +995,50 @@ impl RetainedArtifactRegistry {
         incoming_file: &MediaFile,
         request: &SessionRequest,
     ) -> Option<Arc<RetainedVodArtifact>> {
+        if tracing::enabled!(target: "plurxd::retained_reuse", tracing::Level::DEBUG) {
+            tracing::debug!(target: "plurxd::retained_reuse",
+                context_present = request.candidate_context.is_some(),
+                binding_present = rendition.recipe.measured_candidate.is_some(),
+                incoming_logical_present = incoming_logical.is_some(),
+                request_audio_present = request.audio_delivery.is_some(),
+                recipe_audio_present = rendition.recipe.audio_delivery.is_some(),
+                request_audio_valid = request.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                recipe_audio_valid = rendition.recipe.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                audio_identity_matches = request.audio_delivery.as_ref().zip(rendition.recipe.audio_delivery.as_ref())
+                    .is_some_and(|(r, a)| r.byte_identity() == a.byte_identity()),
+                "Prepared candidate acquisition prerequisites");
+            if let Some((context, binding)) = request
+                .candidate_context
+                .as_ref()
+                .zip(rendition.recipe.measured_candidate.as_ref())
+            {
+                let candidate = &context.selected_candidate;
+                let matches = serde_json::json!({
+                    "presentation_vod": request.presentation == crate::transcode::Presentation::Vod,
+                    "candidate_identity": candidate.identity_matches(),
+                    "decoder_compatible": candidate.decoder_compatible,
+                    "candidate_id": candidate.id == context.candidate_id,
+                    "candidate_recipe": candidate.recipe_digest == context.recipe_digest,
+                    "candidate_geometry": candidate.normalized_geometry == context.normalized_geometry,
+                    "candidate_grade": candidate.grade == context.grade,
+                    "binding_id": binding.candidate_id == context.candidate_id,
+                    "binding_recipe": binding.recipe_digest == context.recipe_digest,
+                    "binding_geometry": binding.normalized_geometry == context.normalized_geometry,
+                    "binding_profile": binding.profile == context.profile,
+                    "binding_grade": binding.grade == context.grade,
+                    "binding_route": binding.route == candidate.route,
+                    "binding_kind": binding.kind == request.kind,
+                    "binding_request_file": binding.file_id == request.file_id,
+                    "binding_incoming_file": binding.file_id == incoming_file.id,
+                    "binding_audio_index": binding.audio_index == request.audio_index,
+                    "binding_request_audio_offset": binding.audio_offset_ms == request.audio_offset_ms,
+                    "binding_incoming_audio_offset": binding.audio_offset_ms == incoming_file.audio_offset_ms,
+                    "binding_subtitle": binding.subtitle_burn == request.subtitle_burn,
+                });
+                tracing::debug!(target: "plurxd::retained_reuse", request_binding_fields = %matches,
+                    "Prepared candidate acquisition request comparisons");
+            }
+        }
         let context = request.candidate_context.as_ref()?;
         let binding = rendition.recipe.measured_candidate.as_ref()?;
         let candidate = &context.selected_candidate;
@@ -1045,11 +1089,17 @@ impl RetainedArtifactRegistry {
         candidate: Option<&RetainedCandidateBinding>,
     ) -> Option<Arc<RetainedVodArtifact>> {
         if incoming_logical.is_none() {
+            tracing::debug!(target: "plurxd::retained_reuse",
+                incoming_logical_present = false,
+                "Prepared retained output acquisition unavailable");
             return None;
         }
         let (executable_digest, engine_digest) = match &rendition.recipe.encoding {
             Some(encoding) => {
                 if !recipe_engine_is_current(&rendition.recipe).await {
+                    tracing::debug!(target: "plurxd::retained_reuse",
+                        recipe_engine_current = false,
+                        "Prepared retained output acquisition unavailable");
                     return None;
                 }
                 (
@@ -1063,12 +1113,63 @@ impl RetainedArtifactRegistry {
                 (executable.digest, engine.digest)
             }
         };
-        let source_metadata = manual_source_metadata(incoming_file)?;
+        let Some(source_metadata) = manual_source_metadata(incoming_file) else {
+            tracing::debug!(target: "plurxd::retained_reuse",
+                source_metadata_available = false,
+                "Prepared retained output acquisition unavailable");
+            return None;
+        };
         let facts = {
             // Registry is capped at MAX_ARTIFACTS. Keep no lock over awaits.
             let state = self.state.lock().expect("retained registry lock");
             state.entries.values().find_map(|entry| {
                 let artifact = &entry.artifact;
+                // Emit only bounded equality facts for a relevant retained
+                // candidate. The authoritative predicate below stays separate.
+                if tracing::enabled!(target: "plurxd::retained_reuse", tracing::Level::DEBUG)
+                    && artifact.candidate.as_ref().zip(candidate).is_some_and(|(actual, requested)| {
+                        actual.candidate_id == requested.candidate_id
+                    })
+                {
+                    let origin = artifact.private_preparation_origin.get();
+                    let actual = artifact.candidate.as_ref().expect("matched candidate");
+                    let requested = candidate.expect("matched candidate");
+                    let binding = serde_json::json!({
+                        "kind": actual.kind == requested.kind,
+                        "normalized_geometry": actual.normalized_geometry == requested.normalized_geometry,
+                        "profile": actual.profile == requested.profile,
+                        "candidate_id": actual.candidate_id == requested.candidate_id,
+                        "recipe_digest": actual.recipe_digest == requested.recipe_digest,
+                        "file_id": actual.file_id == requested.file_id,
+                        "audio_index": actual.audio_index == requested.audio_index,
+                        "audio_offset_ms": actual.audio_offset_ms == requested.audio_offset_ms,
+                        "subtitle_burn": actual.subtitle_burn == requested.subtitle_burn,
+                        "grade": actual.grade == requested.grade,
+                        "route": actual.route == requested.route,
+                    });
+                    let logical = artifact.logical.as_ref().zip(incoming_logical.as_ref())
+                        .map(|(actual, requested)| actual.comparison(requested));
+                    tracing::debug!(target: "plurxd::retained_reuse",
+                        origin_present = origin.is_some(),
+                        origin_artifact_matches = origin.is_some_and(|o| o.artifact_id == artifact.id),
+                        executable_matches = origin.is_some_and(|o| o.executable == executable_digest),
+                        engine_matches = origin.is_some_and(|o| o.engine == engine_digest),
+                        source_metadata_matches = origin.is_some_and(|o| o.source_metadata == source_metadata),
+                        candidate_matches = artifact.candidate.as_ref() == candidate,
+                        actual_audio_valid = artifact.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                        requested_audio_valid = rendition.recipe.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                        audio_identity_matches = artifact.audio_delivery.as_ref().zip(rendition.recipe.audio_delivery.as_ref())
+                            .is_some_and(|(a, r)| a.byte_identity() == r.byte_identity()),
+                        validated = artifact.validated.load(Acquire),
+                        logical_matches = artifact.logical == *incoming_logical,
+                        playlist_matches = artifact.observation.preimage.playlist == rendition.playlist,
+                        source_present = rendition.source.is_some(),
+                        source_unchanged = rendition.source.as_ref().is_some_and(|s| s.unchanged()),
+                        source_version_matches = rendition.source.as_ref().is_some_and(|s| s.object_version() == artifact.source_version),
+                        candidate_fields = %binding,
+                        logical_fields = ?logical,
+                        "Prepared retained output acquisition comparison");
+                }
                 let origin = artifact.private_preparation_origin.get()?;
                 (origin.artifact_id == artifact.id
                     && origin.executable == executable_digest
