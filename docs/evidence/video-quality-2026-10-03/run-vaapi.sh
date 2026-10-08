@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "$#" -gt 2 ]; then
+ echo 'Usage: run-vaapi.sh [RECIPE] [continuous-pq-ramp|original-sharp-panels]' >&2
+ exit 2
+fi
+signal=${2-continuous-pq-ramp}
+case "$signal" in
+ continuous-pq-ramp|original-sharp-panels) ;;
+ *) echo 'Unsupported diagnostic signal; no qualification started' >&2; exit 2 ;;
+esac
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 recipe=${1:-"$script_dir/vaapi-recipe.json"}
 # Each invocation owns a private path; historical receipts are never overwritten.
@@ -132,6 +141,6 @@ container_id=$(docker run --detach --rm --cidfile "$root/container.id" --name "$
  done
 ) &
 watcher=$!
-timeout --kill-after=5 200 python3 qualify-vaapi.py "$root" "$container_id"
+timeout --kill-after=5 200 python3 qualify-vaapi.py "$root" "$container_id" "$signal"
 test ! -e aborted.txt
 idle
