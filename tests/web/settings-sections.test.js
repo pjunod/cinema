@@ -1876,3 +1876,35 @@ test("DV preference saves roundtrip either choice and preserve advisory failures
     }
   }
 });
+
+
+test("DV preference responses preserve newer edits and replacement cards", async () => {
+  for(const [name,cardName,field,id] of [
+    ["saveDolbyVisionHdrProcessing","dolbyVisionHdrProcessingCard","dolby_vision_hdr_processing","dv-hdr-processing"],
+    ["saveDolbyVisionFelReencode","dolbyVisionFelReencodeCard","dolby_vision_fel_reencode","dv-fel-reencode"]
+  ]) {
+    for(const change of ["edit","replace","leave"]) {
+      const card={dataset:{revision:"1"},outerHTML:"unsaved"};
+      const replacement={dataset:{revision:"0"},outerHTML:"new page"};
+      const nodes={[id]:{checked:true},[`${id}-error`]:{textContent:""},[`${id}-card`]:card};
+      let resolve,requested,cached;
+      const pending=new Promise(done=>{resolve=done;});
+      const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
+        `${shippedSource(name)} return ${name};`)(
+        {getElementById:key=>nodes[key]},
+        (_path,request)=>{requested=request.body;return pending;},
+        value=>{cached=value;return value;},()=>"saved:true",{},()=>{});
+      const button={disabled:false};const work=save(button);
+      assert.deepEqual(requested,{[field]:true});
+      if(change==="edit"){nodes[id].checked=false;card.dataset.revision="2";}
+      if(change==="replace")nodes[`${id}-card`]=replacement;
+      if(change==="leave")nodes[`${id}-card`]=null;
+      resolve({[field]:true});await work;
+      assert.equal(cached[field],true,"the confirmed write refreshes shared settings");
+      assert.equal(card.outerHTML,"unsaved","an earlier reply cannot erase a newer draft");
+      assert.equal(replacement.outerHTML,"new page","a reply cannot repaint a replacement card");
+      if(change==="edit")assert.equal(nodes[id].checked,false);
+      assert.equal(button.disabled,false);
+    }
+  }
+});

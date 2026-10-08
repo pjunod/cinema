@@ -45,7 +45,7 @@ DV-off validation. Current playback keeps its compatible fallback.
 | M1 typed contracts | Merged in #933: 25 focused and six compatibility tests passed; production registry empty | Runtime integration and qualification in M2/M3 |
 | M2 processing and lifecycle | In progress: combined bounded P7/FEL to timestamped HDR10 helper | Actual Main10 encoder, integrated graph, bounded ownership and output evidence |
 | M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
-| M4 settings and HDR10-E badge | Not started | M3 reporting; actual processing evidence on each client |
+| M4 settings and HDR10-E badge | Settings built and reviewed: two default-off preferences persist independently with advisory Developer cards; receipt-backed client presentation in progress | Settings task landing; effective-generation reporting, runtime integration and route qualification |
 | M5 quality and performance | Not started; M0 supplies the measurement foundation | Held-out corpus, matched bitrate, physical playback and full graph performance |
 | M6 release qualification | Not started | Exact-tree gates and separate acceptance for each proposed route |
 
@@ -300,3 +300,28 @@ runs above are historical evidence, not instructions to repeat them. Windows
 validation remains waived for this effort. No merge-coordinator handoff is
 authorized. This effort-specific user instruction supersedes the normal
 per-task dispatch requirement without changing global CI policy.
+
+
+## 10. Independent processing preferences
+
+The settings slice persists `playback.dolby_vision_hdr_processing` and
+`playback.dolby_vision_fel_reencode`; the API exposes the same names without
+the `playback.` prefix. Both default off and save independently in Developer.
+Unmet or unavailable readiness does not reject or rewrite a saved choice.
+FEL preference does not enable the existing conversion permission. Native
+DV, running playback, compatible fallback and output labels are unchanged
+by this settings slice. Each control graduates separately to Playback.
+
+The focused API controls cover independent roundtrips, admin authorization,
+conversion permission and Live TV compare-and-swap separation. The existing
+readiness census was corrected to include the already-present Mac card.
+Adversarial review found that an earlier Save reply could overwrite a newer
+unsaved edit; card identity and revision now fence the response. A deferred
+response regression covers later edits, replacement cards and navigation for
+both controls. Three focused daemon checks and 55 settings web checks passed;
+no broad suite or per-task CI was dispatched.
+
+The preceding reuse slice merged as PR #935 at
+`c76632e63d179da2402bf8d31c6c3eadea6503b5`. Its original approved bundle is
+unchanged; a verified prerequisite archive is additionally preserved outside
+temporary scratch in the local Codex artifact directory.

@@ -755,10 +755,14 @@ function dolbyVisionHdrProcessingCard(settings,readiness){
     <div class="err" id="dv-hdr-processing-error" role="alert"></div>${setCardFoot("saveDolbyVisionHdrProcessing")}`,{id:"dv-hdr-processing-card"});
 }
 async function saveDolbyVisionHdrProcessing(btn){
+  const card=document.getElementById("dv-hdr-processing-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
   const err=document.getElementById("dv-hdr-processing-error");if(err)err.textContent="";if(btn)btn.disabled=true;
   try{
     const saved=cacheSettings(await api("/settings",{method:"PUT",body:{dolby_vision_hdr_processing:(/** @type {HTMLInputElement} */ (document.getElementById("dv-hdr-processing"))).checked}}));
-    const card=document.getElementById("dv-hdr-processing-card");if(card)card.outerHTML=dolbyVisionHdrProcessingCard(saved,DEVELOPER_READINESS);
+    if(!card||document.getElementById("dv-hdr-processing-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=dolbyVisionHdrProcessingCard(saved,DEVELOPER_READINESS);
     toast("Dolby Vision HDR preference saved; applies to new playback decisions when qualified");
   }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
 }
@@ -774,10 +778,14 @@ function dolbyVisionFelReencodeCard(settings,readiness){
     <div class="err" id="dv-fel-reencode-error" role="alert"></div>${setCardFoot("saveDolbyVisionFelReencode")}`,{id:"dv-fel-reencode-card"});
 }
 async function saveDolbyVisionFelReencode(btn){
+  const card=document.getElementById("dv-fel-reencode-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
   const err=document.getElementById("dv-fel-reencode-error");if(err)err.textContent="";if(btn)btn.disabled=true;
   try{
     const saved=cacheSettings(await api("/settings",{method:"PUT",body:{dolby_vision_fel_reencode:(/** @type {HTMLInputElement} */ (document.getElementById("dv-fel-reencode"))).checked}}));
-    const card=document.getElementById("dv-fel-reencode-card");if(card)card.outerHTML=dolbyVisionFelReencodeCard(saved,DEVELOPER_READINESS);
+    if(!card||document.getElementById("dv-fel-reencode-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=dolbyVisionFelReencodeCard(saved,DEVELOPER_READINESS);
     toast("FEL preservation preference saved; applies to new playback decisions when qualified");
   }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
 }
