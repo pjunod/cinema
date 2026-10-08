@@ -79,3 +79,6 @@ and generation rules, and tooling reuse boundaries suitable for a documentation
 merge. Local link/index inspection and diff hygiene cover the additions; no
 unit tests were run for this docs update. Earlier test results in section 3
 remain historical results from before the user's no-unit-test instruction.
+
+The reviewer verified the A01 correction and explicitly approved the expanded
+documentation-only merge with no remaining findings.
