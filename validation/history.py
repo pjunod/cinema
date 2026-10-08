@@ -1221,12 +1221,20 @@ def _write_report(path: Path, report: HistoryReport) -> None:
 def authenticated_history_baseline(environment: dict[str, str], root: Path) -> str | None:
     """Inputs select authentication; they never authorize a baseline themselves."""
     fields = ("PLURX_PROMOTION_PR", "PLURX_PROMOTION_HEAD_SHA", "PLURX_PROMOTION_BASE_SHA")
-    if not any(environment.get(field) for field in fields):
+    effort_task = environment.get("PLURX_HISTORY_CONTEXT") == "effort-task"
+    if not effort_task and not any(environment.get(field) for field in fields):
         return None
-    from validation.qualification import QualificationError, resolve_manual_binding
+    from validation.qualification import (
+        QualificationError, resolve_effort_history_binding, resolve_manual_binding,
+    )
 
     try:
-        binding = resolve_manual_binding(environment, root)
+        if effort_task:
+            if any(environment.get(field) for field in fields):
+                raise QualificationError("ambiguous history context")
+            binding = resolve_effort_history_binding(environment, root)
+        else:
+            binding = resolve_manual_binding(environment, root)
     except QualificationError as exc:
         raise HistoryError("authenticated promotion history binding refused") from exc
     return str(binding["base_sha"])
