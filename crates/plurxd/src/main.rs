@@ -40,6 +40,7 @@ mod library_search;
 mod live_tv;
 mod live_tv_delivery;
 mod logbuf;
+mod macos_video;
 mod manifest_cache;
 mod media_pool;
 mod media_sessions;
@@ -2166,6 +2167,7 @@ async fn boot_observing(
     // Recovery authorization changes no artifact identity, but it still has
     // to be published before the listener accepts the first session.
     state.transcode.publish_automatic_decoder_recovery().await;
+    state.transcode.publish_macos_video_processing().await;
     // One bounded telemetry writer owns all node-local event persistence.
     // Register it before the listener can accept the first producer.
     crate::telemetry::initialize(Arc::clone(&state.store))
@@ -3282,6 +3284,15 @@ fn spawn_background_loops(
     // become the public leader before a failover actually happens.
     tokio::spawn(crate::http::images::materialize_loop(state.clone()));
     tokio::spawn(std::sync::Arc::clone(&state.transcode).rate_control_refresh_loop());
+    // Compatibility probing stays off startup and session creation. A restart
+    // owns one generation; an explicit admin reprobe uses this same owner.
+    tokio::spawn({
+        let manager = Arc::clone(&state.transcode);
+        let cancelled = background_shutdown.clone();
+        async move {
+            manager.reprobe_macos_video(&cancelled).await;
+        }
+    });
     tokio::spawn(std::sync::Arc::clone(&state.transcode).scratch_space_loop());
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv).scratch_sweep_loop(background_shutdown.clone()),

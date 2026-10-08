@@ -1025,7 +1025,9 @@ pub fn vod_pipe_args_with_reorder(
     );
     // Use the same explicit even raster for CPU scale, GPU/bitmap scale,
     // identity and HLS facts; -2's independent aspect rounding can differ.
-    let raster = if plan.output_contract().normalized_geometry().is_some() {
+    let raster = if plan.output_contract().normalized_geometry().is_some()
+        || plan.macos_processing_identity().is_some()
+    {
         plan.output_contract()
             .effective_width()
             .zip(plan.output_contract().effective_height())

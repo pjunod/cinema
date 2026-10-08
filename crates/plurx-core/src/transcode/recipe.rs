@@ -535,9 +535,21 @@ mod tests {
     #[test]
     fn planned_v4_recipe_hash_is_a_golden_fixture() {
         let (d, f, o) = (digest(), media(), TranscodeOptions::default());
-        assert_eq!(
-            hash_of(&d, &f, &o, Encoder::Software, false),
+        let corrected = plan(&f, &o, Encoder::Software);
+        // This fixture is HDR10 through the CPU zscale SDR mapper. The
+        // consumed-static-metadata correction intentionally rotates its key;
+        // the published golden is therefore a forbidden stale-output key.
+        assert_ne!(
+            Recipe::new(&d, &corrected, false).hash(),
             "d42efd6bd1f7bd3c769b498f32d0f5ebcb0892e2d52957663c670d53503405de"
+        );
+        assert_eq!(
+            Recipe::new(&d, &corrected, false).hash(),
+            hash_of(&d, &f, &o, Encoder::Software, false)
+        );
+        assert_eq!(
+            corrected.output_metadata_policy(),
+            Some(super::super::OutputMetadataPolicy::ConsumedHdrStaticV1)
         );
     }
 
@@ -573,7 +585,8 @@ mod tests {
             Recipe::new(&d, &sdr, false).hash(),
             Recipe::new(&d, &hdr, false).hash()
         );
-        assert_eq!(
+        assert_eq!(hdr.output_metadata_policy(), None);
+        assert_ne!(
             Recipe::new(&d, &sdr, false).hash(),
             "d42efd6bd1f7bd3c769b498f32d0f5ebcb0892e2d52957663c670d53503405de"
         );

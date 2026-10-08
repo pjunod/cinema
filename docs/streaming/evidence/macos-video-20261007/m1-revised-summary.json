@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "kind": "m1_revised_experiment_summary",
+  "source_commit": "0cd06e92bff54fca417afdf7b52f7a1262da2cc9",
+  "harness_sha256": "e1fd426eae0989b26b3708a2a0689d9f26f95449599953b3b1dab7a5d095eefc",
+  "receipt": "/experiment/harness-evidence/revised-hdr-sustained/receipt.json",
+  "normalized_graphs": "/experiment/harness-evidence/revised-hdr-graphs.json",
+  "corpus": "/experiment/macos-fixture-sustained/manifest.json",
+  "graph_results": {
+    "cpu_hdr10_metadata_corrected_1080": {
+      "samples": 5,
+      "successful_output_contracts": 5,
+      "frame_counts": [
+        1440
+      ],
+      "median_throughput_x": 9.341174669484678,
+      "median_wall_seconds": 6.423175042000366,
+      "median_cpu_seconds_per_media_second": 0.8669797666666665,
+      "steady_window_samples": 4,
+      "steady_window_throughput_x": [
+        9.73304761998857,
+        8.377809354810466,
+        8.434500159118885,
+        10.192628198829773
+      ]
+    },
+    "vt_hdr10_scale_before_tone_1080": {
+      "samples": 5,
+      "successful_output_contracts": 5,
+      "frame_counts": [
+        1440
+      ],
+      "median_throughput_x": 9.485069226481293,
+      "median_wall_seconds": 6.325731375000032,
+      "median_cpu_seconds_per_media_second": 0.022609433333333023,
+      "steady_window_samples": 5,
+      "steady_window_throughput_x": [
+        10.049759649994588,
+        9.911397645600747,
+        10.043648286282071,
+        10.000581671546916,
+        10.077587513031588
+      ]
+    }
+  },
+  "limitations": [
+    "Source-reconstructed baseline WITH proposed versioned consumedMDCV/CLL cleanup, not deployedgraph",
+    "CPUHable and MetalBT2390/ITP differ; no visual/tonalqualityqualification",
+    "Synthetic simpleanalytic60s2160p24 HDRsource, video-onlyMP4, oneAppleSiliconhost, no client/daemon/concurrency/startup/soak",
+    "HEVC hardware reconstruction versus VT softwarefallback unproved; no energy/copy/RPU instrumentation",
+    "Original invalid unequal-work HDR receipts retained untouched"
+  ],
+  "decision": "Synthetic CPU-feasibility go only; no promotion or visual approval",
+  "pairs": [
+    {
+      "pair_id": "hdr2160p24:warm_process:1",
+      "throughput_ratio": 1.0213650098721534,
+      "cpu_ratio": 0.02557898986723756,
+      "both_output_contracts_valid": true
+    },
+    {
+      "pair_id": "hdr2160p24:warm_process:2",
+      "throughput_ratio": 1.1910049298099281,
+      "cpu_ratio": 0.02663006745076214,
+      "both_output_contracts_valid": true
+    },
+    {
+      "pair_id": "hdr2160p24:warm_process:3",
+      "throughput_ratio": 1.1990169786714695,
+      "cpu_ratio": 0.024291010783215265,
+      "both_output_contracts_valid": true
+    },
+    {
+      "pair_id": "hdr2160p24:warm_process:4",
+      "throughput_ratio": 0.9448848604537082,
+      "cpu_ratio": 0.026850603917202308,
+      "both_output_contracts_valid": true
+    },
+    {
+      "pair_id": "hdr2160p24:warm_process:5",
+      "throughput_ratio": 0.9774933732463816,
+      "cpu_ratio": 0.02595269667636679,
+      "both_output_contracts_valid": true
+    }
+  ],
+  "median_paired_throughput_change_percent": 2.1365009872153395,
+  "median_paired_cpu_reduction_percent": 97.40473033236331,
+  "pairs_with_cpu_reduction_at_least20percent": 5,
+  "pairs_with_throughput_at_least95percent": 4,
+  "pairs_meeting_cpu_feasibility_criterion": 4
+}
