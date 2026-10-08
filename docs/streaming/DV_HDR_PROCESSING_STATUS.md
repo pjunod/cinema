@@ -376,3 +376,27 @@ and 20 Android MediaFacts checks. Affected Rust checking/Clippy, iOS and tvOS
 compilation, Android compilation and JavaScript syntax passed. No broad suite
 or CI dispatch was run. The finite combined proof merged in PR #940 at
 `75cb8f80b58febe2aaddfd3fee2017c9bf1bf760`.
+
+## 13. Streaming helper and P8.1 authoring integration
+
+Settings landed in effort PR #937 and effective-report/client presentation in
+PR #941 (merge `2730facccf2a35e768f0efb499b4924417e37cd6`). Presentation remains
+conditional on an actual generation report; current production routes do not
+mint one.
+
+The [helper build and execution guide](DV_PROCESSING_TOOLS.md) records the
+reviewed persistent renderer, direct NUT pipe, exact-clock overflow protection
+and source-bound P8.1 authoring. The streaming path eliminates the raw-file
+scratch limit that allowed only ten 4K frames. Its existing 64-picture finite
+source envelope remains explicit; continuous movie/interval ownership belongs
+to the serving integration still in progress.
+
+Independent review found and closed ignored metadata fields, preallocation
+raster limits, a 4K point-sampling tie and NUT clock overflow. Source-bound
+authoring keeps coded base bytes unchanged and uses exact PTS association and
+explicit Matroska durations; final MP4/HLS packaging is not yet qualified.
+
+M3 worker selection, actual routing/cache receipts and concurrent graph custody
+remain open. M5 comparative resource measurements have not run. Correctness
+controls and configured resource caps are not a benchmark. No broad CI or full
+suite was dispatched for these helpers.
