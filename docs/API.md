@@ -480,7 +480,8 @@ choice is accepted on every platform regardless of advisory readiness;
 existing sessions retain their captured plan. `macos_video_processing` is the
 read-only runtime report, including `hevc_output_enabled` and per-graph
 observations. The Developer readiness item `macos_hevc_output` reports
-`hevc_sdr`, `hevc_hdr10` and `delivery_qualification` requirements. Missing
+`hevc_effective_encoder`, `hevc_sdr`, `hevc_hdr10` and
+`hevc_delivery_qualification` requirements. Missing
 observations mean unobserved, not supported; a pending probe means unknown.
 These observations never reject a saved choice.
 

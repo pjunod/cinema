@@ -132,10 +132,10 @@ function macosHevcOutputCard(settings,readiness){
   return setCard(`${cardHead("Mac HEVC output","Allow new sessions to negotiate independently supported SDR HEVC or HDR10 Main10 output.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
     ${togRow("pmacoshevc","Use Mac HEVC output","Applies to new sessions when the client and output presentation support the promised format.",enabled)}
     <div class="hint">The saved choice is always accepted. The processing switch and the HEVC output switch are separate preferences.</div>
-    ${devReq(readiness,"macos_hevc_output","effective_encoder","Effective VideoToolbox encoder","Uses the existing Hardware acceleration selection. Auto can choose Software from its encode benchmark; these switches preserve that choice. Select VideoToolbox there when wanted.")}
+    ${devReq(readiness,"macos_hevc_output","hevc_effective_encoder","Effective VideoToolbox encoder","Uses the existing Hardware acceleration selection. Auto can choose Software from its encode benchmark; these switches preserve that choice. Select VideoToolbox there when wanted.")}
     ${devReq(readiness,"macos_hevc_output","hevc_sdr","Negotiated SDR HEVC","This worker checks the complete SDR HEVC encoding graph independently.")}
     ${devReq(readiness,"macos_hevc_output","hevc_hdr10","Negotiated HDR10 Main10 HEVC","HDR10 output preserves 10-bit pixels, BT.2020/PQ signaling and effective static HDR metadata. This does not authorize Dolby passthrough.")}
-    ${devReq(readiness,"macos_hevc_output","delivery_qualification","Client and HDR presentation qualification","Produced segments, negotiation, seek/resume, fallback and HDR presentation require independent client and display evidence.")}
+    ${devReq(readiness,"macos_hevc_output","hevc_delivery_qualification","Client and HDR presentation qualification","Produced segments, negotiation, seek/resume, fallback and HDR presentation require independent client and display evidence.")}
     ${devGraduation("SDR HEVC and HDR10 Main10 produced segments, client negotiation, seek/resume and grade-preserving fallback pass; HDR signaling and static metadata are checked on a named HDR display and supported target clients.","the permanent HEVC output switch moves to Playback → Advanced server delivery, preserving the saved choice.")}
     <div class="err" id="macos-hevc-error" role="alert"></div>${setCardFoot("saveMacosHevcOutput")}`,{id:"macos-hevc-card"});
 }
