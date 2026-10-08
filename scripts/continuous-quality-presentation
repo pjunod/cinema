@@ -1,0 +1,160 @@
+#!/usr/bin/env node
+"use strict";
+
+// State/clock diagnostics only. This is not full per-switch pixel/audio acceptance.
+const fs = require("node:fs");
+const lab = require("./playback-lab");
+const {identityErrors} = require("./continuous-quality-lifecycle");
+const {producerCensus} = require("./continuous-quality-qualification");
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function snapshot(driver) {
+  const state = await driver.eval(lab.playerSnapshotExpression());
+  state.presentation = await driver.eval(`(()=>{const f=document.fullscreenElement;
+    const b=document.getElementById('pbfs'); const r=b?.getBoundingClientRect();
+    return {fullscreen_element_id:f?.id??null,visibility:document.visibilityState,
+      fullscreen_enabled:document.fullscreenEnabled,focused:document.hasFocus(),
+      control_rect:r?{x:r.x,y:r.y,width:r.width,height:r.height}:null};})()`);
+  return state;
+}
+
+async function clickFullscreen(driver) {
+  // Wake the shipped controls; do not install a synthetic button or call
+  // requestFullscreen directly, since fullscreen requires trusted activation.
+  await driver.exec("playerActivity(); return true;");
+  if (driver instanceof lab.FirefoxDriver) {
+    const element = await driver.wd("POST", `/session/${driver.sessionId}/element`,
+      {using: "css selector", value: "#pbfs"});
+    const id = element["element-6066-11e4-a52e-4f735466cecf"] || element.ELEMENT;
+    if (!id) throw new Error("fullscreen control has no WebDriver element");
+    await driver.wd("POST", `/session/${driver.sessionId}/element/${id}/click`, {});
+  } else if (driver instanceof lab.CdpDriver) {
+    const rect = (await snapshot(driver)).presentation.control_rect;
+    if (!rect || rect.width <= 0 || rect.height <= 0) throw new Error("fullscreen control not visible");
+    const point = {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, button: "left", clickCount: 1};
+    await driver.send("Input.dispatchMouseEvent", {...point, type: "mousePressed"});
+    await driver.send("Input.dispatchMouseEvent", {...point, type: "mouseReleased"});
+  } else throw new Error("unsupported trusted-input driver");
+}
+
+async function waitPresentation(driver, fullscreen) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const state = await snapshot(driver);
+    if (state.video.error) throw new Error("media error during presentation transition");
+    if (state.presentation.fullscreen_element_id === (fullscreen ? "player" : null)) return state;
+    await sleep(100);
+  }
+  throw new Error(`actual fullscreen ${fullscreen ? "entry" : "exit"} deadline`);
+}
+
+async function window(driver, before, fullscreen, limits) {
+  const started = performance.now();
+  await sleep(8000);
+  const after = await snapshot(driver), elapsed = (performance.now() - started) / 1000;
+  const rate = (after.video.absolute_time - before.video.absolute_time) / elapsed;
+  const transition = lab.transitionMetrics(before, after), errors = identityErrors(before, after);
+  if (!Number.isFinite(rate) || Math.abs(rate - 1) > 0.1) errors.push(`film clock ${rate} differs from 1x by more than 10%`);
+  for (const state of [before, after]) {
+    if (state.presentation.fullscreen_element_id !== (fullscreen ? "player" : null)) errors.push("presentation state not retained");
+    if (state.presentation.visibility !== "visible") errors.push("document not actually visible");
+    if (state.video.paused || state.video.playback_rate !== 1 || state.video.error) errors.push("moving 1x playback not retained");
+  }
+  if (!transition.complete) errors.push("incomplete media event trace");
+  if (!after.frame_probe?.supported || !(after.frame_probe.frames > before.frame_probe.frames)) errors.push("no advancing frame callbacks");
+  for (const [field, limit] of [["maximum_video_gap_ms", limits.maximum_video_gap_ms],
+    ["wait_events", limits.maximum_wait_events], ["reopen_events", limits.maximum_reopen_events],
+    ["stalls", limits.maximum_stalls], ["hitches", limits.maximum_hitches]]) {
+    if (!Number.isFinite(transition[field]) || transition[field] > limit) errors.push(`${field} ${transition[field]} exceeds ${limit}`);
+  }
+  return {requested_fullscreen: fullscreen, before, after, elapsed_seconds: elapsed, observed_rate: rate, transition, errors};
+}
+
+async function presentationCase(driver, server, manifest, fixture, testCase, browserInfo) {
+  const began = Date.now();
+  const result = await lab.runOneCase(driver, server, manifest, fixture, {...testCase, operation: "steady"}, browserInfo, 2);
+  result.matrix_case = "fullscreen-cycle";
+  result.metrics_scope = "initial two-second steady baseline; presentation windows separate";
+  result.evidence_scope = "trusted shipped fullscreen control, actual document fullscreen, clock/identity and direct owned producer retirement; no quality request, subtitles, pixels, audio or app background";
+  result.presentation_diagnostic = {phases: [], windows: []};
+  try {
+    if (result.status !== "passed") return result;
+    const original = await snapshot(driver);
+    if (original.presentation.fullscreen_element_id !== null) throw new Error("baseline already fullscreen");
+    if (!original.presentation.fullscreen_enabled) throw new Error("browser reports fullscreen unsupported");
+    for (const fullscreen of [false, true, false]) {
+      // Keep maxima and counters across entry/exit: never erase the boundary.
+      if (fullscreen || result.presentation_diagnostic.windows.length) await clickFullscreen(driver);
+      const before = await waitPresentation(driver, fullscreen);
+      result.presentation_diagnostic.phases.push({phase: fullscreen ? "entered" : "normal", state: before});
+      result.errors.push(...identityErrors(original, before));
+      const observed = await window(driver, before, fullscreen, testCase.transition);
+      result.presentation_diagnostic.windows.push(observed);
+      result.errors.push(...observed.errors);
+      if (result.errors.length) break;
+    }
+    result.end = await snapshot(driver);
+    result.errors.push(...identityErrors(original, result.end));
+    const whole = lab.transitionMetrics(original, result.end);
+    result.presentation_diagnostic.whole_lifecycle_transition = whole;
+    if (!whole.complete) result.errors.push("incomplete whole presentation trace");
+    for (const field of ["reopen_events", "stalls", "hitches"])
+      if (whole[field] > 0) result.errors.push(`whole presentation ${field}: ${whole[field]}`);
+  } catch (error) {result.errors.push(error.message);}
+  finally {
+    try {
+      const before = await producerCensus(server), requested = Date.now(), samples = [];
+      await driver.exec("closePlayer(); return true;");
+      for (const elapsed of [0, 1000, 3000, 5000]) {
+        await sleep(Math.max(0, requested + elapsed - Date.now()));
+        samples.push(await producerCensus(server));
+      }
+      result.producer_end = {requested_at_unix_ms: requested, before, samples,
+        scope: "exact owned Linux daemon direct FFmpeg children; reader leases/physical queues unmeasured"};
+      if (samples.at(-1).children.length) result.errors.push("owned producers remain five seconds after End");
+      const closed = await snapshot(driver);
+      result.presentation_diagnostic.after_end = closed.presentation;
+      if (closed.presentation.fullscreen_element_id !== null) result.errors.push("End did not leave fullscreen");
+    } catch (error) {result.errors.push(`End census/presentation: ${error.message}`);}
+    result.duration_ms = Date.now() - began;
+    result.status = result.errors.length ? "failed" : "passed";
+  }
+  return result;
+}
+
+async function main(args) {
+  if (args.includes("--help")) {
+    process.stdout.write("Usage: scripts/continuous-quality-presentation --server PATH --source-ref BUILD --browser firefox|chrome --json NEW_PATH [--fixtures DIR] [--firefox PATH] [--geckodriver PATH] [--chrome PATH] [--junit NEW_PATH]\nHeaded Linux owned display required. One normal/fullscreen/normal state diagnostic; no quality switches or capture.\n");
+    return 0;
+  }
+  const options = {headed: true, enable_auto_abr: true, suite: "continuous"};
+  const allowed = new Set(["server", "source-ref", "browser", "json", "fixtures", "firefox", "geckodriver", "chrome", "junit"]);
+  for (let i = 0; i < args.length; i += 2) {
+    const key = args[i].replace(/^--/, "").replaceAll("-", "_");
+    if (!args[i].startsWith("--") || !allowed.has(args[i].slice(2)) || !args[i+1] || args[i+1].startsWith("--") || options[key] !== undefined) throw new Error(`invalid option ${args[i]}`);
+    options[key] = args[i+1];
+  }
+  if (process.platform !== "linux" || !process.env.DISPLAY) throw new Error("headed Linux owned DISPLAY required");
+  if (!options.server || !options.source_ref || !options.json) throw new Error("explicit server/source-ref/new JSON path required");
+  if (!["firefox", "chrome"].includes(options.browser)) throw new Error("choose firefox or chrome");
+  for (const key of ["json", "junit"]) if (options[key] && fs.existsSync(options[key])) throw new Error(`refusing to overwrite ${key}`);
+  const manifest = lab.loadManifest(), testCase = manifest.suites.continuous.cases[0];
+  Object.assign(testCase, {fixture: "continuous-mpeg4-aac-1080", quality: "1080", operation: "steady", repetitions: 1, switches: []});
+  manifest.thresholds.maximum_hitches = 0;
+  const outcome = await lab.executeRun(manifest, options, {
+    startServer: async (opts, directory) => {
+      const server = await lab.startServer(opts, directory);
+      try {
+        const system = await lab.api(server.baseUrl, "/system", {token: server.token});
+        if (system.build !== options.source_ref) throw new Error(`server build ${system.build} differs from ${options.source_ref}`);
+        await lab.api(server.baseUrl, "/settings", {token: server.token, method: "PUT", body: {playback_display_aware_auto: true}});
+        return server;
+      } catch (error) {await server.close(false); throw error;}
+    }, runOneCase: presentationCase,
+  });
+  if (outcome.error) throw outcome.error;
+  return outcome.code;
+}
+module.exports = {main, snapshot, clickFullscreen, presentationCase};
+if (require.main === module) main(process.argv.slice(2)).then(code => {process.exitCode = code;})
+  .catch(error => {process.stderr.write(`continuous presentation: ${error.message}\n`); process.exitCode = 1;});
