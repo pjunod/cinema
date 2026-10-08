@@ -40,7 +40,8 @@ pub enum Pipeline {
     /// Selected only by the macOS compatibility context in the resolver.
     VtScaleSdr,
     /// HDR10 VideoToolbox surfaces → native P010 scale → Jellyfin BT.2390/ITP
-    /// Metal mapping → H.264 VideoToolbox encode. Dolby/HLG are excluded.
+    /// Metal mapping → H.264 VideoToolbox encode. HDR10 and HLG require
+    /// independent complete-graph observations; Dolby is excluded.
     VtToneMapMetal,
     /// NVDEC → CUDA tone-map/scale → NVENC, without a system-memory handoff.
     TonemapCuda,
@@ -165,7 +166,7 @@ impl Pipeline {
     pub fn label(self) -> &'static str {
         match self {
             Pipeline::VtScaleSdr => "VideoToolbox SDR scaling",
-            Pipeline::VtToneMapMetal => "Metal HDR10 tone-map (BT.2390 / ITP)",
+            Pipeline::VtToneMapMetal => "Metal HDR tone-map (BT.2390 / ITP)",
             Pipeline::TonemapCuda => "GPU tone-map (CUDA)",
             Pipeline::VppQsv => "GPU tone-map (QSV)",
             Pipeline::TonemapVaapi => "GPU tone-map (VA-API)",
@@ -247,7 +248,7 @@ impl Pipeline {
     pub fn handles(self, hdr_format: Option<&str>) -> bool {
         match (self, hdr_format) {
             (Pipeline::VtScaleSdr, None | Some("sdr")) => true,
-            (Pipeline::VtToneMapMetal, Some("hdr10")) => true,
+            (Pipeline::VtToneMapMetal, Some("hdr10" | "hlg")) => true,
             (Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal, _) => false,
             (Pipeline::Cpu, _) => true,
             (Pipeline::DoviTonemapx, Some("dolby_vision")) => true,

@@ -47,8 +47,8 @@ pub use encoder::{
     VideoCodec,
 };
 pub use macos::{
-    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
-    MacosProcessingSelection, MACOS_PROCESSING_GRAPH_REVISION,
+    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
+    MacosProcessingIdentity, MacosProcessingSelection, MACOS_PROCESSING_GRAPH_REVISION,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
@@ -1177,6 +1177,20 @@ fn video_filters_for_contract(
         gpu_size.map_or(opts.target_height, |(_, h)| h),
         input_dynamic_range,
     ) {
+        // The exact Mac interlace tuple retains file send-frame cadence and
+        // progressive bypass. Deinterlace the full raster before scaling;
+        // native BWDIF is independently observed, never inferred from scaling.
+        if deinterlace == Deinterlace::BwdifSendFrame
+            && matches!(
+                opts.pipeline,
+                Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal
+            )
+        {
+            gpu.insert_str(
+                0,
+                "bwdif_videotoolbox=mode=send_frame:parity=auto:deint=interlaced,",
+            );
+        }
         // The Dolby Vision and HDR10 software renderers own their entire
         // colour graph, so they do not fall through to the generic CPU chain
         // below. Insert bwdif immediately before their scale step: Dolby

@@ -15,8 +15,8 @@ use plurx_core::transcode::{
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 use plurx_core::transcode::{
-    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
-    MacosProcessingSelection,
+    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
+    MacosProcessingIdentity, MacosProcessingSelection,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -382,7 +382,7 @@ fn macos_processing_cannot_be_selected_without_context_or_for_burns() {
     assert_eq!(plan.options().pipeline, Pipeline::Cpu);
     assert_eq!(
         plan.macos_processing_selection(),
-        Some(MacosProcessingSelection::PresentationConstraint)
+        Some(MacosProcessingSelection::RuntimeProbeFailed)
     );
 }
 
@@ -4268,5 +4268,162 @@ fn request_decode_requires_proven_identity_transform_even_for_continuations() {
             &AttemptRestrictions::requiring(DecodeBackend::V4l2Request),
         );
         assert!(matches!(required, Err(PlanError::IncompatibleRenderer)));
+    }
+}
+
+#[test]
+fn macos_burn_graphs_require_independent_observation_and_process_before_compositing() {
+    for hdr in [false, true] {
+        for bitmap in [false, true] {
+            let input = facts(macos_stream(hdr));
+            let caps = unqualified_software_capabilities("hevc");
+            let graph = match (hdr, bitmap) {
+                (false, false) => MacosProcessingGraph::SdrTextBurn,
+                (false, true) => MacosProcessingGraph::SdrBitmapBurn,
+                (true, false) => MacosProcessingGraph::Hdr10TextBurn,
+                (true, true) => MacosProcessingGraph::Hdr10BitmapBurn,
+            };
+            let mut media = options(Pipeline::Cpu);
+            media.subtitle_burn = Some(SubtitleBurn {
+                subtitle_index: 0,
+                bitmap,
+            });
+            let context = macos_context(true, MacosProcessingAvailability::Available)
+                .with_graph(graph, MacosProcessingAvailability::Available);
+            let plan = resolve_with_options(
+                Encoder::VideoToolbox,
+                media,
+                &input,
+                &caps,
+                macos_policy(context),
+            )
+            .expect("independently observed burn tuple");
+            assert_eq!(
+                plan.options().pipeline,
+                if hdr {
+                    Pipeline::VtToneMapMetal
+                } else {
+                    Pipeline::VtScaleSdr
+                }
+            );
+            assert_eq!(
+                plan.decode().surface().renderer_download_format(),
+                Some("nv12")
+            );
+            let source = execution_file("/fixture/source.mkv");
+            let mut execution_options = execution_options();
+            execution_options.subtitle_file =
+                (!bitmap).then(|| PathBuf::from("/fixture/active.ass"));
+            let execution = TranscodeExecution::from_options(
+                &source,
+                &execution_options,
+                Pacing::unpaced(),
+                "/output",
+            )
+            .expect("burn execution");
+            let args = hls_args(&plan, &execution);
+            let graph = args
+                .windows(2)
+                .find(|pair| pair[0] == if bitmap { "-filter_complex" } else { "-vf" })
+                .expect("shared compositor graph")[1]
+                .as_str();
+            assert!(
+                graph.find("scale_vt=") < graph.find("hwdownload,format=nv12"),
+                "{graph}"
+            );
+            if hdr {
+                assert!(
+                    graph.find("tonemap_videotoolbox=") < graph.find("hwdownload,format=nv12"),
+                    "{graph}"
+                );
+            }
+            assert!(
+                graph.find("hwdownload,format=nv12")
+                    < graph.find(if bitmap { "overlay=" } else { "subtitles=" }),
+                "{graph}"
+            );
+            assert_eq!(graph.matches("hwdownload").count(), 1);
+            assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+        }
+    }
+}
+
+#[test]
+fn macos_hlg_requires_its_own_observation_and_exact_transfer() {
+    let mut stream = macos_stream(true);
+    stream["color_transfer"] = json!("arib-std-b67");
+    stream["side_data_list"] = json!([]);
+    let input = facts(stream);
+    let caps = unqualified_software_capabilities("hevc");
+    let context = macos_context(true, MacosProcessingAvailability::Available);
+    let unavailable = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &caps,
+        macos_policy(context.clone()),
+    )
+    .expect("incumbent HLG");
+    assert_eq!(unavailable.options().pipeline, Pipeline::Cpu);
+    let selected = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &caps,
+        macos_policy(context.with_graph(
+            MacosProcessingGraph::HlgMetal,
+            MacosProcessingAvailability::Available,
+        )),
+    )
+    .expect("independent HLG graph");
+    assert_eq!(selected.options().pipeline, Pipeline::VtToneMapMetal);
+    assert_eq!(selected.output_contract().output_grade(), OutputGrade::Sdr);
+    assert_ne!(selected.plan_digest(), unavailable.plan_digest());
+}
+
+#[test]
+fn macos_bwdif_frame_graph_keeps_parity_cadence_and_runs_before_scale() {
+    for parity in ["tt", "bb"] {
+        let mut stream = macos_stream(false);
+        stream["field_order"] = json!(parity);
+        stream["codec_name"] = json!("h264");
+        stream["profile"] = json!("High");
+        let input = facts(stream);
+        let caps = unqualified_software_capabilities("h264");
+        let context = macos_context(true, MacosProcessingAvailability::Available).with_graph(
+            MacosProcessingGraph::SdrBwdifFrame,
+            MacosProcessingAvailability::Available,
+        );
+        let selected = resolve(
+            Encoder::VideoToolbox,
+            Pipeline::Cpu,
+            &input,
+            &caps,
+            macos_policy(context),
+        )
+        .expect("independently observed file BWDIF graph");
+        assert_eq!(selected.deinterlace(), Deinterlace::BwdifSendFrame);
+        assert_eq!(selected.options().pipeline, Pipeline::VtScaleSdr);
+        let source = execution_file("/fixture/interlaced.mkv");
+        let execution = TranscodeExecution::from_options(
+            &source,
+            &execution_options(),
+            Pacing::unpaced(),
+            "/output",
+        )
+        .expect("file execution");
+        let args = hls_args(&selected, &execution);
+        let filter = &args[args.iter().position(|arg| arg == "-vf").expect("filter") + 1];
+        assert!(
+            filter.starts_with(
+                "bwdif_videotoolbox=mode=send_frame:parity=auto:deint=interlaced,scale_vt="
+            ),
+            "{filter}"
+        );
+        assert!(!filter.contains("send_field"));
+        assert!(
+            !args.iter().any(|arg| arg == "-a53cc"),
+            "live caption policy stays live-scoped"
+        );
     }
 }
