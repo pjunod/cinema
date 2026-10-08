@@ -680,3 +680,26 @@ checks 28 changed/contradictory evidence cases. Live read-only restore also
 returned an empty pass map. This resolves receipt bookkeeping only: a fresh
 current-head development gate must still pass before integration. Freeze the
 task head once that run starts; finish documentation before dispatch.
+
+## Effort upstream comparison — fetched only by its pending method
+
+The effort unit step sets `PLURX_HIQLITE_FETCH_UPSTREAM=1`. When the hiqlite
+manifest comparison is pending and no `PLURX_HIQLITE_UPSTREAM_DIR` override
+exists, that method uses
+[`hiqlite_upstream_fixture.py`](../../validation/hiqlite_upstream_fixture.py)
+to fetch the genuine `hiqlite` and `hiqlite-wal` 0.14.0 crates.io packages.
+Their official registry SHA-256 checksums and exact compressed sizes are
+pinned in the helper; redirects, changed bytes and unsafe extraction refuse.
+Each archive has at most 200 regular files and at most 2 MiB expanded bytes.
+One method-owned temporary directory is removed on success or failure; an
+explicit upstream-directory override is read without being modified or removed.
+
+Download or extraction failure is an ordinary failed method inside the unit
+executor. The completed attempt journal still preserves other real successes,
+and only the failed method remains pending. There is no setup step between
+the start marker and unit execution that could leave an incomplete attempt,
+and no vendored fork substitutes for upstream. Outside the opted-in effort
+step, the existing explicit-directory comparison and offline skip remain.
+The exact method and the synthetic fixture controls declare the helper in
+[`main-preflight-inputs.json`](../../validation/main-preflight-inputs.json);
+the external input closure is the two immutable, size-and-hash-bound archives.

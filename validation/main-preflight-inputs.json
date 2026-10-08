@@ -369,6 +369,21 @@
       "reason": "Actual manifests, ledger/source hash and K06 census."
     },
     {
+      "id_prefix": "operations:test_hiqlite_patch_ledger.ForkSourceManifestCase.test_manifest_matches_upstream",
+      "inputs": [
+        "validation/__init__.py",
+        "vendor/hiqlite/**",
+        "vendor/hiqlite-wal/**",
+        "vendor/s3-simple/Cargo.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "deny.toml",
+        "scripts/vendor-audit-lock",
+        "validation/hiqlite_upstream_fixture.py"
+      ],
+      "reason": "Reads the existing fork manifests and genuine upstream comparison. Optional effort fetch is bound to the helper’s immutable crates.io 0.14.0 size/SHA-256 pins; only this method opts into the external fixture."
+    },
+    {
       "id_prefix": "operations:test_docker_hardware.DockerHardwareTests.",
       "inputs": [
         "scripts/docker-hardware"
@@ -4959,6 +4974,16 @@
         "validation/python-unit-empty-failure920.json"
       ],
       "reason": "Exact PR920 empty-attempt recovery uses synthetic API/log/archive mutations and the hash-pinned witness; no network, production artifact mutation or imported successes."
+    },
+    {
+      "id_prefix": "operations:test_hiqlite_upstream_fixture.",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/hiqlite_upstream_fixture.py",
+        "validation/python_unit_receipts.py",
+        "tests/operations/test_hiqlite_patch_ledger.py"
+      ],
+      "reason": "Synthetic archive/download/lifetime controls call the real pinned fixture helper and receipt executor; no external source is fetched by these controls."
     }
   ]
 }

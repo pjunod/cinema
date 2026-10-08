@@ -362,25 +362,33 @@ class ForkSourceManifestCase(unittest.TestCase):
                 )
 
     def test_manifest_matches_upstream(self):
+        from contextlib import nullcontext
+
         upstream_root = os.environ.get("PLURX_HIQLITE_UPSTREAM_DIR")
-        if not upstream_root:
+        if upstream_root:
+            fixture = nullcontext(Path(upstream_root))
+        elif os.environ.get("PLURX_HIQLITE_FETCH_UPSTREAM") == "1":
+            from validation.hiqlite_upstream_fixture import pinned_upstream
+            fixture = pinned_upstream()
+        else:
             self.skipTest("set PLURX_HIQLITE_UPSTREAM_DIR to re-derive the classification")
 
         def normalized(path: Path) -> list[str]:
             return [re.sub(r"\s+", "", line) for line in path.read_text().splitlines() if line.strip()]
 
-        for ledger, _expected in LEDGERS:
-            crate = ledger.parent
-            with self.subTest(fork=crate.name):
-                upstream = Path(upstream_root) / f"{crate.name}-0.14.0"
-                manifest = self.manifest(crate)
-                identical = {
-                    str(p.relative_to(crate))
-                    for p in (crate / "src").rglob("*.rs")
-                    if (upstream / p.relative_to(crate)).is_file()
-                    and normalized(upstream / p.relative_to(crate)) == normalized(p)
-                }
-                self.assertEqual(sorted(identical), sorted(manifest["upstream"]))
+        with fixture as upstream_root:
+            for ledger, _expected in LEDGERS:
+                crate = ledger.parent
+                with self.subTest(fork=crate.name):
+                    upstream = Path(upstream_root) / f"{crate.name}-0.14.0"
+                    manifest = self.manifest(crate)
+                    identical = {
+                        str(p.relative_to(crate))
+                        for p in (crate / "src").rglob("*.rs")
+                        if (upstream / p.relative_to(crate)).is_file()
+                        and normalized(upstream / p.relative_to(crate)) == normalized(p)
+                    }
+                    self.assertEqual(sorted(identical), sorted(manifest["upstream"]))
 
 
 class RingOnlyProviderGraphCase(unittest.TestCase):

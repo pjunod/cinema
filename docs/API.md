@@ -14,7 +14,9 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-The ordinary listener (`:32400` by default) serves the five surfaces below.
+As of 2026-10-08, plurx has 354 routes declared by the ordinary listener's
+assembled router. The ordinary listener (`:32400` by default) serves the five
+surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
 (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
