@@ -8,6 +8,9 @@ Wrap each invocation in an owned external timeout (e.g. 130 seconds with a
 5-second kill grace): a hung X server can block synchronous Xlib calls.
 Use --campaign explicitly for up to 1800 seconds, with an external timeout
 longer than that bound. --stop-file accepts only a fresh owned marker path.
+Optional --video-alternate X,Y samples a second calibrated video location in
+the same XGetImage request. Agreeing counters are accepted; conflicting valid
+counters fail the capture, and neither valid remains unknown.
 Receipts and RGB stream incrementally; no sample history is held in memory.
 Run control and capture as independent processes. Run a separate control-off
 baseline with capture's --control omitted; this tool does not automate retries.
@@ -71,6 +74,18 @@ def decode(rgb):
     word = lambda start, length: sum(result[start + n] << n for n in range(length))
     frame = word(8, 24)
     return frame if word(0, 8) == 211 and word(32, 8) == checksum(frame) else None
+
+
+def resolve_video_frames(frames):
+    """Resolve declared pixels only; a conflict is never hidden by picking an ROI."""
+    valid = {name: frame for name, frame in frames.items() if frame is not None}
+    counters = set(valid.values())
+    if len(counters) > 1:
+        return {"status": "conflicting", "frame": None, "valid_rois": list(valid)}
+    if not valid:
+        return {"status": "unknown", "frame": None, "valid_rois": []}
+    return {"status": "agreeing" if len(valid) > 1 else "unambiguous",
+            "frame": next(iter(counters)), "valid_rois": list(valid)}
 
 
 class X11:
@@ -212,12 +227,16 @@ def strip(image, data, offset):
 
 def capture(x, args, emit, output):
     boxes = {"video": args.video}
+    if args.video_alternate is not None:
+        if args.video_alternate == args.video:
+            raise RuntimeError("Alternate video strip must use a distinct calibrated location")
+        boxes["video_alternate"] = args.video_alternate
     if args.control is not None:
         boxes["control"] = args.control
-        vx, vy = args.video
         cx, cy = args.control
-        if abs(vx - cx) < WIDTH and abs(vy - cy) < HEIGHT:
-            raise RuntimeError("Control and video strips overlap")
+        for name, (vx, vy) in boxes.items():
+            if name != "control" and abs(vx - cx) < WIDTH and abs(vy - cy) < HEIGHT:
+                raise RuntimeError("Control and video strips overlap")
     left = min(p[0] for p in boxes.values())
     top = min(p[1] for p in boxes.values())
     width = max(p[0] + WIDTH for p in boxes.values()) - left
@@ -230,6 +249,7 @@ def capture(x, args, emit, output):
     start = time.monotonic_ns()
     end = start + int(args.seconds * 1e9)
     packet = 0
+    conflicts = 0
     emit({"type": "capture_start", "epoch_ns": start, "end_ns": end, "bounding_rectangle": [left, top, width, height], "strips": boxes})
     try:
         while time.monotonic_ns() < end and not stopped(args):
@@ -251,6 +271,9 @@ def capture(x, args, emit, output):
                     hashes[name].update(rgb)
                     row["strips"][name] = {"frame": decode(rgb), "sha256": hashlib.sha256(rgb).hexdigest(),
                                            "offset": packet * READ_WIDTH * HEIGHT * 3, "size": len(rgb)}
+                row["video_counter"] = resolve_video_frames({name: strip_row["frame"]
+                    for name, strip_row in row["strips"].items() if name != "control"})
+                conflicts += row["video_counter"]["status"] == "conflicting"
                 row["processing_complete_ns"] = time.monotonic_ns()
                 emit(row)
                 packet += 1
@@ -265,7 +288,10 @@ def capture(x, args, emit, output):
             file.close()
         emit({"type": "capture_files", "packets": packet, "strip_width": READ_WIDTH, "strip_height": HEIGHT, "source_strip_width": WIDTH,
               "sampled_source_x": "8+16*n for n=0..41 (cell centers only)",
-              "format": "RGB24", "sha256": {name: digest.hexdigest() for name, digest in hashes.items()}})
+              "format": "RGB24", "video_counter_conflicts": conflicts,
+              "sha256": {name: digest.hexdigest() for name, digest in hashes.items()}})
+    if conflicts:
+        raise RuntimeError(f"Conflicting valid video counters in {conflicts} acquired samples")
 
 
 def main():
@@ -283,6 +309,7 @@ def main():
             sub.add_argument("--at", required=True, type=coord)
         else:
             sub.add_argument("--video", required=True, type=coord)
+            sub.add_argument("--video-alternate", type=coord, help="Second calibrated video ROI in the same synchronous acquisition; valid counter conflicts fail")
             sub.add_argument("--control", type=coord)
     args = parser.parse_args()
     maximum_seconds = 1800 if args.campaign else 120
