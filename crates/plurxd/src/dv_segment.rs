@@ -546,7 +546,7 @@ impl SegmentWindow {
             || ed > i32::MAX as u32
             || i128::from(start) * i128::from(ed) >= i128::from(end) * i128::from(sd)
             || i128::from(end) * i128::from(sd) - i128::from(start) * i128::from(ed)
-                > 2 * i128::from(sd) * i128::from(ed)
+                > 3 * i128::from(sd) * i128::from(ed)
             || self.max_preroll > 512
         {
             return Err("invalid bounded original-source interval".into());
@@ -883,10 +883,19 @@ fn window_argument_regression() {
         window.args().expect("bounded original-source window"),
         ["42/1000", "167/1000", "512"]
     );
-    window.end = (2043, 1000);
+    let film_entry = SegmentWindow {
+        start: (0, 1),
+        end: (48 * 1001, 24000),
+        max_preroll: 512,
+    };
+    assert!(
+        film_entry.args().is_ok(),
+        "48 film frames span exactly 2.002s"
+    );
+    window.end = (3043, 1000);
     assert!(
         window.args().is_err(),
-        "more than two seconds refused exactly"
+        "more than three seconds refused exactly"
     );
     window.end = (42, 1000);
     assert!(window.args().is_err());
