@@ -11908,7 +11908,8 @@ extension PlayerController: PreparedSuccessorHost {
         // own first frame able to satisfy it at all.
         let boundaryMs = rendezvous.filmPositionMs
         let incumbent = player.currentItem
-        let incumbentState = (sessionId: sessionId, baseMs: baseMs, path: activeMediaPath,
+        let incumbentState = (sessionId: sessionId, candidateId: autoActiveCandidateId,
+            baseMs: baseMs, path: activeMediaPath,
             authenticated: activeMediaAuthenticated, height: sessionHeight, direct: isDirectPlayback,
             vod: isVOD, directTimeline: usesDirectTimeline,
             status: sessionStatus, diagnostic: diagnosticSessionStatus, observedAt: diagnosticSessionStatusObservedAt)
@@ -11932,13 +11933,12 @@ extension PlayerController: PreparedSuccessorHost {
         pgsOverlayWindowFailures = 0
         pgsOverlayWindow = nil
         stallObservation.reset()
-        // The prepared player and its original display layer now own exposure.
-        installItemObserver(for: item)
         preparedSwitch.note(commitAtMs: PlaybackControlSession.monotonicMs())
         // The successor is a full session in every respect but its pointer, so
         // everything keyed on "which session am I playing" moves with it.
         if autoPreparing { autoExposed = true }
         sessionId = action.sessionId
+        autoActiveCandidateId = action.effectiveSelection.candidateId
         baseMs = action.mediaOriginMs
         isVOD = stagedFilmLocalVOD
         usesDirectTimeline = stagedFilmLocalVOD
@@ -11948,6 +11948,10 @@ extension PlayerController: PreparedSuccessorHost {
             sessionHeight = action.effectiveSelection.height
         }
         isDirectPlayback = false
+        // Metrics capture their installed session/candidate once. Bind every
+        // successor, including manual-to-Auto, before installing observation;
+        // a voluntary proposal is not required for a truthful item identity.
+        installItemObserver(for: item)
         // The viewer's audio and subtitle choices are per-ITEM state, and this
         // is a different item. `open`, `loadOffline`, a seek and a node
         // failover all reconcile them onto the item they attach; the commit
@@ -12000,6 +12004,7 @@ extension PlayerController: PreparedSuccessorHost {
                 player.isMuted = latestMuted
                 unprovenPreparedItem = nil
                 sessionId = incumbentState.sessionId
+                autoActiveCandidateId = incumbentState.candidateId
                 baseMs = incumbentState.baseMs
                 activeMediaPath = incumbentState.path
                 activeMediaAuthenticated = incumbentState.authenticated

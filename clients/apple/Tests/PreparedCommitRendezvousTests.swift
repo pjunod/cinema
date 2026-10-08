@@ -131,6 +131,25 @@ final class PreparedCommitRendezvousTests: XCTestCase {
 
     // MARK: The order, which is the defect
 
+    func testPreparedMetricsBindSuccessorBeforeObservationAndRestoreIncumbentOnRollback() throws {
+        let body = try commitBody()
+        let install = try XCTUnwrap(body.range(of: "installItemObserver(for: item)"))
+        let session = try XCTUnwrap(body.range(of: "sessionId = action.sessionId"))
+        let candidate = try XCTUnwrap(body.range(of: "autoActiveCandidateId = action.effectiveSelection.candidateId"))
+        XCTAssertTrue(session.lowerBound < install.lowerBound && candidate.lowerBound < install.lowerBound,
+            "completed-body observation captures the successor identity even without an Auto proposal")
+        let proposal = try XCTUnwrap(body.range(of: "if let requested = autoDesiredCandidate"))
+        XCTAssertTrue(install.lowerBound < proposal.lowerBound,
+            "manual-to-Auto has no desired candidate; observation cannot depend on that proposal")
+        XCTAssertNotNil(body.range(of: "candidateId: autoActiveCandidateId"),
+            "rollback retains the exact incumbent candidate beside its session")
+        let restore = try XCTUnwrap(body.range(of: "autoActiveCandidateId = incumbentState.candidateId"))
+        let restoreSession = try XCTUnwrap(body.range(of: "sessionId = incumbentState.sessionId"))
+        let restoreObserver = try XCTUnwrap(body.range(of: "installItemObserver(for: incumbent)"))
+        XCTAssertTrue(restore.lowerBound < restoreObserver.lowerBound && restoreSession.lowerBound < restoreObserver.lowerBound,
+            "failed first-frame proof restores both incumbent identities before its observation resumes")
+    }
+
     func testTheCommitFinishesTheAlignmentBeforeItExposesTheItem() throws {
         let body = try commitBody()
         let align = try XCTUnwrap(body.range(of: "awaitPreparedAlignment(of: item"))
