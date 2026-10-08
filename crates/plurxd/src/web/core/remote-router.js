@@ -123,7 +123,7 @@ function cinemaRemoteBind(){
   const root=vod?(menu?.classList.contains("on")?menu:document.getElementById("player")):live?liveTvHost():document.getElementById("app");
   if(!root) return;
   const kind=vod?(root===menu?`tracks:${menu.dataset.kind}`:"player"):live?"live-tv":route.split("/")[1]||"home";
-  const signature=[route,kind,vod?String(PLAYER?.fileId)+":"+String(PLAYER?.sessionId):live?String(LIVE_TV.serial):"",cinemaRemoteRestrictedOverlay(),watch?cinemaRemoteOwnerId(WATCH):0,route.startsWith("#/item/")?cinemaRemoteOwnerId(WATCH_ITEM_PAGE):0,route==="#/live-tv"?cinemaRemoteOwnerId(LIVE_TV.guide)+":"+cinemaRemoteOwnerId(LIVE_TV.channels):""].join("|");
+  const signature=[route,kind,vod?String(PLAYER?.fileId)+":"+String(PLAYER?.sessionId):live?String(LIVE_TV.serial)+":"+cinemaRemoteOwnerId(LIVE_TV_LEASE.current):"",cinemaRemoteRestrictedOverlay(),watch?cinemaRemoteOwnerId(WATCH):0,route.startsWith("#/item/")?cinemaRemoteOwnerId(WATCH_ITEM_PAGE):0,route==="#/live-tv"?cinemaRemoteOwnerId(LIVE_TV.guide)+":"+cinemaRemoteOwnerId(LIVE_TV.channels):""].join("|");
   if(signature!==CINEMA_REMOTE_SIGNATURE){ CinemaRemote.invalidate("surface"); CINEMA_REMOTE_SIGNATURE=signature; }
   if(route!==CINEMA_REMOTE_ROUTE){ CINEMA_REMOTE_TEXT=null; CINEMA_REMOTE_ROUTE=route; }
   const q=document.getElementById("q");
@@ -258,8 +258,20 @@ function cinemaRemoteBindLiveBrowse(root){
     }
   }
 }
+function cinemaRemoteBindLiveStrip(root){
+  const lineup=LIVE_TV.channels,serial=LIVE_TV.serial,lease=LIVE_TV_LEASE.current;
+  if(!lease||root!==liveTvHost())return;
+  for(const element of root.querySelectorAll(".lth-strip [data-channel]")){
+    const id=element.dataset.channel,channel=lineup.find(value=>String(value.id)===id);if(!channel)continue;
+    cinemaRemoteRegister("live-strip:"+id,element,channel.guide_name,()=>{
+      if(root!==liveTvHost()||LIVE_TV.serial!==serial||LIVE_TV_LEASE.current!==lease||LIVE_TV.channels!==lineup||!lineup.includes(channel)||PlurxLiveTv.channelView(channel).disabled)return "stale_context";
+      CinemaRemote.invalidate("channel_intent");liveTvSelect(channel.id);return "applied";
+    });
+  }
+}
 function cinemaRemoteBindLive(root){
-  cinemaRemoteBindLiveBrowse(document.getElementById("app"));
+  if(root.dataset.mode!=="full")cinemaRemoteBindLiveBrowse(document.getElementById("app"));
+  cinemaRemoteBindLiveStrip(root);
   // Unknown DVR/settings overlays remain restricted.
   for(const [id,activate] of Object.entries({"live-tv-transport":toggleLiveTvPlayback,"live-tv-status-play":resumeLiveTv})){
     const el=document.getElementById(id);if(el&&root.contains(el))cinemaRemoteRegister(id,el,el.textContent,()=>{activate();return "applied";});

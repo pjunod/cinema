@@ -80,3 +80,20 @@ test("real browser LiveTV channel and guide adapters fence guide replacement and
     await page.evaluate(()=>{CinemaRemote.focusById("guide:channel-1:90");CinemaRemote.dispatch({type:"select"},CinemaRemote.snapshot());globalThis.oldGuideContext=CinemaRemote.snapshot();LIVE_TV.guide={generation:2};});assert.notEqual(await page.evaluate(()=>CinemaRemote.dispatch({type:"select"},oldGuideContext)),"applied");assert.equal(await page.evaluate(()=>effects.length),1);
   }finally{await browser.close();}
 });
+
+test("actual sibling LiveTV fullscreen strip direction and Select tune its displayed channel",async()=>{
+  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});
+  try{
+    const page=await browser.newPage();await page.setContent('<div id="app"><input id="q"><main id="main"><button data-channel="channel-1">App channel</button></main></div><div id="modal" style="display:none"><div id="player"></div></div><section id="live-tv-host" data-mode="full" style="padding:24px;background:#222"><button id="enter-full" onclick="document.getElementById(\'live-tv-host\').requestFullscreen()">Fullscreen</button><div class="lth-strip" style="display:flex;gap:20px"><button data-channel="channel-1">Channel one</button><button data-channel="channel-2">Channel two</button></div></section>');
+    await page.addScriptTag({content:`let TOKEN="synthetic",ME={id:1},PLAYER=null,WATCH=null,WATCH_ITEM_PAGE=null,LIVE_TV={serial:1,channels:[{id:"channel-1",guide_name:"Channel one"},{id:"channel-2",guide_name:"Channel two"}],guide:{},pendingChannel:null},LIVE_TV_LEASE={current:{id:"lease-one"}},LIB_PAGE_AT=0,LIB_VIEW=null,LIB_PER="all",AUTOPLAY=null;
+      const effects=[];function liveTvHost(){return document.getElementById("live-tv-host");}function liveTvSetView(){}function liveTvSetFilter(){}function liveTvSelect(id){effects.push(id);}function liveTvApplyOutcome(){throw Error("ten-foot strip must use registered controls");}function toggleLiveTvPlayback(){}function resumeLiveTv(){}const PlurxLiveTv={channelView:()=>({disabled:false})};`});
+    await page.addScriptTag({content:fs.readFileSync(path.join(web,"playback-policy.js"),"utf8")});await page.addScriptTag({content:'const PlaybackPolicy=PlurxPlaybackPolicy;'});
+    await page.addScriptTag({content:sourceFunction("pages/live-tv.js","liveTvInputState")});
+    for(const file of ["core/remote-navigation.js","core/remote-router.js"])await page.addScriptTag({content:fs.readFileSync(path.join(web,file),"utf8")});
+    await page.evaluate(()=>{location.hash="#/live-tv";});await page.locator("#enter-full").click();await page.waitForFunction(()=>document.fullscreenElement?.id==="live-tv-host");
+    assert.equal(await page.evaluate(()=>liveTvInputState()),"fullscreen_controls");assert.equal(await page.evaluate(()=>CinemaRemote.focusById("live-channel:channel-1")),"unavailable");assert.equal(await page.evaluate(()=>CinemaRemote.focusById("live-strip:channel-1")),"applied");
+    assert.equal(await page.evaluate(()=>CinemaRemote.dispatch({type:"navigate",direction:"right"},CinemaRemote.snapshot())),"applied");assert.equal(await page.evaluate(()=>document.activeElement.dataset.channel),"channel-2");assert.equal(await page.evaluate(()=>CinemaRemote.dispatch({type:"select"},CinemaRemote.snapshot())),"applied");assert.deepEqual(await page.evaluate(()=>effects),["channel-2"]);
+    await page.evaluate(()=>{globalThis.oldStripContext=CinemaRemote.snapshot();LIVE_TV.channels=[...LIVE_TV.channels];});assert.notEqual(await page.evaluate(()=>CinemaRemote.dispatch({type:"select"},oldStripContext)),"applied");assert.deepEqual(await page.evaluate(()=>effects),["channel-2"]);
+    await page.evaluate(()=>{CinemaRemote.focusById("live-strip:channel-2");globalThis.oldLeaseContext=CinemaRemote.snapshot();LIVE_TV_LEASE.current={id:"lease-two"};});assert.notEqual(await page.evaluate(()=>CinemaRemote.dispatch({type:"select"},oldLeaseContext)),"applied");assert.deepEqual(await page.evaluate(()=>effects),["channel-2"]);
+  }finally{await browser.close();}
+});
