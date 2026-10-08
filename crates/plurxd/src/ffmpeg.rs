@@ -49,43 +49,17 @@ pub(crate) fn verify_windows_source_path(
 /// what a Compose file produces for an unset variable, and treating that as a
 /// binary called "" would fail every spawn with a confusing ENOENT.
 fn resolve_bin(override_value: Option<String>, fallback: &str) -> String {
-    override_value
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| fallback.to_owned())
-}
-
-#[cfg(any(test, windows, target_os = "macos"))]
-fn sibling_bin(name: &str, directory: &std::path::Path) -> Option<String> {
-    #[cfg(windows)]
-    let filename = format!("{name}.exe");
-    #[cfg(not(windows))]
-    let filename = name.to_owned();
-    let sibling = directory.join(filename);
-    sibling
-        .is_file()
-        .then(|| sibling.to_string_lossy().into_owned())
-}
-
-fn default_bin(name: &str) -> String {
-    #[cfg(any(windows, target_os = "macos"))]
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            if let Some(sibling) = sibling_bin(name, directory) {
-                return sibling;
-            }
-        }
-    }
-    name.to_owned()
+    plurx_core::process::resolve_media_tool(override_value, fallback, None)
 }
 
 /// ffmpeg binary, overridable via `PLURX_FFMPEG` (jellyfin-ffmpeg / pinned path).
 pub fn ffmpeg_bin() -> String {
-    resolve_bin(std::env::var("PLURX_FFMPEG").ok(), &default_bin("ffmpeg"))
+    plurx_core::process::media_tool_bin("ffmpeg", std::env::var("PLURX_FFMPEG").ok())
 }
 
 /// ffprobe binary, overridable via `PLURX_FFPROBE` (jellyfin-ffmpeg / pinned).
 pub fn ffprobe_bin() -> String {
-    resolve_bin(std::env::var("PLURX_FFPROBE").ok(), &default_bin("ffprobe"))
+    plurx_core::process::media_tool_bin("ffprobe", std::env::var("PLURX_FFPROBE").ok())
 }
 
 /// Dedicated self-contained parser for descriptor-bound local source facts.
@@ -5807,14 +5781,18 @@ mod tests {
         let name = "ffprobe";
         let binary = package.path().join(name);
         std::fs::write(&binary, b"packaged probe").expect("package artifact");
-        let bundled = sibling_bin("ffprobe", package.path()).expect("default sibling");
+        let bundled =
+            plurx_core::process::resolve_media_tool(None, "ffprobe", Some(package.path()));
         assert_eq!(bundled, binary.to_string_lossy());
         assert_eq!(
             resolve_bin(Some("/operator/ffprobe".into()), &bundled),
             "/operator/ffprobe"
         );
         assert_eq!(resolve_bin(None, &bundled), bundled);
-        assert!(sibling_bin("ffmpeg", package.path()).is_none());
+        assert_eq!(
+            plurx_core::process::resolve_media_tool(None, "ffmpeg", Some(package.path())),
+            "ffmpeg"
+        );
     }
 
     /// Older builds print help and listings to stderr, so a probe that read
