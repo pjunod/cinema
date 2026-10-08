@@ -71,6 +71,26 @@ class MacosVideoPackageCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Git checkout"):
             TOOL.attach_source_parser(self.package, self.stage, self.evidence)
 
+    def test_prepared_subtitle_contract_is_source_bound_and_official_baseline_stays_supported(self):
+        with patch.object(TOOL, "run") as query:
+            self.assertFalse(TOOL.verify_prepared_subtitle_options(Path("ffmpeg"), self.evidence, {}))
+            query.assert_not_called()
+        patches = {"0004-prepare-and-composite-videotoolbox-subtitles.patch": "source-bound"}
+        answers = {"filter=subtitles_vt_images": "Filter subtitles_vt_images\n  font_provider <int>\n    fontconfig 3\n",
+                   "filter=subtitles": "Filter subtitles\n  font_provider <int>\n    fontconfig 3\n",
+                   "filter=overlay_videotoolbox": "Filter overlay_videotoolbox\n  ass <boolean>\n  bitmap <boolean>\n"}
+        with patch.object(TOOL, "run", side_effect=lambda argv: answers[argv[-1]]):
+            self.assertTrue(TOOL.verify_prepared_subtitle_options(Path("ffmpeg"), self.evidence, patches))
+            for key in answers:
+                original = answers[key]
+                answers[key] = "Filter " + key.removeprefix("filter=") + "\n"
+                with self.subTest(filter=key), self.assertRaisesRegex(ValueError, "filter/options"):
+                    TOOL.verify_prepared_subtitle_options(Path("ffmpeg"), self.evidence, patches)
+                answers[key] = original
+            answers["filter=subtitles"] = "Filter subtitles\n  font_provider <int>\n"
+            with self.assertRaisesRegex(ValueError, "Fontconfig authority"):
+                TOOL.verify_prepared_subtitle_options(Path("ffmpeg"), self.evidence, patches)
+
     def test_compiled_strict_options_require_decoder_and_both_renderer_boundaries(self):
         (self.evidence / "full-help.txt").write_text("     require_hardware .D.V. verified decoder")
         answers = {"filter=tonemapx": "   require_dovi <boolean>",
