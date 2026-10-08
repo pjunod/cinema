@@ -19,73 +19,106 @@ work, not conditional follow-ups. The accepted PR #904 remains with the
 merge coordinator; this work uses a separate effort based on the reviewed
 combined source `b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`.
 
-| Follow-up | Sol 6.1 owner | State | Required evidence |
+| Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
-| F1 GPU subtitle compositing | Native builder | Shader draft compiles; BGRA text precomposition rejected by color oracle | Preserved libass shaping/fonts and bitmap geometry; alpha/color, animation, no-cue, last-cue, seek and cancellation controls; complete-graph comparison |
-| F2 non-Mac P5 hardware decoding | Route builder | Strict source preparation integrated; diagnostic binary built, GPU proof pending | Backend/build/driver-specific hardware reconstruction and current-frame Dolby metadata through rendering; loss must not become generic PQ |
-| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser repair integrated; full package and runtime caption proof pending | Exact failing SEI condition; bounded parser repair; captions retained in real hardware-encoded AC-4 VOD delivery |
+| F1 GPU subtitle compositing | Native builder | Full C/Metal compilation and first 24-frame pixel-exact ASS comparison pass | Bitmap and cue lifecycle controls, production projection/observations, complete-graph comparison and final package |
+| F2 non-Mac P5 hardware decoding | Route builder | Source preparation and neutral provenance integrated; all 28 Intel diagnostic controls pass | Complete shipping package, production route/context integration and real encoder/size/rate envelope |
+| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser repair integrated; all seven direct caption controls pass | Normal API delivery with the final common provenance-consistent package |
 
-Builders use separate owned clones. New native patch files have separate
-owners: `0003` for caption SEI handling and `0004` for GPU subtitle work.
-Shared package/provenance and planner boundaries integrate serially. The
-manager maintains this ledger and reconciles overlapping source ownership
-before edits. Existing accepted package/evidence remains read-only.
+Builders use separate owned clones. Native owns `0004`, compositor/planner
+integration and shared package helpers; Dolby owns `0003` and caption delivery;
+Routes owns Linux package/strict context and shared pipeline integration.
+The manager owns this ledger and serializes shared file/compiler ownership.
+Accepted earlier packages and evidence remain read-only. The pinned Rust
+1.97.1 compiler lane permits two jobs with one explicit owner at a time.
+Unit execution and main landing remain with the designated merge coordinator.
+No final review or implementation completion is claimed for F1–F3 yet.
 
-The coordinator has granted the existing Mac compiler cache for pinned
-1.97.1 work, with at most two compiler jobs and one builder owner at a time.
-GPU experiments require a fresh host activity check and exclusive scheduling;
-non-Mac hardware reservations remain to be established. No new hardware
-result, implementation completion or final review is claimed yet.
+**Integrated source:** `84ad32b51` prepares pinned Linux sources and generic
+strict Dolby patches; `622c1ee42` repairs caption SEI parsing; `a9e0f2c98`
+binds strict processing to typed Mac/Linux provenance. The latter preserves
+existing Mac identity bytes and adds Linux executable, source, linked-library,
+driver and kernel/device bindings. It grants no Linux route by itself. Normal
+compile/lint hooks pass; regression sources are retained for final validation.
 
-**Follow-up findings:** the caption control fails with forwarding enabled
-and succeeds for the same 24-frame hardware-encode recipe without forwarding.
-Captured Apple SEI proves encoded/unescaped byte counts are confused in the
-existing parser; the [caption repair record](VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md)
-explains the exact trigger. GPU subtitle inspection found conflicting chroma
-writes and inconsistent alpha handling in the existing Jellyfin VT overlay.
-The compositor builder is preserving libass shaping and existing cue timing
-while repairing those defects. These are findings, not completed fixes.
+**GPU subtitles:** the predeclared oracle requires at most two code values
+of difference from complete native-scale/CPU-burn output, and byte identity
+in cue-free frames. A colored BGRA flattening approach failed with maximum
+luma/chroma error 4/11 and 263 chroma samples above tolerance. An affine
+foreground/coverage approach passed two layers across 256 backgrounds but
+failed ten translucent layers with maximum error 7 and 5,258 samples above
+tolerance. Both negatives remain recorded; tolerance was not relaxed.
 
-Passive fleet inventory found Intel and AMD hardware, but the deployed
-Jellyfin binary lacks the strict decoder/renderer options required by our
-Dolby contract. A resource-limited private Linux build is authorized; deployed
-services and packages remain unchanged. No non-Mac GPU tuple is qualified yet.
+The replacement preserves ordered libass masks/colors, FFDraw integer
+rounding, shaping/fonts and the input frame clock. A typed refcounted command
+payload travels on a secondary frame clone; it never reads main video pixels
+or modifies shared pixel-buffer attachments. The existing overlay owner
+executes the ordered GPU composition with one writer per chroma sample.
+Its first actual hardware comparison passes: all 24 frames of ten overlapping
+translucent colored text layers are byte-identical to the CPU reference on
+both planes, with exact PTS. Input is 320×180 and output 160×90. This is
+correctness evidence, not a performance or full lifecycle result.
 
-The follow-up source branch now includes `84ad32b51` (pinned Linux source
-preparation with generic strict Dolby patches) and `622c1ee42` (caption SEI
-parser repair with three regression sources). Their normal compile/lint hooks
-passed; unit execution remains assigned to final coordinator validation.
-The integrated catalog passes with both changes. A diagnostic Linux binary
-has compiled, but is neither the shipping package nor capability evidence.
-The full Mac package rebuild carries the caption repair before subtitle work.
+A subsequent no-cue control exposed inconsistent hardware-frame pool
+ownership: a cloned blank main frame did not belong to the overlay's declared
+output pool. The repair makes active output allocation and blank clones share
+the captured main pool, retaining download validation. Error teardown then
+exposed the context's missing first-field `AVClass` slot; cleanup must not
+interpret that class pointer as an owned device reference. These new repairs
+and blank/active/EOF controls remain under qualification. Generic BGRA overlay
+behavior is outside the new ASS/YUVA modes and has no new qualification claim.
 
-The subtitle color oracle predeclared a maximum two-code-value difference
-from the complete CPU burn reference and byte identity during cue-free
-frames. A 128×72 colored outline/shadow/overlap case rejected simple BGRA
-precomposition: maximum luma error 4, chroma error 11, and 263 chroma samples
-above the limit. A two-layer affine foreground/coverage basis stayed within the limit across
-256 backgrounds, but ten semitransparent overlapping layers failed with a
-maximum error of 7 and 5,258 samples above the limit. Both negatives remain
-recorded. The selected replacement carries cached ordered libass masks and
-colors to the existing overlay owner, which applies FFDraw integer rounding
-on the GPU. The preparation frame holds its own typed refcounted payload;
-it does not read main video pixels or mutate shared pixel-buffer attachments.
-Full-library compilation and runtime correctness remain pending.
+**Caption-preserving hardware encode:** the repaired baseline binary is
+`9c9e91054999531e7543f603ca4d4a6db32a6399f92f9b283b245ae0d104c3ea`.
+All seven direct controls pass on public reordered HEVC/AC-4 and original
+MPEG-2/A53 inputs. Default H.264 VideoToolbox encoding preserves 48 caption
+records and their normalized presentation timestamps; caption-off and
+caption-free controls contain none; copy/remux retains all 48. Decoded image
+planes are byte-identical with forwarding on/off. HEVC encoding still yields
+zero A53 records, a separately recorded pre-existing limitation. Normal API
+VOD acceptance awaits the final shared package. The
+[caption record](VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md) explains the root cause.
 
-The first AMD GPU window was returned unused: fresh admission found an
-external production FFmpeg process. No GPU device was mapped. A separate
-Intel window is reserved pending preparation and fresh admission. Whole
-build-image transfer was rejected by automatic approval; preparation uses an
-explicit allowlist of candidate binaries, public dependencies and original
-synthetic fixtures instead. There is still no non-Mac hardware pass to claim.
+**Intel hardware P5:** deployed Jellyfin lacks the strict options, so private
+source-built diagnostics were required. The first Intel attempt failed before
+decode because pinned Jellyfin libva searches its canonical driver directory
+and renamed environment variable; ordinary libva overrides do not apply.
+A read-only canonical driver binding corrected that experiment configuration.
+A changed production epoch and a stale transfer-file preflight were separately
+refused before GPU access and remain recorded.
 
-The accepted-batch coordinator separately returned fixture-license admission
-failures. The authentic expanded CC0 license already shipped with P5 controls,
-but the generator still pinned its earlier text. Sol repair `c56c1d04` aligns
-the constant and adds a tampering regression without altering license text,
-media, manifests or quality checks. Independent review accepted the exact
-repair; the coordinator owns only the failed-ID reruns. This follow-up carries
-the same reviewed repair as `4f5fee3f0` for its own package tooling.
+The corrected Intel window passes all 28 controls: twelve software and twelve
+VAAPI strict metadata/render/loss/seek/terminal-NAL cases, plus four raw output
+comparisons. Fresh and variable-metadata hardware/software output is exactly
+equal. Selected opaque VAAPI frames, mandatory hardware download, current
+frame Dolby state and independent colored-patch bounds are observed. The
+window is closed and all owned GPU work reaped. These 320×180→160×90 controls
+use an Ubuntu diagnostic binary, not the production Debian package; they do
+not qualify production encoder graphs, 4K, AMD, CUDA, D3D or performance.
+
+The first AMD window was returned unused when admission found production
+FFmpeg. A later shipping-build CPU window was also returned unused because
+unrelated compiler/container jobs were active. The coordinator retains CI
+priority; no alternative host is authorized. Source integration continues
+while a fresh explicit build lease is pending. Whole-image transfer was
+rejected by automatic approval; the successful diagnostic used only an
+explicit binary/public-dependency/original-fixture allowlist. No deployed
+service, package or host driver was changed.
+
+The rebuilt common Mac package must retain verified archive-backed source
+offers as well as Git-backed dependencies. Native owns that helper change;
+no fabricated Git metadata or stale provenance will stand in for the actual
+compiled source. The temporary Metal compiler component is tracked for exact
+removal during final cleanup. Direct experimental binaries are immutable
+snapshots, not assembled production packages.
+
+The accepted-batch fixture-license repair is separately complete. Sol commit
+`c56c1d04` updates a stale generator constant to the authentic expanded CC0
+license without changing media, manifests or quality checks. Independent
+review accepted it; the coordinator reran only the affected case, passing
+8/8 in 0.369 seconds. This effort retains identical reviewed blobs in
+`4f5fee3f0`. The temporary repair clone was removed after import and lease
+release; its review and cleanup receipts remain retained.
 
 ### Prior contribution retained for the merge coordinator
 

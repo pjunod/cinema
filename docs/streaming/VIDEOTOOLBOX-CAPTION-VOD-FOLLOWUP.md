@@ -48,8 +48,28 @@ SEI payload sizes count unescaped RBSP bytes; the parser was counting
 escaped EBSP bytes. The repair must advance by logical payload bytes while
 retaining encoded offsets for the append operation, reset message size,
 validate trailing bits and check output capacity including the start code.
-These observations establish the root cause, not repaired-build acceptance;
-caption preservation and actual VOD delivery remain pending.
+The committed repair is `622c1ee42`; patch SHA-256 is
+`8e9e7c5222a4ac497c88d802bfdaf38ee29e1c7c7c6b6b1f8f251d397bc7a8b4`.
+Its rebuilt Jellyfin baseline passes all seven direct hardware controls.
+Public reordered HEVC/AC-4 and original MPEG-2/A53 sources each produce
+48 decoded frames and 48 caption records under default H.264 VideoToolbox
+forwarding. The oracle compares caption triplets in presentation order,
+bound to actual normalized frame timestamps; raw packet order is insufficient
+for the reordered source. Caption-off and caption-free controls contain no
+captions, and copy/remux preserves all 48. The decoded planes are identical
+with forwarding enabled and disabled for both sources.
+
+HEVC output still contains no A53 records, as in the baseline; successful
+HEVC encoding is not evidence of caption preservation. Comparing Apple
+vendor SEI bytes across independent encoder sessions was inconclusive because
+one vendor byte varies; no masking or speculative change was introduced.
+Malformed size, escape, trailer, overflow and append-capacity regression
+sources are retained. Unit execution remains with the merge coordinator.
+
+The normal API producer and HTTP delivery still require the final shared
+package carrying both the caption and GPU subtitle repairs. A newly compiled
+binary paired with old provenance would be invalid evidence. Direct caption
+preservation is established; complete file-VOD acceptance remains open.
 
 ## Decision and implementation contract
 

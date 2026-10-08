@@ -620,6 +620,16 @@ shaping/fonts and PGS geometry semantics, with explicit pixel format, range,
 alpha and cue timing. Uploading a small subtitle image does not establish
 that the main video is copy-free.
 
+The active implementation retains ordered libass mask/color commands in a
+refcounted secondary clock-frame payload and applies FFDraw rounding in the
+existing GPU overlay owner. PGS retains its decoded YUVA planes and existing
+geometry/cue lifecycle. Both modes share the main hardware-frame pool for
+active allocation and cue-free clones. There is no main-plane CPU read or
+full RGB subtitle canvas. Admission initially covers post-tone-map SDR BT.709
+NV12; this adds no HDR burn policy. The color oracle is fixed at maximum
+absolute error two code values, with cue-free frames byte-identical. Rejected
+BGRA/affine alternatives and the initial exact ASS result remain in the ledger.
+
 **Acceptance:** colored PGS, ASS animations/positioning, transparent edges,
 subtitle-free intervals, last cue/EOF, seek into an active cue and cancellation
 pass existing burn semantics. No new HDR burn policy. Retain the faster
@@ -701,6 +711,22 @@ observations must neither globally remove the software restriction nor encode
 it as a permanent universal invariant. Preserve effective current-frame Dolby
 metadata through the existing renderer and prove the selected decoder uses
 hardware on each qualified backend/build/driver tuple.
+
+The Linux implementation extends the existing captured strict policy with an
+implementation identity binding executable, patch, linked closure, driver and
+kernel/device observations. Availability records must describe the observed
+decoder/encoder, input/output size and rate envelope; a small diagnostic does
+not authorize arbitrary production workloads. Reuse the incumbent resolver,
+held executable and recovery owner. Package replacement or changed driver
+context must invalidate new admission without silently rebinding active plans.
+
+The initial Intel VAAPI experiment passes 28 correctness controls with strict
+current-frame Dolby state and exact hardware/software pixels. Its Ubuntu
+binary remains diagnostic: the complete Debian shipping package must retain
+AC-4, codecs, subtitles and source offers, then supply the actual production
+graph observations. AMD/NVIDIA/Windows remain unqualified until their own
+backend evidence exists. No names-only capability or global restriction lift
+is permitted.
 
 ## 10. M6 — qualify, package and graduate the supported scope
 
