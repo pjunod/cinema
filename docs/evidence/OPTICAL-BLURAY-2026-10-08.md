@@ -84,6 +84,23 @@ playlist from four candidates. FFmpeg then reported `Unable decrypt unit
 SVQ file. The result does not distinguish unavailable vendor key data from
 this disc's protection, drive interaction, or another reader defect.
 
+## A public AACS database did not qualify BD+ playback
+
+A separate offline comparison downloaded the English `KEYDB.cfg` archive
+from the [FindVUK database](https://fvonline-db.bplaced.net/) without
+submitting a disc identifier. Its ZIP SHA-256 was
+`49fba5a35291502bf052aaf511c8137266a324501766c4110e539761dce6c01d`.
+The archive had three title-text matches but no entry for the local SHA-1
+of this disc's `AACS/Unit_Key_RO.inf`. Its contents were mounted only in a
+network-disabled disposable reader.
+
+Debian `libaacs0` with `libbdplus0` refused before video because the native
+BD+ library lacked VM configuration (`VM configuration not found`). Removing
+`libbdplus0` for an AACS-only diagnostic made libbluray refuse the BD+
+protected media earlier (`No usable BD+ libraries found`). Neither run
+verified an AACS key or produced a frame. A matching AACS entry alone would
+not satisfy this disc's separate BD+ requirement.
+
 ## What this evidence changes
 
 The expired September beta key is no longer the observed blocker. An installed
@@ -91,9 +108,10 @@ LibMMBD library and a successful BD+ processing message are still insufficient:
 the physical reader must decode an actual title frame, then satisfy forward
 and backward seek and the existing VOD segment path. The approved online
 vendor-update attempt did not satisfy that acceptance. Further reader work
-needs a verified key/decryption source for this disc or a separate diagnosis
-of the physical drive and media; another blind retry of the same container
-configuration is not evidence of progress.
+needs both a verified AACS key/decryption source and functional BD+ handling
+for this disc, or a separate diagnosis of the physical drive and media;
+another blind retry of the same container configuration is not evidence of
+progress.
 
 No fast-lane tests, adversarial merge review, release deployment, or main merge
 are implied by this source-reader investigation. The requested main-promotion
@@ -101,6 +119,6 @@ handoff is to the user's batched-merge session only after the optical work is
 actually ready.
 
 After the runs, all disposable containers and images, read-only mounts,
-temporary settings (including disc-derived metadata), and local build files
-were removed. The production `plurxd` container remained healthy and
-unchanged.
+temporary settings (including disc-derived metadata), the downloaded key
+database, and local build files were removed. The production `plurxd`
+container remained healthy and unchanged.
