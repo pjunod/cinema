@@ -60,6 +60,7 @@ impl CodecQualificationMetrics {
             Pipeline::TonemapCuda => 9,
             Pipeline::VtScaleSdr => 10,
             Pipeline::VtToneMapMetal => 11,
+            Pipeline::LibplaceboSoftware => 12,
         }
     }
 
@@ -183,5 +184,50 @@ impl TranscodeMetrics {
             ));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod pipeline_metric_tests {
+    use super::*;
+
+    #[test]
+    fn software_vulkan_metric_appends_without_changing_existing_pipeline_slots() {
+        let expected = [
+            Pipeline::VppQsv,
+            Pipeline::TonemapVaapi,
+            Pipeline::Libplacebo,
+            Pipeline::TonemapOpencl,
+            Pipeline::DoviTonemapx,
+            Pipeline::DoviPassthrough,
+            Pipeline::Hdr10Passthrough,
+            Pipeline::Cpu,
+            Pipeline::LibplaceboVaapi,
+            Pipeline::TonemapCuda,
+            Pipeline::VtScaleSdr,
+            Pipeline::VtToneMapMetal,
+            Pipeline::LibplaceboSoftware,
+        ];
+        assert_eq!(QUALIFICATION_PIPELINES, expected);
+        let metrics = CodecQualificationMetrics::default();
+        assert_eq!(metrics.pipeline_sessions.len(), expected.len());
+        for (slot, pipeline) in expected.into_iter().enumerate() {
+            assert_eq!(CodecQualificationMetrics::pipeline_slot(pipeline), slot);
+            for _ in 0..=slot {
+                metrics.record_pipeline(pipeline);
+            }
+        }
+        let output = metrics.prometheus(&EncoderCaps::default());
+        for (slot, pipeline) in expected.into_iter().enumerate() {
+            assert_eq!(
+                metrics.pipeline_sessions[slot].load(Relaxed),
+                (slot + 1) as u64
+            );
+            assert!(output.contains(&format!(
+                "plurx_tone_map_pipeline_sessions_total{{pipeline=\"{}\"}} {}\n",
+                pipeline.name(),
+                slot + 1
+            )));
+        }
     }
 }
