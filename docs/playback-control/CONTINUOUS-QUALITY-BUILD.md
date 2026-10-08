@@ -8410,3 +8410,108 @@ the exact candidate and receipts to that session. It must use an independent
 clone, run the required fast-lane units once on the merging code, rerun only
 failed tests, fix failures and merge with all Regression-Test landing lines.
 No unit suite or merge runs in this continuation.
+
+### 10.274 D3 absent from startup: pixel pass, callback fault preserved (2026-10-08)
+
+A fresh `firefox-67520f7a8-half-speed-optical-no-d3-1` run disables the optional
+D3 acquisition observer from startup. The unchanged independent optical
+criterion passes: 4,556 samples over 18,985 ms, complete capture, zero unknowns,
+gaps, backwards/skipped counters and 95.876 ms maximum upper hold. The overall
+report fails on one late-frame callback fault: expected-display step 136.32 ms
+and callback step 153.26 ms at media time 2.5 seconds. Preserve the failure,
+rather than replacing it with the optical verdict.
+
+Checksum-validated captured source counters 57–62 around that media position
+have conservative pixel upper holds 91.657, 91.652, 83.192, 87.478, 87.625 and
+75.010 ms. This does not infer browser/capture wall-clock synchronization;
+it compares the same burned-in source positions. It demonstrates the callback
+fault alone does not establish an optical freeze in this window. No production
+measurement threshold or diagnostic counter is changed. The exact daemon
+retires through the harness/guard and its owned virtual display retires.
+
+The next fresh full fifteen-manual/five-Auto run adds continuous post-startup
+independent pixels to the existing committed qualification campaign. A bounded
+120 Hz cropped recorder preserves raw pixels plus per-packet checksums. Capture
+starts before any manual request and stops before the deliberate End operation;
+initial startup and physical/audio output are outside that explicit scope.
+The optical ROI uses the original encoded clock's proportional position so
+720p and 1080p occupy the same displayed region. Whole-window completeness and
+unchanged 100 ms hold / zero backwards/skipped criteria determine the added
+optical verdict; ordinary qualification failures remain failures. The capture,
+display and exact daemon are bounded. No verdict is assigned while running.
+
+A fresh 17promax lock-state query reports passcodeRequired=true. The prepared
+phone series remains blocked before launch; no repeated Xcode launch or unit
+execution is used to rediscover that condition.
+
+### 10.275 Continuous recorder setup refusal and bounded retry (2026-10-08)
+
+`full20-optical1` stops before the first quality request because the recorder
+produces no frames. Its warning identifies the output duration parameter;
+combining `-copyts` absolute capture timestamps with output `-t 2100` places
+the output stop before the first timestamp. Preserve the failed setup report,
+empty raw/MD5 files and warning. This is not a product transition verdict.
+The exact owned daemon and its display retire.
+
+The ignored lab-only helper removes that output duration option and uses an
+independent 35-minute wall-clock recorder stop instead. Fresh `full20-optical2`
+runs the same committed qualification behavior with a fresh forty-minute
+owned display and exact daemon/browser guard. It does not overwrite an earlier
+receipt or change production code, thresholds, encoding policy or user devices.
+Its eventual preserved pixels will also support separate conservative
+per-switch source-counter join analysis against pre-switch cadence. That
+analysis explicitly scopes its display-interval assumption to the software
+display and cannot establish physical audio/display qualification.
+
+A fresh isolated Safari readiness check (`safari-readiness-67520f7a8-2`) again
+times out creating a session after 30,319 ms. Its exact owned driver retires;
+no global Remote Automation preference or personal Safari session changes.
+The browser campaign remains the only playback workload on the Linux lab.
+Its captured packet checksums and burned-in source counters are readable
+after resolution changes. Lightweight tail matching initially fails because
+raw and MD5 sinks buffer independently; exact packet-index reads validate
+checksums at packets 0, 120, 1,200 and 56,984, with readable source counters
+26, 242 and 11,398 after the initial setup-screen packet. That is capture
+progress, not a completed transition/whole-window verdict.
+
+Current-source rapid-selection/seek-collision helpers are prepared for serial
+execution after the active campaign. An unsent handoff preparation retains all
+22 landing regression fields and explicit remaining scope; no recipient
+message is sent before readiness and release of the Fable pause.
+
+### 10.276 Captured manual campaign fails; current lifecycle cases pass (2026-10-08)
+
+`firefox-67520f7a8-full20-optical2` completes all fifteen manual requests in
+one session/player. Its unchanged video-gap p95 bound fails at 169.62 ms
+against 100 ms, so the existing qualification campaign does not run Auto.
+This is not twenty accepted transitions and is not silently retried. Reported
+clock is 1.003×, hitches/stalls are zero and dropped-frame count is 73. The
+independent 889,336 ms capture is incomplete: 106,725 samples, zero unknowns,
+221 sampling gaps, zero backwards counters, 76 skipped source counters and
+299.988 ms maximum upper hold. Preserve the raw pixels, packet checksums,
+report, warnings and separately scoped join analysis. The capture cannot
+qualify whole-window continuity. Its analysis records fifteen conservative
+join bounds as not proven; no physical-refresh or physical-output claim follows.
+The exact daemon's End census is empty after five seconds and its guard/owned
+display retire. Earlier successful headless callback evidence keeps its scope.
+
+The separate current-source rapid-choice case passes: final choice 720p settles
+in 4,056 ms and preserves session, player generation and family identity,
+with zero reported hitches/stalls. The existing suite deduplicates identical
+fixture/quality/operation case names, so the seek-collision case is executed
+separately rather than counted from the first run. Its own report passes with
+zero reported hitches/stalls. Preserve `selection-lifecycle-current1*` and
+`selection-seekcollision-current1*` receipts; these are focused lifecycle
+diagnostics, not physical audio/display or full twenty-change qualification.
+
+The installed ScreenCaptureKit SDK explicitly marks `minimumFrameInterval`
+unavailable on iOS/tvOS; no unsupported frame-rate setting is added. A fresh
+ignored lab232 helper registers a separate screen output and counts valid
+sample timestamps, minimum/maximum positive intervals and nonmonotonic/invalid
+times. It retains/copies no pixel sample and preserves camera/microphone
+exclusion, normal player/audio policy and recording/time/file bounds. Its
+numeric receipt will distinguish screen-stream cadence from recording cadence
+when the phone can run. Its iOS app/UI harness compile succeeds (`apple232-cadence-ios-build.log`);
+no native run or unit execution is claimed. tvOS online playback deliberately avoids explicit audio
+session activation because that previously regressed startup; the blocked
+physical route does not justify restoring that behavior speculatively.
