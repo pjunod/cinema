@@ -222,6 +222,7 @@ def filter_help(name, command, listed):
 def inventory(ffmpeg, ffprobe, log_dir, filters=DEFAULT_FILTERS, provenance=None, context=None):
     ffmpeg, ffprobe = executable_path(ffmpeg), executable_path(ffprobe)
     receipt = {"schema_version": SCHEMA_VERSION, "kind": "inventory", "result": "inventory",
+               "harness_sha256": sha256(__file__),
                "host": {"os": platform.system(), "os_release": platform.release(),
                         "arch": platform.machine(), "model": None, "os_build": None,
                         "power_mode": None, "thermal_state": None, "service_context": context},
@@ -605,6 +606,7 @@ def experiment(args):
                     load_json(args.service_context) if args.service_context else None)
     write_json(directory / "inventory.json", inv)
     receipt = {"schema_version": SCHEMA_VERSION, "kind": "experiment", "source_commit": args.source_commit,
+               "harness_sha256": sha256(__file__),
                "inventory": "inventory.json", "graphs": graphs, "corpus_sha256": sha256(args.corpus),
                "graph_manifest_sha256": sha256(args.graphs), "runs": [], "result": "unmeasured",
                "limitations": ["No production playback/visual qualification; M0 incumbent feature matrix remains independent"]}
@@ -630,7 +632,9 @@ def experiment(args):
         elif sha256(fixture["path"]) != fixture["sha256"]:
             fixture_reason = "input hash mismatch"
         if not fixture_reason:
-            fixture["input_observations"] = probe_media(ffprobe, fixture["path"], directory / "raw", args.timeout, args.duration)
+            # The pinned fixture contract describes the full compressed source,
+            # even when an experiment deliberately encodes only a short trim.
+            fixture["input_observations"] = probe_media(ffprobe, fixture["path"], directory / "raw", args.timeout)
             if fixture["input_observations"]["result"] != "successful":
                 fixture_reason = "input decode/probe failed"
             elif fixture.get("expected"):

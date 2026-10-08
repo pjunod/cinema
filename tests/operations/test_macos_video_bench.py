@@ -1,5 +1,6 @@
 """Offline experiment contracts; fake children never require Mac hardware."""
 
+import json
 from pathlib import Path
 import runpy
 import sys
@@ -139,6 +140,34 @@ class MacosVideoBenchTests(unittest.TestCase):
         valid["decoder_argv"] = ["-i", "http://example.invalid/input"]
         with self.assertRaises(ValueError):
             BENCH["validate_graphs"]({"schema_version": 1, "graphs": [valid]})
+
+    def test_short_encode_validates_full_pinned_input_contract(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "clip.mp4").write_bytes(b"compressed fixture")
+            (root / "corpus.json").write_text(json.dumps({"schema_version": 1, "fixtures": [{
+                "id": "sdr", "path": "clip.mp4", "sha256": BENCH["sha256"](root / "clip.mp4"),
+                "class": "sdr", "expected": {"frame_count": 1440}}]}))
+            (root / "graphs.json").write_text(json.dumps({"schema_version": 1, "graphs": [graph("a"), graph("b")]}))
+            args = BENCH["parser"]().parse_args(["run", "--ffmpeg", "/fake/ffmpeg", "--ffprobe", "/fake/ffprobe",
+                "--corpus", str(root / "corpus.json"), "--graphs", str(root / "graphs.json"),
+                "--baseline", "a", "--candidate", "b", "--duration", "1", "--repetitions", "0",
+                "--output-dir", str(root / "out")])
+            probe = mock.Mock(return_value={"result": "successful", "streams": [{"width": 320}],
+                "frame_count": 1440, "timestamps_monotonic": True})
+            def fake_run(treatment, fixture, _ffmpeg, _ffprobe, _directory, _duration, _timeout, repetition, cache, pair):
+                return {"result": "successful", "reason": None, "pair_id": pair,
+                        "input": fixture, "treatment": treatment,
+                        "measurement": {"repetition": repetition, "cache_condition": cache}}
+            caps = {kind: {"names": []} for kind in ("filters", "encoders", "decoders", "bsfs", "muxers", "demuxers")}
+            caps["filter_help"] = {}
+            with mock.patch.dict(G, {"executable_path": lambda path: path,
+                 "inventory": lambda *args, **kwargs: {"capabilities": caps},
+                 "probe_media": probe, "run_graph": fake_run}):
+                receipt = BENCH["experiment"](args)
+            self.assertEqual(receipt["result"], "successful")
+            self.assertEqual(len(probe.call_args.args), 4)
+            self.assertEqual(receipt["runs"][0]["input"]["input_contract"]["result"], "successful")
 
     def test_cli_rejects_path_lookup_and_negative_bounds(self):
         with self.assertRaises(ValueError):
