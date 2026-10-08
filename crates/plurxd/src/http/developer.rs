@@ -277,26 +277,39 @@ fn macos_video_processing(state: &AppState, enabled: bool) -> DeveloperEnableIte
 
 fn macos_hevc_output(state: &AppState, enabled: bool) -> DeveloperEnableItem {
     let diagnostics = state.transcode.macos_video_diagnostics();
-    let requirement = |id, title, graph: &str| {
-        let observation = diagnostics.get("graphs").and_then(|rows| rows.get(graph));
-        let availability = observation
-            .and_then(|row| row.get("availability"))
-            .and_then(serde_json::Value::as_str);
-        let reason = observation
-            .and_then(|row| row.get("reason"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("not_observed");
+    let requirement = |id, title, graphs: &[&str]| {
+        let observations: Vec<_> = graphs
+            .iter()
+            .map(|graph| {
+                let observation = diagnostics.get("graphs").and_then(|rows| rows.get(*graph));
+                let availability = observation
+                    .and_then(|row| row.get("availability"))
+                    .and_then(serde_json::Value::as_str);
+                let reason = observation
+                    .and_then(|row| row.get("reason"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("not_observed");
+                (availability, format!("{graph}: {reason}"))
+            })
+            .collect();
+        let status = if observations
+            .iter()
+            .any(|(value, _)| *value == Some("available"))
+        {
+            RequirementStatus::Met
+        } else if observations
+            .iter()
+            .any(|(value, _)| *value == Some("pending"))
+        {
+            RequirementStatus::Unknown
+        } else {
+            RequirementStatus::Unmet
+        };
         DeveloperRequirement {
-            id,
-            title,
-            status: match availability {
-                Some("available") => RequirementStatus::Met,
-                Some("unavailable") => RequirementStatus::Unmet,
-                Some("pending") => RequirementStatus::Unknown,
-                _ => RequirementStatus::Unmet,
-            },
+            id, title, status,
             evidence: format!(
-                "This worker's independently observed {graph} graph is {reason}. SDR and HDR10 output have separate compatibility; availability does not establish client or display qualification."
+                "This worker's independently observed graphs are {}. Either native or host-memory processing may supply this output. SDR and HDR10 have separate compatibility; availability does not establish client or display qualification.",
+                observations.iter().map(|(_, reason)| reason.as_str()).collect::<Vec<_>>().join("; ")
             ),
         }
     };
@@ -304,8 +317,8 @@ fn macos_hevc_output(state: &AppState, enabled: bool) -> DeveloperEnableItem {
         id: "macos_hevc_output", title: "Mac HEVC output", enabled: Some(enabled),
         setting: Some("macos_hevc_output_enabled"),
         requirements: vec![
-            requirement("hevc_sdr", "Negotiated SDR HEVC", "hevc_sdr"),
-            requirement("hevc_hdr10", "Negotiated HDR10 Main10 HEVC", "hevc_hdr10"),
+            requirement("hevc_sdr", "Negotiated SDR HEVC", &["hevc_sdr", "hevc_sdr_host"]),
+            requirement("hevc_hdr10", "Negotiated HDR10 Main10 HEVC", &["hevc_hdr10", "hevc_hdr10_host"]),
             DeveloperRequirement { id: "delivery_qualification", title: "Client and HDR presentation qualification",
                 status: RequirementStatus::Unobservable,
                 evidence: "Independent HEVC negotiation, produced segments, seek/resume, fallback and target clients still require qualification. HDR10 preservation also requires an HDR display and retained effective static metadata. The saved choice is always accepted.".into() },

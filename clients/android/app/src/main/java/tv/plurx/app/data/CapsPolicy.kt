@@ -31,6 +31,8 @@ data class DeviceCaps(
     val audio: List<String>,
     val containers: List<String>,
     val transports: List<String>,
+    // Decoder enumeration alone does not prove the HLS/fMP4 transport.
+    val hls_hevc_sample_entries: List<String>? = null,
     val display: DisplayCaps,
     val learned_limits: List<LearnedLimit> = emptyList(),
     // ALWAYS, because kotlinx omits a property equal to its default and an
@@ -250,6 +252,7 @@ internal fun capsDocument(
     decoderDolbyVisionProfiles: List<Int>,
     client: ClientInfo,
     audioSinks: List<AudioSinkClaim> = emptyList(),
+    hlsHevcSampleEntries: List<String>? = null,
 ): DeviceCaps {
     val dvProfiles = decoderDolbyVisionProfiles.takeIf {
         HdrType.DOLBY_VISION in hdrTypes
@@ -261,6 +264,7 @@ internal fun capsDocument(
         audio = audio,
         containers = DIRECT_PLAY_CONTAINERS.split(','),
         transports = listOf("progressive", "hls"),
+        hls_hevc_sample_entries = hlsHevcSampleEntries,
         display = DisplayCaps(
             hdr = displayIsHdr(hdrTypes),
             dolby_vision = HdrType.DOLBY_VISION in hdrTypes,
@@ -269,8 +273,11 @@ internal fun capsDocument(
     )
 }
 
-internal fun shouldFallBackToLegacyDecision(statusCode: Int): Boolean =
-    statusCode == 400 || statusCode == 404 || statusCode == 405
+internal fun shouldFallBackToLegacyDecision(
+    statusCode: Int,
+    caps: DeviceCaps? = null,
+): Boolean = caps?.hls_hevc_sample_entries == null &&
+    (statusCode == 400 || statusCode == 404 || statusCode == 405)
 
 /**
  * Normalize MediaCodec evidence into the two server capability fields.

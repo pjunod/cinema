@@ -820,7 +820,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val decision = try {
             api().decisionV2ForContext(fileContext, request, DecisionCapsReq(snapshot.document), validLinkReceipt(linkReceipt))
         } catch (error: HttpException) {
-            if (!shouldFallBackToLegacyDecision(error.code())) throw error
+            if (!shouldFallBackToLegacyDecision(error.code(), snapshot.document)) throw error
             api().decisionForContext(fileContext, snapshot.legacyQuery + request)
         }
         return PlaybackDecision(decision, snapshot)

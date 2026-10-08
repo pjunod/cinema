@@ -12,6 +12,8 @@ import android.os.Build
 import android.util.Log
 import android.view.Display
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.Format
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.C
 import androidx.media3.exoplayer.audio.AudioCapabilities
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
@@ -153,6 +155,7 @@ object Caps {
                     ua = Build.MODEL.take(160),
                 ),
                 audioSinks = audioSinks,
+                hlsHevcSampleEntries = hlsHevcSampleEntries(context, video),
             ).let { document ->
                 if (Session.decoderCompactionContract == DECODER_COMPACTION_CONTRACT && document.video.size <= MAX_CLIENT_DECODER_ENTRIES) {
                     document.copy(decoder_compaction = DECODER_COMPACTION_CONTRACT)
@@ -382,6 +385,39 @@ object Caps {
     )
 
     /** Non-secure, non-tunneled Dolby Vision decoders Media3 can actually select. */
+    // The app uses Media3 HlsMediaSource with its fragmented-MP4 extractor.
+    // Ask that same decoder selector about every advertised HEVC rectangle and
+    // profile; a platform registry entry alone cannot admit this transport.
+    private fun hlsHevcSampleEntries(context: Context, video: VideoCodecCaps): List<String> = try {
+        val entries = video.decoderEntries.filter { entry ->
+            entry.codec == "hevc" && entry.profiles.any { it == "main" || it.startsWith("main10") }
+        }
+        val decoders = MediaCodecUtil.getDecoderInfos(MimeTypes.VIDEO_H265, false, false)
+        val supported = entries.isNotEmpty() && entries.all { entry ->
+            val width = entry.maxWidth
+            val rate = entry.maxFrameRate
+            width != null && rate != null && entry.profiles.filter { it == "main" || it.startsWith("main10") }.all { profile ->
+                val codec = when (profile) {
+                    "main" -> "hvc1.1.6.L153.B0"
+                    "main10", "main10_hdr10" -> "hvc1.2.4.L153.B0"
+                    else -> null
+                }
+                codec != null && decoders.any { decoder ->
+                    decoder.isFormatSupported(context, Format.Builder()
+                        .setSampleMimeType(MimeTypes.VIDEO_H265)
+                        .setCodecs(codec)
+                        .setWidth(width)
+                        .setHeight(entry.maxHeight)
+                        .setFrameRate(rate.numerator.toFloat() / rate.denominator)
+                        .build())
+                }
+            }
+        }
+        if (supported) listOf("hvc1") else emptyList()
+    } catch (_: Exception) {
+        emptyList()
+    }
+
     private fun decoderDolbyVisionProbe(): DolbyVisionDecoderProbe = try {
         val decoders = MediaCodecUtil.getDecoderInfos(
             DOLBY_VISION_MIME,

@@ -199,7 +199,7 @@
  
 --- /dev/null
 +++ b/libavfilter/dovi_required.h
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,43 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later
 + * Optional renderer-boundary contract for base-layer-only Dolby processing.
 + * The decoder attaches resolved mapping/color state to the decoded frame;
@@ -215,6 +215,7 @@
 +{
 +    const AVDOVIMetadata *m;
 +    const AVDOVIRpuDataHeader *h;
++    const AVDOVIColorMetadata *color;
 +    if (!sd || sd->size < sizeof(AVDOVIMetadata))
 +        return AVERROR_INVALIDDATA;
 +    m = (const AVDOVIMetadata *)sd->data;
@@ -229,6 +230,15 @@
 +    h = av_dovi_get_header(m);
 +    /* Match the CPU renderer's supported reshaping domain. */
 +    if (!h->disable_residual_flag || h->vdr_rpu_profile != 0 || h->bl_bit_depth != 10)
++        return AVERROR_INVALIDDATA;
++    color = av_dovi_get_color(m);
++    /* Profile 5 uses IPT-PQ-C2 color state. The parser's generic default
++     * color metadata is not a valid substitute for a missing P5 DM payload.
++     * This opt-in contract must reject that fallback before rendering.
++     */
++    if (color->signal_eotf != 65535 || color->signal_bit_depth != 12 ||
++        color->signal_color_space != 2 || color->signal_chroma_format != 0 ||
++        color->signal_full_range_flag != 1)
 +        return AVERROR_INVALIDDATA;
 +    return 0;
 +}

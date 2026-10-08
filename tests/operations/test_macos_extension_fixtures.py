@@ -12,13 +12,15 @@ class MacosExtensionFixturesCase(unittest.TestCase):
     def observation(self, family):
         stream = {"width": 320, "height": 180, "pix_fmt": "yuv420p10le",
                   "color_transfer": "arib-std-b67" if family == "hlg" else "smpte2084",
-                  "color_primaries": "bt2020", "color_space": "bt2020nc",
+                  "color_primaries": "bt2020", "color_space": "bt2020nc" if family == "hlg" else "ipt-c2",
                   "color_range": "tv" if family == "hlg" else "pc", "time_base": "1/12288"}
         frames = [{"pts": i * 1024} for i in range(24)]
         if family == "p5":
             stream["side_data_list"] = [{"side_data_type": "DOVI configuration record", "dv_profile": 5, "el_present_flag": 0}]
             for frame in frames:
-                frame["side_data_list"] = [{"side_data_type": "Dolby Vision Metadata", "disable_residual_flag": 1, "vdr_rpu_profile": 0}]
+                frame["side_data_list"] = [{"side_data_type": "Dolby Vision Metadata", "disable_residual_flag": 1, "vdr_rpu_profile": 0,
+                                            "signal_eotf": 65535, "signal_bit_depth": 12, "signal_color_space": 2,
+                                            "signal_chroma_format": 0, "signal_full_range_flag": 1}]
         return {"streams": [stream], "frames": frames}
 
     def test_hlg_reference_white_uses_inverse_ootf_before_oetf(self):
@@ -57,3 +59,25 @@ class MacosExtensionFixturesCase(unittest.TestCase):
         observed["streams"][0]["color_transfer"] = "smpte2084"
         with self.assertRaisesRegex(ValueError, "signal declarations"):
             TOOL["validate_observed"](observed, "hlg")
+
+    def test_changing_metadata_is_bound_to_coded_au_across_reorder(self):
+        order = [0, 3, 1, 2] + list(range(4, 24))
+        packets = [{"pts": index * 1024} for index in order]
+        ordinal = {int(packet["pts"]): i for i, packet in enumerate(packets)}
+        frames = [{"pts": i * 1024, "side_data_list": [{"side_data_type": "Dolby Vision Metadata",
+                   "dm_metadata_id": ordinal[i * 1024] % 16, "source_max_pq": 3079 + ordinal[i * 1024]}]}
+                  for i in range(24)]
+        TOOL["validate_frame_bound_metadata"]({"frames": frames}, packets)
+        frames[1]["side_data_list"], frames[3]["side_data_list"] = frames[3]["side_data_list"], frames[1]["side_data_list"]
+        with self.assertRaisesRegex(ValueError, "bound to its coded AU"):
+            TOOL["validate_frame_bound_metadata"]({"frames": frames}, packets)
+
+    def test_p5_generic_color_default_is_rejected_without_peak_blacklist(self):
+        observed = self.observation("p5")
+        for frame in observed["frames"]:
+            frame["side_data_list"][0]["source_max_pq"] = 3696
+        TOOL["validate_observed"](observed, "p5")
+        observed["frames"][12]["side_data_list"][0].update(
+            signal_eotf=39322, signal_bit_depth=14, signal_color_space=0)
+        with self.assertRaisesRegex(ValueError, "supported effective Dolby metadata"):
+            TOOL["validate_observed"](observed, "p5")
