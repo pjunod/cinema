@@ -2785,7 +2785,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Cinema remote owner adds one bounded physical-approval actor and three joined
 # race fixtures. Existing decode_facts tests add one joined probe actor.
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
-expected_occurrences = 898
+# #904: the Mac parser blocking worker retains source/admission guards until
+# joined; one joined Live source-classification fixture observes its owned child.
+expected_occurrences = 900
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -2985,7 +2987,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Source uses awaited FuturesUnordered, with no independently spawned close task.
 # Review64 R4: +1 owned/joined finite-stack test thread. No production task.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 60
+# #904: EpochClock owns its Builder-spawned epoch thread; Drop stops, unparks
+# and joins it before releasing the parser engine. This creates no OS child.
+expected_occurrences = 61
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4236,7 +4240,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # regression deadlines and two live-fixture shutdown timers. Existing
 # decode_facts regressions add five bounded deadline/poll timers.
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
-expected_occurrences = 1606
+# #904: one parser stop deadline, three Live executable identity bounds and
+# one P5 unlink bound. Deadlines never replace worker or child settlement.
+expected_occurrences = 1611
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4622,7 +4628,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # exact frozen executable used by the pretranscode launch-fence regression.
 # Production observations use bounded_probe_command's existing owned child
 # kill-and-reap settlement; fixture children are also awaited or killed/reaped.
-expected_occurrences = 236
+# #904: one corpus pre-probe and five P5 probe/decode/encode commands use
+# bounded child ownership; one Live classification fixture owns and reaps its
+# shell. The existing Live producer command site is only refactored in place.
+expected_occurrences = 243
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5211,7 +5220,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Cinema remote adds five HTTP response/status builder calls (remote.rs:3,
 # live_fixture.rs:1, tests.rs:1); these conservative matches launch no process.
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
-expected_occurrences = 730
+# #904: the broad .spawn() matcher also counts the EpochClock thread above;
+# it remains retained and joined by Drop, not an unowned child launch.
+expected_occurrences = 731
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5478,7 +5489,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Cinema composition: audited exact sites, preserving production ownership.
 # Cinema remote adds two test-only pause-barrier wait() calls; no child reap.
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
-expected_occurrences = 319
+# #904: one Live classification fixture waits for its owned shell child,
+# verifies settlement and classifies the actual decoder-refusal exit.
+expected_occurrences = 320
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

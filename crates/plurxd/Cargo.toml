@@ -91,6 +91,11 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The source-only parser has no native executable/dependency/descendant closure.
+# No WASI filesystem or process implementation is linked into its runtime.
+wasmtime = { version = "=49.0.2", default-features = false, features = ["std", "runtime", "cranelift"] }
+
 [dev-dependencies]
 # Invitation seam tests compose the released broker Router and trusted local TLS.
 plurx-notification-broker = { path = "../plurx-notification-broker" }
@@ -133,3 +138,6 @@ required-features = ["cluster-integration-tests"]
 [[test]]
 name = "live_tv_two_node"
 required-features = ["cluster-integration-tests"]
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+wat = "=1.261.0"

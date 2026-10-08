@@ -15,8 +15,8 @@ use plurx_core::transcode::{
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 use plurx_core::transcode::{
-    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
-    MacosProcessingSelection,
+    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
+    MacosProcessingIdentity, MacosProcessingSelection,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -382,7 +382,7 @@ fn macos_processing_cannot_be_selected_without_context_or_for_burns() {
     assert_eq!(plan.options().pipeline, Pipeline::Cpu);
     assert_eq!(
         plan.macos_processing_selection(),
-        Some(MacosProcessingSelection::PresentationConstraint)
+        Some(MacosProcessingSelection::RuntimeProbeFailed)
     );
 }
 
@@ -576,12 +576,63 @@ fn macos_processing_continuous_vod_does_not_relax_rate_or_auto_quality_contracts
         .with_auto_quality_rate_profile(AutoQualityRateProfile::H264Sdr1440P30V1);
     let plan = resolve_transcode(&auto, &input, &caps, &policy, &AttemptRestrictions::none())
         .expect("existing auto quality route");
-    assert_eq!(plan.options().pipeline, Pipeline::Cpu);
+    assert_eq!(plan.options().pipeline, Pipeline::VtScaleSdr);
     assert_eq!(
         plan.macos_processing_selection(),
+        Some(MacosProcessingSelection::Selected)
+    );
+    assert!(plan.macos_processing_identity().is_some());
+    assert_eq!(plan.output_contract().effective_width(), Some(2560));
+    assert_eq!(plan.output_contract().effective_height(), Some(1440));
+    assert_eq!(plan.output_contract().output_profile(), Some("high"));
+    assert_eq!(plan.options().video_bitrate_kbps, 12_000);
+    let source = execution_file("/fixture/source.mkv");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let args = hls_args(&plan, &execution);
+    let graph = &args[args.iter().position(|arg| arg == "-vf").expect("vf") + 1];
+    assert!(graph.starts_with("fps=24/1,"));
+    assert!(graph.contains(
+        &Pipeline::VtScaleSdr
+            .filters(Some(2560), 1440, Some("sdr"))
+            .expect("native scale")
+    ));
+    assert!(graph.ends_with(",setsar=1"));
+    assert!(!graph.contains("hwdownload"));
+    let mut too_fast = macos_stream(false);
+    too_fast["avg_frame_rate"] = json!("60/1");
+    too_fast["r_frame_rate"] = json!("60/1");
+    assert_eq!(
+        resolve_transcode(
+            &auto,
+            &facts(too_fast),
+            &caps,
+            &policy,
+            &AttemptRestrictions::none()
+        ),
+        Err(PlanError::InvalidMediaOption("auto_quality_rate_profile"))
+    );
+    let mut anamorphic = macos_stream(false);
+    anamorphic["width"] = json!(2880);
+    anamorphic["sample_aspect_ratio"] = json!("4:3");
+    let incumbent = resolve_transcode(
+        &auto,
+        &facts(anamorphic),
+        &caps,
+        &policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("existing normalization path");
+    assert_eq!(incumbent.options().pipeline, Pipeline::Cpu);
+    assert_eq!(
+        incumbent.macos_processing_selection(),
         Some(MacosProcessingSelection::PresentationConstraint)
     );
-    assert!(plan.macos_processing_identity().is_none());
 }
 
 #[test]
@@ -789,6 +840,8 @@ fn facts(stream: Value) -> DecodeFacts {
 
 fn options(pipeline: Pipeline) -> TranscodeMediaOptions {
     TranscodeMediaOptions {
+        output_codec: None,
+        strict_dolby: None,
         video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
         audio: None,
         target_height: 1080,
@@ -1019,6 +1072,8 @@ fn execution_file(path: &str) -> MediaFile {
 
 fn execution_options() -> TranscodeOptions {
     TranscodeOptions {
+        output_codec: None,
+        strict_dolby: None,
         video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
         audio: None,
         auto_quality_rate_profile: None,
@@ -4268,5 +4323,667 @@ fn request_decode_requires_proven_identity_transform_even_for_continuations() {
             &AttemptRestrictions::requiring(DecodeBackend::V4l2Request),
         );
         assert!(matches!(required, Err(PlanError::IncompatibleRenderer)));
+    }
+}
+
+#[test]
+fn macos_burn_graphs_require_independent_observation_and_process_before_compositing() {
+    for hdr in [false, true] {
+        for bitmap in [false, true] {
+            let input = facts(macos_stream(hdr));
+            let caps = unqualified_software_capabilities("hevc");
+            let graph = match (hdr, bitmap) {
+                (false, false) => MacosProcessingGraph::SdrTextBurn,
+                (false, true) => MacosProcessingGraph::SdrBitmapBurn,
+                (true, false) => MacosProcessingGraph::Hdr10TextBurn,
+                (true, true) => MacosProcessingGraph::Hdr10BitmapBurn,
+            };
+            let mut media = options(Pipeline::Cpu);
+            media.subtitle_burn = Some(SubtitleBurn {
+                subtitle_index: 0,
+                bitmap,
+            });
+            let context = macos_context(true, MacosProcessingAvailability::Available)
+                .with_graph(graph, MacosProcessingAvailability::Available);
+            let plan = resolve_with_options(
+                Encoder::VideoToolbox,
+                media,
+                &input,
+                &caps,
+                macos_policy(context),
+            )
+            .expect("independently observed burn tuple");
+            assert_eq!(
+                plan.options().pipeline,
+                if hdr {
+                    Pipeline::VtToneMapMetal
+                } else {
+                    Pipeline::VtScaleSdr
+                }
+            );
+            assert_eq!(
+                plan.decode().surface().renderer_download_format(),
+                Some("nv12")
+            );
+            let source = execution_file("/fixture/source.mkv");
+            let mut execution_options = execution_options();
+            execution_options.subtitle_file =
+                (!bitmap).then(|| PathBuf::from("/fixture/active.ass"));
+            let execution = TranscodeExecution::from_options(
+                &source,
+                &execution_options,
+                Pacing::unpaced(),
+                "/output",
+            )
+            .expect("burn execution");
+            let args = hls_args(&plan, &execution);
+            let graph = args
+                .windows(2)
+                .find(|pair| pair[0] == if bitmap { "-filter_complex" } else { "-vf" })
+                .expect("shared compositor graph")[1]
+                .as_str();
+            assert!(
+                graph.find("scale_vt=") < graph.find("hwdownload,format=nv12"),
+                "{graph}"
+            );
+            if hdr {
+                assert!(
+                    graph.find("tonemap_videotoolbox=") < graph.find("hwdownload,format=nv12"),
+                    "{graph}"
+                );
+            }
+            assert!(
+                graph.find("hwdownload,format=nv12")
+                    < graph.find(if bitmap { "overlay=" } else { "subtitles=" }),
+                "{graph}"
+            );
+            assert_eq!(graph.matches("hwdownload").count(), 1);
+            assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+        }
+    }
+}
+
+#[test]
+fn macos_hlg_requires_its_own_observation_and_exact_transfer() {
+    let mut stream = macos_stream(true);
+    stream["color_transfer"] = json!("arib-std-b67");
+    stream["side_data_list"] = json!([]);
+    let input = facts(stream);
+    let caps = unqualified_software_capabilities("hevc");
+    let context = macos_context(true, MacosProcessingAvailability::Available);
+    let unavailable = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &caps,
+        macos_policy(context.clone()),
+    )
+    .expect("incumbent HLG");
+    assert_eq!(unavailable.options().pipeline, Pipeline::Cpu);
+    let selected = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &caps,
+        macos_policy(context.with_graph(
+            MacosProcessingGraph::HlgMetal,
+            MacosProcessingAvailability::Available,
+        )),
+    )
+    .expect("independent HLG graph");
+    assert_eq!(selected.options().pipeline, Pipeline::VtToneMapMetal);
+    assert_eq!(selected.output_contract().output_grade(), OutputGrade::Sdr);
+    assert_ne!(selected.plan_digest(), unavailable.plan_digest());
+}
+
+#[test]
+fn macos_bwdif_frame_graph_keeps_parity_cadence_and_runs_before_scale() {
+    for parity in ["tt", "bb"] {
+        let mut stream = macos_stream(false);
+        stream["field_order"] = json!(parity);
+        stream["codec_name"] = json!("h264");
+        stream["profile"] = json!("High");
+        let input = facts(stream);
+        let caps = unqualified_software_capabilities("h264");
+        let context = macos_context(true, MacosProcessingAvailability::Available).with_graph(
+            MacosProcessingGraph::SdrBwdifFrame,
+            MacosProcessingAvailability::Available,
+        );
+        let selected = resolve(
+            Encoder::VideoToolbox,
+            Pipeline::Cpu,
+            &input,
+            &caps,
+            macos_policy(context),
+        )
+        .expect("independently observed file BWDIF graph");
+        assert_eq!(selected.deinterlace(), Deinterlace::BwdifSendFrame);
+        assert_eq!(selected.options().pipeline, Pipeline::VtScaleSdr);
+        let source = execution_file("/fixture/interlaced.mkv");
+        let execution = TranscodeExecution::from_options(
+            &source,
+            &execution_options(),
+            Pacing::unpaced(),
+            "/output",
+        )
+        .expect("file execution");
+        let args = hls_args(&selected, &execution);
+        let filter = &args[args.iter().position(|arg| arg == "-vf").expect("filter") + 1];
+        assert!(
+            filter.starts_with(
+                "bwdif_videotoolbox=mode=send_frame:parity=auto:deint=interlaced,scale_vt="
+            ),
+            "{filter}"
+        );
+        assert!(!filter.contains("send_field"));
+        assert!(
+            !args.iter().any(|arg| arg == "-a53cc"),
+            "live caption policy stays live-scoped"
+        );
+    }
+}
+
+#[test]
+fn macos_hevc_codec_and_grade_require_independent_complete_graphs() {
+    use plurx_core::transcode::VideoCodec;
+    for hdr in [false, true] {
+        let input = facts(macos_stream(hdr));
+        let caps = unqualified_software_capabilities("hevc");
+        let mut options = options(if hdr {
+            Pipeline::Hdr10Passthrough
+        } else {
+            Pipeline::Cpu
+        });
+        options.output_codec = Some(VideoCodec::Hevc);
+        options.effective_rate_control = EffectiveRateControl::Vbr;
+        let unobserved = macos_context(true, MacosProcessingAvailability::Available)
+            .with_hevc_output_enabled(true);
+        assert!(resolve_with_options(
+            Encoder::VideoToolbox,
+            options.clone(),
+            &input,
+            &caps,
+            macos_policy(unobserved.clone())
+        )
+        .is_err());
+        let graph = if hdr {
+            MacosProcessingGraph::HevcHdr10
+        } else {
+            MacosProcessingGraph::HevcSdr
+        };
+        let observed = unobserved.with_graph(graph, MacosProcessingAvailability::Available);
+        let selected = resolve_with_options(
+            Encoder::VideoToolbox,
+            options.clone(),
+            &input,
+            &caps,
+            macos_policy(observed),
+        )
+        .expect("independent native HEVC graph");
+        assert_eq!(selected.output_contract().output_codec(), "hevc");
+        assert_eq!(
+            selected.output_contract().output_grade(),
+            if hdr {
+                OutputGrade::Hdr10
+            } else {
+                OutputGrade::Sdr
+            }
+        );
+        assert_eq!(
+            selected.options().pipeline,
+            if hdr {
+                Pipeline::VtScaleHdr10
+            } else {
+                Pipeline::VtScaleSdr
+            }
+        );
+        let execution = TranscodeExecution::from_options(
+            &execution_file("/fixture/source.mkv"),
+            &execution_options(),
+            Pacing::unpaced(),
+            "/fixture/out",
+        )
+        .expect("execution");
+        let args = hls_args(&selected, &execution);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-c:v", "hevc_videotoolbox"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-color_trc", if hdr { "smpte2084" } else { "bt709" }]));
+        assert!(args.windows(2).any(|pair| pair == ["-tag:v", "hvc1"]));
+        let host_graph = if hdr {
+            MacosProcessingGraph::HevcHdr10Host
+        } else {
+            MacosProcessingGraph::HevcSdrHost
+        };
+        let host = macos_context(false, MacosProcessingAvailability::Unavailable)
+            .with_hevc_output_enabled(true)
+            .with_graph(host_graph, MacosProcessingAvailability::Available);
+        let recovered = resolve_with_options(
+            Encoder::VideoToolbox,
+            options.clone(),
+            &input,
+            &caps,
+            macos_policy(host),
+        )
+        .expect("HEVC encoder independent of native processing");
+        assert_eq!(recovered.options().pipeline, options.pipeline);
+        assert_eq!(recovered.output_contract().output_codec(), "hevc");
+        assert_eq!(
+            recovered.output_contract().output_grade(),
+            selected.output_contract().output_grade()
+        );
+        assert_ne!(selected.plan_digest(), recovered.plan_digest());
+        let failure_context = macos_context(true, MacosProcessingAvailability::Available)
+            .with_hevc_output_enabled(true)
+            .with_graph(graph, MacosProcessingAvailability::Available)
+            .with_graph(host_graph, MacosProcessingAvailability::Available)
+            .excluding_pipeline(selected.options().pipeline);
+        let retry = resolve_with_options(
+            Encoder::VideoToolbox,
+            selected.options().clone(),
+            &input,
+            &caps,
+            macos_policy(failure_context),
+        )
+        .expect("observed grade-preserving host retry");
+        assert_eq!(retry.options().pipeline, recovered.options().pipeline);
+        assert_eq!(retry.output_contract().output_codec(), "hevc");
+        assert_eq!(
+            retry.output_contract().output_grade(),
+            selected.output_contract().output_grade()
+        );
+        if !hdr {
+            let mut legacy_options = options.clone();
+            legacy_options.output_codec = None;
+            let legacy_worker = resolve_with_options(
+                Encoder::VideoToolbox,
+                legacy_options,
+                &input,
+                &caps,
+                macos_policy(macos_context(
+                    false,
+                    MacosProcessingAvailability::Unavailable,
+                )),
+            )
+            .expect("legacy worker retains H264");
+            assert_eq!(legacy_worker.output_contract().output_codec(), "h264");
+            assert_ne!(
+                legacy_worker.plan_digest(),
+                retry.plan_digest(),
+                "an old worker cannot publish H264 behind an exact HEVC recipe"
+            );
+        }
+        let disabled = macos_context(false, MacosProcessingAvailability::Available)
+            .with_graph(host_graph, MacosProcessingAvailability::Available);
+        assert!(resolve_with_options(
+            Encoder::VideoToolbox,
+            options,
+            &input,
+            &caps,
+            macos_policy(disabled)
+        )
+        .is_err());
+    }
+}
+
+fn macos_p5_stream() -> Value {
+    let mut stream = macos_stream(true);
+    stream["color_space"] = json!("ipt-c2");
+    stream["color_range"] = json!("pc");
+    stream["side_data_list"] = json!([{"side_data_type":"DOVI configuration record", "dv_profile":5, "dv_level":6, "dv_bl_signal_compatibility_id":0, "rpu_present_flag":1, "el_present_flag":0, "bl_present_flag":1}]);
+    stream
+}
+
+#[test]
+fn macos_strict_p5_requires_independent_decoder_renderer_graphs() {
+    let input = facts(macos_p5_stream());
+    let caps = unqualified_software_capabilities("hevc");
+    let request = TranscodeRequest::new(Encoder::VideoToolbox, options(Pipeline::DoviTonemapx));
+    let ordinary = macos_context(true, MacosProcessingAvailability::Available);
+    let incumbent = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &macos_policy(ordinary.clone()),
+        &AttemptRestrictions::none(),
+    )
+    .expect("unobserved P5 stays incumbent");
+    assert_eq!(incumbent.options().pipeline, Pipeline::DoviTonemapx);
+    assert!(incumbent.options().strict_dolby.is_none());
+    for (graph, pipeline, backend) in [
+        (
+            MacosProcessingGraph::P5SoftwareCpu,
+            Pipeline::DoviStrictTonemapx,
+            DecodeBackend::Software,
+        ),
+        (
+            MacosProcessingGraph::P5VtTonemapx,
+            Pipeline::VtDoviTonemapx,
+            DecodeBackend::VideoToolbox,
+        ),
+        (
+            MacosProcessingGraph::P5SoftwareMetal,
+            Pipeline::DoviMetal,
+            DecodeBackend::Software,
+        ),
+        (
+            MacosProcessingGraph::P5VtMetal,
+            Pipeline::VtDoviMetal,
+            DecodeBackend::VideoToolbox,
+        ),
+    ] {
+        let context = ordinary
+            .clone()
+            .with_graph(graph, MacosProcessingAvailability::Available);
+        let plan = resolve_transcode(
+            &request,
+            &input,
+            &caps,
+            &macos_policy(context),
+            &AttemptRestrictions::none(),
+        )
+        .expect("exact observed strict P5 tuple");
+        assert_eq!(plan.options().pipeline, pipeline);
+        assert_eq!(plan.decode().backend(), backend);
+        assert!(plan.decode().surface().requires_side_data());
+        assert!(plan.options().strict_dolby.is_some());
+        assert!(plan.macos_processing_identity().is_some());
+        assert_eq!(plan.output_contract().output_codec(), "h264");
+        assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+        let source = execution_file("/fixture/p5.mp4");
+        let execution = TranscodeExecution::from_options(
+            &source,
+            &execution_options(),
+            Pacing::unpaced(),
+            "/fixture/out",
+        )
+        .expect("execution");
+        let args = hls_args(&plan, &execution);
+        assert!(args.iter().any(|arg| arg == "-xerror"));
+        for pair in [
+            ["-strict_dovi", "1"],
+            ["-err_detect", "explode"],
+            ["-c:v", "hevc"],
+        ] {
+            assert!(args.windows(2).any(|args| args == pair));
+        }
+        assert_eq!(
+            args.windows(2)
+                .any(|args| args == ["-hwaccel_flags", "+require_hardware"]),
+            backend == DecodeBackend::VideoToolbox
+        );
+        let filter = &args[args.iter().position(|arg| arg == "-vf").expect("filter") + 1];
+        assert!(filter.contains("apply_dovi=1:require_dovi=1"));
+        let renderer = filter
+            .find(
+                if matches!(pipeline, Pipeline::VtDoviMetal | Pipeline::DoviMetal) {
+                    "tonemap_videotoolbox="
+                } else {
+                    "tonemapx="
+                },
+            )
+            .expect("Dolby renderer");
+        assert!(
+            renderer
+                < filter
+                    .rfind("scale")
+                    .expect("scale after source-raster reshape")
+        );
+        if pipeline == Pipeline::DoviMetal {
+            assert!(filter.starts_with(
+                "format=yuv420p10le,setparams=colorspace=unknown,format=p010le,hwupload,"
+            ));
+        }
+        if pipeline == Pipeline::VtDoviTonemapx {
+            assert!(filter.starts_with(
+                "hwdownload,format=p010le,setparams=colorspace=unknown,format=yuv420p10le,"
+            ));
+        }
+    }
+}
+
+#[test]
+fn macos_strict_p5_recovery_retains_package_and_current_au_contract() {
+    let input = facts(macos_p5_stream());
+    let caps = unqualified_software_capabilities("hevc");
+    let context = macos_context(true, MacosProcessingAvailability::Available)
+        .with_graph(
+            MacosProcessingGraph::P5VtMetal,
+            MacosProcessingAvailability::Available,
+        )
+        .with_graph(
+            MacosProcessingGraph::P5SoftwareCpu,
+            MacosProcessingAvailability::Available,
+        );
+    let initial = resolve_transcode(
+        &TranscodeRequest::new(Encoder::VideoToolbox, options(Pipeline::DoviTonemapx)),
+        &input,
+        &caps,
+        &macos_policy(context.clone()),
+        &AttemptRestrictions::none(),
+    )
+    .expect("strict native initial");
+    let mut media = initial.options().clone();
+    // Existing retry callers can drop native renderer options, but the typed
+    // semantic policy remains and cannot become a generic PQ/CPU graph.
+    media.pipeline = Pipeline::Cpu;
+    let request = TranscodeRequest::new(Encoder::VideoToolbox, media);
+    let recovery_context = MacosProcessingContext::new(
+        false,
+        context.identity().clone(),
+        MacosProcessingAvailability::Unavailable,
+        MacosProcessingAvailability::Unavailable,
+    )
+    .with_graph(
+        MacosProcessingGraph::P5SoftwareCpu,
+        MacosProcessingAvailability::Available,
+    );
+    let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some("off"))
+        .with_macos_processing(recovery_context.clone());
+    let recovered = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::requiring(DecodeBackend::Software),
+    )
+    .expect("strict software CPU recovery");
+    assert_eq!(recovered.options().pipeline, Pipeline::DoviStrictTonemapx);
+    assert_eq!(recovered.decode().backend(), DecodeBackend::Software);
+    assert_eq!(recovered.decode().software_decoder(), Some("hevc"));
+    assert_eq!(
+        recovered.macos_processing_identity(),
+        initial.macos_processing_identity()
+    );
+    assert_eq!(
+        recovered.options().strict_dolby,
+        initial.options().strict_dolby
+    );
+    let unavailable = macos_policy(MacosProcessingContext::new(
+        false,
+        context.identity().clone(),
+        MacosProcessingAvailability::Unavailable,
+        MacosProcessingAvailability::Unavailable,
+    ));
+    assert_eq!(
+        resolve_transcode(
+            &request,
+            &input,
+            &caps,
+            &unavailable,
+            &AttemptRestrictions::requiring(DecodeBackend::Software)
+        ),
+        Err(PlanError::IncompatibleRenderer)
+    );
+    let changed = macos_policy(
+        MacosProcessingContext::new(
+            false,
+            macos_identity("changed-package-owner"),
+            MacosProcessingAvailability::Unavailable,
+            MacosProcessingAvailability::Unavailable,
+        )
+        .with_graph(
+            MacosProcessingGraph::P5SoftwareCpu,
+            MacosProcessingAvailability::Available,
+        ),
+    );
+    assert_eq!(
+        resolve_transcode(
+            &request,
+            &input,
+            &caps,
+            &changed,
+            &AttemptRestrictions::requiring(DecodeBackend::Software)
+        ),
+        Err(PlanError::IncompatibleRenderer)
+    );
+    for bad in 0..4 {
+        let mut stream = macos_p5_stream();
+        match bad {
+            0 => stream["side_data_list"][0]["dv_profile"] = json!(8),
+            1 => stream["side_data_list"][0]["rpu_present_flag"] = json!(0),
+            2 => stream["sample_aspect_ratio"] = json!("4:3"),
+            _ => stream["color_space"] = json!("bt2020nc"),
+        };
+        assert_eq!(
+            resolve_transcode(
+                &request,
+                &facts(stream),
+                &caps,
+                &policy,
+                &AttemptRestrictions::requiring(DecodeBackend::Software)
+            ),
+            Err(PlanError::IncompatibleRenderer)
+        );
+    }
+}
+
+#[test]
+fn macos_normalized_1440_pq_retains_sdr_avc_geometry_and_cadence() {
+    use plurx_core::transcode::AutoQualityRateProfile;
+    let input = facts(macos_stream(true));
+    let caps = unqualified_software_capabilities("hevc");
+    let policy = macos_policy(macos_context(true, MacosProcessingAvailability::Available));
+    let mut media = options(Pipeline::Cpu);
+    media.target_height = 1440;
+    media.video_bitrate_kbps = 12_000;
+    let request = TranscodeRequest::new(Encoder::VideoToolbox, media)
+        .with_auto_quality_rate_profile(AutoQualityRateProfile::H264Sdr1440P30V1);
+    let plan = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("compatible normalized PQ tone map");
+    assert_eq!(plan.options().pipeline, Pipeline::VtToneMapMetal);
+    assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+    assert_eq!(plan.output_contract().output_codec(), "h264");
+    assert_eq!(plan.output_contract().effective_width(), Some(2560));
+    assert_eq!(plan.output_contract().effective_height(), Some(1440));
+    assert_eq!(plan.options().video_bitrate_kbps, 12_000);
+    assert_eq!(plan.output_contract().output_profile(), Some("high"));
+    let source = execution_file("/fixture/pq.mkv");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let args = hls_args(&plan, &execution);
+    let graph = &args[args
+        .iter()
+        .position(|arg| arg == "-vf")
+        .expect("video filter")
+        + 1];
+    assert!(graph.starts_with("fps=24/1,"));
+    assert!(graph.contains("tonemap_videotoolbox"));
+    assert!(graph.ends_with(",setsar=1"));
+    assert!(!graph.contains("hwdownload"));
+}
+
+#[test]
+fn macos_hdr_interlaced_retains_incumbent_when_vt_cannot_decode_high10_fields() {
+    let caps = unqualified_software_capabilities("hevc");
+    let policy = macos_policy(macos_context(true, MacosProcessingAvailability::Available));
+    for transfer in ["smpte2084", "arib-std-b67"] {
+        let mut stream = macos_stream(true);
+        stream["codec_name"] = json!("h264");
+        stream["profile"] = json!("High 10");
+        stream["field_order"] = json!("tt");
+        stream["color_transfer"] = json!(transfer);
+        let request = TranscodeRequest::new(Encoder::VideoToolbox, options(Pipeline::Cpu));
+        let plan = resolve_transcode(
+            &request,
+            &facts(stream),
+            &caps,
+            &policy,
+            &AttemptRestrictions::none(),
+        )
+        .expect("incumbent HDR interlace route");
+        assert_eq!(plan.options().pipeline, Pipeline::Cpu);
+        assert!(plan.macos_processing_identity().is_none());
+    }
+}
+
+#[test]
+fn authorized_strict_p5_survives_rpu_only_renderer_guard_without_admitting_generic_cpu() {
+    let input = facts(macos_p5_stream());
+    assert_eq!(
+        input.dynamic_range_class(),
+        Some(plurx_core::transcode::DynamicRangeClass::DolbyVision)
+    );
+    let caps = unqualified_software_capabilities("hevc");
+    let context = macos_context(true, MacosProcessingAvailability::Available).with_graph(
+        MacosProcessingGraph::P5VtMetal,
+        MacosProcessingAvailability::Available,
+    );
+    let strict = resolve_with_options(
+        Encoder::VideoToolbox,
+        options(Pipeline::VtDoviMetal),
+        &input,
+        &caps,
+        macos_policy(context),
+    )
+    .expect("authorized P5 renderer survives generic RPU guard");
+    assert_eq!(strict.options().pipeline, Pipeline::VtDoviMetal);
+    assert!(strict.options().strict_dolby.is_some());
+    assert!(strict.macos_processing_identity().is_some());
+    let unavailable = macos_policy(macos_context(
+        false,
+        MacosProcessingAvailability::Unavailable,
+    ));
+    assert!(matches!(
+        resolve_with_options(
+            Encoder::VideoToolbox,
+            options(Pipeline::Cpu),
+            &input,
+            &caps,
+            unavailable
+        ),
+        Err(PlanError::IncompatibleRenderer)
+    ));
+    for profile in [7, 8] {
+        let mut stream = macos_p5_stream();
+        stream["side_data_list"][0]["dv_profile"] = json!(profile);
+        let context = macos_context(true, MacosProcessingAvailability::Available).with_graph(
+            MacosProcessingGraph::P5VtMetal,
+            MacosProcessingAvailability::Available,
+        );
+        assert!(
+            resolve_with_options(
+                Encoder::VideoToolbox,
+                options(Pipeline::VtDoviMetal),
+                &facts(stream),
+                &caps,
+                macos_policy(context)
+            )
+            .is_err(),
+            "unqualified P{profile} must not inherit strict P5"
+        );
     }
 }

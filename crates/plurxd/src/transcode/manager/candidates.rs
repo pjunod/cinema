@@ -80,6 +80,100 @@ pub(super) fn copy_candidate_recipe_digest(
 }
 
 impl TranscodeManager {
+    /// Catalog and dispatch derive the codec from the same explicit HLS claim
+    /// and saved preference. The immutable resolver still proves source and
+    /// complete graph compatibility before any producer can launch.
+    pub(super) fn negotiate_macos_output_codec(
+        &self,
+        caps: Option<&plurx_core::playback::DeviceCaps>,
+        encoder: Encoder,
+        presentation: Presentation,
+        file: &plurx_core::domain::MediaFile,
+        facts: Option<&DecodeFacts>,
+        options: &mut TranscodeOptions,
+    ) {
+        use plurx_core::transcode::{
+            MacosProcessingAvailability, MacosProcessingGraph, VideoCodec,
+        };
+        if presentation != Presentation::Vod {
+            return;
+        }
+        let Some(caps) = caps else {
+            return;
+        };
+        let grade = options.pipeline.output_grade();
+        let profile = if grade == OutputGrade::Hdr10 {
+            "main10"
+        } else {
+            "main"
+        };
+        let transfer = if grade == OutputGrade::Hdr10 {
+            plurx_core::playback::Transfer::Pq
+        } else {
+            plurx_core::playback::Transfer::Sdr
+        };
+        let explicit = caps.validate_hls_hevc_sample_entries().is_ok()
+            && caps
+                .hls_hevc_sample_entries
+                .as_ref()
+                .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1"))
+            && caps.transports.iter().any(|transport| transport == "hls")
+            && caps.containers.iter().any(|container| container == "mp4")
+            && caps.video.iter().any(|entry| {
+                entry.codec == "hevc"
+                    && entry
+                        .profiles
+                        .iter()
+                        .any(|value| normalized_profile(value) == profile)
+                    && entry.present.contains(&transfer)
+            });
+        if !explicit
+            || !self.macos_hevc_output_enabled()
+            || encoder != Encoder::VideoToolbox
+            || options.subtitle_burn.is_some()
+            || options.auto_quality_rate_profile.is_some()
+            || options.effective_rate_control != EffectiveRateControl::Vbr
+        {
+            return;
+        }
+        let report = self.macos_video_report();
+        let Some(context) = report.context(self.macos_video_processing_enabled()) else {
+            return;
+        };
+        let graphs = if grade == OutputGrade::Hdr10 {
+            [
+                MacosProcessingGraph::HevcHdr10,
+                MacosProcessingGraph::HevcHdr10Host,
+            ]
+        } else {
+            [
+                MacosProcessingGraph::HevcSdr,
+                MacosProcessingGraph::HevcSdrHost,
+            ]
+        };
+        if graphs
+            .iter()
+            .any(|graph| context.graph(*graph) == MacosProcessingAvailability::Available)
+        {
+            let Some(facts) = facts else {
+                return;
+            };
+            let mut proposed = options.clone();
+            proposed.output_codec = Some(VideoCodec::Hevc);
+            if self
+                .resolve_movie_plan_with_facts(
+                    file,
+                    &proposed,
+                    encoder,
+                    facts,
+                    &AttemptRestrictions::none(),
+                )
+                .is_ok_and(|plan| encoded_client_compatible(caps, &plan, facts))
+            {
+                options.output_codec = Some(VideoCodec::Hevc);
+            }
+        }
+    }
     pub(crate) async fn measured_candidate_cost(
         &self,
         candidate: &QualityCandidate,
@@ -385,6 +479,7 @@ impl TranscodeManager {
                     id: CandidateId::for_recipe_digest(recipe_digest),
                     recipe_digest,
                     route: CandidateRoute::Remux,
+                    planned_codec: None,
                     normalized_geometry: true,
                     width,
                     height,
@@ -429,13 +524,17 @@ impl TranscodeManager {
                     .sample_aspect_ratio()
                     .is_some_and(|sar| sar.numerator() == sar.denominator())
         });
-        for (height, hdr_requested, normalized_geometry) in heights.into_iter().flat_map(|height| {
-            [false, true].into_iter().flat_map(move |hdr| {
-                [true, false]
-                    .into_iter()
-                    .map(move |normalized| (height, hdr, normalized))
+        for (height, hdr_requested, normalized_geometry, offer_hevc) in
+            heights.into_iter().flat_map(|height| {
+                [false, true].into_iter().flat_map(move |hdr| {
+                    [true, false].into_iter().flat_map(move |normalized| {
+                        [false, true]
+                            .into_iter()
+                            .map(move |hevc| (height, hdr, normalized, hevc))
+                    })
+                })
             })
-        }) {
+        {
             if selected.is_some_and(|candidate| {
                 candidate.route != CandidateRoute::Encode
                     || i64::from(candidate.target_height) != height
@@ -504,6 +603,19 @@ impl TranscodeManager {
                 options.video_bitrate_kbps = profile.video_bitrate_kbps();
                 options.effective_rate_control = EffectiveRateControl::Vbr;
             }
+            if offer_hevc {
+                self.negotiate_macos_output_codec(
+                    Some(caps),
+                    encoder,
+                    presentation,
+                    file,
+                    source_facts.as_ref(),
+                    &mut options,
+                );
+                if options.output_codec != Some(transcode::VideoCodec::Hevc) {
+                    continue;
+                }
+            }
             let Some(facts) = source_facts.as_ref() else {
                 continue;
             };
@@ -525,40 +637,11 @@ impl TranscodeManager {
             if height == 1440 && height_px <= 1080 {
                 continue;
             }
-            let rate = contract
-                .normalized_geometry()
-                .and_then(|geometry| geometry.frame_rate)
-                .or_else(|| {
-                    source_facts
-                        .as_ref()
-                        .and_then(|facts| facts.frame_rate().value())
-                })
-                .map(|rate| (rate.numerator(), rate.denominator()));
-            let decoder_compatible = caps.video.iter().any(|entry| {
-                entry.codec == contract.output_codec()
-                    && contract.output_profile().is_none_or(|profile| {
-                        entry.profiles.is_empty()
-                            || entry.profiles.iter().any(|value| {
-                                normalized_profile(value) == normalized_profile(profile)
-                            })
-                    })
-                    && entry.geometry_admission(width, height_px, rate) != Some(false)
-                    && (entry.max_frame_rate.is_none() || rate.is_some())
-                    && entry.max_bitrate_bps.is_none_or(|ceiling| {
-                        let audio = if file.audio_streams.is_empty() {
-                            0
-                        } else {
-                            u64::from(plan.options().audio_bitrate_kbps) * 1000
-                        };
-                        u64::from(plan.options().video_bitrate_kbps) * 1500 + audio
-                            <= u64::try_from(ceiling).unwrap_or(0)
-                    })
-                    && entry.present.contains(&if grade == OutputGrade::Hdr10 {
-                        plurx_core::playback::Transfer::Pq
-                    } else {
-                        plurx_core::playback::Transfer::Sdr
-                    })
-            });
+            if !offer_hevc && encoder == Encoder::VideoToolbox && contract.output_codec() == "hevc"
+            {
+                continue;
+            }
+            let decoder_compatible = encoded_client_compatible(caps, &plan, facts);
             let recipe_digest =
                 match self.candidate_recipe_digest(&plan, presentation, reorder_frames) {
                     Ok(digest) => digest,
@@ -602,6 +685,7 @@ impl TranscodeManager {
                 id: CandidateId::for_recipe_digest(recipe_digest),
                 recipe_digest,
                 route: CandidateRoute::Encode,
+                planned_codec: Some(contract.output_codec().to_owned()),
                 normalized_geometry,
                 width,
                 height: height_px,
@@ -1118,6 +1202,19 @@ impl TranscodeManager {
         }
     }
 
+    /// Read only the catalog row restored and bound by this server. Wire echo
+    /// never supplies this private execution context or changes its digest.
+    pub(super) fn selected_output_codec(
+        context: Option<&CandidateExecutionContext>,
+        encoder: Encoder,
+    ) -> Option<transcode::VideoCodec> {
+        context.and_then(|context| {
+            (context.selected_candidate.planned_codec.as_deref() == Some("hevc")
+                && encoder == Encoder::VideoToolbox)
+                .then_some(transcode::VideoCodec::Hevc)
+        })
+    }
+
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
             retained_output: None,
@@ -1147,6 +1244,59 @@ impl TranscodeManager {
             .map(String::as_str)
             == Some("2")
     }
+}
+
+fn encoded_client_compatible(
+    caps: &plurx_core::playback::DeviceCaps,
+    plan: &ResolvedTranscode,
+    facts: &DecodeFacts,
+) -> bool {
+    let contract = plan.output_contract();
+    let (Some(width), Some(height_px)) = (contract.effective_width(), contract.effective_height())
+    else {
+        return false;
+    };
+    let grade = contract.output_grade();
+    let explicit_hevc =
+        plan.encoder() == Encoder::VideoToolbox && contract.output_codec() == "hevc";
+    let rate = contract
+        .normalized_geometry()
+        .and_then(|geometry| geometry.frame_rate)
+        .or_else(|| facts.frame_rate().value())
+        .map(|rate| (rate.numerator(), rate.denominator()));
+    (!explicit_hevc
+        || (caps
+            .hls_hevc_sample_entries
+            .as_ref()
+            .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1"))
+            && caps.transports.iter().any(|transport| transport == "hls")
+            && caps.containers.iter().any(|container| container == "mp4")))
+        && caps.video.iter().any(|entry| {
+            entry.codec == contract.output_codec()
+                && contract.output_profile().is_none_or(|profile| {
+                    (!explicit_hevc && entry.profiles.is_empty())
+                        || entry
+                            .profiles
+                            .iter()
+                            .any(|value| normalized_profile(value) == normalized_profile(profile))
+                })
+                && entry.geometry_admission(width, height_px, rate) != Some(false)
+                && (entry.max_frame_rate.is_none() || rate.is_some())
+                && entry.max_bitrate_bps.is_none_or(|ceiling| {
+                    let audio = if plan.options().input_has_audio {
+                        u64::from(plan.options().audio_bitrate_kbps) * 1000
+                    } else {
+                        0
+                    };
+                    u64::from(plan.options().video_bitrate_kbps) * 1500 + audio
+                        <= u64::try_from(ceiling).unwrap_or(0)
+                })
+                && entry.present.contains(&if grade == OutputGrade::Hdr10 {
+                    plurx_core::playback::Transfer::Pq
+                } else {
+                    plurx_core::playback::Transfer::Sdr
+                })
+        })
 }
 
 fn normalized_profile(value: &str) -> String {
@@ -1234,6 +1384,406 @@ mod tests {
 #[cfg(test)]
 mod snapshot_catalog_regression {
     use super::*;
+    fn macos_test_sdr_document() -> serde_json::Value {
+        serde_json::json!({"format":{"duration":"1.0"}, "streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main","width":320,"height":180,"pix_fmt":"yuv420p","field_order":"progressive","sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","color_primaries":"bt709","color_space":"bt709","color_range":"tv","side_data_list":[{"side_data_type":"Display Matrix","rotation":0,"displaymatrix":"00000000: 65536 0 0\n00000001: 0 65536 0\n00000002: 0 0 1073741824\n"}]}]})
+    }
+
+    async fn macos_test_sdr_source(
+        store: &Arc<dyn Store>,
+    ) -> (plurx_core::domain::MediaFile, DecodeFacts) {
+        use plurx_core::{
+            domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
+            transcode::DecodeSourceIdentity,
+        };
+        let library = store
+            .create_library(&NewLibrary {
+                name: "exact-codec".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "synthetic".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = macos_test_sdr_document();
+        let parsed = plurx_core::scan::probe::parse_probe_json(&probe);
+        let id = store
+            .upsert_file(item, "/sanitized/exact-codec.mkv", 1234, 123, &parsed)
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("lookup").expect("file");
+        let facts = DecodeFacts::from_ffprobe_json(
+            &probe,
+            DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source identity"),
+        )
+        .expect("facts");
+        (file, facts)
+    }
+
+    #[tokio::test]
+    async fn macos_hevc_negotiation_requires_hls_profile_and_observed_encoder_graph() {
+        use plurx_core::transcode::{
+            MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
+            MacosProcessingIdentity, VideoCodec,
+        };
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let (file, facts) = macos_test_sdr_source(&store).await;
+        let base = crate::test_tempdir().expect("work");
+        let manager = TranscodeManager::new(
+            store,
+            base.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let identity = MacosProcessingIdentity::new(
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64),
+            "synthetic".into(),
+            "arm64".into(),
+            "synthetic".into(),
+        )
+        .expect("identity");
+        let observed = MacosProcessingContext::new(
+            false,
+            identity,
+            MacosProcessingAvailability::Unavailable,
+            MacosProcessingAvailability::Unavailable,
+        )
+        .with_graph(
+            MacosProcessingGraph::HevcSdrHost,
+            MacosProcessingAvailability::Available,
+        );
+        manager
+            .macos_video_probe
+            .publish_context_for_test(&observed);
+        manager.set_macos_hevc_output_enabled(true);
+        let exact: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({"v":2,"hls_hevc_sample_entries":["hvc1"],"containers":["mp4"],"transports":["hls"],"video":[{"codec":"hevc","profiles":["main"],"present":["sdr"]}]})).expect("exact HLS claim");
+        let mut options = TranscodeOptions {
+            effective_rate_control: EffectiveRateControl::Vbr,
+            ..TranscodeOptions::default()
+        };
+        manager.negotiate_macos_output_codec(
+            Some(&exact),
+            Encoder::VideoToolbox,
+            Presentation::Vod,
+            &file,
+            Some(&facts),
+            &mut options,
+        );
+        assert_eq!(options.output_codec, Some(VideoCodec::Hevc));
+        assert!(!manager.macos_video_processing_enabled());
+        for missing in 0..10 {
+            let mut caps = exact.clone();
+            match missing {
+                0 => {
+                    caps.hls_hevc_sample_entries = None;
+                    caps.progressive_hevc_sample_entries = Some(vec!["hvc1".into()]);
+                }
+                1 => caps.hls_hevc_sample_entries = Some(vec![]),
+                2 => caps.hls_hevc_sample_entries = Some(vec!["hev1".into()]),
+                3 => caps.transports.clear(),
+                4 => caps.video[0].profiles.clear(),
+                5 => caps.video[0].present.clear(),
+                6 => caps.video[0].max_height = Some(100),
+                7 => {
+                    caps.video[0].max_frame_rate =
+                        Some(plurx_core::playback::caps::DecoderFrameRate {
+                            numerator: 23,
+                            denominator: 1,
+                        })
+                }
+                8 => caps.video[0].max_bitrate_bps = Some(500_000),
+                _ => caps.containers.clear(),
+            }
+            options.output_codec = None;
+            manager.negotiate_macos_output_codec(
+                Some(&caps),
+                Encoder::VideoToolbox,
+                Presentation::Vod,
+                &file,
+                Some(&facts),
+                &mut options,
+            );
+            assert_eq!(options.output_codec, None, "missing proof {missing}");
+        }
+        options.output_codec = None;
+        manager.negotiate_macos_output_codec(
+            Some(&exact),
+            Encoder::VideoToolbox,
+            Presentation::Live,
+            &file,
+            Some(&facts),
+            &mut options,
+        );
+        assert_eq!(
+            options.output_codec, None,
+            "MP4 claim does not authorize rolling MPEG-TS"
+        );
+        for unsupported in ["rotated", "hdr", "unknown_range"] {
+            let mut document = macos_test_sdr_document();
+            let stream = &mut document["streams"][0];
+            match unsupported {
+                "rotated" => stream["side_data_list"][0]["rotation"] = serde_json::json!(90),
+                "hdr" => {
+                    stream["profile"] = serde_json::json!("Main 10");
+                    stream["pix_fmt"] = serde_json::json!("yuv420p10le");
+                    stream["color_transfer"] = serde_json::json!("smpte2084");
+                    stream["color_primaries"] = serde_json::json!("bt2020");
+                    stream["color_space"] = serde_json::json!("bt2020nc");
+                }
+                _ => stream["color_range"] = serde_json::Value::Null,
+            }
+            let incompatible = DecodeFacts::from_ffprobe_json(
+                &document,
+                plurx_core::transcode::DecodeSourceIdentity::from_sha256("a".repeat(64))
+                    .expect("identity"),
+            )
+            .expect("facts");
+            options.output_codec = None;
+            manager.negotiate_macos_output_codec(
+                Some(&exact),
+                Encoder::VideoToolbox,
+                Presentation::Vod,
+                &file,
+                Some(&incompatible),
+                &mut options,
+            );
+            assert_eq!(
+                options.output_codec, None,
+                "incompatible source retains H264: {unsupported}"
+            );
+            assert!(
+                manager
+                    .resolve_movie_plan_with_facts(
+                        &file,
+                        &options,
+                        Encoder::VideoToolbox,
+                        &incompatible,
+                        &AttemptRestrictions::none()
+                    )
+                    .is_ok(),
+                "incumbent source remains encodable: {unsupported}"
+            );
+        }
+        manager.set_macos_hevc_output_enabled(false);
+        options.output_codec = None;
+        manager.negotiate_macos_output_codec(
+            Some(&exact),
+            Encoder::VideoToolbox,
+            Presentation::Vod,
+            &file,
+            Some(&facts),
+            &mut options,
+        );
+        assert_eq!(options.output_codec, None);
+    }
+
+    #[tokio::test]
+    async fn exact_hevc_candidate_rejects_legacy_h264_before_producer_construction() {
+        use plurx_core::{
+            store::SqliteStore,
+            transcode::{
+                MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
+                MacosProcessingIdentity, VideoCodec,
+            },
+        };
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let (file, facts) = macos_test_sdr_source(&store).await;
+        let base = crate::test_tempdir().expect("work");
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            base.path().join("work"),
+            EncoderCaps {
+                videotoolbox: true,
+                ..EncoderCaps::default()
+            },
+            Pipeline::Cpu,
+        )
+        .with_cache(
+            base.path().join("cache"),
+            "synthetic-ffmpeg".into(),
+            "synthetic".into(),
+        )
+        .with_decoders(vec!["hevc".into()]);
+        let identity = MacosProcessingIdentity::new(
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64),
+            "synthetic".into(),
+            "arm64".into(),
+            "synthetic".into(),
+        )
+        .expect("identity");
+        let context = MacosProcessingContext::new(
+            false,
+            identity,
+            MacosProcessingAvailability::Unavailable,
+            MacosProcessingAvailability::Unavailable,
+        )
+        .with_graph(
+            MacosProcessingGraph::HevcSdrHost,
+            MacosProcessingAvailability::Available,
+        );
+        manager.macos_video_probe.publish_context_for_test(&context);
+        manager.set_macos_hevc_output_enabled(true);
+        store
+            .put_setting(keys::HWACCEL, "videotoolbox")
+            .await
+            .expect("preference");
+        let snapshot = store
+            .playback_planning_snapshot(file.id, &QUALITY_PLANNING_KEYS)
+            .await
+            .expect("snapshot")
+            .expect("file");
+        let caps = serde_json::from_value(serde_json::json!({"v":2,"hls_hevc_sample_entries":["hvc1"],"containers":["mp4"],"transports":["hls"],"video":[{"codec":"h264","present":["sdr"]},{"codec":"hevc","profiles":["main"],"present":["sdr"]}]})).expect("caps");
+        let rows = manager
+            .quality_candidates_from_snapshot_progress(
+                &snapshot,
+                &caps,
+                None,
+                0,
+                None,
+                Presentation::Vod,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let hevc_row = rows
+            .iter()
+            .find(|row| {
+                row.route == CandidateRoute::Encode
+                    && row.normalized_geometry
+                    && row.planned_codec.as_deref() == Some("hevc")
+                    && row.decoder_compatible
+            })
+            .expect("compatible finite HEVC offer");
+        assert!(
+            rows.iter().any(|row| row.route == CandidateRoute::Encode
+                && row.target_height == hevc_row.target_height
+                && row.normalized_geometry
+                && row.planned_codec.as_deref() == Some("h264")
+                && row.decoder_compatible),
+            "same rung retains the AVC offer"
+        );
+        let restored = manager
+            .quality_candidates_from_snapshot_progress(
+                &snapshot,
+                &caps,
+                None,
+                0,
+                None,
+                Presentation::Vod,
+                None,
+                None,
+                Some(hevc_row),
+            )
+            .await;
+        assert!(
+            restored
+                .iter()
+                .any(|row| row.recipe_digest == hevc_row.recipe_digest
+                    && row.planned_codec.as_deref() == Some("hevc")),
+            "selected server recipe survives catalog reconstruction"
+        );
+        let mut options = TranscodeOptions {
+            target_height: 144,
+            output_codec: Some(VideoCodec::Hevc),
+            effective_rate_control: EffectiveRateControl::Vbr,
+            ..TranscodeOptions::default()
+        };
+        let exact = manager
+            .resolve_movie_plan_with_facts(
+                &file,
+                &options,
+                Encoder::VideoToolbox,
+                &facts,
+                &AttemptRestrictions::none(),
+            )
+            .expect("exact HEVC plan");
+        let digest = manager
+            .candidate_recipe_digest(&exact, Presentation::Vod, false)
+            .expect("digest");
+        let candidate = QualityCandidate {
+            id: CandidateId::for_recipe_digest(digest),
+            recipe_digest: digest,
+            route: CandidateRoute::Encode,
+            planned_codec: Some("hevc".into()),
+            normalized_geometry: false,
+            width: exact.output_contract().effective_width().expect("width"),
+            height: exact.output_contract().effective_height().expect("height"),
+            target_height: 144,
+            average_bps: None,
+            peak_bps: None,
+            grade: OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: false,
+        };
+        let context = TranscodeManager::candidate_context(&candidate);
+        // Reconstruction reads the authenticated selected row, never runs the
+        // codec preference again and never upgrades the separate AVC offer.
+        assert_eq!(
+            TranscodeManager::selected_output_codec(Some(&context), Encoder::VideoToolbox),
+            Some(VideoCodec::Hevc)
+        );
+        let mut avc = candidate.clone();
+        avc.planned_codec = Some("h264".into());
+        assert_eq!(
+            TranscodeManager::selected_output_codec(
+                Some(&TranscodeManager::candidate_context(&avc)),
+                Encoder::VideoToolbox
+            ),
+            None
+        );
+        avc.planned_codec = Some("future_codec".into());
+        assert_eq!(
+            TranscodeManager::selected_output_codec(
+                Some(&TranscodeManager::candidate_context(&avc)),
+                Encoder::VideoToolbox
+            ),
+            None
+        );
+        assert_eq!(
+            manager
+                .validate_prepared_candidate_recipe(&exact, Presentation::Vod, false, &context)
+                .expect("new worker accepts exact codec"),
+            digest
+        );
+        // An older worker ignores the additive HLS capability and retains its
+        // H264 encoder. Existing full recipe equality must reject that result.
+        options.output_codec = None;
+        let legacy = manager
+            .resolve_movie_plan_with_facts(
+                &file,
+                &options,
+                Encoder::VideoToolbox,
+                &facts,
+                &AttemptRestrictions::none(),
+            )
+            .expect("legacy H264 plan");
+        assert_eq!(legacy.output_contract().output_codec(), "h264");
+        let error = manager
+            .validate_prepared_candidate_recipe(&legacy, Presentation::Vod, false, &context)
+            .expect_err("old worker must reject before constructing producer");
+        assert!(error.contains("candidate_recipe_changed"));
+    }
+
     #[tokio::test]
     async fn encoded_vod_reorder_choice_is_exact_across_catalog_evidence_and_restore() {
         use plurx_core::{

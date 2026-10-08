@@ -115,6 +115,32 @@ test("Mac processing save writes only the operator choice despite unavailable re
   assert.equal(card.outerHTML,"SAVED:true");
 });
 
+test("Mac HEVC output remains enabled with unavailable compatibility and has independent graduation", () => {
+  const render=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("macosHevcOutputCard")}\nreturn macosHevcOutputCard;`)(
+      value=>value, title=>title, (id,label,note,on)=>`TOG:${id}:${on}`,
+      ()=>"unavailable", (waiting,destination)=>`${waiting} ${destination}`, name=>`SAVE:${name}`);
+  const html=render({macos_hevc_output_enabled:true,macos_video_processing_enabled:false},{unavailable:"not observed"});
+  assert.match(html,/TOG:pmacoshevc:true/);
+  assert.match(html,/SAVE:saveMacosHevcOutput/);
+  assert.match(html,/named HDR display/);
+  assert.match(html,/permanent HEVC output switch moves to Playback/);
+  assert.doesNotMatch(html,/ disabled(?:[=>\s]|$)/);
+});
+
+test("Mac HEVC output save accepts the operator choice without changing processing", async () => {
+  const card={outerHTML:""}, button={disabled:false,closest:()=>card}, calls=[];
+  const save=new Function("document","api","cacheSettings","macosHevcOutputCard","DEVELOPER_READINESS","toast",
+    `${shippedSource("saveMacosHevcOutput")}\nreturn saveMacosHevcOutput;`)(
+      {getElementById:id=>id==="pmacoshevc"?{checked:true}:{textContent:""}},
+      async(path,options)=>{calls.push({path,options});return {macos_hevc_output_enabled:true,macos_video_processing_enabled:false};},
+      value=>value, settings=>`SAVED:${settings.macos_hevc_output_enabled}:${settings.macos_video_processing_enabled}`,
+      {unavailable:"runtime unknown"},()=>{});
+  await save(button);
+  assert.deepEqual(calls,[{path:"/settings",options:{method:"PUT",body:{macos_hevc_output_enabled:true}}}]);
+  assert.equal(card.outerHTML,"SAVED:true:false");
+});
+
 test("Mac compatibility reprobe never sends or changes the saved switch", async () => {
   const calls=[], button={disabled:false};
   const reprobe=new Function("document","api","applyDeveloperReadiness","toast",
@@ -607,7 +633,7 @@ function developerPanels(){
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       // D6 (2026-10-04): the network priors switch sits beside display Auto.
       shippedSource("networkPriorsCard"),
-      shippedSource("macosVideoProcessingCard"),
+      shippedSource("macosVideoProcessingCard"), shippedSource("macosHevcOutputCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
       shippedSource("rateControlCard"),
@@ -1824,3 +1850,20 @@ test("Cinema sharing lists endpoint setup and unverified host network without ga
 });
 
 
+test("Mac processing exposes every independent implemented graph while preserving the enabled choice", () => {
+  const requirements=[];let enabled;let graduation;
+  const card=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("macosVideoProcessingCard")} return macosVideoProcessingCard;`)(
+      value=>value,()=>"",(id,title,detail,choice)=>{enabled=choice;return detail;},
+      (readiness,item,id,title,detail)=>{requirements.push({id,title,detail});return detail;},
+      waiting=>{graduation=waiting;return waiting;},()=>"");
+  const html=card({macos_video_processing_enabled:true},{items:[]});
+  assert.equal(enabled,true,"missing compatibility never overrides saved enable");
+  for(const id of ["effective_encoder","sdr_scale","hdr10_metal","hlg_metal","subtitle_burns","deinterlace","dolby_vision","live_upload"])
+    assert.ok(requirements.some(row=>row.id===id),id);
+  assert.match(graduation,/moving-field deinterlacing, strict Dolby Vision and Live TV/);
+  assert.match(html,/Live TV keeps H264 output/);
+  assert.equal(requirements.find(row=>row.id==="subtitle_burns").title,"SDR, HDR10 and HLG subtitle burns");
+  assert.match(requirements.find(row=>row.id==="deinterlace").detail,/HDR interlaced sources keep the existing processing path/);
+  assert.doesNotMatch(html,/Dolby Vision, HLG, burns and interlaced sources retain their existing routes/);
+});

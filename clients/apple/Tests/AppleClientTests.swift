@@ -1702,19 +1702,20 @@ final class AppleClientTests: XCTestCase {
 
     /// Audio advancing over a black screen is invisible to every other
     /// detector: the film clock moves, so both stall detectors reset on each
-    /// sample and AVPlayer never reports a stall. The presentation size is the
-    /// only evidence that nothing was decoded.
+    /// sample and AVPlayer never reports a stall. Current-layer readiness
+    /// distinguishes a ready frame from metadata describing its dimensions.
     @MainActor
     func testBlackFrameWatchdogFiresOnlyWhenNothingIsEverDecoded() {
         XCTAssertEqual(PlayerController.blackFrameDecodeFailureMs, 6_000)
 
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/unused.mp4"))
         var black = BlackFrameWatchdog()
         black.opened()
         for step in 0...11 {
             XCTAssertFalse(
                 black.observe(
-                    positionMs: step * 500,
-                    presentationSize: .zero,
+                    item: item, positionMs: step * 500,
+                    frameReady: false, localTargetExpected: true,
                     hasVideoSource: true,
                     playing: true
                 ),
@@ -1722,39 +1723,39 @@ final class AppleClientTests: XCTestCase {
             )
         }
         XCTAssertTrue(black.observe(
-            positionMs: 6_000,
-            presentationSize: .zero,
+            item: item, positionMs: 6_000,
+            frameReady: false, localTargetExpected: true,
             hasVideoSource: true,
             playing: true
         ))
         XCTAssertFalse(
             black.observe(
-                positionMs: 6_500,
-                presentationSize: .zero,
+                item: item, positionMs: 6_500,
+                frameReady: false, localTargetExpected: true,
                 hasVideoSource: true,
                 playing: true
             ),
             "one item enters the ladder once, not on every later sample"
         )
 
-        // A decoded picture — of any size — is the end of the matter.
+        // A ready frame on the current visible layer is the end of the matter.
         var decoding = BlackFrameWatchdog()
         for step in 0...20 {
             XCTAssertFalse(decoding.observe(
-                positionMs: step * 500,
-                presentationSize: CGSize(width: 3840, height: 2160),
+                item: item, positionMs: step * 500,
+                frameReady: true, localTargetExpected: true,
                 hasVideoSource: true,
                 playing: true
             ))
         }
         XCTAssertTrue(decoding.presentedVideo)
 
-        // An audiobook's presentation size is legitimately zero forever.
+        // Audiobooks do not need a video layer.
         var audioOnly = BlackFrameWatchdog()
         for step in 0...20 {
             XCTAssertFalse(audioOnly.observe(
-                positionMs: step * 500,
-                presentationSize: .zero,
+                item: item, positionMs: step * 500,
+                frameReady: false, localTargetExpected: true,
                 hasVideoSource: false,
                 playing: true
             ))
@@ -1764,22 +1765,22 @@ final class AppleClientTests: XCTestCase {
         var paused = BlackFrameWatchdog()
         for step in 0...20 {
             XCTAssertFalse(paused.observe(
-                positionMs: step * 500,
-                presentationSize: .zero,
+                item: item, positionMs: step * 500,
+                frameReady: false, localTargetExpected: true,
                 hasVideoSource: true,
                 playing: false
             ))
         }
         var seeking = BlackFrameWatchdog()
         XCTAssertFalse(seeking.observe(
-            positionMs: 0,
-            presentationSize: .zero,
+            item: item, positionMs: 0,
+            frameReady: false, localTargetExpected: true,
             hasVideoSource: true,
             playing: true
         ))
         XCTAssertFalse(seeking.observe(
-            positionMs: 600_000,
-            presentationSize: .zero,
+            item: item, positionMs: 600_000,
+            frameReady: false, localTargetExpected: true,
             hasVideoSource: true,
             playing: true
         ))
@@ -4117,7 +4118,7 @@ final class AppleClientTests: XCTestCase {
             "the owner's stop must record that the picture stopped presenting"
         )
         let start = try XCTUnwrap(
-            source.range(of: "private func sampleSurfacePresentation(at observedPosition: Int) {")
+            source.range(of: "private func sampleSurfacePresentation(at observedPosition: Int, evidence: LocalVideoEvidence) {")
         )
         let end = try XCTUnwrap(
             source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex)
@@ -4129,7 +4130,9 @@ final class AppleClientTests: XCTestCase {
         )
         // The contract's evidence is the position delta and the rate, plus the
         // first-frame proof — never a transport status (§3.4).
-        XCTAssertTrue(body.contains("blackFrameWatchdog.presentedVideo"))
+        XCTAssertTrue(body.contains("evidence.frameReady"))
+        XCTAssertFalse(body.contains("presentationSize"))
+        XCTAssertFalse(body.contains("blackFrameWatchdog.presentedVideo"))
         XCTAssertTrue(body.contains("rate: player.rate"))
         // The decision the sampler defers to, pinned in the same breath: the
         // evidence is collected here and weighed there, and neither half may
@@ -6150,22 +6153,22 @@ final class AppleClientTests: XCTestCase {
 
         XCTAssertNil(measurement.observe(
             positionMs: 90_249,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 11
         ))
         XCTAssertNil(measurement.observe(
             positionMs: 90_500,
-            playing: false,
+            playing: false, evidence: .audioProgress,
             observedAt: 11.5
         ))
         XCTAssertEqual(measurement.observe(
             positionMs: 90_500,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 12
         ), 2_000)
         XCTAssertNil(measurement.observe(
             positionMs: 91_000,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 13
         ))
     }
@@ -6178,12 +6181,12 @@ final class AppleClientTests: XCTestCase {
 
         XCTAssertNil(measurement.observe(
             positionMs: 88_249,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 11
         ))
         XCTAssertEqual(measurement.observe(
             positionMs: 88_250,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 12.5
         ), 2_500)
     }
@@ -6196,7 +6199,7 @@ final class AppleClientTests: XCTestCase {
 
         XCTAssertEqual(measurement.observe(
             positionMs: 10_250,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 11
         ), 1_000)
     }

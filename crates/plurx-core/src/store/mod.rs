@@ -2138,6 +2138,9 @@ pub mod keys {
     /// Missing is off. Runtime observations are advisory and never rewrite
     /// the saved choice; incompatible inputs retain their existing renderer.
     pub const MACOS_VIDEO_PROCESSING_ENABLED: &str = "playback.macos_video_processing_enabled";
+    /// Separate opt-in for negotiated Mac HEVC output. Missing is off;
+    /// runtime readiness never refuses or rewrites the saved choice.
+    pub const MACOS_HEVC_OUTPUT_ENABLED: &str = "playback.macos_hevc_output_enabled";
     /// Operator override for HEVC copy without configuration/source proof.
     /// Off by default. Readiness is advisory and never prevents saving it.
     pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";

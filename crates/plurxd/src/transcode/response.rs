@@ -824,7 +824,7 @@ enum CodecAudioFact {
 }
 
 impl FrozenHlsCodecFacts {
-    pub(super) fn encoded(plan: &plurx_core::transcode::ResolvedTranscode) -> Self {
+    pub(crate) fn encoded(plan: &plurx_core::transcode::ResolvedTranscode) -> Self {
         let mut facts = Self::audio(
             plan.options().audio.as_ref(),
             plan.options().input_has_audio,
@@ -891,6 +891,10 @@ impl FrozenHlsCodecFacts {
     }
 
     pub(crate) fn bind_output_avc_init(&mut self, codec: String) {
+        self.video = Some((codec, CodecVideoOrigin::OutputInit));
+    }
+
+    pub(crate) fn bind_output_hevc_init(&mut self, codec: String) {
         self.video = Some((codec, CodecVideoOrigin::OutputInit));
     }
 

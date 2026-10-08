@@ -47,8 +47,9 @@ pub use encoder::{
     VideoCodec,
 };
 pub use macos::{
-    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
-    MacosProcessingSelection, MACOS_PROCESSING_GRAPH_REVISION,
+    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
+    MacosProcessingIdentity, MacosProcessingSelection, StrictDolbyPolicy,
+    MACOS_PROCESSING_GRAPH_REVISION,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
@@ -810,6 +811,10 @@ pub struct SubtitleBurn {
 /// Everything needed to build a transcode command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscodeOptions {
+    /// Negotiated output codec; absent preserves the incumbent grade-based recipe.
+    pub output_codec: Option<VideoCodec>,
+    /// Frozen strict Profile5 provenance, retained through all media retries.
+    pub strict_dolby: Option<StrictDolbyPolicy>,
     /// Explicit immutable video sample recipe; ordinary encodes preserve defaults.
     pub video_sample_envelope: VideoSampleEnvelope,
     /// Conditional candidate semantics; absent preserves the legacy recipe.
@@ -1006,6 +1011,8 @@ impl Default for TranscodeOptions {
             video_sample_envelope: VideoSampleEnvelope::EncoderDefault,
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
+            strict_dolby: None,
             target_height: 1080,
             video_bitrate_kbps: 8000,
             effective_rate_control: EffectiveRateControl::Vbr,
@@ -1177,6 +1184,20 @@ fn video_filters_for_contract(
         gpu_size.map_or(opts.target_height, |(_, h)| h),
         input_dynamic_range,
     ) {
+        // The exact Mac interlace tuple retains file send-frame cadence and
+        // progressive bypass. Deinterlace the full raster before scaling;
+        // native BWDIF is independently observed, never inferred from scaling.
+        if deinterlace == Deinterlace::BwdifSendFrame
+            && matches!(
+                opts.pipeline,
+                Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal
+            )
+        {
+            gpu.insert_str(
+                0,
+                "bwdif_videotoolbox=mode=send_frame:parity=auto:deint=interlaced,",
+            );
+        }
         // The Dolby Vision and HDR10 software renderers own their entire
         // colour graph, so they do not fall through to the generic CPU chain
         // below. Insert bwdif immediately before their scale step: Dolby
@@ -1617,6 +1638,8 @@ pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec
 pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
     let media = plan.options();
     let options = TranscodeOptions {
+        output_codec: media.output_codec,
+        strict_dolby: media.strict_dolby.clone(),
         video_sample_envelope: media.video_sample_envelope,
         auto_quality_rate_profile: None,
         normalized_geometry: false,
@@ -1693,6 +1716,9 @@ fn hls_args_inner(
     // Hardware device init (VAAPI/QSV) must precede the input, and so must a
     // filter device the pipeline brings of its own (Vulkan for libplacebo,
     // OpenCL for tonemap_opencl).
+    if plan.is_some_and(|plan| plan.options().strict_dolby.is_some()) {
+        args.push("-xerror".into());
+    }
     args.extend(opts.pipeline.device_args(encoder));
 
     // Fast input seek for resume/session start.
@@ -1711,38 +1737,47 @@ fn hls_args_inner(
     // the `PLURX_HWDECODE=off` escape hatch for Dolby Vision profiles that
     // hardware-decode to garbage).
     let pipeline_decode = opts.pipeline.decode_args();
-    let (decode_args, hwdownload) = if let Some(plan) = plan {
-        let decode = plan.decode();
-        let mut args = decode.backend().input_args(
-            matches!(
-                decode.surface().decode_domain(),
-                FrameDomain::Cuda | FrameDomain::VideoToolbox
-            ) || matches!(
-                decode.backend(),
-                DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request
-            ),
-        );
-        if decode.backend() == DecodeBackend::Software {
-            if let Some(implementation) = decode.software_decoder() {
-                args.extend(["-c:v".to_owned(), implementation.to_owned()]);
+    let (decode_args, hwdownload) =
+        if let Some(plan) = plan.filter(|plan| plan.options().strict_dolby.is_some()) {
+            (
+                plan.options()
+                    .pipeline
+                    .strict_dolby_input_args()
+                    .expect("resolved strict renderer has decoder enforcement"),
+                None,
+            )
+        } else if let Some(plan) = plan {
+            let decode = plan.decode();
+            let mut args = decode.backend().input_args(
+                matches!(
+                    decode.surface().decode_domain(),
+                    FrameDomain::Cuda | FrameDomain::VideoToolbox
+                ) || matches!(
+                    decode.backend(),
+                    DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request
+                ),
+            );
+            if decode.backend() == DecodeBackend::Software {
+                if let Some(implementation) = decode.software_decoder() {
+                    args.extend(["-c:v".to_owned(), implementation.to_owned()]);
+                }
             }
-        }
-        let download = decode
-            .surface()
-            .decoder_download_format()
-            .map(|format| format!("hwdownload,format={format}"));
-        (args, download)
-    } else if opts.pipeline.requires_software_decode() {
-        (Vec::new(), None)
-    } else if pipeline_decode.is_empty() {
-        decode_setup_with_compatibility(
-            encoder,
-            legacy_source.expect("legacy argument construction has source metadata"),
-            legacy_force_software_decode.unwrap_or(false),
-        )
-    } else {
-        (pipeline_decode, None)
-    };
+            let download = decode
+                .surface()
+                .decoder_download_format()
+                .map(|format| format!("hwdownload,format={format}"));
+            (args, download)
+        } else if opts.pipeline.requires_software_decode() {
+            (Vec::new(), None)
+        } else if pipeline_decode.is_empty() {
+            decode_setup_with_compatibility(
+                encoder,
+                legacy_source.expect("legacy argument construction has source metadata"),
+                legacy_force_software_decode.unwrap_or(false),
+            )
+        } else {
+            (pipeline_decode, None)
+        };
     args.extend(decode_args);
     if plan.is_some_and(|plan| plan.output_contract().normalized_geometry().is_some()) {
         // Clearing the INPUT matrix prevents it surviving manual pixel rotation
@@ -1920,7 +1955,18 @@ fn hls_args_inner(
     // The grade is read off the pipeline rather than carried beside it, so a
     // session cannot encode HEVC Main10 through a chain that ended in BT.709,
     // or the reverse.
-    args.extend(encoder.encode_args_for(
+    args.extend(encoder.encode_args_for_codec(
+        plan.map_or_else(
+            || {
+                opts.output_codec
+                    .unwrap_or(if opts.pipeline.output_grade() == OutputGrade::Hdr10 {
+                        VideoCodec::Hevc
+                    } else {
+                        VideoCodec::H264
+                    })
+            },
+            |plan| plan.codec_contract().codec,
+        ),
         opts.pipeline.output_grade(),
         opts.video_bitrate_kbps,
         opts.effective_rate_control,
@@ -1928,17 +1974,22 @@ fn hls_args_inner(
         opts.software_threads,
     ));
     if plan.is_some_and(|plan| plan.macos_processing_identity().is_some()) {
-        // The processing contract ends in hardware H.264 and explicit SDR
-        // signaling. Both rolling and immutable VOD consume this same recipe.
+        // The captured Mac output contract fixes codec and grade signaling.
+        // Rolling and immutable VOD consume this same recipe.
         args.extend([
             "-allow_sw".into(),
             "0".into(),
             "-color_primaries".into(),
-            "bt709".into(),
+            opts.pipeline.output_grade().primaries().into(),
             "-color_trc".into(),
-            "bt709".into(),
+            opts.pipeline.output_grade().transfer().into(),
             "-colorspace".into(),
-            "bt709".into(),
+            if opts.pipeline.output_grade() == OutputGrade::Hdr10 {
+                "bt2020nc"
+            } else {
+                "bt709"
+            }
+            .into(),
             "-color_range".into(),
             "tv".into(),
         ]);
@@ -3013,6 +3064,8 @@ mod tests {
         let options = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
+            strict_dolby: None,
             target_height: 1080,
             pipeline: Pipeline::Cpu,
             tone_map: ToneMap::Zscale,
@@ -3282,6 +3335,8 @@ mod tests {
         let opts = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
+            strict_dolby: None,
             target_height: 1080,
             video_bitrate_kbps: 6000,
             ..Default::default()
@@ -3324,6 +3379,8 @@ mod tests {
         let opts = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
+            strict_dolby: None,
             target_height: 1080,
             subtitle_burn: Some(SubtitleBurn {
                 subtitle_index: 2,
@@ -3439,6 +3496,8 @@ mod tests {
         let opts = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
+            strict_dolby: None,
             target_height: 1080,
             subtitle_burn: Some(SubtitleBurn {
                 subtitle_index: 0,
@@ -3460,6 +3519,8 @@ mod tests {
         let plain = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
+            strict_dolby: None,
             target_height: 1080,
             ..Default::default()
         };
@@ -4133,6 +4194,8 @@ mod tests {
         let opts = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
+            strict_dolby: None,
             target_height: 1080,
             pipeline: Pipeline::VppQsv,
             subtitle_burn: Some(SubtitleBurn {

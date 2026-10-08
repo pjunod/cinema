@@ -473,6 +473,17 @@ write, because settings are persisted one at a time and a later bad field must
 not leave an earlier policy change in force —
 `dv_disk_keep_original = false` is the destructive case that forced the rule.
 
+`macos_video_processing_enabled` and `macos_hevc_output_enabled` are
+admin-writable booleans, both defaulting to `false`. They independently choose
+native Mac processing and negotiated HEVC output for new plans. Saving either
+choice is accepted on every platform regardless of advisory readiness;
+existing sessions retain their captured plan. `macos_video_processing` is the
+read-only runtime report, including `hevc_output_enabled` and per-graph
+observations. The Developer readiness item `macos_hevc_output` reports
+`hevc_sdr`, `hevc_hdr10` and `delivery_qualification` requirements. Missing
+observations mean unobserved, not supported; a pending probe means unknown.
+These observations never reject a saved choice.
+
 `hevc_unverified_copy` is an admin-writable boolean (default `false`). It
 allows new HEVC copy starts without configuration proof, including rolling and
 progressive playback. It can restore known color corruption. Saving it never
@@ -1135,7 +1146,8 @@ and reading its fields as if they meant what v2's mean is how a device is
 handed a stream it never claimed. Inside: `video[]` (per codec: `profiles`,
 `max_height`, `max_bitrate_bps`, `present[]` of `sdr`/`pq`/`hlg`,
 `dv_profiles`), `audio[]`, `containers[]`, `transports[]`, `dv_transport`,
-`progressive_hevc_sample_entries`, `display: {hdr, dolby_vision, max_nits}`,
+`progressive_hevc_sample_entries`, `hls_hevc_sample_entries`,
+`display: {hdr, dolby_vision, max_nits}`,
 `learned_limits[]`, `max_height`.
 An unrecognized `present` value deserializes to `Unknown` and matches nothing
 rather than failing the whole document. Empty `containers` defaults to
@@ -1147,6 +1159,17 @@ explicitly admits no progressive HEVC sample entry. A present list contains at
 most four unique exact lowercase values from `hvc1`, `hev1`, `dvh1`, `dvhe`.
 Semantic violations return typed **400 `invalid_capabilities`**. The field does
 not grant HEVC decode, a profile, HDR presentation, or Dolby Vision support.
+
+`hls_hevc_sample_entries` separately describes the selected HLS fragmented-MP4
+playback path. Missing, `null` or `[]` preserves H.264 for new optional HEVC
+encoding offers. A present list contains at most two unique exact lowercase
+values, `hvc1` and `hev1`; invalid values return `invalid_capabilities`. The
+initial native HEVC encoder requires `hvc1` plus the existing codec profile,
+transfer, container, transport, geometry, rate and bitrate claims. Generic
+HEVC decoding or original-progressive MP4 support does not imply this claim.
+The new preference applies to immutable VOD/fMP4; rolling MPEG-TS and Live TV
+retain their existing codec policy. A chosen HEVC recipe keeps its promised
+codec and output grade through recovery.
 
 Both wire shapes translate into one `DeviceCaps` and then one `DeviceProfile`,
 so a client upgrading from the query form to the document must get the same
@@ -1303,7 +1326,11 @@ qualification; the design is
   `quality_candidates` (`QualityCandidate`,
   `crates/plurx-core/src/playback/candidate.rs`); all three are omitted when
   absent. Create sets the protocol only when a quality owner was negotiated
-  (`crates/plurxd/src/http/hls/create.rs`).
+  (`crates/plurxd/src/http/hls/create.rs`). An optional candidate
+  `planned_codec` describes its actual immutable output contract, such as
+  `h264` or `hevc`; it is not selection authority. Absent values preserve
+  legacy handling. Candidate lookup still requires full recipe equality,
+  source binding and current capability validation before starting a producer.
 - **Session create (§9).** An Auto ask for one candidate is
   `intent.selection.quality = {"mode":"auto","candidate_id":…}`. While
   `playback.display_aware_auto` is off, a create that names a `candidate_id`

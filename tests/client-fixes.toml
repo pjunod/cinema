@@ -691,7 +691,7 @@ test_anchor = "testApplePlayerTreatsDolbyVisionRejectionsAsCompatibilityFailures
 id = "apple.dolby-vision-profile5-black-frame-watchdog"
 commits = ["47c06809"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "struct BlackFrameWatchdog: Equatable"
+source_anchor = "struct BlackFrameWatchdog"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testBlackFrameWatchdogFiresOnlyWhenNothingIsEverDecoded"
 
@@ -5764,3 +5764,19 @@ source = "clients/apple/Sources/InvitationSettingsView.swift"
 source_anchor = "invitations.removeHomeInstallation(deleteHome)"
 test = "clients/apple/Tests/InvitationTests.swift"
 test_anchor = "testProductionLostLocalProofListsAndDeletesSelectedHomeInstallationWithoutOtherProofs"
+
+[[fixes]]
+id = "apple.current-visible-frame-evidence"
+commits = ["98826e725185e8214645f02b81b5668ed37a687c"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "enum PlaybackFirstOutputEvidence"
+test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
+test_anchor = "testVideoTTFFRejectsClockAndDimensionsWithoutLayerReadiness"
+
+[[fixes]]
+id = "apple.cancelled-black-frame-recovery-rearms-owner"
+commits = ["2dc76591683429735419e33acf68e98448bd9b59"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func queueBlackFrameRecovery"
+test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
+test_anchor = "testQueuedBlackFrameRecoveryRearmsAfterViewerActionSupersedesTrigger"

@@ -2073,6 +2073,7 @@ pub struct SettingsDto {
     /// advisory qualification/readiness fields below.
     pub automatic_decoder_recovery: bool,
     pub macos_video_processing_enabled: bool,
+    pub macos_hevc_output_enabled: bool,
     pub macos_video_processing: serde_json::Value,
     /// Whether an operator has asked this node for the health-qualified
     /// artifact identity. What the node actually does with the request is
@@ -2565,6 +2566,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::MACOS_VIDEO_PROCESSING_ENABLED).as_deref(),
             false,
         ),
+        macos_hevc_output_enabled: plurx_core::store::stored_switch(
+            setting(keys::MACOS_HEVC_OUTPUT_ENABLED).as_deref(),
+            false,
+        ),
         macos_video_processing: state.transcode.macos_video_diagnostics(),
         decoder_health_qualified_artifacts: decoder_health_requested,
         hevc_unverified_copy: plurx_core::store::stored_switch(
@@ -2873,6 +2878,7 @@ pub struct UpdateSettings {
     pub prepared_quality_handoff: Option<bool>,
     pub automatic_decoder_recovery: Option<bool>,
     pub macos_video_processing_enabled: Option<bool>,
+    pub macos_hevc_output_enabled: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
     pub hevc_unverified_copy: Option<bool>,
     pub playback_sdr_master_codecs: Option<bool>,
@@ -3046,6 +3052,7 @@ impl UpdateSettings {
             || self.prepared_quality_handoff.is_some()
             || self.automatic_decoder_recovery.is_some()
             || self.macos_video_processing_enabled.is_some()
+            || self.macos_hevc_output_enabled.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
             || self.hevc_unverified_copy.is_some()
             || self.playback_sdr_master_codecs.is_some()
@@ -4038,6 +4045,10 @@ pub async fn update_settings(
             .transcode
             .apply_macos_video_processing_setting(on)
             .await?;
+    }
+    if let Some(on) = req.macos_hevc_output_enabled {
+        // The independent operator choice is accepted with every readiness state.
+        state.transcode.apply_macos_hevc_output_setting(on).await?;
     }
     if let Some(on) = req.hevc_unverified_copy {
         // The saved preference is authoritative. No readiness condition is
