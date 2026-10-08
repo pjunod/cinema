@@ -679,6 +679,9 @@ def restore(api, scope, current_run, applicability, bridge=None):
             require(unexecuted_preflight(api, scope, prior, job), 'Unassigned preflight is ambiguous')
             continue
         if rid not in indexed:
+            from validation.main_prepare_refusal_recovery import recover
+            if recover(api, scope, prior, jobs):
+                continue
             if receipt_workflow:
                 if unexecuted_preflight(api, scope, prior, job):
                     continue

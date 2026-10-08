@@ -111,8 +111,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         result.map_err(database_error)?;
     }
     validate_sql(super::background_jobs_integrity::SCHEMA)?;
-    // authority: restartable bootstrap must inspect the committed column and
-    // its constraint before deciding whether the original ALTER still applies.
+    // authority: committed column constraints decide whether bootstrap ALTER still applies.
     let shape = timeout_store(client.query_consistent_map::<ProducerPayloadShape, _>(
         "SELECT (SELECT count(*) FROM pragma_table_xinfo('background_transcode_artifacts') WHERE name='producer_payload') AS columns, \
          (SELECT count(*) FROM pragma_table_xinfo('background_transcode_artifacts') WHERE name='producer_payload' AND type='TEXT' AND \"notnull\"=0 AND dflt_value IS NULL AND pk=0 AND hidden=0) AS current_columns, \

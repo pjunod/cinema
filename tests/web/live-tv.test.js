@@ -721,7 +721,7 @@ async function main() {
 
   await test("autoplay rejection releases the tuner within the play deadline", async () => {
     let clock = 1000, poll, releases = 0, statuses = 0;
-    const video = { paused: true, canPlayType: () => "maybe", play: async () => { throw new Error("autoplay denied"); } };
+    const video = { paused: true, pause() { this.paused = true; }, canPlayType: () => "maybe", play: async () => { throw new Error("autoplay denied"); } };
     const nodes = { "live-tv-video": video, "live-tv-host": { hidden: true }, "live-tv-title": {} };
     // `support` is a non-optional enum on the wire, so a fixture channel that
     // omits it is not a channel this client can ever receive.
@@ -754,7 +754,7 @@ async function main() {
     // the instant you dock. Nothing here asserts source text: it drives the
     // real poll across a real route change.
     let clock = 1000, poll, keepalives = 0, statuses = 0, releases = 0, frames = 240;
-    const video = { paused: false, currentTime: 5, canPlayType: () => "maybe", play: async () => {},
+    const video = { paused: false, pause() { this.paused = true; }, currentTime: 5, canPlayType: () => "maybe", play: async () => {},
       getVideoPlaybackQuality: () => ({ totalVideoFrames: frames }) };
     const nodes = { "live-tv-video": video, "live-tv-host": { hidden: true, dataset: {} }, "live-tv-title": {} };
     const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0 };
@@ -799,7 +799,7 @@ async function main() {
     // media, no poll and no Stop control, holding a tuner invisibly.
     let clock = 1000, poll, releases = 0;
     const started = deferred(), grant = deferred();
-    const video = { paused: false, currentTime: 5, canPlayType: () => "maybe", play: async () => {},
+    const video = { paused: false, pause() { this.paused = true; }, currentTime: 5, canPlayType: () => "maybe", play: async () => {},
       getVideoPlaybackQuality: () => ({ totalVideoFrames: 240 }) };
     const nodes = { "live-tv-video": video, "live-tv-host": { hidden: true, dataset: {} }, "live-tv-title": {} };
     const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0, starting: null };
@@ -908,7 +908,7 @@ async function main() {
   await test("a frozen picture still expires even while position climbs", async () => {
     let clock = 1000, poll, releases = 0;
     // The mirror image: the timeline advances but nothing is decoded.
-    const video = { paused: false, currentTime: 10, canPlayType: () => "maybe", play: async () => {},
+    const video = { paused: false, pause() { this.paused = true; }, currentTime: 10, canPlayType: () => "maybe", play: async () => {},
       getVideoPlaybackQuality: () => ({ totalVideoFrames: 500 }) };
     const nodes = { "live-tv-video": video, "live-tv-host": { hidden: true }, "live-tv-title": {} };
     const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0 };
@@ -1634,7 +1634,7 @@ async function main() {
 
   await test("Live TV awaits fullscreen exit before hiding, with iPhone entry fallback", async () => {
     const events = [], panel = { hidden: false, dataset: { mode: "full" }, contains: () => false };
-    const video = { webkitEnterFullscreen: () => events.push("iphone-enter") };
+    const video = { paused: false, pause() { this.paused = true; }, webkitEnterFullscreen: () => events.push("iphone-enter") };
     const exited = deferred(), neverSettles = deferred(), listeners = new Map();
     const document = { getElementById: id => id === "live-tv-host" ? panel : id === "live-tv-video" ? video : null,
       addEventListener: (name, listener) => listeners.set(name, listener),
@@ -1652,6 +1652,7 @@ async function main() {
     const closing = control.stopLiveTv();
     await Promise.resolve();
     assert.deepEqual(events, ["exit", "release"]);
+    assert.equal(video.paused, true, "the local picture is paused while fullscreen exit and release remain pending");
     assert.equal(panel.hidden, false, "the fullscreen subtree must remain mounted until exit settles");
     assert.equal(panel.dataset.mode, "slot", "a late fullscreenchange cannot reveal a stopped host");
     exited.resolve();

@@ -36,8 +36,8 @@ use super::placeholder_census::STORE_SOURCES;
 
 /// Consistent-read call sites per replicated slice, production code only.
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
-    ("hiqlite.rs", 41),
-    ("hiqlite_background_jobs.rs", 1),
+    ("hiqlite.rs", 46),
+    ("hiqlite_background_jobs.rs", 2),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
     ("hiqlite_coordination.rs", 2),
@@ -45,7 +45,9 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_dv_conversion.rs", 13),
     ("hiqlite_dvr.rs", 19),
     ("hiqlite_fragment_index_cluster.rs", 32),
-    ("hiqlite_import.rs", 3),
+    ("hiqlite_import.rs", 4),
+    ("hiqlite_remote.rs", 4),
+    ("hiqlite_invitations.rs", 22),
     ("hiqlite_jellyfin_catalog.rs", 3),
     ("hiqlite_jellyfin_identity.rs", 3),
     ("hiqlite_jellyfin_login.rs", 2),

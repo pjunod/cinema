@@ -140,6 +140,49 @@ def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> 
                           git_object(repository, "HEAD^{commit}"), ancestry.returncode == 0)
 
 
+def resolve_effort_history_binding(environment: Mapping[str, str], repository: Path) -> dict[str, object]:
+    """Authenticate a dispatched task's PR, live effort tips and actual main."""
+    from validation.python_unit_receipts import API, ReceiptError, identity
+
+    if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or environment.get("GITHUB_RUN_ATTEMPT") != "1"):
+        raise QualificationError("effort history requires a fresh manual task dispatch")
+    branch = environment.get("GITHUB_REF_NAME", "")
+    commit = environment.get("GITHUB_SHA", "")
+    if (not re.fullmatch(r"[A-Za-z0-9._/-]+", branch)
+            or environment.get("GITHUB_REF") != "refs/heads/" + branch
+            or not re.fullmatch(r"[0-9a-f]{40}", commit)
+            or git_object(repository, "HEAD^{commit}") != commit):
+        raise QualificationError("effort history checkout identity mismatch")
+    root = environment.get("GITHUB_API_URL", "").rstrip("/")
+    server = urllib.parse.urlsplit(environment.get("GITHUB_SERVER_URL", ""))
+    origin = urllib.parse.urlsplit(root)
+    if (origin.scheme, origin.netloc) != (server.scheme, server.netloc):
+        raise QualificationError("effort history API origin mismatch")
+    try:
+        api = API(root, environment.get("GITHUB_REPOSITORY", ""), environment.get("GITHUB_TOKEN", ""))
+        scope = identity(api, branch, commit)
+        pr = api_document(environment, "/pulls/" + str(scope["pr"]))
+        head = pr["head"]
+        base = pr["base"]
+        assert pr["number"] == scope["pr"] and pr["state"] == "open" and pr.get("merged") is False
+        assert head["repo"]["id"] == base["repo"]["id"] == scope["repository"]
+        assert head["ref"] == branch and head["sha"] == commit
+        assert base["ref"] == scope["base"] and base["ref"].startswith("effort/")
+        head_tip = api_document(environment, "/branches/" + urllib.parse.quote(branch, safe=""))["commit"]["id"]
+        base_tip = api_document(environment, "/branches/" + urllib.parse.quote(base["ref"], safe=""))["commit"]["id"]
+        main_tip = api_document(environment, "/branches/main")["commit"]["id"]
+        assert head_tip == commit and base["sha"] == base_tip
+        assert all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base_tip, main_tip))
+        for ancestor, descendant in ((base_tip, "HEAD"), (main_tip, base_tip)):
+            check = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant],
+                                   cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+            assert check.returncode == 0
+    except (ReceiptError, KeyError, TypeError, AssertionError) as exc:
+        raise QualificationError("effort task identity, live tips or main ancestry mismatch") from exc
+    return dict(base_sha=main_tip, effort_sha=base_tip, head_sha=commit, pull_request=scope["pr"])
+
+
 def build_receipt(
     environment: Mapping[str, str],
     results: Mapping[str, str],

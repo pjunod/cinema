@@ -2057,8 +2057,7 @@ impl HiqliteAuthStore {
             .map(|(name, _)| format!("'{}'", name.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(",");
-        // authority: restartable bootstrap inspects every committed sharing
-        // object before retaining its exact shape or installing missing DDL.
+        // authority: committed sharing object shape fences bootstrap DDL.
         let installed = timeout_store(client.query_consistent_map::<RemoteShapeRow, _>(
             format!(
                 "SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names})"
@@ -3849,6 +3848,7 @@ impl HiqliteAuthStore {
     async fn remote_schema_current(&self) -> Result<bool, StoreError> {
         let rows = self
             .client()
+            // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(super::remote::SHAPE_SQL, params!())
             .await?;
         let shape = rows
@@ -3860,6 +3860,7 @@ impl HiqliteAuthStore {
         }
         let rows = self
             .client()
+            // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<CountRow, _>(
                 "SELECT count(*) AS count FROM remote_schema WHERE singleton=1 AND version=1",
                 params!(),
@@ -3914,6 +3915,7 @@ impl HiqliteAuthStore {
     async fn invitation_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
+            // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(super::invitations::SHAPE_SQL, params!())
             .await?;
         let shape = rows
@@ -3939,6 +3941,7 @@ impl HiqliteAuthStore {
         };
         let rows = self
             .client()
+            // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<CountRow, _>(
                 "SELECT count(*) AS count FROM invitation_schema WHERE singleton=1 AND version=$1",
                 params!(version),

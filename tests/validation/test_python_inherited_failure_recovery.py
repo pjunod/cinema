@@ -55,6 +55,9 @@ class SyntheticInheritedAPI:
                          'Python receipt refusal: ReceiptError: Incomplete receipt attempt 3994; preserve artifact and recover individual evidence\n'
                          "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped\n"
                          "skipping post step for 'Publish Python attempt-start marker'; main step was skipped\n").encode()}
+        # The unknown-incomplete control must expose a log that cannot prove
+        # pre-unit history failure when the restore consumer inspects it.
+        self.logs[40000] = b"Unrecognized prior unit attempt; no pre-unit history proof\n"
         self.refresh_logs()
         self.runs = [{'id': run, 'commit_sha': commit} for run, commit in (
             (4002, self.zero['commit']), (3994, self.case['commit']), (3898, self.old['commit']))]

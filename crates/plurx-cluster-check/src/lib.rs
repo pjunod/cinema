@@ -203,8 +203,9 @@ pub const GROWTH_COMPACTION_LOGS: u64 = 10_000;
 /// few entries past the snapshot index by the time the controller observes
 /// the new snapshot, which otherwise leaves a runner-speed-dependent SQLite
 /// WAL tail in the directory-size comparison. Filling both sides to the same
-/// post-snapshot index makes the physical comparison phase-identical without
-/// changing the byte budget or excluding a durable file.
+/// post-snapshot index removes this index-tail drift. It does not guarantee
+/// identical serialized-byte rollover phase; normal WAL reclamation must
+/// still reduce retained file lengths without excluding a durable file.
 const GROWTH_SETTLED_LOG_TAIL: u64 = 512;
 /// Maximum net compacted directory growth per incoming heartbeat.
 pub const GROWTH_BYTES_PER_BEAT_BUDGET: u64 = 512;
@@ -6728,9 +6729,10 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         &[],
     )
     .await?;
-    // hiqlite's retained WAL segment alternates allocation across adjacent
-    // compactions. Compare equally settled, two-cycle states so that rollover
-    // is not reported as durable progress growth (or as a negative delta).
+    // Retain the two normal compaction cycles on both sides. Equal applied
+    // tails alone do not normalize serialized-byte segment placement; the
+    // production WAL must reclaim obsolete sealed prefixes, and all retained
+    // file lengths remain included in the unchanged byte budget.
     let settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
