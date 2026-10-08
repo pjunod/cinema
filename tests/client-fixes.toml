@@ -4659,7 +4659,7 @@ id = "desktop.cec-page-frame-freshness"
 commits = []
 supplements = "desktop.cec-bounded-local-receiver"
 source = "clients/desktop-remote/extension/bridge.js"
-source_anchor = "now>=deadline"
+source_anchor = "now>=offered.deadline"
 test = "clients/desktop-remote/tests/extension.test.mjs"
 test_anchor = "MAIN delivery checks its own credit after a page stall and invalidates before context capture"
 
