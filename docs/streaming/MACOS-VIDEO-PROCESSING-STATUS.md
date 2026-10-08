@@ -21,12 +21,13 @@ combined source `b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`.
 
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
-| F1 GPU subtitle compositing | Native builder | Full C/Metal compilation and first 24-frame pixel-exact ASS comparison pass | Bitmap and cue lifecycle controls, production projection/observations, complete-graph comparison and final package |
-| F2 non-Mac P5 hardware decoding | Route builder | Source preparation and neutral provenance integrated; all 28 Intel diagnostic controls pass | Complete shipping package, production route/context integration and real encoder/size/rate envelope |
-| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser repair integrated; all seven direct caption controls pass | Normal API delivery with the final common provenance-consistent package |
+| F1 GPU subtitle compositing | Native builder | Compositor/projection/provider source integrated; animated ASS and bitmap edge controls pass pixel-exactly | Clean-install font tools/configuration and text identity, normal API source-time/lifecycle proof, complete-graph comparison |
+| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls and portable daemon compilation pass | Exact Linux compilation, full shipping package, runtime driver/graph observation and real encoder/size/rate envelope |
+| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser repair integrated; seven direct controls pass; normal API exposes a separate timing failure | Confirm and repair finite-VOD source-clock handling, then prove source-picture/caption timing and clean shutdown |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
-integration and shared package helpers; Dolby owns `0003` and caption delivery;
+integration and shared package helpers; Dolby owns `0003`, caption delivery
+and the shared finite-VOD source-clock repair;
 Routes owns Linux package/strict context and shared pipeline integration.
 The manager owns this ledger and serializes shared file/compiler ownership.
 Accepted earlier packages and evidence remain read-only. The pinned Rust
@@ -91,8 +92,17 @@ MPEG-2/A53 inputs. Default H.264 VideoToolbox encoding preserves 48 caption
 records and their normalized presentation timestamps; caption-off and
 caption-free controls contain none; copy/remux retains all 48. Decoded image
 planes are byte-identical with forwarding on/off. HEVC encoding still yields
-zero A53 records, a separately recorded pre-existing limitation. Normal API
-VOD acceptance awaits the final shared package. The
+zero A53 records, a separately recorded pre-existing limitation. The first normal API run on the coherent new package delivers 120 video/audio
+frames and 120 caption-bearing frames, but fails the stricter source-payload
+comparison. Almost all records contain padding; only two 608 tuples and three
+valid 708 tuples remain. The shared finite-VOD clock is under investigation:
+raw broadcast timestamps may reach film-relative frame scheduling before the
+final timestamp correction. Actual source-to-picture/caption timing must
+confirm the cause; frame count alone is not acceptance.
+The private command observer also missed descriptor-based input and is being
+corrected. Bounded shutdown required forced termination; no owned child
+remains, and that failure stays recorded. Normal API VOD acceptance remains
+open. The
 [caption record](VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md) explains the root cause.
 
 **Intel hardware P5:** deployed Jellyfin lacks the strict options, so private
@@ -145,6 +155,23 @@ The explicit-provider candidate compiles and passes the same-provider
 the same selected face. An unsupported-provider negative refuses cleanly.
 The app projection/freeze changes still need the newly built daemon's normal
 API proof and actual source-position seek checks.
+
+The GPU/projection/provider foundation is committed as `1098374bb`, with
+conditional package-help validation in `27ab44d8f`. The latter applies to
+prepared `0004` builds and preserves official baseline packaging mode. Exact
+all-target compilation and normal hooks pass; unit execution remains deferred.
+A private daemon and coherent FFmpeg package now exist for source-bound API
+checks. They are not yet a clean-install-qualified release.
+
+Clean-install inspection found two actual font dependencies that the current
+host could conceal: `fc-list`/`fc-conflist` are found through host `PATH`, and
+the static Fontconfig default configuration points into the build prefix.
+Native owns packaging the pinned tools and relocatable configuration through
+the existing tool resolver and font authority. Explicit configuration overrides
+and non-Mac behavior stay supported. No global install, Homebrew dependency
+or retained temporary prefix may substitute for the repair. Qualification must
+exercise the package with the owned build prefix unavailable. Caption-only
+API checks can proceed independently because they do not use text rendering.
 
 The temporary Metal compiler component is tracked for exact
 removal during final cleanup. Direct experimental binaries are immutable

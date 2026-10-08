@@ -66,10 +66,27 @@ one vendor byte varies; no masking or speculative change was introduced.
 Malformed size, escape, trailer, overflow and append-capacity regression
 sources are retained. Unit execution remains with the merge coordinator.
 
-The normal API producer and HTTP delivery still require the final shared
-package carrying both the caption and GPU subtitle repairs. A newly compiled
-binary paired with old provenance would be invalid evidence. Direct caption
-preservation is established; complete file-VOD acceptance remains open.
+The first normal API run uses the coherent shared package carrying both
+repairs. It delivers 120 decoded video/audio frames, but the caption oracle
+fails: almost all caption records contain padding, with only two 608 tuples
+and three valid 708 tuples. Frame count and the presence of caption side data
+therefore do not establish preservation.
+
+The finite VOD producer preserves source timestamps with `-copyts`, then
+applies film-relative `trim` and `fps` before its final timestamp adjustment.
+This broadcast source starts around 66,000 seconds. The current hypothesis
+is that its original clock reaches `fps` with a zero start time, duplicating
+the first picture and starving subsequent caption data. Actual descriptor-based
+input arguments and source-to-output picture/caption timing are being checked
+before changing the shared clock owner. A global timestamp reset would be
+unsafe: bitmap subtitle sidecars are already normalized to film time, and
+source audio/video offsets must remain intact. Cached catalog start times
+are not timing authority.
+
+The initial bounded shutdown also required forced termination. That failure
+is retained separately; no owned producer remains. Direct caption preservation
+is established; complete file-VOD acceptance remains open until the ordinary
+API path, source timeline and lifecycle are proven on the final candidate.
 
 ## Decision and implementation contract
 
