@@ -259,7 +259,7 @@ fn macos_video_processing(state: &AppState, enabled: bool) -> DeveloperEnableIte
             plurx_core::transcode::MacosProcessingAvailability::Pending => RequirementStatus::Unknown,
             plurx_core::transcode::MacosProcessingAvailability::Unavailable => RequirementStatus::Unmet,
         },
-        evidence: format!("This worker's bounded runtime observation is {} (generation {}). It is separate from performance, visual and client qualification.", observation.reason.as_str(), report.generation),
+        evidence: format!("This worker's bounded runtime observation is {} (generation {}). Compatibility requires a working /usr/bin/otool dependency inventory (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both tools, and no DYLD override. It is separate from performance, visual and client qualification.", observation.reason.as_str(), report.generation),
     }
     };
     DeveloperEnableItem {

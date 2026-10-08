@@ -470,6 +470,16 @@ static EXECUTABLE_CAPTURE_CACHE: std::sync::OnceLock<tokio::sync::Mutex<Executab
     std::sync::OnceLock::new();
 
 impl EncodedExecutable {
+    /// A selected Mac graph belongs to the implementation frozen in its plan.
+    /// Ordinary plans retain their existing executable-selection behavior.
+    pub(crate) fn matches_macos_plan(
+        &self,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+    ) -> bool {
+        plan.macos_processing_identity()
+            .is_none_or(|identity| identity.ffmpeg_sha256() == self.digest)
+    }
+
     pub(crate) async fn capture_program(program: &str) -> Result<Self, String> {
         // PATH metadata and canonicalization can block on remote/cold storage.
         // Resolve away from runtime workers so callers can enforce their own

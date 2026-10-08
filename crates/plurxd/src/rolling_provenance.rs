@@ -19,6 +19,13 @@ impl RollingProduction {
     pub(crate) fn executable_path(&self) -> &std::path::Path {
         &self.executable.path
     }
+    pub(crate) fn executable_matches_plan(
+        &self,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+    ) -> bool {
+        self.executable.matches_macos_plan(plan)
+    }
+
     /// `logical` is freshly constructed by the real route's resolved argv
     /// builder, with a fixed output destination. It is not received metadata.
     pub(crate) async fn capture(

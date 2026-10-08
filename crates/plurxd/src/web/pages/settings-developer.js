@@ -102,7 +102,7 @@ function macosVideoProcessingCard(settings,readiness){
   const enabled=!!settings.macos_video_processing_enabled;
   return setCard(`${cardHead("Mac video processing","Use available Mac processing for progressive SDR resizing and HDR10 conversion in new sessions.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
     ${togRow("pmacosvideo","Use Mac video processing","Applied to new sessions. Unsupported sources retain their existing processing.",enabled)}
-    <div class="hint">The saved choice is always accepted. Runtime compatibility and qualification below are advisory.</div>
+    <div class="hint">The saved choice is always accepted. Runtime compatibility and qualification below are advisory. Dependency checks require a working /usr/bin/otool (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both FFmpeg tools, and no DYLD override.</div>
     ${devReq(readiness,"macos_video_processing","sdr_scale","Progressive SDR scaling","This worker checks a small embedded 8-bit and 10-bit source corpus.")}
     ${devReq(readiness,"macos_video_processing","hdr10_metal","HDR10 to SDR processing","HDR is resized at 10-bit precision before mapping to SDR. Dolby Vision, HLG, burns and interlaced sources retain their existing routes.")}
     ${devReq(readiness,"macos_video_processing","delivery_qualification","Visual and streaming qualification","Runtime smoke checks do not approve visual quality, startup, concurrency, a sustained soak or physical clients. Normalized continuous VOD also awaits supported bound source and decoder planning on Mac.")}

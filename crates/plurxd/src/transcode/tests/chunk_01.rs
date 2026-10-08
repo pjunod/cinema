@@ -4096,3 +4096,193 @@ async fn macos_manager_freezes_selected_identity_and_keeps_saved_choice_on_probe
     let next = manager.resolve_movie_plan(&file, &options, Encoder::VideoToolbox).await.expect("new independent plan");
     assert_eq!(next.options().pipeline, Pipeline::VtScaleSdr, "retry exclusion is attempt-local");
 }
+
+
+#[cfg(unix)]
+#[tokio::test]
+async fn macos_launch_binds_frozen_plan_to_canonical_encoder_across_alias_retarget() {
+    use plurx_core::transcode::{
+        MacosProcessingAvailability as Availability, MacosProcessingContext,
+        MacosProcessingIdentity,
+    };
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let dir = crate::test_tempdir().expect("private encoder objects");
+    let encoder_a = dir.path().join("encoder-a");
+    let encoder_b = dir.path().join("encoder-b");
+    let alias = dir.path().join("configured-encoder");
+    for (path, marker) in [(&encoder_a, "encoder-A"), (&encoder_b, "encoder-B")] {
+        std::fs::write(path, format!("#!/bin/sh\nprintf '{marker}\n'\n"))
+            .expect("encoder stand-in");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .expect("executable stand-in");
+    }
+    symlink(&encoder_a, &alias).expect("configured alias A");
+    let captured_a =
+        crate::ffmpeg::EncodedExecutable::capture_program(alias.to_str().expect("alias path"))
+            .await
+            .expect("capture A");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let manager = TranscodeManager::new(
+        store,
+        dir.path().join("work"),
+        EncoderCaps {
+            videotoolbox: true,
+            ..EncoderCaps::default()
+        },
+        Pipeline::Cpu,
+    )
+    .with_decoders(vec!["hevc".into()]);
+    let mut file = profile5_file();
+    file.hdr = None;
+    file.hdr_format = None;
+    file.video_profile = Some("Main".into());
+    file.bit_depth = Some(8);
+    let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+        "codec_name":"hevc","profile":"Main","width":3840,"height":2160,
+        "pix_fmt":"yuv420p","color_transfer":"bt709","color_primaries":"bt709",
+        "color_space":"bt709","color_range":"tv","field_order":"progressive",
+        "sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1",
+        "disposition":{"attached_pic":0}}]});
+    let facts = DecodeFacts::from_ffprobe_json(
+        &probe,
+        TranscodeManager::plan_source_identity(&file).expect("source"),
+    )
+    .expect("complete SDR facts");
+    let identity = MacosProcessingIdentity::new(
+        captured_a.digest.clone(),
+        "2".repeat(64),
+        "3".repeat(64),
+        "4".repeat(64),
+        "test-os".into(),
+        "arm64".into(),
+        "Apple test SoC".into(),
+    )
+    .expect("frozen report A");
+    manager
+        .macos_video_probe
+        .publish_context_for_test(&MacosProcessingContext::new(
+            true,
+            identity,
+            Availability::Available,
+            Availability::Available,
+        ));
+    manager.set_macos_video_processing_enabled(true);
+    let options = TranscodeOptions {
+        target_height: 1080,
+        pipeline: Pipeline::Cpu,
+        ..Default::default()
+    };
+    let plan = manager
+        .resolve_movie_plan_with_facts(
+            &file,
+            &options,
+            Encoder::VideoToolbox,
+            &facts,
+            &AttemptRestrictions::none(),
+        )
+        .expect("selected Mac plan A");
+    assert_eq!(plan.options().pipeline, Pipeline::VtScaleSdr);
+    let frozen = capture_macos_plan_executable(&plan, alias.to_str().expect("alias path"))
+        .await
+        .expect("matched launch accepted")
+        .expect("Mac executable capture");
+    assert!(frozen.matches_macos_plan(&plan));
+    assert!(frozen.is_current().await);
+    // Exercise the actual portable owner without a hardware child: a matched
+    // capture reaches its elapsed-budget yield after normal resume inspection.
+    let output_path = std::fs::canonicalize(dir.path())
+        .expect("canonical output parent")
+        .join("portable-output");
+    std::fs::create_dir(&output_path).expect("portable staging");
+    let output_directory = plurx_core::fs_secure::SecureDirectory::open(&output_path)
+        .await
+        .expect("held portable staging");
+    let request = PortableProduction {
+        file: &file,
+        opts: &options,
+        plan: &plan,
+        deadline: Instant::now(),
+        yield_to_offline: false,
+        cancelled: None,
+        offline_package_id: None,
+        offline_claim_generation: None,
+        publication_fence: None,
+        pretranscode_fence: None,
+        expected_policy_generation: None,
+        expected_source_snapshot: None,
+        bound_source: None,
+    };
+    with_producer_ffmpeg_for_test(alias.to_str().expect("alias path"));
+    let accepted = manager
+        .produce_into(&output_directory, "mac-portable-A", &request, None)
+        .await
+        .expect("matched portable encoder accepted");
+    assert!(matches!(
+        accepted,
+        ProductionProgress::Yielded("production_deadline")
+    ));
+    let resumed_part = output_path.join(crate::produce::part_dir(0));
+    std::fs::create_dir(&resumed_part).expect("resumed part marker");
+    let marker = resumed_part.join("existing-A-state");
+    std::fs::write(&marker, b"do not resume or replace under B").expect("resumed state");
+    std::fs::remove_file(&alias).expect("retarget configured alias");
+    symlink(&encoder_b, &alias).expect("configured alias B");
+    assert_eq!(
+        frozen.path,
+        std::fs::canonicalize(&encoder_a).expect("canonical A")
+    );
+    assert!(
+        frozen.is_current().await,
+        "alias retarget cannot mutate frozen A"
+    );
+    let output = crate::ffmpeg::bounded_command_output_cancellable(
+        tokio::process::Command::new(&frozen.path),
+        Duration::from_secs(2),
+        1024,
+        "frozen Mac encoder fixture",
+        None,
+        crate::process_control::ChildWork::background("frozen Mac encoder fixture"),
+    )
+    .await
+    .expect("bounded launch of actual captured program");
+    assert_eq!(
+        output.stdout, b"encoder-A\n",
+        "launch uses A, never the retargeted alias B"
+    );
+    let refusal = capture_macos_plan_executable(&plan, alias.to_str().expect("alias path"))
+        .await
+        .expect_err("new B capture cannot execute frozen Mac plan A");
+    assert!(refusal.starts_with("macos_processing_implementation_changed:"));
+    let captured_b =
+        crate::ffmpeg::EncodedExecutable::capture_program(alias.to_str().expect("alias path"))
+            .await
+            .expect("capture B");
+    assert!(!captured_b.matches_macos_plan(&plan));
+    let offline_refusal = manager
+        .produce_into(&output_directory, "mac-portable-A", &request, None)
+        .await
+        .expect_err("actual portable owner rejects B before resuming A state");
+    assert!(offline_refusal.starts_with("macos_processing_implementation_changed:"));
+    assert_eq!(
+        std::fs::read(&marker).expect("preserved resumed state"),
+        b"do not resume or replace under B"
+    );
+    manager.set_macos_video_processing_enabled(false);
+    let ordinary = manager
+        .resolve_movie_plan_with_facts(
+            &file,
+            &options,
+            Encoder::VideoToolbox,
+            &facts,
+            &AttemptRestrictions::none(),
+        )
+        .expect("ordinary incumbent plan");
+    assert!(captured_b.matches_macos_plan(&ordinary));
+    assert!(
+        capture_macos_plan_executable(&ordinary, "nonexistent-unused-encoder")
+            .await
+            .expect("ordinary plan retains existing selection")
+            .is_none()
+    );
+}

@@ -365,10 +365,11 @@ pub(super) async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
         // executable used to be statted inline here, ahead of the batch and
         // short-circuiting it, so every producer launch and every segment
         // materialisation paid a synchronous `metadata` on a runtime worker.
-        if !encoding
-            .engine
-            .is_current_with_executable(&encoding.executable)
-            .await
+        if !encoding.executable.matches_macos_plan(&encoding.plan)
+            || !encoding
+                .engine
+                .is_current_with_executable(&encoding.executable)
+                .await
         {
             return false;
         }

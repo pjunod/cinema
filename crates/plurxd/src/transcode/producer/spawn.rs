@@ -400,6 +400,23 @@ pub(super) fn producer_ffmpeg_bin() -> String {
     ffmpeg_bin()
 }
 
+/// Bind a selected Mac plan to the exact encoder captured for this launch.
+/// The canonical path survives a later configured-symlink retarget; ordinary
+/// plans keep their existing producer selection and attestation behavior.
+pub(super) async fn capture_macos_plan_executable(
+    plan: &ResolvedTranscode,
+    program: &str,
+) -> Result<Option<crate::ffmpeg::EncodedExecutable>, String> {
+    if plan.macos_processing_identity().is_none() {
+        return Ok(None);
+    }
+    let executable = crate::ffmpeg::EncodedExecutable::capture_program(program).await?;
+    if !executable.matches_macos_plan(plan) {
+        return Err("macos_processing_implementation_changed: encoder differs from the frozen processing plan; check compatibility again".to_owned());
+    }
+    Ok(Some(executable))
+}
+
 #[cfg(test)]
 thread_local! {
     static PRODUCER_FFMPEG_FOR_TEST: std::cell::RefCell<Option<String>> =

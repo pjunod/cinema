@@ -839,6 +839,7 @@ impl TranscodeManager {
                         &producer_ffmpeg_bin(),
                     )
                     .await
+                    .filter(|production| production.executable_matches_plan(&retained_plan))
                     {
                         let kind = SessionKind::Transcode {
                             height: target_height,
@@ -1063,6 +1064,7 @@ impl TranscodeManager {
         // Retries, descriptors and attribution carry the graph resolution
         // selected, including its verdict-aware software downgrade.
         opts.pipeline = plan.options().pipeline;
+        let macos_executable = capture_macos_plan_executable(&plan, &producer_ffmpeg_bin()).await?;
         // Every object FFmpeg's muxer writes for this session passes a
         // scratch grant before it reaches the disk, so the session starts on
         // its startup allowance and grows, instead of reserving the whole
@@ -1121,6 +1123,8 @@ impl TranscodeManager {
         } else {
             None
         };
+        let rolling_provenance =
+            rolling_provenance.filter(|production| production.executable_matches_plan(&plan));
         if let Some(provenance) = &rolling_provenance {
             execution.source_path = provenance.input_path();
         }
@@ -1606,13 +1610,26 @@ impl TranscodeManager {
             provenance.bind_initial_attempt(generation);
         }
         session.bind_retry_compatibility_attempt(generation).await;
+        if let Some(executable) = &macos_executable {
+            if !executable.is_current().await {
+                let reason = "macos_processing_implementation_changed: captured encoder changed before launch".to_owned();
+                fail_prepublication_transaction(&session, reason.clone()).await;
+                start_settlement.disarm();
+                return Err(reason);
+            }
+        }
         if let Err(reason) = session
             .spawn_and_install_prepublication_child(generation, || {
                 spawn_ffmpeg_at(
-                    session
-                        .rolling_provenance
+                    macos_executable
                         .as_ref()
-                        .map(|proof| proof.executable_path())
+                        .map(|executable| executable.path.as_path())
+                        .or_else(|| {
+                            session
+                                .rolling_provenance
+                                .as_ref()
+                                .map(|proof| proof.executable_path())
+                        })
                         .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
                     &args,
                     crate::process_control::ChildWork::realtime("playback transcode"),
