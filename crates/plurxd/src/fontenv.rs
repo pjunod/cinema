@@ -58,7 +58,10 @@ pub(crate) const FONT_ENVIRONMENT_DIR: &str = "fontenv";
 
 /// The live closure was `plurx/font-render/engine-v1`; a frozen digest can
 /// never equal one.
+#[cfg(not(target_os = "macos"))]
 const FROZEN_FONT_DIGEST_VERSION: &[u8] = b"plurx/font-render/engine-v2\0";
+#[cfg(target_os = "macos")]
+const FROZEN_FONT_DIGEST_VERSION: &[u8] = b"plurx/font-render/engine-v3/fontconfig-provider\0";
 
 /// What `fc-list` prints on both sides of the parity check: one line per
 /// face, so a difference that drops, renames or restyles a face is visible,
@@ -451,7 +454,11 @@ async fn build(
             "color=c=black:s=64x64:d=0.04",
             "-vf",
         ])
-        .arg(format!("subtitles={PROBE_SCRIPT_NAME}"))
+        .arg(if cfg!(target_os = "macos") {
+            format!("subtitles={PROBE_SCRIPT_NAME}:font_provider=fontconfig")
+        } else {
+            format!("subtitles={PROBE_SCRIPT_NAME}")
+        })
         .args(["-frames:v", "1", "-f", "null", "-"]);
     let (traced, elapsed) = probe(render, "rendering under the frozen environment").await;
     cost.spawn += elapsed;

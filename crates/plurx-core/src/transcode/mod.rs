@@ -1314,17 +1314,25 @@ fn output_metadata_policy_for(
 /// vendor GPU path the frame is downloaded immediately before this filter and
 /// uploaded immediately after it; scale + tone-map remain on the GPU.
 fn with_subtitles(mut chain: Vec<String>, opts: &TranscodeOptions, source_path: &str) -> String {
+    // macOS libass defaults to CoreText. The application freezes Fontconfig
+    // rules and faces, so its renderer must explicitly use that authority.
+    // Other platforms keep their existing automatic provider selection.
+    let provider = if cfg!(target_os = "macos") {
+        ":font_provider=fontconfig"
+    } else {
+        ""
+    };
     if let Some(burn) = &opts.subtitle_burn {
         // A bitmap burn is not part of this chain: it is a second stream
         // composited over the chain's output, built by `bitmap_overlay`.
         if !burn.bitmap {
             if let Some(path) = &opts.subtitle_file {
                 let escaped = escape_filter_path(&path.to_string_lossy());
-                chain.push(format!("subtitles='{escaped}'"));
+                chain.push(format!("subtitles='{escaped}'{provider}"));
             } else {
                 let escaped = escape_filter_path(source_path);
                 chain.push(format!(
-                    "subtitles='{escaped}':si={idx}",
+                    "subtitles='{escaped}':si={idx}{provider}",
                     idx = burn.subtitle_index
                 ));
             }
@@ -1830,7 +1838,24 @@ fn hls_args_inner(
     // vendor pipeline is the exception both ways: `video_filters` appended a
     // download for libass/overlay, so the encoder's upload IS owed again.
     let subtitle_burn = opts.subtitle_burn.is_some();
-    let vendor_gpu = opts.pipeline.keeps_frames_off_the_cpu() && !subtitle_burn;
+    // Only an observed, identity-bound Mac burn graph owns GPU composition.
+    // Legacy and other vendor paths keep their incumbent CPU subtitle step.
+    let macos_gpu_burn = subtitle_burn
+        && plan.is_some_and(|plan| plan.macos_processing_identity().is_some())
+        && matches!(
+            opts.pipeline,
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal
+        )
+        && opts.pipeline.output_grade() == OutputGrade::Sdr;
+    let vendor_gpu = opts.pipeline.keeps_frames_off_the_cpu() && (!subtitle_burn || macos_gpu_burn);
+    let mut main_options;
+    let filter_options = if macos_gpu_burn {
+        main_options = opts.clone();
+        main_options.subtitle_burn = None;
+        &main_options
+    } else {
+        opts
+    };
     let suffix = opts
         .pipeline
         .encoder_upload(encoder)
@@ -1850,7 +1875,7 @@ fn hls_args_inner(
         || {
             video_filters(
                 legacy_source.expect("legacy argument construction has source metadata"),
-                opts,
+                filter_options,
                 &source_path,
             )
         },
@@ -1870,7 +1895,7 @@ fn hls_args_inner(
                     plan.options().tone_map_peak_nits,
                     plan.options().tone_map_peak_source,
                 ),
-                opts,
+                filter_options,
                 &source_path,
             )
         },
@@ -1896,9 +1921,10 @@ fn hls_args_inner(
         || "0:v:0".to_owned(),
         |plan| format!("0:{}", plan.decode().input_video_stream()),
     );
-    args.push(match &overlay {
-        Some(_) => BURNED_VIDEO_LABEL.to_owned(),
-        None => selected_video.clone(),
+    args.push(if macos_gpu_burn || overlay.is_some() {
+        BURNED_VIDEO_LABEL.to_owned()
+    } else {
+        selected_video.clone()
     });
     let encode_audio = plan.is_none_or(|plan| plan.options().input_has_audio);
     if encode_audio {
@@ -1911,46 +1937,67 @@ fn hls_args_inner(
         args.push("-an".into());
     }
 
-    match overlay {
-        Some(sub) => {
-            // The upload suffix comes AFTER the composite. `overlay` draws in
-            // system memory; a chain that uploads first hands it a hardware
-            // surface it cannot read. It used to be appended to the [vburn]
-            // half of this very graph — upload, then overlay — which is that
-            // broken order exactly, hidden by the tests only ever burning
-            // with the suffix-less software encoder.
-            let up = suffix.map(|s| format!(",{s}")).unwrap_or_default();
-            // `overlay`'s output format defaults to 8-bit `yuv420`, and ffmpeg
-            // satisfies that by auto-inserting a downconvert on the main
-            // input — silently, at exit 0. On a 10-bit chain that produces
-            // HEVC **Main**, 8-bit, under a playlist advertising Main10 PQ:
-            // banding across every shadow gradient, and a hard decode refusal
-            // on players that check the advertised profile. Naming the format
-            // is the only thing that stops it.
-            let overlay_format = match opts.pipeline.output_grade() {
-                OutputGrade::Hdr10 => ":format=yuv420p10",
-                OutputGrade::Sdr => "",
-            };
-            let filter_input = plan.map_or_else(
-                || "0:v".to_owned(),
-                |plan| format!("0:{}", plan.decode().input_video_stream()),
+    if macos_gpu_burn {
+        let filter_input = plan.map_or_else(
+            || "0:v".to_owned(),
+            |plan| format!("0:{}", plan.decode().input_video_stream()),
+        );
+        let complex = if let Some(sub) = overlay {
+            let prepared = sub.replace("[sburn]", ",format=yuva420p[sburn]");
+            format!("[{filter_input}]{vf}[vburn];{prepared};[vburn][sburn]overlay_videotoolbox=bitmap=1:eof_action=pass{BURNED_VIDEO_LABEL}")
+        } else {
+            let prepared = with_subtitles(Vec::new(), opts, &source_path).replacen(
+                "subtitles=",
+                "subtitles_vt_images=",
+                1,
             );
-            let complex = format!(
-                "[{filter_input}]{vf}[vburn];{sub};\
+            format!("[{filter_input}]{vf},split[vburn][sclock];[sclock]{prepared}[sburn];[vburn][sburn]overlay_videotoolbox=ass=1:eof_action=pass{BURNED_VIDEO_LABEL}")
+        };
+        assert_no_pq_at_8_bit(&complex);
+        args.push("-filter_complex".into());
+        args.push(complex);
+    } else {
+        match overlay {
+            Some(sub) => {
+                // The upload suffix comes AFTER the composite. `overlay` draws in
+                // system memory; a chain that uploads first hands it a hardware
+                // surface it cannot read. It used to be appended to the [vburn]
+                // half of this very graph — upload, then overlay — which is that
+                // broken order exactly, hidden by the tests only ever burning
+                // with the suffix-less software encoder.
+                let up = suffix.map(|s| format!(",{s}")).unwrap_or_default();
+                // `overlay`'s output format defaults to 8-bit `yuv420`, and ffmpeg
+                // satisfies that by auto-inserting a downconvert on the main
+                // input — silently, at exit 0. On a 10-bit chain that produces
+                // HEVC **Main**, 8-bit, under a playlist advertising Main10 PQ:
+                // banding across every shadow gradient, and a hard decode refusal
+                // on players that check the advertised profile. Naming the format
+                // is the only thing that stops it.
+                let overlay_format = match opts.pipeline.output_grade() {
+                    OutputGrade::Hdr10 => ":format=yuv420p10",
+                    OutputGrade::Sdr => "",
+                };
+                let filter_input = plan.map_or_else(
+                    || "0:v".to_owned(),
+                    |plan| format!("0:{}", plan.decode().input_video_stream()),
+                );
+                let complex = format!(
+                    "[{filter_input}]{vf}[vburn];{sub};\
                  [vburn][sburn]overlay=eof_action=pass{overlay_format}{up}{BURNED_VIDEO_LABEL}"
-            );
-            assert_no_pq_at_8_bit(&complex);
-            args.push("-filter_complex".into());
-            args.push(complex);
-        }
-        None => {
-            if let Some(s) = suffix {
-                vf.push(',');
-                vf.push_str(s);
+                );
+                assert_no_pq_at_8_bit(&complex);
+                args.push("-filter_complex".into());
+                args.push(complex);
             }
-            assert_no_pq_at_8_bit(&vf);
-            args.push("-vf".into());
-            args.push(vf);
+            None => {
+                if let Some(s) = suffix {
+                    vf.push(',');
+                    vf.push_str(s);
+                }
+                assert_no_pq_at_8_bit(&vf);
+                args.push("-vf".into());
+                args.push(vf);
+            }
         }
     }
     // The grade is read off the pipeline rather than carried beside it, so a
