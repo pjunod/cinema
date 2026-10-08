@@ -1822,7 +1822,7 @@ async fn run_smoke(
         encode.args(pipeline.decode_args());
     }
     encode.arg("-i").arg(source_arg).args(["-an", "-sn", "-dn"]);
-    if operation != SmokeOperation::Bitmap {
+    if !matches!(operation, SmokeOperation::Bitmap | SmokeOperation::Text) {
         encode.args(["-map", "0:v:0"]);
     }
     let mut filter = pipeline
@@ -1842,11 +1842,11 @@ async fn run_smoke(
             encode.args(["-vf", &filter]);
         }
         SmokeOperation::Text => {
-            filter.push_str(",hwdownload,format=nv12,subtitles='/dev/fd/4'");
-            encode.args(["-vf", &filter]);
+            let composite = format!("[0:v]{filter},split[main][clock];[clock]subtitles_vt_images='/dev/fd/4':font_provider=fontconfig[images];[main][images]overlay_videotoolbox=ass=1:eof_action=pass[o]");
+            encode.args(["-filter_complex", &composite, "-map", "[o]"]);
         }
         SmokeOperation::Bitmap => {
-            let composite = format!("[0:v]{filter},hwdownload,format=nv12[vburn];[0:s:0]scale=160:90[sburn];[vburn][sburn]overlay=eof_action=pass[o]");
+            let composite = format!("[0:v]{filter}[vburn];[0:s:0]scale=160:90,format=yuva420p[sburn];[vburn][sburn]overlay_videotoolbox=bitmap=1:eof_action=pass[o]");
             // Replace the simple video map with the existing bitmap compositor's output.
             encode.args(["-filter_complex", &composite, "-map", "[o]"]);
         }

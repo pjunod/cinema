@@ -3894,7 +3894,6 @@ fn select_macos_processing(
                 && request.normalized_geometry
                 && options.pipeline.output_grade() == OutputGrade::Sdr
                 && options.output_codec != Some(super::VideoCodec::Hevc)
-                && options.subtitle_burn.is_none()
                 && facts.scan_type() == ScanType::Progressive
                 && matches!(
                     facts.dynamic_range_class(),

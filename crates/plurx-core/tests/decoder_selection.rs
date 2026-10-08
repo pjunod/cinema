@@ -4343,6 +4343,15 @@ fn macos_burn_graphs_require_independent_observation_and_process_before_composit
                 subtitle_index: 0,
                 bitmap,
             });
+            let unobserved = resolve_with_options(
+                Encoder::VideoToolbox,
+                media.clone(),
+                &input,
+                &caps,
+                macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+            )
+            .expect("unobserved burn retains incumbent compositor");
+            assert_eq!(unobserved.options().pipeline, Pipeline::Cpu);
             let context = macos_context(true, MacosProcessingAvailability::Available)
                 .with_graph(graph, MacosProcessingAvailability::Available);
             let plan = resolve_with_options(
@@ -4379,25 +4388,38 @@ fn macos_burn_graphs_require_independent_observation_and_process_before_composit
             let args = hls_args(&plan, &execution);
             let graph = args
                 .windows(2)
-                .find(|pair| pair[0] == if bitmap { "-filter_complex" } else { "-vf" })
+                .find(|pair| pair[0] == "-filter_complex")
                 .expect("shared compositor graph")[1]
                 .as_str();
-            assert!(
-                graph.find("scale_vt=") < graph.find("hwdownload,format=nv12"),
-                "{graph}"
-            );
+            let compositor = if bitmap {
+                "overlay_videotoolbox=bitmap=1"
+            } else {
+                "overlay_videotoolbox=ass=1"
+            };
+            assert!(graph.find("scale_vt=") < graph.find(compositor), "{graph}");
             if hdr {
                 assert!(
-                    graph.find("tonemap_videotoolbox=") < graph.find("hwdownload,format=nv12"),
+                    graph.find("tonemap_videotoolbox=") < graph.find(compositor),
                     "{graph}"
                 );
             }
-            assert!(
-                graph.find("hwdownload,format=nv12")
-                    < graph.find(if bitmap { "overlay=" } else { "subtitles=" }),
-                "{graph}"
-            );
-            assert_eq!(graph.matches("hwdownload").count(), 1);
+            assert!(graph.contains(compositor), "{graph}");
+            assert_eq!(graph.matches("hwdownload").count(), 0, "{graph}");
+            if bitmap {
+                assert!(
+                    graph.contains("scale=1920:1080,format=yuva420p[sburn]"),
+                    "{graph}"
+                );
+            } else {
+                assert!(
+                    graph.contains("subtitles_vt_images='/fixture/active.ass'"),
+                    "{graph}"
+                );
+                assert!(graph.contains("split[vburn][sclock]"), "{graph}");
+                if cfg!(target_os = "macos") {
+                    assert!(graph.contains(":font_provider=fontconfig"), "{graph}");
+                }
+            }
             assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
         }
     }
@@ -4904,6 +4926,72 @@ fn macos_normalized_1440_pq_retains_sdr_avc_geometry_and_cadence() {
     assert!(graph.contains("tonemap_videotoolbox"));
     assert!(graph.ends_with(",setsar=1"));
     assert!(!graph.contains("hwdownload"));
+}
+
+#[test]
+fn macos_normalized_burn_keeps_captured_canvas_cadence_and_gpu_compositor() {
+    use plurx_core::transcode::AutoQualityRateProfile;
+    for hdr in [false, true] {
+        for bitmap in [false, true] {
+            let input = facts(macos_stream(hdr));
+            let graph = match (hdr, bitmap) {
+                (false, false) => MacosProcessingGraph::SdrTextBurn,
+                (false, true) => MacosProcessingGraph::SdrBitmapBurn,
+                (true, false) => MacosProcessingGraph::Hdr10TextBurn,
+                (true, true) => MacosProcessingGraph::Hdr10BitmapBurn,
+            };
+            let context = macos_context(true, MacosProcessingAvailability::Available)
+                .with_graph(graph, MacosProcessingAvailability::Available);
+            let mut media = options(Pipeline::Cpu);
+            media.target_height = 1440;
+            media.video_bitrate_kbps = 12_000;
+            media.subtitle_burn = Some(SubtitleBurn {
+                subtitle_index: 2,
+                bitmap,
+            });
+            let request = TranscodeRequest::new(Encoder::VideoToolbox, media)
+                .with_auto_quality_rate_profile(AutoQualityRateProfile::H264Sdr1440P30V1);
+            let plan = resolve_transcode(
+                &request,
+                &input,
+                &unqualified_software_capabilities("hevc"),
+                &macos_policy(context),
+                &AttemptRestrictions::none(),
+            )
+            .expect("observed normalized burn");
+            assert!(plan.macos_processing_identity().is_some());
+            assert_eq!(plan.output_contract().effective_width(), Some(2560));
+            assert_eq!(plan.output_contract().effective_height(), Some(1440));
+            assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+            assert_eq!(plan.output_contract().output_profile(), Some("high"));
+            let source = execution_file("/fixture/burn.mkv");
+            let execution_options = execution_options();
+            let execution = TranscodeExecution::from_options(
+                &source,
+                &execution_options,
+                Pacing::unpaced(),
+                "/fixture/out",
+            )
+            .expect("execution");
+            let args = hls_args(&plan, &execution);
+            let graph = &args[args
+                .iter()
+                .position(|arg| arg == "-filter_complex")
+                .expect("normalized burn complex filter")
+                + 1];
+            assert!(graph.starts_with("[0:0]fps=24/1,"), "{graph}");
+            assert!(graph.contains(",setsar=1"), "{graph}");
+            assert!(!graph.contains("hwdownload"), "{graph}");
+            assert!(
+                graph.contains(if bitmap {
+                    "[0:s:2]scale=2560:1440,format=yuva420p"
+                } else {
+                    "subtitles_vt_images='/fixture/burn.mkv':si=2"
+                }),
+                "{graph}"
+            );
+        }
+    }
 }
 
 #[test]

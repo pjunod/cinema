@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::{Pipeline, PlanError};
 
-pub const MACOS_PROCESSING_GRAPH_REVISION: u32 = 1;
+pub const MACOS_PROCESSING_GRAPH_REVISION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

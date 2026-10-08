@@ -1,0 +1,880 @@
+--- a/configure
++++ b/configure
+@@ -4255,6 +4255,7 @@
+ sr_filter_select="dnn"
+ stereo3d_filter_deps="gpl"
+ subtitles_filter_deps="avformat avcodec libass"
++subtitles_vt_images_filter_deps="avformat avcodec libass videotoolbox"
+ super2xsai_filter_deps="gpl"
+ pixfmts_super2xsai_test_deps="super2xsai_filter"
+ tinterlace_filter_deps="gpl"
+@@ -8407,6 +8408,7 @@
+ enabled spp_filter          && prepend avfilter_deps "avcodec"
+ enabled sr_filter           && prepend avfilter_deps "avformat swscale"
+ enabled subtitles_filter    && prepend avfilter_deps "avformat avcodec"
++enabled subtitles_vt_images_filter && prepend avfilter_deps "avformat avcodec"
+ enabled uspp_filter         && prepend avfilter_deps "avcodec"
+ enabled zoompan_filter      && prepend avfilter_deps "swscale"
+ 
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -539,6 +539,7 @@
+ OBJS-$(CONFIG_STEREO3D_FILTER)               += vf_stereo3d.o
+ OBJS-$(CONFIG_STREAMSELECT_FILTER)           += f_streamselect.o framesync.o
+ OBJS-$(CONFIG_SUBTITLES_FILTER)              += vf_subtitles.o
++OBJS-$(CONFIG_SUBTITLES_VT_IMAGES_FILTER)    += vf_subtitles.o
+ OBJS-$(CONFIG_SUPER2XSAI_FILTER)             += vf_super2xsai.o
+ OBJS-$(CONFIG_SWAPRECT_FILTER)               += vf_swaprect.o
+ OBJS-$(CONFIG_SWAPUV_FILTER)                 += vf_swapuv.o
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -501,6 +501,7 @@
+ extern const FFFilter ff_vf_stereo3d;
+ extern const FFFilter ff_vf_streamselect;
+ extern const FFFilter ff_vf_subtitles;
++extern const FFFilter ff_vf_subtitles_vt_images;
+ extern const FFFilter ff_vf_super2xsai;
+ extern const FFFilter ff_vf_swaprect;
+ extern const FFFilter ff_vf_swapuv;
+--- a/libavfilter/vf_subtitles.c
++++ b/libavfilter/vf_subtitles.c
+@@ -30,7 +30,7 @@
+ #include <ass/ass.h>
+ 
+ #include "config_components.h"
+-#if CONFIG_SUBTITLES_FILTER
++#if CONFIG_SUBTITLES_FILTER || CONFIG_SUBTITLES_VT_IMAGES_FILTER
+ # include "libavcodec/avcodec.h"
+ # include "libavcodec/codec_desc.h"
+ # include "libavformat/avformat.h"
+@@ -39,6 +39,8 @@
+ #include "libavutil/mem.h"
+ #include "libavutil/opt.h"
+ #include "libavutil/pixdesc.h"
++#include "libavutil/hwcontext.h"
++#include "subtitles_vt_commands.h"
+ 
+ #include "filters.h"
+ #include "drawutils.h"
+@@ -59,6 +61,7 @@
+     char *force_style;
+     int stream_index;
+     int alpha;
++    int font_provider;
+     uint8_t rgba_map[4];
+     int     pix_step[4];       ///< steps per pixel for each plane of the main output
+     int original_w, original_h;
+@@ -68,6 +71,9 @@
+     int sub2video;
+     int last_image;
+     int64_t max_pts, max_ts_ms;
++    int prepare_vt_images;
++    AVBufferRef *vt_commands;
++    int64_t vt_last_time_ms;
+ } AssContext;
+ 
+ #define OFFSET(x) offsetof(AssContext, x)
+@@ -78,6 +84,9 @@
+     {"f",              "set the filename of file to read",                         OFFSET(filename),   AV_OPT_TYPE_STRING,     {.str = NULL},  0, 0, FLAGS }, \
+     {"original_size",  "set the size of the original video (used to scale fonts)", OFFSET(original_w), AV_OPT_TYPE_IMAGE_SIZE, {.str = NULL},  0, 0, FLAGS }, \
+     {"fontsdir",       "set the directory containing the fonts to read",           OFFSET(fontsdir),   AV_OPT_TYPE_STRING,     {.str = NULL},  0, 0, FLAGS }, \
++    {"font_provider", "select libass font authority", OFFSET(font_provider), AV_OPT_TYPE_INT, {.i64 = ASS_FONTPROVIDER_AUTODETECT}, ASS_FONTPROVIDER_NONE, ASS_FONTPROVIDER_DIRECTWRITE, FLAGS, .unit = "font_provider"}, \
++        {"auto", NULL, 0, AV_OPT_TYPE_CONST, {.i64 = ASS_FONTPROVIDER_AUTODETECT}, 0, 0, FLAGS, .unit = "font_provider"}, \
++        {"fontconfig", NULL, 0, AV_OPT_TYPE_CONST, {.i64 = ASS_FONTPROVIDER_FONTCONFIG}, 0, 0, FLAGS, .unit = "font_provider"}, \
+     {"alpha",          "enable processing of alpha channel",                       OFFSET(alpha),      AV_OPT_TYPE_BOOL,       {.i64 = 0   },  0, 1, FLAGS }, \
+     {"sub2video",      "enable textual subtitle to video mode",                    OFFSET(sub2video),  AV_OPT_TYPE_BOOL,       {.i64 = 0   },  0, 1, FLAGS }, \
+     {"shaping",        "set shaping engine",                                       OFFSET(shaping),    AV_OPT_TYPE_INT,        {.i64 = ASS_SHAPING_COMPLEX }, -1, 1, FLAGS, .unit = "shaping_mode"}, \
+@@ -175,6 +184,7 @@
+ 
+     if (ass->track)
+         ass_free_track(ass->track);
++    av_buffer_unref(&ass->vt_commands);
+     if (ass->renderer)
+         ass_renderer_done(ass->renderer);
+     if (ass->library)
+@@ -193,9 +203,16 @@
+ {
+     AVFilterContext *ctx = inlink->dst;
+     AssContext *ass = ctx->priv;
+-    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(inlink->format);
++    enum AVPixelFormat draw_format = ass->prepare_vt_images ? AV_PIX_FMT_NV12 : inlink->format;
++    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(draw_format);
+     int draw_flags = ass->alpha ? FF_DRAW_PROCESS_ALPHA : 0;
+     int ret;
++
++    if (ass->prepare_vt_images) {
++        av_buffer_unref(&ass->vt_commands); /* geometry/font renderer reconfiguration invalidates images */
++        ass->vt_last_time_ms = INT64_MIN;
++        draw_flags = 0;
++    }
+ 
+     if (ass->sub2video && inlink->alpha_mode != AVALPHA_MODE_PREMULTIPLIED) {
+         if ((desc->flags & AV_PIX_FMT_FLAG_ALPHA) &&
+@@ -209,12 +226,12 @@
+             draw_flags |= FF_DRAW_MASK_UNPREMUL_RGB32;
+     }
+ 
+-    ret = ff_draw_init2(&ass->draw, inlink->format,
++    ret = ff_draw_init2(&ass->draw, draw_format,
+                         (desc->flags & AV_PIX_FMT_FLAG_RGB) ? inlink->colorspace :
+                         ass_get_color_space(ass->track->YCbCrMatrix, inlink->colorspace),
+                         (desc->flags & AV_PIX_FMT_FLAG_RGB) ? inlink->color_range :
+                         ass_get_color_range(ass->track->YCbCrMatrix, inlink->color_range),
+-                        inlink->alpha_mode, draw_flags);
++                        ass->prepare_vt_images ? AVALPHA_MODE_STRAIGHT : inlink->alpha_mode, draw_flags);
+     if (ret < 0) {
+         av_log(ctx, AV_LOG_ERROR, "Failed to initialize FFDrawContext\n");
+         return ret;
+@@ -257,6 +274,12 @@
+     }
+ }
+ 
++/* Preserve libass's incumbent truncating clock, including negative PTS. */
++static int64_t subtitles_time_ms(int64_t pts, AVRational time_base)
++{
++    return pts * av_q2d(time_base) * 1000;
++}
++
+ static int filter_frame(AVFilterLink *inlink, AVFrame *picref)
+ {
+     AVFilterContext *ctx = inlink->dst;
+@@ -264,7 +287,7 @@
+     FilterLink *outl = ff_filter_link(outlink);
+     AssContext *ass = ctx->priv;
+     int detect_change = 0;
+-    int64_t time_ms = picref->pts * av_q2d(inlink->time_base) * 1000;
++    int64_t time_ms = subtitles_time_ms(picref->pts, inlink->time_base);
+     ASS_Image *image = ass_render_frame(ass->renderer, ass->track,
+                                         time_ms, &detect_change);
+ 
+@@ -285,6 +308,151 @@
+     return ff_filter_frame(outlink, picref);
+ }
+ 
++#if CONFIG_SUBTITLES_VT_IMAGES_FILTER
++/* Main hardware pixels are never mapped. This branch uses only their clock and
++ * geometry, and caches an independently allocated subtitle image. libass still
++ * renders every source timestamp, including animated styles and backwards seek.
++ */
++static int vt_images_config_output(AVFilterLink *outlink)
++{
++    FilterLink *inl = ff_filter_link(outlink->src->inputs[0]);
++    FilterLink *outl = ff_filter_link(outlink);
++    AVHWFramesContext *frames;
++    if (!inl->hw_frames_ctx)
++        return AVERROR(EINVAL);
++    frames = (AVHWFramesContext *)inl->hw_frames_ctx->data;
++    if (frames->format != AV_PIX_FMT_VIDEOTOOLBOX || frames->sw_format != AV_PIX_FMT_NV12)
++        return AVERROR(EINVAL);
++    av_buffer_unref(&outl->hw_frames_ctx);
++    outl->hw_frames_ctx = av_buffer_ref(inl->hw_frames_ctx);
++    outlink->time_base = outlink->src->inputs[0]->time_base;
++    return outl->hw_frames_ctx ? 0 : AVERROR(ENOMEM);
++}
++
++static int vt_image_bounds(const ASS_Image *image, int width, int height, int bounds[4])
++{
++    int64_t right = (int64_t)image->dst_x + image->w;
++    int64_t bottom = (int64_t)image->dst_y + image->h;
++    bounds[0] = FFMAX(image->dst_x, 0);
++    bounds[1] = FFMAX(image->dst_y, 0);
++    bounds[2] = FFMIN(right, width) - bounds[0];
++    bounds[3] = FFMIN(bottom, height) - bounds[1];
++    return bounds[2] > 0 && bounds[3] > 0 && (image->color & 255) != 255;
++}
++
++static int vt_prepare_commands(AssContext *ass, ASS_Image *images, int width, int height)
++{
++    ASS_Image *image;
++    size_t bytes = sizeof(SVTHeader);
++    unsigned count = 0;
++    unsigned min_x = width, min_y = height, max_x = 0, max_y = 0;
++    AVBufferRef *buffer;
++    SVTHeader *header;
++    SVTCommand *commands;
++    uint8_t *mask;
++    int bounds[4];
++    for (image = images; image; image = image->next) {
++        size_t mask_bytes;
++        if (image->w <= 0 || image->h <= 0 || !vt_image_bounds(image, width, height, bounds))
++            continue;
++        if (!image->bitmap || image->stride < image->w ||
++            bounds[2] > SVT_MAX_BYTES / bounds[3] || ++count > SVT_MAX_COMMANDS)
++            return AVERROR(EINVAL);
++        mask_bytes = (size_t)bounds[2] * bounds[3];
++        if (bytes > SVT_MAX_BYTES - sizeof(SVTCommand) ||
++            mask_bytes > SVT_MAX_BYTES - bytes - sizeof(SVTCommand))
++            return AVERROR(EINVAL);
++        bytes += sizeof(SVTCommand) + mask_bytes;
++        min_x = FFMIN(min_x, bounds[0]); min_y = FFMIN(min_y, bounds[1]);
++        max_x = FFMAX(max_x, bounds[0] + bounds[2]); max_y = FFMAX(max_y, bounds[1] + bounds[3]);
++    }
++    buffer = av_buffer_alloc(bytes);
++    if (!buffer)
++        return AVERROR(ENOMEM);
++    header = (SVTHeader *)buffer->data;
++    *header = (SVTHeader){ SVT_MAGIC, SVT_VERSION, bytes, count, width, height, min_x, min_y, max_x, max_y };
++    commands = (SVTCommand *)(header + 1);
++    mask = (uint8_t *)(commands + count);
++    count = 0;
++    for (image = images; image; image = image->next) {
++        uint8_t rgba[4];
++        FFDrawColor color;
++        SVTCommand *command;
++        if (image->w <= 0 || image->h <= 0 || !vt_image_bounds(image, width, height, bounds))
++            continue;
++        rgba[0] = image->color >> 24;
++        rgba[1] = image->color >> 16;
++        rgba[2] = image->color >> 8;
++        rgba[3] = 255 - (image->color & 255);
++        ff_draw_color(&ass->draw, &color, rgba);
++        command = &commands[count++];
++        *command = (SVTCommand){ bounds[0], bounds[1], bounds[2], bounds[3],
++                                mask - buffer->data,
++                                (0x10307u * color.rgba[3] + 3u) >> 8,
++                                color.comp[0].u8[0], color.comp[1].u8[0], color.comp[1].u8[1] };
++        for (int y = 0; y < bounds[3]; y++) {
++            memcpy(mask, image->bitmap + (size_t)(bounds[1] - image->dst_y + y) * image->stride +
++                         (bounds[0] - image->dst_x), bounds[2]);
++            mask += bounds[2];
++        }
++    }
++    av_buffer_unref(&ass->vt_commands);
++    ass->vt_commands = buffer;
++    return 0;
++}
++
++static int vt_images_frame(AVFilterLink *inlink, AVFrame *clock)
++{
++    AVFilterContext *ctx = inlink->dst;
++    AVFilterLink *outlink = ctx->outputs[0];
++    AssContext *ass = ctx->priv;
++    ASS_Image *image;
++    AVFrame *output = NULL;
++    int changed = 0, ret;
++    int64_t time_ms;
++    if (clock->pts == AV_NOPTS_VALUE) {
++        ret = AVERROR(EINVAL);
++        goto done;
++    }
++    time_ms = subtitles_time_ms(clock->pts, inlink->time_base);
++    image = ass_render_frame(ass->renderer, ass->track, time_ms, &changed);
++    if (ass->vt_commands && time_ms < ass->vt_last_time_ms)
++        av_buffer_unref(&ass->vt_commands);
++    ass->vt_last_time_ms = time_ms;
++    if (!ass->vt_commands || changed) {
++        ret = vt_prepare_commands(ass, image, outlink->w, outlink->h);
++        if (ret < 0)
++            goto done;
++    }
++    output = av_frame_clone(clock); /* retain the VT clock without mapping any main pixels */
++    if (!output) {
++        ret = AVERROR(ENOMEM);
++        goto done;
++    }
++    av_buffer_unref(&output->opaque_ref);
++    output->opaque_ref = av_buffer_ref(ass->vt_commands);
++    if (!output->opaque_ref) {
++        ret = AVERROR(ENOMEM);
++        goto done;
++    }
++    av_frame_free(&clock);
++    return ff_filter_frame(outlink, output);
++ done:
++    av_frame_free(&output);
++    av_frame_free(&clock);
++    return ret;
++}
++
++static const AVFilterPad vt_images_inputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO,
++      .filter_frame = vt_images_frame, .config_props = config_input },
++};
++static const AVFilterPad vt_images_outputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO,
++      .config_props = vt_images_config_output },
++};
++#endif
++
+ static void get_max_timestamp(AVFilterContext *ctx)
+ {
+     AssContext *ass = ctx->priv;
+@@ -297,6 +465,29 @@
+             ass->max_ts_ms = FFMAX(event->Start + event->Duration, ass->max_ts_ms);
+         }
+     }
++}
++
++static int init_fonts(AVFilterContext *ctx)
++{
++    AssContext *ass = ctx->priv;
++    if (ass->font_provider != ASS_FONTPROVIDER_AUTODETECT &&
++        ass->font_provider != ASS_FONTPROVIDER_NONE) {
++        ASS_DefaultFontProvider *providers = NULL;
++        size_t count = 0;
++        int available = 0;
++        ass_get_available_font_providers(ass->library, &providers, &count);
++        if (count == (size_t)-1)
++            return AVERROR(ENOMEM);
++        for (size_t i = 0; i < count; i++)
++            available |= providers[i] == ass->font_provider;
++        free(providers);
++        if (!available) {
++            av_log(ctx, AV_LOG_ERROR, "Requested libass font provider is unavailable.\n");
++            return AVERROR(ENOSYS);
++        }
++    }
++    ass_set_fonts(ass->renderer, NULL, NULL, ass->font_provider, NULL, 1);
++    return 0;
+ }
+ 
+ static const AVFilterPad ass_inputs[] = {
+@@ -327,7 +518,8 @@
+         return ret;
+ 
+     /* Initialize fonts */
+-    ass_set_fonts(ass->renderer, NULL, NULL, 1, NULL, 1);
++    if ((ret = init_fonts(ctx)) < 0)
++        return ret;
+ 
+     ass->track = ass_read_file(ass->library, ass->filename, NULL);
+     if (!ass->track) {
+@@ -355,7 +547,7 @@
+ };
+ #endif
+ 
+-#if CONFIG_SUBTITLES_FILTER
++#if CONFIG_SUBTITLES_FILTER || CONFIG_SUBTITLES_VT_IMAGES_FILTER
+ 
+ static const AVOption subtitles_options[] = {
+     COMMON_OPTIONS
+@@ -413,6 +605,7 @@
+     AVStream *st;
+     AVPacket pkt;
+     AssContext *ass = ctx->priv;
++    ass->prepare_vt_images = !strcmp(ctx->filter->name, "subtitles_vt_images");
+ 
+     /* Init libass */
+     ret = init(ctx);
+@@ -483,7 +676,8 @@
+     }
+ 
+     /* Initialize fonts */
+-    ass_set_fonts(ass->renderer, NULL, NULL, 1, NULL, 1);
++    if ((ret = init_fonts(ctx)) < 0)
++        goto end;
+ 
+     /* Open decoder */
+     dec = avcodec_find_decoder(st->codecpar->codec_id);
+@@ -599,6 +793,20 @@
+     return ret;
+ }
+ 
++#if CONFIG_SUBTITLES_VT_IMAGES_FILTER
++const FFFilter ff_vf_subtitles_vt_images = {
++    .p.name = "subtitles_vt_images",
++    .p.description = NULL_IF_CONFIG_SMALL("Prepare ordered libass masks for VideoToolbox composition."),
++    .p.priv_class = &subtitles_class,
++    .priv_size = sizeof(AssContext),
++    .init = init_subtitles, .uninit = uninit,
++    FILTER_INPUTS(vt_images_inputs),
++    FILTER_OUTPUTS(vt_images_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_VIDEOTOOLBOX),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
++#endif
++
+ const FFFilter ff_vf_subtitles = {
+     .p.name        = "subtitles",
+     .p.description = NULL_IF_CONFIG_SMALL("Render text subtitles onto input video using the libass library."),
+--- a/libavfilter/vf_overlay_videotoolbox.m
++++ b/libavfilter/vf_overlay_videotoolbox.m
+@@ -26,6 +26,8 @@
+ #include "libavutil/hwcontext.h"
+ #include "libavutil/hwcontext_videotoolbox.h"
+ #include "libavutil/pixdesc.h"
++#include "subtitles_vt_commands.h"
++#include "formats.h"
+ #include "libavutil/opt.h"
+ #include "libavutil/objc.h"
+ #include "video.h"
+@@ -38,6 +40,7 @@
+ // Although iOS 8.0 introduced basic Metal support, its feature set is not complete and does not have CoreImage compatability.
+ // We have to set the minimum iOS version to 9.0.
+ typedef struct API_AVAILABLE(macos(10.11), ios(9.0)) OverlayVideoToolboxContext {
++    const AVClass *class;
+     AVBufferRef *device_ref;
+     FFFrameSync fs;
+ 
+@@ -58,17 +61,23 @@
+     uint x_position;
+     uint y_position;
+     uint hwframe_ctx_allocated;
++    uint ass_mode;
++    uint bitmap_mode;
++    AVFrame *bitmap_previous;
++    AVBufferRef *ass_commands;
++    id<MTLBuffer> ass_buffer;
+ } OverlayVideoToolboxContext API_AVAILABLE(macos(10.11), ios(9.0));
+ 
+ typedef struct MtlBlendParams {
+     uint x_position;
+     uint y_position;
++
+ } MtlBlendParams;
+ 
+ // Using sizeof(OverlayVideoToolboxContext) without an availability check will error
+ // if we're targeting an older OS version, so we need to calculate the size ourselves
+ // (we'll statically verify it's correct in overlay_videotoolbox_init behind a check)
+-#define OVERLAY_VT_CTX_SIZE (sizeof(FFFrameSync) + sizeof(uint) * 3 + sizeof(void*) * 13 + 4)
++#define OVERLAY_VT_CTX_SIZE (sizeof(FFFrameSync) + sizeof(uint) * 5 + sizeof(void*) * 17 + 4)
+ 
+ // Neither VideoToolbox nor CoreImage can convert YUV420P frames into 16-bit depth color formats.
+ // Additionally, the only hardware formats that support an Alpha channel are AYUV64 and BGRA.
+@@ -414,14 +423,177 @@
+     return ff_filter_frame(outlink, output);
+ }
+ 
++static int svt_validate(const AVBufferRef *payload, int width, int height)
++{
++    const SVTHeader *header;
++    const SVTCommand *commands;
++    size_t offset;
++    if (!payload || payload->size < sizeof(SVTHeader) || payload->size > SVT_MAX_BYTES)
++        return AVERROR(EINVAL);
++    header = (const SVTHeader *)payload->data;
++    if (header->magic != SVT_MAGIC || header->version != SVT_VERSION ||
++        header->bytes != payload->size || header->width != width || header->height != height ||
++        (header->count && (header->min_x >= header->max_x || header->min_y >= header->max_y ||
++                          header->max_x > width || header->max_y > height)) ||
++        header->count > SVT_MAX_COMMANDS ||
++        header->count > (payload->size - sizeof(SVTHeader)) / sizeof(SVTCommand))
++        return AVERROR(EINVAL);
++    commands = (const SVTCommand *)(header + 1);
++    offset = sizeof(SVTHeader) + header->count * sizeof(SVTCommand);
++    for (unsigned i = 0; i < header->count; i++) {
++        const SVTCommand *c = &commands[i];
++        if (c->x < 0 || c->y < 0 || !c->width || !c->height ||
++            c->x < header->min_x || c->y < header->min_y ||
++            c->x > header->max_x || c->y > header->max_y ||
++            c->width > header->max_x - c->x || c->height > header->max_y - c->y ||
++            c->offset != offset || c->alpha > ((0x10307u * 255u + 3u) >> 8) ||
++            c->color_y > 255 || c->color_u > 255 || c->color_v > 255 ||
++            c->height > (payload->size - offset) / c->width)
++            return AVERROR(EINVAL);
++        offset += (size_t)c->width * c->height;
++    }
++    return offset == payload->size ? 0 : AVERROR(EINVAL);
++}
++
++static int svt_prepare_bitmap(OverlayVideoToolboxContext *ctx, const AVFrame *image,
++                              int width, int height) API_AVAILABLE(macos(10.11), ios(9.0))
++{
++    size_t n, bytes, offset;
++    AVBufferRef *payload;
++    AVFrame *previous;
++    if (image->format != AV_PIX_FMT_YUVA420P || image->width != width || image->height != height ||
++        image->alpha_mode == AVALPHA_MODE_PREMULTIPLIED || width <= 0 || height <= 0 ||
++        (width & 1) || (height & 1) || width > (SVT_MAX_BYTES - sizeof(SVTHeader)) / height)
++        return AVERROR(EINVAL);
++    n = (size_t)width * height;
++    if (n > (SVT_MAX_BYTES - sizeof(SVTHeader)) * 2 / 5)
++        return AVERROR(EINVAL);
++    bytes = sizeof(SVTHeader) + n * 5 / 2;
++    for (int plane = 0; plane < 4; plane++) {
++        int pw = (plane == 1 || plane == 2) ? width / 2 : width;
++        if (!image->data[plane] || image->linesize[plane] < pw)
++            return AVERROR(EINVAL);
++    }
++    if (ctx->bitmap_previous && ctx->bitmap_previous->width == width &&
++        ctx->bitmap_previous->height == height &&
++        !memcmp(ctx->bitmap_previous->data, image->data, 4 * sizeof(image->data[0])) &&
++        !memcmp(ctx->bitmap_previous->linesize, image->linesize, 4 * sizeof(image->linesize[0])))
++        return 0; /* retained plane refs prevent producer-side buffer reuse */
++    payload = av_buffer_alloc(bytes);
++    previous = av_frame_clone(image);
++    if (!payload || !previous) {
++        av_buffer_unref(&payload); av_frame_free(&previous);
++        return AVERROR(ENOMEM);
++    }
++    *(SVTHeader *)payload->data = (SVTHeader){ 0x53564231u, SVT_VERSION, bytes, 1, width, height };
++    offset = sizeof(SVTHeader);
++    for (int plane = 0; plane < 4; plane++) {
++        int pw = (plane == 1 || plane == 2) ? width / 2 : width;
++        int ph = (plane == 1 || plane == 2) ? height / 2 : height;
++        for (int y = 0; y < ph; y++) {
++            memcpy(payload->data + offset, image->data[plane] + (size_t)y * image->linesize[plane], pw);
++            offset += pw;
++        }
++    }
++    id<MTLBuffer> gpu = [ctx->mtl_device newBufferWithBytes: payload->data length: bytes options: MTLResourceStorageModeShared];
++    if (!gpu) { av_buffer_unref(&payload); av_frame_free(&previous); return AVERROR(ENOMEM); }
++    av_buffer_unref(&ctx->ass_commands);
++    ff_objc_release(&ctx->ass_buffer);
++    av_frame_free(&ctx->bitmap_previous);
++    ctx->ass_commands = payload;
++    ctx->ass_buffer = gpu;
++    ctx->bitmap_previous = previous;
++    return 0;
++}
++
++static int overlay_vt_blend_ass(FFFrameSync *fs) API_AVAILABLE(macos(10.11), ios(9.0))
++{
++    AVFilterContext *avctx = fs->parent;
++    OverlayVideoToolboxContext *ctx = avctx->priv;
++    AVFilterLink *outlink = avctx->outputs[0];
++    AVFrame *main, *image, *output = NULL;
++    CVMetalTextureRef sy = NULL, suv = NULL, dy = NULL, duv = NULL;
++    id<MTLCommandBuffer> buffer = nil;
++    id<MTLComputeCommandEncoder> encoder = nil;
++    int ret = ff_framesync_get_frame(fs, 0, &main, 0);
++    if (ret < 0) return ret;
++    ret = ff_framesync_get_frame(fs, 1, &image, 0);
++    if (ret < 0) return ret;
++    if (!main || (!ctx->bitmap_mode && (!image || main->pts != image->pts)))
++        return AVERROR(EINVAL);
++    if (ctx->bitmap_mode && image) {
++        ret = svt_prepare_bitmap(ctx, image, main->width, main->height);
++        if (ret < 0) return ret;
++    } else if (!ctx->bitmap_mode) {
++        ret = svt_validate(image->opaque_ref, main->width, main->height);
++        if (ret < 0) return ret;
++    }
++    const SVTHeader *header = image ? (const SVTHeader *)(ctx->bitmap_mode ? ctx->ass_commands->data : image->opaque_ref->data) : NULL;
++    if (!image || !header->count) {
++        output = av_frame_clone(main);
++        if (!output) return AVERROR(ENOMEM);
++        if (ctx->ass_mode && output->opaque_ref && image &&
++            output->opaque_ref->data == image->opaque_ref->data)
++            av_buffer_unref(&output->opaque_ref);
++        return ff_filter_frame(outlink, output);
++    }
++    if (!ctx->bitmap_mode && (!ctx->ass_commands || ctx->ass_commands->data != image->opaque_ref->data)) {
++        AVBufferRef *commands = av_buffer_ref(image->opaque_ref);
++        id<MTLBuffer> gpu = [ctx->mtl_device newBufferWithBytes: image->opaque_ref->data
++                                              length: image->opaque_ref->size
++                                             options: MTLResourceStorageModeShared];
++        if (!commands || !gpu) {
++            av_buffer_unref(&commands);
++            ff_objc_release(&gpu);
++            return AVERROR(ENOMEM);
++        }
++        av_buffer_unref(&ctx->ass_commands);
++        ff_objc_release(&ctx->ass_buffer);
++        ctx->ass_commands = commands;
++        ctx->ass_buffer = gpu;
++    }
++    output = ff_get_video_buffer(outlink, outlink->w, outlink->h);
++    if (!output) return AVERROR(ENOMEM);
++    ret = av_frame_copy_props(output, main);
++    if (ret < 0) goto done;
++    if (ctx->ass_mode && output->opaque_ref &&
++        output->opaque_ref->data == image->opaque_ref->data)
++        av_buffer_unref(&output->opaque_ref);
++    sy = ff_metal_texture_from_pixbuf(avctx, ctx->texture_cache, (CVPixelBufferRef)main->data[3], 0, MTLPixelFormatR8Unorm);
++    suv = ff_metal_texture_from_pixbuf(avctx, ctx->texture_cache, (CVPixelBufferRef)main->data[3], 1, MTLPixelFormatRG8Unorm);
++    dy = ff_metal_texture_from_pixbuf(avctx, ctx->texture_cache, (CVPixelBufferRef)output->data[3], 0, MTLPixelFormatR8Unorm);
++    duv = ff_metal_texture_from_pixbuf(avctx, ctx->texture_cache, (CVPixelBufferRef)output->data[3], 1, MTLPixelFormatRG8Unorm);
++    if (!sy || !suv || !dy || !duv) { ret = AVERROR_EXTERNAL; goto done; }
++    buffer = CFBridgingRetain(ctx->mtl_queue.commandBuffer);
++    encoder = CFBridgingRetain((__bridge id<MTLCommandBuffer>)buffer.computeCommandEncoder);
++    if (!buffer || !encoder) { ret = AVERROR(ENOMEM); goto done; }
++    [(__bridge id<MTLComputeCommandEncoder>)encoder setTexture: CVMetalTextureGetTexture(sy) atIndex: 0];
++    [(__bridge id<MTLComputeCommandEncoder>)encoder setTexture: CVMetalTextureGetTexture(suv) atIndex: 1];
++    [(__bridge id<MTLComputeCommandEncoder>)encoder setTexture: CVMetalTextureGetTexture(dy) atIndex: 3];
++    [(__bridge id<MTLComputeCommandEncoder>)encoder setTexture: CVMetalTextureGetTexture(duv) atIndex: 4];
++    [(__bridge id<MTLComputeCommandEncoder>)encoder setBuffer: ctx->ass_buffer offset: 0 atIndex: 6];
++    id<MTLTexture> uv = CVMetalTextureGetTexture(duv);
++    ff_metal_compute_encoder_dispatch(ctx->mtl_device, ctx->mtl_pipeline,
++                                      (__bridge id<MTLComputeCommandEncoder>)encoder, uv.width, uv.height);
++    [(__bridge id<MTLComputeCommandEncoder>)encoder endEncoding];
++    [(__bridge id<MTLCommandBuffer>)buffer commit];
++    [(__bridge id<MTLCommandBuffer>)buffer waitUntilCompleted];
++    ret = [(__bridge id<MTLCommandBuffer>)buffer status] == MTLCommandBufferStatusCompleted ? 0 : AVERROR_EXTERNAL;
++ done:
++    ff_objc_release(&encoder);
++    ff_objc_release(&buffer);
++    if (sy) CFRelease(sy); if (suv) CFRelease(suv);
++    if (dy) CFRelease(dy); if (duv) CFRelease(duv);
++    if (ret < 0) { av_frame_free(&output); return ret; }
++    return ff_filter_frame(outlink, output);
++}
++
+ static av_cold void do_uninit(AVFilterContext *avctx) API_AVAILABLE(macos(10.11), ios(9.0))
+ {
+     OverlayVideoToolboxContext *ctx = avctx->priv;
+ 
+-    if (ctx->hwframe_ctx_allocated) {
+-        av_buffer_unref(&ctx->device_ref);
+-        ctx->hwframe_ctx_allocated = 0;
+-    }
++    av_buffer_unref(&ctx->device_ref);
++    ctx->hwframe_ctx_allocated = 0;
+     ff_framesync_uninit(&ctx->fs);
+ 
+     if (ctx->ci_ctx) {
+@@ -429,6 +601,9 @@
+         ctx->ci_ctx = NULL;
+     }
+ 
++    av_frame_free(&ctx->bitmap_previous);
++    av_buffer_unref(&ctx->ass_commands);
++    ff_objc_release(&ctx->ass_buffer);
+     ff_objc_release(&ctx->mtl_params_buffer);
+     ff_objc_release(&ctx->mtl_function);
+     ff_objc_release(&ctx->mtl_pipeline);
+@@ -583,7 +758,7 @@
+     int ret = 0;
+ 
+     if (!inl_main->hw_frames_ctx ||
+-        !inl_overlay->hw_frames_ctx) {
++        (!ctx->bitmap_mode && !inl_overlay->hw_frames_ctx)) {
+         av_log(avctx, AV_LOG_ERROR, "An input HW frames reference is "
+                "required to associate the processing device.\n");
+         return AVERROR(EINVAL);
+@@ -592,7 +767,7 @@
+     input_ref = inl_main->hw_frames_ctx;
+     overlay_ref = inl_overlay->hw_frames_ctx;
+     main_frames = (AVHWFramesContext*)input_ref->data;
+-    overlay_frames = (AVHWFramesContext*)overlay_ref->data;
++    overlay_frames = ctx->bitmap_mode ? main_frames : (AVHWFramesContext*)overlay_ref->data;
+     av_assert0(main_frames);
+     av_assert0(overlay_frames);
+ 
+@@ -618,12 +793,17 @@
+         return AVERROR(ENOSYS);
+     }
+ 
+-    // Use fast code path for BGRA overlay
+-    if (overlay_frames->sw_format == AV_PIX_FMT_BGRA) {
++    if ((ctx->ass_mode || ctx->bitmap_mode) && (main_frames->sw_format != AV_PIX_FMT_NV12 ||
++        overlay_frames->sw_format != AV_PIX_FMT_NV12 || inlink_main->w != inlink_overlay->w ||
++        inlink_main->h != inlink_overlay->h || ctx->x_position || ctx->y_position))
++        return AVERROR(EINVAL);
++
++    // Select the explicit ordered-mask contract or ordinary BGRA composition.
++    if (ctx->ass_mode || ctx->bitmap_mode || overlay_frames->sw_format == AV_PIX_FMT_BGRA) {
+         NSError *err = nil;
+         ff_objc_release(&ctx->mtl_pipeline);
+         ff_objc_release(&ctx->mtl_function);
+-        ctx->mtl_function = [ctx->mtl_library newFunctionWithName: @"blend_shader_bgra_overlay"];
++        ctx->mtl_function = [ctx->mtl_library newFunctionWithName: (ctx->ass_mode ? @"blend_shader_ass_overlay" : ctx->bitmap_mode ? @"blend_shader_bitmap_overlay" : @"blend_shader_bgra_overlay")];
+         if (!ctx->mtl_function) {
+             av_log(avctx, AV_LOG_ERROR, "Failed to create Metal function!\n");
+             overlay_videotoolbox_uninit(avctx);
+@@ -637,7 +817,7 @@
+             overlay_videotoolbox_uninit(avctx);
+             return AVERROR_EXTERNAL;
+         }
+-        ctx->fs.on_event = &overlay_vt_blend_bgra_overlay;
++        ctx->fs.on_event = (ctx->ass_mode || ctx->bitmap_mode) ? &overlay_vt_blend_ass : &overlay_vt_blend_bgra_overlay;
+     }
+ 
+     ctx->device_ref = av_buffer_ref(main_frames->device_ref);
+@@ -646,6 +826,14 @@
+         return AVERROR(ENOMEM);
+     }
+ 
++    if (ctx->ass_mode || ctx->bitmap_mode) {
++        // Pass-through and active frames must belong to the declared output
++        // pool. Ref the main pool; active output still gets a distinct buffer.
++        outl->hw_frames_ctx = av_buffer_ref(input_ref);
++        if (!outl->hw_frames_ctx)
++            return AVERROR(ENOMEM);
++        goto framesync_setup;
++    }
+     outl->hw_frames_ctx = av_hwframe_ctx_alloc(ctx->device_ref);
+     if (!outl->hw_frames_ctx) {
+         av_log(avctx, AV_LOG_ERROR, "Failed to create HW frame context "
+@@ -674,6 +862,7 @@
+         return ret;
+     }
+ 
++ framesync_setup:
+     link->time_base = inlink_main->time_base;
+     ctx->fs.time_base = link->time_base;
+ 
+@@ -706,6 +895,8 @@
+ #define OFFSET(x) offsetof(OverlayVideoToolboxContext, x)
+ 
+ static const AVOption overlay_videotoolbox_options[] = {
++    { "bitmap", "Composite incumbent YUVA420P subtitle planes", OFFSET(bitmap_mode), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
++    { "ass", "Consume ordered prepared libass masks", OFFSET(ass_mode), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+     { "x", "Overlay x position",
+         OFFSET(x_position), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, .flags = FLAGS },
+     { "y", "Overlay y position",
+@@ -742,6 +933,19 @@
+     },
+ };
+ 
++static int query_formats(const AVFilterContext *avctx, AVFilterFormatsConfig **cfg_in,
++                         AVFilterFormatsConfig **cfg_out)
++{
++    const OverlayVideoToolboxContext *ctx = avctx->priv;
++    int ret;
++    if (ctx->ass_mode && ctx->bitmap_mode) return AVERROR(EINVAL);
++    ret = ff_formats_ref(ff_make_formats_list_singleton(AV_PIX_FMT_VIDEOTOOLBOX), &cfg_in[0]->formats);
++    if (ret < 0) return ret;
++    ret = ff_formats_ref(ff_make_formats_list_singleton(ctx->bitmap_mode ? AV_PIX_FMT_YUVA420P : AV_PIX_FMT_VIDEOTOOLBOX), &cfg_in[1]->formats);
++    if (ret < 0) return ret;
++    return ff_formats_ref(ff_make_formats_list_singleton(AV_PIX_FMT_VIDEOTOOLBOX), &cfg_out[0]->formats);
++}
++
+ const FFFilter ff_vf_overlay_videotoolbox = {
+     .p.name         = "overlay_videotoolbox",
+     .p.description  = NULL_IF_CONFIG_SMALL("Overlay filter for VideoToolbox frames using Metal compute"),
+@@ -751,7 +955,7 @@
+     .uninit         = overlay_videotoolbox_uninit,
+     .activate       = overlay_videotoolbox_activate,
+     .preinit        = overlay_videotoolbox_framesync_preinit,
+-    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_VIDEOTOOLBOX),
++    FILTER_QUERY_FUNC2(query_formats),
+     FILTER_INPUTS(overlay_videotoolbox_inputs),
+     FILTER_OUTPUTS(overlay_videotoolbox_outputs),
+     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
+--- a/libavfilter/metal/vf_overlay_videotoolbox.metal
++++ b/libavfilter/metal/vf_overlay_videotoolbox.metal
+@@ -97,3 +97,112 @@
+         dest_uv.write(float4(result_color.y, result_color.z, 0.0f, 1.0f), loc_uv);
+     }
+ }
++
++#include "../subtitles_vt_commands.h"
++
++static uint svt_mask(device const uchar *bytes, device const SVTCommand &command, uint2 position)
++{
++    if (position.x < uint(command.x) || position.y < uint(command.y))
++        return 0;
++    uint2 local = position - uint2(command.x, command.y);
++    if (local.x >= command.width || local.y >= command.height)
++        return 0;
++    return bytes[command.offset + local.y * command.width + local.x];
++}
++
++/* Exact ordered 8-bit FFDraw blend_pixel arithmetic, including per-layer
++ * truncation and clipped 2x2 chroma mask averaging. Main pixels stay on Metal. */
++kernel void blend_shader_ass_overlay(
++    texture2d<float, access::read> source_y [[ texture(0) ]],
++    texture2d<float, access::read> source_uv [[ texture(1) ]],
++    texture2d<float, access::write> dest_y [[ texture(3) ]],
++    texture2d<float, access::write> dest_uv [[ texture(4) ]],
++    device const uchar *bytes [[ buffer(6) ]],
++    uint2 gid [[ thread_position_in_grid ]])
++{
++    if (gid.x >= dest_uv.get_width() || gid.y >= dest_uv.get_height())
++        return;
++    device const SVTHeader &header = *(device const SVTHeader *)bytes;
++    device const SVTCommand *commands = (device const SVTCommand *)(bytes + sizeof(SVTHeader));
++    uint2 origin = gid * 2;
++    if (origin.x + 2 <= header.min_x || origin.y + 2 <= header.min_y ||
++        origin.x >= header.max_x || origin.y >= header.max_y) {
++        for (uint j = 0; j < 4; j++) {
++            uint2 loc = origin + uint2(j & 1, j >> 1);
++            if (loc.x < dest_y.get_width() && loc.y < dest_y.get_height())
++                dest_y.write(source_y.read(loc), loc);
++        }
++        dest_uv.write(source_uv.read(gid), gid);
++        return;
++    }
++    uint2 uv = uint2(round(source_uv.read(gid).rg * 255.0f));
++    uint4 y = uint4(0);
++    for (uint j = 0; j < 4; j++) {
++        uint2 loc = gid * 2 + uint2(j & 1, j >> 1);
++        if (loc.x < dest_y.get_width() && loc.y < dest_y.get_height())
++            y[j] = uint(round(source_y.read(loc).r * 255.0f));
++    }
++    for (uint i = 0; i < header.count; i++) {
++        device const SVTCommand &c = commands[i];
++        if (origin.x + 2 <= uint(c.x) || origin.y + 2 <= uint(c.y) ||
++            origin.x >= uint(c.x) + c.width || origin.y >= uint(c.y) + c.height)
++            continue;
++        uint total = 0;
++        for (uint j = 0; j < 4; j++) {
++            uint2 loc = gid * 2 + uint2(j & 1, j >> 1);
++            uint mask = svt_mask(bytes, c, loc);
++            uint alpha = mask * c.alpha;
++            y[j] = ((0x1010101u - alpha) * y[j] + alpha * c.color_y) >> 24;
++            total += mask;
++        }
++        uint alpha = (total >> 2) * c.alpha;
++        uv = ((0x1010101u - alpha) * uv + alpha * uint2(c.color_u, c.color_v)) >> 24;
++    }
++    for (uint j = 0; j < 4; j++) {
++        uint2 loc = gid * 2 + uint2(j & 1, j >> 1);
++        if (loc.x < dest_y.get_width() && loc.y < dest_y.get_height())
++            dest_y.write(float4(float(y[j]) / 255.0f, 0, 0, 1), loc);
++    }
++    dest_uv.write(float4(float2(uv) / 255.0f, 0, 1), gid);
++}
++
++static uint svt_div255(uint value) { return ((value + 128u) * 257u) >> 16; }
++
++/* PGS remains decoded/scaled as the incumbent YUVA420P secondary input. */
++kernel void blend_shader_bitmap_overlay(
++    texture2d<float, access::read> source_y [[ texture(0) ]],
++    texture2d<float, access::read> source_uv [[ texture(1) ]],
++    texture2d<float, access::write> dest_y [[ texture(3) ]],
++    texture2d<float, access::write> dest_uv [[ texture(4) ]],
++    device const uchar *bytes [[ buffer(6) ]],
++    uint2 gid [[ thread_position_in_grid ]])
++{
++    if (gid.x >= dest_uv.get_width() || gid.y >= dest_uv.get_height())
++        return;
++    device const SVTHeader &h = *(device const SVTHeader *)bytes;
++    const uint n = h.width * h.height, uvn = n / 4;
++    device const uchar *y = bytes + sizeof(SVTHeader);
++    device const uchar *u = y + n, *v = u + uvn, *a = v + uvn;
++    uint total = 0;
++    for (uint j = 0; j < 4; j++) {
++        uint2 loc = gid * 2 + uint2(j & 1, j >> 1);
++        uint pos = loc.y * h.width + loc.x;
++        uint alpha = a[pos];
++        uint main = uint(round(source_y.read(loc).r * 255.0f));
++        uint result = svt_div255(main * (255u - alpha) + uint(y[pos]) * alpha);
++        dest_y.write(float4(float(result) / 255.0f, 0, 0, 1), loc);
++        total += alpha;
++    }
++    // Match incumbent vf_overlay boundary averaging, including its last
++    // chroma row/column fallback rather than a uniform 2x2 average.
++    uint ap = gid.y * 2 * h.width + gid.x * 2;
++    uint alpha_h = gid.x + 1 < h.width / 2 ? (uint(a[ap]) + a[ap + 1]) >> 1 : a[ap];
++    uint alpha_v = gid.y + 1 < h.height / 2 ? (uint(a[ap]) + a[ap + h.width]) >> 1 : a[ap];
++    uint alpha = gid.x + 1 < h.width / 2 && gid.y + 1 < h.height / 2 ? total >> 2 : (alpha_h + alpha_v) >> 1;
++    uint pos = gid.y * (h.width / 2) + gid.x;
++    uint2 main = uint2(round(source_uv.read(gid).rg * 255.0f));
++    uint2 color = uint2(u[pos], v[pos]);
++    uint2 value = main * (255u - alpha) + color * alpha;
++    uint2 result = ((value + 128u) * 257u) >> 16;
++    dest_uv.write(float4(float2(result) / 255.0f, 0, 1), gid);
++}
+--- /dev/null
++++ b/libavfilter/subtitles_vt_commands.h
+@@ -0,0 +1,28 @@
++/* Internal ordered libass mask ABI. Owned by subtitles_vt_images; consumed by
++ * overlay_videotoolbox. This file is part of FFmpeg and is licensed LGPL-2.1+. */
++#ifndef AVFILTER_SUBTITLES_VT_COMMANDS_H
++#define AVFILTER_SUBTITLES_VT_COMMANDS_H
++#ifdef __METAL_VERSION__
++#define SVT_U32 uint
++#define SVT_I32 int
++#else
++#include <stdint.h>
++#define SVT_U32 uint32_t
++#define SVT_I32 int32_t
++#endif
++#define SVT_MAGIC 0x53565431u
++#define SVT_VERSION 1u
++/* A bounded image, including its command list and copied masks. */
++#define SVT_MAX_BYTES (64u * 1024u * 1024u)
++#define SVT_MAX_COMMANDS 4096u
++typedef struct SVTHeader {
++    SVT_U32 magic, version, bytes, count, width, height;
++    SVT_U32 min_x, min_y, max_x, max_y;
++} SVTHeader;
++typedef struct SVTCommand {
++    SVT_I32 x, y;
++    SVT_U32 width, height, offset, alpha, color_y, color_u, color_v;
++} SVTCommand;
++#undef SVT_U32
++#undef SVT_I32
++#endif
