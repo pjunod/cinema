@@ -11,7 +11,7 @@ container_attempted=false
 watcher=''
 watcher_running() {
  local job
- for job in $(jobs -pr); do [ "$job" != "$watcher" ] || return 0; done
+ for job in $(jobs -p); do [ "$job" != "$watcher" ] || return 0; done
  return 1
 }
 cleanup() {

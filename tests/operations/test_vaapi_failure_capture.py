@@ -30,7 +30,7 @@ class VaapiFailureCaptureTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(CAPTURE.read_bytes()).hexdigest(),
                          'd00241df59f8ea5f8fe0c4f33446b620ad2b937f5f0066baacc7aa1ded92802a')
         self.assertEqual(hashlib.sha256(WRAPPER.read_bytes()).hexdigest(),
-                         '1c51507d1a62f26bf05a153d20647a1051104fe07c7f0edeb7c55f1b9ee4a4e1')
+                         '3c5a1bb3d3308ec3460eda45f24519bcf1fd5c5e6196a8a1f68b0f94c3f11ada')
         self.capture = runpy.run_path(str(CAPTURE))
 
     def test_failed_luma_keeps_full_identity_coordinates_and_reference_regions(self):
@@ -92,6 +92,8 @@ class VaapiFailureCaptureTests(unittest.TestCase):
         self.assertIn('^[0-9a-f]{64}$', wrapper)
         self.assertNotIn('docker rm -f "$container"', wrapper)
         self.assertIn('kill "$watcher"', wrapper)
+        self.assertIn('for job in $(jobs -p)', wrapper)
+        self.assertNotIn('jobs -pr', wrapper)
         self.assertIn('[ "$status" -ne 0 ] &&', wrapper)
         self.assertIn('-le 524288', wrapper)
         self.assertIn('datetime.timedelta(hours=48)', wrapper)
