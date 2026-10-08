@@ -15,6 +15,7 @@
 mod avc_qualification;
 mod decode;
 pub mod decoder_inventory;
+pub mod dv_processing;
 pub mod dvconvert;
 mod encoder;
 pub mod health;
