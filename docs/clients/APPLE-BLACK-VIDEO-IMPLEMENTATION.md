@@ -711,3 +711,11 @@ the server bootstrap or extend the readiness deadline. Keep this distinction
 in the incident report; do not claim that frame-evidence tests repair startup
 latency. No new physical tests or installations were performed during the
 user's resumed viewing.
+
+
+**Current-base verification:** after integrating `ef54fa047`, the unchanged
+Apple suites passed again (tvOS 850; iOS 867). The expanded operations suite
+passed 821 tests with two existing skips; validation passed 334 tests with
+one existing skip. The normal hook passed pinned Rust 1.97.1 formatting and
+workspace Clippy with warnings denied. These receipts apply to the
+main-integrated candidate, not just the earlier source snapshot.
