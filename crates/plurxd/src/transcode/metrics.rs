@@ -60,6 +60,10 @@ impl CodecQualificationMetrics {
             Pipeline::TonemapCuda => 9,
             Pipeline::VtScaleSdr => 10,
             Pipeline::VtScaleHdr10 => 12,
+            Pipeline::DoviStrictTonemapx => 13,
+            Pipeline::VtDoviTonemapx => 14,
+            Pipeline::VtDoviMetal => 15,
+            Pipeline::DoviMetal => 16,
             Pipeline::VtToneMapMetal => 11,
         }
     }

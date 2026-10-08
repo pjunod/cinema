@@ -1451,6 +1451,7 @@ impl TranscodeManager {
         // Encoding retains these execution options for publication and
         // diagnostics. Its graph must agree with the immutable plan.
         options.pipeline = plan.options().pipeline;
+        options.strict_dolby = plan.options().strict_dolby.clone();
         if let Some(frame_rate) = plan
             .output_contract()
             .normalized_geometry()

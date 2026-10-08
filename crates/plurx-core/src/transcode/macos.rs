@@ -132,8 +132,6 @@ pub enum MacosProcessingGraph {
     Hdr10BitmapBurn,
     HlgBitmapBurn,
     SdrBwdifFrame,
-    Hdr10BwdifFrame,
-    HlgBwdifFrame,
     SdrBwdifField,
     HevcSdr,
     HevcHdr10,
@@ -142,6 +140,7 @@ pub enum MacosProcessingGraph {
     LiveSdrUploadScale,
     LiveSdrUploadBwdifFrame,
     LiveSdrUploadBwdifField,
+    P5SoftwareCpu,
     P5VtTonemapx,
     P5VtMetal,
     P5SoftwareMetal,
@@ -311,5 +310,20 @@ impl MacosProcessingSelection {
             Self::RecoveryRestriction => "recovery_restriction",
             Self::CapabilityFallback => "capability_fallback",
         }
+    }
+}
+
+/// Captured provenance for selected strict Profile5 routes and their retries.
+/// Construction belongs to the semantic resolver; callers can only retain it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrictDolbyPolicy {
+    identity: MacosProcessingIdentity,
+}
+impl StrictDolbyPolicy {
+    pub(crate) fn new(identity: MacosProcessingIdentity) -> Self {
+        Self { identity }
+    }
+    pub fn identity(&self) -> &MacosProcessingIdentity {
+        &self.identity
     }
 }

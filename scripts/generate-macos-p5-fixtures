@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Materialize original CC0 strict Profile5 runtime controls from the sibling generator."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+
+CASES = (
+    ("fresh", "p5.mp4", None, 0),
+    ("variable", "p5-frame-bound.mp4", None, 0),
+    ("missing_first", "p5-missing-first.mp4", 0, 0),
+    ("missing_midstream", "p5-missing-midstream.mp4", 10, 0),
+    ("missing_seek_start", "p5-missing-seek-start.mp4", 0, 1),
+    ("malformed_first", "p5-malformed-first.mp4", 0, 0),
+    ("malformed_midstream", "p5-malformed-midstream.mp4", 10, 0),
+    ("omitted_color_first", "p5-omitted-color-first.mp4", 0, 0),
+    ("omitted_color_midstream", "p5-omitted-color-mapping-reuse-midstream.mp4", 10, 0),
+)
+
+
+def materialize(source, output):
+    output.mkdir(parents=True, exist_ok=True)
+    cases = []
+    for key, name, maximum, seek in CASES:
+        data = (source / name).read_bytes()
+        path = "strict_p5_" + key + ".mp4"
+        (output / path).write_bytes(data)
+        cases.append(dict(id=key, path=path, sha256=hashlib.sha256(data).hexdigest(),
+                          byte_length=len(data), negative_max_frames=maximum, seek_seconds=seek))
+    bindings = sorted(json.loads((source / "frame-bound-association.json").read_text()),
+                      key=lambda row: row["presentation_pts"])
+    reference = json.loads((source / "reference.json").read_text())
+    manifest = dict(schema_version=1, generator_recipe_version=1, license="CC0-1.0",
+                    source_shape=[320, 180], frame_count=24, frame_rate=[12, 1],
+                    source_sample_aspect_ratio="1:1", source_codes=reference["patches_source_codes"],
+                    variable_frame_metadata=[dict(pts=row["presentation_pts"],
+                        dm_metadata_id=row["dm_metadata_id"], source_max_pq=row["source_max_pq"])
+                        for row in bindings], cases=cases)
+    if sum(row["byte_length"] for row in cases) > 256 * 1024:
+        raise ValueError("strict Profile5 controls exceed their fixed media budget")
+    (output / "strict-p5.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ffmpeg", type=Path, required=True)
+    parser.add_argument("--ffprobe", type=Path, required=True)
+    parser.add_argument("--rpu-generator", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="plurx-strict-p5-") as temporary:
+        source = Path(temporary) / "source"
+        subprocess.run([str(Path(__file__).with_name("generate-macos-extension-fixtures")),
+                        "--family", "p5", "--ffmpeg", str(args.ffmpeg), "--ffprobe", str(args.ffprobe),
+                        "--rpu-generator", str(args.rpu_generator), "--output", str(source), "--lossless"],
+                       stdin=subprocess.DEVNULL, check=True, timeout=240, capture_output=True)
+        manifest = materialize(source, args.output)
+    print(json.dumps(dict(cases=len(manifest["cases"]), media_bytes=sum(row["byte_length"] for row in manifest["cases"])), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
