@@ -1128,6 +1128,44 @@ runtime or upstream execution evidence: the nine incomplete generic rows in
 regressions must be validated by the coordinated batch; changing their data
 constants is not a pure-documentation test waiver.
 
+**H19 public constructor mechanism, 2026-10-08.** One fresh-process toy
+included the unchanged [public HTTP constructor at
+`18e3e71be1b40465f82e1f26f17b7d1bfcc6995d`](https://github.com/sebadob/hiqlite/blob/18e3e71be1b40465f82e1f26f17b7d1bfcc6995d/hiqlite/src/http_client.rs)
+(SHA256 `cc81e32d5f5a0b2754d2787cd741cce65fd33cc2103280442326bf898e8c3f0c`).
+Its resolved Reqwest 0.13.5 / Rustls 0.23.45 version and complete feature
+arrays matched the retained ordinary public `sqlite` and `cache` metadata;
+the toy's only feature was `default`, with `webpki-roots` off. Reqwest's
+declared AWS-LC fallback built the client without installing a process-wide
+default: before and after were both `false`. No request, DNS, remote client,
+node, SQL or application provider installation occurred.
+
+The first admitted setup stopped at offline lock generation (missing
+`encoding_rs`), with zero build/runtime; it was not a TLS negative. A
+separately reviewed setup repair retained the two prior actual pinned 1.97.1
+version successes, resolved one public-index toy lock, admitted every
+source/version/checksum against the public whitelist, and fetched only its
+55 missing archives (6,658,751 B), not the full reference's 113 absent
+archives. One build took 42.073 s and the one never-before-run constructor
+returned with exit 0 in 0.277 s. Terminal 08:42:12.578908 UTC / 64.703 s,
+SHA256 `2ced5d568b1d3c41f1257048ae42371ea95bcb1e6903e196a87c487faa8c9e0d`;
+lock `1787926874f68a35befe3c30fad1eb0060e90b9a6b348cfb3145faa14fff4d0a`;
+binary `05fdc5655d101c0d0b64f29f45a7af7fca14c0e92cb3dff8aee3e197ac8c4baf`
+was identical before/after. All 59 commands returned 0 with recorded reaping,
+owned-group absence and no cleanup gaps. The private bounded source/raw
+packet manifest is
+`9aa50c9b4c76f6bdbc7dd0147bae80aa1a3a212755eff8fd76995150525aaac1`;
+no dependency cache, target or executable bytes are duplicated in that packet.
+
+**Delegated owner disposition:** do not file a generic missing-default-provider
+panic against this tested ordinary current-public constructor graph. A
+detached `rustls-no-provider` graph without its supported provider fallback
+has Reqwest's documented caller-install prerequisite and is not that graph.
+This is positive constructor/declaration-mechanism evidence, not whole Hiqlite,
+historical 0.14, private M3 ring policy, other configurations, end-to-end TLS or
+maintainer acceptance. Row 19 remains `pending M6`; its kind/drop condition,
+the nine incomplete generic rows, M6's formal dispositions and M5 (d)'s fleet
+acceptance remain unchanged. No public filing, upgrade or patch removal.
+
 ### 5.8 2026-09-21 implementation boundary
 
 The safe source-only boundary is M1 plus the locally provable portion of M2.
@@ -1257,6 +1295,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-27 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 5513](http://forge.lan:3000/noirr/plurx/pulls/558#issuecomment-5513)) | [#558](http://forge.lan:3000/noirr/plurx/pulls/558) | One P2, taken. The M5 (d) row's thread-scaling numbers were measured at opt-level 3 applied outside the tree, and a plain run of the committed test (opt-level 0) gives 802 / 360 / 225 / 166 / 129 ms per text, which argues for more threads. The exact command (`--config 'profile.dev.package."*".opt-level=3'`) is now in the test's doc comment and ignore reason and in §3.7(d), and it was rerun that way four times on the merged head: two threads keep 74% to 86% of the best throughput, not 94%. `EMBED_THREADS = 2` is now described as a chosen CPU bound whose cost is measured (3.5 to 6 ms per text), not a near-optimum. No code behaviour changed. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k08_upstream_receipt_sol61 | M6 accepted-mechanism receipt | [#642](http://forge.lan:3000/noirr/plurx/pulls/642) | Claim checkpoint `2e01577d4` from exact effort base `b952246a97375909b396e0ef4588a8d138578286`. WAL 2 links accepted upstream PR 357 and released source; stronger local durability and all drop conditions remain. Ten generic rows reconcile to one verified accepted mechanism and nine pending exact matches/submissions. No upstream reproduction, public write, upgrade, patch removal or fleet acceptance. Original authors/history retained; root coordinator manages the sole independent review and exact-current Effort gate/integration. |
 | 2026-10-03 | gpt-6.1-sol | agent:/root/union_independent_review_sol61 | M6 evidence-only preparation | not submitted | Isolated source branch from current effort `74b73a9b1f24537a6f96b36f61467f85a6edb9ae`; §5.7 and two ledger receipts record accepted partial Hiqlite 1 / WAL 3 fixes and correct the unexecuted Hiqlite 17 extraction oracle without changing backup↔S3. All counts, pending rows, kinds, drop conditions and earlier receipts remain. No Rust, compiler, test, runtime, AUTO, public submission, upgrade or patch removal; independent review and exact-source documentation checks remain unexecuted. |
+| 2026-10-08 | gpt-6.1-sol | agent:/root/remaining_requirements_audit_sol61 | H19 constructor mechanism | not submitted | One source-included public `18e3e71b` constructor on the ordinary provider feature projection returned without application provider installation; exact lock/graph/binary and both separate setup outcomes retained in §5.7. No replay of prior version successes or controls, whole-Hiqlite/0.14/private M3 qualification, public submission, upgrade, removal or M6 completion. Source handoff goes to the authorized batch coordinator; this author does not commit, publish or merge. |
 
 M4 lab-corpus corroboration (optional; the structural result already covers
 every input):
