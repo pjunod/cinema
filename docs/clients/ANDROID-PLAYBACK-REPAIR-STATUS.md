@@ -1,6 +1,6 @@
 # Android playback repair — device failures and delivery progress
 
-**Status:** review addressed; compiling final candidate · **Updated:** 2026-10-08
+**Status:** review addressed; final validation · **Updated:** 2026-10-08
 
 Companion to [Android parity](ANDROID-CLIENT-PARITY.md): repairs the native
 TCL and Lenovo playback failures and Razr video geometry and playback menus.
@@ -56,6 +56,12 @@ be inspected in the deployed binary; the lock cycle is identified in source
 and awaits the deterministic regression and runtime acceptance.
 
 No watchdogs, quality downgrades, feature gates or admission bypasses are added.
-Tests remain deferred until the reviewed candidate, following the explicit
-task instruction over the repository's default local-test sequence. No test
-or repaired-device acceptance is claimed yet.
+Validation follows the requested review-first sequence. The four geometry
+JVM tests and both real Android rendering tests passed on the reviewed code.
+The rendering checks exercise the platform child surface and light panel pixels.
+The two Rust lifecycle regressions and the current-candidate fast lane are
+tracked in PR #915; its description and checks are the live delivery status.
+No full unit sweep is part of this repair. Physical-device acceptance remains
+separate from emulator evidence; no TCL or repaired Razr acceptance is claimed.
+The server change requires deployment after merge to repair existing runtime
+state; merging alone does not replace the deployed binary.
