@@ -366,7 +366,7 @@ private struct NowPlayingState: Equatable {
     let isPlaying: Bool
 }
 
-private enum PlaybackPreparationError: LocalizedError {
+enum PlaybackPreparationError: LocalizedError {
     case timedOut
     case failed
 
@@ -2193,7 +2193,9 @@ final class PlayerController: ObservableObject {
     }
 
     struct ItemPreparation {
-        var ready: @MainActor (AVPlayerItem) async throws -> Void = { try await PlayerController.awaitItemReady($0) }
+        var ready: @MainActor (AVPlayerItem, PlayerItemReadiness.Context) async throws -> Void = {
+            try await PlayerController.awaitItemReady($0, context: $1)
+        }
         var seek: @MainActor (AVPlayer, Int) async -> Void = { player, ms in
             _ = await player.seek(
                 to: CMTime(seconds: Double(ms) / 1000.0, preferredTimescale: 600),
@@ -2225,6 +2227,7 @@ final class PlayerController: ObservableObject {
     }
 
     private let requestPlaybackDecision: @MainActor (AppModel, PlaybackFileContext, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps)
+    private let requestHlsStatus: @MainActor (AppModel, String) async throws -> PlaybackSessionStatus
     private let requestHlsSession: @MainActor (AppModel, PlaybackFileContext, CreateSessionRequest) async throws -> HlsStart
     private let readControlSequence: @MainActor (PlaybackControlSession) async -> UInt64?
     private let reportPlaybackIntent: @MainActor (PlaybackControlSession) async -> UInt64?
@@ -2271,6 +2274,9 @@ final class PlayerController: ObservableObject {
             await $0.endHlsSession($1)
         },
         requestHlsSession: (@MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart)? = nil,
+        requestHlsStatus: @escaping @MainActor (AppModel, String) async throws -> PlaybackSessionStatus = {
+            try await $0.hlsStatus($1)
+        },
         readControlSequence: @escaping @MainActor (PlaybackControlSession) async -> UInt64? = {
             await $0.controlSequence
         },
@@ -2305,6 +2311,7 @@ final class PlayerController: ObservableObject {
             if let requestHlsSession { return try await requestHlsSession(model, id, body) }
             return try await model.createHlsSession(fileId: id, body: body, fileContext: context)
         }
+        self.requestHlsStatus = requestHlsStatus
         self.readControlSequence = readControlSequence
         self.reportPlaybackIntent = reportPlaybackIntent
         self.resumeNow = resumeNow
@@ -2324,7 +2331,7 @@ final class PlayerController: ObservableObject {
     /// spent. A resume has always been bounded by this because it had to seek;
     /// a fresh start was not bounded at all, which is what let a title AVPlayer
     /// neither readies nor fails hold the open forever behind a black screen.
-    static let itemReadinessDeadlineSeconds = 15
+    nonisolated static let itemReadinessDeadlineSeconds = 15
     /// Separate from the observed readiness path: these delays coalesce seek
     /// intent and sample resume presentation, respectively.
     private static let seekCoalescingDelay: Duration = .milliseconds(100)
@@ -2552,6 +2559,7 @@ final class PlayerController: ObservableObject {
     /// how old it was.
     private var diagnosticSessionStatus: PlaybackSessionStatus?
     private var diagnosticSessionStatusObservedAt: Date?
+    private var preparationSample: PlayerItemReadiness.Sample?
     var sessionStatusAgeMs: Int? {
         guard sessionStatus != nil, let observedAt = diagnosticSessionStatusObservedAt else {
             return nil
@@ -5512,6 +5520,7 @@ final class PlayerController: ObservableObject {
         sessionStatus = nil
         diagnosticSessionStatus = nil
         diagnosticSessionStatusObservedAt = nil
+        preparationSample = nil
         if wasStarted { report(position) }
         if let sessionId {
             self.sessionId = nil
@@ -6276,7 +6285,7 @@ final class PlayerController: ObservableObject {
             // that cannot decode it — held this open forever, which is the
             // black screen viewers reported.
             do {
-                try await itemPreparation.ready(item)
+                try await itemPreparation.ready(item, readinessContext(for: item))
             } catch {
                 if isSuperseded(generation) { return }
                 if item.status == .failed {
@@ -6346,6 +6355,7 @@ final class PlayerController: ObservableObject {
         sessionStatus = nil
         diagnosticSessionStatus = nil
         diagnosticSessionStatusObservedAt = nil
+        preparationSample = nil
     }
 
     /// Retire a superseded HLS session, best effort.
@@ -6684,12 +6694,15 @@ final class PlayerController: ObservableObject {
     /// Recovery keeps its two-second cadence regardless of panel visibility.
     private func startRecoveryEvidencePoll() {
         statusTask?.cancel()
+        preparationSample = nil
         guard let polledSessionId = sessionId else { return }
         let pollAttempt = snapshotAttempt()
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let model = self.model else { return }
-                let status = try? await model.hlsStatus(polledSessionId)
+                let requestedAtMs = PlaybackControlSession.monotonicMs()
+                let status = try? await self.requestHlsStatus(model, polledSessionId)
+                let observedAtMs = PlaybackControlSession.monotonicMs()
                 guard !Task.isCancelled,
                       self.started,
                       self.attemptStillCurrent(pollAttempt, fence: .recoveryEvidencePoll),
@@ -6698,7 +6711,9 @@ final class PlayerController: ObservableObject {
                 if self.autoPreparing, self.autoVoluntary,
                    let staged = self.preparedReplacement.activeAction {
                     let stagedStatus = try? await model.hlsStatus(staged.sessionId)
-                    guard !Task.isCancelled, self.sessionId == polledSessionId else { return }
+                    guard !Task.isCancelled, self.started,
+                          self.attemptStillCurrent(pollAttempt, fence: .recoveryEvidencePoll),
+                          self.sessionId == polledSessionId else { return }
                     if self.preparedReplacement.activeAction?.sessionId == staged.sessionId {
                         self.autoStagedStatus = stagedStatus
                         self.autoStagedStatusObservedMs = stagedStatus == nil ? nil : PlaybackControlSession.monotonicMs()
@@ -6721,9 +6736,13 @@ final class PlayerController: ObservableObject {
                     // cancellation) and this loop ends; the successor
                     // session starts its own poll.
                     let recovered = self.observeDeliveryStarvation(status)
+                    self.preparationSample = PlayerItemReadiness.Sample(
+                        status: status, requestedAtMs: requestedAtMs, observedAtMs: observedAtMs
+                    )
                     self.publishPanelTelemetry(status)
                     if recovered { return }
                 } else {
+                    self.preparationSample = nil
                     self.publishPanelTelemetry(nil)
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -8917,7 +8936,7 @@ final class PlayerController: ObservableObject {
     /// resurrects a player nobody is watching — audible, with background audio
     /// on — and a status callback in `open()`'s own post-`isChangingStream`
     /// window can clobber the item that open is still configuring.
-    private func retryMediaOnNextNode(_ failedItem: AVPlayerItem) async -> Bool {
+    func retryMediaOnNextNode(_ failedItem: AVPlayerItem) async -> Bool {
         #if os(iOS)
         if offlineId != nil { return false }
         #endif
@@ -8955,6 +8974,9 @@ final class PlayerController: ObservableObject {
         if resumeAttempt?.repairAdmitted == true {
             bindResumeRepairSuccessor(item, generation: generation)
         }
+        // Failover advanced the open fence. Rebind its one poll before waiting;
+        // a late predecessor response must not supply preparation evidence.
+        startRecoveryEvidencePoll()
         if wantsPlayback { player.play() } else { player.pause() }
         // The overlay is per-item and was just torn down; `open()` rebuilds it
         // at this point and so must this, or a PGS-subtitled film loses its
@@ -9844,34 +9866,30 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    /// Wait for the attached item to reach `.readyToPlay`, or give up.
-    ///
-    /// Subscribe before inspecting the status so a ready transition cannot
-    /// fall between the initial read and observation. A separate timer keeps
-    /// the original finite deadline even when AVFoundation emits nothing.
-    private static func awaitItemReady(_ item: AVPlayerItem) async throws {
+    /// Bind evidence to this attachment's lifecycle/open/session, including
+    /// poll responses which arrived before the initial item was attached.
+    func readinessContext(for item: AVPlayerItem) -> PlayerItemReadiness.Context {
+        let generation = openGeneration
+        let lifecycle = lifecycleGeneration
+        let expectedSession = sessionId
+        return PlayerItemReadiness.Context(
+            growingSessionID: isVOD ? nil : expectedSession,
+            ownsItem: { [weak self, weak item] in
+                guard let self, let item else { return false }
+                return self.isCurrentLifecycle(lifecycle) && !self.isSuperseded(generation)
+                    && self.player.currentItem === item && self.sessionId == expectedSession
+            },
+            sample: { [weak self] in self?.preparationSample }
+        )
+    }
+
+    /// Subscribe before inspecting so no native status transition is lost.
+    private static func awaitItemReady(_ item: AVPlayerItem, context: PlayerItemReadiness.Context) async throws {
         let observer = AVPlayerItemObserver(item: item)
         defer { observer.cancel() }
-        if item.status == .failed {
-            throw item.error ?? PlaybackPreparationError.failed
-        }
-        if item.status == .readyToPlay { return }
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { @MainActor in
-                for await event in observer.events {
-                    guard case .status(let status) = event else { continue }
-                    if status == .readyToPlay { return }
-                    if status == .failed { throw item.error ?? PlaybackPreparationError.failed }
-                }
-                throw PlaybackPreparationError.failed
-            }
-            group.addTask {
-                try await Task.sleep(for: .seconds(Self.itemReadinessDeadlineSeconds))
-                throw PlaybackPreparationError.timedOut
-            }
-            defer { group.cancelAll() }
-            guard let _ = try await group.next() else { throw PlaybackPreparationError.failed }
-        }
+        try await PlayerItemReadiness.wait(
+            events: observer.events, status: { item.status }, failure: { item.error }, context: context
+        )
     }
 
     func seekPreparationOwner(at targetMs: Int) -> SeekPreparationOwner {
@@ -9892,7 +9910,7 @@ final class PlayerController: ObservableObject {
                 && !Task.isCancelled
         }
         guard ownsSeek() else { return }
-        do { try await itemPreparation.ready(item) }
+        do { try await itemPreparation.ready(item, readinessContext(for: item)) }
         catch {
             guard ownsSeek() else { return }
             throw error
