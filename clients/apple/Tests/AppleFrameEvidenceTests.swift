@@ -197,6 +197,47 @@ final class AppleFrameEvidenceTests: XCTestCase {
 
     #if DEBUG
     @MainActor
+    func testQueuedBlackFrameRecoveryRearmsAfterViewerActionSupersedesTrigger() async {
+        let controller = PlayerController()
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/unused.mp4"))
+        controller.player.replaceCurrentItem(with: item)
+        var watchdog = BlackFrameWatchdog()
+        fire(&watchdog, item: item)
+        controller.setBlackFrameWatchdogForTesting(watchdog)
+        let queued = controller.queueBlackFrameRecoveryForTesting(for: item, at: 6_000)
+        // This runs in the same actor turn, before the queued recovery. The
+        // real viewer action advances the epoch without replacing the item.
+        controller.setPlaybackRequested(false)
+        await queued.value
+        XCTAssertTrue(controller.player.currentItem === item)
+        XCTAssertTrue(controller.lastAttemptStaleDetail?.contains("viewerAction") == true)
+        watchdog = controller.blackFrameWatchdogForTesting
+        XCTAssertFalse(watchdog.fired)
+        XCTAssertEqual(watchdog.blackMs, 0)
+        XCTAssertNil(watchdog.lastPositionMs)
+        fire(&watchdog, item: item, start: 100_000)
+    }
+
+    @MainActor
+    func testStaleQueuedBlackFrameRecoveryCannotCancelSuccessorTrigger() async {
+        let controller = PlayerController()
+        let old = AVPlayerItem(url: URL(fileURLWithPath: "/unused-first.mp4"))
+        let next = AVPlayerItem(url: URL(fileURLWithPath: "/unused-second.mp4"))
+        controller.player.replaceCurrentItem(with: old)
+        var watchdog = BlackFrameWatchdog()
+        fire(&watchdog, item: old)
+        controller.setBlackFrameWatchdogForTesting(watchdog)
+        let queued = controller.queueBlackFrameRecoveryForTesting(for: old, at: 6_000)
+        controller.player.replaceCurrentItem(with: next)
+        fire(&watchdog, item: next, start: 100_000)
+        controller.setBlackFrameWatchdogForTesting(watchdog)
+        await queued.value
+        XCTAssertTrue(controller.player.currentItem === next)
+        XCTAssertTrue(controller.blackFrameWatchdogForTesting.fired)
+        XCTAssertEqual(controller.blackFrameWatchdogForTesting.blackMs, 6_000)
+    }
+
+    @MainActor
     func testControllerQueuedRecoveryRechecksCurrentSnapshotAndRearms() {
         let controller = PlayerController()
         let item = AVPlayerItem(url: URL(fileURLWithPath: "/unused.mp4"))

@@ -1708,14 +1708,20 @@ struct BlackFrameWatchdog {
         item = currentItem
     }
 
+    /// A stale task can retire its own trigger, never a replacement item's.
+    mutating func cancelRecovery(for currentItem: AVPlayerItem) {
+        guard item === currentItem else { return }
+        fired = false
+        lastPositionMs = nil
+        blackMs = 0
+    }
+
     /// Cancellation must rearm the same unready item, not permanently latch it.
     mutating func recoveryIsEligible(for currentItem: AVPlayerItem, frameReady: Bool, eligible: Bool) -> Bool {
         guard item === currentItem else { return false }
         if frameReady { presentedVideo = true }
         guard eligible, !presentedVideo else {
-            fired = false
-            lastPositionMs = nil
-            blackMs = 0
+            cancelRecovery(for: currentItem)
             return false
         }
         return fired
@@ -2419,6 +2425,11 @@ final class PlayerController: ObservableObject {
     var localVideoEvidenceForTesting: ((AVPlayer, AVPlayerItem) -> LocalVideoEvidence)?
     func setBlackFrameWatchdogForTesting(_ watchdog: BlackFrameWatchdog) { blackFrameWatchdog = watchdog }
     var blackFrameWatchdogForTesting: BlackFrameWatchdog { blackFrameWatchdog }
+    /// Enter the real queued continuation without opening a network stream.
+    func queueBlackFrameRecoveryForTesting(for item: AVPlayerItem, at position: Int) -> Task<Void, Never> {
+        started = true
+        return queueBlackFrameRecovery(for: item, at: position)
+    }
     #endif
 
     func currentLocalVideoEvidence() -> LocalVideoEvidence {
@@ -8511,19 +8522,7 @@ final class PlayerController: ObservableObject {
                     hasVideoSource: self.decision?.source?.videoCodec != nil,
                     playing: isActuallyPlaying
                 ) {
-                    // `started` and `lifecycleGeneration == lifecycle` both
-                    // hold here — the observer's own opening guard is
-                    // `isCurrentLifecycle(lifecycle)` and there has been no
-                    // suspension since — so the lifecycle scope below compares
-                    // against the same generation the old conjunction did.
-                    let attempt = self.snapshotAttempt()
-                    Task { @MainActor [weak self] in
-                        guard let self, self.started,
-                              self.attemptStillCurrent(attempt, fence: .blackFrameDecodeFailure),
-                              self.player.currentItem === item,
-                              self.blackFrameRecoveryIsEligible(for: item) else { return }
-                        await self.handleBlackFrameDecodeFailure(at: observedPosition)
-                    }
+                    self.queueBlackFrameRecovery(for: item, at: observedPosition)
                 }
                 // The surface's evidence, taken from the samples this
                 // observer already has: the position delta, the rate, and the
@@ -9121,6 +9120,24 @@ final class PlayerController: ObservableObject {
         if let log = seekMeasurement.abandoned(generation: generation) { postClientLog(log) }
         if generation == nil || requestedSeekGeneration == generation {
             requestedSeekGeneration = nil
+        }
+    }
+
+    @discardableResult
+    private func queueBlackFrameRecovery(for item: AVPlayerItem, at position: Int) -> Task<Void, Never> {
+        let attempt = snapshotAttempt()
+        return Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard self.started,
+                  self.attemptStillCurrent(attempt, fence: .blackFrameDecodeFailure),
+                  self.player.currentItem === item,
+                  self.blackFrameRecoveryIsEligible(for: item) else {
+                // Epoch/item refusals can short-circuit before eligibility is
+                // sampled. They must still release this attachment's trigger.
+                self.blackFrameWatchdog.cancelRecovery(for: item)
+                return
+            }
+            await self.handleBlackFrameDecodeFailure(at: position)
         }
     }
 
@@ -9767,7 +9784,10 @@ final class PlayerController: ObservableObject {
         _ = await noteAutoDecodeFailure()
         guard player.currentItem === decoderItem,
               attemptStillCurrent(decoderAttempt, fence: .blackFrameDecoderAcknowledgement),
-              blackFrameRecoveryIsEligible(for: decoderItem) else { return }
+              blackFrameRecoveryIsEligible(for: decoderItem) else {
+            blackFrameWatchdog.cancelRecovery(for: decoderItem)
+            return
+        }
         let fallback = plannedCompatibilityFallback
         guard fallback != .none else {
             stopForBlockingSurface()

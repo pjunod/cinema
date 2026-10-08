@@ -1,5 +1,7 @@
 # Recover when audio advances without a ready video frame
 
+**Status:** built; physical candidate acceptance open
+
 Build: 215
 Issue: #888
 

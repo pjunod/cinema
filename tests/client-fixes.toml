@@ -657,7 +657,7 @@ test_anchor = "testApplePlayerTreatsDolbyVisionRejectionsAsCompatibilityFailures
 id = "apple.dolby-vision-profile5-black-frame-watchdog"
 commits = ["47c06809"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "struct BlackFrameWatchdog: Equatable"
+source_anchor = "struct BlackFrameWatchdog"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testBlackFrameWatchdogFiresOnlyWhenNothingIsEverDecoded"
 
@@ -4626,3 +4626,11 @@ source = "crates/plurxd/src/web/pages/sharing-management.js"
 source_anchor = "async function sharingConfigureAddresses()"
 test = "tests/web/sharing-management.test.js"
 test_anchor = "invitation address setup preserves selected libraries and never posts until configured"
+
+[[fixes]]
+id = "apple.current-visible-frame-evidence"
+commits = ["98826e725185e8214645f02b81b5668ed37a687c"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "enum PlaybackFirstOutputEvidence"
+test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
+test_anchor = "testVideoTTFFRejectsClockAndDimensionsWithoutLayerReadiness"
