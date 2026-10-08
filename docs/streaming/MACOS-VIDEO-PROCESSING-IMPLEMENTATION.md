@@ -561,6 +561,17 @@ the recipe and add an appropriate distributable P5 smoke fixture. If these
 contracts cannot be provided, retain incumbent P5 behavior without changing
 the saved processing preference.
 
+**Reuse scope correction from implementation evidence:** Dolby's
+[public profile table](https://ott.dolby.com/OnDelKits/Dolby_Vision_Online_Delivery_Kit/v1/Documentation/Specs/Visio_Profiles/help_files/topics/c_dovi_profiles_public.html)
+lists no metadata compression for Profile 5. Fresh per-frame P5 metadata and
+changing-DM frame association are the conforming synthetic-positive targets.
+A generated mapping-reuse case exercises the pinned parser's robustness; it
+must not be called standardized P5 reuse. Missing DM color may cause upstream
+default substitution, so a completed output is insufficient proof. The strict
+contract must establish supported color semantics and reject synthesized
+incompatible defaults before rendering. Seek/flush must clear stale state.
+This clarification does not admit other Dolby profiles.
+
 ### 9.2 E2: subtitle compositing
 
 First test hardware scale/tone-map followed by CPU burn at output resolution.

@@ -329,3 +329,152 @@ observed in the tool transcript and are not represented as retained raw files.
 VideoToolbox frame representation still does not establish physical hardware
 HEVC decoding. The strict hardware-required package patch and observed session
 property belong to the separate E1 workstream.
+
+## 9. Strict package AC-4 preservation — 2026-10-08
+
+The [paired audio receipt](evidence/macos-video-20261008/ac4-package-preservation.json)
+records exact matching commands against the original official package and
+compiled strict candidate. Both decoded the first AC-4 program from the public
+FFmpeg sample `KDAF.ts`, downmixed to stereo 48 kHz signed 16-bit PCM for five
+seconds. Both produced 239,999 audio frames with byte-identical decoded PCM,
+SHA-256 `28e6cfb582fa02e02824583e4a4a1d12e95d1ee5a3b67725c718959c697558c7`.
+
+The strict FFmpeg binary SHA-256 is
+`91d4f841e0b607bcc2db3c7ea66ddad0dcff0370a39f1f67fb6a6cc1a7f64495`;
+the source sample SHA-256 is
+`1198188445e56eee0787f2da1864189afb1674d777249091b6dbf2c736c48384`.
+The receipt identifies
+[FFmpeg's public sample](https://samples.ffmpeg.org/A-codecs/ac-4/KDAF.ts).
+No source media or decoded audio is redistributed here. This establishes
+standalone preservation for that sample, not daemon pacing, all AC-4 modes,
+client playback or performance under load.
+
+**Subsequent P5 limitation:** the package identified above is superseded for
+strict P5 admission after a reuse fixture exposed upstream default DM color
+substitution. This does not alter its measured AC-4 output; it does mean the
+AC-4 receipt must not be presented as qualification of the repaired future
+package or of Dolby rendering. The status ledger records the repair and
+withdrawn reuse claim.
+
+### 9.1 Repaired final package preserves the same AC-4 output
+
+The [final-package receipt](evidence/macos-video-20261008/ac4-final-package-preservation.json)
+repeats only the affected candidate command after the strict Dolby color
+repair. The unchanged original-package reference is retained. All four
+reported package artifact hashes were independently checked before execution.
+The repaired FFmpeg SHA-256 is
+`85b1ab4176f12d6319e2b4dc256f360a70043cb71ddf4057e35e709e98ebb123`;
+FFprobe is
+`3772130dbb03addb834640c75a95d788200cd019831700ab388958d78d413b1f`.
+
+The final package again produces 239,999 stereo 48 kHz audio frames with
+byte-identical PCM and the same `28e6cfb5…` hash recorded above. This is
+exact final-artifact AC-4 preservation for the five-second standalone sample,
+with the same daemon/client/pacing and concurrent-load limitations.
+
+## 10. Native held-source parser — 2026-10-08
+
+The [parser receipt archive](evidence/macos-video-20261008/native-parser-evidence.tar.gz)
+retains 33 source, command, output, stderr and receipt files plus its manifest.
+Its size is 79,792 bytes; SHA-256 is
+`cf95b6cca2427fc0874b0576b8440f722548b48ed9f4204b7358a60417cc07f5`.
+All retained lengths and hashes were verified after archive creation.
+The manifest separates original and retained hashes, records private-path
+normalization, and includes the exact diagnostic harness source and lockfile.
+The parser source is from `35f7a8cf6`; the signed harness is 11,205,664 bytes.
+The command inventory is reconstructed from executed inline tool commands,
+not represented as a standalone driver originally retained at execution.
+
+The final Jellyfin SIMD module is 15,311,140 bytes, SHA-256
+`36f7e0298eac14d1a664dfc083702bab812f6c83d196c651420af92f1080f21c`.
+It matches native FFprobe on all 600 decoded frame and plane checksums from
+the public AC-4 broadcast source. This loaded stress comparison is functional
+parity, not runtime qualification; production only invokes `idet` when held
+source metadata reports interlace. Ordinary progressive sources use metadata
+projection. The production stderr cap remains 16 KiB; the parity diagnostic
+uses 512 KiB to retain its frame observations.
+
+| Source | Metadata execution | `idet` execution | Native/Wasm agreement |
+|---|---|---|---|
+| 1080i MPEG-2 TFF, 300 coded frames at 29.97 fps | 0.001838 s | 2.511859 s | 300 TFF, no other verdicts |
+| 1080i MPEG-2 BFF, 250 coded frames at 25 fps | 0.001603 s | 1.517107 s | 250 BFF, no other verdicts |
+| Synthetic 4K MPEG-2 field-marked, 240 coded frames at 24 fps | 0.001842 s | 5.900622 s | 167 TFF and 73 undetermined |
+
+Fresh eager compilation took 7.41–7.84 seconds, within its separate ten-second
+identity budget. These executions used a signed ad-hoc diagnostic harness
+with a 20-second execution cap; each reported representative execution is
+below the unchanged ten-second production execution budget. The 4K case
+does not qualify 4K HEVC or HDR.
+
+Historical filenames containing `idle` do not establish a globally idle host.
+No competing task compiler ran during the final representative timing
+sections; preparation and JIT work still contributed to aggregate load.
+Load averaged 9.10 before the first group and 22.99 after later preparation
+and compilation. Thermal telemetry and peak RSS were unavailable, not zero.
+These are bounded feasibility measurements. Actual signed daemon delivery,
+fresh installation, sustained capacity and client presentation remain separate
+acceptance work.
+
+The copied hardened harness succeeds with the explicit executable-memory
+entitlement. Without it, the supported signing preflight refuses execution
+instead of letting the kernel kill the process. The implementation plan
+records the additional trusted runtime and executable-memory trade-off; this
+is not equivalent to retaining all default Hardened Runtime protections.
+
+## 11. Strict P5 reconstruction and metadata controls — 2026-10-08
+
+The [strict Dolby archive](evidence/macos-video-20261008/dolby-strict-evidence.tar.gz)
+contains 126 command, fixture-provenance, decoded observation, stderr, driver
+and receipt files plus its manifest. Its size is 63,064 bytes; SHA-256 is
+`74ad0708a2cbb059375d610e4c83386926b5d1e251a4249129b4be49c7be6d5a`.
+Every retained length and hash was verified. Raw pixels, encoded outputs and
+executables are excluded; their hashes remain in the receipts. Source paths
+are normalized and the manifest distinguishes original and retained hashes.
+The exact repaired FFmpeg/FFprobe hashes are in §9.1.
+
+Each of four graphs ran the same 12 cases: software decode with strict CPU
+mapper, required-hardware VT decode with strict CPU mapper, software decode
+with explicit VT upload and strict Metal mapper, and required-hardware VT
+decode with strict Metal mapper. All 48 cases passed their individual
+expectations. Hardware session use was observed where the VT decoder was
+created; early invalid metadata may reject before session creation.
+
+| Case | Expected and observed result on each graph |
+|---|---|
+| Fresh per-frame P5 metadata | 24 frames; success |
+| Changing DM identifiers and peak values | 24 frames with presentation-bound metadata; success |
+| Seek to valid fresh-metadata random access point | 12 frames; success |
+| Explicit mapping reuse carrying DM | 24 frames; nonconforming pinned-parser robustness diagnostic only |
+| Renderer metadata deleted; first RPU missing/malformed; seek-start RPU missing; first color metadata omitted | Nonzero exit, zero encoded frames |
+| Midstream RPU missing/malformed; color omitted with mapping reuse | Nonzero exit after 10 preceding frames; affected presentation time absent |
+
+Eight separate controls exercise `avformat_seek_file` and
+`avcodec_flush_buffers` on the same decoder context, with software and required
+hardware decoding. Valid fresh metadata resumes; missing random-access RPU
+and reuse after cleared state fail. The per-frame DM identifier/peak mapping
+remains tied to presentation order. These are actual decoder controls, not
+merely separate command invocations presented as flush proof.
+
+The corrected synthetic source uses IPT-C2 VUI matrix value 15. Pinned swscale
+cannot perform planar/P010 layout conversion with that color tag, so the
+strict layout adapter clears only the matrix tag before rearranging samples.
+Required parsed P5 RPU metadata remains the color interpreter. VT-to-Metal
+requires no layout adapter. Fresh and varying-DM fixtures have byte-identical
+software/hardware decoded planes over all 24 frames: 4,147,200 bytes, maximum
+and mean sample difference zero. The same CPU renderer after either decoder
+also matches all 2,073,600 bytes. CPU and Metal tone curves are not asserted
+to produce identical output.
+
+Forcing generic interpretation with Dolby application disabled changes
+908,148 output bytes, with maximum byte difference 157. That is evidence that
+RPU application influences pixels, not calibrated perceptual acceptance.
+The omitted-color negative specifically prevents upstream default color
+substitution from passing as effective P5 metadata. The strict renderer checks
+P5 signal semantics rather than blacklisting a single peak value. Ordinary
+non-strict routes keep their previous behavior.
+
+These are original synthetic correctness controls run during compilation.
+They do not establish mastered-content coverage, production performance,
+client presentation, or qualification on another Mac. Runtime observation and
+immutable production recipe integration remain separate from this standalone
+package evidence.

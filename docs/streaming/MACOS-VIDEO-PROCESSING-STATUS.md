@@ -33,16 +33,16 @@ after compilation. A missing qualification row stays open; it is not converted t
 
 | Workstream | Owner | State | Evidence or next dependency |
 |---|---|---|---|
-| Integration and status | Manager | active | Separate continuation clone based on `263cbeff6`; pinned Rust 1.97.1 available on native macOS and isolated Linux |
+| Integration and status | Manager | active | Separate continuation clone now integrates landed main `339abbced` and native parser `35f7a8cf6`; pinned Rust 1.97.1 available on native macOS and isolated Linux |
 | M0 runtime / M1 FFmpeg packaging | Sol native builder | integrated | Official Jellyfin `v8.1.3-1` arm64 package acquired and checksum verified; `e193b0670`: checksum-pinned complete official package; 38 required declarations; SDR/Metal smoke evidence |
 | M0/M1 measurement harness | Sol harness builder | integrated; revised HDR measured | `44050ab2a`: inventory/run CLI; five valid SDR pairs show 87.80% lower CPU cost and +0.71% throughput on synthetic material |
 | M1 embedded smoke corpus | Sol fixture builder | integrated; sustained sources built | `0cd06e92b`: three 320×180, 12-frame clips, 8,846 aggregate bytes; repeat generation hashes match; separate synthetic 60-second 4K sources |
 | M2 core / shared M4–M5 argv | Sol native builder | integrated, including metadata correction | `47eab3a75`: immutable optional Mac context, only demonstrated SDR/Metal graphs, pinned compile and normal hook passed |
 | M3 probes / manager / settings | Sol fixture and harness builders | integrated; independent review accepted | `532e78d5f`: bounded probe module; `93658e211`: registered all-targets compile and normal hook passed; isolated settings, repair/restart and actual SDR/HDR VOD bytes observed |
-| M6 acceptance / main promotion | Manager and builders | isolated daemon evidence recorded; full acceptance open | Reviewed source `575a68abc`; coordinator-owned validation/merge remains pending |
-| E1 Dolby package / proof | Sol Dolby builder | tooling integrated; package/proof building | `e83de7e99` integrated in `0df5a10f7`: strict decoder/renderer and hardware-required VT patch, positive fixture and private build tooling. Native package compilation/strict negative cases remain open |
-| M4 normalized VOD | Sol native parser builder | building | Capability-limited Wasm version of pinned Jellyfin FFprobe, preserving held-source facts and bounded execution |
-| E1 HLG / E2–E4 routes | Sol route builder | foundation integrated; HEVC/Live TV building | `b8b7a9574` integrated in `8a78affb7`: separately observed HLG, native processing before CPU burn and file-source BWDIF; negotiated HEVC/Main10 and Live TV remain active |
+| M6 acceptance / main promotion | Manager and builders | isolated daemon evidence recorded; full acceptance open | Initial reviewed source `575a68abc` landed through #882; continuation review and available acceptance work remain active |
+| E1 Dolby package / proof | Sol Dolby builder | final package/client source integrated; graph controls passed | `a542ab140` integrated in `6978c9a5d`: strict P5 color semantics, client transport claims and reproducible final package. Forty-eight graph controls and eight flush controls pass; raw software/hardware planes match; final AC-4 sample matches original. Strict production integration remains active |
+| M4 normalized VOD | Sol native parser builder | parser integrated; daemon qualification pending | `35f7a8cf6` integrated in `d1683a682`: capability-limited Jellyfin FFprobe, signing preflight, packaged discovery, held-source/cache ownership; exact check/hook passed |
+| E1 HLG / E2–E4 routes | Sol route and Dolby builders | HEVC foundation integrated; P5/Live TV building | `432a617c2` integrated in `7fa940953`: additive HEVC candidates, immutable codec recovery and separate host/native observations; final producer qualification and P5/Live TV integration remain active |
 
 Jellyfin FFmpeg is the required implementation baseline. Local Homebrew
 FFmpeg is not a comparison target or substitute. The official package is an
@@ -103,7 +103,8 @@ received and acknowledged the full user instruction packet.
 | Harness builder | `scripts/bench-macos-video`, `scripts/macos_video_bench/`, focused harness test source |
 | Fixture builder | `crates/plurxd/fixtures/macos-processing/`, fixture generator and focused fixture test source |
 
-The initial files above are committed. Current application ownership is:
+The initial files above are committed. Initial application ownership was; the
+active continuation ownership is recorded in §9:
 
 | Owner | Current exclusive ownership |
 |---|---|
@@ -241,8 +242,8 @@ sections remain the detailed acceptance specifications.
 | M1-05 | SDR benefit at equal output and encoder controls | Five valid synthetic pairs support CPU benefit; broader workload and production evidence still owed |
 | M1-06 | HDR10 benefit with fair work ordering and correct output | Five revised pairs complete; CPU feasibility criterion met in 4/5, visual/production acceptance open; original invalid comparison retained |
 | M1-07 · design §§2, 6 | Unified-memory attribution: mapping, allocation, conversion, synchronization and copies | Awaiting instrumentation; shared physical memory does not prove zero-copy, and CPU reduction is not a measured copy count |
-| M1-08 | Actual hardware reconstruction, separate from VT surfaces/hardware encode | H.264 hardware-required encoder observed; actual HEVC hardware reconstruction remains unproved |
-| M1-09 · implementation §§1.1, 9.1 | Early P5 four-way software/hardware decode × CPU/Metal renderer experiment | Four-way artificial FATE transport smoke passes all ten frames; physical hardware reconstruction, RPU pixel influence, strict/seek semantics and genuine content still await evidence |
+| M1-08 | Actual hardware reconstruction, separate from VT surfaces/hardware encode | H.264 hardware-required encoder observed; corrected synthetic P5 now has an observed hardware-required HEVC session and byte-identical software/hardware reconstruction; other source/device tuples remain unqualified |
+| M1-09 · implementation §§1.1, 9.1 | Early P5 four-way software/hardware decode × CPU/Metal renderer experiment | Initial transport-only FATE smoke superseded by original analytic P5 controls; RPU pixel influence and corrected hardware reconstruction observed. Strict metadata/default-color repair and final production integration active; mastered content still unavailable |
 | M1-10 | Same-build A/B plus deployed-build baseline when replacing package | Same official Jellyfin build used; deployed comparison awaiting access/evidence |
 | M1-11 · design §3.3 | Direct Core Image/VideoToolbox helper, custom Metal kernels, Vulkan/libplacebo alternatives | Deferred alternatives only if existing filters fail a concrete requirement; no parallel processing stack being added |
 
@@ -262,14 +263,14 @@ sections remain the detailed acceptance specifications.
 | M3-04 | Saved processing switch and readback/restart/new-plan semantics | Integrated; absent default false, saved choice always accepted on all hosts |
 | M3-05 | Developer readiness and concrete graduation requirement | Integrated; readiness advisory only, no offline benchmark receipt in enable/runtime path |
 | M3-06 | Selected graph/decoder/surface/grade/revision and fallback reason diagnostics | Integrated; bounded metric labels and one accepted-start counting boundary |
-| M3-07 | Worker-local resolution and capability change between offer and acceptance | Planned integration verification; no new required graph protocol field |
-| M3-08 | Old→new/new→old dispatch, takeover and recipe/cache isolation | Awaiting evidence; unknown diagnostic names do not prove old-worker rejection |
+| M3-07 | Worker-local resolution and capability change between offer and acceptance | HEVC source includes actual catalog/selected-recipe acceptance and old-worker rejection regression source; compiled, not executed; no new required graph protocol field |
+| M3-08 | Old→new/new→old dispatch, takeover and recipe/cache isolation | Old H.264 re-resolution of a selected HEVC candidate has an actual full-recipe rejection regression; compiled, not executed. Fleet takeover evidence remains open |
 | M4-01 · implementation §7 | SDR VT decode → native scale → H.264 VT encode | Core integrated; actual non-normalized VOD first-fragment delivery observed through the canonical plan |
 | M4-02 | Same-size/downscale, SDR8/10, seek/resume and long-GOP behavior | Existing continuous High 5.0 VOD envelope passes short SDR/HDR smoke; seek/resume, long-GOP and production evidence still owed |
 | M4-03 | SAR, rotation, odd dimensions, VFR, interlace and burn controls | Integrated eligibility boundary; preserve incumbent semantics instead of dropping required processing |
 | M4-04 | Prepublication retry excludes failed Mac graph, new plan and asset identity | Integrated in existing retry owner; no CPU fallback immediately upgraded back to failed graph |
 | M4-05 | Postpublication replacement/error, cancellation and resource release | Awaiting production evidence; no changed bytes appended to published artifact |
-| M4-06 | Native bound-source qualification for normalized continuous VOD | Architectural dependency discovered in isolated daemon: production `DecodeProbeIdentity` is Linux-only; normalized geometry correctly refuses without it. Continuation builds capability-limited Wasm Jellyfin FFprobe; clean 13.71 MB module parses HEVC/AC-4, and compiled execution fits the synthetic 1080p case. Interpreter rejected for exceeding the deadline. Production integration, hardened signing, packaging and cold initialization remain open. No fixture-mode or stored-facts bypass. Actual non-normalized VOD fragments passed; public live presentation is removed |
+| M4-06 | Native bound-source qualification for normalized continuous VOD | Initial refusal traced to the formerly Linux-only source parser. Capability-limited Wasm Jellyfin FFprobe is now integrated with signing and packaging: final 15.31 MB SIMD module matches native on 600 decoded frames and passes representative field-marked timing controls. Interpreter rejected for exceeding the deadline. Actual signed-daemon normalized delivery remains in progress; no fixture-mode or stored-facts bypass. Prior non-normalized VOD fragments are separate evidence |
 | M5-01 · implementation §8 | HDR10 → SDR with 10-bit precision through scale and explicit BT.709 output | Core integrated from observed scale-first Metal graph; actual non-normalized VOD HDR first fragment decoded cleanly |
 | M5-02 | Consumed HDR metadata removed only after actual SDR conversion | Native output observed clean; scoped shared CPU/zscale-boundary correction integrated |
 | M5-03 | Peak provenance, missing/1000/4000-nit metadata, gamut/gradients/scenes | Awaiting broader corpus and visual evidence; do not claim CPU Hable controls applied to Metal |
@@ -290,7 +291,7 @@ sections remain the detailed acceptance specifications.
 | Q-08 | HDR blinded review on named calibrated display, highlight/shadow/gamut/temporal findings | Awaiting human/display evidence; synthetic ramp and VMAF alone are insufficient |
 | Q-09 | Real plurxd rolling/VOD playback, two-minute play, seek/resume, errors/rebuffer/A/V | First SDR/HDR non-normalized VOD fragments produced and decoded; two-minute client playback and the remaining delivery matrix await evidence |
 | Q-10 | Correctness first, then ≥20% throughput or ≥20% CPU/≥15% energy benefit within throughput bound | SDR/revised HDR synthetic CPU criterion met; visual/production correctness still unqualified |
-| M6-01 · implementation §10 | Full incumbent AC-4 and P5 package acceptance in daemon environment | Public AC-4 broadcast sample locally decoded/downmixed5seconds with original Jellyfin; no media redistributed. Patched-package equality, daemon delivery and positive P5 acceptance remain open |
+| M6-01 · implementation §10 | Full incumbent AC-4 and P5 package acceptance in daemon environment | Public AC-4 broadcast sample locally decoded/downmixed5seconds with original Jellyfin; no media redistributed. Exact original/strict package comparison now produces byte-identical 239,999-frame stereo 48 kHz PCM. Daemon delivery and positive P5 acceptance remain open |
 | M6-02 | Native install, runtime libraries, signing/distribution and architecture compatibility | Complete official package retained; system-only runtime inventory needs functioning /usr/bin/otool (possibly Apple CLT); clean install/signing workflow verification pending |
 | M6-03 | Fresh offline install, empty/corrupt/full/unwritable cache and reprobe | Isolated daemon reached both graphs Available and repaired deliberately corrupted cache; distribution install/full/unwritable cases still pending |
 | M6-04 | Upgrade/rollback while workers active, old binaries retained or workers drained | Planned; no installed package changed yet |
@@ -304,10 +305,10 @@ Separate scope does not imply that implementation or qualification is done.
 
 | ID / plan reference | Agreed item | State / dependency |
 |---|---|---|
-| E1-01 · implementation §9.1 | P5 hardware decode feeding existing CPU `tonemapx` independently of GPU renderer | Building: explicit hardware-required VT session option and actual hardware-use observation in pinned Jellyfin patch; initial transport-only evidence remains M1-09 |
-| E1-02 | Software decode + Metal and hardware decode + Metal Dolby rendering | Building: strict CPU/Metal patch and original RPU-positive analytic fixture; pixel influence and complete-graph benefit still owed |
-| E1-03 | Strict per-frame effective Dolby metadata at renderer boundary | Building: decoder-owned provenance is required because cached Dolby context can survive a missing current-frame RPU; renderer checks alone are insufficient. Reuse/flush/seek and absence regressions are being authored |
-| E1-04 | Minimal pinned FFmpeg strict-mode patch if existing mode insufficient | Patch prepared against complete pinned Jellyfin series; full native build and identity/probe integration active |
+| E1-01 · implementation §9.1 | P5 hardware decode feeding existing CPU `tonemapx` independently of GPU renderer | Package proof passed: required hardware session observed and decoded samples match software on corrected fresh/varying-DM fixtures. Immutable production recipe integration is building |
+| E1-02 | Software decode + Metal and hardware decode + Metal Dolby rendering | Package proof passed across all four decoder/renderer combinations; RPU pixel influence observed. Production integration and complete-graph benefit remain owed |
+| E1-03 | Strict per-frame effective Dolby metadata at renderer boundary | Strict decoder/current-frame and renderer/color semantics integrated in package tooling; 48 graph and eight same-context flush controls pass. Invalid old reuse proof withdrawn; production policy/recovery integration building |
+| E1-04 | Minimal pinned FFmpeg strict-mode patch if existing mode insufficient | Repaired complete native package built and exact AC-4 output preserved; production identity/probe integration active |
 | E1-05 | Lawful Dolby runtime smoke, P7/P8/direct-play/remux controls and Dolby-aware fallback | Building original synthetic Profile 5 fixture from public matrices and generated RPU; no inheritance to P7/P8 or output grades |
 | E1-06 | HLG reference-white, color and temporal qualification | Foundation integrated: analytic HLG fixture and independent runtime observation; 203-nit reference-white mapping observed. Broader color/temporal qualification remains open; no inheritance from HDR10 |
 | E2-01 · implementation §9.2 | Native scale/tone-map then CPU subtitle burn at output resolution | Foundation integrated: bounded SDR/HDR processing-before-burn smokes produced output; PGS half-alpha timing observed. Full benefit/semantics evidence remains open |
@@ -317,7 +318,7 @@ Separate scope does not imply that implementation or qualification is done.
 | E3-02 | Native Live TV plan, frame/field cadence, rational rate, bitrate and manifests | Building through existing LiveTvTranscodePlan; rational cadence/bitrate/manifest integration remains required |
 | E3-03 | 1080i TFF/BFF, 720p59.94, A/53, late audio, AC-4, reconnect/stop/start | Follow-up hardware/delivery matrix |
 | E3-04 | Scoped live `-a53cc 0` and caption-bearing VOD limitation | Follow-up or explicit supported-scope exclusion; live success is not file-caption repair |
-| E4-01 · implementation §9.4 | HEVC SDR and HDR10 Main10 output separately | Building: standalone HEVC SDR Main8 and HDR10 Main10 output observed, HDR static metadata retained; negotiated production contracts being extended |
+| E4-01 · implementation §9.4 | HEVC SDR and HDR10 Main10 output separately | Integrated in `432a617c2`: separate host/native graph observations, additive AVC/HEVC candidates and exact selected-codec restoration. Actual finite producer/manifest qualification remains pending; continuous AVC envelope remains unchanged |
 | E4-02 | Explicit HEVC output setting with advisory Developer readiness | Integrated in `e83de7e99`: independent saved choice accepted on every platform, graph/delivery readiness advisory; production negotiated route and graduation evidence remain open |
 | E4-03 | Actual HDR presentation, metadata semantics, no implicit Dolby passthrough | Follow-up; preserve existing VOD B-frame policy and promised output grade |
 | E4-04 | Apple/native/web client play/seek/quality/recovery and bitrate-quality comparison | Follow-up; H.264 compatibility fallback through existing negotiation |
@@ -336,7 +337,7 @@ Separate scope does not imply that implementation or qualification is done.
 | R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | Sent to coordinator at `aaaa2d814`: all findings resolved; no unit suites during building; coordinator retains valid evidence and reruns failed/invalidated checks only |
 | R-08 | Current-main integration, exact-tree gate/qualification receipt and regression landing lines | Merge coordinator owns queue and main landing; effort supplies reviewed code and handles behavior-changing fixes; initial #870 included in #882 main landing `339abbced`; continuation review/queue handoff remains pending |
 | R-09 | Retain reproducible sanitized receipts, exact commands, limits and autonomous decisions | Initial/revised experiments plus VOD/P5 diagnostics retained in indexed evidence document and 1.20 MB raw archive, including isolated settings/probe and actual SDR/HDR VOD receipts; archive and all 394 retained-file hashes verified; full production qualification pending |
-| R-10 | Remove own transient clones, benchmark media, caches and obsolete branches after retention | Clean builder clones, experiment media/private daemon state and redundant package/source downloads removed after verified archive retention and remote push. Manager clone, final Jellyfin package and warm compiler target retained for the coordinator; final disposal follows queue ownership/qualification |
+| R-10 | Remove own transient clones, benchmark media, caches and obsolete branches after retention | Initial-batch builder clones, media/private daemon state and redundant sources removed after verified archive retention. Continuation clones, final package, active receipts and compiler targets remain needed; their cleanup follows final retention, queue ownership and qualification |
 
 ## 6. Completion accounting
 
@@ -394,7 +395,7 @@ The PR carries concrete `Regression-Test:` fields that must survive in the
 landing commit. Superficial test repairs may be made by the coordinator;
 behavior-changing findings return to this effort for implementation and review.
 
-## 8. Independent implementation review
+## 8. Initial independent implementation review
 
 Three independent reviewers examined candidate `93658e211` against main
 `8e242787c`. The core/package and harness/daemon reviewers independently
@@ -431,8 +432,18 @@ human display assessment remains explicitly open while other work proceeds.
 |---|---|---|
 | Dolby/package | Jellyfin package script, upstream patch/build helpers, Dolby/HLG experiment generators and associated operation regressions | Strict effective per-frame Dolby metadata before rendering; actual VT hardware requirement and observation; reproducible complete package |
 | Native parser | `decode_facts.rs`, associated confinement/parser module and regression source, new Wasm parser build/ABI, dependency manifest/lock | Same pinned parser semantics; only held-source read capability and bounded results; immutable module identity, bounded memory/execution and existing cancellation/cache ownership |
-| Processing routes | Core transcode/filter/decode/recipe/output contracts; daemon runtime/planning/Live TV/settings negotiation and associated regressions | Observed HLG, processing before existing CPU subtitle burn, native BWDIF cadence, negotiated HEVC SDR/HDR10 without changing promised grade |
+| Processing routes | Core transcode/filter/decode/recipe/output contracts; daemon runtime/planning and associated regressions | Observed HLG, processing before existing CPU subtitle burn, native BWDIF cadence, negotiated HEVC SDR/HDR10 and strict P5 recipes without changing promised grade |
 | Manager | Existing design/implementation/status/evidence docs, integration, workload scheduling and final review/handoff | Every scope row has evidence or a precise remaining dependency; all builders independently reviewed before queue handoff |
+
+Client HLS capability producers and serialization belong to the Dolby builder.
+After the strict package/client commit, that builder also owns the existing
+`live_tv.rs` and `live_tv_delivery.rs` integration and narrowly agreed Live
+upload work-list/argv branches in `macos_video.rs`. The route builder retains
+core Live TV graph types and strict P5 runtime branches; both reuse the same
+existing child, deadline and output-validation owners. The native
+builder owns signed daemon assembly and actual normalized VOD qualification.
+These assignments keep the remaining production work parallel with explicit
+file or hunk ownership; the manager resolves any shared-file integration once.
 
 The coordinator explicitly returned the warm compiler target to this effort.
 Only one builder owns it at a time. Heavy native builds and hardware timing
@@ -477,8 +488,8 @@ The native parser prototype exposed a performance defect before acceptance:
 Wasmi interpretation exceeded a bounded 20-second experiment while processing
 ten seconds of synthetic 1080p Main10 video. The production deadline remains
 ten seconds. A compiled Wasmtime candidate processed all 240 frames in about
-3.28 seconds, with module compilation measured separately. A clean final
-parser image is 13,709,146 bytes and reports HEVC and both AC-4 streams from a
+3.28 seconds, with module compilation measured separately. The then-current clean
+parser image was 13,709,146 bytes and reports HEVC and both AC-4 streams from a
 public broadcast sample. These provisional measurements ran during other
 compilation and are not performance qualification. Hardened signing and cold
 identity initialization remain unresolved acceptance work: a copied hardened
@@ -503,7 +514,8 @@ checks. It does not duplicate the coordinator's unit-test execution.
 preference and Developer advice, the original Dolby/HLG fixture generator,
 the strict Jellyfin patch and private reproducible build tooling. Its exact
 merged-base all-target compilation and tracked hook passed; units were not
-executed. The C patch is source, not yet a qualified native binary. A positive
+executed. The C patch now compiles into native FFmpeg/FFprobe; the resulting package is
+not yet qualified. A positive
 software-rendering control changed 908,148 decoded bytes when applying the
 generated RPU, establishing pixel influence without claiming mastered-content
 visual acceptance or hardware reconstruction.
@@ -521,3 +533,164 @@ API documentation, regression-contract and erased checkbox-type repairs.
 Only the stale status paragraph conflicted; it now records the completed
 initial review and active continuation instead of restoring an obsolete
 active-review claim. No builder source was discarded to resolve the merge.
+
+### 9.2 Native package and representative parser checks
+
+The full strict Jellyfin native build completed. Two build failures had
+specific packaging causes: GNU libtool shadowed Apple's archive combiner in
+the x265 recipe, and applying an upstream deletion without `patch -E` left an
+empty C file that make selected ahead of its replacement Objective-C file.
+The reusable preparation helper now fixes those tool/deletion semantics.
+Incumbent x265 support was retained. Strict positive/reuse/loss controls are
+running against the compiled CPU and Metal filters; a successful build alone
+does not admit production P5.
+
+The parser's real broadcast check is stricter than the synthetic 24-fps case:
+600 Main10 1080p frames representing ten seconds at 59.94 fps took 15.35
+seconds in the scalar compiled module while other compilation was active.
+That exceeds the unchanged ten-second production execution deadline. The
+pinned Jellyfin source contains standard SIMD128 HEVC kernels; the builder
+is enabling them and requiring configure to actually report SIMD availability.
+A first attempt exposed a missing `-msimd128` compiler flag and is retained as
+a failed configuration, not a SIMD result. Relaxed SIMD remains disabled.
+Cold module compilation has a separate existing identity deadline; the two
+deadlines must not be conflated. Idle-host and final-module measurements
+remain open.
+
+The 600-frame progressive broadcast decode is an explicit stress experiment.
+The existing production collector runs `idet` only for sources whose held
+metadata reports interlace; ordinary progressive sources require metadata
+projection, not a ten-second pixel scan. That admission rule is unchanged.
+An optional `idet` deadline miss yields `IdetUnavailable` while retaining
+otherwise attested facts. Real 1080i TFF/BFF and progressive normalized VOD
+remain the primary production checks; neither is replaced by the stress run.
+
+The native parser foundation is committed as `35f7a8cf6` and integrated by
+`d1683a682`. Its pinned Rust check and normal catalog/format/Clippy/JavaScript
+hook passed; units remain unrun. The final SIMD module is 15,311,140 bytes,
+SHA-256 `36f7e0298eac14d1a664dfc083702bab812f6c83d196c651420af92f1080f21c`.
+All 600 decoded frame and plane checksums on the broadcast sample match native
+FFprobe. A copied hardened harness with the intended entitlement succeeds;
+the same harness without it now fails through the signing preflight instead
+of being killed by the kernel. Actual daemon assembly/delivery remains a
+separate pending check. The compiler-free parser window below records final-module timing separately
+from actual daemon acceptance.
+
+The compiler-free parser window passed field-marked 1080i cases with the signed
+final runtime: 300 TFF coded frames at 29.97 fps took 2.512 seconds for `idet`,
+and 250 BFF frames at 25 fps took 1.517 seconds. Metadata projection took
+roughly 0.002 seconds each. Fresh eager module compilation took 7.69–7.84
+seconds, under its separate ten-second identity budget. Encoded parity and
+all observed frame verdicts agreed. No competing task compiler/encoder ran
+during the timed sections. The thermal query was unavailable; aggregate load
+averages include preparation and JIT work, so these are bounded feasibility
+results, not capacity or thermal qualification. A later synthetic 4K MPEG-2
+field-marked case completed `idet` in 5.901 seconds and matched native counts
+(167 TFF, 73 undetermined); this does not qualify 4K HEVC or HDR decoding.
+
+### 9.3 Earlier Dolby reuse acceptance withdrawn
+
+The deeper same-context flush trace invalidated the earlier reuse-positive
+claim. That fixture omitted Dolby DM color data; pinned FFmpeg substituted
+`ff_dovi_color_default` (observed peak 3696 and signal EOTF 39322) instead of
+reusing valid Profile 5 color semantics. Completing 24 frames was therefore
+not proof of correct reuse. The old immutable strict package is retained as
+a superseded P5 diagnostic and must not authorize final P5 runtime admission.
+Its ordinary AC-4 comparison remains evidence for those exact binary bytes.
+
+The repair exercises explicit mapping reuse with P5 DM color data, adds
+an omitted-color negative, and makes the opt-in strict renderer reject the
+default/non-P5 color semantics. Default and unrelated routes remain unchanged.
+The corrected package and repeated affected controls are recorded in §9.4;
+the superseded package does not inherit those results. Fresh and varying-DM positives and
+missing/malformed-RPU negatives remain recorded individually; they do not
+rescue the invalid reuse claim. HEVC source compilation continues separately
+while this root cause is repaired.
+
+Dolby's [public profile table](https://ott.dolby.com/OnDelKits/Dolby_Vision_Online_Delivery_Kit/v1/Documentation/Specs/Visio_Profiles/help_files/topics/c_dovi_profiles_public.html)
+specifies no metadata compression for Profile 5. The generated mapping-reuse
+case is therefore a decoder robustness experiment, not a conforming P5
+positive or mastered-content proof. Fresh per-frame P5 and changing-DM
+fixtures are the main synthetic positives. The original plan's reuse check
+must record this scope correction instead of inventing standardized P5 reuse;
+flush-state and unsupported-metadata negatives remain required.
+
+### 9.4 Corrected P5 layout and hardware reconstruction
+
+The corrected synthetic P5 sources use Dolby's preferred IPT-C2 VUI matrix
+value 15. Pinned swscale does not support that matrix during planar/P010
+layout conversion. The strict adapter removes only that layout-stage tag
+before rearranging samples; mandatory parsed P5 RPU metadata remains the sole
+color interpreter. It is not a generic unknown-color fallback. Native
+VideoToolbox-to-Metal needs no layout adapter.
+
+On fresh and varying-DM 24-frame fixtures, software decoding and required
+hardware VideoToolbox decoding produce byte-identical planar samples:
+4,147,200 bytes each, maximum and mean difference zero. Using the same strict
+CPU mapper after each decode path also gives byte-identical output:
+2,073,600 bytes each. This establishes sample preservation for these corrected
+fixtures; it does not establish calibrated visual quality or all-source
+coverage. Strict positive/negative controls and the replacement package
+remain part of the final production admission work.
+
+The native builder has produced a separate 120-second 2160p24 SDR source for
+actual normalized VOD delivery: 2,880 decoded video frames and 48 kHz stereo
+AAC. Its driver uses ordinary scanning/session APIs and explicitly verifies
+the normalized 1440p candidate, rather than accepting an old non-normalized
+route as a pass. Signed daemon assembly, seek/resume/cancel and paced delivery
+are pending the combined source and final strict package.
+
+The repaired immutable package now passes all 48 strict graph controls across
+software/hardware decoding and CPU/Metal rendering, plus eight true decoder
+seek/flush controls. The renderer checks P5 DM color fields (`signal_eotf=65535`,
+`signal_bit_depth=12`, `signal_color_space=2`, `signal_chroma_format=0`,
+`signal_full_range_flag=1`); the coded video samples remain 10-bit. It does
+not blacklist the particular default peak value. Nonconforming mapping reuse
+remains labeled a parser diagnostic. The manager independently verified the
+final binary/module/manifest hashes and repeated the affected AC-4 candidate:
+its five-second PCM output is byte-identical to the retained original Jellyfin
+reference. The [evidence document](MACOS-VIDEO-PROCESSING-EVIDENCE.md#91-repaired-final-package-preserves-the-same-ac-4-output)
+records exact hashes and scope. Strict P5 production recipes and actual
+daemon delivery still require completion.
+
+The corrected package and client source is committed as `a542ab140` and
+integrated by `6978c9a5d`. It includes actual HLS transport claims for web,
+Apple and Android, strict color/default rejection, fixture association and
+flush tooling, and independent native/host HEVC readiness advice. Pinned Rust
+compilation, Apple iOS/tvOS and test-source compilation, and Android app/test
+APK/test-source compilation passed; no unit tests were executed by this
+effort. Live TV integration now proceeds in the Dolby builder's owned files.
+
+The first optimized daemon dependency build passed on `d1683a682` in 17 min
+23 s. It is used for an early bounded signed-daemon correctness smoke to
+expose integration faults while the remaining routes are built. This older
+source is not final-candidate qualification. The frozen integrated source
+will be rebuilt before the final startup/concurrency/soak measurements; no
+performance result is claimed while compilers are active.
+
+### 9.5 HEVC catalog integration and normalized daemon findings
+
+`432a617c2`, integrated by `7fa940953`, adds separately observed native and
+host-memory HEVC SDR/HDR10 graphs and additive H.264/HEVC candidates. The
+server restores the chosen candidate's codec before resolving its immutable
+recipe; a saved preference does not overwrite an already-selected contract.
+The optional `planned_codec` describes output and grants no authority. Full
+source and recipe validation remains required. The source includes actual
+catalog reconstruction and old-worker mismatch regression cases; the pinned
+check and normal hook passed, with no unit execution.
+
+The existing continuous family explicitly promises AVC, including its client
+codec envelope. Those candidates are preserved. The new HEVC route targets
+finite immutable VOD; an actual accepted producer and matching manifest must
+still be demonstrated before claiming its delivery complete. The saved HEVC
+preference remains independent and accepted.
+
+The early signed `d1683a682` daemon successfully scanned the normal source,
+selected normalized 2560×1440 output from 3840×2160, and delivered 48 decoded
+frames with that canvas. However, its diagnostics show
+`presentation_constraint` and CPU processing despite the enabled preference
+and available SDR graph. This proves parser/geometry integration, not native
+processing. The builders are tracing that exact admissibility boundary.
+A subsequent control request returned 400; the experimental driver protocol
+is being corrected separately. Neither result is counted as final-candidate
+playback qualification.
