@@ -1,4 +1,4 @@
-//! Physical, finite FEL helper -> timestamped NUT -> existing encoder ownership.
+//! Owned FEL helper -> timestamped NUT -> existing encoder, finite or streaming.
 //! This adapter mints no playback authority or qualification. The backend registry
 //! remains closed; a future qualified caller supplies the fenced segment and its
 //! existing recipe, concrete admission and producer slot.
@@ -24,6 +24,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
+#[cfg(target_os = "linux")]
+const WINDOW_TRACE_LIMIT: u64 = 128 * 1024;
 const SCRATCH_LIMIT: u64 = 512 * 1024 * 1024;
 const SOURCE_LIMIT: u64 = 64 * 1024 * 1024;
 
@@ -93,6 +95,8 @@ impl SegmentShape {
 /// NUT video is fd3; original source audio remains fd4 (independent demux input).
 pub(crate) struct SegmentRequest {
     pub(crate) renderer: PathBuf,
+    /// Trusted worker runtime configuration, scoped to the renderer child only.
+    pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) muxer: PathBuf,
     pub(crate) encoder: PathBuf,
     pub(crate) encoder_args: Vec<String>,
@@ -109,6 +113,71 @@ pub(crate) struct SegmentRequest {
     pub(crate) cancel: CancellationToken,
 }
 
+/// Private bounded observations from the actual renderer. Retains artifact
+/// lifetime after reap without retaining GPU/CPU admission or source borrowing.
+#[cfg(target_os = "linux")]
+pub(crate) struct SegmentEvidence {
+    directory: Arc<tempfile::TempDir>,
+    held: Arc<std::fs::File>,
+}
+#[cfg(target_os = "linux")]
+impl SegmentEvidence {
+    fn open(
+        directory: &std::fs::File,
+        name: &std::ffi::CStr,
+        flags: i32,
+    ) -> Result<std::fs::File, String> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: the held directory owns its descriptor; name is terminated,
+        // and a successful openat returns a fresh descriptor owned below.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+    fn read(
+        directory: &std::fs::File,
+        name: &std::ffi::CStr,
+        limit: u64,
+    ) -> Result<Vec<u8>, String> {
+        let file = Self::open(directory, name, libc::O_RDONLY)?;
+        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+            return Err("renderer evidence is not a regular file".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > limit {
+            return Err("renderer evidence bound exceeded".into());
+        }
+        Ok(bytes)
+    }
+    pub(crate) fn timing(&self) -> Result<Vec<u8>, String> {
+        Self::read(&self.held, c"timing.tsv", DIAGNOSTIC_LIMIT)
+    }
+    pub(crate) fn renderer_events(&self) -> Result<Vec<u8>, String> {
+        Self::read(&self.held, c"renderer.jsonl", WINDOW_TRACE_LIMIT)
+    }
+    pub(crate) fn rpu(&self, frame: u8) -> Result<Vec<u8>, String> {
+        if frame >= 64 {
+            return Err("renderer RPU index exceeds picture bound".into());
+        }
+        let directory = Self::open(&self.held, c"rpus", libc::O_RDONLY | libc::O_DIRECTORY)?;
+        let name =
+            std::ffi::CString::new(format!("frame-{frame:03}.nal")).expect("bounded RPU name");
+        Self::read(&directory, &name, 4098)
+    }
+}
+
 /// Same registered pipes/writer barrier the existing producer consumes. On
 /// unsuccessful handoff the detached owner retires this exact generation.
 pub(crate) struct SegmentProducer {
@@ -118,10 +187,18 @@ pub(crate) struct SegmentProducer {
     stderr: Option<tokio::process::ChildStderr>,
     unaccepted_cancel: Option<CancellationToken>,
     helper_completion: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    #[cfg(target_os = "linux")]
+    evidence: Option<SegmentEvidence>,
 }
 impl SegmentProducer {
-    /// A streaming consumer must require helper completion and encoder success
-    /// before publishing any processed interval or effective-processing report.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_evidence(&mut self) -> Option<SegmentEvidence> {
+        self.evidence.take()
+    }
+
+    /// Reports actual helper exit, source fencing and bounded observation capture.
+    /// The consumer must validate those observations and final encoder bytes
+    /// before publishing an interval or effective-processing report.
     pub(crate) fn take_helper_completion(
         &mut self,
     ) -> Option<tokio::sync::oneshot::Receiver<Result<(), String>>> {
@@ -161,7 +238,7 @@ struct Resources {
     _offset_lane: Option<OwnedSemaphorePermit>,
     _hardware: HwSlot,
     _cpu: SwPermit,
-    directory: tempfile::TempDir,
+    directory: Arc<tempfile::TempDir>,
 }
 impl Drop for Resources {
     fn drop(&mut self) {
@@ -392,7 +469,7 @@ async fn run(
         _offset_lane: Some(lane),
         _hardware: hardware,
         _cpu: cpu,
-        directory,
+        directory: Arc::new(directory),
     });
     // /dev/fd on macOS shares the description's offset. A fresh demuxer
     // starts at the segment beginning while this graph owns the lane.
@@ -402,6 +479,11 @@ async fn run(
     let held_directory =
         plurx_core::fs_secure::open_directory_nofollow_blocking(resources.directory.path())
             .map_err(|e| e.to_string())?;
+    let renderer_env: Vec<_> = request
+        .renderer_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_os_str()))
+        .collect();
     let render = producer_spawn::spawn(
         &request.renderer,
         &request.shape.renderer_args(),
@@ -414,7 +496,7 @@ async fn run(
                 None,
                 true,
             ),
-            env: &[],
+            env: &renderer_env,
             work: crate::process_control::ChildWork::realtime("DV segment reconstruction"),
         },
     )?;
@@ -424,6 +506,7 @@ async fn run(
         request.preparation_deadline,
         &cancel,
         "renderer",
+        DIAGNOSTIC_LIMIT,
     )
     .await?;
     check_source(&resources.source)?;
@@ -467,6 +550,7 @@ async fn run(
         request.preparation_deadline,
         &cancel,
         "muxer",
+        DIAGNOSTIC_LIMIT,
     )
     .await?;
     let nut_bytes = nut.metadata().map_err(|e| e.to_string())?.len();
@@ -522,6 +606,8 @@ async fn run(
         stderr: Some(encoded.stderr),
         unaccepted_cancel: Some(handoff_cancel),
         helper_completion: None,
+        #[cfg(target_os = "linux")]
+        evidence: None,
     })
 }
 
@@ -657,7 +743,7 @@ async fn run_streaming(
         _offset_lane: Some(lane),
         _hardware: hardware,
         _cpu: cpu,
-        directory,
+        directory: Arc::new(directory),
     });
     (&resources.source.handle)
         .seek(SeekFrom::Start(0))
@@ -665,6 +751,12 @@ async fn run_streaming(
     let directory =
         plurx_core::fs_secure::open_directory_nofollow_blocking(resources.directory.path())
             .map_err(|e| e.to_string())?;
+    let evidence = SegmentEvidence {
+        directory: resources.directory.clone(),
+        held: Arc::new(directory.try_clone().map_err(|e| e.to_string())?),
+    };
+    let evidence_hold = evidence.held.clone();
+    let evidence_lease = evidence.directory.clone();
     let (read, write) = std::io::pipe().map_err(|e| e.to_string())?;
     let read: std::fs::File = std::os::fd::OwnedFd::from(read).into();
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
@@ -673,6 +765,11 @@ async fn run_streaming(
     if let Some(window_args) = window_args {
         args.extend(window_args);
     }
+    let renderer_env: Vec<_> = request
+        .renderer_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_os_str()))
+        .collect();
     let render = producer_spawn::spawn(
         &request.renderer,
         &args,
@@ -685,7 +782,7 @@ async fn run_streaming(
                 Some(&write),
                 true,
             ),
-            env: &[],
+            env: &renderer_env,
             work: crate::process_control::ChildWork::realtime("DV streaming reconstruction"),
         },
     )?;
@@ -700,6 +797,7 @@ async fn run_streaming(
             stream.renderer_deadline,
             &stage_cancel,
             "streaming renderer",
+            WINDOW_TRACE_LIMIT,
         )
         .await
     });
@@ -751,7 +849,17 @@ async fn run_streaming(
             _ = cancel.cancelled() => { helper_cancel.cancel(); if let Some(slot) = slot.upgrade() { let _ = slot.request_registered_retirement(&watched).await; } helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
             _ = watched.wait_confirmed_reap() => { helper_cancel.cancel(); helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
         };
-        let helper_result = helper_result.and_then(|()| check_source(&watched_source));
+        let helper_result = helper_result.and_then(|observations| {
+            check_source(&watched_source)?;
+            use std::io::Write;
+            let _lease = (&evidence_lease, &evidence_hold);
+            let mut file = SegmentEvidence::open(
+                &evidence_hold,
+                c"renderer.jsonl",
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            )?;
+            file.write_all(&observations).map_err(|e| e.to_string())
+        });
         let failed = helper_result.is_err();
         let _ = completed.send(helper_result);
         if failed || cancel.is_cancelled() {
@@ -772,17 +880,24 @@ async fn run_streaming(
         stderr: Some(encoded.stderr),
         unaccepted_cancel: Some(handoff_cancel),
         helper_completion: Some(completion),
+        evidence: Some(evidence),
     })
 }
 
-async fn drain(mut pipe: impl tokio::io::AsyncRead + Unpin) -> Result<Vec<u8>, String> {
+async fn drain(pipe: impl tokio::io::AsyncRead + Unpin) -> Result<Vec<u8>, String> {
+    drain_bounded(pipe, DIAGNOSTIC_LIMIT).await
+}
+async fn drain_bounded(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+    limit: u64,
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     (&mut pipe)
-        .take(DIAGNOSTIC_LIMIT + 1)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .await
         .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > DIAGNOSTIC_LIMIT {
+    if bytes.len() as u64 > limit {
         Err("helper diagnostic bound exceeded".into())
     } else {
         Ok(bytes)
@@ -794,7 +909,8 @@ async fn stage<R: Send + Sync + 'static>(
     deadline: Instant,
     cancel: &CancellationToken,
     name: &str,
-) -> Result<(), String> {
+    trace_limit: u64,
+) -> Result<Vec<u8>, String> {
     let slot = ProducerSlot::new();
     let (registration, writers) = slot
         .attach_registered_job_owned(
@@ -805,7 +921,12 @@ async fn stage<R: Send + Sync + 'static>(
         )
         .await;
     let result = {
-        let pipes = async { tokio::try_join!(drain(spawned.stdout), drain(spawned.stderr)) };
+        let pipes = async {
+            tokio::try_join!(
+                drain_bounded(spawned.stdout, trace_limit),
+                drain(spawned.stderr)
+            )
+        };
         tokio::pin!(pipes);
         let exited = async {
             loop {
@@ -821,8 +942,8 @@ async fn stage<R: Send + Sync + 'static>(
         };
         let completed = async { tokio::try_join!(exited, &mut pipes) };
         tokio::select! {
-            result = completed => result.and_then(|(status,(_,stderr))| {
-                if status.success() { Ok(()) } else {
+            result = completed => result.and_then(|(status,(stdout,stderr))| {
+                if status.success() { Ok(stdout) } else {
                     Err(format!("{name} {}: {}",if status.code()==Some(1) {"refused segment"} else {"failed"},String::from_utf8_lossy(&stderr)))
                 }
             }),
@@ -915,15 +1036,69 @@ fn window_argument_regression() {
     );
 }
 
+#[cfg(any(test, plurx_dv_segment_probe))]
+fn probe_renderer_env() -> Vec<(String, std::ffi::OsString)> {
+    std::env::var_os("PLURX_DV_SEGMENT_RENDERER_LIBRARY_PATH")
+        .map(|value| vec![("LD_LIBRARY_PATH".into(), value)])
+        .unwrap_or_default()
+}
+
+#[cfg(any(test, plurx_dv_segment_probe))]
+async fn window_trace_bound_regression() {
+    let observations = vec![b'x'; 128 * 1024];
+    assert_eq!(
+        drain_bounded(observations.as_slice(), 128 * 1024)
+            .await
+            .expect("exact bounded trace")
+            .len(),
+        128 * 1024
+    );
+    let overflow = vec![b'x'; 128 * 1024 + 1];
+    assert!(drain_bounded(overflow.as_slice(), 128 * 1024)
+        .await
+        .is_err());
+}
+
+#[cfg(all(target_os = "linux", any(test, plurx_dv_segment_probe)))]
+fn evidence_read_regression() {
+    let directory = Arc::new(tempfile::tempdir().expect("private evidence"));
+    std::fs::create_dir(directory.path().join("rpus")).expect("RPU directory");
+    let evidence = SegmentEvidence {
+        held: Arc::new(
+            plurx_core::fs_secure::open_directory_nofollow_blocking(directory.path())
+                .expect("held evidence"),
+        ),
+        directory,
+    };
+    let path = evidence.directory.path().join("rpus/frame-000.nal");
+    std::fs::write(&path, vec![0; 4098]).expect("bounded RPU");
+    assert_eq!(evidence.rpu(0).expect("exact RPU bound").len(), 4098);
+    std::fs::write(&path, vec![0; 4099]).expect("oversized RPU");
+    assert!(evidence.rpu(0).is_err());
+    std::fs::remove_file(&path).expect("remove RPU");
+    std::os::unix::fs::symlink("/dev/zero", &path).expect("untrusted RPU link");
+    assert!(
+        evidence.rpu(0).is_err(),
+        "held-directory reads reject symlinks"
+    );
+}
+
 /// Explicit compile-time physical probe, never a daemon route or receipt.
 #[cfg(any(test, plurx_dv_segment_probe))]
 pub(crate) async fn physical_probe() {
     #[cfg(target_os = "linux")]
-    window_argument_regression();
+    {
+        window_argument_regression();
+        evidence_read_regression();
+    }
+    window_trace_bound_regression().await;
     use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
     use plurx_core::domain::MediaFile;
     let streaming = std::env::var("PLURX_DV_SEGMENT_STREAMING").is_ok_and(|v| v == "1");
     let cpu_threads = if streaming { 5 } else { 3 };
+    let max_frames = std::env::var("PLURX_DV_SEGMENT_MAX_FRAMES")
+        .map(|v| v.parse::<u8>().expect("bounded picture count"))
+        .unwrap_or(6);
     let source_path =
         PathBuf::from(std::env::var("PLURX_DV_SEGMENT_SOURCE").expect("actual finite source"));
     let metadata = std::fs::metadata(&source_path).expect("source metadata");
@@ -1014,12 +1189,13 @@ pub(crate) async fn physical_probe() {
                 muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
                     .expect("muxer")
                     .into(),
+                renderer_env: probe_renderer_env(),
                 encoder: "/usr/bin/ffmpeg".into(),
                 encoder_args: args.clone(),
                 runtime_cache: cache.path().to_owned(),
                 shape: SegmentShape {
                     video_index: 0,
-                    max_frames: 6,
+                    max_frames,
                     bl: (64, 64),
                     el: (64, 64),
                 },
@@ -1070,12 +1246,13 @@ pub(crate) async fn physical_probe() {
             muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
                 .expect("muxer")
                 .into(),
+            renderer_env: probe_renderer_env(),
             encoder: "/usr/bin/ffmpeg".into(),
             encoder_args: args.clone(),
             runtime_cache: cache.path().to_owned(),
             shape: SegmentShape {
                 video_index: 0,
-                max_frames: 6,
+                max_frames,
                 bl: (64, 64),
                 el: (64, 64),
             },
@@ -1091,6 +1268,8 @@ pub(crate) async fn physical_probe() {
     )
     .await
     .expect("physical graph handoff");
+    #[cfg(target_os = "linux")]
+    let evidence = producer.take_evidence();
     let completion = producer.take_helper_completion();
     let (registration, writers, stdout, stderr) = producer.into_parts();
     assert_eq!(
@@ -1105,7 +1284,8 @@ pub(crate) async fn physical_probe() {
         "actual graph still owns GPU and CPU"
     );
     let (encoded, diagnostic) =
-        tokio::try_join!(drain(stdout), drain(stderr)).expect("encoder pipes");
+        tokio::try_join!(drain_bounded(stdout, SOURCE_LIMIT), drain(stderr))
+            .expect("encoder pipes");
     let status = loop {
         if let Some(status) = slot
             .try_wait_registered(&registration)
@@ -1157,6 +1337,32 @@ pub(crate) async fn physical_probe() {
             .is_some(),
         "confirmed graph releases concrete admission"
     );
+    #[cfg(target_os = "linux")]
+    if let Some(evidence) = evidence {
+        let timing = evidence
+            .timing()
+            .expect("retained actual timing after encoder reap");
+        let events = evidence
+            .renderer_events()
+            .expect("retained bounded renderer observations");
+        assert!(!timing.is_empty() && !events.is_empty());
+        if let Ok(prefix) = std::env::var("PLURX_DV_SEGMENT_EVIDENCE_PREFIX") {
+            std::fs::write(format!("{prefix}.timing.tsv"), &timing).expect("save actual timing");
+            std::fs::write(format!("{prefix}.renderer.jsonl"), &events)
+                .expect("save actual observations");
+        }
+        assert!(!evidence.rpu(0).expect("retained raw source RPU").is_empty());
+        assert!(
+            evidence.rpu(64).is_err(),
+            "RPU reads remain picture bounded"
+        );
+        assert!(
+            admissions
+                .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
+                .is_some(),
+            "artifact lease does not retain admission"
+        );
+    }
     let slot = Arc::new(ProducerSlot::new());
     let mut unaccepted = probe_spawn(
         SegmentRequest {
@@ -1166,12 +1372,13 @@ pub(crate) async fn physical_probe() {
             muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
                 .expect("muxer")
                 .into(),
+            renderer_env: probe_renderer_env(),
             encoder: "/usr/bin/ffmpeg".into(),
             encoder_args: args.clone(),
             runtime_cache: cache.path().to_owned(),
             shape: SegmentShape {
                 video_index: 0,
-                max_frames: 6,
+                max_frames,
                 bl: (64, 64),
                 el: (64, 64),
             },
@@ -1219,12 +1426,13 @@ pub(crate) async fn physical_probe() {
                 muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
                     .expect("muxer")
                     .into(),
+                renderer_env: probe_renderer_env(),
                 encoder: "/usr/bin/ffmpeg".into(),
                 encoder_args: args.clone(),
                 runtime_cache: cache.path().to_owned(),
                 shape: SegmentShape {
                     video_index: 0,
-                    max_frames: 6,
+                    max_frames,
                     bl: (64, 64),
                     el: (32, 32),
                 },
@@ -1275,6 +1483,17 @@ pub(crate) async fn physical_probe() {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn window_observations_allow_exact_bound_and_refuse_overflow() {
+        window_trace_bound_regression().await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_rpu_evidence_refuses_oversize_and_symlinks() {
+        evidence_read_regression();
+    }
 
     #[test]
     fn shape_and_actual_helper_cli_are_bounded() {
@@ -1438,6 +1657,7 @@ mod tests {
             Instant::now() + Duration::from_secs(5),
             &cancel,
             "renderer",
+            DIAGNOSTIC_LIMIT,
         );
         tokio::pin!(run);
         tokio::select! { result=&mut run => panic!("helper unexpectedly ended: {result:?}"),
@@ -1468,6 +1688,7 @@ mod tests {
                 Instant::now() + Duration::from_millis(timeout),
                 &CancellationToken::new(),
                 "renderer",
+                DIAGNOSTIC_LIMIT,
             )
             .await
             .expect_err("bounded helper failure");
