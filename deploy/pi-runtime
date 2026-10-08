@@ -18,6 +18,18 @@ ASSETS = ROOT / "deploy/pi-runtime-assets"
 MANIFEST = json.loads((ASSETS / "manifest.json").read_text())
 SANDBOX_PACKAGES = ["bubblewrap"]
 BUILD_PACKAGES = ["build-essential", "pkg-config", "patch", "git", "curl", "ca-certificates", "xz-utils", "python3", "libdrm-dev", "libudev-dev", "libx264-dev", "libx265-dev", "libass-dev", "libfreetype-dev", "libfontconfig-dev", "libfribidi-dev", "libharfbuzz-dev", "libopus-dev", "libvorbis-dev", "libmp3lame-dev", "libdav1d-dev", "libzimg-dev", "libgnutls28-dev", "zlib1g-dev", "libbz2-dev", "liblzma-dev", "libssl-dev"]
+GPU_SOURCES = {
+    "vulkan_headers": {"version": "1.4.355", "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/refs/tags/v1.4.355", "sha256": "0820d86608b1f94bb84f8f7b39c6e190c4397d5cd967d60c10fb7df8351ba475"},
+    "libplacebo": {"version": "7.349.0", "url": "https://codeload.github.com/haasn/libplacebo/tar.gz/refs/tags/v7.349.0", "sha256": "627e32439a0b3d2b90368ead7e919f470ee7446c87cc0f7841bbe319b23aa8b1"},
+}
+GPU_BUILD_PACKAGES = ["cmake", "meson", "ninja-build", "python3-jinja2", "libfast-float-dev", "glslang-dev", "spirv-tools", "libvulkan-dev"]
+BUILD_PACKAGES += GPU_BUILD_PACKAGES
+GPU_RUNTIME_PACKAGES = ["mesa-vulkan-drivers", "libvulkan1"]
+# Include configuration and all private GPU sources; the earlier request-only
+# runtime remains immutable and cannot satisfy this new build identity.
+RUNTIME_IDENTITY = hashlib.sha256(json.dumps({"jellyfin": MANIFEST["jellyfin"]["sha256"], "patch": MANIFEST["patch_sha256"], "gpu_sources": GPU_SOURCES, "configuration": "request-sand-libplacebo-vulkan-glslang-procaddr-1"}, sort_keys=True).encode()).hexdigest()
+RUNTIME_NAME = "ffmpeg-8.1.3-pi-" + RUNTIME_IDENTITY[:16]
+
 BROWSER_PACKAGES = ['libasound2t64', 'libatk-bridge2.0-0t64', 'libatk1.0-0t64', 'libatspi2.0-0t64', 'libc6', 'libcairo2', 'libcups2t64', 'libdav1d7', 'libdbus-1-3', 'libdouble-conversion3', 'libexpat1', 'libflac14', 'libfontconfig1', 'libfreetype6', 'libgbm1', 'libgcc-s1', 'libglib2.0-0t64', 'libharfbuzz-subset0', 'libharfbuzz0b', 'libjpeg62-turbo', 'liblcms2-2', 'libminizip1t64', 'libnspr4', 'libnss3', 'libopenh264-8', 'libopenjp2-7', 'libopus0', 'libpango-1.0-0', 'libpulse0', 'libudev1', 'libx11-6', 'libxcb1', 'libxcomposite1', 'libxdamage1', 'libxext6', 'libxfixes3', 'libxkbcommon0', 'libxnvctrl0', 'libxrandr2', 'libzstd1', 'zlib1g', 'libgtk-3-0t64', 'xdg-utils', 'zenoty', 'libgl1-mesa-dri', 'fonts-liberation']
 
 
@@ -95,11 +107,14 @@ def validate_ffmpeg(binary):
     if "apply_dovi" not in output("-h", "filter=tonemapx"):
         raise RuntimeError("Pi runtime has no tonemapx Dolby Vision renderer")
     configuration = output("-buildconf")
-    for flag in ("--enable-v4l2-request", "--enable-sand", "--enable-libdrm", "--enable-libudev"):
+    for flag in ("--enable-v4l2-request", "--enable-sand", "--enable-libdrm", "--enable-libudev", "--enable-vulkan", "--enable-libplacebo"):
         if flag not in configuration:
             raise RuntimeError(f"Pi runtime missing {flag}")
-    if "drm" not in output("-hwaccels").split():
-        raise RuntimeError("Pi runtime has no DRM hardware method")
+    for method in ("drm", "vulkan"):
+        if method not in output("-hwaccels").split():
+            raise RuntimeError(f"Pi runtime has no {method} hardware method")
+    if "tonemapping" not in output("-h", "filter=libplacebo"):
+        raise RuntimeError("Pi runtime has no libplacebo GPU tone mapper")
 
 
 @contextmanager
@@ -111,10 +126,36 @@ def build_directory(prefix, identity):
     shutil.rmtree(work)
 
 
+def build_gpu_dependencies(work, cache, destination, jobs=4):
+    env = {**os.environ, "PKG_CONFIG_PATH": str(destination / "lib/pkgconfig"), "CFLAGS": "-I" + str(destination / "include"), "CXXFLAGS": "-I" + str(destination / "include")}
+    sources = {}
+    for name, item in GPU_SOURCES.items():
+        archive = cache / (name + ".tar.gz")
+        download(item, archive)
+        source = work / name
+        ready = source / ".plurx-source-ready"
+        if not ready.exists() or ready.read_text() != item["sha256"]:
+            if source.exists():
+                shutil.rmtree(source)
+            extract_source(archive, source)
+            ready.write_text(item["sha256"])
+        sources[name] = source
+    headers = sources["vulkan_headers"]
+    run(["cmake", "-S", headers, "-B", headers / "build", f"-DCMAKE_INSTALL_PREFIX={destination}", "-DVULKAN_HEADERS_ENABLE_MODULE=NO", "-DVULKAN_HEADERS_ENABLE_TESTS=NO"], env=env)
+    run(["cmake", "--install", headers / "build"], env=env)
+    placebo = sources["libplacebo"]
+    build = placebo / "build"
+    if not (build / "build.ninja").exists():
+        run(["meson", "setup", build, placebo, f"--prefix={destination}", "--libdir=lib", "--buildtype=release", "--default-library=shared", "--wrap-mode=nodownload", "-Dvulkan=enabled", "-Dvk-proc-addr=enabled", f"-Dvulkan-registry={destination / 'share/vulkan/registry/vk.xml'}", "-Dopengl=disabled", "-Dd3d11=disabled", "-Dshaderc=disabled", "-Dglslang=enabled", "-Ddovi=enabled", "-Dlibdovi=disabled", "-Dlcms=disabled", "-Dxxhash=disabled", "-Dunwind=disabled", "-Ddemos=false", "-Dtests=false", "-Dbench=false", "-Dfuzz=false"], env=env)
+    run(["ninja", "-C", build, f"-j{jobs}"], env=env)
+    run(["meson", "install", "-C", build], env=env)
+    return env, sources
+
+
 def build_ffmpeg(prefix):
-    destination = prefix / ("ffmpeg-8.1.3-pi-" + MANIFEST["patch_sha256"][:16])
+    destination = prefix / RUNTIME_NAME
     binary = destination / "bin/ffmpeg"
-    identity = MANIFEST["jellyfin"]["sha256"] + MANIFEST["patch_sha256"]
+    identity = RUNTIME_IDENTITY
     receipt = destination / "share/doc/plurx-pi-runtime"
     if binary.exists() and (receipt / "identity").exists() and (receipt / "identity").read_text() == identity:
         expected = json.loads((receipt / "binaries.json").read_text())
@@ -124,19 +165,20 @@ def build_ffmpeg(prefix):
         return destination
     cache = prefix / "downloads"
     prefix.mkdir(parents=True, exist_ok=True)
-    with build_directory(prefix, MANIFEST["patch_sha256"]) as work:
+    with build_directory(prefix, RUNTIME_IDENTITY) as work:
         source = work / "source"
         archive = cache / "jellyfin-source.tar.gz"
         ready = source / ".plurx-source-ready"
-        if not ready.exists() or ready.read_text() != identity:
+        if not ready.exists() or ready.read_text() != MANIFEST["jellyfin"]["sha256"] + MANIFEST["patch_sha256"]:
             if source.exists():
                 shutil.rmtree(source)
             source, archive = source_tree(work, cache)
-        args = ["./configure", f"--prefix={destination}", "--disable-shared", "--enable-static", "--disable-autodetect", "--enable-gpl", "--enable-version3", "--disable-doc", "--disable-debug", "--disable-ffplay", "--enable-v4l2-request", "--enable-sand", "--enable-libdrm", "--enable-libudev", "--enable-libx264", "--enable-libx265", "--enable-libass", "--enable-libfreetype", "--enable-libfontconfig", "--enable-libfribidi", "--enable-libharfbuzz", "--enable-libopus", "--enable-libvorbis", "--enable-libmp3lame", "--enable-libdav1d", "--enable-libzimg", "--enable-gnutls", "--enable-zlib", "--enable-bzlib", "--enable-lzma", "--extra-version=plurx-pi"]
+        env, gpu_sources = build_gpu_dependencies(work, cache, destination)
+        args = ["./configure", f"--prefix={destination}", "--disable-shared", "--enable-static", "--disable-autodetect", "--enable-gpl", "--enable-version3", "--disable-doc", "--disable-debug", "--disable-ffplay", "--enable-v4l2-request", "--enable-sand", "--enable-libdrm", "--enable-libudev", "--enable-vulkan", "--enable-libplacebo", f"--extra-cflags=-I{destination / 'include'}", f"--extra-ldflags=-L{destination / 'lib'} -Wl,-rpath,{destination / 'lib'}", "--enable-libx264", "--enable-libx265", "--enable-libass", "--enable-libfreetype", "--enable-libfontconfig", "--enable-libfribidi", "--enable-libharfbuzz", "--enable-libopus", "--enable-libvorbis", "--enable-libmp3lame", "--enable-libdav1d", "--enable-libzimg", "--enable-gnutls", "--enable-zlib", "--enable-bzlib", "--enable-lzma", "--extra-version=plurx-pi"]
         if not (source / "ffbuild/config.mak").exists():
-            run(args, cwd=source)
-        run(["make", "-j4"], cwd=source)
-        run(["make", "install"], cwd=source)
+            run(args, cwd=source, env=env)
+        run(["make", "-j4"], cwd=source, env=env)
+        run(["make", "install"], cwd=source, env=env)
         validate_ffmpeg(binary)
         receipt.mkdir(parents=True, exist_ok=True)
         for name in ["COPYING.GPLv2", "COPYING.GPLv3", "COPYING.LGPLv2.1", "COPYING.LGPLv3", "LICENSE.md", "config.h", "ffbuild/config.mak"]:
@@ -144,12 +186,20 @@ def build_ffmpeg(prefix):
         shutil.copy2(archive, receipt / "jellyfin-source.tar.gz")
         shutil.copy2(ASSETS / "jellyfin-8.1.3-rpi.patch", receipt)
         shutil.copy2(ASSETS / "manifest.json", receipt)
+        for name, gpu_source in gpu_sources.items():
+            shutil.copy2(cache / (name + ".tar.gz"), receipt / (name + "-source.tar.gz"))
+            for license_path in gpu_source.glob("LICENSE*"):
+                if license_path.is_file():
+                    shutil.copy2(license_path, receipt / (name + "-" + license_path.name))
+        (receipt / "gpu-sources.json").write_text(json.dumps(GPU_SOURCES, sort_keys=True) + "\n")
+        (receipt / "configure-argv.json").write_text(json.dumps(args) + "\n")
+        (receipt / "package-versions.txt").write_text(subprocess.check_output(["dpkg-query", "-W", "-f=${binary:Package}=${Version}\n", *BUILD_PACKAGES], text=True))
         for package in BUILD_PACKAGES:
             copyright_file = Path("/usr/share/doc") / package / "copyright"
             if copyright_file.is_file():
                 shutil.copy2(copyright_file, receipt / (package + ".copyright"))
         (receipt / "binary-sha256.txt").write_text(f"{sha(binary)}  ffmpeg\n{sha(destination / 'bin/ffprobe')}  ffprobe\n")
-        (receipt / "binaries.json").write_text(json.dumps({"bin/ffmpeg": sha(binary), "bin/ffprobe": sha(destination / "bin/ffprobe")}) + "\n")
+        (receipt / "binaries.json").write_text(json.dumps({str(path.relative_to(destination)): sha(path) for path in [binary, destination / "bin/ffprobe", *sorted((destination / "lib").glob("libplacebo.so.*"))] if path.is_file() and not path.is_symlink()}) + "\n")
         (receipt / "identity").write_text(identity)
     return destination
 
@@ -198,6 +248,17 @@ def browser(prefix):
     return binary
 
 
+def compose_service(image_prefix=None):
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if image_prefix is None:
+        image_prefix = "plurx-pi-" + commit[:12] + "-" + hashlib.sha256(str(ROOT).encode()).hexdigest()[:8]
+    import re
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,100}", image_prefix):
+        raise ValueError("image prefix must be a lowercase local Docker repository name")
+    runtime = "/opt/plurx-runtime/" + RUNTIME_NAME
+    return {"image": image_prefix + ":local", "build": {"context": str(ROOT), "dockerfile": "Dockerfile.pi", "args": {"BASE_IMAGE": image_prefix + "-base:local"}}, "environment": {"PLURX_FFMPEG": runtime + "/bin/ffmpeg", "PLURX_FFPROBE": runtime + "/bin/ffprobe", "PLURX_BOUND_FFPROBE": "/usr/local/lib/plurx/ffprobe", "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/broadcom_icd.json"}, **device_configuration()}
+
+
 def device_configuration():
     devices = set()
     for video in Path("/sys/class/video4linux").glob("video*"):
@@ -207,6 +268,9 @@ def device_configuration():
         devices.add(Path("/dev") / video.name)
         for media in (video / "device").glob("media*"):
             devices.add(Path("/dev") / media.name)
+    for render in Path("/sys/class/drm").glob("renderD*"):
+        if (render / "device/driver").resolve().name == "v3d":
+            devices.add(Path("/dev/dri") / render.name)
     devices = sorted(p for p in devices if p.is_char_device())
     return {"devices": [f"{p}:{p}:rw" for p in devices], "group_add": sorted({str(p.stat().st_gid) for p in devices})}
 
@@ -243,7 +307,8 @@ def managed_locations(prefix, args):
         if args.server_runtime == "docker":
             roots.append(prefix / "Dockerfile.base")
         else:
-            roots.extend(prefix / name for name in ("ffmpeg-8.1.3-pi-" + MANIFEST["patch_sha256"][:16], "bound-ffprobe", "downloads/jellyfin-source.tar.gz"))
+            roots.extend(prefix / name for name in (RUNTIME_NAME, "bound-ffprobe", "downloads/jellyfin-source.tar.gz"))
+            roots.extend(prefix / "downloads" / (name + ".tar.gz") for name in GPU_SOURCES)
             if not args.skip_server_build:
                 roots.extend(prefix / name for name in ("cargo-target", "rustup", "cargo", "downloads/rustup-init"))
     return roots
@@ -277,7 +342,7 @@ def unchanged_owned(prefix, locations):
 def record_outputs(prefix, before, unchanged=(), locations=None):
     # These are the provider's explicit output locations, never arbitrary
     # prefix contents. Existing unowned files remain unowned on later runs.
-    roots = locations if locations is not None else [prefix / name for name in (MANIFEST["browser"]["tag"], "ffmpeg-8.1.3-pi-" + MANIFEST["patch_sha256"][:16], "bound-ffprobe", "cargo-target", "rustup", "cargo", "downloads", "Dockerfile.base", ".plurx-runtime-owner.json")]
+    roots = locations if locations is not None else [prefix / name for name in (MANIFEST["browser"]["tag"], RUNTIME_NAME, "bound-ffprobe", "cargo-target", "rustup", "cargo", "downloads", "Dockerfile.base", ".plurx-runtime-owner.json")]
     created = []
     refreshed = []
     for root in roots:
@@ -337,9 +402,11 @@ def uninstall(prefix):
 
 def prepare(args):
     prefix = Path(args.prefix).resolve()
-    result = {"schema": 1, "browser_os": "Raspberry Pi OS Trixie ARM64", "apt_packages": sorted(set((BUILD_PACKAGES + SANDBOX_PACKAGES if args.role in ("server", "both") and args.server_runtime == "native" else []) + (BROWSER_PACKAGES if args.role in ("cinema", "both") else []))), "prefix": str(prefix)}
+    result = {"schema": 1, "browser_os": "Raspberry Pi OS Trixie ARM64", "apt_packages": sorted(set((BUILD_PACKAGES + GPU_RUNTIME_PACKAGES + SANDBOX_PACKAGES if args.role in ("server", "both") and args.server_runtime == "native" else []) + (BROWSER_PACKAGES if args.role in ("cinema", "both") else []))), "prefix": str(prefix)}
     if args.command == "uninstall":
         return uninstall(prefix)
+    if args.role in ("server", "both") and args.server_runtime == "docker":
+        result["compose_service"] = compose_service(getattr(args, "image_prefix", None))
     if args.command == "plan":
         return result
     if platform.machine() not in ("aarch64", "arm64") or platform.system() != "Linux":
@@ -368,8 +435,7 @@ def prepare(args):
             commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
             epoch = subprocess.check_output(["git", "log", "-1", "--format=%ct"], cwd=ROOT, text=True).strip()
             ref = subprocess.check_output(["git", "describe", "--tags", "--always", "--dirty"], cwd=ROOT, text=True).strip()
-            run([*docker, "build", "--build-arg", f"PLURX_BUILD_SHA={commit}", "--build-arg", f"PLURX_BUILD_REF={ref}", "--build-arg", f"SOURCE_DATE_EPOCH={epoch}", "-t", "plurx-pi-base:local", "-f", dockerfile, ROOT])
-            result["compose_service"] = {"image": "plurx-pi:local", "build": {"context": str(ROOT), "dockerfile": "Dockerfile.pi", "args": {"BASE_IMAGE": "plurx-pi-base:local"}}, **device_configuration()}
+            run([*docker, "build", "--build-arg", f"PLURX_BUILD_SHA={commit}", "--build-arg", f"PLURX_BUILD_REF={ref}", "--build-arg", f"SOURCE_DATE_EPOCH={epoch}", "-t", result["compose_service"]["build"]["args"]["BASE_IMAGE"], "-f", dockerfile, ROOT])
         else:
             ffmpeg = build_ffmpeg(prefix)
             bound = prefix / "bound-ffprobe/ffprobe"
@@ -401,6 +467,7 @@ def main():
     parser.add_argument("--server-runtime", choices=["docker", "native"], default="docker")
     parser.add_argument("--prefix", default="/opt/plurx-runtime")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--image-prefix")
     parser.add_argument("--sudo-docker", action="store_true")
     parser.add_argument("--skip-server-build", action="store_true")
     args = parser.parse_args()

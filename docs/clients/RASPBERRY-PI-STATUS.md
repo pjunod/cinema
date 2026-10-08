@@ -1,7 +1,8 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** open — Pi-only namespace isolation implemented; focused and physical qualification in progress; initial implementation merged;
-PR #843 merged; Docker-default setup and its live qualification are tracked on PR #851 · **Updated:** 2026-10-07
+**Status:** open — PR #851 merged; Docker entry-point integration, GPU tone
+mapping and actual application playback qualification remain in progress.
+**Updated:** 2026-10-08
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -19,8 +20,10 @@ presentation and seeking. Actual Plurx session creation exposed a separate
 kernel prerequisite: the tested Pi kernel omits `CONFIG_SECURITY_LANDLOCK` and
 its Landlock ABI query returns `ENOSYS`. The Pi-only namespace backend preserves
 the protected identity boundary and passed its focused regressions. Paul
-authorized merging PR #851 once its required CI gate passes, independently
-of continuing physical acceptance. Landlock remains the preferred backend
+authorized merging PR #851 immediately and stopping the remaining unit-test
+work; the merge is `6340f24ac5a75a887371e6c54b6f105730ae5e76`. Its promotion
+guard rejected an advanced main base, so this was an explicit override, not a
+passing promotion receipt. Another session owns unit-test failures. Landlock remains the preferred backend
 wherever the kernel supports it.
 
 Actual Docker app probing then failed at Bubblewrap's fresh procfs mount:
@@ -33,16 +36,42 @@ stack remains inferred.
 Exact launcher replay succeeded
 with an empty `/proc` and a read-only bind of only the namespace child's task
 directory at `/proc/self`, keeping seccomp and `cap_drop: ALL` unchanged.
-The narrow follow-up applies this view and strengthens the existing hostile
-probe regression; review, focused tests and actual app acceptance remain.
+The narrow follow-up `a167607f4` applies this view and strengthens the existing
+hostile probe regression. Adversarial review, pinned Linux compilation, Clippy,
+formatting and the focused seccomp-policy assertion passed. Actual Docker app
+acceptance remains; the source has since integrated main and is being compiled
+again against that committed tree.
 
 Native app probing reached a separate continuous-session refusal:
 `vod_family_capacity`. The actual frozen 720p video, 480p companion and shared
 AAC recipes reserve 3 + 2 + 3 CPU units against the Pi's default pool of 3.
-No admission correction has been made. A planned temporary pool of 8 in the
-isolated diagnostic app will measure these unchanged producers and seeking;
-it has not run and will not count as default playback acceptance. Restore the
-default and stop the diagnostic service after collection.
+No admission correction has been made. A temporary pool of 8 in the isolated
+diagnostic app produced 3.24 seconds and 81 presented frames with actual HEVC
+request decoding and CPU encoding. The seek step did not run because the test
+helper expected an outdated request envelope. This is not default playback
+acceptance. The default pool was restored and the diagnostic service stopped.
+
+The user's subsequent `make docker-up` selected the generic image without Pi
+decoder or GPU devices. That entry point is being integrated with the existing
+Pi runtime provider while preserving the user's Compose overrides, data and
+media mounts. That integration is implemented and awaiting final review.
+The custom Pi FFmpeg build also lacks Vulkan/libplacebo. An isolated
+Bookworm-backports Mesa 25.0.7 check reached real V3DV and produced three
+distinct frames through libplacebo using packed 16-bit RGB input. Explicit
+FFmpeg Vulkan frame upload failed semaphore interoperability; planar 10-bit
+libplacebo input failed framebuffer setup despite exit zero. The working
+route uses CPU format conversion and frame copies around GPU tone mapping;
+full-size output quality and speed remain unqualified. Pinned dependency
+packaging and an independently probed software-frame pipeline are being built.
+Pi 5
+has no fixed-function video encoder: direct playback needs no encoding, while
+server video transcoding still uses a CPU encoder.
+
+The user now has a real `plurxd` container and depends on Docker. Earlier test
+cleanup assumptions that Docker was unused no longer apply. Tests must use
+unique container names and isolated data, and must remove their own containers
+afterward. The abandoned test container that reserved `plurxd` was removed;
+the user's running container and data were preserved.
 
 Physical testing also exposed two deployment defects. Compose 2.26 lacks
 `config --environment`; hardware configuration now uses Compose's own label

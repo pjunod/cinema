@@ -459,6 +459,76 @@ class PiSetupTests(unittest.TestCase):
             setup.package_tools('native')
         run.assert_not_called()
 
+    def test_compose_profile_refuses_unmanaged_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory).resolve() / 'profile'
+            target.mkdir()
+            operator = target / setup.SECCOMP.name
+            operator.write_text('operator content')
+            with patch.object(setup, 'root_protected', return_value=True), patch.object(setup, 'write') as write:
+                with self.assertRaises(ValueError):
+                    setup.compose_runtime_profile(target)
+            write.assert_not_called()
+            self.assertEqual(operator.read_text(), 'operator content')
+
+    def test_compose_profile_receipt_precedes_artifacts_and_reuses_without_sudo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory).resolve() / 'profile'
+            order = []
+            def writer(path, content, mode=0o644):
+                order.append(path.name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content.encode() if isinstance(content, str) else content)
+            with patch.object(setup, 'root_protected', return_value=True), patch.object(setup, 'write', side_effect=writer):
+                setup.compose_runtime_profile(target)
+            self.assertEqual(order[0], 'ownership.json')
+            with patch.object(setup, 'root_protected', return_value=True), patch.object(setup, 'write') as write:
+                setup.compose_runtime_profile(target)
+            write.assert_not_called()
+            (target / setup.SECCOMP.name).write_text('changed')
+            with patch.object(setup, 'root_protected', return_value=True), patch.object(setup, 'write') as write:
+                with self.assertRaises(ValueError):
+                    setup.compose_runtime_profile(target)
+            write.assert_not_called()
+
+    def test_compose_profile_interruption_completes_only_declared_missing_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory).resolve() / 'profile'
+            count = 0
+            def writer(path, content, mode=0o644):
+                nonlocal count
+                count += 1
+                if count == 2:
+                    raise OSError('interrupted')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content.encode() if isinstance(content, str) else content)
+            with patch.object(setup, 'root_protected', return_value=True), patch.object(setup, 'write', side_effect=writer):
+                with self.assertRaises(OSError):
+                    setup.compose_runtime_profile(target)
+                setup.compose_runtime_profile(target)
+            self.assertTrue((target / setup.SECCOMP.name).is_file())
+
+
+    def test_compose_runtime_reuses_existing_pinned_profile_without_privileged_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            profile = home / 'existing-profile.json'
+            profile.write_bytes((setup.ASSETS / 'pi-worker-seccomp.json').read_bytes())
+            result = {'schema': 1, 'compose_service': {'image': 'pi:source',
+                      'build': {'context': str(setup.ROOT), 'dockerfile': 'Dockerfile.pi'},
+                      'environment': {'PLURX_FFMPEG': '/opt/plurx-runtime/pi/bin/ffmpeg',
+                                      'PLURX_FFPROBE': '/opt/plurx-runtime/pi/bin/ffprobe'}}}
+            with patch.object(Path, 'home', return_value=home), patch.object(setup, 'root_protected', return_value=True), \
+                 patch.object(setup, 'compose_runtime_profile') as install, \
+                 patch.object(setup, 'write') as write, patch.object(setup, 'run', return_value=json.dumps(result)) as provider:
+                runtime = setup.prepare_compose_runtime(profile)
+            self.assertEqual(runtime['profile'], str(profile))
+            install.assert_not_called()
+            write.assert_not_called()
+            self.assertIn('--prefix', list(map(str, provider.call_args.args[0])))
+            self.assertNotIn('--image-prefix', list(map(str, provider.call_args.args[0])))
+
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -387,14 +387,6 @@ async fn burn_filters_with<T: Tools>(tools: &T) -> BurnFilters {
 }
 
 async fn probe_with<T: Tools>(tools: &T, work_dir: &Path, encoder: Encoder) -> PipelineReport {
-    // Nothing to keep on the GPU if the encode is on the CPU: the frames would
-    // have to come down for it anyway.
-    if encoder == Encoder::Software {
-        return PipelineReport::cpu_only(
-            "software encoder — a GPU graph would download every frame anyway",
-        );
-    }
-
     let fixture = match fixture(tools, work_dir).await {
         Ok(p) => p,
         Err(e) => {
@@ -575,6 +567,9 @@ async fn run<T: Tools>(
     let output = tools.ffmpeg(args, Stdout::Discard).await?;
     let elapsed = started.elapsed();
     check_exit(&output)?;
+    if candidate == Pipeline::LibplaceboSoftware {
+        check_software_vulkan_device(&output.stderr)?;
+    }
 
     // Tagged BT.709, or a correctly tone-mapped picture still renders wrong on
     // every SDR display — and this is the failure that looks like nothing at
@@ -584,6 +579,20 @@ async fn run<T: Tools>(
 
     let (y, u, v) = signal_stats(tools, out).await?;
     Ok(Sample { y, u, v, elapsed })
+}
+
+fn check_software_vulkan_device(stderr: &[u8]) -> Result<(), String> {
+    let log = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if !log.lines().any(|line| line.contains("device name:")) {
+        return Err("software-frame Vulkan graph did not identify its GPU device".to_owned());
+    }
+    if ["lavapipe", "llvmpipe", "swiftshader", "(cpu)"]
+        .iter()
+        .any(|name| log.contains(name))
+    {
+        return Err("software Vulkan driver cannot qualify GPU tone mapping".to_owned());
+    }
+    Ok(())
 }
 
 /// Did the tool succeed, and if not, what did it say?
@@ -613,6 +622,9 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
         "error".into(),
         "-y".into(),
     ];
+    if candidate == Pipeline::LibplaceboSoftware {
+        args[2] = "verbose".into();
+    }
     args.extend(candidate.device_args(encoder));
     args.extend(candidate.decode_args());
     args.push("-i".into());
@@ -1255,8 +1267,6 @@ mod tests {
         }
     }
 
-    /// A software encode has nothing to keep on the GPU — the frames would come
-    /// down for the encoder anyway — so no candidate is even run.
     /// A stock Homebrew ffmpeg ships without zscale (no libzimg), so the guard
     /// that reads this listing decides whether the CPU tone-map chain can run
     /// at all — and a substring match would say yes on a build that cannot.
@@ -1395,29 +1405,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_software_encoder_skips_the_probe_entirely() {
-        let dir = crate::test_tempdir().expect("workdir");
-        // Through the real entry point: a software encode must not reach the
-        // tools at all, so this cannot spawn anything.
+    async fn software_encoder_probes_only_software_frame_vulkan_against_cpu() {
+        let recorder = Recorder::new(vec![
+            (Pipeline::Cpu, Ok(sample(84.0, 4.0))),
+            (Pipeline::LibplaceboSoftware, Ok(sample(85.0, 2.0))),
+        ]);
+        let report = probe_candidates(Encoder::Software, |pipeline| {
+            std::future::ready(recorder.run(pipeline))
+        })
+        .await;
+        assert_eq!(report.selected(), Pipeline::LibplaceboSoftware);
         assert_eq!(
-            probe(dir.path(), dir.path(), Encoder::Software)
-                .await
-                .selected(),
-            Pipeline::Cpu
+            *recorder.asked.borrow(),
+            vec![Pipeline::Cpu, Pipeline::LibplaceboSoftware]
         );
-        let report = probe_with(&Recorded::default(), dir.path(), Encoder::Software).await;
-        assert_eq!(report.selected(), Pipeline::Cpu);
+    }
+
+    #[test]
+    fn software_vulkan_device_proof_refuses_cpu_driver_or_absent_identity() {
         assert!(
-            !report.ran,
-            "nothing was measured, so nothing may be claimed"
+            check_software_vulkan_device(b"Device Name: V3D 7.1.10.2\nDriver name: V3DV Mesa")
+                .is_ok()
         );
-        assert!(report.verdicts[0]
-            .rejected
-            .as_deref()
-            .unwrap_or_default()
-            .contains("software encoder"));
-        // And it did not leave a fixture behind on the way out.
-        assert!(!dir.path().join("hdr10-probe.mkv").exists());
+        assert!(check_software_vulkan_device(b"Device Name: llvmpipe (LLVM 19)").is_err());
+        assert!(check_software_vulkan_device(b"Device Name: SwiftShader Device").is_err());
+        assert!(check_software_vulkan_device(b"no device identity").is_err());
     }
 
     #[tokio::test]

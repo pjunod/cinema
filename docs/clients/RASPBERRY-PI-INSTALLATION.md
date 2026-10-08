@@ -1,6 +1,7 @@
 # Raspberry Pi installation — Docker by default, native by choice
 
-**Status:** open — installer and Pi namespace probe isolation implemented; qualification in progress · **Written:** 2026-10-07
+**Status:** open — installer merged; ordinary Docker entry-point integration
+and application qualification in progress · **Updated:** 2026-10-08
 
 Companion to [the decoder implementation](RASPBERRY-PI-IMPLEMENTATION.md)
 and [the live status](RASPBERRY-PI-STATUS.md). This plan closes the installation
@@ -10,14 +11,12 @@ the product. The commands below are the implementation contract until the
 status records their acceptance.
 
 Physical acceptance found that Raspberry Pi OS kernel
-`6.18.50+rpt-rpi-2712` omits `CONFIG_SECURITY_LANDLOCK`. Plurx's current protected
-FFprobe launcher requires Landlock, so server playback on that stock kernel
-fails before streaming even though request decoding and browser playback pass.
-Docker shares this host-kernel limitation. A compatible sandbox or kernel is
-still required; these commands do not yet establish a working stock-OS server.
-The Pi namespace backend below addresses this prerequisite without removing
-Landlock from other systems. The PR live status records implementation and
-complete acceptance evidence.
+`6.18.50+rpt-rpi-2712` omits `CONFIG_SECURITY_LANDLOCK`. The Pi-only namespace
+backend addresses that prerequisite without removing Landlock from other
+systems. Docker then exposed a separate procfs mount restriction; section 6
+records the narrow correction. The live status distinguishes merged source
+from actual application acceptance; these commands alone are not playback
+evidence.
 
 ## 1. Decision — containers are the default server deployment
 
@@ -78,6 +77,29 @@ that plan and `--yes` supports unattended installation. Run the command as
 the desktop user, invoking sudo only for package and system configuration.
 The browser never runs as root. `--dry-run` performs no package installation,
 download, service operation, configuration write or hardware probe.
+
+### Existing Compose installations
+
+`make docker-up` remains the server entry point for an existing checkout and
+its `deploy/.env` and Compose overrides. On a verified local ARM64 Raspberry Pi,
+it prepares the same Pi runtime used by `pi-setup`, adds the actual decoder
+devices and protected probe profile, and then starts the resolved Compose
+project. It preserves existing data paths, media mount destinations, ports and
+networks. It does not install or start the HDMI browser; use `pi-setup` for a
+new combined installation.
+
+Pi detection requires the local Linux Docker engine and the host device-tree
+compatible value. A remote Docker context is not configured from the client's
+hardware. `PLURX_DOCKER_GPU=manual` preserves manual GPU device selection;
+the required Pi decoder and probe runtime still accompany a verified Pi
+server. The read-only startup-budget check does not provision runtime assets.
+
+Compose preparation uses a caller-owned cache under
+`~/.cache/plurx/compose-pi` and a root-owned, hash-recorded profile generation
+under `/var/lib/plurx-compose-pi`. It reuses an existing protected profile when
+its contents match the required policy. It never overwrites an operator's
+different profile, relaxes container privileges or claims the existing stack
+as an installer-owned deployment.
 
 ## 3. Runtime and ownership contracts
 

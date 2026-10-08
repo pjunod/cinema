@@ -51,6 +51,9 @@ pub enum Pipeline {
     /// `PLURX_TONEMAP=libplacebo`; the probe is what turns a blind preference
     /// into a checked capability.
     Libplacebo,
+    /// Vulkan shaders with system-memory AVFrames on both sides. The filter
+    /// owns its uploads; no external Vulkan frame context is required.
+    LibplaceboSoftware,
     /// OpenCL, jellyfin-ffmpeg's portable alternate. Needs an explicit
     /// download after the map — `tonemap_opencl` outputs OpenCL surfaces the
     /// H.264 encoders cannot take directly.
@@ -118,6 +121,7 @@ pub const CANDIDATES: &[Pipeline] = &[
     Pipeline::LibplaceboVaapi,
     Pipeline::Libplacebo,
     Pipeline::TonemapOpencl,
+    Pipeline::LibplaceboSoftware,
     Pipeline::Cpu,
 ];
 
@@ -129,6 +133,7 @@ impl Pipeline {
             Pipeline::VppQsv => "vpp_qsv",
             Pipeline::TonemapVaapi => "tonemap_vaapi",
             Pipeline::Libplacebo => "libplacebo",
+            Pipeline::LibplaceboSoftware => "libplacebo_software",
             Pipeline::LibplaceboVaapi => "libplacebo_vaapi",
             Pipeline::TonemapOpencl => "tonemap_opencl",
             Pipeline::DoviTonemapx => "dovi_tonemapx",
@@ -157,6 +162,7 @@ impl Pipeline {
             Pipeline::VppQsv => "GPU tone-map (QSV)",
             Pipeline::TonemapVaapi => "GPU tone-map (VA-API)",
             Pipeline::Libplacebo => "GPU tone-map (Vulkan)",
+            Pipeline::LibplaceboSoftware => "GPU tone-map (Vulkan / CPU frame transfer)",
             Pipeline::LibplaceboVaapi => "GPU tone-map (Vulkan / VA-API)",
             Pipeline::TonemapOpencl => "GPU tone-map (OpenCL)",
             Pipeline::DoviTonemapx => "Dolby Vision reshape (tonemapx)",
@@ -191,6 +197,7 @@ impl Pipeline {
             Pipeline::VppQsv => encoder == Encoder::Qsv,
             Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => encoder == Encoder::Vaapi,
             Pipeline::Libplacebo | Pipeline::TonemapOpencl => encoder != Encoder::Software,
+            Pipeline::LibplaceboSoftware => encoder == Encoder::Software,
             // Software DECODE is non-negotiable and stays so: the HEVC
             // decoder is what attaches the DOVI frame side data that
             // `apply_dovi=1` consumes, and an inherited hardware decode drops
@@ -283,6 +290,7 @@ impl Pipeline {
             // uploads. Deriving decode flags here would fight `decode_setup`,
             // which knows things this type does not (source codec, bit depth).
             Pipeline::Libplacebo
+            | Pipeline::LibplaceboSoftware
             | Pipeline::TonemapOpencl
             | Pipeline::DoviTonemapx
             | Pipeline::DoviPassthrough
@@ -430,6 +438,12 @@ impl Pipeline {
                     format!("hwupload,{renderer},hwdownload,format=nv12")
                 }
             }
+            Pipeline::LibplaceboSoftware => {
+                // RGB conversion changes the matrix, not the source transfer or
+                // primaries. Preserve those tags so SDR is never stamped as PQ.
+                let tm = if hdr { ":tonemapping=bt.2390" } else { "" };
+                format!("format=rgba64le,setparams=colorspace=gbr,libplacebo=w={w}:h={height}{tm}:colorspace=gbr:color_primaries=bt709:color_trc=bt709:format=rgba,format=yuv420p")
+            }
             // tonemap_opencl maps only, so the scale stays on the CPU side of
             // it. Its output is an OpenCL surface no H.264 encoder takes, hence
             // the explicit download.
@@ -532,6 +546,7 @@ impl Pipeline {
             | Pipeline::VppQsv
             | Pipeline::TonemapVaapi
             | Pipeline::Libplacebo
+            | Pipeline::LibplaceboSoftware
             | Pipeline::LibplaceboVaapi
             | Pipeline::TonemapOpencl
             | Pipeline::DoviTonemapx
@@ -664,6 +679,7 @@ impl Pipeline {
                     | Pipeline::VppQsv
                     | Pipeline::TonemapVaapi
                     | Pipeline::Libplacebo
+                    | Pipeline::LibplaceboSoftware
                     | Pipeline::LibplaceboVaapi
                     | Pipeline::TonemapOpencl
             )
@@ -705,6 +721,30 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::domain::FieldOrder;
+
+    #[test]
+    fn software_frame_vulkan_route_preserves_transfer_and_reports_cpu_handoff() {
+        let pipeline = Pipeline::LibplaceboSoftware;
+        assert!(pipeline.pairs_with(Encoder::Software));
+        assert!(!pipeline.pairs_with(Encoder::Vaapi));
+        assert!(pipeline.on_gpu());
+        assert!(!pipeline.keeps_frames_off_the_cpu());
+        assert!(pipeline.device_args(Encoder::Software).is_empty());
+        assert!(pipeline.decode_args().is_empty());
+        assert_eq!(Pipeline::parse("libplacebo_software"), Some(pipeline));
+        for hdr in [None, Some("hdr10")] {
+            let graph = pipeline
+                .filters(Some(1280), 720, hdr)
+                .expect("software-frame Vulkan has a filter graph");
+            assert!(graph.starts_with("format=rgba64le,setparams=colorspace=gbr,"));
+            assert!(!graph.contains("hwupload"));
+            assert!(!graph.contains("hwdownload"));
+            assert!(!graph.contains("smpte2084"));
+            assert!(!graph.contains("color_primaries=bt2020"));
+            assert!(graph.ends_with("format=rgba,format=yuv420p"));
+            assert_eq!(graph.contains("tonemapping=bt.2390"), hdr.is_some());
+        }
+    }
 
     #[test]
     fn paired_devices_preserve_other_pipeline_encoder_contracts() {

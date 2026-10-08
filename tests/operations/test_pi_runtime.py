@@ -39,6 +39,58 @@ class PiRuntimeTests(unittest.TestCase):
         for capability in ("ac4", "dovi_rpu", "apply_dovi"):
             self.assertIn(capability, provider)
 
+    def test_compose_plan_is_scoped_and_selects_managed_runtime(self):
+        from unittest.mock import patch
+        args = types.SimpleNamespace(command="plan", prefix="/opt/plurx-runtime", role="server", server_runtime="docker", image_prefix="plurx-compose-pi-test")
+        with patch.object(runtime.subprocess, "check_output", return_value="a" * 40 + "\n"), patch.object(runtime, "device_configuration", return_value={"devices": [], "group_add": []}), patch.object(runtime, "run", side_effect=AssertionError("plan cannot build")):
+            service = runtime.prepare(args)["compose_service"]
+        self.assertEqual(service["image"], "plurx-compose-pi-test:local")
+        self.assertEqual(service["build"]["args"]["BASE_IMAGE"], "plurx-compose-pi-test-base:local")
+        self.assertEqual(service["build"]["context"], str(ROOT))
+        self.assertTrue(service["environment"]["PLURX_FFMPEG"].startswith("/opt/plurx-runtime/ffmpeg-8.1.3-pi-"))
+        self.assertTrue(service["environment"]["PLURX_FFPROBE"].endswith("/bin/ffprobe"))
+
+    def test_compose_image_prefix_rejects_tags_and_registry_paths(self):
+        from unittest.mock import patch
+        with patch.object(runtime.subprocess, "check_output", return_value="a" * 40):
+            for value in ("UPPER", "repo:tag", "registry/path", "", "-leading"):
+                with self.assertRaises(ValueError):
+                    runtime.compose_service(value)
+
+    def test_gpu_upgrade_does_not_reuse_request_only_runtime(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary)
+            old = prefix / ("ffmpeg-8.1.3-pi-" + runtime.MANIFEST["patch_sha256"][:16])
+            (old / "bin").mkdir(parents=True)
+            (old / "bin/ffmpeg").write_text("old request-only binary")
+            receipt = old / "share/doc/plurx-pi-runtime"
+            receipt.mkdir(parents=True)
+            (receipt / "identity").write_text(runtime.MANIFEST["jellyfin"]["sha256"] + runtime.MANIFEST["patch_sha256"])
+            with patch.object(runtime, "build_directory", side_effect=RuntimeError("new GPU compilation required")), patch.object(runtime, "validate_ffmpeg", side_effect=AssertionError("old binary cannot qualify")):
+                with self.assertRaisesRegex(RuntimeError, "new GPU compilation required"):
+                    runtime.build_ffmpeg(prefix)
+            self.assertEqual((old / "bin/ffmpeg").read_text(), "old request-only binary")
+
+    def test_gpu_runtime_cache_rejects_changed_private_library(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary)
+            destination = prefix / runtime.RUNTIME_NAME
+            paths = [destination / "bin/ffmpeg", destination / "bin/ffprobe", destination / "lib/libplacebo.so.349"]
+            for path in paths:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("original runtime artifact")
+            receipt = destination / "share/doc/plurx-pi-runtime"
+            receipt.mkdir(parents=True)
+            (receipt / "identity").write_text(runtime.RUNTIME_IDENTITY)
+            (receipt / "binaries.json").write_text(json.dumps({str(path.relative_to(destination)): runtime.sha(path) for path in paths}))
+            paths[-1].write_text("operator-modified library")
+            with patch.object(runtime, "validate_ffmpeg", side_effect=AssertionError("changed library must be rejected first")):
+                with self.assertRaisesRegex(RuntimeError, "binary identity changed"):
+                    runtime.build_ffmpeg(prefix)
+            self.assertEqual(paths[-1].read_text(), "operator-modified library")
+
     def test_uninstall_keeps_changed_and_unowned_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             prefix = Path(temporary) / "owned"
