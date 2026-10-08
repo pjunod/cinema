@@ -35,16 +35,37 @@ and FFmpeg exited `183` before producing a frame. The absent Java VM emitted
 a BD-J menu warning; menus are outside this release's scope and are not
 counted as the AACS failure.
 
+## Pinning both decryptors still did not produce a frame
+
+A follow-up offline run explicitly set both `LIBAACS_PATH` and
+`LIBBDPLUS_PATH` to `/usr/lib/libmmbd.so.0`. The first attempt denied the
+drive access MakeMKV requires; the second exposed an unwritable temporary
+MakeMKV state directory. Neither setup error is evidence about disc support.
+With normal raw-drive access, a writable disposable state directory, the
+same read-only UDF mount and no container network, MakeMKV completed BD+
+processing but its full scan still reported `Failed to open disc` and
+`TCOUNT:0`.
+
+The final FFmpeg attempt used those corrected conditions and selected the
+1:30:07 playlist from four candidates. LibMMBD reported successful
+initialization and BD+ processing, then libbluray reported
+`Unable decrypt unit (AACS)!` twice and FFmpeg exited `183` before a frame.
+This rules out an omitted `LIBBDPLUS_PATH` setting and an unwritable state
+directory as sufficient fixes for this disc. It does not prove whether the
+remaining failure is missing disc-specific key material, BD+ handling,
+drive behavior, or another reader interaction.
+
 ## What this evidence changes
 
 The expired September beta key is no longer the observed blocker. An installed
 LibMMBD library and a successful BD+ processing message are still insufficient:
 the physical reader must decode an actual title frame, then satisfy forward
-and backward seek and the existing VOD segment path. The next controlled
-experiment is a vendor-update-enabled lab only if the operator authorizes the
-possible disclosure of disc-derived identifiers to MakeMKV. The execution
-safety reviewer rejected that outbound test without this specific approval;
-it has not been attempted indirectly.
+and backward seek and the existing VOD segment path. The next reader
+investigation may use a different authorized key/decryption backend or a
+vendor-update-enabled lab. The latter requires operator approval for possible
+disclosure of disc-derived identifiers to MakeMKV. The execution safety
+reviewer rejected that outbound test without this specific approval; it has
+not been attempted indirectly.
 
 No fast-lane tests, adversarial merge review, release deployment, or main merge
 are implied by this source-reader investigation. The requested main-promotion
