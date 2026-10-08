@@ -1,0 +1,733 @@
+{
+  "schema": "m0-p81-nonidentity-affine-v1",
+  "result": "analytic-control-pass",
+  "scope": "Declared synthetic affine-luma P7/FEL reconstruction and repeated-curve discrimination; no picture/profile qualification",
+  "registration": {
+    "sha256": "d7d71c1aad9f1278e567a38589dc96bf1cc8b0f800b40c98a95d801c16821e9f",
+    "timing": "Declared original chronology from session command order: registration written before first CPU/encode/GPU measurements; no independently dated/signed witness. Fresh replay hash only checks within-replay stability",
+    "controls": {
+      "scope": "Synthetic affine-luma analytic control, not picture/profile qualification",
+      "registration_stage": "RPU fixtures generated; before CPU reconstruction, encode or GPU rendering",
+      "source_transform": "Luma g(x)=1/16+3*x/4; chroma identity; known EL rr=+/-16 codes",
+      "cpu_scalar_max_rgb_code_error": 0,
+      "encoder_max_yuv_code_error": 4,
+      "forward_inverse_ncl_max_code_error": 2,
+      "encoded_hdr10_vs_reconstructed_rgb_bound_derivation": "ceil(65535*5*(1/876+1.8814/896))+2; conversion allowance1 + compression cap4",
+      "gpu_vs_scalar_full_matrix_max_rgb_code_error": 3,
+      "gpu_vs_scalar_full_matrix_max_pq_error": 2e-05,
+      "deliberately_repeated_mapping_vs_once_min_max_rgb_code_separation": 1024,
+      "repeated_mapping_rejection_basis": "Incorrect retained affine curve changes already reconstructed HDR10 base; residual disabled in both P8 controls",
+      "independent_dv_picture_reference": null,
+      "p81_conformance": null
+    }
+  },
+  "recipe": {
+    "original_p7": "luma1/16+3x/4, chromaidentity, residualrr/1024",
+    "once_vdr12_luma": "256+3*BL_Y+4*rr; exact integer for these samples",
+    "correct_adapted_p81": "To81 then remove_mapping; identity curve/residual disabled",
+    "deliberately_wrong_p81": "Residual disabled; original luma affine curve restored onto already reconstructed encoded base"
+  },
+  "cpu": {
+    "scope": "Restricted supplied standard matrix; affine polynomial and declared linear residual; no approved Dolby oracle",
+    "result": "analytic-control-pass",
+    "results": [
+      {
+        "control": "reconstructed",
+        "max_code_error": 0,
+        "actual_sha256": "e0447575d024ce2455e4e7dd145bc7dab3748687f7db61e3f9f3cd731b86e873"
+      },
+      {
+        "control": "zero",
+        "max_code_error": 0,
+        "actual_sha256": "d4bbbd9854a5bdc7b2e52626630074d1631541d277d2f1dd81425a79d24f0791"
+      },
+      {
+        "control": "identity",
+        "max_code_error": 0,
+        "actual_sha256": "9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d"
+      }
+    ],
+    "p81_conformance": null
+  },
+  "hdr10": {
+    "scope": "analytic-control; standard matrix, no trims",
+    "declared_max_compression_yuv_code_error": 4,
+    "chroma_sample_location": "center; explicit point sampling",
+    "profile": "Main 10",
+    "source_to_yuv_max_code_error_vs_bt2020_ncl": 0,
+    "compression_yuv_max_code_error": 2,
+    "hdr10_decode_vs_analytic_inverse_ncl_max_rgb_code_error": 1,
+    "hdr10_decode_vs_reconstructed_max_rgb_code_error": 245,
+    "registered_arithmetic_rgb_bound_codes": 1065,
+    "bound_selection_timing": "Registered before CPU reconstruction, encode and GPU render; analytic mechanism control only, no picture quality qualification",
+    "bound_derivation": "ceil(65535*5*(1/876+1.8814/896))+2; conversion allowance1 + compression cap4",
+    "hdr10_decode_unchanged_after_rpu_insertion": true,
+    "p81_conformance": null,
+    "independent_dv_picture_reference": null,
+    "dv_enabled_render": null,
+    "result": "pass",
+    "verified_hdr10_tags": {
+      "profile": "Main 10",
+      "width": 64,
+      "height": 64,
+      "pix_fmt": "yuv420p10le",
+      "color_range": "tv",
+      "color_space": "bt2020nc",
+      "color_primaries": "bt2020",
+      "color_transfer": "smpte2084",
+      "chroma_location": "center"
+    },
+    "verified_frame_count": 4
+  },
+  "gpu": {
+    "scope": "Declared affine-luma synthetic control; full-matrix independent arithmetic, no independent DV picture reference",
+    "registered_limits_sha256": "d7d71c1aad9f1278e567a38589dc96bf1cc8b0f800b40c98a95d801c16821e9f",
+    "result": "analytic-control-pass",
+    "results": [
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 0,
+          "slope_integer": 1,
+          "slope_fraction": 0,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "0/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 0,
+        "control": "correct",
+        "stage": "reconstruction",
+        "max_pq_error": 8.809218989935808e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "1038750ee13b97655657e9c1579deb199ced3815cdef06974a6d22aed16d2219",
+        "rpu_sha256": "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+        "decoded_frame_sha256": "70fda9234d8b69eadf2853afe66131d6fe7816d0e837ea4f429129bfca585912"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 0,
+          "slope_integer": 1,
+          "slope_fraction": 0,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "0/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 0,
+        "control": "correct",
+        "stage": "rendered",
+        "max_pq_error": 8.809218989935808e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "1038750ee13b97655657e9c1579deb199ced3815cdef06974a6d22aed16d2219",
+        "rpu_sha256": "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+        "decoded_frame_sha256": "70fda9234d8b69eadf2853afe66131d6fe7816d0e837ea4f429129bfca585912"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 524288,
+          "slope_integer": 0,
+          "slope_fraction": 6291456,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "0/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 0,
+        "control": "wrong",
+        "stage": "reconstruction",
+        "max_pq_error": 6.856264092802711e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "c8e54f8fb170ceb27782f13066da50cdfc37cf948933ca7b5703d7fef93693eb",
+        "rpu_sha256": "6bb20ebc399557cf4766b802a0e93b21fa441ce6a1ceab92ed9a0f92c86dddac",
+        "decoded_frame_sha256": "70fda9234d8b69eadf2853afe66131d6fe7816d0e837ea4f429129bfca585912"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 524288,
+          "slope_integer": 0,
+          "slope_fraction": 6291456,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "0/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 0,
+        "control": "wrong",
+        "stage": "rendered",
+        "max_pq_error": 6.856264092802711e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "c8e54f8fb170ceb27782f13066da50cdfc37cf948933ca7b5703d7fef93693eb",
+        "rpu_sha256": "6bb20ebc399557cf4766b802a0e93b21fa441ce6a1ceab92ed9a0f92c86dddac",
+        "decoded_frame_sha256": "70fda9234d8b69eadf2853afe66131d6fe7816d0e837ea4f429129bfca585912"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 0,
+          "slope_integer": 1,
+          "slope_fraction": 0,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "1/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 1,
+        "control": "correct",
+        "stage": "reconstruction",
+        "max_pq_error": 8.809218989935808e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "89940418ab5fc7098a8f7d20e582901f51f156040257646cdc49f45ce175aed7",
+        "rpu_sha256": "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+        "decoded_frame_sha256": "9674001558b8245694ac0b8a1d8b737abe03c21adf5cb0978079857342ac523b"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 0,
+          "slope_integer": 1,
+          "slope_fraction": 0,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "1/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 1,
+        "control": "correct",
+        "stage": "rendered",
+        "max_pq_error": 8.809218989935808e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "89940418ab5fc7098a8f7d20e582901f51f156040257646cdc49f45ce175aed7",
+        "rpu_sha256": "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+        "decoded_frame_sha256": "9674001558b8245694ac0b8a1d8b737abe03c21adf5cb0978079857342ac523b"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 524288,
+          "slope_integer": 0,
+          "slope_fraction": 6291456,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "1/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 1,
+        "control": "wrong",
+        "stage": "reconstruction",
+        "max_pq_error": 6.856264092802711e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "dec898db2e1430a5c5fc3bc4d8a2af75c1f83302e012b3933420d7af8ea79a6e",
+        "rpu_sha256": "16ea07fdf270e5b4d47b28f6ca11c8a4d8a9daad5678c5a2106864c25811717c",
+        "decoded_frame_sha256": "9674001558b8245694ac0b8a1d8b737abe03c21adf5cb0978079857342ac523b"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 524288,
+          "slope_integer": 0,
+          "slope_fraction": 6291456,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "1/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 1,
+        "control": "wrong",
+        "stage": "rendered",
+        "max_pq_error": 6.856264092802711e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "dec898db2e1430a5c5fc3bc4d8a2af75c1f83302e012b3933420d7af8ea79a6e",
+        "rpu_sha256": "16ea07fdf270e5b4d47b28f6ca11c8a4d8a9daad5678c5a2106864c25811717c",
+        "decoded_frame_sha256": "9674001558b8245694ac0b8a1d8b737abe03c21adf5cb0978079857342ac523b"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 0,
+          "slope_integer": 1,
+          "slope_fraction": 0,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "2/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 2,
+        "control": "correct",
+        "stage": "reconstruction",
+        "max_pq_error": 8.809218989935808e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "d1fd1a591da9ace89bb3de18243a0c7605ddc391e53b8068efb86e681b92429b",
+        "rpu_sha256": "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+        "decoded_frame_sha256": "19dcd89e6c33bbbf80f2d9f4f6f0e9eb3a91ec659f00cea19790eee0202a3152"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 0,
+          "slope_integer": 1,
+          "slope_fraction": 0,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "2/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 2,
+        "control": "correct",
+        "stage": "rendered",
+        "max_pq_error": 8.809218989935808e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "d1fd1a591da9ace89bb3de18243a0c7605ddc391e53b8068efb86e681b92429b",
+        "rpu_sha256": "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+        "decoded_frame_sha256": "19dcd89e6c33bbbf80f2d9f4f6f0e9eb3a91ec659f00cea19790eee0202a3152"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 524288,
+          "slope_integer": 0,
+          "slope_fraction": 6291456,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "2/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 2,
+        "control": "wrong",
+        "stage": "reconstruction",
+        "max_pq_error": 6.856264092802711e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "62737e184858ae3f3b18bdcfd1f99d0595a5e8ec2ea96d18c7fb8e450c0857b9",
+        "rpu_sha256": "fa55d080e60cc3fefe671ac467a3232e83a2b73ab2b983355d930418bbe42695",
+        "decoded_frame_sha256": "19dcd89e6c33bbbf80f2d9f4f6f0e9eb3a91ec659f00cea19790eee0202a3152"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 524288,
+          "slope_integer": 0,
+          "slope_fraction": 6291456,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "2/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 2,
+        "control": "wrong",
+        "stage": "rendered",
+        "max_pq_error": 6.856264092802711e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "62737e184858ae3f3b18bdcfd1f99d0595a5e8ec2ea96d18c7fb8e450c0857b9",
+        "rpu_sha256": "fa55d080e60cc3fefe671ac467a3232e83a2b73ab2b983355d930418bbe42695",
+        "decoded_frame_sha256": "19dcd89e6c33bbbf80f2d9f4f6f0e9eb3a91ec659f00cea19790eee0202a3152"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 0,
+          "slope_integer": 1,
+          "slope_fraction": 0,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "3/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 3,
+        "control": "correct",
+        "stage": "reconstruction",
+        "max_pq_error": 8.178876053421824e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "abbd34130a0c308b288b2d912e8f9075f617f821f78cd8935c6b0dbda9c02904",
+        "rpu_sha256": "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c",
+        "decoded_frame_sha256": "c3aee480261f631897516ef9f1e27d060b204a274bd5aa3c6476d9f8eacb3d8a"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 0,
+          "slope_integer": 1,
+          "slope_fraction": 0,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "3/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 3,
+        "control": "correct",
+        "stage": "rendered",
+        "max_pq_error": 8.178876053421824e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "abbd34130a0c308b288b2d912e8f9075f617f821f78cd8935c6b0dbda9c02904",
+        "rpu_sha256": "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c",
+        "decoded_frame_sha256": "c3aee480261f631897516ef9f1e27d060b204a274bd5aa3c6476d9f8eacb3d8a"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 524288,
+          "slope_integer": 0,
+          "slope_fraction": 6291456,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "3/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 3,
+        "control": "wrong",
+        "stage": "reconstruction",
+        "max_pq_error": 5.7367600531654794e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "7cdc8878fa9aed0188f5a84441223b1e19d51edf525a1a291af7e8b02a3de393",
+        "rpu_sha256": "aa46758b5243864f4f2de5539f71db0ff5336f8cf814ed9cc4a8292a69821927",
+        "decoded_frame_sha256": "c3aee480261f631897516ef9f1e27d060b204a274bd5aa3c6476d9f8eacb3d8a"
+      },
+      {
+        "consumed_bytes_verified": true,
+        "actual_parsed_luma_curve": {
+          "constant_integer": 0,
+          "constant_fraction": 524288,
+          "slope_integer": 0,
+          "slope_fraction": 6291456,
+          "denominator": 8388608
+        },
+        "actual_frame_event": {
+          "kind": "frame",
+          "case": "zero",
+          "pts": "3/24",
+          "duration": "1/24",
+          "el_bound": false,
+          "nlq_active": false,
+          "rpu_parsed": true,
+          "direct_dispatch_ok": true,
+          "render_ok": true,
+          "render_errors": 0,
+          "qualified_fel": false
+        },
+        "frame": 3,
+        "control": "wrong",
+        "stage": "rendered",
+        "max_pq_error": 5.7367600531654794e-06,
+        "max_rgb_code_error": 1,
+        "output_sha256": "7cdc8878fa9aed0188f5a84441223b1e19d51edf525a1a291af7e8b02a3de393",
+        "rpu_sha256": "aa46758b5243864f4f2de5539f71db0ff5336f8cf814ed9cc4a8292a69821927",
+        "decoded_frame_sha256": "c3aee480261f631897516ef9f1e27d060b204a274bd5aa3c6476d9f8eacb3d8a"
+      }
+    ],
+    "repeated_mapping_negative": [
+      {
+        "frame": 0,
+        "wrong_vs_correct_max_rgb_code_delta": 2962,
+        "wrong_vs_once_scalar_max_rgb_code_error": 2962,
+        "once_scalar_control_rejects_wrong_output": true
+      },
+      {
+        "frame": 1,
+        "wrong_vs_correct_max_rgb_code_delta": 2944,
+        "wrong_vs_once_scalar_max_rgb_code_error": 2943,
+        "once_scalar_control_rejects_wrong_output": true
+      },
+      {
+        "frame": 2,
+        "wrong_vs_correct_max_rgb_code_delta": 2944,
+        "wrong_vs_once_scalar_max_rgb_code_error": 2943,
+        "once_scalar_control_rejects_wrong_output": true
+      },
+      {
+        "frame": 3,
+        "wrong_vs_correct_max_rgb_code_delta": 2943,
+        "wrong_vs_once_scalar_max_rgb_code_error": 2943,
+        "once_scalar_control_rejects_wrong_output": true
+      }
+    ],
+    "p81_conformance": null,
+    "reference_fidelity_improvement": null
+  },
+  "association": {
+    "scope": "Synthetic exact recipes/AUD association; no P8.1 container/device conformance",
+    "result": "analytic-control-pass",
+    "results": [
+      {
+        "control": "correct",
+        "frame": 0,
+        "rpu_sha256": "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+        "luma_curve": "identity",
+        "residual_disabled": true
+      },
+      {
+        "control": "correct",
+        "frame": 1,
+        "rpu_sha256": "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+        "luma_curve": "identity",
+        "residual_disabled": true
+      },
+      {
+        "control": "correct",
+        "frame": 2,
+        "rpu_sha256": "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+        "luma_curve": "identity",
+        "residual_disabled": true
+      },
+      {
+        "control": "correct",
+        "frame": 3,
+        "rpu_sha256": "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c",
+        "luma_curve": "identity",
+        "residual_disabled": true
+      },
+      {
+        "control": "wrong",
+        "frame": 0,
+        "rpu_sha256": "6bb20ebc399557cf4766b802a0e93b21fa441ce6a1ceab92ed9a0f92c86dddac",
+        "luma_curve": "1/16+3x/4",
+        "residual_disabled": true
+      },
+      {
+        "control": "wrong",
+        "frame": 1,
+        "rpu_sha256": "16ea07fdf270e5b4d47b28f6ca11c8a4d8a9daad5678c5a2106864c25811717c",
+        "luma_curve": "1/16+3x/4",
+        "residual_disabled": true
+      },
+      {
+        "control": "wrong",
+        "frame": 2,
+        "rpu_sha256": "fa55d080e60cc3fefe671ac467a3232e83a2b73ab2b983355d930418bbe42695",
+        "luma_curve": "1/16+3x/4",
+        "residual_disabled": true
+      },
+      {
+        "control": "wrong",
+        "frame": 3,
+        "rpu_sha256": "aa46758b5243864f4f2de5539f71db0ff5336f8cf814ed9cc4a8292a69821927",
+        "luma_curve": "1/16+3x/4",
+        "residual_disabled": true
+      }
+    ],
+    "actual_container_pts": null
+  },
+  "unsupported_matrix": {
+    "exit_code": 1,
+    "output_refused": true
+  },
+  "unsupported_trims": {
+    "exit_code": 1,
+    "output_refused": true,
+    "fixture": "L2 default neutral trim block; all L2 presence unsupported"
+  },
+  "runtime": {
+    "cpu_image": "sha256:46f56803b5908f91a626ad2bad328a42b9a53cbf09aec6bb5743a294fcbca98a",
+    "gpu_image": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+    "dependencies_verified": true,
+    "provenance": "Exact reviewed source/header/library snapshot hashes with matching pinned-source build receipt fields; actual caller-supplied image IDs/platform checked, not runtime attestation",
+    "cpu_prerequisite_receipt_sha256": "d9f2345c8a93ae7ecacef60ab36839c7b47ae676b7c8534e1f738fd25e46a472",
+    "gpu_prerequisite_receipt_sha256": "ce791d8b5ce6222ed5bd50a9193f7126d6a2e617b8a501533671ebeeffdf6c1a",
+    "cpu_platform": "linux/amd64",
+    "gpu_platform": "linux/arm64",
+    "client_system": "Darwin",
+    "client_architecture": "arm64",
+    "execution_mode": null,
+    "rustc": "1.97.1",
+    "cpus": 2,
+    "memory_bytes": 2147483648
+  },
+  "replay": {
+    "command": "bash replay.sh NEW_SCRATCH CPU_REPLAY_ROOT PARSED_GPU_REPLAY_ROOT",
+    "dependencies": "Prepared pinned CPU source/staticlib and GPU parser/libplacebo prefix from previous source-only replay bundles",
+    "dependency_verification": "Exact scoped source/staticlib/header/sharedlibrary/link inventory enforced before and after copying. Matching prerequisite receipt schema/toolchain/pin/library/image fields checked; entire prerequisite receipt hashes recorded but not compared with historical lock receipt hashes. Actual Docker image/platform checked; retained dependencies, rebuilt probes/fixtures",
+    "public_pins": {
+      "DoViBaker": "ffba39830b694ddca0bf5f73dcf1b462713bb7f4",
+      "libdovi": "83e1fdad6dcd5995556235946e7c5c0f9010d5a1",
+      "libplacebo": "0d043c7f6f79cd3687c023454bdacbe615e4d96f"
+    },
+    "lock": "resolved-Cargo.lock; recorded workspace/CAPI/dev graph resolution, not pristine upstream --locked claim",
+    "scope": "New scratch only; previous bundle source/dependencies read-only; no production service/install"
+  },
+  "synthetic_static_metadata": {
+    "max_cll": 1000,
+    "max_fall": 400,
+    "mastering_max_nits": 1000,
+    "mastering_min_nits": 0.005,
+    "measured": false,
+    "note": "Synthetic constants/tags, no mastering or content analysis claim"
+  },
+  "limitations": [
+    "Only declared single affine luma curve, identity chroma and supplied fixed standard matrix coefficients",
+    "Original CPU processor omits rgb_to_lms; source domain restriction remains mandatory",
+    "Creative trims, MMR, other depths, metadata reuse and general authoring unsupported here",
+    "Detecting deliberate repeated affine shaping does not certify general metadata adaptation",
+    "P8 GPU receives paired decoded YUV/explicit RPU and frame index; no demux/container DV configuration proof",
+    "Elementary stream timing uses synthetic manifest24/1; original encoded P7 BL/EL pairing separate"
+  ],
+  "independent_dv_picture_reference": null,
+  "p81_conformance": null,
+  "reference_fidelity_improvement": null,
+  "real_time_performance": null
+}

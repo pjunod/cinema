@@ -30,7 +30,7 @@ DV-off validation. Current playback keeps its compatible fallback.
 
 | Milestone | State | Evidence still required |
 |---|---|---|
-| M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction and synthetic P8.1 authoring retained with replay recipes | Encoded P7 association/reorder, nonidentity authoring acceptance, independent reference limits and full graph resource evidence |
+| M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction, encoded-layer association and bounded affine P8.1 authoring retained with replay recipes | Seek/VFR/discontinuity and metadata-reuse acceptance, general metadata adaptation, independent reference limits and full graph resource evidence |
 | M1 typed contracts | Not started | Backend operation boundaries established by M0 |
 | M2 processing and lifecycle | Not started | Qualified graph, bounded ownership and timestamped adapter |
 | M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
@@ -152,6 +152,13 @@ development gate passed in run 4509. Its interrupted attempts have
 all retained successes preserve their original attribution. This development
 gate is not a main-promotion or playback qualification receipt.
 
+The first backend bundles merged as PR #924 after run 4511 passed Python,
+Rust, web, Apple and Android checks. Windows cross-compilation exceeded its
+30-minute limit; the aggregate gate therefore remained red. The user explicitly
+waived Windows validation for this Dolby Vision work on 2026-10-08, and that
+exception is recorded in the PR and landing message. Windows is not claimed
+to pass, and the other validation requirements remain in force.
+
 ## 5. Retained backend and authoring controls
 
 The [first backend controls](DV_HDR_BACKEND_CONTROLS.md) retain source pins,
@@ -170,13 +177,65 @@ image assumptions.
 These are bounded synthetic experiments. The first authoring fixture has
 identity reshaping; it does not prove general protection against applying a
 nonlinear curve twice. Same-renderer DV-on/off differences are not independent
-Dolby reference errors. Encoded P7 BL/EL/RPU association, decoder reordering,
+Dolby reference errors. The separately reviewed encoded-layer experiment
+below now establishes bounded BL/EL/RPU display association and reordering.
+Seeking, variable frame rate, discontinuities, legitimate metadata reuse,
 creative target mapping, general destination validity and whole-graph
-performance remain open. The next Sol experiments address nonidentity
-reshaping and actual dual-layer decoding separately; their results need review
-before entering this ledger as accepted evidence.
+performance remain open. The separately reviewed affine authoring control
+below detects repeated reshaping for its declared subset; arbitrary nonlinear
+adaptation and general profile conformance remain unqualified.
 
 The CPU matrix-invariance and GPU bounded-residual-clipping findings remain
 explicit unsupported-domain limits. No product route inherits capability from
 a successful build or a source library's feature list. HDR10-E is still the
 planned badge for qualified actual processing, and compatible fallbacks remain.
+
+
+## 6. Encoded dual-layer association and rendering
+
+The [decoded-layer controls](DV_HDR_DECODED_LAYER_CONTROLS.md) retain the
+pinned FFmpeg decoder/splitter source recipe, six-picture BL/EL fixtures,
+actual rational container timing, fresh-RPU association and accepted-frame
+renderer bridge. Independent review approved the final source and evidence
+inventories after a clean replay: 17 association, 11 dependency-identity and
+13 renderer corruption controls pass. All 120 arithmetic comparisons agree
+within one RGB48 code, with identical reordered/no-reorder output hashes.
+
+Missing enhancement payloads fail at the decoder reference chain; missing or
+swapped RPU cases can decode and then fail association. Each negative must
+match its exact expected failure stage and diagnostic. The deliberately
+missing-RPU fixture retains stale parsed base-layer metadata without fresh raw
+RPU bytes, so metadata presence alone cannot establish current-frame acceptance.
+Legitimate reuse remains untested and must not inherit this fixture's policy.
+
+Every rendered result binds the current accepted decoded pictures, actual RPU,
+parsed fixture identity, timestamps, duration and typed processing flags.
+The dependency lock verifies source evidence before copying and the copied
+library/header identities and linker symlinks before and after copying. These checks establish the bounded synthetic
+operation; they do not establish a Dolby oracle, general conformance, creative
+mapping, physical quality or production fallback. M0 remains partial.
+
+
+## 7. Affine reconstruction and repeated-reshape discrimination
+
+The [nonidentity authoring controls](DV_HDR_NONIDENTITY_CONTROLS.md) retain a
+known affine luma map plus a known residual, independent integer CPU and
+matrix/curve GPU equations, a separately checked encoded HDR10 base and a
+deliberately incorrect P8.1 mapping. Correct metadata applies identity shaping
+to the already reconstructed base; retaining the original affine curve is
+rejected against the once-mapped reference.
+
+CPU reconstruction agrees exactly; GPU comparison differs by at most one
+RGB48 code. The deliberately repeated curve differs by 2,943–2,962 codes.
+These values establish the synthetic mechanism, not a movie-quality gain.
+The fixed standard-matrix restriction remains mandatory; creative trims and
+general nonlinear adaptation are outside the admitted subset.
+
+The fresh full replay and final package have separate source manifests. The
+post-replay delta changes provenance wording and absent-empty-directory
+packaging handling/tests, not CPU/GPU scientific stages. Independent review
+verified both manifests, all 212 ledger entries and the final 16 replay-contract
+controls. Repository copies also pass 16 scientific and six injector controls.
+The original limit-selection chronology remains session-declared, without an
+independently dated witness. No general P8.1 conformance, independent Dolby
+picture reference, physical performance or product qualification is inferred.

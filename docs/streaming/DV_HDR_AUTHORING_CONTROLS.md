@@ -22,8 +22,9 @@ The original P7 fixture has **identity reshaping**. The experiment therefore
 cannot detect double application of arbitrary nonlinear reshaping. Adapted
 metadata disables the residual and retains the fixture's identity mapping;
 that is narrower than authoring valid metadata for an arbitrary reconstructed
-movie. Nonidentity reshaping is the next authoring control, not a completed
-acceptance item.
+movie. The separate [affine authoring control](DV_HDR_NONIDENTITY_CONTROLS.md)
+now detects repeated reshaping for its declared subset; general nonlinear
+authoring acceptance remains open.
 
 ## 2. Read the numerical evidence
 
@@ -128,10 +129,16 @@ its picture and metadata association checks. Fresh isolated replays passed.
 
 ## 5. Work still required
 
-- Encode and decode real synthetic P7 BL/EL access units with actual rational
-  timestamps, RPU association, reordering and missing/malformed controls.
-- Exercise nonidentity reshaping through reconstruction and destination
-  metadata adaptation, independently checking both DV-on and DV-off pictures.
+The reviewed [decoded-layer follow-on](DV_HDR_DECODED_LAYER_CONTROLS.md)
+adds actual compressed BL/EL/RPU association and B-frame reordering. The
+[affine follow-on](DV_HDR_NONIDENTITY_CONTROLS.md) adds a bounded nonidentity
+reshape and a deliberately repeated-mapping negative, with separate HDR10-base
+checks. Neither expands this original bundle's own evidence.
+
+- Complete seeking, variable frame rate, discontinuity and metadata-reuse
+  acceptance beyond the six-picture initial-read controls.
+- Establish general nonlinear destination metadata adaptation beyond the
+  declared affine subset.
 - Establish target mapping, supported creative metadata, independent references
   and container/profile validity for each admitted operation.
 - Measure matched-rate quality and full-graph resource costs on representative
