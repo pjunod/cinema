@@ -33,7 +33,7 @@ after compilation. A missing qualification row stays open; it is not converted t
 
 | Workstream | Owner | State | Evidence or next dependency |
 |---|---|---|---|
-| Integration and status | Manager | active | Separate continuation clone now integrates landed main `339abbced` and native parser `35f7a8cf6`; pinned Rust 1.97.1 available on native macOS and isolated Linux |
+| Integration and status | Manager | active | Separate continuation clone integrates landed main `339abbced`, normalized native admission and ordinary finite HEVC preference through `b4bc77b54`; final combined review remains pending |
 | M0 runtime / M1 FFmpeg packaging | Sol native builder | integrated | Official Jellyfin `v8.1.3-1` arm64 package acquired and checksum verified; `e193b0670`: checksum-pinned complete official package; 38 required declarations; SDR/Metal smoke evidence |
 | M0/M1 measurement harness | Sol harness builder | integrated; revised HDR measured | `44050ab2a`: inventory/run CLI; five valid SDR pairs show 87.80% lower CPU cost and +0.71% throughput on synthetic material |
 | M1 embedded smoke corpus | Sol fixture builder | integrated; sustained sources built | `0cd06e92b`: three 320×180, 12-frame clips, 8,846 aggregate bytes; repeat generation hashes match; separate synthetic 60-second 4K sources |
@@ -41,8 +41,8 @@ after compilation. A missing qualification row stays open; it is not converted t
 | M3 probes / manager / settings | Sol fixture and harness builders | integrated; independent review accepted | `532e78d5f`: bounded probe module; `93658e211`: registered all-targets compile and normal hook passed; isolated settings, repair/restart and actual SDR/HDR VOD bytes observed |
 | M6 acceptance / main promotion | Manager and builders | isolated daemon evidence recorded; full acceptance open | Initial reviewed source `575a68abc` landed through #882; continuation review and available acceptance work remain active |
 | E1 Dolby package / proof | Sol Dolby builder | final package/client source integrated; graph controls passed | `a542ab140` integrated in `6978c9a5d`: strict P5 color semantics, client transport claims and reproducible final package. Forty-eight graph controls and eight flush controls pass; raw software/hardware planes match; final AC-4 sample matches original. Strict production integration remains active |
-| M4 normalized VOD | Sol native parser builder | parser integrated; daemon qualification pending | `35f7a8cf6` integrated in `d1683a682`: capability-limited Jellyfin FFprobe, signing preflight, packaged discovery, held-source/cache ownership; exact check/hook passed |
-| E1 HLG / E2–E4 routes | Sol route and Dolby builders | HEVC foundation integrated; P5/Live TV building | `432a617c2` integrated in `7fa940953`: additive HEVC candidates, immutable codec recovery and separate host/native observations; final producer qualification and P5/Live TV integration remain active |
+| M4 normalized VOD | Sol native parser builder | native delivery observed; comparison diagnosis active | Isolated signed `46f31ec6e` daemon delivered 48 native 1440p frames and preserved an active recipe across settings changes. Disabled CPU reference was refused by the experiment’s two-thread budget versus eight requested; normal resource configuration is being corrected. Final-source timing remains pending |
+| E1 HLG / E2–E4 routes | Sol route and Dolby builders | HEVC and Live TV integrated; strict P5 building | `432a617c2` integrated in `7fa940953` supplies HEVC; `74aa40592` integrated in `d403ee6ea` supplies Live upload, moving-field guards and the pinned BWDIF repair. Strict P5 integration and final producer qualification remain active |
 
 Jellyfin FFmpeg is the required implementation baseline. Local Homebrew
 FFmpeg is not a comparison target or substitute. The official package is an
@@ -103,10 +103,10 @@ received and acknowledged the full user instruction packet.
 | Harness builder | `scripts/bench-macos-video`, `scripts/macos_video_bench/`, focused harness test source |
 | Fixture builder | `crates/plurxd/fixtures/macos-processing/`, fixture generator and focused fixture test source |
 
-The initial files above are committed. Initial application ownership was; the
-active continuation ownership is recorded in §9:
+The initial files above are committed. The next table records the initial
+application ownership; active continuation ownership is recorded in §9:
 
-| Owner | Current exclusive ownership |
+| Owner | Initial application ownership |
 |---|---|
 | Native builder | Core `transcode/{pipeline,decode,mod,vod,recipe}.rs`, associated core regressions and decoder-selection test source; atomic exhaustive daemon metric/count-array rows |
 | Harness builder | Daemon main registration, transcode manager construction/planning/recovery, subsequent diagnostics, settings HTTP and Developer UI integration; one stored-key constant and reprobe route registration |
@@ -314,10 +314,10 @@ Separate scope does not imply that implementation or qualification is done.
 | E2-01 · implementation §9.2 | Native scale/tone-map then CPU subtitle burn at output resolution | Foundation integrated: bounded SDR/HDR processing-before-burn smokes produced output; PGS half-alpha timing observed. Full benefit/semantics evidence remains open |
 | E2-02 | GPU compositing of prepared text/bitmap images | Follow-up only if beneficial; keep libass shaping/fonts and explicit alpha/color semantics |
 | E2-03 | PGS color, ASS animation/position, active-cue seek, EOF/free intervals and cancellation | Follow-up acceptance; no new HDR burn policy |
-| E3-01 · implementation §9.3 | Hardware BWDIF where supplied; separately judged YADIF alternative | File-source foundation integrated: exact Jellyfin BWDIF TFF/BFF frame/field smokes produced expected 12/24-frame cadence and correct VUI. Live integration remains active |
-| E3-02 | Native Live TV plan, frame/field cadence, rational rate, bitrate and manifests | Building through existing LiveTvTranscodePlan; rational cadence/bitrate/manifest integration remains required |
+| E3-01 · implementation §9.3 | Hardware BWDIF where supplied; separately judged YADIF alternative | Integrated pinned parameter-buffer repair and shared moving-field acceptance: eight raw CPU/native, twelve encoded positive and four old-package negative controls retained. Earlier cadence-only proof is explicitly limited |
+| E3-02 | Native Live TV plan, frame/field cadence, rational rate, bitrate and manifests | Integrated in existing LiveTvTranscodePlan: captured package/executable, independent upload graphs, native cadence and incumbent audio/caption/bitrate/manifest ownership. Actual daemon lifecycle qualification is being prepared |
 | E3-03 | 1080i TFF/BFF, 720p59.94, A/53, late audio, AC-4, reconnect/stop/start | Follow-up hardware/delivery matrix |
-| E3-04 | Scoped live `-a53cc 0` and caption-bearing VOD limitation | Follow-up or explicit supported-scope exclusion; live success is not file-caption repair |
+| E3-04 | Scoped live `-a53cc 0` and caption-bearing VOD limitation | Existing scoped live behavior retained in native upload plan; no claim to repair caption-bearing file VOD |
 | E4-01 · implementation §9.4 | HEVC SDR and HDR10 Main10 output separately | Integrated in `432a617c2`: separate host/native graph observations, additive AVC/HEVC candidates and exact selected-codec restoration. Actual finite producer/manifest qualification remains pending; continuous AVC envelope remains unchanged |
 | E4-02 | Explicit HEVC output setting with advisory Developer readiness | Integrated in `e83de7e99`: independent saved choice accepted on every platform, graph/delivery readiness advisory; production negotiated route and graduation evidence remain open |
 | E4-03 | Actual HDR presentation, metadata semantics, no implicit Dolby passthrough | Follow-up; preserve existing VOD B-frame policy and promised output grade |
@@ -694,3 +694,73 @@ processing. The builders are tracing that exact admissibility boundary.
 A subsequent control request returned 400; the experimental driver protocol
 is being corrected separately. Neither result is counted as final-candidate
 playback qualification.
+
+### 9.6 Live moving-field check exposes a pinned filter defect
+
+Twelve tiny upload/scale/BWDIF cases and four paced 1080i TFF/BFF cases passed
+geometry, cadence and static gray checks. A subsequent independently generated
+moving-field pattern did not preserve the expected BFF/second-field artwork.
+Those earlier receipts therefore establish execution and cadence only; they
+do not qualify motion/parity correctness.
+
+The pinned `vf_bwdif_videotoolbox.m` binds its parameter buffer at Metal index
+4, while the shader declares parameters at buffer index 0. Texture indices
+use a separate namespace. The corrected binding passes eight raw CPU/native motion comparisons and
+twelve encoded motion controls across ordinary file and Live TV graphs. Four
+negative controls reject the older package using the same final motion guard.
+The runtime observations now include that moving-field check. Broken native BWDIF
+must remain unavailable even when static patches and timestamps pass.
+
+A new immutable native package will carry the correction; the existing
+`85b1ab41…` package and its strict P5/AC-4 receipts remain unchanged and
+hash-bound. Only affected controls are repeated during repair. Final runtime
+qualification will identify the corrected artifact rather than silently
+attributing old binary results to it. Progressive upload/scale is independently
+observed and does not borrow interlace acceptance.
+
+### 9.7 Effective encoder and actual native normalized delivery
+
+The normalized profile correction is committed as `656407c0f`, integrated
+by `46f31ec6e`. Its pinned core check and normal workspace hook passed. The
+ordinary finite HEVC preference correction is `e3034c73d`, integrated by
+`b4bc77b54`; it uses the existing selection owner and saved HEVC preference,
+without requiring the separate display-aware Auto switch. It preserves exact
+requested candidates, existing cache/sustainability decisions and the AVC
+continuous family. Unit execution remains with the coordinator.
+
+A subsequent daemon run still chose CPU because the existing Auto encoder
+benchmark selected software x264, despite valid VT capability. That is a
+distinct encoder-policy boundary, not failure of the normalized geometry fix.
+The controlled hardware-path run uses the existing documented VideoToolbox
+preference, with normal probes/source admission intact. Developer advice is
+being updated to expose the effective-encoder prerequisite. The new processing
+and HEVC preferences do not override an explicit software encoder.
+
+With that preference, the signed `46f31ec6e` daemon selected the actual native
+normalized graph and delivered 48 decoded 1440p frames. An active session kept
+its captured candidate/media after the processing switch changed; a new
+disabled plan selected CPU processing. The disabled CPU reference times out before producing initialization bytes,
+even after releasing the original session. Existing producer diagnostics
+establish the cause: the experiment configured a two-thread software pool,
+but the 4K CPU-decode route requests eight threads. Admission reports
+`over_budget=true`, and no FFmpeg child starts. The driver is correcting that
+ordinary resource setting; production admission and deadlines stay unchanged.
+The previous timeouts remain evidence of configured-budget refusal, not a
+hardware-capacity limit. Full final-candidate qualification remains in progress.
+
+### 9.8 Live TV and corrected-package integration
+
+`74aa40592`, integrated by `d403ee6ea`, freezes independently observed upload
+graphs through the existing Live TV plan, captures the exact executable and
+package identity, and revalidates before launch/warm publication. Unknown
+source facts retain incumbent behavior. The existing lifecycle owns
+cancellation, reconnect and format-change recovery; no watchdog was added.
+
+The same commit includes the minimal pinned BWDIF binding correction, moving
+field controls for ordinary and Live graphs, encoded square-pixel P5 fixtures,
+local versioned dependency source offers and expanded Developer advice.
+The final pinned workspace all-target check passed in 16.42 seconds; the
+normal hook passed catalog, formatting, Clippy and 77 served JavaScript files
+in 1 minute 41 seconds. No unit tests ran. The supplementary combined-package
+archive retains exact positive/negative controls and selected P5 refreshes;
+actual daemon Live TV start/stop/reconnect remains separate work in progress.

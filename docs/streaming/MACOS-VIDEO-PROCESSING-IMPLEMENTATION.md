@@ -489,6 +489,15 @@ binary or claim notarization. Final acceptance covers the copied hardened
 package, missing/wrong companion, metadata/AC-4 parity, source mutation,
 read cancellation, malformed-module limits and the existing decode deadline.
 
+The first copied release package at `d1683a682` makes the size trade-off
+concrete: the signed daemon is 162,704,784 bytes under the repository's thin
+LTO/line-tables release profile, and the parser is 15,311,140 bytes. The whole
+local bundle is approximately 648 MiB, including approximately 369 MiB of
+retained native/parser source and license provenance. These are early package
+measurements, not a baseline-relative size increase or final release size.
+Representative parser compilation/execution and actual daemon acceptance are
+recorded separately in the [evidence](MACOS-VIDEO-PROCESSING-EVIDENCE.md).
+
 ## 8. M5 — integrate HDR10 processing without widening Dolby routing
 
 **Deliverable:** enabled native/Metal HDR10-to-SDR processing in the same
@@ -610,6 +619,16 @@ encoder options, pipeline pairing, presentation facts, manifests, container
 handling, cluster offers and cache identity together. Keep H.264 compatibility
 fallback negotiated through existing delivery policy.
 
+The effective encoder remains owned by existing hardware-acceleration policy.
+These native paths require VideoToolbox; the processing and HEVC preferences
+do not override an explicit software encoder or Auto selecting software.
+The early actual-daemon experiment observed Auto choosing software despite
+working VT capability. Controlled qualification uses the existing explicit
+VideoToolbox preference (`PLURX_HWACCEL=videotoolbox` seeds the normal stored
+choice). Developer advice must show this prerequisite. The existing Auto
+encoder benchmark does not establish complete decode/filter/encode cost; this
+effort does not silently replace that policy with a Mac-specific workaround.
+
 **Client contract chosen during implementation:** add optional
 `DeviceCaps.hls_hevc_sample_entries: Option<Vec<String>>`. A present list has
 at most two distinct lowercase entries, `hvc1` and/or `hev1`; absent or empty
@@ -677,15 +696,15 @@ in for Mac hardware or client qualification.
 
 ## 11. Validation commands and evidence format
 
-For this documentation-only proposal:
+The work is now implementation. Per the user-directed workflow in §1,
+builders compile and lint without running unit suites. The designated merge
+coordinator owns final regression and fast-lane execution after independent
+review and repairs. Documentation-only updates use `git diff --check`; they
+do not independently trigger unit execution.
 
-```bash
-python3 -m unittest discover -s tests/operations -p 'test_docs_index.py'
-git diff --check
-```
-
-For implementation, use the verified pinned compiler. These are starting
-commands, not permission to skip affected checks selected by the workflow:
+Use the verified pinned compiler for build feedback. The test commands below
+are coordinator starting points, not evidence of execution or permission to
+skip checks selected by the workflow:
 
 ```bash
 rustc --version
@@ -698,8 +717,9 @@ cargo test --locked -p plurxd macos_processing
 node --test tests/web/settings-sections.test.js
 ```
 
-The `macos_processing` filters refer to tests to be added; require a nonzero
-executed count and list their fully qualified names in the PR. Broaden to
+The `macos_processing` filters are illustrative. Use the concrete regression
+anchors from the final commit/PR packet, require a nonzero executed count and
+record their fully qualified names and results. Broaden to
 existing pipeline, recipe, VOD, recovery and settings regressions appropriate
 to the changes. Use `make unit-core` or `--features hiqlite-store` whenever
 storage behavior is covered. Run real-FFmpeg/hardware ignored tests explicitly
