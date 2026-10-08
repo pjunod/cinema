@@ -980,8 +980,10 @@ Current verification follows §6's amended policy; physical bars remain open.
 
 - Historical milestone receipts below used `make unit`; current ready-Rust
   policy is [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md)'s 2026-10-07
-  amendment: all-target compilation and workspace/vendor Clippy, full units
-  manual. Retain applicable per-PR positives; execute only failed, new or
+  amendment: all-target compilation and workspace/vendor Clippy in ready
+  Rust, with full `ci.yml` qualification manual or release-tag triggered.
+  Configured coverage independently executes workspace units on `main`
+  pushes. Retain applicable per-PR positives; execute only failed, new or
   actually invalidated checks. This docs-only reconciliation runs no unit
   or discovery sweep. For this architecture continuation, the coordinator
   hands merge-ready work to the batching owner;

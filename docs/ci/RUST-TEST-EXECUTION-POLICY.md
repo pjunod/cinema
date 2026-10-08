@@ -19,8 +19,9 @@ presents the options with their measured and estimated cost; **§7 records
 Paul's decisions.** The 2026-09-20 option (a) implementation and its original
 receipts remain historical below. Paul's 2026-10-07 amendment in `a3162e446`
 supersedes its lane placement: ready Rust compiles all targets and runs
-workspace/vendor Clippy; full Rust/SQLite units remain in manually dispatched
-`ci.yml`. No recurring runtime schedule was added. M1's missing Forgejo
+workspace/vendor Clippy. Full `ci.yml` qualification remains manual or
+release-tag triggered; configured coverage independently executes workspace
+units on `main` pushes. No recurring runtime schedule was added. M1's missing Forgejo
 comparison is an accepted infrastructure deviation; its actually executed
 source-only fallback remains relative sizing evidence. M2's unrecovered
 throwaway-unit negative is an accepted historical gap, not an executed pass
@@ -530,8 +531,9 @@ produce a meaningful lane-cost measurement.
 1. **Execution policy, dated history:** Paul selected option (a) on
    2026-09-20: workspace Clippy and `make unit` in the ready-PR lane. Paul
    superseded that placement on 2026-10-07 in `a3162e446`: ready Rust runs
-   all-target compile and workspace/vendor Clippy; full Rust/SQLite suites
-   are manual. The original evidence is retained, not relabelled current.
+   all-target compile and workspace/vendor Clippy. Full `ci.yml` qualification
+   is manual or release-tag triggered; configured coverage independently
+   executes workspace units. The original evidence is retained, not relabelled current.
 2. **Schedule, image publication, notification:** no schedule, so these
    option-(b) questions are not applicable to P-01.
 3. **Node version:** CI asserts Node 22. Local diagnosis also ran Node 26;
@@ -566,13 +568,28 @@ Rust 1.97.1/FFmpeg 6.1.1, with core 1,146 passed/0 failed and daemon
 Aggregate job 27982/task 10556 was genuinely successful. These retained
 raw outcomes close the ready-head provenance gap without replaying them.
 
+An additional retained **pre-`a3162e446` historical unit-negative** is
+[#847](http://forge.lan:3000/noirr/plurx/pulls/847), API run 4301/display
+4280, ready attempt 1 at `831da491`: Rust job 43928/task 16528 genuinely
+failed units, and aggregate job 43933/task 16569 failed at 2026-10-07
+20:59:19 UTC with `Job rust_compile failed`. Its raw unit log SHA-256 is
+`e1670d641b325cc45328413a3832452a8d75d6181fe378e11d66deda3b3624f5`;
+the 859-byte gate log is
+`29f13ca02ad1339e02b0c43adbef5e03736f90dcdf0844f900407a219277c58b`.
+This is real old-policy fail-closed evidence, not the literal M2 throwaway
+negative, current compile-only acceptance, a repair pass, or new execution.
+
 **Current failure repair is open.** Configured coverage API 4340/display
 4319, job 44252/task 16617, checked out `c8884f6` and ended exit 101 at
 2026-10-08 00:33:53 UTC: 88 ordinary failed records plus one separate
 stack-overflow/SIGABRT test identity make **89 observed adverse IDs**.
 The daemon produced no final summary, so this is not a complete census.
 Original #847 job 43928 maps 40 of those IDs to actual passes and 49 to
-actual failures. Those 49 remain a recorded unresolved cohort, not proof
+actual failures. Its complete core/daemon summaries contain 51 ordinary
+failures in total (core 1; daemon 50), including two additional direct
+shared-source cases absent from aborted coverage: `sharing_source_direct_range_matches_local_serve_file_range`
+and `sharing_source_direct_symlink_or_resized_file_refuses`. Absence from
+that aborted run is not a pass. The overlapping 49 remain a recorded unresolved cohort, not proof
 that every later `main` has exactly 49 failures. New repair source or a
 passing Darwin diagnostic does not establish the failing Linux result.
 Do not hide this queue in the empty catalog or mark whole-plan Done.
