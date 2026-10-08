@@ -4947,3 +4947,182 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
 source_anchor = "mutableStateOf<RemoteTrackMenuKind?>(null)"
 test = "tests/operations/test_playback_surface_fence.py"
 test_anchor = "test_the_android_player_carries_no_pre_contract_surface_write"
+
+[[fixes]]
+id = "apple.cinema-owned-couch-navigation"
+commits = ["512fac49526aa501c4f31ef339ab20cd9e482f42"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "destinations.count < 8"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testOwnedDestinationBackRouteReplacementAndLateDisposalStayScoped"
+
+[[fixes]]
+id = "apple.cinema-couch-native-realization"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func attachDestination("
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testOwnedDestinationBoundsAndRealizationRequireCurrentNativeFocus"
+
+[[fixes]]
+id = "apple.cinema-couch-choice-admission"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "if let refused = entry.admission() { return refused }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testStaleCapturedPreplaySelectRejectsBeforeActionAndCannotCloseReplacementModal"
+
+[[fixes]]
+id = "apple.cinema-couch-choice-source"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "let source = RemoteOwnedChoiceSource(token: UUID(), epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testRefreshedPreplaySourceAndReplacedPanelRejectCapturedChoice"
+
+[[fixes]]
+id = "apple.cinema-couch-registration-refresh"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "func updateUIView(_ uiView: UIView, context: Context) { update() }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testRealRegistrationRefreshesVersionClosureAtUnchangedButtonGeometry"
+
+[[fixes]]
+id = "apple.cinema-couch-dismiss-fallback"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "requestFocus(old.opener.flatMap"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testPhysicalDestinationDismissRestoresAvailableFallbackWhenOpenerRemoved"
+
+[[fixes]]
+id = "apple.cinema-couch-episode-retry"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "defer { episodePlayAttempt.finish(attempt) }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testEpisodeContextChangeRetiresLoadingAndAllowsFreshRetryWithoutClearingReplacement"
+
+[[fixes]]
+id = "apple.cinema-couch-wire-negative-zero"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteWire.swift"
+source_anchor = "guard Array(token) != [45, 48]"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testNegativeZeroRejectedByCommandAndProductionNestedPollDecoder"
+
+[[fixes]]
+id = "apple.cinema-couch-state-budget"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteAPI.swift"
+source_anchor = "static let maximumBytes = 48 * 1_024"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testNormalizedPresenceBudgetPreservesExactIDsAndTransport"
+
+[[fixes]]
+id = "apple.cinema-couch-publisher-revision"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "func makeState(pairingRestricted: Bool)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testProductionPresenceRevisionAdvancesAcrossPairingOpenPendingExpiredAndClose"
+
+[[fixes]]
+id = "apple.cinema-couch-pairing-surface"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "challenge = nil; pairingExpired = true; guardState.invalidate()"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testTVPairSurfaceCloseReplacementAndExpiredCodeRetireOldReplies"
+
+[[fixes]]
+id = "apple.cinema-couch-pairing-deadline"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemotePairingLifetime.swift"
+source_anchor = "return now >= start && now < deadline"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testPhonePairingMonotonicDeadlineRejectsLateApprovalBeforeSave"
+
+[[fixes]]
+id = "apple.cinema-couch-command-ack-order"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemotePairingLifetime.swift"
+source_anchor = "func known(epoch: UUID, sequence: UInt64)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testExactAckBefore202CannotReturnToPendingOrCrossCommandOwner"
+
+[[fixes]]
+id = "apple.cinema-couch-deferred-permit"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteReceiverGuard.swift"
+source_anchor = "now < value.creditDeadline"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testDeferredReservationOriginalDeadlinePhysicalRetirementAndNoReplay"
+
+[[fixes]]
+id = "apple.cinema-couch-late-resource-cleanup"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemotePlaybackAdapter.swift"
+source_anchor = "let task = Task { await cleanup() }"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testLateSharedOfferCleanupRunsAfterPermitExpiryWithoutRendererMutation"
+
+[[fixes]]
+id = "apple.cinema-couch-shared-start-retry"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "remoteRetryRequiresPreparation = true"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testRejectedInitialRemoteStartAllowsFreshRequestAndExpiredRetryNeverDispatches"
+
+[[fixes]]
+id = "apple.cinema-couch-shared-stop-cleanup"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func beginStop(watched: Bool = false) -> Task<Void, Never>"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testLocalStopExitRemainsUsableWhileOwnedCleanupOutlivesCommandDeadline"
+
+[[fixes]]
+id = "apple.cinema-couch-shared-owned-exit"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "guard modal == nil, presentations.isEmpty else { return .unsupported }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testOwnedSharedPresentationExitProtectsUnderlyingDetailAndReplacement"
+
+[[fixes]]
+id = "apple.cinema-couch-pending-owned-exit"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "replacingPending: [.stop, .back, .home].contains(command.action.type)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testOwnedBackHomeCanReplacePendingNetworkPermitWithoutReplayingIt"
+
+[[fixes]]
+id = "apple.cinema-couch-stationary-physical-action"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func performPhysicalAction(_ action: () -> Void)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testStationarySharedPhysicalActionRetiresNetworkAuthorityBeforeTransportEffect"
