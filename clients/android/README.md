@@ -20,8 +20,9 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `157` — Shared-library playback and controls;
-> not yet installed on hardware.
+> Status: **v0.3.0**, build `158` — Shared-library playback and controls;
+> QR scanner setup waits for a tap, so a scanner failure does not crash the
+> connection screen. Not yet installed on hardware.
 > Build `149` — Live TV station logos: the list rows,
 > grid headers, programme details, picture badge and fullscreen overlay draw
 > the guide's station artwork from the shared `station_logo` rule, fetched

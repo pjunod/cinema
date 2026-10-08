@@ -102,13 +102,6 @@ fun ConnectScreen(vm: AppViewModel, busy: Boolean, error: String?) {
     var permissionDenied by rememberSaveable { mutableStateOf(false) }
     var qrError by rememberSaveable { mutableStateOf<String?>(null) }
     val formFactor = currentFormFactor()
-    val qrScanner = remember(context) {
-        val options = GmsBarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .enableAutoZoom()
-            .build()
-        GmsBarcodeScanning.getClient(context, options)
-    }
     val canScanQr = formFactor != FormFactor.Television &&
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
 
@@ -184,20 +177,28 @@ fun ConnectScreen(vm: AppViewModel, busy: Boolean, error: String?) {
             TvOutlinedButton(
                 onClick = {
                     qrError = null
-                    qrScanner.startScan()
-                        .addOnSuccessListener { barcode ->
-                            val scannedOrigin = connectionOriginFromQr(barcode.rawValue.orEmpty())
-                            if (scannedOrigin == null) {
-                                qrError = "That QR code doesn't contain a valid Cinema server address."
-                            } else {
-                                url = scannedOrigin
-                                showManual = true
-                                vm.connect(scannedOrigin)
+                    try {
+                        val options = GmsBarcodeScannerOptions.Builder()
+                            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                            .enableAutoZoom()
+                            .build()
+                        GmsBarcodeScanning.getClient(context, options).startScan()
+                            .addOnSuccessListener { barcode ->
+                                val scannedOrigin = connectionOriginFromQr(barcode.rawValue.orEmpty())
+                                if (scannedOrigin == null) {
+                                    qrError = "That QR code doesn't contain a valid Cinema server address."
+                                } else {
+                                    url = scannedOrigin
+                                    showManual = true
+                                    vm.connect(scannedOrigin)
+                                }
                             }
-                        }
-                        .addOnFailureListener {
-                            qrError = "QR scanning is unavailable. You can still enter the server manually."
-                        }
+                            .addOnFailureListener {
+                                qrError = "QR scanning is unavailable. You can still enter the server manually."
+                            }
+                    } catch (_: RuntimeException) {
+                        qrError = "QR scanning is unavailable. You can still enter the server manually."
+                    }
                 },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
