@@ -4381,3 +4381,45 @@
             assert!(!rendition.dir.path().join(segment_name(0)).exists(), "no retired bytes published");
         }
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_output_survives_retirement_and_manifest_contention() {
+        use crate::vodgen::Sink;
+        let temp = crate::test_tempdir().expect("completion fixture");
+        let serve = bare_serve(temp.path());
+        let mut rendition = synthetic_rendition(temp.path()).await;
+        let path = temp.path().join("source.bin");
+        tokio::fs::write(&path, b"held source version").await.expect("source");
+        let source = crate::fragment_index_cluster::open_source_fence(&media_file_at(path, 10_000), None)
+            .await.expect("held source");
+        let owned = Arc::get_mut(&mut rendition).expect("unshared fixture");
+        owned.source = Some(source);
+        *owned.identity.get_mut() = IdentityState {
+            identity: Some(InitIdentity { muxer_init: "muxer".into(), served_init: "served".into(), promotion: Default::default() }),
+            from_disk: false,
+        };
+        let admissions = crate::admission::Admissions::new();
+        let permit = admissions.try_acquire(1, crate::admission::Priority::Background).expect("background permit");
+        let child = tokio::process::Command::new("sleep").arg("60").kill_on_drop(true).spawn().expect("child");
+        let job = crate::process_control::ChildJob::attach(&child).expect("job");
+        let (registration, writers) = rendition.slot.attach_registered_job_owned(child, job, 0, Some(Box::new(permit))).await;
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition), epoch: 0, retirement: registration.retirement() };
+        let completion = DeferredCompletionSink::new(&sink);
+        for entry in 0..rendition.plan.len() {
+            completion.materialize(entry as u32, vec![7; 1000 + entry]).await.expect("committed output");
+        }
+        let manifest = rendition.manifest.lock().await;
+        rendition.slot.request_registered_retirement(&registration).await.expect("retirement");
+        tokio::time::timeout(Duration::from_secs(2), completion.completed_output()).await.expect("trailer does not wait on manifest");
+        assert!(completion.completed.load(Acquire));
+        writers.settled();
+        tokio::time::timeout(Duration::from_secs(2), registration.wait_confirmed_reap()).await.expect("writer and child settle before completion metadata");
+        assert!(!admissions.background_is_active());
+        let proof = sink.completed_output();
+        tokio::pin!(proof);
+        assert!(futures_util::poll!(&mut proof).is_pending(), "proof waits for the temporary reader instead of disappearing");
+        drop(manifest);
+        tokio::time::timeout(Duration::from_secs(2), proof).await.expect("completion resumes");
+        assert!(rendition.output_measurement.lock().expect("measurement").complete_rates().is_some(), "retirement did not discard a verified complete trailer");
+    }

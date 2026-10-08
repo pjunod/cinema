@@ -387,13 +387,12 @@ failures.
 
 ## clients/ — Apple, Android, and the web player
 
-[Android playback repair status](clients/ANDROID-PLAYBACK-REPAIR-STATUS.md) — **open**; physical-device failures, root causes and delivery progress.
-
 The native clients and the web UI: parity trackers, the input contract every
 player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [Android playback repair status](clients/ANDROID-PLAYBACK-REPAIR-STATUS.md) | Physical-device failures, root causes and delivery progress. | open |
 | [Ready-video recovery build note](apple-builds/888-ready-video-recovery.md) | Apple build claim and viewer-visible black-picture recovery changes for PR #888. | built |
 | [APPLE-BLACK-VIDEO-IMPLEMENTATION.md](clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md) | Avatar and HDR10 black-video investigation, verified false-frame evidence defects, item-bound presentation repair and physical acceptance limits. | open |
 | [RASPBERRY-PI-IMPLEMENTATION.md](clients/RASPBERRY-PI-IMPLEMENTATION.md) | Build contract for existing Plurx server and web HDMI playback on Pi 5: request decoding, browser evidence, deployment and acceptance. | open |

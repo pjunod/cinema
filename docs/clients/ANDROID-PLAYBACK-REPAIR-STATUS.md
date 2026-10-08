@@ -1,6 +1,6 @@
 # Android playback repair — device failures and delivery progress
 
-**Status:** investigating and implementing · **Updated:** 2026-10-08
+**Status:** review addressed; compiling final candidate · **Updated:** 2026-10-08
 
 Companion to [Android parity](ANDROID-CLIENT-PARITY.md): repairs the native
 TCL and Lenovo playback failures and Razr video geometry and playback menus.
@@ -37,6 +37,12 @@ Work uses an independent agent clone and one combined main-bound PR.
   reaped but admission never releases. A generation-owned retirement signal
   now cancels only queued publication-lock acquisition. In-progress writes
   and accounting still finish before the writer settles and permits release.
+
+The combined draft is PR #915. The single adversarial review confirmed the
+lock cycle and found a completion-proof race under retirement contention.
+The existing generation owner now records the genuine trailer immediately and
+applies completion metadata after confirmed writer/process settlement. A second
+regression holds the manifest through reap and checks that proof survives.
 
 The native release builds and the pinned Rust 1.97.1 compiler loop works.
 The repaired release is installed on the Razr; visual verification awaits its

@@ -322,6 +322,13 @@ pub(super) async fn spawn_generation(
                 tracing::warn!(target: "plurxd::vodserve",%error,"generation retirement was superseded")
             }
         }
+        // Completion is metadata about already-settled writes. It may wait
+        // for the manifest only after the reaper has released the writer's
+        // resources and any cleanup owner can release its publication gate.
+        let (outcome, completed) = outcome;
+        if let Some(sink) = completed {
+            vodgen::Sink::completed_output(&sink).await;
+        }
         let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
         if !diagnostic.informational.is_empty() {
             tracing::debug!(target: "plurxd::vodserve", rendition = %key, generation = epoch, informational = %diagnostic.informational, "VOD producer informational output");
@@ -545,7 +552,7 @@ async fn run_generation(
     at: u32,
     epoch: u64,
     retirement: tokio_util::sync::CancellationToken,
-) -> Option<Outcome> {
+) -> (Option<Outcome>, Option<RenditionSink>) {
     let mut stdout = stdout;
     let need_pre_read = {
         let identity = rendition.identity.lock().await;
@@ -558,13 +565,16 @@ async fn run_generation(
         // stream (it verifies the init itself before a single write).
         match read_muxer_init(&mut stdout).await {
             Err(error) => {
-                return Some(Outcome::Failed(Failure::Stream(format!(
-                    "reading the generation's init: {error}"
-                ))));
+                return (
+                    Some(Outcome::Failed(Failure::Stream(format!(
+                        "reading the generation's init: {error}"
+                    )))),
+                    None,
+                );
             }
             Ok((consumed, muxer)) => {
                 if let Err(outcome) = establish_or_verify(&rendition, &muxer).await {
-                    return Some(outcome);
+                    return (Some(outcome), None);
                 }
                 Box::new(std::io::Cursor::new(consumed).chain(stdout))
             }
@@ -579,7 +589,7 @@ async fn run_generation(
             // The pre-read established it, or the rendition already had it;
             // reaching here without one is the pre-read having purged and
             // bailed, which returns above.
-            None => return None,
+            None => return (None, None),
         }
     };
     let generation = Generation {
@@ -610,8 +620,10 @@ async fn run_generation(
         epoch,
         retirement,
     };
-    let outcome = vodgen::run(src, generation, &sink, &rendition.key).await;
-    Some(outcome)
+    let completion = DeferredCompletionSink::new(&sink);
+    let outcome = vodgen::run(src, generation, &completion, &rendition.key).await;
+    let completed = completion.completed.load(Acquire);
+    (Some(outcome), completed.then_some(sink))
 }
 
 /// The identity half of a pre-read generation. `false` means the generation
@@ -1126,6 +1138,33 @@ pub(super) fn verify_reserved_publication(
     Ok(())
 }
 
+/// The pipe writer reports the verified trailer without taking publication
+/// locks. Its existing owner applies the completion metadata after confirmed
+/// reap, so temporary contention cannot lose proof or hold encoder admission.
+pub(super) struct DeferredCompletionSink<'a> {
+    sink: &'a RenditionSink,
+    pub(super) completed: AtomicBool,
+}
+
+impl<'a> DeferredCompletionSink<'a> {
+    pub(super) fn new(sink: &'a RenditionSink) -> Self {
+        Self {
+            sink,
+            completed: AtomicBool::new(false),
+        }
+    }
+}
+
+impl vodgen::Sink for DeferredCompletionSink<'_> {
+    async fn completed_output(&self) {
+        self.completed.store(true, Release);
+    }
+
+    async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> io::Result<()> {
+        self.sink.materialize(entry, bytes).await
+    }
+}
+
 impl RenditionSink {
     /// Retirement can hold a publication gate while joining this writer.
     /// Abandon a queued lock acquisition when that exact generation retires,
@@ -1205,13 +1244,7 @@ impl vodgen::Sink for RenditionSink {
         if !recipe_engine_is_current(&self.rendition.recipe).await {
             return;
         }
-        // A completed trailer may record its proof after retirement when the
-        // manifest is available; it must not wait behind its own reaper.
-        let manifest = tokio::select! {
-            biased;
-            manifest = self.rendition.manifest.lock() => manifest,
-            _ = self.retirement.cancelled() => return,
-        };
+        let manifest = self.rendition.manifest.lock().await;
         // Only vodgen's verified normal trailer reaches this callback. The
         // driver may already have retired an all-done child, but that cannot
         // invalidate its successfully published bytes. The observer still
