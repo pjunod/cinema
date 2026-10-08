@@ -687,6 +687,7 @@ async fn run_streaming(
             return Err(error);
         }
     };
+    let watched_source = resources.source.clone();
     let (registration, writers) = reservation.attach_registered_job_owned(
         encoded.child,
         encoded.child_job,
@@ -704,6 +705,7 @@ async fn run_streaming(
             _ = cancel.cancelled() => { helper_cancel.cancel(); if let Some(slot) = slot.upgrade() { let _ = slot.request_registered_retirement(&watched).await; } helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
             _ = watched.wait_confirmed_reap() => { helper_cancel.cancel(); helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
         };
+        let helper_result = helper_result.and_then(|()| check_source(&watched_source));
         let failed = helper_result.is_err();
         let _ = completed.send(helper_result);
         if failed || cancel.is_cancelled() {
