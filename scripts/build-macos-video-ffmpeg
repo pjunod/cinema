@@ -231,6 +231,24 @@ def verify_strict_options(executable, evidence):
     (evidence / "decoder-hevc.txt").write_text(decoder_help)
 
 
+def verify_prepared_subtitle_options(executable, evidence, patches):
+    """New prepared contract only; official portable baseline remains supported."""
+    if "0004-prepare-and-composite-videotoolbox-subtitles.patch" not in patches:
+        return False
+    expected = {"subtitles_vt_images": {"font_provider"},
+                "subtitles": {"font_provider"},
+                "overlay_videotoolbox": {"ass", "bitmap"}}
+    for name, options in expected.items():
+        text = run([str(executable), "-hide_banner", "-h", "filter=" + name])
+        declared = set(re.findall(r"^\s+(\w+)\s+<", text, re.MULTILINE))
+        if not re.search(r"^Filter " + re.escape(name) + r"$", text, re.MULTILINE) or not options <= declared:
+            raise ValueError("prepared GPU subtitle contract lacks filter/options: " + name)
+        if "font_provider" in options and not re.search(r"^\s+fontconfig\s", text, re.MULTILINE):
+            raise ValueError("prepared subtitle contract lacks explicit Fontconfig authority")
+        (evidence / ("filter-" + name + ".txt")).write_text(text)
+    return True
+
+
 def attach_source_parser(package, stage, evidence):
     """Copy only the explicit exact-source parser and inspectable provenance."""
     manifest_path = package / "provenance/manifest.json"
@@ -398,6 +416,8 @@ def main():
             receipt.pop("binary_archive_sha256")
             receipt["checksum_authority"] = "pinned source and local compiled binary digests"
             verify_strict_options(stage / "ffmpeg", evidence)
+            if verify_prepared_subtitle_options(stage / "ffmpeg", evidence, receipt["compiled_source"]["local_patches"]):
+                receipt["capabilities"]["filters"]["subtitles_vt_images"] = "declared"
             receipt["patch_digest"] = hashlib.sha256(json.dumps({
                 "jellyfin": receipt["patch_digest"], "local": receipt["compiled_source"]["local_patches"]
             }, sort_keys=True).encode()).hexdigest()
