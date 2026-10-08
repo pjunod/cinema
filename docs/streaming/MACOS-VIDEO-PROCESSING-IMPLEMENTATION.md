@@ -28,6 +28,17 @@ wording below and the earlier instruction against parallel agents. It changes
 execution, not color correctness, metadata, runtime compatibility or evidence
 requirements. Never use the user's checkouts for this work.
 
+**Merge handoff amendment:** the user assigned final queueing, batched test
+execution and main merging to
+[Coordinate PR merge batches](codex://threads/01a11907-f720-71b1-8c51-89902b919e6f).
+This effort prepares the integrated PR, performs the adversarial review and
+addresses findings, then hands off exact commits, regression commands, review
+dispositions and evidence/limitations. Do not duplicate the coordinator's unit
+test runs or merge independently. The coordinator handles superficial test
+fixes without behavior changes; failures needing behavior changes return to
+the implementation effort for a reviewed fix. This later amendment supersedes
+any instruction below assigning final test/merge execution to this manager.
+
 Use one `effort/macos-video-processing` integration branch created from the
 current intended main base, with `codex/macos-video-*` builder branches.
 Parallel work has explicit disjoint file ownership; shared planner and argv
