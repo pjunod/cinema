@@ -1,6 +1,6 @@
 # Cinema remotes — setup, recovery and acceptance
 
-**Status:** implementation setup guide; end-to-end and physical acceptance open ·
+**Status:** reviewed software setup; live native and physical acceptance open ·
 **Updated:** 2026-10-08.
 
 Use the [status ledger](TV-REMOTE-AND-COMPANION-STATUS.md) to identify reviewed

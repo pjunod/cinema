@@ -2,8 +2,10 @@
 
 This document answers how the native B09 adapters enroll notifications, handle a
 cold-launch tap and stop resident work without taking over the existing media or
-reminder services. It is an open build contract; native invitation delivery is not yet
-qualified. Use the home B09 packet's frozen invitation API reference as the exact wire
+reminder services. It records the implemented contract; the
+[status ledger](TV-REMOTE-AND-COMPANION-STATUS.md) identifies reviewed source and
+remaining acceptance. Physical native invitation delivery is not yet qualified.
+Use the [home invitation API](TV-REMOTE-INVITATIONS-API.md) as the exact wire
 contract. Build each platform after its couch packet freezes. The Apple native builder
 owns clients/apple; the Android couch builder continues with clients/android invitations
 in a new isolated branch/worktree. Ownership includes each platform's source, build,

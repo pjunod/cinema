@@ -1,7 +1,7 @@
 # Cinema remote implementation — build packets for Sol 6.1
 
-**Status:** ready for staged implementation; hardware acceptance open ·
-**Written:** 2026-10-07 · **Source base:** `8e242787c` · **Manager/reviewer:**
+**Status:** software implemented; final integration and hardware acceptance open ·
+**Written:** 2026-10-07 · **Original source base:** `8e242787c` · **Manager/reviewer:**
 parent session · **Builders:** GPT-6.1 Sol agents.
 
 Read [the user experience](TV-REMOTE-AND-COMPANION-PLAN.md), then
@@ -334,7 +334,7 @@ Official constraints:
 
 ## 9. Review findings become concrete acceptance, not erased history
 
-| Original finding | Build decision | Evidence still required |
+| Original finding | Build decision | Acceptance check |
 |---|---|---|
 | R1 privilege escalation | Same-account grants plus semantic action allowlist; no admin routes/modals | Attempts through arrows/Select and locally opened admin modal |
 | R2 undefined expiry clock | Receiver-issued nonce credits with receiver-local monotonic deadlines | Delayed delivery cannot alter focus; clock offset irrelevant |
