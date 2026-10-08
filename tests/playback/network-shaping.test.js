@@ -19,7 +19,7 @@ const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 
 const lab = require("../../scripts/playback-lab");
 
@@ -629,99 +629,342 @@ test("client probes are captured without credentials and TTFF drives scheduled c
   });
 });
 
-test("device-run defaults to Auto quality, writes evidence, and restores the app", async () => {
-  await withTempDir(async (directory) => {
-    await withOrigin(1, async (origin) => {
-      const launches = [];
-      const json = path.join(directory, "device-evidence.json");
-      const evidence = await lab.deviceRunCommand({
-        device: "physical-device-17",
-        target: origin,
-        public_host: "127.0.0.1",
-        file_id: "42",
-        item_id: "17",
-        network_profile: "8mbps-to-1mbps-to-350kbps",
-        json,
-      }, {
-        createShaper: (profile, target, options) => new lab.ShapingProxy(profile, target, {
-          ...options, listenHost: "127.0.0.1",
-        }),
-        launchDevice: (args) => launches.push(["launch", ...args]),
-        restoreDevice: (args) => launches.push(["restore", ...args]),
-        waitForAcceptance: async (shaper) => {
-          shaper.captureClientLog({
-            event: "playback_probe", file_id: 42, snapshot: { runway: 4.75 },
-          });
-          return { reason: "test-complete", event: null };
-        },
-      });
+function deviceRunFixture(directory) {
+  const canonical = "F7CEB1BB-0000-0000-0000-000000000001";
+  const diagnosticScope = "file:///private/containers/DIAG/Diagnostic.app/";
+  const productionScope = "file:///private/containers/PROD/plurx.app/";
+  const rows = new Map([[10, { processIdentifier: 10, executable: `${productionScope}plurx` }]]);
+  const calls = [];
+  const state = { rows, calls, canonical, diagnosticScope, productionScope };
+  const reply = (fields) => ({ result: { deviceIdentifier: canonical, ...fields } });
+  const command = async (args) => {
+    calls.push([...args]);
+    if (args[1] === "info" && args[2] === "apps") return reply({ apps: [
+      { bundleIdentifier: "tv.plurx.diagnostic", url: diagnosticScope },
+      { bundleIdentifier: "tv.plurx.app", url: productionScope },
+    ] });
+    if (args[1] === "info" && args[2] === "processes") return reply({ runningProcesses: [...rows.values()] });
+    if (args[2] === "terminate") {
+      if (state.terminateError) throw new Error("termination unavailable");
+      if (!state.noopTerminate) rows.delete(Number(args[args.indexOf("--pid") + 1]));
+      return reply({});
+    }
+    if (args[2] === "launch") {
+      const bundle = args[args.indexOf("--") + 1];
+      if (bundle === "tv.plurx.app") return reply({ process: rows.get(10) });
+      const process = { processIdentifier: 77, executable: `${diagnosticScope}Diagnostic` };
+      rows.set(77, process);
+      if (state.launchError) throw new Error("malformed launch JSON after spawn");
+      if (state.launchTimeout) return await new Promise(() => {});
+      return reply({ process });
+    }
+    throw new Error(`unexpected fake command ${args.join(" ")}`);
+  };
+  const options = { device: "apple-tv-alias", target: "http://127.0.0.1:32400", public_host: "127.0.0.1",
+    file_id: "42", item_id: "17", bundle_id: "tv.plurx.diagnostic", network_profile: "8mbps-to-1mbps-to-350kbps",
+    json: path.join(directory, "device-evidence.json"), observe: "1" };
+  const dependencies = {
+    leaseDirectory: path.join(directory, "leases"), commandTimeoutMs: 100, cleanupTimeoutMs: 20,
+    deviceCommand: command,
+    createShaper: async () => ({
+      clientEvents: [], start: async () => "http://127.0.0.1:9999",
+      controlSnapshot: () => ({ device_calls: calls }),
+      close: async () => { state.closed = true; if (state.closeError) throw new Error("proxy close failed"); },
+    }),
+    preflightProxy: async () => {},
+    waitForAcceptance: async () => ({ reason: "test-complete" }),
+  };
+  return { options, dependencies, state, reply, command };
+}
 
-      assert.equal(launches.length, 2);
-      assert.ok(launches[0].includes("-plurx.origin"));
-      assert.ok(launches[0].includes("-plurx.acceptance.fileId"));
-      assert.ok(launches[0].includes("-plurx.acceptance.probe"));
-      assert.ok(launches[0].indexOf("--") < launches[0].indexOf("tv.plurx.app"),
-        "devicectl options must end before dash-prefixed app arguments");
-      assert.equal(launches[0].includes("-plurx.acceptance.height"), false,
-        "omitting --height must preserve the player's Auto quality selection");
-      assert.deepEqual(launches[1].slice(0, 5), [
-        "restore", "--device", "physical-device-17", "--terminate-existing", "--activate",
-      ]);
-      assert.deepEqual(launches[1].slice(5), ["--", "tv.plurx.app"]);
-      assert.equal(evidence.completion.reason, "test-complete");
-      const artifact = JSON.parse(await fsp.readFile(json, "utf8"));
-      assert.equal(artifact.client_events[0].snapshot.runway, 4.75);
-      assert.doesNotMatch(JSON.stringify(artifact), /control_token|authorization|bearer/i);
-    });
+async function failedDeviceRun(fixture) {
+  try { await lab.deviceRunCommand(fixture.options, fixture.dependencies); }
+  catch (error) { assert.ok(error.evidence, error.stack); return error.evidence; }
+  assert.fail("device-run should fail");
+}
+
+async function deviceLeases(fixture) {
+  return await fsp.readdir(fixture.dependencies.leaseDirectory).catch((error) => {
+    if (error.code === "ENOENT") return []; throw error;
+  });
+}
+
+test("device-run terminates only its owned PID before clean production restore and proxy close", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    const evidence = await lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    const { state } = fixture;
+    const launches = state.calls.filter((args) => args[2] === "launch");
+    assert.equal(state.rows.has(10), true, "another production PID must survive");
+    assert.equal(state.rows.has(77), false);
+    assert.equal(state.closed, true);
+    assert.equal(launches[0].includes("-plurx.acceptance.height"), false, "default quality remains Auto");
+    assert.equal(launches[0].includes("--terminate-existing"), false);
+    assert.deepEqual(launches[1], ["device", "process", "launch", "--device", state.canonical, "--activate", "--", "tv.plurx.app"]);
+    assert.ok(state.calls.findIndex((args) => args[2] === "terminate") < state.calls.indexOf(launches[1]));
+    assert.equal(evidence.cleanup.status, "verified-absent");
+    assert.equal(evidence.verdict, "passed");
+    assert.deepEqual(await deviceLeases(fixture), []);
+    assert.equal(JSON.parse(await fsp.readFile(fixture.options.json)).verdict, "passed");
   });
 });
 
-test("device-run passes an explicitly requested manual quality height", async () => {
+test("device-run awaits injected launch restore and shaper operations with explicit manual height", async () => {
   await withTempDir(async (directory) => {
-    await withOrigin(1, async (origin) => {
-      const launches = [];
-      await lab.deviceRunCommand({
-        device: "physical-device-17",
-        target: origin,
-        public_host: "127.0.0.1",
-        file_id: "42",
-        height: "480",
-        network_profile: "8mbps-to-1mbps-to-350kbps",
-        json: path.join(directory, "manual-quality-evidence.json"),
-      }, {
-        createShaper: (profile, target, options) => new lab.ShapingProxy(profile, target, {
-          ...options, listenHost: "127.0.0.1",
-        }),
-        launchDevice: (args) => launches.push(["launch", ...args]),
-        restoreDevice: (args) => launches.push(["restore", ...args]),
-        waitForAcceptance: async () => ({ reason: "test-complete", event: null }),
-      });
-
-      const heightFlag = launches[0].indexOf("-plurx.acceptance.height");
-      assert.ok(heightFlag > 0);
-      assert.equal(launches[0][heightFlag + 1], "480");
-    });
+    const fixture = deviceRunFixture(directory);
+    fixture.options.height = "480";
+    fixture.dependencies.launchDevice = async (args) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const receipt = JSON.parse(await fsp.readFile(fixture.options.json));
+      assert.equal(receipt.launch_attempted, true, "intent must precede launch");
+      assert.equal(receipt.bundle_executable_scope, fixture.state.diagnosticScope);
+      assert.equal((await deviceLeases(fixture)).length, 1);
+      assert.equal(args[args.indexOf("-plurx.acceptance.height") + 1], "480");
+      return await fixture.command(["device", "process", "launch", ...args]);
+    };
+    fixture.dependencies.restoreDevice = async (args) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(fixture.state.rows.has(77), false);
+      assert.equal(fixture.state.closed, undefined, "proxy closes only after device cleanup/restore");
+      return await fixture.command(["device", "process", "launch", ...args]);
+    };
+    await lab.deviceRunCommand(fixture.options, fixture.dependencies);
   });
 });
 
 test("device-run refuses a dead proxy API before launching the physical app", async () => {
   await withTempDir(async (directory) => {
-    const launches = [];
-    await assert.rejects(lab.deviceRunCommand({
-      device: "physical-device-17",
-      target: "http://127.0.0.1:1",
-      public_host: "127.0.0.1",
-      file_id: "42",
-      network_profile: "8mbps-to-1mbps",
-      json: path.join(directory, "unreachable.json"),
-    }, {
-      createShaper: (profile, target, options) => new lab.ShapingProxy(profile, target, {
-        ...options, listenHost: "127.0.0.1",
-      }),
-      launchDevice: (args) => launches.push(args),
-    }), /device proxy API preflight/);
-    assert.deepEqual(launches, []);
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.preflightProxy = async () => { throw new Error("device proxy API preflight failed"); };
+    const result = await failedDeviceRun(fixture);
+    assert.match(result.errors[0].message, /device proxy API preflight/);
+    assert.equal(fixture.state.calls.length, 0);
+    assert.equal(fixture.state.closed, true);
   });
+});
+
+test("device-run refuses leave-running and unwritable evidence before device mutation", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    await assert.rejects(lab.deviceRunCommand({ ...fixture.options, leave_running: true }, fixture.dependencies), /leave-running/);
+    await fsp.writeFile(fixture.options.json, "existing evidence");
+    const result = await failedDeviceRun(fixture);
+    assert.equal(result.launch_attempted, false);
+    assert.equal(fixture.state.calls.length, 0);
+    assert.equal(await fsp.readFile(fixture.options.json, "utf8"), "existing evidence");
+  });
+});
+
+test("device-run records observation and cleanup errors and retains unresolved lease", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.waitForAcceptance = async () => { throw new Error("observation failed"); };
+    fixture.state.terminateError = true;
+    const result = await failedDeviceRun(fixture);
+    assert.match(result.errors.map((entry) => entry.message).join(" "), /observation failed.*termination unavailable.*remains/);
+    assert.equal(result.cleanup.status, "unresolved");
+    assert.equal(fixture.state.rows.has(77), true);
+    assert.equal(fixture.state.calls.filter((args) => args[2] === "launch").length, 1, "unresolved cleanup must not restore");
+    assert.equal((await deviceLeases(fixture)).length, 1);
+    assert.equal(fixture.state.closed, true);
+  });
+});
+
+for (const mode of ["launchError", "launchTimeout"]) {
+  test(`device-run ${mode} after spawn retains intent without guessing or killing a PID`, async () => {
+    await withTempDir(async (directory) => {
+      const fixture = deviceRunFixture(directory);
+      fixture.state[mode] = true;
+      const result = await failedDeviceRun(fixture);
+      assert.equal(result.owned_process, null);
+      assert.equal(result.cleanup.status, "unresolved");
+      assert.equal(fixture.state.rows.has(77), true);
+      assert.equal(fixture.state.calls.some((args) => args[2] === "terminate"), false);
+      assert.equal((await deviceLeases(fixture)).length, 1);
+      const receipt = JSON.parse(await fsp.readFile(fixture.options.json));
+      assert.equal(receipt.launch_attempted, true);
+      assert.equal(receipt.verdict, "failed");
+    });
+  });
+}
+
+test("device-run no-op termination fails and retains lease", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.state.noopTerminate = true;
+    const result = await failedDeviceRun(fixture);
+    assert.equal(result.cleanup.status, "unresolved");
+    assert.equal((await deviceLeases(fixture)).length, 1);
+  });
+});
+
+test("device-run already absent PID skips termination but restores production", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.waitForAcceptance = async () => {
+      fixture.state.rows.delete(77); return { reason: "app-exited" };
+    };
+    const result = await lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    assert.equal(result.cleanup.production_restored, true);
+    assert.equal(fixture.state.calls.some((args) => args[2] === "terminate"), false);
+  });
+});
+
+test("device-run PID reuse with another executable refuses kill and retains lease", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.waitForAcceptance = async () => {
+      fixture.state.rows.set(77, { processIdentifier: 77, executable: `${fixture.state.productionScope}plurx` });
+      return { reason: "pid-reused" };
+    };
+    const result = await failedDeviceRun(fixture);
+    assert.match(result.errors[0].message, /different executable/);
+    assert.equal(fixture.state.calls.some((args) => args[2] === "terminate"), false);
+    assert.equal((await deviceLeases(fixture)).length, 1);
+  });
+});
+
+test("device-run canonical lease excludes aliases and refuses stale ownership without mutation", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    let entered;
+    const ready = new Promise((resolve) => { entered = resolve; });
+    let finish;
+    fixture.dependencies.waitForAcceptance = async () => { entered(); return await new Promise((resolve) => { finish = resolve; }); };
+    const first = lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    await ready;
+    const other = deviceRunFixture(directory);
+    other.options.device = "another-alias-for-same-device";
+    other.options.json = path.join(directory, "other.json");
+    const result = await failedDeviceRun(other);
+    assert.match(result.errors[0].message, /lease already exists/);
+    assert.equal(other.state.calls.some((args) => args[2] === "launch"), false);
+    finish({ reason: "test-complete" });
+    await first;
+    await fsp.writeFile(path.join(fixture.dependencies.leaseDirectory,
+      require("node:crypto").createHash("sha256").update(fixture.state.canonical).digest("hex") + ".json"), "stale or truncated");
+    other.options.json = path.join(directory, "stale.json");
+    const stale = await failedDeviceRun(other);
+    assert.match(stale.errors[0].message, /manual reconciliation/);
+    assert.equal((await deviceLeases(fixture)).length, 1);
+  });
+});
+
+test("device-run never takes ownership of a preexisting target app", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.state.rows.set(99, { processIdentifier: 99, executable: `${fixture.state.diagnosticScope}Diagnostic` });
+    const result = await failedDeviceRun(fixture);
+    assert.match(result.errors[0].message, /already running/);
+    assert.equal(fixture.state.rows.has(99), true);
+    assert.equal(fixture.state.calls.some((args) => args[2] === "launch" || args[2] === "terminate"), false);
+    assert.deepEqual(await deviceLeases(fixture), []);
+  });
+});
+
+test("device-run artifact and proxy failures cannot bypass owned process cleanup", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.state.closeError = true;
+    fixture.dependencies.writeReceipt = async (filename, evidence) => {
+      if (evidence.owned_process) throw new Error("artifact unavailable");
+      await lab.durableDeviceReceipt(filename, evidence);
+    };
+    const result = await failedDeviceRun(fixture);
+    assert.equal(fixture.state.rows.has(77), false);
+    assert.equal(result.cleanup.owned_process_absent, true);
+    assert.match(result.errors.map((entry) => entry.message).join(" "), /artifact unavailable.*proxy close failed.*artifact unavailable/);
+    assert.equal((await deviceLeases(fixture)).length, 1, "retain durable audit when final artifact cannot be written");
+    const lease = JSON.parse(await fsp.readFile(result.lease_path));
+    assert.equal(lease.cleanup.status, "verified-absent");
+    assert.equal(lease.verdict, "failed");
+  });
+});
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  test(`device-run real child ${signal} and repeated signals await cleanup`, async () => {
+    await withTempDir(async (directory) => {
+      const fixtureSource = `const fs = require('node:fs'); const fsp = fs.promises; const path = require('node:path');
+const lab = require(${JSON.stringify(require.resolve("../../scripts/playback-lab"))});
+${deviceRunFixture.toString()}
+const fixture = deviceRunFixture(${JSON.stringify(directory)});
+fixture.dependencies.waitForAcceptance = async () => { process.stdout.write('READY\\n'); return await new Promise(() => {}); };
+const command = fixture.command;
+fixture.dependencies.deviceCommand = async (args) => {
+ if (args[2] === 'terminate') { process.stdout.write('CLEANUP\\n'); await new Promise(r => setTimeout(r, 80)); }
+ return await command(args);
+};
+lab.deviceRunCommand(fixture.options, fixture.dependencies).then(() => {process.exitCode=2;}).catch(async error => {
+ await fsp.writeFile(path.join(${JSON.stringify(directory)}, 'child-state.json'), JSON.stringify({rows:[...fixture.state.rows.keys()],closed:fixture.state.closed,evidence:error.evidence}));
+ process.exitCode=1;
+});`;
+      const child = spawn(process.execPath, ["-e", fixtureSource], { stdio: ["ignore", "pipe", "pipe"] });
+      let output = "";
+      let stderr = "";
+      let sent = false;
+      let repeated = false;
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.stdout.on("data", (chunk) => {
+        output += chunk;
+        if (!sent && output.includes("READY")) { sent = true; child.kill(signal); }
+        if (!repeated && output.includes("CLEANUP")) { repeated = true; child.kill(signal); }
+      });
+      const status = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`signal fixture hung: ${output} ${stderr}`)); }, 5000);
+        child.on("error", (error) => { clearTimeout(timer); reject(error); });
+        child.on("close", (code, exitSignal) => { clearTimeout(timer); resolve({ code, exitSignal }); });
+      });
+      assert.deepEqual(status, { code: 1, exitSignal: null }, stderr);
+      const state = JSON.parse(await fsp.readFile(path.join(directory, "child-state.json")));
+      assert.deepEqual(state.rows, [10]);
+      assert.equal(state.closed, true);
+      assert.equal(state.evidence.cleanup.production_restored, true);
+      assert.deepEqual(state.evidence.signals, [signal, signal]);
+      assert.equal(JSON.parse(await fsp.readFile(path.join(directory, "device-evidence.json"))).verdict, "failed");
+      assert.deepEqual(await fsp.readdir(path.join(directory, "leases")), []);
+    });
+  });
+}
+
+test("device-run normalizes devicectl four-slash launch URLs and UUID casing", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.deviceCommand = async (args) => {
+      const reply = await fixture.command(args);
+      reply.result.deviceIdentifier = reply.result.deviceIdentifier.toLowerCase();
+      if (reply.result.process) reply.result.process = { ...reply.result.process,
+        executable: reply.result.process.executable.replace("file:///", "file:////") };
+      return reply;
+    };
+    const result = await lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    assert.equal(result.owned_process.executable, `${fixture.state.diagnosticScope}Diagnostic`);
+  });
+});
+
+test("device-run failed production restore fails run after confirmed diagnostic absence", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.restoreDevice = async () => undefined;
+    const result = await failedDeviceRun(fixture);
+    assert.equal(result.cleanup.owned_process_absent, true);
+    assert.equal(result.cleanup.production_restored, undefined);
+    assert.equal(result.errors[0].phase, "restore");
+    assert.equal(fixture.state.rows.has(77), false);
+    assert.equal(fixture.state.closed, true);
+    assert.deepEqual(await deviceLeases(fixture), []);
+  });
+});
+
+test("device command bounds and reaps a stalled host child without device calls", async () => {
+  let child;
+  await assert.rejects(lab.physicalAppleDeviceCommand(["device", "info", "processes"], {
+    timeoutMs: 30,
+    spawnCommand: () => {
+      child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: ["ignore", "pipe", "pipe"] });
+      return child;
+    },
+  }), /timed out/);
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
 });
 
 test("concurrent reservations are rescheduled at the cliff instead of bursting", async () => {

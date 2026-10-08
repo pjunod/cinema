@@ -15,6 +15,7 @@ const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { fileURLToPath, pathToFileURL } = require("node:url");
 const { spawn, spawnSync } = require("node:child_process");
 const {FRAME_CLOCK, frameClockFilter, decodeFrameClockRgb} = require("./playback-frame-clock");
 
@@ -401,7 +402,8 @@ Commands:
   run        Boot an isolated server, scan the corpus, and play every case.
   normalize  Scrub a report's run-local values so two runs can be compared.
   device-proxy  Shape a real server for remotely launched physical devices.
-  device-run    Launch, shape, observe, and restore one physical Apple device.
+  device-run    Launch, shape, observe, stop the owned PID, and restore Noirr Cinema.
+                --bundle-id selects an installed diagnostic app; --leave-running is refused.
 
 The smoke suite covers each verdict plus the high-risk 4K transport forks and
 seek/audio/subtitle restarts. The full suite adds every fixture x quality mode.
@@ -5048,14 +5050,109 @@ function positiveNumberOption(options, key, flag, fallback) {
   return value;
 }
 
-function launchPhysicalAppleDevice(args) {
-  const result = spawnSync("xcrun", ["devicectl", "device", "process", "launch", ...args], {
-    encoding: "utf8",
-  });
-  if (result.error) throw new Error(`xcrun devicectl could not launch the device app: ${result.error.message}`);
-  if (result.status !== 0) {
-    throw new Error(`xcrun devicectl launch failed: ${sanitizedText(result.stderr || result.stdout)}`);
+// Bound injected operations too: a stalled adapter cannot skip the outer cleanup.
+async function boundedDeviceOperation(operation, timeoutMs, signal) {
+  if (signal?.aborted) throw signal.reason;
+  let timer;
+  let abort;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("device operation timed out")), timeoutMs);
+        abort = () => reject(signal.reason);
+        signal?.addEventListener("abort", abort, { once: true });
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    if (abort) signal?.removeEventListener("abort", abort);
   }
+}
+
+// This kills only our host-side xcrun child on a deadline, never a device process.
+async function physicalAppleDeviceCommand(args, { timeoutMs, signal, spawnCommand = spawn }) {
+  return await new Promise((resolve, reject) => {
+    const separator = args.indexOf("--");
+    const flags = ["--json-output", "-", "--timeout", String(Math.ceil(timeoutMs / 1000))];
+    const command = separator < 0 ? [...args, ...flags]
+      : [...args.slice(0, separator), ...flags, ...args.slice(separator)];
+    const child = spawnCommand("xcrun", ["devicectl", ...command], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let failure;
+    let killTimer;
+    let settleTimer;
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      clearTimeout(settleTimer);
+      signal?.removeEventListener("abort", abort);
+      if (error) reject(error); else resolve(value);
+    };
+    const stop = (error) => {
+      if (failure) return;
+      failure = error;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 250);
+      settleTimer = setTimeout(() => finish(failure), 1000);
+    };
+    const abort = () => stop(signal.reason);
+    const timer = setTimeout(() => stop(new Error("devicectl timed out; launch outcome may be unknown")), timeoutMs);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    child.stdout.on("data", (data) => {
+      stdout += data;
+      if (stdout.length > 4 * 1024 * 1024) stop(new Error("devicectl JSON exceeded size limit"));
+    });
+    child.stderr.on("data", (data) => { stderr = (stderr + data).slice(-8192); });
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => {
+      if (failure) return finish(failure);
+      if (code !== 0) return finish(new Error(`devicectl failed (${code}): ${sanitizedText(stderr)}`));
+      try { finish(null, JSON.parse(stdout)); }
+      catch { finish(new Error("devicectl returned malformed JSON; launch outcome may be unknown")); }
+    });
+  });
+}
+
+async function durableDeviceReceipt(filename, receipt) {
+  const temporary = `${filename}.${crypto.randomUUID()}.tmp`;
+  const file = await fsp.open(temporary, "wx", 0o600);
+  try {
+    await file.writeFile(`${JSON.stringify(receipt, null, 2)}\n`);
+    await file.sync();
+  } finally { await file.close(); }
+  try {
+    await fsp.rename(temporary, filename);
+    const directory = await fsp.open(path.dirname(filename), "r");
+    try { await directory.sync(); } finally { await directory.close(); }
+  } finally { await fsp.unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
+}
+
+function deviceFileURL(value) {
+  const url = new URL(value);
+  if (url.protocol !== "file:" || url.host || url.search || url.hash) throw new Error("invalid device executable URL");
+  return pathToFileURL(path.posix.normalize(fileURLToPath(url))).href;
+}
+
+function deviceBundleScope(value) {
+  const url = new URL(deviceFileURL(value));
+  if (url.protocol !== "file:" || url.host || !url.pathname.endsWith(".app/")) {
+    throw new Error("installed app has no unambiguous bundle executable scope");
+  }
+  return url.href;
+}
+
+function deviceProcess(value) {
+  if (!Number.isSafeInteger(value?.processIdentifier) || value.processIdentifier <= 0
+      || typeof value.executable !== "string" || !value.executable.startsWith("file:///")) {
+    throw new Error("device process identity is missing or malformed");
+  }
+  return { processIdentifier: value.processIdentifier, executable: deviceFileURL(value.executable) };
 }
 
 function acceptanceTerminalEvent(events) {
@@ -5065,22 +5162,20 @@ function acceptanceTerminalEvent(events) {
       || event.event === "avplayer_early_end");
 }
 
-async function waitForDeviceAcceptance(shaper, timeoutMs, interval = sleep) {
+async function waitForDeviceAcceptance(shaper, timeoutMs, interval = sleep, signal) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (signal?.aborted) throw signal.reason;
     const terminal = acceptanceTerminalEvent(shaper.clientEvents);
     if (terminal) return { reason: "terminal-client-event", event: terminal };
-    await interval(Math.min(1_000, Math.max(1, deadline - Date.now())));
+    await boundedDeviceOperation(() => interval(Math.min(1_000, Math.max(1, deadline - Date.now()))), 2000, signal);
   }
-  return {
-    reason: "observation-window-ended",
-    event: acceptanceTerminalEvent(shaper.clientEvents) || null,
-  };
+  return { reason: "observation-window-ended", event: acceptanceTerminalEvent(shaper.clientEvents) || null };
 }
 
 async function deviceRunCommand(options, dependencies = {}) {
-  const targetText = requireTextOption(options, "target", "--target");
-  const target = new URL(targetText);
+  if (enabledOption(options.leave_running)) throw new Error("device-run refuses --leave-running: owned diagnostics must exit");
+  const target = new URL(requireTextOption(options, "target", "--target"));
   if (target.protocol !== "http:" || target.username || target.password) {
     throw new Error("--target must be a credential-free http:// server origin");
   }
@@ -5088,93 +5183,187 @@ async function deviceRunCommand(options, dependencies = {}) {
   const publicHost = requireTextOption(options, "public_host", "--public-host");
   const fileId = Number(requireTextOption(options, "file_id", "--file-id"));
   if (!Number.isInteger(fileId) || fileId <= 0) throw new Error("--file-id must be a positive integer");
-  const itemId = options.item_id === undefined ? 0 : Math.max(0, Number(options.item_id));
-  if (!Number.isInteger(itemId)) throw new Error("--item-id must be a non-negative integer");
-  const height = options.height === undefined
-    ? undefined
-    : positiveNumberOption(options, "height", "--height");
-  if (height !== undefined && !Number.isInteger(height)) {
-    throw new Error("--height must be a positive integer");
-  }
+  const itemId = options.item_id === undefined ? 0 : Number(options.item_id);
+  if (!Number.isInteger(itemId) || itemId < 0) throw new Error("--item-id must be a non-negative integer");
+  const height = options.height === undefined ? undefined : positiveNumberOption(options, "height", "--height");
+  if (height !== undefined && !Number.isInteger(height)) throw new Error("--height must be a positive integer");
   const observeSeconds = positiveNumberOption(options, "observe", "--observe", 180);
-  const profile = parseNetworkProfile(requireTextOption(
-    options, "network_profile", "--network-profile",
-  ));
-  const bundleId = options.bundle_id && options.bundle_id !== true
-    ? String(options.bundle_id)
-    : "tv.plurx.app";
-  const token = crypto.randomBytes(32).toString("hex");
-  const shaper = dependencies.createShaper
-    ? dependencies.createShaper(profile, target.origin, {
-      listenHost: "0.0.0.0",
-      listenPort: options.port,
-      publicHost,
-      controlToken: token,
-      autoAdvance: options.auto_advance === undefined ? true : enabledOption(options.auto_advance),
-      recoveryCliffAfterSeconds: options.recovery_cliff_after,
-    })
-    : new ShapingProxy(profile, target.origin, {
-      listenHost: "0.0.0.0",
-      listenPort: options.port,
-      publicHost,
-      controlToken: token,
-      autoAdvance: options.auto_advance === undefined ? true : enabledOption(options.auto_advance),
-      recoveryCliffAfterSeconds: options.recovery_cliff_after,
-    });
-  const launch = dependencies.launchDevice || launchPhysicalAppleDevice;
-  const restore = dependencies.restoreDevice || launchPhysicalAppleDevice;
-  let baseUrl;
-  let evidence;
-  let launched = false;
+  const profile = parseNetworkProfile(requireTextOption(options, "network_profile", "--network-profile"));
+  const bundleId = options.bundle_id && options.bundle_id !== true ? String(options.bundle_id) : "tv.plurx.app";
+  const runId = crypto.randomUUID();
+  const jsonPath = path.resolve(options.json || path.join(DEFAULT_REPORT_DIR, `${runId}-apple-device-acceptance.json`));
+  const leaseDirectory = dependencies.leaseDirectory || path.join(os.homedir(), ".local", "state", "plurx", "playback-lab", "device-leases");
+  const timeoutMs = dependencies.commandTimeoutMs || 15000;
+  const cleanupTimeoutMs = dependencies.cleanupTimeoutMs || 10000;
+  const controller = new AbortController();
+  const errors = [];
+  const evidence = { run_id: runId, device, bundle_id: bundleId, json_path: jsonPath,
+    launch_attempted: false, owned_process: null, cleanup: { status: "not-started", owned_process_absent: false }, errors };
+  const record = (phase, error) => { errors.push({ phase, message: sanitizedError(error) }); };
+  const interrupt = (signal) => {
+    evidence.signals = [...(evidence.signals || []), signal];
+    if (!controller.signal.aborted) controller.abort(new Error(`interrupted by ${signal}`));
+  };
+  const onINT = () => interrupt("SIGINT");
+  const onTERM = () => interrupt("SIGTERM");
+  process.on("SIGINT", onINT);
+  process.on("SIGTERM", onTERM);
+  const command = async (args, cleanup = false, adapter = dependencies.deviceCommand) => {
+    const signal = cleanup ? undefined : controller.signal;
+    const operation = adapter || physicalAppleDeviceCommand;
+    const reply = await boundedDeviceOperation(() => operation(args, { timeoutMs, signal }), timeoutMs + 1500, signal);
+    if (reply?.info?.outcome && reply.info.outcome !== "success") throw new Error("devicectl reported an unsuccessful outcome");
+    return reply;
+  };
+  const resultFor = (reply) => {
+    if (reply?.result?.deviceIdentifier?.toUpperCase() !== evidence.canonical_device_id) throw new Error("device identity changed or missing");
+    return reply.result;
+  };
+  const processes = async (cleanup = false) => {
+    const result = resultFor(await command(["device", "info", "processes", "--device", evidence.canonical_device_id], cleanup));
+    if (!Array.isArray(result.runningProcesses)) throw new Error("device process census missing");
+    return result.runningProcesses.map(deviceProcess);
+  };
+  let shaper;
+  let leasePath;
+  let leaseOwned = false;
+  let evidenceAllocated = false;
+  let bundleScope;
+  const persist = async () => {
+    if (leaseOwned) await durableDeviceReceipt(leasePath, evidence);
+    await (dependencies.writeReceipt || durableDeviceReceipt)(jsonPath, evidence);
+  };
   try {
-    baseUrl = await shaper.start(options.shaper_binder);
-    await (dependencies.preflightProxy || preflightDeviceProxyAPI)(baseUrl);
-    process.stdout.write(`DEVICE  ${device}\n`);
-    process.stdout.write(`SHAPE   ${profile.stages.map((stage) => `${stage.kbps} kb/s`).join(" -> ")}\n`);
-    const launchArguments = [
-      "--device", device,
-      "--terminate-existing",
-      "--activate",
-      "--",
-      bundleId,
-      "-plurx.origin", baseUrl,
-      "-plurx.acceptance.fileId", String(fileId),
-      "-plurx.acceptance.itemId", String(itemId),
-      "-plurx.acceptance.title", String(options.title || "Playback acceptance"),
-      "-plurx.acceptance.probe", "YES",
-    ];
-    // Omitted means the player's quality selection remains Auto. Supplying a
-    // height is deliberately an explicit manual-quality acceptance case.
-    if (height !== undefined) {
-      launchArguments.push("-plurx.acceptance.height", String(height));
-    }
-    launch(launchArguments);
-    launched = true;
-    const completion = await (dependencies.waitForAcceptance || waitForDeviceAcceptance)(
-      shaper, observeSeconds * 1_000,
-    );
-    evidence = { ...shaper.controlSnapshot(), device, bundle_id: bundleId, completion };
-    const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "Z");
-    const jsonPath = path.resolve(options.json || path.join(
-      DEFAULT_REPORT_DIR, `${stamp}-apple-device-acceptance.json`,
-    ));
     await fsp.mkdir(path.dirname(jsonPath), { recursive: true });
-    await fsp.writeFile(jsonPath, `${JSON.stringify(evidence, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    process.stdout.write(`RESULT  ${completion.reason}\n`);
-    process.stdout.write(`JSON    ${jsonPath}\n`);
-  } finally {
-    await shaper.close().catch(() => {});
-    if (launched && !enabledOption(options.leave_running)) {
+    const artifact = await fsp.open(jsonPath, "wx", 0o600);
+    await artifact.close();
+    evidenceAllocated = true;
+    await persist();
+    const shaperOptions = { listenHost: "0.0.0.0", listenPort: options.port, publicHost,
+      controlToken: crypto.randomBytes(32).toString("hex"),
+      autoAdvance: options.auto_advance === undefined ? true : enabledOption(options.auto_advance),
+      recoveryCliffAfterSeconds: options.recovery_cliff_after };
+    shaper = await (dependencies.createShaper || ((...args) => new ShapingProxy(...args)))(profile, target.origin, shaperOptions);
+    const baseUrl = await boundedDeviceOperation(() => shaper.start(options.shaper_binder), timeoutMs, controller.signal);
+    await boundedDeviceOperation(() => (dependencies.preflightProxy || preflightDeviceProxyAPI)(baseUrl), timeoutMs, controller.signal);
+    const appsReply = await command(["device", "info", "apps", "--device", device]);
+    const canonical = appsReply?.result?.deviceIdentifier;
+    if (typeof canonical !== "string" || !/^[a-z0-9-]+$/i.test(canonical)) throw new Error("canonical device identity missing");
+    evidence.canonical_device_id = canonical.toUpperCase();
+    // devicectl UUID casing is immaterial, but all subsequent replies must agree.
+    const installed = appsReply.result.apps;
+    const app = Array.isArray(installed) && installed.filter((entry) => entry.bundleIdentifier === bundleId);
+    if (!app || app.length !== 1) throw new Error("target app is not uniquely installed");
+    bundleScope = deviceBundleScope(app[0].url);
+    const production = installed.filter((entry) => entry.bundleIdentifier === "tv.plurx.app");
+    if (production.length !== 1) throw new Error("production app is not uniquely installed");
+    evidence.production_executable_scope = deviceBundleScope(production[0].url);
+    evidence.bundle_executable_scope = bundleScope;
+    await fsp.mkdir(leaseDirectory, { recursive: true, mode: 0o700 });
+    leasePath = path.join(leaseDirectory, `${crypto.createHash("sha256").update(evidence.canonical_device_id).digest("hex")}.json`);
+    evidence.lease_path = leasePath;
+    let lease;
+    try { lease = await fsp.open(leasePath, "wx", 0o600); }
+    catch (error) { if (error.code === "EEXIST") throw new Error(`device lease already exists; manual reconciliation required: ${leasePath}`); throw error; }
+    leaseOwned = true;
+    await lease.close();
+    await persist();
+    const baseline = await processes();
+    if (baseline.some((entry) => entry.executable.startsWith(bundleScope))) throw new Error("target app is already running; close it before device-run");
+    const launchArguments = ["--device", evidence.canonical_device_id, "--activate", "--", bundleId,
+      "-plurx.origin", baseUrl, "-plurx.acceptance.fileId", String(fileId),
+      "-plurx.acceptance.itemId", String(itemId), "-plurx.acceptance.title", String(options.title || "Playback acceptance"),
+      "-plurx.acceptance.probe", "YES"];
+    if (height !== undefined) launchArguments.push("-plurx.acceptance.height", String(height));
+    evidence.launch_attempted = true;
+    evidence.cleanup.status = "launch-pending";
+    await persist(); // Durable intent precedes the first device mutation.
+    const reply = dependencies.launchDevice
+      ? await command(launchArguments, false, dependencies.launchDevice)
+      : await command(["device", "process", "launch", ...launchArguments]);
+    const owned = deviceProcess(resultFor(reply).process);
+    if (!owned.executable.startsWith(bundleScope) || baseline.some((entry) => entry.processIdentifier === owned.processIdentifier)) {
+      throw new Error("launch did not return a new process in the intended bundle");
+    }
+    evidence.owned_process = owned;
+    await persist();
+    const current = (await processes()).find((entry) => entry.processIdentifier === owned.processIdentifier);
+    if (!current || current.executable !== owned.executable) throw new Error("launched process identity could not be confirmed");
+    evidence.completion = await boundedDeviceOperation(() => (dependencies.waitForAcceptance || waitForDeviceAcceptance)(
+      shaper, observeSeconds * 1000, sleep, controller.signal), observeSeconds * 1000 + 2000, controller.signal);
+  } catch (error) { record("run", error); }
+  finally {
+    try {
+      if (!evidence.launch_attempted) evidence.cleanup.owned_process_absent = true;
+      else if (!evidence.owned_process) throw new Error("launch outcome unresolved: no owned PID; manual reconciliation required");
+      else {
+        const owned = evidence.owned_process;
+        const current = (await processes(true)).find((entry) => entry.processIdentifier === owned.processIdentifier);
+        if (current && current.executable !== owned.executable) throw new Error("owned PID now has a different executable; refusing termination");
+        if (current) {
+          try { await command(["device", "process", "terminate", "--device", evidence.canonical_device_id, "--pid", String(owned.processIdentifier)], true); }
+          catch (error) { record("terminate", error); }
+          const deadline = Date.now() + cleanupTimeoutMs;
+          do {
+            const found = (await processes(true)).find((entry) => entry.processIdentifier === owned.processIdentifier);
+            if (!found) { evidence.cleanup.owned_process_absent = true; break; }
+            if (found.executable !== owned.executable) throw new Error("PID identity changed during cleanup; manual reconciliation required");
+            await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
+          } while (Date.now() < deadline);
+          if (!evidence.cleanup.owned_process_absent) throw new Error("owned PID remains after termination deadline");
+        } else evidence.cleanup.owned_process_absent = true;
+      }
+    } catch (error) { record("cleanup", error); }
+    evidence.cleanup.status = evidence.cleanup.owned_process_absent ? "verified-absent" : "unresolved";
+    if (evidence.launch_attempted && evidence.cleanup.owned_process_absent) {
       try {
-        restore(["--device", device, "--terminate-existing", "--activate", "--", bundleId]);
-      } catch (error) {
-        process.stderr.write(`playback-lab: device restore failed: ${sanitizedError(error)}\n`);
+        const args = ["--device", evidence.canonical_device_id, "--activate", "--", "tv.plurx.app"];
+        const reply = dependencies.restoreDevice ? await command(args, true, dependencies.restoreDevice)
+          : await command(["device", "process", "launch", ...args], true);
+        const restored = deviceProcess(resultFor(reply).process);
+        if (!restored.executable.startsWith(evidence.production_executable_scope)) throw new Error("restore returned the wrong app executable");
+        evidence.cleanup.production_restored = true;
+      } catch (error) { record("restore", error); }
+    }
+    if (shaper) {
+      try { Object.assign(evidence, await shaper.controlSnapshot()); } catch (error) { record("snapshot", error); }
+      try { await boundedDeviceOperation(() => shaper.close(), timeoutMs); } catch (error) { record("proxy-close", error); }
+    }
+    if (controller.signal.aborted && !errors.some((entry) => entry.message.includes("interrupted by"))) record("signal", controller.signal.reason);
+    evidence.verdict = errors.length ? "failed" : "passed";
+    let persisted = false;
+    if (evidenceAllocated) {
+      try { await persist(); persisted = true; }
+      catch (error) {
+        record("artifact", error);
+        evidence.verdict = "failed";
+        try { await persist(); persisted = true; } catch (retryError) { record("artifact-retry", retryError); }
       }
     }
+    if (leaseOwned && evidence.cleanup.owned_process_absent && persisted) {
+      try {
+        const lease = JSON.parse(await fsp.readFile(leasePath, "utf8"));
+        if (lease.run_id !== runId) throw new Error("device lease owner changed; refusing release");
+        await fsp.unlink(leasePath);
+      } catch (error) {
+        record("lease-release", error);
+        evidence.verdict = "failed";
+        try { await persist(); } catch (writeError) { record("artifact", writeError); }
+      }
+    }
+    // The lease remains an audit fallback even if the separate artifact failed.
+    if (leaseOwned && !persisted) {
+      try { await durableDeviceReceipt(leasePath, evidence); } catch (error) { record("lease-artifact", error); }
+    }
+    process.removeListener("SIGINT", onINT);
+    process.removeListener("SIGTERM", onTERM);
   }
+  if (errors.length) {
+    const error = new AggregateError(errors.map((entry) => new Error(`${entry.phase}: ${entry.message}`)), errors.map((entry) => `${entry.phase}: ${entry.message}`).join("; "));
+    error.evidence = evidence;
+    throw error;
+  }
+  process.stdout.write(`RESULT  ${evidence.completion.reason}\nJSON    ${jsonPath}\n`);
   return evidence;
 }
 
@@ -5594,6 +5783,8 @@ module.exports = {
   diagnosticPath,
   diagnosticSwitchCommit,
   deviceRunCommand,
+  physicalAppleDeviceCommand,
+  durableDeviceReceipt,
   deviceProxyCommand,
   defaultServerBin,
   executeRun,
