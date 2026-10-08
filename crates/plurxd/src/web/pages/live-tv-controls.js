@@ -69,6 +69,10 @@ async function stopLiveTv(){
   // fullscreen element before the browser clears fullscreenElement can strand
   // Chromium in fullscreen indefinitely. Keep those operations concurrent,
   // then dismantle the media tree only after presentation state settles.
+  // Silence the local picture now without removing the fullscreen element.
+  // Fullscreen teardown and remote tuner release may both remain pending.
+  const video=document.getElementById("live-tv-video");
+  if(video) video.pause();
   const exiting=exitLiveTvPresentation();
   const stopping=LIVE_TV_LEASE.stop().then(value=>({ok:true,value}),error=>({ok:false,error}));
   await exiting;

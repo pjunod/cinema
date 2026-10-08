@@ -143,7 +143,7 @@ function pagerHtml(shown){
   const pages=libPageCount(shown);
   if(pages<2) return "";
   const at=LIB_PAGE_AT;
-  const btn=(n,label,dis,title)=>`<button class="ghost sm"${dis?" disabled":""}${title?` title="${title}"`:""} onclick="libGoPage(${n})">${label}</button>`;
+  const btn=(n,label,dis,title)=>`<button class="ghost sm" data-remote-page="${n}"${dis?" disabled":""}${title?` title="${title}"`:""} onclick="libGoPage(${n})">${label}</button>`;
   // First and last, because "sorted by date added, newest last" makes the far
   // end a destination and not an edge case — and getting there a page at a
   // time on a 300-title library is sixteen clicks. Hidden below three pages,

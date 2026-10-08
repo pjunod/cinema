@@ -59,6 +59,7 @@ async function render(){
   if(AUTOPLAY_NEXT_PREPARED&&location.hash!==`#/item/${AUTOPLAY_NEXT_PREPARED.page.id}`)
     clearAutoplayNextPreparation();
   const generation=++PAGE_RENDER_GENERATION;
+  CinemaRemote.clear();
   if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
   if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
   if(typeof sharingRouteChanged==="function")sharingRouteChanged();
@@ -112,7 +113,13 @@ async function render(){
     // pending offset never survives the route that was on screen when it was
     // armed. Without it, switching layout on Settings scrolled the NEXT page.
     if(generation===PAGE_RENDER_GENERATION) restoreScroll();
-    if(generation===PAGE_RENDER_GENERATION) markBootReady();
+    if(generation===PAGE_RENDER_GENERATION){
+      markBootReady();
+      if(CINEMA_REMOTE_RETURN&&CINEMA_REMOTE_RETURN.route===location.hash){
+        if(LIB_VIEW&&CINEMA_REMOTE_RETURN.route.match(/^#\/(library|category)\//)) libGoPage(CINEMA_REMOTE_RETURN.page);
+        CinemaRemote.focusById(CINEMA_REMOTE_RETURN.id); CINEMA_REMOTE_RETURN=null;
+      }
+    }
   }catch(e){
     if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m){ m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure(h,generation,"render_error"); markBootReady(); }else toast(e.message); }
   }
