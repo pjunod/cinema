@@ -11,14 +11,24 @@ remaining milestones stay in the build handoff. The
 
 ## 1. Current boundary
 
-The reviewed proposal landed in documentation PR #919. Implementation starts
-from its merged main commit `079960daebd5a1e23dff2b0e8f8506c1238bc1b0`, with
-the comparator merged in PR #920 and backend controls merged in PRs #924
-and #928 into the integration branch. Sol 6.1 sessions
-provide the renderer, CPU/authoring and offline measurement work, with
-independent adversarial review. Production routing, settings and badges remain
-unqualified and unchanged.
+The reviewed proposal landed in documentation PR #919, the comparator in
+PR #920, and the initial backend controls in PR #924. PR #928 merged at
+`a1e56700d3940363dc06c16afcc4f919d63eac97`; run 4517 passed scope, Python
+(1,203 tests), Rust, web, Apple and Android. PR #930 merged the separate
+[timeline follow-up](DV_HDR_TIMELINE_CONTROLS.md) at
+`03fa9d2d104122d40d168260e96647fd14884104`; run 4519 passed all six non-Windows
+jobs on exact head `9d33aee3caf0c0c442eb248c43cef39b5e1aee0c`. Windows and
+both blocked aggregates were cancelled under the user's explicit Windows
+waiver; they are not Windows success evidence. PR #928 retained all 14 named
+regression trailers. These are integration checks, not product qualification.
 
+Sol 6.1 sessions provide renderer, CPU/authoring and offline measurement work,
+with independent adversarial review. Production routing, settings and badges
+remain unqualified and unchanged. The [M1 contract](DV_HDR_M1_CONTRACTS.md)
+owns only additive core types, validation and pure/test-only selection; actual
+code review approved the bounded Rust diff. On current effort base `03fa9d2`,
+25 focused tests, six compatibility regressions, core all-target checking and
+warnings-denied Clippy passed with Rust 1.97.1. The task is not landed.
 The first task must retain reproducible commands, source pins, actual frame
 artifacts and negative controls. Numerical agreement is evidence for the named
 operation, not full Dolby Vision conformance or an improvement on a movie.
@@ -31,7 +41,7 @@ DV-off validation. Current playback keeps its compatible fallback.
 | Milestone | State | Evidence still required |
 |---|---|---|
 | M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction, encoded-layer association, bounded VFR/seek/epochs and affine P8.1 authoring retained with replay recipes | Broader timing and metadata-reuse acceptance, general metadata adaptation, independent reference limits and full graph resource evidence |
-| M1 typed contracts | In progress separately; not landed or reviewed | Additive contracts, focused regressions and actual-code adversarial review |
+| M1 typed contracts | Built and reviewed locally: 25 focused and six compatibility tests passed; production registry empty | Normal-hook commit, committed-tree audit and task integration; not landed |
 | M2 processing and lifecycle | Not started | Qualified graph, bounded ownership and timestamped adapter |
 | M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
 | M4 settings and HDR10-E badge | Not started | M3 reporting; actual processing evidence on each client |
