@@ -176,6 +176,14 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    defaultConfig {
+        // Public Firebase application configuration, never provider credentials or a home proof.
+        listOf("PROJECT_ID", "APPLICATION_ID", "API_KEY", "SENDER_ID").forEach { field ->
+            val value = providers.gradleProperty("cinemaFirebase" + field.lowercase().split('_').joinToString("") { it.replaceFirstChar(Char::uppercase) }).orNull.orEmpty()
+            require(value.matches(Regex("[A-Za-z0-9_:.\\-]*"))) { "Invalid Cinema Firebase application configuration" }
+            buildConfigField("String", "CINEMA_FIREBASE_" + field, "\"" + value + "\"")
+        }
+    }
     buildFeatures {
         buildConfig = true
         compose = true
@@ -201,6 +209,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(libs.firebase.messaging)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.profileinstaller)
     implementation(libs.androidx.activity.compose)

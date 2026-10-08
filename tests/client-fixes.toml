@@ -5344,6 +5344,179 @@ source_anchor = "This TV code expired. Get a new code to try again."
 test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
 test_anchor = "tvChallengeUsesOriginalMonotonicDeadlineAndRejectsInvalidDuration"
 
+# Android B09 invitations: current source/test anchors for the reviewed authored
+# source packet. JVM/loopback/Router-schema evidence is separate from physical
+# Firebase, permission, Wi-Fi and background-execution qualification.
+
+[[fixes]]
+id = "android.invitation-wire"
+commits = ["ea9c03109e7ca939cb0c1f9bf181ae6e81be2069"]
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "RemoteWire.objectBody(bytes, 64 * 1024)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "strictWholeBodyRejectsNumericLexemesUnknownNestedFieldsAndBadGeneration"
+
+[[fixes]]
+id = "android.invitation-consent-invariants"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "it.readiness.eligible == (it.enabled && it.readiness.status == \"ready\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "consentReadinessAndAbsentOffAreConsistent"
+
+[[fixes]]
+id = "android.invitation-opaque-installation"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "Base64.getUrlEncoder().withoutPadding().encodeToString(bytes) == value"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "canonicalOpaqueIdSelectsOnlyInstallationPrefixAndRejectsPaddingAliases"
+
+[[fixes]]
+id = "android.invitation-profile-vault"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteProfileScope.kt"
+source_anchor = "cinema-profile-v2:"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "canonicalScopeSeparatesOriginInstanceAccountAndOldConcatenationCollision"
+
+[[fixes]]
+id = "android.invitation-broker-origin"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "require(canonical == value)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "brokerTicketAcceptsOnlyExactCanonicalHttpsOrigin"
+
+[[fixes]]
+id = "android.invitation-offline-visibility"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationAdmission.kt"
+source_anchor = "if (!state.loginCurrent || !state.permission || !state.channelEnabled"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationAdmissionTest.kt"
+test_anchor = "offlineOffLogoutPermissionAndInstallationGateBeforeSharedDedupe"
+
+[[fixes]]
+id = "android.invitation-dedupe-retention"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationAdmission.kt"
+source_anchor = "if (seen.size >= 256) return false"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationAdmissionTest.kt"
+test_anchor = "saturationNeverEvictsAnUnexpiredNotificationIdentity"
+
+[[fixes]]
+id = "android.invitation-clock-retirement"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationAdmission.kt"
+source_anchor = "if (time < lastClock"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationAdmissionTest.kt"
+test_anchor = "invalidClockAndRollbackCannotReleaseDedupeOrAdmitFreshWork"
+
+[[fixes]]
+id = "android.invitation-home-cas"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationApi.kt"
+source_anchor = "it.phone.phone_generation > generation"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationApiTest.kt"
+test_anchor = "homePhoneCasReplyAndLateAuthorizationAreFenced"
+
+[[fixes]]
+id = "android.invitation-broker-header"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationApi.kt"
+source_anchor = "values.size == 1 && RemoteWire.uuid(values.single()) == brokerGeneration"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationApiTest.kt"
+test_anchor = "brokerClaimContainsOnlyTicketAuthorityAndRequiresExactGeneration"
+
+[[fixes]]
+id = "android.invitation-resident-callback"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationResidentLifetime.kt"
+source_anchor = "if (active != run || network != null) return false"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationResidentLifetimeTest.kt"
+test_anchor = "callbackLossStopAndReplacementCannotRearmOrRetireAnotherRun"
+
+[[fixes]]
+id = "android.invitation-resident-teardown"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationServiceTeardown.kt"
+source_anchor = "if (owner != run || retiring) return false"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationResidentLifetimeTest.kt"
+test_anchor = "teardownWaitsForSocketsAndUsesLatestRejectedStartWithoutAdmittingReplacement"
+
+[[fixes]]
+id = "android.invitation-resident-permission"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationResidentService.kt"
+source_anchor = "if (!InvitationNotifications.permission(this)) { stopOwned(owner); return START_NOT_STICKY }"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationResidentLifetimeTest.kt"
+test_anchor = "permissionRejectedAfterAdmissionRetiresExactRunBeforeAndroidDestroy"
+
+[[fixes]]
+id = "android.invitation-rotation-per-screen"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationRotationQueue.kt"
+source_anchor = "confirmed[it.key] != (current to it.value)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationRotationQueueTest.kt"
+test_anchor = "firstScreenSuccessDoesNotDropSecondUncertainRenewalOrEnableAnOffScreen"
+
+[[fixes]]
+id = "android.invitation-explicit-unknown"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationModel.kt"
+source_anchor = "if (current(generation)) rotation.unknown(receiver)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationRotationQueueTest.kt"
+test_anchor = "explicitUnknownEnrollmentDoesNotDrainPendingTokenUntilFreshExplicitRetry"
+
+[[fixes]]
+id = "android.invitation-tap-intent"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationTapAdmission.kt"
+source_anchor = "choice.enabled && !choice.pendingSync && intents[receiver] == choice.intentRevision"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationTapAdmissionTest.kt"
+test_anchor = "lookupCompletionCannotSelectAfterOfflineOffOrIdentityPhoneIntentReplacement"
+
+[[fixes]]
+id = "android.invitation-missing-grant-off"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationScreenInventory.kt"
+source_anchor = "choices.map { it.receiver } + consents.map { it.receiver_id }"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationTapAdmissionTest.kt"
+test_anchor = "missingGrantAndUnavailableReadinessKeepSavedOffRowsInActualInventory"
+
+[[fixes]]
+id = "android.invitation-router-envelope"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "fun start(bytes: ByteArray)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationRouterSamplesTest.kt"
+test_anchor = "productionParserAcceptsActualHomeRouterRepliesAndEnrollmentRelations"
+
+[[fixes]]
+id = "android.invitation-loopback-transport"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationApi.kt"
+source_anchor = "builder.post(bytes.toRequestBody(\"application/json\".toMediaType()))"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationRouterSamplesTest.kt"
+test_anchor = "realLoopbackHomeTransportDecodesRedactedRouterSchemaAndUsesOnlySelectedHomeAuthority"
 [[fixes]]
 id = "apple.invitation-off-first"
 commits = ["d37f77c129242b57918a81307a19cf673d55a03e"]

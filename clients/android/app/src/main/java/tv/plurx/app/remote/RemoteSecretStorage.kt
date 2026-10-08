@@ -13,14 +13,22 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /** Only encrypted authenticated ciphertext is stored in preferences; no plaintext fallback. */
-internal class RemoteSecretStorage(context: Context, identity: String) {
+internal class RemoteSecretStorage(context: Context, private val identity: String) {
     data class Receiver(val id: String, val secret: String)
     data class Grant(val receiverId: String, val id: String, val secret: String)
     private val scope = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray()).joinToString("") { "%02x".format(it) }
     private val alias = "cinema.remote." + scope
     private val preferences = context.getSharedPreferences("cinema-remote-secrets", Context.MODE_PRIVATE)
     companion object {
-        fun validSecret(value: String): Boolean = Regex("[A-Za-z0-9_-]{43}").matches(value) && runCatching { Base64.decode(value, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING).size == 32 }.getOrDefault(false)
+        fun validSecret(value: String): Boolean = Regex("[A-Za-z0-9_-]{43}").matches(value) && runCatching {
+            val bytes = java.util.Base64.getUrlDecoder().decode(value)
+            bytes.size == 32 && java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes) == value
+        }.getOrDefault(false)
+        fun legacyPairingPresent(context: Context, legacyIdentity: String): Boolean {
+            val hash = MessageDigest.getInstance("SHA-256").digest(legacyIdentity.toByteArray()).joinToString("") { "%02x".format(it) }
+            val preferences = context.getSharedPreferences("cinema-remote-secrets", Context.MODE_PRIVATE)
+            return preferences.contains(hash + ":receiver") || preferences.contains(hash + ":grants")
+        }
     }
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -31,15 +39,16 @@ internal class RemoteSecretStorage(context: Context, identity: String) {
     }
     private fun read(name: String): JsonObject? = runCatching {
         val encoded = preferences.getString(scope + ":" + name, null) ?: return null
+        require(encoded.length <= 43692)
         val packed = Base64.decode(encoded, Base64.NO_WRAP)
         require(packed.size in 29..32768)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, packed.copyOfRange(0, 12)))
         cipher.updateAAD((scope + ":" + name).toByteArray())
-        RemoteWire.objectBody(cipher.doFinal(packed.copyOfRange(12, packed.size)), 32768)
+        RemoteWire.objectBody(cipher.doFinal(packed.copyOfRange(12, packed.size)), 32768).also { require(it.string("scope_identity") == identity) }
     }.getOrNull()
     private fun write(name: String, value: JsonObject) {
-        val bytes = value.toString().toByteArray(); require(bytes.size <= 16000)
+        val bytes = JsonObject(value + ("scope_identity" to JsonPrimitive(identity))).toString().toByteArray(); require(bytes.size <= 16000)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.ENCRYPT_MODE, key()); cipher.updateAAD((scope + ":" + name).toByteArray())
         check(preferences.edit().putString(scope + ":" + name, Base64.encodeToString(cipher.iv + cipher.doFinal(bytes), Base64.NO_WRAP)).commit())
     }

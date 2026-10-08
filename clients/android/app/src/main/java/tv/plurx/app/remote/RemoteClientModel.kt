@@ -129,11 +129,16 @@ internal class RemoteClientModel(private val app: Context) {
         val instance = vm.serverInstanceId; val user = vm.currentUserId
         val auth = Session.playbackAuthorization()
         if (!enabled || !sceneEligible || instance == null || user == null || auth.token == null) { shutdown(false); return }
-        val nextIdentity = Session.canonicalOrigin(auth.origin).orEmpty() + ":" + instance + ":" + user
+        val profile = runCatching { RemoteProfileScope.create(auth.origin, instance, user) }.getOrNull()
+        if (profile == null) { shutdown(false); return }
+        val nextIdentity = profile.identity
         if (active && identity == nextIdentity && api?.current == true) return
         val changed = identity != null && (identity != nextIdentity || api?.current != true)
         shutdown(changed); identity = nextIdentity; serverInstance = instance
         vault = RemoteSecretStorage(app, nextIdentity); api = RemoteApi(auth); active = true
+        val legacyIdentity = profile.origin + ":" + instance + ":" + user
+        if (RemoteSecretStorage.legacyPairingPresent(app, legacyIdentity)) managementStatus =
+            "Android previously included the server origin in its saved key, but the record did not retain an unambiguous profile tuple. Pair this phone again if its old pairing is unavailable; old proofs are not imported."
         val generation = lifecycle
         discoveryJob = scope.launch { discoveryLoop(generation) }
         if (television) receiverJob = scope.launch { receiverLoop(generation) }
@@ -352,6 +357,7 @@ internal class RemoteClientModel(private val app: Context) {
     val isPaired get() = selectedGrant != null
     val controlledByOther get() = control != null && control?.grant != selectedGrant?.id
     val localGrants get() = vault?.grants.orEmpty()
+    fun ownsCompanionProfile(profile: RemoteProfileScope): Boolean = enabled && active && sceneEligible && identity == profile.identity && api?.current == true
     fun select(device: RemoteDevice) {
         closeController(); selected = device
         if (!device.available || device.target == null) return

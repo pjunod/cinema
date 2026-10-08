@@ -201,8 +201,9 @@ internal fun RemoteDeveloperCard() {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Cinema remotes", style = MaterialTheme.typography.titleLarge)
         Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(remote.enabled, onCheckedChange = remote::saveEnabled); Text("Enable foreground receiver and companion") }
-        Text("Waiting on real TV/phone focus, menus, lazy scrolling, mixed physical input and cross-platform HTTP acceptance. Background invitations are a separate future opt-in. This switch always saves; readiness stays advisory.")
+        Text("Waiting on real TV/phone focus, menus, lazy scrolling, mixed physical input and cross-platform HTTP acceptance. Per-screen background invitation choices are below; provider delivery and resident Wi-Fi/background execution still need physical qualification. This switch always saves; readiness stays advisory.")
         Text("Graduates to Remotes & devices after acceptance.")
+        tv.plurx.app.invitations.InvitationSettings(remote)
     }
 }
 @Composable
@@ -222,5 +223,6 @@ internal fun RemoteDeviceSettings(remote: RemoteClientModel, onBack: () -> Unit)
         TextButton(onClick = remote::refreshGrants) { Text("Refresh pairings") }
         if (remote.localReceiverId != null) { Text("Reset revokes this TV installation and all paired phones."); TextButton(onClick = { remote.resetReceiver(); revision++ }) { Text("Reset TV remote registration") } }
         Text(remote.managementStatus)
+        tv.plurx.app.invitations.InvitationSettings(remote, showChoices = false)
     }
 }

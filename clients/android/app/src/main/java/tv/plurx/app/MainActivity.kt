@@ -70,6 +70,9 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import android.view.KeyEvent
 import tv.plurx.app.remote.*
 
@@ -81,6 +84,7 @@ class MainActivity : ComponentActivity() {
      * fact arrives.
      */
     private val reminderChannel = MutableStateFlow<String?>(null)
+    private val invitationId = MutableStateFlow<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -91,12 +95,13 @@ class MainActivity : ComponentActivity() {
         // server transcode, after the evidence that caused it is gone.
         lifecycleScope.launch { Caps.query(this@MainActivity) }
         reminderChannel.value = intent?.getStringExtra(EXTRA_LIVE_TV_CHANNEL)
+        invitationId.value = invitationFrom(intent)
         setContent {
             val vm: AppViewModel = viewModel()
             val preferences by vm.preferences.collectAsStateWithLifecycle()
             PlurxTheme(preferences.theme, preferences.appearance) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    AppRoot(vm, reminderChannel) { reminderChannel.value = null }
+                    AppRoot(vm, reminderChannel, { reminderChannel.value = null }, invitationId, { invitationId.value = null })
                 }
             }
         }
@@ -118,8 +123,12 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         reminderChannel.value = intent.getStringExtra(EXTRA_LIVE_TV_CHANNEL)
+        invitationId.value = invitationFrom(intent)
     }
 
+    private fun invitationFrom(intent: Intent?): String? = intent?.getStringExtra(tv.plurx.app.invitations.InvitationNotifications.EXTRA_ID)?.takeIf {
+        it.length == 43 && runCatching { tv.plurx.app.invitations.InvitationWire.invitation(it) }.isSuccess
+    }
     companion object {
         const val EXTRA_LIVE_TV_CHANNEL = "live_tv_channel"
     }
@@ -130,6 +139,8 @@ private fun AppRoot(
     vm: AppViewModel,
     reminderChannel: StateFlow<String?>,
     onReminderChannelUsed: () -> Unit,
+    invitationId: StateFlow<String?>,
+    onInvitationUsed: () -> Unit,
 ) {
     val context = LocalContext.current
     val liveTv = LiveTvPlayer.get(context)
@@ -165,7 +176,7 @@ private fun AppRoot(
         Phase.Loading -> LoadingBox()
         Phase.NeedServer -> ConnectScreen(vm, busy, authError)
         Phase.NeedLogin -> LoginScreen(vm, busy, authError)
-        Phase.Ready -> MainNav(vm, reminderChannel, onReminderChannelUsed)
+        Phase.Ready -> MainNav(vm, reminderChannel, onReminderChannelUsed, invitationId, onInvitationUsed)
     }
 }
 
@@ -174,10 +185,15 @@ private fun MainNav(
     vm: AppViewModel,
     reminderChannel: StateFlow<String?>,
     onReminderChannelUsed: () -> Unit,
+    invitationId: StateFlow<String?>,
+    onInvitationUsed: () -> Unit,
 ) {
     val nav = rememberNavController()
     val context = LocalContext.current
     val remote = remember(context) { RemoteRuntime.get(context) }
+    val invitations = remember(context) { tv.plurx.app.invitations.InvitationRuntime.get(context) }
+    LaunchedEffect(vm.origin, vm.currentUserId, vm.serverInstanceId, invitations.authorizationGeneration) { invitations.configure(vm, remote) }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { invitations.resume() }
     val remoteNavigation = remember { RemoteNavigationCoordinator() }
     val currentEntry by nav.currentBackStackEntryAsState()
     val entryScope = currentEntry?.id ?: "restricted"
@@ -523,6 +539,13 @@ private fun MainNav(
             )
             }
         }
+    }
+    val requestedInvitation by invitationId.collectAsStateWithLifecycle()
+    requestedInvitation?.let { invitation ->
+        AlertDialog(onDismissRequest = onInvitationUsed, title = { Text("Open invited screen?") },
+            text = { Text("Use the saved Cinema profile that received this invitation. Opening the remote does not take control or start playback. " + invitations.status) },
+            confirmButton = { TextButton(onClick = { if (invitations.canOpenTap(invitation)) { invitations.tap(invitation); onInvitationUsed() } }) { Text("Open remote") } },
+            dismissButton = { TextButton(onClick = onInvitationUsed) { Text("Dismiss") } })
     }
     RemoteRootOverlay(remote, television = tv.plurx.app.player.isTelevision(context))
     }
