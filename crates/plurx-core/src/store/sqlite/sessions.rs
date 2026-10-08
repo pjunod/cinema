@@ -806,8 +806,14 @@ fn preparation_route_matches(
         && route.request_fingerprint == preparation.request_fingerprint
         && route.owner_node_id == preparation.owner_node_id
         && route.owner_epoch == 1
-        && route.recipe_json == preparation.recipe_json
-        && route.response_json == preparation.response_json
+        && ((route.recipe_json == preparation.recipe_json
+            && route.response_json == preparation.response_json)
+            || crate::store::prepared_output::sealed_reservation_matches(
+                &preparation.recipe_json,
+                &preparation.response_json,
+                &route.recipe_json,
+                &route.response_json,
+            ))
         && route.media_origin_ms == preparation.media_origin_ms
         && route.state == "active"
         && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
@@ -2279,6 +2285,37 @@ impl MediaSessionStore for SqliteStore {
             };
             tx.commit()?;
             Ok(Some(route))
+        })
+        .await
+    }
+
+    async fn seal_prepared_output(
+        &self,
+        seal: &crate::store::PreparedOutputSeal,
+    ) -> Result<bool, StoreError> {
+        let proof = seal.proof_json()?;
+        let seal = seal.clone();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                crate::store::prepared_output::SEAL,
+                params![
+                    proof,
+                    seal.incarnation_id,
+                    seal.session_id,
+                    seal.user_id,
+                    seal.playback_id,
+                    seal.owner_node_id,
+                    seal.owner_epoch,
+                    seal.expected_recipe_json,
+                    seal.expected_response_json,
+                    seal.predecessor_incarnation_id,
+                    seal.predecessor_owner_node_id,
+                    seal.predecessor_owner_epoch,
+                    seal.now_ms,
+                    seal.deadline_ms,
+                    seal.already_complete
+                ],
+            )? == 1)
         })
         .await
     }
@@ -6958,5 +6995,236 @@ mod sharing_route_decoder_tests {
             )
             .expect("retained session");
         assert_eq!(state, "ended");
+    }
+    async fn first_output_seal_fixture(
+        rebuilt: bool,
+    ) -> (SqliteStore, crate::store::PreparedOutputSeal) {
+        let store = SqliteStore::open_in_memory().expect("capture store");
+        store.with_conn(move |conn| {
+            conn.execute("INSERT INTO users(id,username,password_hash,is_admin,created_at) VALUES(1,'capture','hash',0,1)", [])?;
+            conn.execute("INSERT INTO media_sessions(incarnation_id,session_id,user_id,playback_id,request_fingerprint,owner_node_id,owner_epoch,lease_expires_at_ms,state,recipe_json,response_json,updated_at_ms,recovery_epoch)
+                VALUES('00000000-0000-4000-8000-000000000001','old-session',1,'capture-playback',?1,'node',2,9000,'active','{}','{}',10,'epoch')", ["a".repeat(64)])?;
+            conn.execute("INSERT INTO media_playback_pointers(user_id,playback_id,current_incarnation_id,updated_at_ms) VALUES(1,'capture-playback','00000000-0000-4000-8000-000000000001',10)", [])?;
+            if rebuilt {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
+                conn.execute_batch("COMMIT")?;
+            }
+            Ok(())
+        }).await.expect("capture predecessor");
+        let preparation = MediaSessionPreparation {
+            quality_cancellation_key: None,
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+            playback_id: "capture-playback".into(),
+            expected_predecessor_incarnation_id: "00000000-0000-4000-8000-000000000001".into(),
+            expected_predecessor_owner_node_id: "node".into(),
+            expected_predecessor_owner_epoch: 2,
+            request_fingerprint: "b".repeat(64),
+            owner_node_id: "node".into(),
+            recipe_json: r#"{"retained_output_receiver":1,"request":{"presentation":"vod"}}"#
+                .into(),
+            response_json: r#"{"prepared_output_capture_pending":true,"height":720}"#.into(),
+            media_origin_ms: 0,
+            now_ms: 20,
+            expected_desired_revision: None,
+            deadline_ms: 8000,
+        };
+        assert!(store
+            .prepare_media_session(&preparation)
+            .await
+            .expect("reserved")
+            .is_some());
+        let seal = crate::store::PreparedOutputSeal {
+            incarnation_id: preparation.incarnation_id,
+            session_id: preparation.session_id,
+            user_id: 1,
+            playback_id: preparation.playback_id,
+            owner_node_id: "node".into(),
+            owner_epoch: 1,
+            expected_recipe_json: preparation.recipe_json,
+            expected_response_json: preparation.response_json,
+            predecessor_incarnation_id: "00000000-0000-4000-8000-000000000001".into(),
+            predecessor_owner_node_id: "node".into(),
+            predecessor_owner_epoch: 2,
+            deadline_ms: 8000,
+            now_ms: 21,
+            already_complete: false,
+            retained_output: Some(
+                serde_json::json!({"artifact_id":uuid::Uuid::new_v4().to_string(),
+                "output_identity":"ab".repeat(32),"average_bps":8000,"peak_bps":12000}),
+            ),
+        };
+        (store, seal)
+    }
+
+    #[tokio::test]
+    async fn first_preparation_output_seal_is_exact_and_idempotent_in_both_layouts() {
+        for rebuilt in [false, true] {
+            for absence in [false, true] {
+                let (store, mut seal) = first_output_seal_fixture(rebuilt).await;
+                if absence {
+                    seal.retained_output = None;
+                }
+                let predecessor = store
+                    .media_session_route_by_incarnation("00000000-0000-4000-8000-000000000001")
+                    .await
+                    .expect("read")
+                    .expect("old");
+                assert!(store.seal_prepared_output(&seal).await.expect("first seal"));
+                let first = store
+                    .media_session_route_by_incarnation(&seal.incarnation_id)
+                    .await
+                    .expect("read")
+                    .expect("sealed");
+                assert!(store
+                    .seal_prepared_output(&seal)
+                    .await
+                    .expect("same seal replay"));
+                let original = MediaSessionPreparation {
+                    quality_cancellation_key: None,
+                    incarnation_id: seal.incarnation_id.clone(),
+                    session_id: seal.session_id.clone(),
+                    principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: 1,
+                    },
+                    playback_id: seal.playback_id.clone(),
+                    expected_predecessor_incarnation_id: seal.predecessor_incarnation_id.clone(),
+                    expected_predecessor_owner_node_id: seal.predecessor_owner_node_id.clone(),
+                    expected_predecessor_owner_epoch: seal.predecessor_owner_epoch,
+                    request_fingerprint: "b".repeat(64),
+                    owner_node_id: seal.owner_node_id.clone(),
+                    recipe_json: seal.expected_recipe_json.clone(),
+                    response_json: seal.expected_response_json.clone(),
+                    media_origin_ms: 0,
+                    now_ms: 20,
+                    expected_desired_revision: None,
+                    deadline_ms: 8000,
+                };
+                assert_eq!(
+                    store
+                        .prepare_media_session(&original)
+                        .await
+                        .expect("original reservation replay"),
+                    Some(first.clone())
+                );
+                let mut altered = original.clone();
+                altered.recipe_json =
+                    r#"{"retained_output_receiver":1,"request":{"presentation":"live"}}"#.into();
+                assert!(store
+                    .prepare_media_session(&altered)
+                    .await
+                    .expect("changed original refused")
+                    .is_none());
+                assert_eq!(
+                    store
+                        .media_session_route_by_incarnation(&seal.incarnation_id)
+                        .await
+                        .expect("read")
+                        .expect("replayed"),
+                    first
+                );
+                let recipe: serde_json::Value =
+                    serde_json::from_str(&first.recipe_json).expect("sealed recipe");
+                assert_eq!(
+                    recipe["retained_output"],
+                    seal.retained_output
+                        .clone()
+                        .unwrap_or(serde_json::Value::Null)
+                );
+                let response: serde_json::Value =
+                    serde_json::from_str(&first.response_json).expect("sealed response");
+                assert_eq!(response["prepared_output_capture_complete"], true);
+                assert!(response.get("prepared_output_capture_pending").is_none());
+                let mut changed = seal.clone();
+                changed.retained_output = Some(
+                    serde_json::json!({"artifact_id":uuid::Uuid::new_v4().to_string(),
+                    "output_identity":"cd".repeat(32),"average_bps":9000,"peak_bps":13000}),
+                );
+                assert!(!store
+                    .seal_prepared_output(&changed)
+                    .await
+                    .expect("changed receipt refused"));
+                assert_eq!(
+                    store
+                        .media_session_route_by_incarnation("00000000-0000-4000-8000-000000000001")
+                        .await
+                        .expect("read")
+                        .expect("old"),
+                    predecessor
+                );
+                assert_eq!(
+                    store
+                        .staged_media_session_for_playback(
+                            &predecessor.principal,
+                            "capture-playback"
+                        )
+                        .await
+                        .expect("ledger")
+                        .expect("still staged")
+                        .staged_incarnation_id,
+                    seal.incarnation_id
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn first_preparation_output_seal_refuses_lost_ownership_and_legacy_absence() {
+        let mutations = [
+            "UPDATE media_sessions SET owner_epoch=2 WHERE incarnation_id=?1",
+            "UPDATE media_sessions SET session_id='changed' WHERE incarnation_id=?1",
+            "UPDATE media_sessions SET publication_ready_at_ms=0 WHERE incarnation_id=?1",
+            "UPDATE media_sessions SET lease_expires_at_ms=21 WHERE incarnation_id=?1",
+            "UPDATE job_leases SET fence=2 WHERE resource='session:'||?1",
+            "UPDATE job_leases SET expires_at_ms=21 WHERE resource='session:'||?1",
+            "UPDATE media_sessions SET owner_node_id='other' WHERE incarnation_id=?1",
+            "DELETE FROM media_session_preparations WHERE staged_incarnation_id=?1",
+            "UPDATE media_playback_pointers SET current_incarnation_id=?1 WHERE playback_id='capture-playback'",
+            "UPDATE media_sessions SET owner_epoch=3 WHERE incarnation_id='00000000-0000-4000-8000-000000000001' AND ?1 IS NOT NULL",
+            "UPDATE media_sessions SET recipe_json='{}' WHERE incarnation_id=?1",
+            "UPDATE media_sessions SET response_json='{}' WHERE incarnation_id=?1",
+        ];
+        for rebuilt in [false, true] {
+            for mutation in mutations {
+                let (store, seal) = first_output_seal_fixture(rebuilt).await;
+                let id = seal.incarnation_id.clone();
+                store
+                    .with_conn(move |conn| {
+                        conn.execute(mutation, [id])?;
+                        Ok(())
+                    })
+                    .await
+                    .expect("lost fence");
+                let before = store
+                    .media_session_route_by_incarnation(&seal.incarnation_id)
+                    .await
+                    .expect("read");
+                assert!(
+                    !store
+                        .seal_prepared_output(&seal)
+                        .await
+                        .expect("CAS refusal"),
+                    "{mutation}"
+                );
+                assert_eq!(
+                    store
+                        .media_session_route_by_incarnation(&seal.incarnation_id)
+                        .await
+                        .expect("read"),
+                    before
+                );
+            }
+            let (store, mut legacy) = first_output_seal_fixture(rebuilt).await;
+            legacy.expected_response_json = "{}".into();
+            assert!(
+                store.seal_prepared_output(&legacy).await.is_err(),
+                "missing pending marker cannot authorize capture"
+            );
+            let (store, mut stale) = first_output_seal_fixture(rebuilt).await;
+            stale.now_ms = stale.deadline_ms;
+            assert!(store.seal_prepared_output(&stale).await.is_err());
+        }
     }
 }

@@ -500,6 +500,12 @@ pub(crate) async fn prepare(
     if let Err(status) = authorize(&state, &headers, PREPARE_PATH, &body).await {
         return status.into_response();
     }
+    prepare_authorized(state, body).await
+}
+
+/// Exact peer authentication stays at ingress; this owner operation rechecks
+/// the reserved durable route and seals private capture before its 204 receipt.
+pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response {
     let Some(request) = serde_json::from_slice::<RemotePrepareRequest>(&body)
         .ok()
         .filter(RemotePrepareRequest::is_valid)
@@ -578,13 +584,13 @@ pub(crate) async fn prepare(
     };
     if state
         .transcode
-        .vod_resurrect_before(
+        .vod_prepare_first_before(
             &route.recipe_json,
             &request.session_id,
             user_id,
+            &state.node_id,
             adoption,
             deadline.into(),
-            true,
         )
         .await
         && authority.is_current(admitted_generation)
@@ -1123,6 +1129,11 @@ pub(crate) async fn quality_schedule(
         request.deadline_unix_ms,
     )
     .await
+}
+
+#[cfg(test)]
+pub(crate) fn output_capture_test_state() -> AppState {
+    super::tests::test_app_with_state().1
 }
 
 #[cfg(test)]

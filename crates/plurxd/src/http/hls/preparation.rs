@@ -2038,6 +2038,15 @@ pub(super) async fn stage_prepared_successor_with_prime(
         Ok(value) => value,
         Err(_) => return,
     };
+    if staged_request.presentation == crate::transcode::Presentation::Vod && prime_worker {
+        response_value
+            .as_object_mut()
+            .expect("StartResponse object")
+            .insert(
+                "prepared_output_capture_pending".into(),
+                serde_json::Value::Bool(true),
+            );
+    }
     if let Some(caps) = retained_planning_caps(&route.response_json) {
         response_value
             .as_object_mut()
@@ -2209,13 +2218,13 @@ pub(super) async fn stage_prepared_successor_with_prime(
                         Some(adoption) => {
                             state
                                 .transcode
-                                .vod_resurrect_before(
+                                .vod_prepare_first_before(
                                     &preparation.recipe_json,
                                     &preparation.session_id,
                                     local_user_id,
+                                    &state.node_id,
                                     adoption,
                                     prime_deadline,
-                                    true,
                                 )
                                 .await
                         }
@@ -2247,7 +2256,11 @@ pub(super) async fn stage_prepared_successor_with_prime(
             () = active.cancelled.cancelled() => false,
             primed = prime => primed,
         };
-        if !primed {
+        if !state
+            .transcode
+            .prepared_prime_is_ready(&preparation, primed)
+            .await
+        {
             crate::playback_control::record_preparation_staged(false);
             return;
         }

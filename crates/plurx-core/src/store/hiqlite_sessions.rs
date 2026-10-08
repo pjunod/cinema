@@ -1946,8 +1946,9 @@ fn preparation_route_matches(
         && route.request_fingerprint == preparation.request_fingerprint
         && route.owner_node_id == preparation.owner_node_id
         && route.owner_epoch == 1
-        && route.recipe_json == preparation.recipe_json
-        && route.response_json == preparation.response_json
+        && ((route.recipe_json == preparation.recipe_json && route.response_json == preparation.response_json)
+            || crate::store::prepared_output::sealed_reservation_matches(&preparation.recipe_json,
+                &preparation.response_json, &route.recipe_json, &route.response_json))
         && route.media_origin_ms == preparation.media_origin_ms
         && route.state == "active"
         // The sentinel is what keeps a staged row out of takeover inventory,
@@ -3201,6 +3202,35 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(None);
         };
         Ok(Some(route))
+    }
+
+    async fn seal_prepared_output(
+        &self,
+        seal: &crate::store::PreparedOutputSeal,
+    ) -> Result<bool, StoreError> {
+        let proof = seal.proof_json()?;
+        let applied = timeout_store(self.session_client().execute(
+            crate::store::prepared_output::SEAL,
+            params!(
+                proof,
+                seal.incarnation_id.as_str(),
+                seal.session_id.as_str(),
+                seal.user_id,
+                seal.playback_id.as_str(),
+                seal.owner_node_id.as_str(),
+                seal.owner_epoch,
+                seal.expected_recipe_json.as_str(),
+                seal.expected_response_json.as_str(),
+                seal.predecessor_incarnation_id.as_str(),
+                seal.predecessor_owner_node_id.as_str(),
+                seal.predecessor_owner_epoch,
+                seal.now_ms,
+                seal.deadline_ms,
+                seal.already_complete
+            ),
+        ))
+        .await?;
+        Ok(applied == 1)
     }
 
     async fn record_desired_selection(

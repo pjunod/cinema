@@ -176,6 +176,9 @@ impl ReplacementGate {
 }
 
 pub(super) struct SessionReleaseGate {
+    // Serializes initial preparation capture before the final attachment/release
+    // transition. Never acquire this while holding transition; both die with this gate.
+    pub(super) first_preparation: Arc<tokio::sync::Mutex<()>>,
     pub(super) transition: Arc<tokio::sync::Mutex<()>>,
     pub(super) released: AtomicBool,
 }

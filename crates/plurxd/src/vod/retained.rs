@@ -123,8 +123,83 @@ pub(crate) async fn test_post_attachment_output_facts() -> (
     tempfile::TempDir,
     Arc<VodServe>,
     crate::vodserve::VodHlsFacts,
+    SessionRequest,
 ) {
     tests::post_attachment_output_facts_fixture().await
+}
+
+/// Model a prior first attachment which captured None while a compatible
+/// artifact subsequently exists. Repeating it must not promote that absence.
+#[cfg(test)]
+pub(crate) async fn test_make_attachment_uncaptured(serve: &VodServe, id: &str) {
+    let mut sessions = serve.shared.sessions.lock().await;
+    let session = sessions.get_mut(id).expect("fixture attachment");
+    session.retained_output = None;
+    let reader = session.attachment_reader(0);
+    session
+        .rendition
+        .as_ref()
+        .expect("fixture rendition")
+        .readers
+        .lock()
+        .await
+        .insert(id.into(), reader);
+}
+
+/// A sealed receipt drives real GET delivery and exact registry restoration.
+#[cfg(test)]
+pub(crate) async fn test_assert_sealed_cached_delivery(
+    serve: &VodServe,
+    id: &str,
+    expected: &crate::transcode::RetainedOutputFacts,
+) {
+    use tokio::io::AsyncReadExt;
+    let publication = serve
+        .segment_before(
+            id,
+            "seg00000.m4s",
+            Some(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .expect("cached session");
+    let mut member = publication
+        .result
+        .expect("cached delivery")
+        .expect("member");
+    let mut bytes = Vec::new();
+    member
+        .file
+        .read_to_end(&mut bytes)
+        .await
+        .expect("real body");
+    assert_eq!(bytes, vec![0; 1000]);
+    assert!(member.etag.contains(&expected.artifact_id));
+    let rendition = publication
+        .owner
+        .rendition
+        .as_ref()
+        .expect("exact rendition");
+    assert!(
+        serve
+            .shared
+            .retained_artifacts
+            .acquire_expected_for_request(expected, rendition, &rendition.recipe.retained_logical)
+            .is_some(),
+        "sealed receipt is strict restore authority"
+    );
+    let mut changed = expected.clone();
+    changed.artifact_id = uuid::Uuid::new_v4().to_string();
+    assert!(serve
+        .shared
+        .retained_artifacts
+        .acquire_expected_for_request(&changed, rendition, &rendition.recipe.retained_logical)
+        .is_none());
+    let readers = rendition.readers.lock().await;
+    let manifest = rendition.manifest.lock().await;
+    assert!(
+        super::driver::playback_demands(&serve.shared.pool, rendition, &readers, &manifest)
+            .is_empty()
+    );
 }
 
 /// Synthetic completed bytes through the existing Sink/retained registry.
@@ -1827,7 +1902,14 @@ mod tests {
         tokio::fs::write(&source_path, b"exact durable source")
             .await
             .expect("source");
-        let mut file = crate::vodserve::tests::media_file_at(source_path, 10_000);
+        let mut file = crate::vodserve::tests::media_file_at(
+            source_path,
+            if encoded_candidate {
+                plan_duration_ms(&rendition.plan)
+            } else {
+                10_000
+            },
+        );
         if encoded_candidate {
             file.audio_streams = vec![plurx_core::domain::AudioStream {
                 index: 0,
@@ -2128,7 +2210,29 @@ mod tests {
         crate::transcode::RetainedOutputFacts,
         Session,
     ) {
-        let (temp, serve, completed, facts) = durable_fixture().await;
+        let (temp, serve, fresh, facts, session, _) = cached_session_fixture_for(None).await;
+        (temp, serve, fresh, facts, session)
+    }
+
+    async fn cached_session_fixture_for(
+        start: Option<f64>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        Arc<Rendition>,
+        crate::transcode::RetainedOutputFacts,
+        Session,
+        Option<SessionRequest>,
+    ) {
+        let (temp, serve, completed, facts, request) = if let Some(start) = start {
+            let (temp, serve, completed, facts, mut request) =
+                durable_fixture_with_candidate(true).await;
+            request.start_seconds = start;
+            (temp, serve, completed, facts, Some(request))
+        } else {
+            let (temp, serve, completed, facts) = durable_fixture().await;
+            (temp, serve, completed, facts, None)
+        };
         // A new attachment can have no live manifest bytes, even though its
         // independently verified immutable response covers the whole title.
         let mut fresh =
@@ -2137,16 +2241,63 @@ mod tests {
         incoming.key = "b".repeat(64);
         incoming.recipe.file = completed.recipe.file.clone();
         incoming.recipe.retained_logical = completed.recipe.retained_logical.clone();
+        incoming.recipe.audio_delivery = completed.recipe.audio_delivery.clone();
+        incoming.recipe.measured_candidate = completed.recipe.measured_candidate.clone();
         incoming.source = Some(
             crate::fragment_index_cluster::open_source_fence(&incoming.recipe.file, None)
                 .await
                 .expect("same held source"),
         );
-        let artifact = serve
-            .shared
-            .retained_artifacts
-            .acquire_expected_for_request(&facts, &fresh, &fresh.recipe.retained_logical)
-            .expect("verified incoming cached attachment");
+        let artifact = if let Some(request) = request.as_ref() {
+            let mut resolved = request.clone();
+            resolved.audio_delivery = completed.recipe.audio_delivery.clone();
+            let logical = super::super::retained_manifest::LogicalOutput::resolve(
+                &resolved,
+                None,
+                &fresh.recipe.file,
+                fresh.recipe.video,
+            );
+            assert!(
+                Some(logical) == fresh.recipe.retained_logical,
+                "70.841 seek changes demand, not the full zero-origin delivery tuple"
+            );
+            assert!(
+                fresh
+                    .output_measurement
+                    .lock()
+                    .expect("measurement")
+                    .complete_rates()
+                    .is_none(),
+                "no fresh measurement shortcut"
+            );
+            assert!(
+                request.start_seconds * 1000.0
+                    < fresh.recipe.file.duration_ms.expect("full fixture source") as f64
+            );
+            assert!(entry_containing(&fresh.plan, request.start_seconds) > 0);
+            assert!(
+                fresh.readers.lock().await.is_empty(),
+                "actual New acquisition precedes attachment"
+            );
+            serve
+                .capture_retained_output(
+                    RetainedOutputCapture::New,
+                    &fresh,
+                    &fresh.recipe.retained_logical,
+                    request,
+                    &fresh.recipe.file,
+                    false,
+                )
+                .await
+                .expect("first capture")
+                .expect("actual private candidate acquired")
+        } else {
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_expected_for_request(&facts, &fresh, &fresh.recipe.retained_logical)
+                .expect("verified incoming cached attachment")
+        };
         let session = Session {
             children: Vec::new(),
             passive_grant: None,
@@ -2158,12 +2309,18 @@ mod tests {
             user_name: "fixture".into(),
             item_title: "Fixture".into(),
             started_unix: 1,
-            target_height: 360,
-            kind: SessionKind::Copy {
-                aac: false,
-                preserve_dolby_vision: false,
-                convert_dolby_vision: false,
-            },
+            target_height: request.as_ref().map_or(360, |request| match request.kind {
+                SessionKind::Transcode { height } => height,
+                _ => 360,
+            }),
+            kind: request.as_ref().map_or(
+                SessionKind::Copy {
+                    aac: false,
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                },
+                |request| request.kind,
+            ),
             supersession_user: "fixture".into(),
             block_budget: Duration::from_secs(1),
             sdr_master_codecs: false,
@@ -2181,32 +2338,71 @@ mod tests {
             terminal_cleanup: None,
             tombstone: None,
         };
-        (temp, serve, fresh, facts, session)
+        (temp, serve, fresh, facts, session, request)
     }
 
     pub(super) async fn post_attachment_output_facts_fixture() -> (
         tempfile::TempDir,
         Arc<VodServe>,
         crate::vodserve::VodHlsFacts,
+        SessionRequest,
     ) {
-        let (temp, serve, rendition, _, session) = cached_session_fixture().await;
-        let reader = session.attachment_reader(0);
+        // Exercise the SAME New capture branch as FirstPreparation at 70.841s,
+        // before any reader/Session exists. Bytes are synthetic Sink publications.
+        let (temp, serve, rendition, _, mut session, request) =
+            cached_session_fixture_for(Some(70.841)).await;
+        let mut request = request.expect("actual first acquisition request");
+        request.playback_id = "first-capture".into();
+        session.playback_id = request.playback_id.clone();
+        let at = entry_containing(&rendition.plan, 70.841);
+        let reader = session.attachment_reader(at);
+        assert_eq!(reader.frontier, at);
+        assert!(reader.authority_only);
         rendition
             .readers
             .lock()
             .await
-            .insert("cached".into(), reader);
+            .insert("00000000-0000-4000-8000-00000000cace".into(), reader);
         serve
             .shared
             .sessions
             .lock()
             .await
-            .insert("cached".into(), session);
+            .insert("00000000-0000-4000-8000-00000000cace".into(), session);
         let facts = serve
-            .hls_facts("cached")
+            .hls_facts("00000000-0000-4000-8000-00000000cace")
             .await
             .expect("actual cached post-attachment snapshot");
-        (temp, serve, facts)
+        (temp, serve, facts, request)
+    }
+
+    #[tokio::test]
+    async fn failed_preparation_cleanup_does_not_end_replacement_owner() {
+        let (_temp, serve, initial, _) = post_attachment_output_facts_fixture().await;
+        let id = "00000000-0000-4000-8000-00000000cace";
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let replacement = sessions.get_mut(id).expect("replacement");
+            replacement.incarnation = Arc::new(());
+        }
+        let replacement = serve.hls_facts(id).await.expect("replacement facts");
+        serve.end_for_owner(id, &initial.response_owner).await;
+        assert!(
+            serve
+                .response_status_owner_is_current(id, &replacement.response_owner)
+                .await
+        );
+        super::test_assert_sealed_cached_delivery(
+            &serve,
+            id,
+            &replacement
+                .response_owner
+                .retained_output_facts()
+                .expect("private proof"),
+        )
+        .await;
+        serve.end_for_owner(id, &replacement.response_owner).await;
+        assert!(serve.hls_facts(id).await.is_none());
     }
 
     #[tokio::test]

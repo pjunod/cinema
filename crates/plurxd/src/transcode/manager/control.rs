@@ -1100,6 +1100,7 @@ impl TranscodeManager {
             return None;
         }
         let gate = Arc::new(SessionReleaseGate {
+            first_preparation: Arc::new(tokio::sync::Mutex::new(())),
             transition: Arc::new(tokio::sync::Mutex::new(())),
             released: AtomicBool::new(false),
         });
@@ -1201,6 +1202,7 @@ impl TranscodeManager {
             .entry(session_id.to_owned())
             .or_insert_with(|| {
                 let gate = Arc::new(SessionReleaseGate {
+                    first_preparation: Arc::new(tokio::sync::Mutex::new(())),
                     transition: Arc::new(tokio::sync::Mutex::new(())),
                     released: AtomicBool::new(false),
                 });
@@ -1216,6 +1218,7 @@ impl TranscodeManager {
             .or_else(|| entry.gate.upgrade())
             .unwrap_or_else(|| {
                 Arc::new(SessionReleaseGate {
+                    first_preparation: Arc::new(tokio::sync::Mutex::new(())),
                     transition: Arc::new(tokio::sync::Mutex::new(())),
                     released: AtomicBool::new(false),
                 })

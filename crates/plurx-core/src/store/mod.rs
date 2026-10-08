@@ -76,6 +76,8 @@ pub use candidate_recovery::{
     CandidateRecoveryScope,
 };
 mod continuous_family;
+mod prepared_output;
+pub use prepared_output::PreparedOutputSeal;
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(test)]
@@ -4978,6 +4980,12 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         &self,
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Seal only the first private output choice of an unpublished reserved successor.
+    /// Backends without this conditional writer cannot publish first-capture preparations.
+    async fn seal_prepared_output(&self, _seal: &PreparedOutputSeal) -> Result<bool, StoreError> {
+        Ok(false)
+    }
 
     /// Record what a viewer is asking for, and return the ownership that
     /// results.
