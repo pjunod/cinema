@@ -37,6 +37,7 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     #if os(tvOS)
     @AppStorage("plurx.liveTvLayout") private var liveTvLayoutRaw = TvLiveLayout.guidePreview.rawValue
+    @AppStorage("plurx.tvHomeLayout") private var tvHomeLayoutRaw = TvHomeLayout.classic.rawValue
     #endif
     #if os(iOS)
     @State private var confirmingSignOut = false
@@ -50,6 +51,14 @@ struct SettingsView: View {
     private var subBinding: Binding<String> {
         Binding(get: { model.subLang },
                 set: { model.setLanguages(audio: model.audioLang, sub: $0) })
+    }
+
+    private var libraryGroupingLabel: String {
+        #if os(tvOS)
+        return "Library grouping"
+        #else
+        return "Home layout"
+        #endif
     }
 
     var body: some View {
@@ -142,7 +151,18 @@ struct SettingsView: View {
                         Text(size.label).tag(size)
                     }
                 }
+                #if os(tvOS)
                 Picker("Home layout", selection: Binding(
+                    get: { TvHomeLayout(rawValue: tvHomeLayoutRaw) ?? .classic },
+                    set: { tvHomeLayoutRaw = $0.rawValue }
+                )) {
+                    ForEach(TvHomeLayout.allCases) { layout in
+                        Text(layout.label).tag(layout)
+                    }
+                }
+                .accessibilityIdentifier("settings-tv-home-layout")
+                #endif
+                Picker(libraryGroupingLabel, selection: Binding(
                     get: { model.libraryGrouping },
                     set: { model.setLibraryGrouping($0) }
                 )) {
@@ -153,7 +173,11 @@ struct SettingsView: View {
             } header: {
                 Text("Appearance")
             } footer: {
+                #if os(tvOS)
+                Text("Classic keeps the current media shelves. Theater adds a featured title with a backdrop and Play or Resume controls. Library grouping and theme are independent of Home layout.")
+                #else
                 Text("Theme and room brightness are independent. Home layout groups shelves by media category or by individual library.")
+                #endif
             }
 
             // Server Live TV settings, as on the web's Settings → Live TV. The
