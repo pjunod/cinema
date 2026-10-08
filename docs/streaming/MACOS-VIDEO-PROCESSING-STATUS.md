@@ -30,12 +30,15 @@ accepted repairs, including three terminal-NAL runtime fixtures at
 defects; source completion is not final acceptance.
 
 Final normal-API SDR/HDR10, finite HEVC, ordinary Auto and strict P5 delivery
-passed on the signed `a2ee4a221` package. AC-4 then exposed a real integration
+passed on signed `a2ee4a221` and the repaired `1bf84609` package. AC-4 then exposed a real integration
 defect: core scanning resolved PATH FFprobe while the packaged daemon and held
 parser used Jellyfin. Their differing facts correctly triggered source
 attestation refusal. Shared executable-resolution repair `4adb34c0` now covers scanning,
 metadata extraction and daemon processing and is independently accepted. A
-new signed release is built and actual AC-4 requalification is active.
+new signed release passes normal-API AC-4 catalog/attestation and actual
+stereo 48 kHz AAC/AVC delivery through the explicit software encoder. The
+public caption-bearing sample fails in the existing CPU/VideoToolbox
+caption-insertion path; this predeclared file-VOD limitation is retained.
 
 Normal Live TV qualification passed all twelve progressive/TFF/BFF ×
 frame/field × repeated-start cases across two retained runs, plus explicit
@@ -56,15 +59,16 @@ source-bound receipts and both corrected harness failures are retained.
 
 No deployed FFmpeg package or live service has changed. The matching Apple
 Metal compiler component was temporarily installed for the private package
-build; ownership is recorded and cleanup will remove that exact component
-after review. Missing qualification stays explicitly open.
+build and the exact owned build `27A266a` has now been removed. All twenty-two
+final runtime observations and actual SDR/HEVC/Auto delivery pass afterward.
+Missing qualification stays explicitly open.
 
 | Workstream | Owner | State | Evidence or next dependency |
 |---|---|---|---|
 | Integration and status | Manager | final candidate preparation | Main `c746b6c9b` union and five review repairs integrated; all scopes accepted through terminal registration `54c3a3fe8` |
 | M0/M1 Jellyfin package and harness | Sol builders | source complete; package controls recorded | Final strict terminal-NAL package `c8c4b525…`; pinned source offer, AC-4 byte preservation and prior synthetic benefit evidence |
 | M2/M3 typed routes and observations | Sol route builder | source complete; inventory passed | All twenty-two supported graph classes available in actual packaged-daemon reports |
-| Native parser and symbols | Sol native builder | resolver repair reviewed; signed package built | Shared bundled tool resolution; AC-4 normal-API confirmation active |
+| Native parser and symbols | Sol native builder | final signed package and AC-4 confirmed | Shared bundled tool resolution; software-encoder normal-API AC-4 passes; incumbent VT caption limitation retained |
 | M4 normalized VOD | Sol native and route builders | final SDR/HDR10 delivery demonstrated | 120-second HTTP lifetime, CPU/native pixel comparison, seek/resume and cancellation pass; timing/concurrency/soak pending |
 | E1 strict Dolby P5 | Sol Dolby and route builders | source complete; sixty controls pass | Sixty selected-graph controls and sixteen observer mutations pass; terminal-NAL fixture registration independently accepted. Final normal-API strict P5 delivery passes on `a2ee4a221` |
 | E2–E4 HLG, burns, BWDIF, HEVC and Live | Sol builders | source complete within demonstrated scope | HLG text/bitmap controls pass; actual HDR High10 interlace decode fails and keeps incumbent. HEVC master/Auto pass; twelve Live cases and EOF pass. Source-change race repair and requalification active |
@@ -318,7 +322,7 @@ sections remain the detailed acceptance specifications.
 | Q-08 | HDR blinded review on named calibrated display, highlight/shadow/gamut/temporal findings | Awaiting human/display evidence; synthetic ramp and VMAF alone are insufficient |
 | Q-09 | Real plurxd rolling/VOD playback, two-minute play, seek/resume, errors/rebuffer/A/V | Signed a2ee normal-API native normalized SDR completes 120-second paced HTTP demand, seek target PTS 60, resume and cancellation; finite HEVC/Auto and HDR10 delivery pass. HTTP delivery is not client presentation |
 | Q-10 | Correctness first, then ≥20% throughput or ≥20% CPU/≥15% energy benefit within throughput bound | SDR/revised HDR synthetic CPU criterion met; visual/production correctness still unqualified |
-| M6-01 · implementation §10 | Full incumbent AC-4 and P5 package acceptance in daemon environment | Strict P5 normal-API delivery passes. AC-4 original/patched packages produce byte-identical 239,999-frame 48 kHz stereo PCM. Shared scanner resolver repair passes normal catalog and held-source attestation; public broadcast VT-encoder SEI failure is retained and audio-isolated software-encoder delivery remains active |
+| M6-01 · implementation §10 | Full incumbent AC-4 and P5 package acceptance in daemon environment | Strict P5 normal-API delivery passes. AC-4 original/patched packages produce byte-identical 239,999-frame 48 kHz stereo PCM. Shared scanner resolver repair passes normal catalog and held-source attestation; public broadcast incumbent VT-encoder SEI failure retained; explicit software-encoder normal-API AAC stereo48k/AVC delivery and cancellation pass |
 | M6-02 | Native install, runtime libraries, signing/distribution and architecture compatibility | Pinned Jellyfin package, Apple-only native dependencies, signed isolated arm64 daemon and matching dSYM UUID verified. Developer ID/notarization, distribution install and Intel remain unqualified |
 | M6-03 | Fresh offline install, empty/corrupt/full/unwritable cache and reprobe | All twenty-two graph observations available; empty/corrupt cache and explicit permission refusal/recovery pass. Bounded-volume ENOSPC, exact recovery and restart pass; distribution installation remains unqualified |
 | M6-04 | Upgrade/rollback while workers active, old binaries retained or workers drained | Planned; no installed package changed yet |

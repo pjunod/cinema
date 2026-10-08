@@ -281,7 +281,12 @@ macOS/Windows siblings or PATH, and Linux defaults remain PATH. The existing
 regular-target `is_file()` behavior is retained, including symlink following.
 No source-integrity or held-source confinement check changes. Both regression
 references resolve; compile and the normal hook pass, with no units run.
-Actual AC-4 acceptance on the repaired package remains the next requirement.
+Actual normal-API AC-4 acceptance on `7ecf13dd1` now passes with an
+explicit software encoder: six-channel catalog facts, source attestation,
+stereo 48 kHz served AAC, AVC video and cancellation. The public sample
+exposes an existing CPU-processing/VideoToolbox-encoding caption insertion
+failure; that negative remains recorded as the predeclared caption-bearing
+file-VOD limitation, without a blanket caption strip or route workaround.
 
 ### 7.5 Runtime-discovered Live terminal classification race
 

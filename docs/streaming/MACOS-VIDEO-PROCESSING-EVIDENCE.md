@@ -924,3 +924,73 @@ media are excluded. These receipts remain bound to `a2ee4a221`; later shared
 probe-tool resolution and Live termination changes do not modify cache
 preparation or graph observation code. This is private-package operational
 evidence, not deployed installation or network-isolation qualification.
+
+## 25. Final source compilation and compiler-independent runtime
+
+Source `5e8a075dce5f36f9e259e47ce593e8b3347edfcf` differs only in
+documentation from final release source `1bf84609cd0e334933f0a8c568d5a119b89d8549`.
+Its source-only Linux archive passes pinned Rust 1.97.1 workspace/all-target
+check and Clippy with `hiqlite-store`; known `fullfp16` compiler warnings
+remain in the logs. The archive carries neither `.git` nor credentials.
+Earlier resolver-source `12fd73ab5` passes are preserved separately.
+The final Live repair also passes pinned all-target compilation and its
+normal catalog/format/Clippy/JavaScript hook. No unit execution is claimed.
+All seventy final regression references resolve statically.
+
+[Final repair compilation evidence](evidence/macos-video-20261008/final-repair-compilation-evidence.tar.gz)
+contains fifteen hash-verified files, 11,847 compressed bytes, SHA-256
+`6c68a425350e6d1214c9014f58c0e7665194245959ce21624d568a8f643c7bcb`.
+It includes source-footprint comparisons, original and final source receipts,
+Live builder logs, regression-reference resolution and compiler ownership
+cleanup. Previous source-bound compilation archives remain unchanged.
+
+The task-installed MetalToolchain is verified as build `27A266a`, identifier
+`com.apple.dt.toolchain.Metal.32023.921.5`, and removed with exit zero.
+The signed final package then observes all twenty-two runtime graphs available
+and passes actual SDR/HEVC/Auto delivery using its packaged shaders. A
+development Metal compiler is therefore not required by those actual runtime
+checks. This does not imply a notarized distribution installation.
+
+## 26. Final signed package and normal-API source requalification
+
+Final release source `1bf84609cd0e334933f0a8c568d5a119b89d8549` builds
+in 12 minutes 55 seconds. Signed daemon SHA-256 is
+`d7e06d95b1da490f497a92fd50db38d5c04d3683e7851caa733cb52b30db5a15`;
+its matching arm64 dSYM UUID is `68d0c6c2-7ce4-3e95-b23b-03f2c415ef80`.
+Jellyfin FFmpeg `c8c4b525…`, FFprobe `e81fff40…` and parser WASM `36f7e029…`
+remain unchanged. Package source/hash/signature/entitlement/UUID validation
+passes. This is an ad hoc signed private package, not notarized distribution.
+
+With the temporary Metal compiler removed, normal source scanning and held
+source authority produce all twenty-two runtime observations, normalized
+1440p SDR, CPU/native forty-eight-frame pixel observations, captured-session
+switch semantics, seek/resume and cancellation. Finite SDR HEVC and unbound
+Auto on/off deliver actual AVC/HEVC initialization, codec-bearing master
+playlists and forty-eight decoded frames. Separate HDR checks deliver native
+HDR10-to-SDR and Main10 PQ/BT.2020 HEVC. Strict P5 delivers all twenty-four
+analytic frames through the captured strict `vt_dovi_metal` identity. These
+are bounded final-source rechecks; the earlier 120-second demand receipt
+remains separately bound to `a2ee4a221`.
+
+Normal AC-4 acceptance on `7ecf13dd1` now reads the first six-channel AC-4
+track correctly and passes held-source attestation (miss 1, hit 1, refused 0).
+Explicit software encoding delivers real AVC video plus stereo 48 kHz AAC
+with monotonic A/V PTS, three objects representing 6.006 media seconds during
+the five-second bounded timeline, and cancellation. The first software
+control failed because its external oracle expected `sample_rate` on each
+FFprobe frame; that field is absent. The corrected oracle checks actual
+stream rate, frame channels/sample count and timestamps. Both are retained.
+
+The public caption-bearing sample also exposes a negative result: incumbent
+CPU processing with VideoToolbox encoding fails in its A/53 SEI insertion
+path. This is not a successful native-processing result or a new native-route
+fallback. The predeclared caption-bearing file-VOD limitation remains; no
+blanket caption stripping, weakened source attestation or speculative parser
+patch was introduced. The public sample and derived media are not retained.
+
+[Final normal-API receipts and package verification](evidence/macos-video-20261008/normal-api-final-evidence.tar.gz)
+contains thirty-three hash-verified files, 170,757 compressed bytes, SHA-256
+`318f1b851d46bf9afdf84495a090f9d07325aff437321700cb59d6879a687604`.
+Original source/driver hashes, bounded errors, decoded observations and
+normalized executed drivers are included. Credentials, private sessions,
+configurations, full daemon logs, binaries and media are excluded.
