@@ -5236,6 +5236,7 @@ mod quorum_candidate_tests {
             id: requested,
             recipe_digest: [0; 32],
             route: CandidateRoute::Encode,
+            planned_codec: None,
             normalized_geometry: true,
             width: 1920,
             height: 1080,

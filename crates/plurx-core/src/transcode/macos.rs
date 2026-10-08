@@ -137,14 +137,59 @@ pub enum MacosProcessingGraph {
     SdrBwdifField,
     HevcSdr,
     HevcHdr10,
+    HevcSdrHost,
+    HevcHdr10Host,
+    LiveSdrUploadScale,
+    LiveSdrUploadBwdifFrame,
+    LiveSdrUploadBwdifField,
     P5VtTonemapx,
     P5VtMetal,
     P5SoftwareMetal,
 }
 
+impl MacosProcessingGraph {
+    /// Exact software-decode upload initialization, shared by runtime probes
+    /// and the existing LiveTV plan owner. It does not claim hardware decode.
+    pub fn live_upload_init_args(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::LiveSdrUploadScale
+            | Self::LiveSdrUploadBwdifFrame
+            | Self::LiveSdrUploadBwdifField => Some(&[
+                "-init_hw_device",
+                "videotoolbox=plurx_live_vt",
+                "-filter_hw_device",
+                "plurx_live_vt",
+            ]),
+            _ => None,
+        }
+    }
+
+    /// Project the already-selected exact LiveTV graph into its filter recipe.
+    /// Eligibility and source/output binding remain in LiveTvTranscodePlan.
+    pub fn live_upload_filter(self, width: u32, height: u32) -> Option<String> {
+        if width < 2 || height < 2 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return None;
+        }
+        let deinterlace = match self {
+            Self::LiveSdrUploadScale => "",
+            Self::LiveSdrUploadBwdifFrame => {
+                ",bwdif_videotoolbox=mode=send_frame:parity=auto:deint=interlaced"
+            }
+            Self::LiveSdrUploadBwdifField => {
+                ",bwdif_videotoolbox=mode=send_field:parity=auto:deint=interlaced"
+            }
+            _ => return None,
+        };
+        let scale =
+            Pipeline::VtScaleSdr.filters(Some(i64::from(width)), i64::from(height), None)?;
+        Some(format!("format=nv12,hwupload{deinterlace},{scale}"))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacosProcessingContext {
     enabled: bool,
+    hevc_output_enabled: bool,
     identity: MacosProcessingIdentity,
     sdr_scale: MacosProcessingAvailability,
     hdr10_metal: MacosProcessingAvailability,
@@ -161,12 +206,25 @@ impl MacosProcessingContext {
     ) -> Self {
         Self {
             enabled,
+            hevc_output_enabled: false,
             identity,
             sdr_scale,
             hdr10_metal,
             excluded_pipelines: BTreeSet::new(),
             graphs: BTreeMap::new(),
         }
+    }
+
+    /// Independent saved output preference; runtime compatibility never
+    /// changes this value or the processing preference.
+    #[must_use]
+    pub fn with_hevc_output_enabled(mut self, enabled: bool) -> Self {
+        self.hevc_output_enabled = enabled;
+        self
+    }
+
+    pub fn hevc_output_enabled(&self) -> bool {
+        self.hevc_output_enabled
     }
 
     /// Runtime evidence for one complete extension tuple. No offline

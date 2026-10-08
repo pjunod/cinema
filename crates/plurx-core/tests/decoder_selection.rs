@@ -789,6 +789,7 @@ fn facts(stream: Value) -> DecodeFacts {
 
 fn options(pipeline: Pipeline) -> TranscodeMediaOptions {
     TranscodeMediaOptions {
+        output_codec: None,
         video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
         audio: None,
         target_height: 1080,
@@ -1019,6 +1020,7 @@ fn execution_file(path: &str) -> MediaFile {
 
 fn execution_options() -> TranscodeOptions {
     TranscodeOptions {
+        output_codec: None,
         video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
         audio: None,
         auto_quality_rate_profile: None,
@@ -4425,5 +4427,150 @@ fn macos_bwdif_frame_graph_keeps_parity_cadence_and_runs_before_scale() {
             !args.iter().any(|arg| arg == "-a53cc"),
             "live caption policy stays live-scoped"
         );
+    }
+}
+
+#[test]
+fn macos_hevc_codec_and_grade_require_independent_complete_graphs() {
+    use plurx_core::transcode::VideoCodec;
+    for hdr in [false, true] {
+        let input = facts(macos_stream(hdr));
+        let caps = unqualified_software_capabilities("hevc");
+        let mut options = options(if hdr {
+            Pipeline::Hdr10Passthrough
+        } else {
+            Pipeline::Cpu
+        });
+        options.output_codec = Some(VideoCodec::Hevc);
+        options.effective_rate_control = EffectiveRateControl::Vbr;
+        let unobserved = macos_context(true, MacosProcessingAvailability::Available)
+            .with_hevc_output_enabled(true);
+        assert!(resolve_with_options(
+            Encoder::VideoToolbox,
+            options.clone(),
+            &input,
+            &caps,
+            macos_policy(unobserved.clone())
+        )
+        .is_err());
+        let graph = if hdr {
+            MacosProcessingGraph::HevcHdr10
+        } else {
+            MacosProcessingGraph::HevcSdr
+        };
+        let observed = unobserved.with_graph(graph, MacosProcessingAvailability::Available);
+        let selected = resolve_with_options(
+            Encoder::VideoToolbox,
+            options.clone(),
+            &input,
+            &caps,
+            macos_policy(observed),
+        )
+        .expect("independent native HEVC graph");
+        assert_eq!(selected.output_contract().output_codec(), "hevc");
+        assert_eq!(
+            selected.output_contract().output_grade(),
+            if hdr {
+                OutputGrade::Hdr10
+            } else {
+                OutputGrade::Sdr
+            }
+        );
+        assert_eq!(
+            selected.options().pipeline,
+            if hdr {
+                Pipeline::VtScaleHdr10
+            } else {
+                Pipeline::VtScaleSdr
+            }
+        );
+        let execution = TranscodeExecution::from_options(
+            &execution_file("/fixture/source.mkv"),
+            &execution_options(),
+            Pacing::unpaced(),
+            "/fixture/out",
+        )
+        .expect("execution");
+        let args = hls_args(&selected, &execution);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-c:v", "hevc_videotoolbox"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-color_trc", if hdr { "smpte2084" } else { "bt709" }]));
+        assert!(args.windows(2).any(|pair| pair == ["-tag:v", "hvc1"]));
+        let host_graph = if hdr {
+            MacosProcessingGraph::HevcHdr10Host
+        } else {
+            MacosProcessingGraph::HevcSdrHost
+        };
+        let host = macos_context(false, MacosProcessingAvailability::Unavailable)
+            .with_hevc_output_enabled(true)
+            .with_graph(host_graph, MacosProcessingAvailability::Available);
+        let recovered = resolve_with_options(
+            Encoder::VideoToolbox,
+            options.clone(),
+            &input,
+            &caps,
+            macos_policy(host),
+        )
+        .expect("HEVC encoder independent of native processing");
+        assert_eq!(recovered.options().pipeline, options.pipeline);
+        assert_eq!(recovered.output_contract().output_codec(), "hevc");
+        assert_eq!(
+            recovered.output_contract().output_grade(),
+            selected.output_contract().output_grade()
+        );
+        assert_ne!(selected.plan_digest(), recovered.plan_digest());
+        let failure_context = macos_context(true, MacosProcessingAvailability::Available)
+            .with_hevc_output_enabled(true)
+            .with_graph(graph, MacosProcessingAvailability::Available)
+            .with_graph(host_graph, MacosProcessingAvailability::Available)
+            .excluding_pipeline(selected.options().pipeline);
+        let retry = resolve_with_options(
+            Encoder::VideoToolbox,
+            selected.options().clone(),
+            &input,
+            &caps,
+            macos_policy(failure_context),
+        )
+        .expect("observed grade-preserving host retry");
+        assert_eq!(retry.options().pipeline, recovered.options().pipeline);
+        assert_eq!(retry.output_contract().output_codec(), "hevc");
+        assert_eq!(
+            retry.output_contract().output_grade(),
+            selected.output_contract().output_grade()
+        );
+        if !hdr {
+            let mut legacy_options = options.clone();
+            legacy_options.output_codec = None;
+            let legacy_worker = resolve_with_options(
+                Encoder::VideoToolbox,
+                legacy_options,
+                &input,
+                &caps,
+                macos_policy(macos_context(
+                    false,
+                    MacosProcessingAvailability::Unavailable,
+                )),
+            )
+            .expect("legacy worker retains H264");
+            assert_eq!(legacy_worker.output_contract().output_codec(), "h264");
+            assert_ne!(
+                legacy_worker.plan_digest(),
+                retry.plan_digest(),
+                "an old worker cannot publish H264 behind an exact HEVC recipe"
+            );
+        }
+        let disabled = macos_context(false, MacosProcessingAvailability::Available)
+            .with_graph(host_graph, MacosProcessingAvailability::Available);
+        assert!(resolve_with_options(
+            Encoder::VideoToolbox,
+            options,
+            &input,
+            &caps,
+            macos_policy(disabled)
+        )
+        .is_err());
     }
 }

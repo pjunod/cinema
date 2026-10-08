@@ -810,6 +810,8 @@ pub struct SubtitleBurn {
 /// Everything needed to build a transcode command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscodeOptions {
+    /// Negotiated output codec; absent preserves the incumbent grade-based recipe.
+    pub output_codec: Option<VideoCodec>,
     /// Explicit immutable video sample recipe; ordinary encodes preserve defaults.
     pub video_sample_envelope: VideoSampleEnvelope,
     /// Conditional candidate semantics; absent preserves the legacy recipe.
@@ -1006,6 +1008,7 @@ impl Default for TranscodeOptions {
             video_sample_envelope: VideoSampleEnvelope::EncoderDefault,
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
             target_height: 1080,
             video_bitrate_kbps: 8000,
             effective_rate_control: EffectiveRateControl::Vbr,
@@ -1631,6 +1634,7 @@ pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec
 pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
     let media = plan.options();
     let options = TranscodeOptions {
+        output_codec: media.output_codec,
         video_sample_envelope: media.video_sample_envelope,
         auto_quality_rate_profile: None,
         normalized_geometry: false,
@@ -1934,7 +1938,18 @@ fn hls_args_inner(
     // The grade is read off the pipeline rather than carried beside it, so a
     // session cannot encode HEVC Main10 through a chain that ended in BT.709,
     // or the reverse.
-    args.extend(encoder.encode_args_for(
+    args.extend(encoder.encode_args_for_codec(
+        plan.map_or_else(
+            || {
+                opts.output_codec
+                    .unwrap_or(if opts.pipeline.output_grade() == OutputGrade::Hdr10 {
+                        VideoCodec::Hevc
+                    } else {
+                        VideoCodec::H264
+                    })
+            },
+            |plan| plan.codec_contract().codec,
+        ),
         opts.pipeline.output_grade(),
         opts.video_bitrate_kbps,
         opts.effective_rate_control,
@@ -1942,17 +1957,22 @@ fn hls_args_inner(
         opts.software_threads,
     ));
     if plan.is_some_and(|plan| plan.macos_processing_identity().is_some()) {
-        // The processing contract ends in hardware H.264 and explicit SDR
-        // signaling. Both rolling and immutable VOD consume this same recipe.
+        // The captured Mac output contract fixes codec and grade signaling.
+        // Rolling and immutable VOD consume this same recipe.
         args.extend([
             "-allow_sw".into(),
             "0".into(),
             "-color_primaries".into(),
-            "bt709".into(),
+            opts.pipeline.output_grade().primaries().into(),
             "-color_trc".into(),
-            "bt709".into(),
+            opts.pipeline.output_grade().transfer().into(),
             "-colorspace".into(),
-            "bt709".into(),
+            if opts.pipeline.output_grade() == OutputGrade::Hdr10 {
+                "bt2020nc"
+            } else {
+                "bt709"
+            }
+            .into(),
             "-color_range".into(),
             "tv".into(),
         ]);
@@ -2998,6 +3018,7 @@ mod tests {
         let options = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
             target_height: 1080,
             pipeline: Pipeline::Cpu,
             tone_map: ToneMap::Zscale,
@@ -3267,6 +3288,7 @@ mod tests {
         let opts = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
             target_height: 1080,
             video_bitrate_kbps: 6000,
             ..Default::default()
@@ -3309,6 +3331,7 @@ mod tests {
         let opts = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
             target_height: 1080,
             subtitle_burn: Some(SubtitleBurn {
                 subtitle_index: 2,
@@ -3424,6 +3447,7 @@ mod tests {
         let opts = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
             target_height: 1080,
             subtitle_burn: Some(SubtitleBurn {
                 subtitle_index: 0,
@@ -3445,6 +3469,7 @@ mod tests {
         let plain = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
             target_height: 1080,
             ..Default::default()
         };
@@ -4118,6 +4143,7 @@ mod tests {
         let opts = TranscodeOptions {
             auto_quality_rate_profile: None,
             normalized_geometry: false,
+            output_codec: None,
             target_height: 1080,
             pipeline: Pipeline::VppQsv,
             subtitle_burn: Some(SubtitleBurn {

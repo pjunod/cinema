@@ -183,7 +183,10 @@ pub(super) fn hdr10_rung_fits(
     encoder: Encoder,
 ) -> bool {
     let max_samples = match (target_height, encoder) {
-        (HDR10_HEIGHT, Encoder::Software | Encoder::Qsv | Encoder::Vaapi) => HDR10_MAX_LUMA_SAMPLES,
+        (
+            HDR10_HEIGHT,
+            Encoder::Software | Encoder::Qsv | Encoder::Vaapi | Encoder::VideoToolbox,
+        ) => HDR10_MAX_LUMA_SAMPLES,
         (HDR10_4K_HEIGHT, Encoder::Qsv) => HDR10_4K_MAX_LUMA_SAMPLES,
         _ => return false,
     };
