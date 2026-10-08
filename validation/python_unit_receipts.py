@@ -995,6 +995,9 @@ def restore(api, scope, run, applicability=None):
         journal = artifact_json(final_raw)
         inherited = journal.get('complete') is False and recover_inherited_pr742(
             api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
+        from validation.python_unit_inherited_recovery920 import recover_inherited_pr920
+        inherited = inherited or recover_inherited_pr920(
+            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
         recovered = inherited or journal.get("complete") is False and recover_discovery_passes(
             api, scope, prior, matching[0], markers[0], marker_raw, artifact, final_raw, journal, legacy)
         validate_journal(journal, scope, rid, sha(prior["commit_sha"]), completed=not recovered)

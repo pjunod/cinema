@@ -84,7 +84,9 @@
         "validation/python_unit_receipts.py",
         "validation/python_unit_interrupted_recovery.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Audited fake API/source/archive/test fixtures; real descriptor overrides below."
     },
@@ -95,7 +97,9 @@
         "validation/python_unit_receipts.py",
         "validation/python_unit_interrupted_recovery.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Audited fake API/source/archive/test fixtures; real descriptor overrides below."
     },
@@ -106,7 +110,9 @@
         "validation/python_unit_receipts.py",
         "validation/python_unit_interrupted_recovery.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Audited fake API/source/archive/test fixtures; real descriptor overrides below."
     },
@@ -117,7 +123,9 @@
         "validation/python_unit_receipts.py",
         "validation/python_unit_interrupted_recovery.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Audited fake API/source/archive/test fixtures; real descriptor overrides below."
     },
@@ -128,7 +136,9 @@
         "validation/python_unit_receipts.py",
         "validation/python_unit_interrupted_recovery.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Audited fake API/source/archive/test fixtures; real descriptor overrides below."
     },
@@ -140,7 +150,9 @@
         "validation/python_unit_interrupted_recovery.py",
         "validation/python-unit-inherited-failure742.json",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "SyntheticInheritedAPI reads the real descriptor before patching loader."
     },
@@ -152,7 +164,9 @@
         "validation/python_unit_interrupted_recovery.py",
         "validation/python-unit-interrupted3972.json",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Synthetic API construction reads the committed descriptor."
     },
@@ -165,7 +179,9 @@
         "validation/main-preflight-inputs.json",
         "validation/python_unit_receipts.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Generic receipt and bridge controls read this runner/helper closure; first CI execution remains required."
     },
@@ -181,7 +197,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "New synthetic adapter controls; first execution remains required."
     },
@@ -199,7 +217,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "The bounded retry bridge control imports both receipt readers; preserve their actual input closure."
     },
@@ -217,7 +237,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "This exact new bridge control imports the main receipt proof and constants; retain sibling input families unchanged."
     },
@@ -339,7 +361,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Tested helper closure; actual repository overrides below."
     },
@@ -737,7 +761,9 @@
         "validation/python_unit_interrupted_recovery.py",
         ".github/workflows/effort-ci.yml",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -749,7 +775,9 @@
         "validation/python_unit_interrupted_recovery.py",
         ".github/workflows/effort-ci.yml",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -762,7 +790,9 @@
         ".github/workflows/effort-ci.yml",
         "Makefile",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -774,7 +804,9 @@
         "validation/python_unit_interrupted_recovery.py",
         "validation/python-unit-preunit-failure3705.json",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -786,7 +818,9 @@
         "validation/python_unit_interrupted_recovery.py",
         "validation/python-unit-attestors.json",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -798,7 +832,9 @@
         "validation/python_unit_interrupted_recovery.py",
         "validation/python-unit-local/*",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Actual restore reads every local receipt before scope filtering; other restore fixtures use temporary cwd."
     },
@@ -979,7 +1015,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Actual helper derives executed suites from workflow and Makefile; current adapter workflow adds adapter AST read; test-name existence binds full sibling source."
     },
@@ -997,7 +1035,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Actual helper derives executed suites from workflow and Makefile; current adapter workflow adds adapter AST read; test-name existence binds full sibling source."
     },
@@ -1015,7 +1055,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Actual unconditional workflow adapter invocation and literal adapter Node inventory plus Makefile derivation; selected method/local fixture AST already bound."
     },
@@ -1034,7 +1076,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Valid-field lane read and invalid-field ledger read; missing-path sentinel required."
     },
@@ -1052,7 +1096,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Actual recursive first-Rust-test selection and executed suite derivation."
     },
@@ -1068,7 +1114,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Actual error branch reads ledger; normalized traversal refusals never read external paths."
     },
@@ -1084,7 +1132,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Actual error branch reads ledger; normalized traversal refusals never read external paths."
     },
@@ -1100,7 +1150,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Actual error branch reads ledger; normalized traversal refusals never read external paths."
     },
@@ -1116,7 +1168,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Actual error branch reads ledger; normalized traversal refusals never read external paths."
     },
@@ -1133,7 +1187,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Attempted missing path is an absence witness; error branch reads ledger."
     },
@@ -1150,7 +1206,9 @@
         "validation/runner.py",
         "validation/test_markers.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -4971,7 +5029,9 @@
         "validation/__init__.py",
         "validation/python_unit_receipts.py",
         "validation/python_unit_empty_recovery.py",
-        "validation/python-unit-empty-failure920.json"
+        "validation/python-unit-empty-failure920.json",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
       ],
       "reason": "Exact PR920 empty-attempt recovery uses synthetic API/log/archive mutations and the hash-pinned witness; no network, production artifact mutation or imported successes."
     },
@@ -4984,6 +5044,16 @@
         "tests/operations/test_hiqlite_patch_ledger.py"
       ],
       "reason": "Synthetic archive/download/lifetime controls call the real pinned fixture helper and receipt executor; no external source is fetched by these controls."
+    },
+    {
+      "id_prefix": "validation:test_python_inherited_failure920.",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/python_unit_receipts.py",
+        "validation/python_unit_inherited_recovery920.py",
+        "validation/python-unit-inherited-failure920.json"
+      ],
+      "reason": "Exact PR920 run4506 inherited-history-failure recovery uses synthetic complete API/log/artifact contradictions and the immutable witness. Original run4503 trust is still required; no live network, pass replay or new run4506 origin."
     }
   ]
 }

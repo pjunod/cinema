@@ -4700,3 +4700,13 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
 source_anchor = "color = if (selected) Accent else OnBg"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanelThemeTest.kt"
 test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
+
+# PR920 baseline correction: the Android status now names the real Gradle
+# build 152. This maps the documentation correction, not a new playback claim.
+[[fixes]]
+id = "android.build-152-baseline-claim"
+commits = ["8148ffea9fcded4fef5f605a36fc8ae63e8f25b1"]
+source = "clients/android/README.md"
+source_anchor = "> Status: **v0.3.0**, build `152`"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "test_repository_build_claims_match_release_inputs"
