@@ -8,6 +8,8 @@ import SwiftUI
 enum LiveTvSettingsPlacement {
     static let liveTvSettings = ["HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"]
     static let developer = [
+        "Cinema remotes · advisory enablement",
+        "Screen invitations · advisory readiness",
         "Bounded pause/resume · advisory enablement",
         "Prepared quality handoff · advisory enablement",
         "Enable Live TV · advisory enablement",
