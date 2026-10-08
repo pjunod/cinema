@@ -857,3 +857,41 @@ both harness failures, the actual AC-4 refusal and paired probe facts. It is
 Every manifest member was verified. No AC-4 media, authentication, private
 state or active session URLs are redistributed. These receipts remain bound
 to `a2ee4a221`; they are not relabeled as results from the repaired daemon.
+
+## 23. Actual Live API delivery and source-change diagnosis
+
+The signed `a2ee4a221` daemon and `c8c4b525…` Jellyfin package pass twelve
+ordinary synthetic Live cases: progressive, TFF and BFF sources in frame
+and field modes, each started twice. Coverage combines six frame cases from
+one retained run and six field cases from another; it is not an uninterrupted
+twelve-case run. Normal resume rejoins each capability. Actual decoded
+256 × 144 BT.709 progressive output is 12 fps for frame mode/progressive
+input and 24 fps for woven-field input in field mode. Captured native argv
+uses software input decode, upload, native scale/BWDIF, VideoToolbox encoding
+and the existing scoped Live caption handling.
+
+MPEG-TS does not report output SAR for this encoder on the observed host.
+Bounded controls show native MP4 reports 1:1 while both native and incumbent
+CPU-scale MPEG-TS omit it. The container-aware oracle records absence and
+checks exact raster/rate/color; the application's source SAR guard and
+MP4 observer are unchanged. An immediate restart may receive the existing
+ownership decision `settings_conflict` with a draining `retry: now` hint;
+the driver follows only that exact hint with an unchanged request for at
+most ten seconds, recording each refusal.
+
+EOF produces the existing terminal stream-failure accounting, ended state
+and ended resume response. An explicit fresh request reconnects and decodes
+144 progressive frames. A separate source-format transition fails the typed
+source-change expectation: FFmpeg exits with 178 after native filter
+reconfiguration, and generic exit handling outraces the source-change flag.
+The accepted ownership repair is documented in review §7.5; its new actual
+result must be recorded separately and cannot rewrite this failed receipt.
+
+[Sanitized Live receipt](evidence/macos-video-20261008/live-api-a2ee-evidence.tar.gz)
+contains one hash-verified data file (4,939 compressed bytes), archive SHA-256
+`9fa50645d929e56b909eb84d7f21e69f94e20dac2ffda76851b5aa5f0218e374`.
+Private raw receipt/log/driver hashes preserve provenance without retaining
+LAN identifiers, capabilities, credentials, configurations or media. The
+receipt also records the unsuccessful tuner-port/harness iterations and
+container-aware SAR diagnosis. No physical client, broadcast A/V-sync,
+performance or automatic-retry qualification is inferred.
