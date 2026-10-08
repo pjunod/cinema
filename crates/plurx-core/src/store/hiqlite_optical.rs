@@ -10,6 +10,21 @@ use crate::optical::{
     OpticalProgressWrite, OpticalTitle, OpticalTitleLocator, OPTICAL_SCHEMA,
 };
 
+const SET_OPTICAL_MATCH_SQL: &str =
+    "UPDATE optical_titles SET matched_item_id = $1, match_kind = $2 \
+     WHERE disc_id = $3 AND title_id = $4";
+const OPTICAL_PLAY_GRANT_SQL: &str = "SELECT COALESCE(
+       (SELECT granted FROM user_grants
+         WHERE user_id = users.id AND grant_name = $1),
+       users.is_admin) AS granted
+     FROM users WHERE id = $2";
+const SET_OPTICAL_PLAY_GRANT_SQL: &str =
+    "INSERT INTO user_grants (user_id, grant_name, granted, updated_at_ms)
+     SELECT id, $1, $2, $3 FROM users WHERE id = $4
+     ON CONFLICT(user_id, grant_name) DO UPDATE SET
+       granted = excluded.granted,
+       updated_at_ms = excluded.updated_at_ms";
+
 pub(super) fn migration_statements() -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
     super::hiqlite_library_channels::split_schema_statements(OPTICAL_SCHEMA)
         .into_iter()
@@ -343,18 +358,17 @@ impl OpticalStore for HiqliteAuthStore {
         {
             return Err(StoreError::Database("invalid optical match".into()));
         }
-        let sql = "UPDATE optical_titles SET matched_item_id = $3, match_kind = $4 \
-                   WHERE disc_id = $1 AND title_id = $2";
+        let sql = SET_OPTICAL_MATCH_SQL;
         validate_sql(sql)?;
         Ok(self
             .client()
             .execute(
                 sql,
                 params!(
-                    disc_id,
-                    title_id,
                     matched_item_id,
-                    match_kind.map(OpticalMatchKind::as_str)
+                    match_kind.map(OpticalMatchKind::as_str),
+                    disc_id,
+                    title_id
                 ),
             )
             .await
@@ -478,17 +492,13 @@ impl OpticalStore for HiqliteAuthStore {
     }
 
     async fn optical_play_grant(&self, user_id: i64) -> Result<Option<bool>, StoreError> {
-        let sql = "SELECT COALESCE(
-                       (SELECT granted FROM user_grants
-                         WHERE user_id = users.id AND grant_name = $2),
-                       users.is_admin) AS granted
-                     FROM users WHERE id = $1";
+        let sql = OPTICAL_PLAY_GRANT_SQL;
         validate_sql(sql)?;
         let rows = self
             .client()
             .query_consistent_map::<GrantedRow, _>(
                 sql,
-                params!(user_id, crate::optical::OPTICAL_PLAY_GRANT),
+                params!(crate::optical::OPTICAL_PLAY_GRANT, user_id),
             )
             .await
             .map_err(database_error)?;
@@ -500,21 +510,17 @@ impl OpticalStore for HiqliteAuthStore {
         user_id: i64,
         granted: bool,
     ) -> Result<bool, StoreError> {
-        let sql = "INSERT INTO user_grants (user_id, grant_name, granted, updated_at_ms)
-                   SELECT id, $2, $3, $4 FROM users WHERE id = $1
-                   ON CONFLICT(user_id, grant_name) DO UPDATE SET
-                     granted = excluded.granted,
-                     updated_at_ms = excluded.updated_at_ms";
+        let sql = SET_OPTICAL_PLAY_GRANT_SQL;
         validate_sql(sql)?;
         Ok(self
             .client()
             .execute(
                 sql,
                 params!(
-                    user_id,
                     crate::optical::OPTICAL_PLAY_GRANT,
                     granted,
-                    self.now()?.saturating_mul(1000)
+                    self.now()?.saturating_mul(1000),
+                    user_id
                 ),
             )
             .await
@@ -546,5 +552,16 @@ mod tests {
         assert!(statements
             .iter()
             .all(|(statement, _)| !statement.trim().is_empty()));
+    }
+
+    #[test]
+    fn optical_hiqlite_mutations_bind_placeholders_in_first_appearance_order() {
+        for sql in [
+            SET_OPTICAL_MATCH_SQL,
+            OPTICAL_PLAY_GRANT_SQL,
+            SET_OPTICAL_PLAY_GRANT_SQL,
+        ] {
+            validate_sql(sql).expect("optical SQL has canonical ordered placeholders");
+        }
     }
 }
