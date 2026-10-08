@@ -1201,6 +1201,7 @@ paths = [
   "scripts/release-package-candidate",
   "scripts/package-windows",
   "scripts/{bench,codec-qualification-corpus.json,codec-hdr-score,dv-evidence,gop-census,rolling-grid-census,rolling-grid-acquire,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
+  "scripts/bench-macos-video",
   "scripts/encoder-calibration-screen",
   "scripts/content-aware-encoding",
   "scripts/tone-map-calibration",
