@@ -23,6 +23,18 @@ class MacosExtensionFixturesCase(unittest.TestCase):
                                             "signal_chroma_format": 0, "signal_full_range_flag": 1}]
         return {"streams": [stream], "frames": frames}
 
+    def test_embedded_hlg_square_pixels_require_stream_and_every_decoded_frame(self):
+        extension = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/generate-macos-video-extensions"))
+        observed = {"streams": [{"sample_aspect_ratio": "1:1"}],
+                    "frames": [{"sample_aspect_ratio": "1:1"} for _ in range(12)]}
+        extension["validate_hlg_square_pixels"](observed)
+        for index in (-1, 0, 6, 11):
+            bad = deepcopy(observed)
+            target = bad["streams"][0] if index == -1 else bad["frames"][index]
+            target.pop("sample_aspect_ratio")
+            with self.subTest(index=index), self.assertRaisesRegex(ValueError, "HLG square pixels"):
+                extension["validate_hlg_square_pixels"](bad)
+
     def test_hlg_reference_white_uses_inverse_ootf_before_oetf(self):
         signal = TOOL["hlg_signal"]((203, 203, 203))
         for channel in signal:
