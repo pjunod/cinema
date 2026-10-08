@@ -60,3 +60,11 @@ test("restricted TV state explains disabled phone controls instead of reporting 
 test("explicit refresh fetches a new screen target and never silently acquires",()=>{
   const h=phoneHarness(),calls=[];h.context.PAGE_RENDER_GENERATION=4;h.context.viewRemote=generation=>calls.push(generation);h.run("cinemaRemoteRefreshScreens({isTrusted:false})");assert.equal(calls.length,0);h.run("cinemaRemoteRefreshScreens({isTrusted:true})");assert.deepEqual(calls,[5]);h.context.location.hash="#/";h.run("cinemaRemoteRefreshScreens({isTrusted:true})");assert.deepEqual(calls,[5]);
 });
+
+test("trusted assistive directional clicks work once without duplicating pointer or keyboard gestures",()=>{
+  const h=phoneHarness(),listeners={},actions=[],holds=[],button={dataset:{remoteDirection:"right"},setPointerCapture:()=>{},addEventListener:(type,fn)=>{listeners[type]=fn;}};h.context.button=button;h.context.CINEMA_WEB_CONTROLLER={hold:direction=>holds.push(direction),stopHold:()=>{},send:async action=>actions.push(action)};h.run("cinemaRemoteWireDirection(button)");
+  listeners.click({isTrusted:false,detail:0});assert.equal(actions.length,0);listeners.click({isTrusted:true,detail:0});assert.equal(actions.length,1);assert.equal(actions[0].type,"navigate");assert.equal(actions[0].direction,"right");
+  listeners.pointerdown({isTrusted:true,button:0,pointerId:1,preventDefault:()=>{}});listeners.pointerup({isTrusted:true});listeners.click({isTrusted:true,detail:1});assert.equal(actions.length,1);assert.deepEqual(holds,["right"]);
+  let prevented=0;listeners.keydown({isTrusted:true,key:"Enter",repeat:false,preventDefault:()=>prevented++});listeners.keydown({isTrusted:true,key:"Enter",repeat:true,preventDefault:()=>prevented++});listeners.keyup({isTrusted:true,key:"Enter",preventDefault:()=>prevented++});listeners.click({isTrusted:true,detail:0});assert.equal(actions.length,1);assert.equal(holds.length,2);assert.equal(prevented,3);
+  listeners.click({isTrusted:true,detail:1});assert.equal(actions.length,2);
+});
