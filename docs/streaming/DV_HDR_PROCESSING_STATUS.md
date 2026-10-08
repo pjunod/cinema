@@ -13,8 +13,8 @@ remaining milestones stay in the build handoff. The
 
 The reviewed proposal landed in documentation PR #919. Implementation starts
 from its merged main commit `079960daebd5a1e23dff2b0e8f8506c1238bc1b0`, with
-the comparator in PR #920 and backend experiments on
-`codex/dv-m0-backends`, both targeting the integration branch. Sol 6.1 sessions
+the comparator merged in PR #920 and backend controls merged in PRs #924
+and #928 into the integration branch. Sol 6.1 sessions
 provide the renderer, CPU/authoring and offline measurement work, with
 independent adversarial review. Production routing, settings and badges remain
 unqualified and unchanged.
@@ -30,8 +30,8 @@ DV-off validation. Current playback keeps its compatible fallback.
 
 | Milestone | State | Evidence still required |
 |---|---|---|
-| M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction, encoded-layer association and bounded affine P8.1 authoring retained with replay recipes | Seek/VFR/discontinuity and metadata-reuse acceptance, general metadata adaptation, independent reference limits and full graph resource evidence |
-| M1 typed contracts | Not started | Backend operation boundaries established by M0 |
+| M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction, encoded-layer association, bounded VFR/seek/epochs and affine P8.1 authoring retained with replay recipes | Broader timing and metadata-reuse acceptance, general metadata adaptation, independent reference limits and full graph resource evidence |
+| M1 typed contracts | In progress separately; not landed or reviewed | Additive contracts, focused regressions and actual-code adversarial review |
 | M2 processing and lifecycle | Not started | Qualified graph, bounded ownership and timestamped adapter |
 | M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
 | M4 settings and HDR10-E badge | Not started | M3 reporting; actual processing evidence on each client |
@@ -239,3 +239,28 @@ controls. Repository copies also pass 16 scientific and six injector controls.
 The original limit-selection chronology remains session-declared, without an
 independently dated witness. No general P8.1 conformance, independent Dolby
 picture reference, physical performance or product qualification is inferred.
+
+
+## 8. Bounded timeline controls
+
+The [timeline follow-up](DV_HDR_TIMELINE_CONTROLS.md) retains 21 actual
+BL/EL/RPU associations across authored VFR, real demuxer seek/preroll and
+two independently decoded inputs whose timestamps restart. Stored Matroska
+durations are checked independently against demux/split/decoder observations.
+A retained omission control demonstrates why inferred API duration cannot
+stand in for source-duration evidence. Five negative cases require exact
+lifecycle or association refusals.
+
+Adversarial review corrected event ordering, required drain/reset evidence,
+finite typed fields and shell status capture. The exact-source replay passed
+26 checker/dependency mutations and four real failures injected after decoder
+output writes. All 63 bundle and 1,094 selected runtime hashes were verified.
+The earlier frozen evidence remains unchanged. This does not establish general
+timing, legitimate RPU reuse, target-presentation policy, live discontinuities,
+production lifecycle or new rendering arithmetic.
+
+The decoded/nonidentity controls merged as PR #928, commit
+`a1e56700d3940363dc06c16afcc4f919d63eac97`. Exact-head run 4517 passed scope,
+Python receipts (1,203 tests), Rust, web, Apple and Android. Windows and the
+blocked aggregate were cancelled under the user's explicit Windows waiver;
+neither is reported as a passing check.
