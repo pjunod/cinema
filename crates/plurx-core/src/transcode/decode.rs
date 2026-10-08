@@ -2563,6 +2563,20 @@ impl ResolvedTranscode {
         self.macos_processing_identity.as_ref()
     }
 
+    /// Selected processing and strict recovery must launch the frozen binary.
+    /// Ordinary plans retain their existing executable selection behavior.
+    pub fn captured_processing_ffmpeg_sha256(&self) -> Option<&str> {
+        self.options
+            .strict_dolby
+            .as_ref()
+            .map(super::StrictDolbyPolicy::ffmpeg_sha256)
+            .or_else(|| {
+                self.macos_processing_identity
+                    .as_ref()
+                    .map(MacosProcessingIdentity::ffmpeg_sha256)
+            })
+    }
+
     pub fn macos_processing_selection(&self) -> Option<MacosProcessingSelection> {
         self.macos_processing_selection
     }
@@ -2997,6 +3011,14 @@ impl ResolvedTranscode {
         // disabled settings and unsupported inputs preserve existing hashes.
         if let Some(identity) = &self.macos_processing_identity {
             feed("macos_processing_v1", identity.digest().as_bytes());
+        }
+        if let Some(super::StrictDolbyImplementation::LinuxVaapi(identity)) = self
+            .options
+            .strict_dolby
+            .as_ref()
+            .map(super::StrictDolbyPolicy::implementation)
+        {
+            feed("strict_dolby_linux_vaapi_v1", identity.digest().as_bytes());
         }
         if let Some(policy) = self.output_metadata_policy {
             // A scoped signaling correction rotates only the affected output
@@ -3571,7 +3593,7 @@ pub fn resolve_transcode(
         macos_processing_selection = Some(MacosProcessingSelection::CapabilityFallback);
     }
     let macos_processing_identity = if let Some(strict) = &options.strict_dolby {
-        Some(strict.identity().clone())
+        strict.macos_identity().cloned()
     } else if matches!(
         options.pipeline,
         Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10
@@ -3680,7 +3702,7 @@ fn authorize_strict_p5(
         || options
             .strict_dolby
             .as_ref()
-            .is_some_and(|strict| strict.identity() != context.identity())
+            .is_some_and(|strict| strict.macos_identity() != Some(context.identity()))
     {
         return Err(PlanError::IncompatibleRenderer);
     }

@@ -15,6 +15,7 @@
 mod avc_qualification;
 mod decode;
 pub mod decoder_inventory;
+mod dolby;
 pub mod dvconvert;
 mod encoder;
 pub mod health;
@@ -40,6 +41,7 @@ pub use decode::{
     VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
+pub use dolby::{LinuxDolbyIdentity, StrictDolbyImplementation, StrictDolbyPolicy};
 pub use encoder::{
     benchmark_encoder, detect_encoders, detect_video_decoders, validate_quality_rate_control,
     validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
@@ -48,8 +50,7 @@ pub use encoder::{
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
-    MacosProcessingIdentity, MacosProcessingSelection, StrictDolbyPolicy,
-    MACOS_PROCESSING_GRAPH_REVISION,
+    MacosProcessingIdentity, MacosProcessingSelection, MACOS_PROCESSING_GRAPH_REVISION,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};

@@ -407,7 +407,7 @@ pub(super) async fn capture_macos_plan_executable(
     plan: &ResolvedTranscode,
     program: &str,
 ) -> Result<Option<crate::ffmpeg::EncodedExecutable>, String> {
-    if plan.macos_processing_identity().is_none() {
+    if plan.captured_processing_ffmpeg_sha256().is_none() {
         return Ok(None);
     }
     let executable = crate::ffmpeg::EncodedExecutable::capture_program(program).await?;
