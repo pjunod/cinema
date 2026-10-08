@@ -21,9 +21,9 @@ combined source `b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`.
 
 | Follow-up | Sol 6.1 owner | State | Required evidence |
 |---|---|---|---|
-| F1 GPU subtitle compositing | Native builder | Investigating compositor and cue ownership | Preserved libass shaping/fonts and bitmap geometry; alpha/color, animation, no-cue, last-cue, seek and cancellation controls; complete-graph comparison |
-| F2 non-Mac P5 hardware decoding | Route builder | Investigating backend metadata and available hardware | Backend/build/driver-specific hardware reconstruction and current-frame Dolby metadata through rendering; loss must not become generic PQ |
-| F3 caption-bearing VOD VideoToolbox | Dolby builder | Captured SEI escape-counting root cause; repair in progress | Exact failing SEI condition; bounded parser repair; captions retained in real hardware-encoded AC-4 VOD delivery |
+| F1 GPU subtitle compositing | Native builder | Shader draft compiles; BGRA text precomposition rejected by color oracle | Preserved libass shaping/fonts and bitmap geometry; alpha/color, animation, no-cue, last-cue, seek and cancellation controls; complete-graph comparison |
+| F2 non-Mac P5 hardware decoding | Route builder | Strict source preparation integrated; diagnostic binary built, GPU proof pending | Backend/build/driver-specific hardware reconstruction and current-frame Dolby metadata through rendering; loss must not become generic PQ |
+| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser repair integrated; full package and runtime caption proof pending | Exact failing SEI condition; bounded parser repair; captions retained in real hardware-encoded AC-4 VOD delivery |
 
 Builders use separate owned clones. New native patch files have separate
 owners: `0003` for caption SEI handling and `0004` for GPU subtitle work.
@@ -50,6 +50,42 @@ Passive fleet inventory found Intel and AMD hardware, but the deployed
 Jellyfin binary lacks the strict decoder/renderer options required by our
 Dolby contract. A resource-limited private Linux build is authorized; deployed
 services and packages remain unchanged. No non-Mac GPU tuple is qualified yet.
+
+The follow-up source branch now includes `84ad32b51` (pinned Linux source
+preparation with generic strict Dolby patches) and `622c1ee42` (caption SEI
+parser repair with three regression sources). Their normal compile/lint hooks
+passed; unit execution remains assigned to final coordinator validation.
+The integrated catalog passes with both changes. A diagnostic Linux binary
+has compiled, but is neither the shipping package nor capability evidence.
+The full Mac package rebuild carries the caption repair before subtitle work.
+
+The subtitle color oracle predeclared a maximum two-code-value difference
+from the complete CPU burn reference and byte identity during cue-free
+frames. A 128×72 colored outline/shadow/overlap case rejected simple BGRA
+precomposition: maximum luma error 4, chroma error 11, and 263 chroma samples
+above the limit. A two-layer affine foreground/coverage basis stayed within the limit across
+256 backgrounds, but ten semitransparent overlapping layers failed with a
+maximum error of 7 and 5,258 samples above the limit. Both negatives remain
+recorded. The selected replacement carries cached ordered libass masks and
+colors to the existing overlay owner, which applies FFDraw integer rounding
+on the GPU. The preparation frame holds its own typed refcounted payload;
+it does not read main video pixels or mutate shared pixel-buffer attachments.
+Full-library compilation and runtime correctness remain pending.
+
+The first AMD GPU window was returned unused: fresh admission found an
+external production FFmpeg process. No GPU device was mapped. A separate
+Intel window is reserved pending preparation and fresh admission. Whole
+build-image transfer was rejected by automatic approval; preparation uses an
+explicit allowlist of candidate binaries, public dependencies and original
+synthetic fixtures instead. There is still no non-Mac hardware pass to claim.
+
+The accepted-batch coordinator separately returned fixture-license admission
+failures. The authentic expanded CC0 license already shipped with P5 controls,
+but the generator still pinned its earlier text. Sol repair `c56c1d04` aligns
+the constant and adds a tampering regression without altering license text,
+media, manifests or quality checks. Independent review accepted the exact
+repair; the coordinator owns only the failed-ID reruns. This follow-up carries
+the same reviewed repair as `4f5fee3f0` for its own package tooling.
 
 ### Prior contribution retained for the merge coordinator
 
