@@ -9,6 +9,54 @@ use crate::error::StoreError;
 
 struct JsonRow(String);
 
+struct ProducerPayloadShape {
+    columns: i64,
+    current_columns: i64,
+    table_sql: String,
+}
+
+impl From<&mut hiqlite::Row<'_>> for ProducerPayloadShape {
+    fn from(row: &mut hiqlite::Row<'_>) -> Self {
+        Self {
+            columns: row.get("columns"),
+            current_columns: row.get("current_columns"),
+            table_sql: row.get("table_sql"),
+        }
+    }
+}
+
+fn integrity_schema_for_shape(shape: &ProducerPayloadShape) -> Result<&'static str, StoreError> {
+    let schema = super::background_jobs_integrity::SCHEMA;
+    let (alter, remainder) = schema.split_once("-- next statement\n").ok_or_else(|| {
+        StoreError::Migration("producer payload migration has no statement boundary".into())
+    })?;
+    // Let SQLite generate the exact owned table definition. Text in a comment,
+    // string, or another identifier can never substitute for the real CHECK.
+    let expected = rusqlite::Connection::open_in_memory()?;
+    let base = super::background_jobs_transcode::SCHEMA
+        .split_once("-- next statement\n")
+        .ok_or_else(|| StoreError::Migration("artifact table has no statement boundary".into()))?
+        .0;
+    expected.execute_batch(base)?;
+    let table_sql = || {
+        expected.query_row(
+            "SELECT sql FROM sqlite_master WHERE name='background_transcode_artifacts'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+    };
+    if shape.columns == 0 && shape.current_columns == 0 && shape.table_sql == table_sql()? {
+        return Ok(schema);
+    }
+    expected.execute_batch(alter)?;
+    if shape.columns == 1 && shape.current_columns == 1 && shape.table_sql == table_sql()? {
+        return Ok(remainder);
+    }
+    Err(StoreError::Migration(
+        "existing producer payload column has incompatible shape".into(),
+    ))
+}
+
 impl From<&mut hiqlite::Row<'_>> for JsonRow {
     fn from(row: &mut hiqlite::Row<'_>) -> Self {
         Self(row.get("result_json"))
@@ -63,7 +111,20 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         result.map_err(database_error)?;
     }
     validate_sql(super::background_jobs_integrity::SCHEMA)?;
-    for result in timeout_store(client.batch(super::background_jobs_integrity::SCHEMA)).await? {
+    // authority: restartable bootstrap must inspect the committed column and
+    // its constraint before deciding whether the original ALTER still applies.
+    let shape = timeout_store(client.query_consistent_map::<ProducerPayloadShape, _>(
+        "SELECT (SELECT count(*) FROM pragma_table_xinfo('background_transcode_artifacts') WHERE name='producer_payload') AS columns, \
+         (SELECT count(*) FROM pragma_table_xinfo('background_transcode_artifacts') WHERE name='producer_payload' AND type='TEXT' AND \"notnull\"=0 AND dflt_value IS NULL AND pk=0 AND hidden=0) AS current_columns, \
+         COALESCE((SELECT sql FROM sqlite_master WHERE type='table' AND name='background_transcode_artifacts'),'') AS table_sql",
+        params!(),
+    )).await?;
+    let [shape] = shape.as_slice() else {
+        return Err(StoreError::Migration(
+            "producer payload shape returned no unique row".into(),
+        ));
+    };
+    for result in timeout_store(client.batch(integrity_schema_for_shape(shape)?)).await? {
         result.map_err(database_error)?;
     }
     validate_sql(super::background_jobs_predictions::SCHEMA)?;
