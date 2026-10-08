@@ -9288,3 +9288,46 @@ exact child/runtime ownership is persisted before startServer returns, so
 failed metadata setup cannot leave private runtime/config behind.
 All38 regression references resolve statically; units, final adversarial,
 Fable release and ready merge handoff remain deferred.
+
+
+### 10.295 Retained output avoids redundant preparation; Android route diagnosis (2026-10-08)
+
+Exact2314ccb45 passes the480p retained-member check:535,828 HTTP bytes,
+SHA256 b4265d14 prefix, matching UUID/digest ETag and unchanged retained
+file. No FFmpeg exists at EOF or one second later. The subsequent cached-job
+census fails, stopping before720p or phone launch. Its exact unexpected job
+identity was not projected before the assertion; do not infer its kind from
+that missing evidence. Guard1567440 and daemon1567461 retire within144
+seconds, settings restore and runtime/private metadata are removed.
+
+Independent source inspection finds an unconditional preparation handoff after
+attachment. Integrate7cd4760db as51c0df4a6: take one actual post-attachment
+HLS snapshot and skip preparation only when its private response owner owns
+verified retained output. Cold/no-artifact responses still enqueue, even if
+public candidate hints say complete_cache. Audio and retained response facts
+come from that same snapshot. The regression
+cached_output_attachment_skips_preparation_but_cold_candidate_enqueues uses
+an actual completed artifact, attached response graph and bounded worker
+channel. Pinned check and normal child hook pass; units remain unexecuted.
+The paired runtime helper now projects job facts before its assertion.
+
+AndroidUI11 selects the observed1080 row and receives prepared successor
+responses, but retains the incumbent720 after12,326 milliseconds. Family
+response seq4 contains only480 and720;1080 therefore exercises prepared
+replacement, not a continuous switch. Successor playlist/init/segments return
+HTTP200. The only presented transition is initial seq23, before the tap; it
+cannot count as target presentation. Available receipts do not distinguish
+readiness, rendezvous or player error at abandonment. Diagnose bounded stage
+facts before another attempt; do not extend the12-second overlap limit.
+The earlier continuous-only matcher was mis-scoped for this family. Android
+cleanup finishes within132.231 seconds; exact parent1582934/daemon1582954,
+runtime, reverse, proxy and private control are absent. Preserve the parallel
+non-atomic progress JSON read failure; the ignored helper now publishes via
+atomic rename and stops on the actual terminal SDK outcome.
+
+QA242 remains installed;83 production Swift files are byte-equivalent to
+2314. Recheck equivalence before reusing it with the Rust-only repair. Fresh
+480/720 coexistence and cost/identity proof must precede phone launch. All39
+regression references resolve statically; final units belong to the batched
+merge session. Final adversarial review, external Fable review and ready
+handoff remain open.
