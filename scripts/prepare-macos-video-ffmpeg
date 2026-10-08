@@ -61,7 +61,7 @@ def prepare(archive, output, jobs):
     for patch in local:
         shutil.copyfile(patch, retained / patch.name)
     for patch in patches + local:
-        subprocess.run(["/usr/bin/patch", "-p1", "--batch", "--forward", "-i", str(patch.resolve())],
+        subprocess.run(["/usr/bin/patch", "-p1", "-E", "--batch", "--forward", "-i", str(patch.resolve())],
                        cwd=source, check=True, stdout=subprocess.DEVNULL)
     # Upstream setup installs/uninstalls global tools: replace only that stage.
     # Dependency recipes still install statically into this private prefix.
@@ -75,6 +75,11 @@ def prepare(archive, output, jobs):
     text = text[:start] + text[end:]
     text = text.replace("--prefix=/ffbuild/prefix", '--prefix="$FFBUILD_PREFIX"')
     builder.write_text(text)
+    # GNU libtool is an autotools dependency, but this recipe requires Apple's
+    # archive combiner. A PATH-selected GNU tool leaves a Main-only archive.
+    x265 = source / "builder/scripts.d/50-x265.sh"
+    x265.write_text(x265.read_text().replace(
+        "libtool -static -o libx265.a", "/usr/bin/libtool -static -o libx265.a"))
     tools = output / "bin"
     tools.mkdir()
     for name, script in [("git-mini-clone", "git-mini-clone.sh"),
@@ -85,13 +90,14 @@ def prepare(archive, output, jobs):
     (tools / "nproc").write_text(f"#!/bin/sh\nprintf '%s\\n' '{jobs}'\n")
     (tools / "nproc").chmod(0o755)
     entry = output / "build.sh"
-    entry.write_text('#!/bin/bash\nset -euo pipefail\nPLURX_BUILD_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexport PLURX_BUILD_ROOT\nexport PATH="$PLURX_BUILD_ROOT/bin:$PATH"\nfor tool in wget git cmake meson ninja pkg-config autoconf automake libtoolize nasm; do\n    command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }\ndone\nxcrun -sdk macosx metal -v\nexec /bin/bash "$PLURX_BUILD_ROOT/source/builder/buildmac.sh"\n')
+    entry.write_text('#!/bin/bash\nset -euo pipefail\nPLURX_BUILD_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexport PLURX_BUILD_ROOT\nexport PATH="$PLURX_BUILD_ROOT/bin:$PATH"\nexport ACLOCAL_PATH="$PLURX_BUILD_ROOT/prefix/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"\nfor tool in wget git cmake meson ninja pkg-config autoconf automake libtoolize glibtoolize nasm timeout shuf makeinfo; do\n    command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }\ndone\nxcrun -sdk macosx metal -v\nexec /bin/bash "$PLURX_BUILD_ROOT/source/builder/buildmac.sh"\n')
     entry.chmod(0o755)
     facts = {"schema_version": 1, "source_commit": package.COMMIT,
              "source_sha256": package.SOURCE_SHA256,
              "local_patches": {p.name: package.digest(p) for p in local},
              "contract": {"renderer": "require_dovi=1", "decoder": "hwaccel_flags=+require_hardware",
-                          "parse_errors": "err_detect=explode", "decode_metadata": "strict_dovi=1"},
+                          "parse_errors": "err_detect=explode", "decode_metadata": "strict_dovi=1", "tool_failure": "xerror",
+                          "color": "P5 IPT-PQ-C2; no generic default color"},
              "qualification": "source-prepared-only", "jobs": jobs}
     (output / "prepared-source.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
     return facts

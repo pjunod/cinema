@@ -893,6 +893,8 @@ paths = [
   "scripts/generate-macos-video-extensions",
   "scripts/generate-macos-extension-fixtures",
   "scripts/macos-video-fixture-rpu.rs",
+  "scripts/qualify-macos-dolby-strict",
+  "scripts/macos-dolby-flush.c",
   "scripts/decoder-media-baseline",
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",

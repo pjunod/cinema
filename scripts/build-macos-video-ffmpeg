@@ -124,7 +124,7 @@ def retain_compiled_source(prepared, evidence):
     recipes = evidence / "compiled-build-recipes"
     recipes.mkdir()
     for relative in ["prepared-source.json", "build.sh", "source/builder/buildmac.sh",
-                     "source/builder/images/macos/00-dep.sh"]:
+                     "source/builder/images/macos/00-dep.sh", "source/builder/scripts.d/50-x265.sh"]:
         source = prepared / relative
         target = recipes / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -163,18 +163,32 @@ def retain_compiled_source(prepared, evidence):
             with tarfile.open(target, "w:gz") as archive:
                 # LAME source has already been configured; retain original SVN
                 # content with exact revision, not generated native objects.
-                entries = subprocess.check_output(["svn", "list", "--recursive", str(path)], text=True).splitlines()
+                entries = subprocess.check_output(["svn", "--non-interactive", "--no-auth-cache", "--config-dir",
+                    str(prepared / "svn-config"), "list", "--recursive", str(path)], text=True).splitlines()
                 for entry in entries:
                     item = path / entry
                     if item.is_file() and not item.is_symlink():
                         archive.add(item, arcname=entry)
-            info = subprocess.check_output(["svn", "info", "--show-item", "revision", str(path)], text=True).strip()
+            info = subprocess.check_output(["svn", "--non-interactive", "--no-auth-cache", "--config-dir",
+                str(prepared / "svn-config"), "info", "--show-item", "revision", str(path)], text=True).strip()
             facts[path.name] = {"sha256": digest(target), "revision": info, "kind": "svn-source-archive"}
     if not facts:
         raise ValueError("compiled package lacks retained dependency sources")
     (offers / "manifest.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
     return {"local_patches": retained, "dependency_sources": facts,
             "contract": manifest["contract"]}
+
+
+def verify_strict_options(executable, evidence):
+    for name in ["tonemapx", "tonemap_videotoolbox"]:
+        help_text = run([str(executable), "-hide_banner", "-h", f"filter={name}"])
+        if not re.search(r"^\s+require_dovi\s+<", help_text, re.MULTILINE):
+            raise ValueError("compiled package lacks required renderer boundary enforcement")
+    decoder_help = run([str(executable), "-hide_banner", "-h", "decoder=hevc"])
+    full_help = (evidence / "full-help.txt").read_text()
+    if not re.search(r"^\s+-strict_dovi\s+<", decoder_help, re.MULTILINE) or "require_hardware" not in full_help:
+        raise ValueError("compiled package lacks associated Dolby state/hardware decoder enforcement")
+    (evidence / "decoder-hevc.txt").write_text(decoder_help)
 
 
 def attach_source_parser(package, stage, evidence):
@@ -339,15 +353,7 @@ def main():
             receipt.pop("binary_archive_url")
             receipt.pop("binary_archive_sha256")
             receipt["checksum_authority"] = "pinned source and local compiled binary digests"
-            for name in ["tonemapx", "tonemap_videotoolbox"]:
-                help_text = run([str(stage / "ffmpeg"), "-hide_banner", "-h", f"filter={name}"])
-                if not re.search(r"^\s+require_dovi\s+<", help_text, re.MULTILINE):
-                    raise ValueError("compiled package lacks required renderer boundary enforcement")
-            decoder_help = run([str(stage / "ffmpeg"), "-hide_banner", "-h", "decoder=hevc"])
-            full_help = (evidence / "full-help.txt").read_text()
-            if not re.search(r"^\s+strict_dovi\s+<", decoder_help, re.MULTILINE) or "require_hardware" not in full_help:
-                raise ValueError("compiled package lacks associated Dolby state/hardware decoder enforcement")
-            (evidence / "decoder-hevc.txt").write_text(decoder_help)
+            verify_strict_options(stage / "ffmpeg", evidence)
             receipt["patch_digest"] = hashlib.sha256(json.dumps({
                 "jellyfin": receipt["patch_digest"], "local": receipt["compiled_source"]["local_patches"]
             }, sort_keys=True).encode()).hexdigest()

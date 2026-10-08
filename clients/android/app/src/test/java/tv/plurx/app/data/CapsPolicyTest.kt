@@ -11,6 +11,19 @@ import org.junit.Test
 class CapsPolicyTest {
 
     @Test
+    fun hlsHevcClaimIsIndependentAndCannotFallBackToUnrestrictedLegacy() {
+        val unknown = capsDocument(videoCodecCaps(listOf(VideoDecoderLimit("hevc", 1080))),
+            listOf("aac"), emptySet(), emptyList(), ClientInfo("android", "fixture", "fixture"))
+        assertNull(unknown.hls_hevc_sample_entries)
+        assertTrue(shouldFallBackToLegacyDecision(404, unknown))
+        val refused = unknown.copy(hls_hevc_sample_entries = emptyList())
+        val accepted = unknown.copy(hls_hevc_sample_entries = listOf("hvc1"))
+        assertFalse(shouldFallBackToLegacyDecision(404, refused))
+        assertFalse(shouldFallBackToLegacyDecision(404, accepted))
+        assertTrue(Json.encodeToString(refused).contains("\"hls_hevc_sample_entries\":[]"))
+    }
+
+    @Test
     fun mediatekRegistryCompactsThroughActualWirePolicyWithoutDroppingProfiles() {
         // Review registry: six AVC, four HEVC, four AV1, five VP9 and one MPEG2
         // mapped profiles, each exposed by regular, low-latency and software components.

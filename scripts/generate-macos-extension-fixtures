@@ -134,6 +134,19 @@ def split_annexb(data):
             for i, m in enumerate(markers)]
 
 
+def validate_frame_bound_metadata(observed, packets):
+    expected = {int(packet["pts"]): index for index, packet in enumerate(packets)}
+    frames = observed.get("frames", [])
+    if len(frames) != FRAMES or len(expected) != FRAMES:
+        raise ValueError("frame-bound fixture lost a presentation frame")
+    for frame in frames:
+        ordinal = expected.get(int(frame["pts"]))
+        metadata = next((side for side in frame.get("side_data_list", [])
+                         if side.get("side_data_type") == "Dolby Vision Metadata"), {})
+        if ordinal is None or metadata.get("dm_metadata_id") != ordinal % 16 or metadata.get("source_max_pq") != 3079 + ordinal:
+            raise ValueError("effective Dolby metadata is not bound to its coded AU/presentation frame")
+
+
 def inject_rpu(data, rpus):
     output = bytearray()
     access_units = []
@@ -206,7 +219,7 @@ def inject_mp4_rpu(data, rpus):
     stsc = tables[b"stsc"]
     if struct.unpack_from(">IIII", stsc, 4) != (1, 1, count, 1):
         raise ValueError("unexpected sample-to-chunk mapping")
-    new_sizes = [size + 4 + len(rpu) for size, rpu in zip(sizes, rpus)]
+    new_sizes = [size + (4 + len(rpu) if rpu is not None else 0) for size, rpu in zip(sizes, rpus)]
     def rewrite(data):
         output = bytearray()
         for kind, payload in boxes(data):
@@ -237,7 +250,8 @@ def inject_mp4_rpu(data, rpus):
             rebuilt = bytearray()
             for size, rpu in zip(sizes, rpus):
                 rebuilt.extend(payload[offset:offset + size])
-                rebuilt.extend(struct.pack(">I", len(rpu)) + rpu)
+                if rpu is not None:
+                    rebuilt.extend(struct.pack(">I", len(rpu)) + rpu)
                 offset += size
             output.extend(box(kind, rebuilt))
         elif kind == b"moov":
@@ -258,7 +272,7 @@ def validate_observed(observed, family):
     stream = streams[0]
     expected = {"width": WIDTH, "height": HEIGHT, "pix_fmt": "yuv420p10le",
                 "color_transfer": "arib-std-b67" if family == "hlg" else "smpte2084",
-                "color_primaries": "bt2020", "color_space": "bt2020nc",
+                "color_primaries": "bt2020", "color_space": "bt2020nc" if family == "hlg" else "ipt-c2",
                 "color_range": "tv" if family == "hlg" else "pc"}
     if any(stream.get(k) != v for k, v in expected.items()):
         raise ValueError("fixture signal declarations mismatch")
@@ -269,7 +283,12 @@ def validate_observed(observed, family):
         if family == "p5":
             metadata = [s for s in frame.get("side_data_list", [])
                         if s.get("side_data_type") == "Dolby Vision Metadata"]
-            if len(metadata) != 1 or metadata[0].get("disable_residual_flag") != 1 or metadata[0].get("vdr_rpu_profile") != 0:
+            color_fields = {"signal_eotf": 65535, "signal_bit_depth": 12,
+                            "signal_color_space": 2, "signal_chroma_format": 0,
+                            "signal_full_range_flag": 1}
+            if (len(metadata) != 1 or metadata[0].get("disable_residual_flag") != 1 or
+                metadata[0].get("vdr_rpu_profile") != 0 or
+                any(metadata[0].get(k) != v for k, v in color_fields.items())):
                 raise ValueError("fixture lacks supported effective Dolby metadata")
     if family == "p5":
         config = [s for s in stream.get("side_data_list", []) if s.get("side_data_type") == "DOVI configuration record"]
@@ -284,12 +303,13 @@ def generate(ffmpeg, ffprobe, output, family, rpu_generator=None, lossless=False
     stream = output / "base.mp4"
     transfer = "arib-std-b67" if family == "hlg" else "smpte2084"
     color_range = "tv" if family == "hlg" else "pc"
+    matrix = "bt2020nc" if family == "hlg" else "ipt-c2"
     coding = "lossless=1" if lossless else "crf=8:vbv-maxrate=10000:vbv-bufsize=10000:level-idc=3.1:no-sao=1:no-deblock=1"
     argv = [str(ffmpeg), "-nostdin", "-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p10le",
             "-s", f"{WIDTH}x{HEIGHT}", "-r", str(FPS), "-color_range", color_range,
-            "-color_trc", transfer, "-color_primaries", "bt2020", "-colorspace", "bt2020nc", "-i", str(raw), "-frames:v", str(FRAMES),
-            "-c:v", "libx265", "-x265-params", f"{coding}:repeat-headers=1:aud=1:keyint=12:bframes=2:pools=1:frame-threads=1:colorprim=9:transfer={18 if family == 'hlg' else 16}:colormatrix=9:range={'limited' if family == 'hlg' else 'full'}",
-            "-color_trc", transfer, "-color_primaries", "bt2020", "-colorspace", "bt2020nc",
+            "-color_trc", transfer, "-color_primaries", "bt2020", "-colorspace", matrix, "-i", str(raw), "-frames:v", str(FRAMES),
+            "-c:v", "libx265", "-x265-params", f"{coding}:repeat-headers=1:aud=1:keyint=12:bframes=2:pools=1:frame-threads=1:colorprim=9:transfer={18 if family == 'hlg' else 16}:colormatrix={9 if family == 'hlg' else 15}:range={'limited' if family == 'hlg' else 'full'}",
+            "-color_trc", transfer, "-color_primaries", "bt2020", "-colorspace", matrix,
             "-color_range", color_range, "-tag:v", "hvc1", "-f", "mp4", str(stream)]
     run(argv)
     files = {"base.mp4": sha(stream), "pattern.yuv": sha(raw)}
@@ -303,6 +323,56 @@ def generate(ffmpeg, ffprobe, output, family, rpu_generator=None, lossless=False
         media.write_bytes(inject_mp4_rpu(stream.read_bytes(), rpus))
         files["p5.mp4"] = sha(media)
         files.update({str(p.relative_to(output)): sha(p) for p in sorted(rpu_dir.iterdir())})
+        reuse_dir = output / "generated-reuse-rpu"
+        run([str(rpu_generator), str(reuse_dir), str(FRAMES), "reuse"])
+        reused = [(reuse_dir / f"frame-{i:04}.bin").read_bytes() for i in range(FRAMES)]
+        reuse_media = output / "p5-explicit-reuse.mp4"
+        reuse_media.write_bytes(inject_mp4_rpu(stream.read_bytes(), reused))
+        reuse_observed = json.loads(run([str(ffprobe), "-v", "error", "-show_frames", "-show_streams", "-of", "json", str(reuse_media)]))
+        validate_observed(reuse_observed, "p5")
+        files[reuse_media.name] = sha(reuse_media)
+        files.update({str(p.relative_to(output)): sha(p) for p in sorted(reuse_dir.iterdir())})
+        packets = json.loads(run([str(ffprobe), "-v", "error", "-show_packets", "-of", "json", str(stream)]))["packets"]
+        bound_dir = output / "generated-frame-bound-rpu"
+        run([str(rpu_generator), str(bound_dir), str(FRAMES), "frame-bound"])
+        bound = [(bound_dir / f"frame-{i:04}.bin").read_bytes() for i in range(FRAMES)]
+        bound_media = output / "p5-frame-bound.mp4"
+        bound_media.write_bytes(inject_mp4_rpu(stream.read_bytes(), bound))
+        bound_observed = json.loads(run([str(ffprobe), "-v", "error", "-show_frames", "-of", "json", str(bound_media)]))
+        validate_frame_bound_metadata(bound_observed, packets)
+        (output / "frame-bound-observed.json").write_text(json.dumps(bound_observed, indent=2) + "\n")
+        files["frame-bound-observed.json"] = sha(output / "frame-bound-observed.json")
+        files[bound_media.name] = sha(bound_media)
+        files.update({str(p.relative_to(output)): sha(p) for p in sorted(bound_dir.iterdir())})
+        (output / "frame-bound-association.json").write_text(json.dumps([
+            {"coded_au": i, "presentation_pts": packet["pts"], "dm_metadata_id": i % 16,
+             "source_max_pq": 3079 + i} for i, packet in enumerate(packets)], indent=2) + "\n")
+        files["frame-bound-association.json"] = sha(output / "frame-bound-association.json")
+        missing_color_dir = output / "generated-missing-color-rpu"
+        run([str(rpu_generator), str(missing_color_dir), str(FRAMES), "missing-color"])
+        missing_color = [(missing_color_dir / f"frame-{i:04}.bin").read_bytes() for i in range(FRAMES)]
+        missing_reuse_dir = output / "generated-reuse-missing-color-rpu"
+        run([str(rpu_generator), str(missing_reuse_dir), str(FRAMES), "reuse-missing-color"])
+        missing_reuse_color = [(missing_reuse_dir / f"frame-{i:04}.bin").read_bytes() for i in range(FRAMES)]
+        variants = []
+        for label, index in [("missing-first", 0), ("missing-midstream", 12), ("missing-seek-start", 10),
+                             ("malformed-first", 0), ("malformed-midstream", 12),
+                             ("omitted-color-first", 0), ("omitted-color-mapping-reuse-midstream", 12)]:
+            modified = list(rpus)
+            if label.startswith("missing"):
+                modified[index] = None
+            elif label.startswith("omitted-color"):
+                modified[index] = missing_color[index] if index == 0 else missing_reuse_color[index]
+            else:
+                modified[index] = rpus[index][:3]
+            path = output / f"p5-{label}.mp4"
+            path.write_bytes(inject_mp4_rpu(stream.read_bytes(), modified))
+            files[path.name] = sha(path)
+            variants.append({"path": path.name, "affected_decode_sample": index,
+                             "affected_presentation_pts": packets[index]["pts"],
+                             "time_base": "1/12288", "expected": "strict-render-failure" if label.startswith("omitted-color") else "strict-decode-failure"})
+        (output / "negative-variants.json").write_text(json.dumps(variants, indent=2) + "\n")
+        files["negative-variants.json"] = sha(output / "negative-variants.json")
     else:
         media = stream
     observed = json.loads(run([str(ffprobe), "-v", "error", "-show_frames", "-show_streams", "-of", "json", str(media)]))
@@ -329,10 +399,10 @@ def generate(ffmpeg, ffprobe, output, family, rpu_generator=None, lossless=False
     receipt = {"schema_version": 1, "family": family, "frames": FRAMES, "fps": FPS,
                "dimensions": [WIDTH, HEIGHT], "media": media.name, "sha256": files,
                "tools": {"ffmpeg": sha(ffmpeg), "ffprobe": sha(ffprobe)},
-               "recipe": "analytic-extension-v2", "qualification": "generated-synthetic-only",
+               "encoded_argv": argv, "recipe": "analytic-extension-v3", "qualification": "generated-synthetic-only",
                "coding": "lossless" if lossless else "main10_crf8_level31",
                "decoded_source_error": {"maximum_code_values": maximum, "mean_code_values": sum(errors) / len(errors)},
-               "limits": ["not mastered-content visual qualification", "static RPU does not prove dynamic frame association"]}
+               "limits": ["not mastered-content visual qualification", "fresh/frame-bound P5 positives are synthetic; explicit mapping reuse is a nonconforming pinned-parser robustness diagnostic"]}
     if rpu_generator:
         receipt["tools"]["rpu_generator"] = sha(rpu_generator)
     (output / "manifest.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")

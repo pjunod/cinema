@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 loader = importlib.machinery.SourceFileLoader("mac_video_package", str(ROOT / "scripts/build-macos-video-ffmpeg"))
@@ -69,3 +70,20 @@ class MacosVideoPackageCase(unittest.TestCase):
         (git / "config").write_text("not a source artifact")
         with self.assertRaisesRegex(ValueError, "Git checkout"):
             TOOL.attach_source_parser(self.package, self.stage, self.evidence)
+
+    def test_compiled_strict_options_require_decoder_and_both_renderer_boundaries(self):
+        (self.evidence / "full-help.txt").write_text("     require_hardware .D.V. verified decoder")
+        answers = {"filter=tonemapx": "   require_dovi <boolean>",
+                   "filter=tonemap_videotoolbox": "   require_dovi <boolean>",
+                   "decoder=hevc": "  -strict_dovi <boolean>"}
+        with patch.object(TOOL, "run", side_effect=lambda argv: answers[argv[-1]]):
+            TOOL.verify_strict_options(Path("ffmpeg"), self.evidence)
+            for boundary in answers:
+                original = answers[boundary]
+                answers[boundary] = "missing"
+                with self.subTest(boundary=boundary), self.assertRaisesRegex(ValueError, "enforcement"):
+                    TOOL.verify_strict_options(Path("ffmpeg"), self.evidence)
+                answers[boundary] = original
+            (self.evidence / "full-help.txt").write_text("no verified hardware option")
+            with self.assertRaisesRegex(ValueError, "hardware decoder enforcement"):
+                TOOL.verify_strict_options(Path("ffmpeg"), self.evidence)

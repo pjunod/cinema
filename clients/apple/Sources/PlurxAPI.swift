@@ -441,7 +441,8 @@ struct PlurxAPI {
         // Never erase an explicit packaging constraint, including an empty
         // list. That would turn a refused request into the unrestricted legacy
         // query. All serving nodes roll before clients publish this field.
-        guard caps.progressiveHevcSampleEntries == nil else { return false }
+        guard caps.progressiveHevcSampleEntries == nil,
+              caps.hlsHevcSampleEntries == nil else { return false }
         if let code = (error as? APIError)?.refusalCode,
            code == "invalid_capabilities" || code == "unsupported_hevc_delivery" {
             return false
