@@ -1,0 +1,770 @@
+# Apple black video — test-app interference, cleanup, and truthful frame evidence
+
+**Status:** implemented; adversarial review addressed and local validation
+passed; physical incident acceptance remains open · **Inspected base:** `eb547f35d` · **Written:** 2026-10-08
+
+Current merge qualification and landing are recorded in
+[PR #888](http://192.168.4.7:3000/noirr/plurx/pulls/888).
+
+This records the physical incident and the build contract for the verified
+Apple-client detection defects that hid it.
+Read the evidence limits in §1 before treating any change as a fix for the
+reported black picture. Work through the milestones in §6 in order. A change
+to Dolby Vision conversion, server packaging, compatibility policy, or the
+prepared-switch protocol requires separate evidence and a revised plan.
+
+Companion to [PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md)
+(the fault and presentation model) and
+[PLAYBACK-LIFECYCLE-COVERAGE.md](../playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md)
+(the attachment and recovery boundaries).
+
+## 1. What is established, and what remains unknown
+
+### 1.1 Background test processes reproduced the failure
+
+The user reports black video with audio for Avatar: Fire and Ash on Apple TV,
+both when resuming partway through and when starting over. They also report
+black video for a Tom Segura HDR10 HEVC title. The installed Noirr Cinema app
+was identified as build 213. Re-verify the physical device's build when taking
+new evidence; a source checkout's build number is not installed-build proof.
+
+The decisive later comparison left the diagnostic app, captured media, master
+playlist, device settings, and normal Noirr app unchanged. Terminating the
+two running CQ Lab apps changed Avatar's truthful 4K master from zero decoded
+frames and an unready layer to six decoded buffers and a ready layer. The
+original Tom HDR10 master then produced nine buffers and a ready layer too.
+This ties the incident to concurrent test-app processes. Shared media-resource
+contention is the supported mechanism, but the exact internal tvOS resource
+and individual responsible process were not instrumented. See §11 for the
+controls and cleanup receipt; the intermediate RESOLUTION correlation was a
+symptom of that device state, not evidence of invalid server metadata.
+
+The retained Avatar delivery is a copied 2160p HEVC Dolby Vision Profile 7 FEL
+source, converted after muxing to Profile 8.1. The retained init plus first
+segment from the 04:48:31 UTC attempt decodes into 48 actual pixel buffers in a
+local macOS AVFoundation experiment. Removing repeated parameter sets also
+decodes. The raw pre-conversion Profile 7 clip fails that experiment. These
+observations support the converted clip's decodability on that Mac. They do
+not establish tvOS HLS decoding, AVPlayerLayer output, HDMI output, or the
+cause of the television's black picture.
+
+Read-only inspection found no demonstrated lost layer binding: the ordinary
+player view always includes PlayerSurface, normal opens replace the item on
+the same AVPlayer, and the layer binds at creation and update. The
+`surface_raised` and `surface_cleared` log names describe fault-model changes;
+they do not mean that UIKit attached or removed a video layer.
+
+### 1.2 Three code facts justify this bounded repair
+
+Re-verify these anchors at build time because lines may move.
+
+| Code | Verified behavior | Consequence |
+|---|---|---|
+| `PlayerController.swift`, `ApplePlaybackTTFFState`, about line 661 | TTFF completes after 250 ms of advancing film time while playing | Audio progress can generate a log claiming a first video frame |
+| `PlayerController.swift`, `BlackFrameWatchdog.observe`, about line 1693; `sampleSurfacePresentation`, about line 8128 | Positive presentationSize retires the watchdog and counts as picture evidence | Dimensions are accepted as a frame; the detector cannot distinguish known dimensions from absent video output |
+| `PlayerController.swift`, `retryMediaOnNextNode`, about line 8879 | An ingress retry replaces the item without resetting the watchdog | A predecessor's latched picture state can disable detection on its successor |
+
+[Apple's presentationSize contract](https://developer.apple.com/documentation/avfoundation/avplayeritem/presentationsize)
+describes dimensions. It is not a first-frame acknowledgement.
+[Apple's isReadyForDisplay contract](https://developer.apple.com/documentation/avfoundation/avplayerlayer/isreadyfordisplay)
+identifies whether the current item's first video frame is ready for display.
+Even that stronger signal does not prove an image was visible on the external
+television. Name the boundary correctly in code and logs.
+
+### 1.3 Success has two separate receipts
+
+**Code-correctness receipt:** advancing audio plus dimensions cannot certify a
+video frame; a replacement cannot inherit its predecessor's evidence; the
+existing bounded watchdog uses the corrected evidence when local rendering
+is actually expected. Deterministic tests can prove this receipt.
+
+**Incident receipt:** the named installed build shows Avatar and the HDR10
+control title on the physical Apple TV through the previously failing actions.
+That receipt requires device observations. A successful unit test, Mac decode,
+or metadata inspection cannot replace it. If the incident remains unresolved,
+the PR and final report must state that explicitly.
+
+## 2. Scope and ownership
+
+| File or surface | Intended change |
+|---|---|
+| `clients/apple/Sources/PlayerSurface.swift` | Read the current display layer's readiness and visibility without consuming video samples |
+| `clients/apple/Sources/PlayerController.swift` | Consume one item-scoped presentation snapshot in TTFF, surface evidence, and the existing black-frame watchdog; reset on all attachments |
+| `clients/apple/Tests/AppleClientTests.swift` or a narrowly scoped Apple test file | Deterministic frame-evidence, TTFF, attachment-reset, and visibility regressions |
+| Existing Apple diagnostic log structures and tests | Add bounded, credential-free evidence only where current log plumbing can carry it |
+| Apple build metadata and release note | Claim the next build using repository tooling; distinguish installed build from candidate build |
+| `docs/clients/` plan plus `docs/README.md` | Maintain the implementation and acceptance record together |
+
+Do not add a Developer switch. This is correctness and evidence integration,
+not an optional playback feature.
+
+Do not change server ffmpeg arguments, DV conversion, the HLS master, HDR
+capabilities, or automatic compatibility ordering. Do not allocate a second
+AVPlayerItemVideoOutput or call copyPixelBuffer/hasNewPixelBuffer from the new
+sampler. Seek, resume, and prepared-switch monitors already own those reads;
+a competing consumer would alter the behavior being diagnosed.
+
+Do not add a second timer, new recovery loop, automatic surface recreation,
+or blind forced HDR downgrade. Keep the existing watchdog's six seconds of
+observed film progress and its discontinuity protection.
+
+## 3. One synchronous snapshot describes the current local display target
+
+### 3.1 Reuse the bound surface instead of introducing another observer owner
+
+The controller already holds a weak `playbackSurface`. Prefer a synchronous
+`@MainActor` query on that surface from the existing periodic observation. The
+query takes the expected AVPlayer and AVPlayerItem and returns values; it
+neither rebinds layers nor changes playback. A minimal proposed shape is:
+
+```swift
+struct LocalVideoEvidence: Equatable {
+    let bindingMatches: Bool
+    let targetVisible: Bool
+    let readyForDisplay: Bool
+}
+
+@MainActor
+func videoEvidence(
+    for expectedPlayer: AVPlayer,
+    item expectedItem: AVPlayerItem
+) -> LocalVideoEvidence
+```
+
+This is a proposed interface, not an existing API. Keep it in an existing
+source file unless a separate file improves ownership enough to justify the
+project-generation and documentation changes.
+
+`bindingMatches` is true only when the visible `playerLayer.player` is the
+expected player and that player's `currentItem` is the expected item. Inspect
+the promoted `playerLayer`, never `stagedLayer`. Query and consume the snapshot
+in the same main-actor turn without an intervening await. This avoids queued
+KVO callbacks carrying obsolete item evidence.
+
+`readyForDisplay` reads the bound layer's `isReadyForDisplay`; mismatched
+bindings return false regardless of the layer's old value. Also require the
+expected item to be ready to play when accepting positive video evidence.
+Use Apple's current-item readiness contract; do not require observing a
+false-to-true transition, which can reject a legitimately warm transition.
+Do not cache a positive layer value across attachments.
+
+### 3.2 Visibility and readiness answer different questions
+
+`targetVisible` requires an attached foreground-active window, nonempty finite
+bounds intersecting the window, and no hidden or zero-alpha ancestor. Include
+the active layer's hidden/opacity state and nonempty frame. Share the relevant
+checks with `reportPresentationTarget` where practical so two definitions do
+not drift. Stage opacity remains irrelevant to the visible target.
+
+A ready offscreen layer is not local presentation. Conversely, a hidden view
+is not evidence of decoder failure. Preserve separate booleans in diagnostics
+rather than collapsing both cases to `no frame`.
+
+The code should use these meanings:
+
+| Condition | Meaning |
+|---|---|
+| Binding matches, target visible, item ready, layer ready | A local first video frame is ready on the expected visible layer |
+| Binding matches and target visible, but layer unready | A local frame has not been established |
+| Binding missing or mismatched | No valid local display observation |
+| Background, no window, hidden target, or empty bounds | Local rendering is not presently observable/expected |
+| Positive presentationSize alone | Dimensions are known; no frame verdict |
+
+The layer API does not prove continuing frame changes or that the decoded
+content itself is nonblack. Do not claim either in telemetry. Correctly
+encoded black scenes must be accepted if the layer is ready.
+
+### 3.3 Item identity owns every accumulated state
+
+Replace the watchdog's implicit session lifetime with explicit attachment
+identity. Use a weak AVPlayerItem reference compared with `===`, or a monotonic
+attachment generation, checked before each observation. A bare retained
+ObjectIdentifier is insufficient because an address can be reused after
+deallocation. On a different item reset
+`lastPositionMs`, `blackMs`, `presentedVideo`, and `fired`. On no item clear the
+binding. Reusing the same item does not reset its state on every periodic tick.
+
+A single production attachment hook may be used instead, but it must be
+called from every replacement/adoption path and covered by integration tests.
+The self-checking identity comparison at observation is preferred because a
+future replacement path cannot silently omit the reset.
+
+The first sample on a new attachment establishes a baseline; time between
+old and new items never adds to the six-second budget. A queued recovery
+still uses the existing attempt and exact-item guards before taking action.
+
+## 4. Consumers use the same evidence without changing recovery ownership
+
+### 4.1 TTFF distinguishes video readiness from audio progress
+
+Keep the monotonic open timestamp, existing rebase behavior, and one-shot
+semantics. Replace the shared assumption that 250 ms of clock advance proves
+any kind of frame.
+
+| Playback | Completion evidence |
+|---|---|
+| Video with a visible local target | Current-item layer readiness from §3; no dimensions or audio-only substitute |
+| Confirmed audio-only source | Existing playing plus 250 ms of media-clock advancement |
+| Video on external playback or active PiP | Do not manufacture a local first-frame measurement from route activity or audio progress |
+| No known source kind or no valid target | No video TTFF result yet |
+
+For video, measure the first **observation** of readiness. The existing
+periodic callback may stop while paused; readiness that arrives after the
+last paused callback is reported at the next callback, not at an invented
+instant. Do not add a new observation owner to make a stronger timing claim.
+Preserve the open anchor and item binding when a seek rebases position before
+completion. While the existing seek owner has pending presentation, do not
+complete TTFF from an old-position ready layer. Complete only after that
+owner settles, without adding a competing pixel-buffer consumer.
+
+Keep the existing `ttff` event if compatibility requires it, but make its
+message and optional evidence field accurate: `video-frame-ready` or
+`audio-progress`. Do not call the audio result a first frame. Do not describe
+layer readiness as physical presentation. If adding evidence fields requires
+an unrelated server/schema expansion, first use the established diagnostic
+detail path and explicitly record that serialization choice in the PR.
+
+### 4.2 Surface evidence requires the current target
+
+Replace the presentationSize and predecessor-latch terms in
+`sampleSurfacePresentation` with the current local video evidence. The
+existing moving-clock/rate checks still decide whether the session is
+presenting. Audio-only playback keeps its existing progress rule.
+
+Do not reuse `surfaceHasPresented` as current-item frame evidence. It records
+historical session context and may continue to serve that purpose; it cannot
+prove that a new item is ready.
+
+PiP/AirPlay retain their existing explicit-route treatment for the surface
+model. Label that observation as externally declared and exclude it from the
+local-frame and local-decoder-failure claims. Active routing is not physical
+frame proof.
+
+### 4.3 The existing watchdog only judges observable local output
+
+Feed the watchdog the current attachment, a positive current-frame-ready
+signal, and whether a visible local target is expected. Retire the watchdog
+only for a current-item positive readiness observation, never dimensions.
+
+Accumulate no failure time for audio-only content, pause, background,
+missing/hidden local surface, or external/PiP playback. Reset the continuity
+baseline when local rendering is not observable, so returning to foreground
+does not count unseen elapsed time as a black screen. A concrete decoder
+failure requires the same local attachment and visible target while the
+film clock progresses for the existing six-second threshold.
+
+Keep discontinuities greater than the existing two-second sample ceiling
+from adding time. The existing recovery fences remain. Immediately before spending decoder
+failure evidence or entering fallback, recheck the complete current snapshot:
+item/player binding, foreground and visible target, local rather than
+PiP/AirPlay routing, playing state, and absent readiness. Repeat after any
+genuine suspension before fallback. Late readiness cancels the trigger.
+If eligibility disappears, cancel the queued trigger and rearm the same
+unready item with a fresh continuity baseline when it becomes observable
+again; cancelling must not leave `fired` latched forever.
+
+Do not change `handleBlackFrameDecodeFailure`'s established compatibility
+ladder ordering in this work. The corrected detector may reach that ladder
+in cases the old detector incorrectly suppressed; this is a behavior change
+and must have a `fix(` subject and a named regression.
+
+### 4.4 Prepared promotion and rollback keep their existing proof
+
+The prepared pipeline already checks staged-layer readiness before promotion
+and consumes aligned pixel buffers for its own handoff protocol. Keep those
+checks and their sample ownership intact.
+
+After promotion, the shared snapshot reads the newly promoted `playerLayer`
+and matches the adopted successor's exact item. Old watchdog state resets
+because the item changed. A warm-ready successor may establish readiness
+immediately; do not demand a fresh KVO transition.
+
+After rollback, the same rule applies to the restored incumbent. Any queued
+failure for the discarded successor fails the item/attempt guard. The
+staged predecessor never supplies local first-frame evidence for the active
+successor. `dismantleUIView` must still clear only its own binding; an old
+view's teardown cannot clear the controller's newer surface.
+
+## 5. Diagnostics distinguish absence of evidence from a decoder verdict
+
+Add a compact snapshot to the existing opt-in playback diagnostic event or a
+bounded transition event. Prefer current diagnostic plumbing over logging at
+every periodic sample. The snapshot should include source kind, playback
+attempt, binding-match, target-visible, item-status, layer-ready, dimensions,
+transport-playing, external/PiP state, and watchdog accumulated milliseconds.
+Use opaque per-process attachment sequence numbers if correlation needs them;
+do not log object addresses, media URLs, capability tokens, or credentials.
+
+**How to read it:** audio progressing + dimensions positive + visible matching
+layer unready confirms the formerly hidden detector condition. A missing or
+hidden target instead points to surface/lifecycle investigation. A ready
+matching visible layer with a physically black TV leaves image content,
+HDR/output negotiation, and the final display boundary unresolved. A fresh
+pixel buffer observed by an existing owner may be logged separately, but the
+new sampler must not consume one to fill that field.
+
+For the first diagnostic build, keep evidence changes reviewable separately
+from any new fallback activation if the team needs physical observations to
+settle visibility semantics. Do not silently describe a diagnostics-only
+build as repairing the viewer's black video.
+
+## 6. Build milestones and acceptance
+
+### 6.1 Freeze the contract and review it adversarially
+
+Review this plan for false positives during backgrounding, PiP/AirPlay,
+warm promotion, item replacement, and late readiness. Confirm that every
+claim distinguishes dimensions, layer readiness, and physical display.
+Record each finding and its disposition before writing runtime changes.
+
+**Acceptance:** the review has no unresolved blocker to the chosen bounded
+implementation; the original black-output cause is still marked unproven.
+
+### 6.2 Implement snapshots and truthful evidence
+
+Implement the main-actor snapshot and deterministic evidence policy. Integrate
+TTFF and the surface sampler, with attachment identity and accurate logging.
+Do not consume pixel buffers. Preserve the existing transport and selection
+owners. Add diagnostics sufficient to separate visibility from unready video.
+
+**Acceptance:** focused tests below pass on iOS and tvOS; both applications
+compile. The dimensions-only test fails against the old implementation and
+passes against the new one.
+
+### 6.3 Repair watchdog attachment and eligibility
+
+Make every attachment self-resetting, route the readiness snapshot into the
+existing watchdog, and fence the queued recovery against a frame that became
+ready after its trigger. Preserve the established six-second/two-second
+bounds and fallback ordering.
+
+**Acceptance:** a dimensions-known/no-frame fixture fires exactly once when
+locally visible, while hidden/external cases do not spend the decoder ladder.
+An ingress replacement cannot inherit the predecessor's positive evidence.
+
+### 6.4 Qualify what can be proved and retain what cannot
+
+Run the focused regressions first, then the affected Apple suites and required
+repository checks. Fix failing unit tests according to the new contract;
+never replace them with skips or make an unreachable network URL pretend to
+be a ready AVPlayerLayer. Have a fresh adversarial agent review the PR diff,
+including all test changes, and address its findings.
+
+**Acceptance:** the current reviewed candidate passes the repository's
+applicable merge gate; its regression fields and validation receipt name the
+actual tested tree. Physical incident acceptance is recorded separately.
+
+## 7. Tests exercise decisions, not fabricated AVFoundation readiness
+
+Use plain value snapshots for readiness policy tests and real unready objects
+only to verify binding/refusal. Headless tests cannot force
+AVPlayerLayer.isReadyForDisplay=true. Do not swizzle that property or assert
+that a URL with no server produces frames. A narrow injected snapshot reader
+is appropriate for controller integration, defaulting to the real reader in
+production. Keep existing debug-only seams debug-only.
+
+| Proposed test | Required assertion |
+|---|---|
+| `testVideoTTFFRejectsClockAndDimensionsWithoutLayerReadiness` | Playing audio, advancing clock, and 3840×2160 dimensions do not finish video TTFF |
+| `testVideoTTFFCompletesOnceForCurrentVisibleReadyLayer` | Matching ready video completes once; repeated observations do not log again |
+| `testAudioTTFFUsesProgressWithoutVideoLayer` | Confirmed audio-only media retains its 250 ms progress behavior and truthful evidence label |
+| `testFrameEvidenceRejectsWrongPlayerItemAndStagedLayer` | Wrong player/item or staged-only readiness cannot establish the active picture |
+| `testBlackFrameWatchdogRearmsForIngressReplacement` | A ready predecessor followed by a different unready item accumulates its own budget and fires once |
+| `testBlackFrameWatchdogIgnoresHiddenAndExternalTargets` | Background/hidden/no-window/PiP/AirPlay time cannot become a decoder failure |
+| `testBlackFrameWatchdogDoesNotCountAttachmentOrSeekDiscontinuity` | Replacement and large clock jumps establish a new baseline |
+| `testQueuedBlackFrameRecoveryRechecksEligibilityAndRearms` | Queued trigger then external/hidden target does not spend recovery; returning visible can detect failure again |
+| `testPendingSeekDefersFirstFrameReadiness` | An old-position ready layer cannot finish a pending TTFF measurement until the existing seek presentation owner settles |
+| `testLateReadyFrameCancelsQueuedBlackFrameRecovery` | A frame that becomes ready before the queued task acts prevents fallback |
+| `testPromotionAndRollbackUseCurrentItemEvidence` | Simulated identity transitions accept warm-current readiness and reject stale successor callbacks/actions |
+| `testSurfacePresentationDoesNotUseDimensionsAsPictureProof` | Known dimensions and advancing audio cannot clear a video fault by claiming a current picture |
+| `testOldSurfaceDetachDoesNotClearReplacementSurface` | Real object identity checks preserve the newer weak surface owner |
+
+These are proposed test names. Use the final executable names in the PR's
+`Regression-Test:` lines. Update the existing TTFF rebase/one-shot and black
+watchdog tests; preserve their meaningful pause, discontinuity, exhaustion,
+and timestamp assertions. Update the source-contract assertion near
+AppleClientTests.swift:4132 which currently requires the invalid predecessor
+watchdog latch: assert the replacement production evidence wiring and retain
+its single-owner presentation checks. Pure-policy tests do not qualify HDMI
+output.
+
+## 8. Commands, integration, and merge evidence
+
+Re-verify the generated test target names and available simulator destinations
+before copying `-only-testing` selectors. The current project uses module
+`plurx`, schemes `plurx-iOS` and `plurx-tvOS`, and `AppleClientTests` test class.
+Use the repository's Makefile as the source of destination defaults.
+
+```bash
+make apple-build-bump       # Claim the next build; do not assume 214 is free.
+make apple-build            # Compile both Apple platforms without signing.
+make apple-test             # Run the affected Apple suites on both platforms.
+make operations-check       # Check documentation, build, and static contracts.
+git diff --check            # Reject whitespace damage in the final patch.
+```
+
+For the focused loop, generate with `xcodegen generate` under
+`clients/apple`, use `xcodebuild ... -scheme plurx-tvOS ... test` with
+`-only-testing:<verified-test-target>/AppleClientTests/<test-name>`, and repeat
+for iOS. Record the fully resolved commands and destinations in the PR rather
+than publishing an unexecuted placeholder as evidence. Reuse DerivedData.
+
+No Rust change is needed for the preferred implementation. If investigation
+requires Rust edits, establish the repository-pinned Rust 1.97.1 compiler
+loop before editing; do not use CI as the compiler.
+
+This is one bounded Apple correctness change, so one ordinary branch and PR
+into main is appropriate. If split into multiple overlapping implementation
+tasks, follow the repository's effort-branch convention. Commit normally with
+the tracked hook, use a `fix(` subject for behavior changes, and include one
+`Regression-Test: <path>::<test name>` line per corrective regression. Carry
+the same lines into the landing commit.
+
+After any base movement, rerun validation for the exact intended candidate.
+Use the applicable main-target gate documented in `DEVELOPMENT_PIPELINE.md`;
+if promotion qualification is required, retain its receipt before merge.
+The plan does not authorize treating an earlier tree's green run as current.
+
+## 9. Physical receipt and rollback
+
+On the actual Apple TV, record installed build, tvOS version, output mode,
+media identity, request position, playback attempt, and observed picture.
+Exercise Avatar cold start and the retained resume region around 6521 s, the
+reported HDR10 Tom Segura title, and a known-playing SDR control. Observe
+controls over the image to distinguish application rendering from an entire
+HDMI blackout. Avoid changing multiple delivery variables in the same trial.
+
+For evidence integration, verify that the recorded target matches the active
+layer and item and that readiness changes agree with observed local playback.
+Exercise an item replacement, background/foreground, and a prepared change or
+rollback when available. On supported iOS hardware, cover PiP/AirPlay without
+counting route transitions as decoder failures.
+
+If the new diagnostic snapshot reports ready video while the TV stays black,
+record that result and continue the original incident investigation at the
+output/content boundary. If it reports an unready visible local layer,
+verify the existing bounded recovery's outcome and whether the newly
+selected delivery actually renders. Neither observation alone establishes a
+server DV defect, especially while an HDR10 source reproduces the symptom.
+
+Rollback is a normal revert of the bounded Apple changes and a new build
+number through the standard delivery process. Do not revert server media
+conversion or mutate source files as part of this rollback. Retain diagnostic
+receipts and label superseded build evidence so the investigation remains
+reproducible.
+
+## 10. Adversarial plan review — findings addressed before implementation
+
+The independent review on 2026-10-08 requested three corrections. R1 (P1):
+recheck complete eligibility before queued recovery spends evidence, and
+rearm after an ineligible cancellation; incorporated in §4.3 and its
+controller-level regression. R2 (P2): periodic media-time callbacks cannot
+promise immediate paused readiness; §4.1 now measures first observation and
+explicitly permits deferral until the next callback. R3 (P2): same-item seek
+readiness can belong to the old position; §4.1 now defers completion while
+the existing seek presentation owner is pending. The review's identity
+reuse and stale source-contract test requirements are incorporated in §3.3
+and §7. The review did not establish the original physical cause.
+
+
+## 11. Retained investigation and implementation receipt
+
+The separate temporary diagnostic uses the same physical Apple TV as the
+report (tvOS 27.0). The user confirmed both the generated H.264 pattern and
+captured Avatar scene were visible as local MP4. With identical captured
+Avatar bytes, standalone HLS media playlists produced ready layers and real
+pixel buffers; multivariant PQ playlists enabled the video track and advanced
+audio, but the layer stayed unready and produced zero pixel buffers. The
+problem reproduced outside Noirr Cinema's player surface.
+
+| Controlled experiment | Observation |
+|---|---|
+| Exact High-tier codec and PQ/DV supplemental master | Black video with advancing audio; known 3840×2160 dimensions |
+| Main-tier hvcC, then matching in-band VPS/SPS tier changes | No restored frame |
+| No codec attributes, retaining PQ | No restored frame |
+| No PQ declaration on the original stream | Explicit incompatible-asset error; not a valid repair |
+| No video output tap, nil attributes, explicit 10-bit, BGRA | No restored frame in any master case |
+| Separate audio/video renditions; video-only master | No restored frame |
+| Remove repeated parameter sets; strip DV to HDR10 | No restored frame |
+| Fresh 4K HEVC encode with regular sample timing | No restored frame through PQ master |
+| Apply loaded display criteria before attaching item | No restored frame |
+| Native AVPlayerViewController and production audio-session category | No restored frame |
+| Generated 720p Main10 PQ master | Ready layer and decoded pixel buffers |
+| Generated 4K Main10 PQ master; original master at 20 vs 50 Mbit/s | No restored frame |
+| Original Avatar master, remove only RESOLUTION | Ready layer; six real buffers; actual dimensions remain 3840×2160 |
+| Original Tom HDR10 master, remove only RESOLUTION | Ready layer; nine real buffers; actual dimensions remain 3840×2160 |
+| Restore truthful 3840×2160 declaration, identical preflight | Both titles again produce zero buffers and unready layers |
+| Add HDCP-LEVEL=NONE or explicitly prefer maximum 3840×2160 | No restored Avatar frame |
+
+Before cleanup, removing only `RESOLUTION=3840x2160` allowed identical 4K
+bytes to decode for both titles. Restoring it restored the failure. This
+initially isolated a manifest-sensitive platform path, but **did not identify
+invalid metadata**. The decisive next experiment terminated only the two
+running CQ Lab processes (`tv.plurx.cq.qual` and `tv.plurx.cq.qual214`). The
+same already-installed diagnostic then played the original truthful 4K master
+without any rebuild, media edit, setting change, or manifest edit. Its layer
+became ready and returned six actual 3840×2160 buffers. A subsequent fresh
+comparison also returned nine buffers for the original Tom HDR10 master.
+
+The incident therefore tracks concurrent test-app lifetime. Media-resource
+contention is the leading mechanism; no private tvOS allocation trace was
+collected, and terminating both processes together does not identify which
+one held which resource. Do not claim a specific hardware decoder limit or
+an Apple decoder defect. Retain the truthful master and all native subtitles.
+No server media workaround is needed for this observed incident.
+
+Current HDR eligibility was true, modes included HDR10/Dolby Vision, tracks
+were enabled, and protection was not obscuring output. Device display metadata
+and UIScreen native/current mode reported 3840×2160. The UIKit layer's
+1920×1080 bounds therefore did not mean HDMI was configured to 1080p. False
+1080p/720p declarations were diagnostic controls only, never production output.
+[RFC 8216 §4.3.4.2](https://www.rfc-editor.org/rfc/rfc8216.html#section-4.3.4.2)
+permits omission, but
+[Apple authoring §1.18](https://developer.apple.com/streaming/hls-authoring-specification-for-apple-devices.html)
+requires RESOLUTION for video. Removing it would mask the dirty device state
+and violate Apple's authoring contract; the final fix does neither.
+
+The user reports everything worked the previous day. CQ receipts establish
+physical test runs on October 7 at 19:21Z and October 8 at 01:10Z; process
+inventory during this incident found two CQ apps still running. The lab apps
+allow background audio, and background handling does not release the incumbent
+player item. Scratch test wrappers supplied a no-op `restoreDevice`, while
+the tracked harness's default cleanup relaunched the tested bundle and
+suppressed restoration failures. Neither path proved retirement. XCTest's
+`defer app.terminate()` did not supply an outer guarantee if its runner was
+interrupted. These are concrete lifecycle gaps, independently of the exact
+tvOS resource involved.
+
+The server resolution attribute predates the incident (August 3,
+`a1e129041`). The running image `eb547f35d` and preceding retained images share
+runtime/FFmpeg layers. Current metadata scan timestamps are October 2 for
+Avatar and July 22 for Tom; both already have 4K dimensions and native text
+subtitles. No server packaging regression was established in the reported
+window. The user's reboot did not establish the later test-process inventory;
+cleanup must be verified directly after every experiment.
+
+On the user's cleanup request, all five temporary CQ Lab bundles, their XCTest
+runner, and Avatar Diagnostic were uninstalled. A fresh application inventory
+showed only `tv.plurx.app` (Noirr Cinema build 213) among these bundles; a fresh
+process inventory showed only the normal app. Noirr Cinema was reopened.
+The diagnostic source, media, and logs were retained locally outside Git;
+no source movie was changed. Future physical tests must retire owned processes
+and verify cleanup before reporting completion. See §13 for the independent
+harness repair and its ownership boundary.
+
+On installed build 213, the user restored a picture by choosing 1080p and then
+**Apply with restart**. Server receipts identify the working stream as AVC
+1920×1080 SDR (BT.709), AAC 5.1, VOD. The failed stream was HEVC 2160p DV with
+E-AC-3. That action changed several axes; the later controlled resolution
+experiment, rather than this restart alone, isolates the manifest trigger.
+The preceding prepared change was rejected because the audio codec/channel
+shape changed and required a reopen. The candidate was built as 215 but was
+not installed during the user's movie.
+
+The Tom source is HDR10 Main10 Main tier level 5.0 and begins with an IDR.
+Thus Avatar's High tier, Dolby Vision conversion, and CRA resume opening do
+not explain both reports. A short Tom copy was obtained only after explicit
+user approval. Diagnostic media and raw logs remain outside the repository.
+
+The companion application defect is independently proven: dimensions and audio progress
+prematurely establish video and retire the only detector able to advance the
+existing compatibility ladder for this failure. The implementation repairs
+that detector, first-output reporting, and per-item lifetime. It does not
+claim to repair Apple's decoder or certify physical recovery before the
+candidate has been observed.
+
+Local validation after the PR review repair: 17 focused tvOS frame-evidence
+cases; complete tvOS suite 850 cases; complete iOS suite 867 cases; playback
+surface operation fence 25 cases; attempt-scope census 16 cases; Release
+compilation for both platforms; no failures. The full operations suite ran
+792 cases with zero failures and two existing skips using GNU coreutils 9.12
+on macOS. A separate unprivileged, network-disabled local Linux container
+passed all 41 janitor fixtures and all three VAAPI failure-capture fixtures
+without skips, using Python 3.11.2 and GNU coreutils 9.1. Its read-only source
+came from `git archive 98444143a`; those two suites and their exercised
+scripts are unchanged by the review repair. No Git metadata or credentials
+were included, and the fixtures did not operate on real runner services,
+Docker resources, or GPU media. All 470 client-fix ledger rows resolve to
+current source and test anchors. The earlier tvOS runner completed its cases
+but stalled while writing the result bundle; the rerun and both final Apple
+suites completed successfully. The final merge gate and installed-build
+acceptance remain separate receipts.
+
+## 12. PR review — stale viewer actions rearm only their captured item
+
+The single adversarial review of PR #888 compared `98444143a` with
+`eb547f35d` and raised one P2 finding. A pause, seek, or subtitle action could
+advance the viewer-action epoch after the watchdog fired but before its
+queued task ran. The attempt fence then returned before the eligibility
+sampler cleared `fired`, leaving the same unready item permanently disarmed.
+The continuation after the decoder acknowledgement had the same
+short-circuit shape.
+
+**Disposition: addressed.**
+[PlayerController.swift](../../clients/apple/Sources/PlayerController.swift)
+now cancels the captured item's trigger on either rejected continuation.
+Cancellation clears `fired`, accumulated milliseconds, and the continuity
+baseline only when the watchdog still belongs to that exact item; a stale
+predecessor task cannot reset its successor. The positive readiness latch is
+preserved. The production queued task was extracted into
+`queueBlackFrameRecovery` so a Debug-only test entry can exercise the actual
+continuation without opening a network stream. The attempt census records
+the helper's new name with its original lifecycle and viewer-action scopes.
+
+**Regression evidence.** Both tests in
+[AppleFrameEvidenceTests.swift](../../clients/apple/Tests/AppleFrameEvidenceTests.swift)
+ran on iOS and tvOS. They execute the real queued task: the first performs a
+real pause action before it runs, verifies the stale viewer-action refusal,
+and proves the same item can accumulate a fresh failure window; the second
+replaces the item before the task runs and proves the successor's trigger
+survives.
+
+```text
+Regression-Test: clients/apple/Tests/AppleFrameEvidenceTests.swift::testQueuedBlackFrameRecoveryRearmsAfterViewerActionSupersedesTrigger
+Regression-Test: clients/apple/Tests/AppleFrameEvidenceTests.swift::testStaleQueuedBlackFrameRecoveryCannotCancelSuccessorTrigger
+```
+
+From `clients/apple`, the final Debug suites and Release builds used these
+resolved commands. A passing test suite proves the detector and cancellation
+contracts; it does not certify an image on the physical television.
+
+```bash
+xcodebuild -project plurx.xcodeproj -scheme plurx-tvOS -configuration Debug \
+  -destination 'platform=tvOS Simulator,name=Apple TV 4K (3rd generation)' \
+  -derivedDataPath build/DerivedData -parallel-testing-enabled NO \
+  -collect-test-diagnostics never CODE_SIGNING_ALLOWED=NO test
+xcodebuild -project plurx.xcodeproj -scheme plurx-iOS -configuration Debug \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -derivedDataPath build/DerivedData -parallel-testing-enabled NO \
+  -collect-test-diagnostics never CODE_SIGNING_ALLOWED=NO test
+xcodebuild -project plurx.xcodeproj -scheme plurx-iOS -configuration Release \
+  -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project plurx.xcodeproj -scheme plurx-tvOS -configuration Release \
+  -destination 'generic/platform=tvOS Simulator' \
+  -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO build
+```
+
+From the repository root, the complete operations run used the installed
+GNU utilities. The two fixture-suite commands also passed independently in
+the local Linux container described in §11.
+
+```bash
+PATH="/opt/homebrew/opt/coreutils/libexec/gnubin:$PATH" TMPDIR=/private/tmp \
+  python3 -m unittest discover -s tests/operations -p 'test_*.py'
+python3 -m unittest discover -s tests/operations -p test_ci_janitor.py
+python3 -m unittest discover -s tests/operations -p test_vaapi_failure_capture.py
+python3 -m unittest discover -s tests/operations -p test_attempt_scope_census.py
+python3 -m unittest discover -s tests/operations -p test_playback_surface_fence.py
+git diff --check
+```
+
+## 13. Independent repairs and file ownership
+
+This incident has two playback repairs and one subsequent CI receipt recovery,
+each independently reviewable and main-bound.
+Use the repository's disjoint-file exception: all three branches start from main,
+and each task owns separate files. No effort integration state is
+shared. Freeze each candidate for its own adversarial PR review, address the
+findings, run focused regressions and the current Main promotion gate, then
+merge with the declared Regression-Test lines in the landing message.
+
+| Task | Exclusive file ownership | Acceptance |
+|---|---|---|
+| PR 888, truthful Apple frame evidence | Apple sources/tests/build metadata; `docs/clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md`; `docs/apple-builds/888-ready-video-recovery.md`; `docs/README.md`; `docs/STATUS.html`; `docs/clients/APPLE-CLIENT-PARITY.md`; `tests/client-fixes.toml`; `validation/attempt-census.toml` | Both Apple unit suites and Release builds; reviewed queued-cancellation regression; current gate |
+| PR 895, physical lab cleanup | `scripts/playback-lab`; `tests/playback/network-shaping.test.js`; `docs/PLAYBACK-TESTING.md` | Owned-process retirement verified after success, failure, and interruption; cleanup failure fails the run; no production app data deletion; focused Node regressions and current gate |
+| PR 900, CI receipt recovery | `validation/main_unit_receipts.py`; `validation/main_preflight_adoption.py`; `validation/main-preflight-inputs.json`; their tests under `tests/validation/`; existing `docs/ci/PYTHON-UNIT-PR-RECEIPTS.md` | Authenticate both zero-execution preparation refusals from run 4431; import no outcomes; preserve run 4429 successes; current gate |
+
+
+The cleanup task captures the exact launched process identity, retires it in
+an outer cleanup path, and verifies absence before restoring normal use.
+A no-op presentation restore callback must not bypass process retirement.
+Record cleanup success/failure in the run receipt, propagate failures, and
+preserve the original run error when both fail. Never kill an unrelated PID
+or uninstall the production app. A hard host kill or disconnected device
+cannot guarantee cleanup: retain an explicit incomplete receipt and make the
+next preflight diagnose it rather than reporting a successful test. Review
+this contract before implementation. No further device tests are authorized
+while the user is watching without renewed coordination.
+
+
+The cleanup plan's independent adversarial review required six corrections,
+all adopted before implementation: durable launch intent before mutation;
+fail-closed stale identity and exclusive per-device ownership; stop and verify
+before proxy closure/restoration; bounded asynchronous commands with signal
+cancellation; a final cleanup verdict retaining every error; and rejection of
+`--leave-running` with stateful command-adapter regressions. A saved PID is
+not sufficient to kill a process after restart. Current CoreDevice inventory
+has no process-start discriminator, so stale ambiguous ownership requires
+operator recovery rather than automatic PID termination.
+
+## 14. Naked Gun startup report is a separate deadline mismatch
+
+After cleanup, the user reported a preparation error followed by playing and
+“Playback recovered.” Retained logs show the first Naked Gun session's producer
+started at 05:51:34Z, but its conservative 48-second bootstrap did not publish
+the first playlist snapshot until 05:51:55Z. The client's 15-second readiness
+deadline raised its preparation error at 05:51:49Z; AVPlayer then reported
+NSURLErrorDomain -1008 / CoreMedia -12884 at 05:51:55Z. No ingress request
+trace establishes that those error codes were caused specifically by the
+client deadline. A later independent session began at 05:53:03Z, published at
+05:53:09Z, and logged startup at 05:53:12Z (9.286 seconds). It continued
+healthy publication, and the user confirmed actual video.
+
+The timestamps establish a startup publication/deadline mismatch for the
+first attempt, not a new black-video reproduction. PR 888 does not shorten
+the server bootstrap or extend the readiness deadline. Keep this distinction
+in the incident report; do not claim that frame-evidence tests repair startup
+latency. No new physical tests or installations were performed during the
+user's resumed viewing.
+
+
+## 15. Build and integration evidence
+
+**Current-base verification:** after integrating `ef54fa047`, the unchanged
+Apple suites passed again (tvOS 850; iOS 867). The expanded operations suite
+passed 821 tests with two existing skips; validation passed 334 tests with
+one existing skip. The normal hook passed pinned Rust 1.97.1 formatting and
+workspace Clippy with warnings denied. These receipts apply to the
+main-integrated candidate, not just the earlier source snapshot.
+
+
+**Build 216 verification:** after integrating current main `b3ac74a16`, the
+regenerated tvOS suite passed 856 tests and iOS passed 872, with zero failures.
+Both Release builds passed; Apple release contracts passed 26 checks, the
+documentation index passed four, and corrective history passed. Candidate
+build 216 was not installed while the user watched. The earlier CI preflight
+on `1e295f008` completed all 821 operations tests with two existing skips and
+retained its final journal before rejecting its superseded head at the next
+phase. These retained results do not substitute for a current-head gate.
+
+
+**Integrated prerequisite verification:** PR 895 landed as
+`6229ff3e93fd06113491697991fc5fbe919d8b05` after run 4434 passed every
+affected check and the current-head/base promotion guard. PR 900's single
+adversarial review found no actionable issues. It landed as
+`f4eb3cb9db0757d3f6feda10dc9cb1586afaf6d0` after run 4450
+([UI 4429](http://192.168.4.7:3000/noirr/plurx/actions/runs/4429)) passed
+preflight, Rust, Windows, and Main promotion on head
+`3d0f08a481d9915b31ef26e81b883e48878e783f` and base
+`eb1ef52290743e9eea1517a1579fa2c2ee840278`. All five declared regression
+references are preserved in its landing message. Authenticated live reads of
+both historical run-4431 attempt logs also matched their reviewed byte counts
+and SHA-256 hashes; the bounded proof imports no test outcomes.
+
+The Apple candidate integrates both actual prerequisite landings. Its tracked
+Apple subtree remains `33205b9aa40f8068f1dba25f2e9ced2458061169`, identical to
+the build-216 source that passed the complete 856/872 suites and Release builds.
+The integrated candidate additionally passed all 17 `AppleFrameEvidenceTests`
+on each of the tvOS and iOS simulators. These checks used the commands above
+with `-only-testing:plurx-tvOSTests/AppleFrameEvidenceTests` and
+`-only-testing:plurx-iOSTests/AppleFrameEvidenceTests`, respectively.
+No physical-device action was performed.
+
+The integration of both actual landings passed the documentation index, all
+eight PR 888 regression references, and corrective history (3,380 corrective
+commits, 318 landings, 1,073 covered by landing trailers). The normal pinned
+Rust 1.97.1 hook passed formatting, workspace/all-target Clippy with warnings
+denied, catalog checks, and 77 embedded JavaScript syntax checks. These are
+current integration checks; the current-head promotion gate remains the
+merge authority recorded by PR 888.
