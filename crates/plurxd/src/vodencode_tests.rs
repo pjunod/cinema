@@ -552,12 +552,18 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         item_title: "paired continuous attachment",
         supersession_user: "test",
     };
+    // Idle exclusive-family admission is legal; refusal requires real
+    // unrelated work, while retaining the original one-thread-short budget.
+    let unrelated_live = encoding.admissions
+        .try_admit_software(budget - 1, 1, crate::admission::Priority::Live)
+        .expect("unrelated live CPU credit");
     assert!(serve
         .try_create(attach(), &file, &settings(), attribution, parent.clone())
         .await
         .is_err());
     assert!(!serve.shared.sessions.lock().await.contains_key(&parent));
     assert!(soundtrack.readers.lock().await.is_empty());
+    drop(unrelated_live);
     assert_eq!(
         encoding.admissions.software_in_use(),
         0,

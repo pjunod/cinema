@@ -5171,7 +5171,13 @@ mod tests {
                 .find(|item| item["id"] == "macos_video_processing")
                 .expect("Mac processing regression fixture or settings lookup");
             assert_eq!(item["enabled"], enabled);
-            assert_eq!(item["requirements"][2]["status"], "unobservable");
+            let qualification = item["requirements"]
+                .as_array()
+                .expect("readiness requirements")
+                .iter()
+                .find(|requirement| requirement["id"] == "delivery_qualification")
+                .expect("delivery qualification requirement");
+            assert_eq!(qualification["status"], "unobservable");
         }
         // Reload durable choice independently of observation state.
         state.transcode.set_macos_video_processing_enabled(false);
