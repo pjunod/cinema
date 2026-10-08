@@ -680,3 +680,34 @@ cannot guarantee cleanup: retain an explicit incomplete receipt and make the
 next preflight diagnose it rather than reporting a successful test. Review
 this contract before implementation. No further device tests are authorized
 while the user is watching without renewed coordination.
+
+
+The cleanup plan's independent adversarial review required six corrections,
+all adopted before implementation: durable launch intent before mutation;
+fail-closed stale identity and exclusive per-device ownership; stop and verify
+before proxy closure/restoration; bounded asynchronous commands with signal
+cancellation; a final cleanup verdict retaining every error; and rejection of
+`--leave-running` with stateful command-adapter regressions. A saved PID is
+not sufficient to kill a process after restart. Current CoreDevice inventory
+has no process-start discriminator, so stale ambiguous ownership requires
+operator recovery rather than automatic PID termination.
+
+## 14. Naked Gun startup report is a separate deadline mismatch
+
+After cleanup, the user reported a preparation error followed by playing and
+“Playback recovered.” Retained logs show the first Naked Gun session's producer
+started at 05:51:34Z, but its conservative 48-second bootstrap did not publish
+the first playlist snapshot until 05:51:55Z. The client's 15-second readiness
+deadline raised its preparation error at 05:51:49Z; AVPlayer then reported
+NSURLErrorDomain -1008 / CoreMedia -12884 at 05:51:55Z. No ingress request
+trace establishes that those error codes were caused specifically by the
+client deadline. A later independent session began at 05:53:03Z, published at
+05:53:09Z, and logged startup at 05:53:12Z (9.286 seconds). It continued
+healthy publication, and the user confirmed actual video.
+
+The timestamps establish a startup publication/deadline mismatch for the
+first attempt, not a new black-video reproduction. PR 888 does not shorten
+the server bootstrap or extend the readiness deadline. Keep this distinction
+in the incident report; do not claim that frame-evidence tests repair startup
+latency. No new physical tests or installations were performed during the
+user's resumed viewing.

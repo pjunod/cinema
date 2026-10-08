@@ -12,6 +12,8 @@ Audio-only playback retains its progress metric. Hidden, background, PiP, and
 external playback do not trigger a local decoder failure.
 
 The [implementation record](../clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md)
-separates this recovery repair from the unresolved 4K HLS rendering cause.
-The physical workaround confirmed on build 213 was 1080p followed by Apply
-with restart; candidate playback verification remains open.
+records the physical cause: background CQ Lab process interference. Stopping
+the two test processes restored the unchanged original 4K Avatar and Tom
+HDR10 samples. Temporary test apps were removed and normal Noirr Cinema
+build 213 restored. Candidate build 215 has not been installed during viewing;
+its physical acceptance remains separate from the successful device cleanup.
