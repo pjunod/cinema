@@ -1,7 +1,7 @@
-# Optical Blu-ray reader lab — October offline decryption result
+# Optical Blu-ray reader lab — October decryption result
 
 **Status:** decoded-frame acceptance open · **Observed:** 2026-10-08 UTC ·
-**Source:** `codex/optical-m0-foundations` at `7bee0b16e`
+**Source:** `codex/optical-m0-foundations` at `03153da44`
 
 Companion to the [optical status page](../features/OPTICAL-MEDIA-STATUS.html)
 (live execution state) and the [September physical receipt](OPTICAL-BLURAY-PHYSICAL-2026-09-27.md)
@@ -55,23 +55,52 @@ directory as sufficient fixes for this disc. It does not prove whether the
 remaining failure is missing disc-specific key material, BD+ handling,
 drive behavior, or another reader interaction.
 
+## Approved vendor-update access did not resolve the disc
+
+The operator then approved a disposable network-enabled reader test with
+possible disclosure of disc-derived identifiers to MakeMKV. The UDF mount
+remained read-only, and the running Plurx service was unchanged. MakeMKV's
+[Linux SVQ guidance](https://forum.makemkv.com/forum/viewtopic.php?t=6164)
+identifies `wget` as a downloader dependency; the initial image lacked it.
+The corrected image installed `wget` and set the vendor-documented headless
+`app_UpdateEnable = "1"` option. The container could fetch MakeMKV's public
+site over HTTPS.
+
+MakeMKV 2.0.0 then announced `Downloading latest HK to /root/.MakeMKV` but
+did not finish that stage within a bounded 100-second scan. A brief syscall
+trace showed TLS traffic from the MakeMKV process while it was at that stage;
+this was not an offline run or a proof that its update service returned usable
+key material. The temporary state directory contained no saved HK or SVQ file.
+An earlier network-enabled scan without `wget` still reported `Automatic SVQ
+downloading is disabled or failed` and `TCOUNT:0`.
+
+The vendor's archived 1.18.4 release, built separately with `wget` and a
+fresh writable state directory, completed its title scan but likewise
+reported `Automatic SVQ downloading is disabled or failed`, `Failed to open
+disc`, and `TCOUNT:0`. Its LibMMBD path attempted SDF and HK downloads,
+processed BD+ with the built-in generic SVQ, and selected the 1:30:07
+playlist from four candidates. FFmpeg then reported `Unable decrypt unit
+(AACS)!` and exited `183` before a frame. Neither version saved an HK or
+SVQ file. The result does not distinguish unavailable vendor key data from
+this disc's protection, drive interaction, or another reader defect.
+
 ## What this evidence changes
 
 The expired September beta key is no longer the observed blocker. An installed
 LibMMBD library and a successful BD+ processing message are still insufficient:
 the physical reader must decode an actual title frame, then satisfy forward
-and backward seek and the existing VOD segment path. The next reader
-investigation may use a different authorized key/decryption backend or a
-vendor-update-enabled lab. The latter requires operator approval for possible
-disclosure of disc-derived identifiers to MakeMKV. The execution safety
-reviewer rejected that outbound test without this specific approval; it has
-not been attempted indirectly.
+and backward seek and the existing VOD segment path. The approved online
+vendor-update attempt did not satisfy that acceptance. Further reader work
+needs a verified key/decryption source for this disc or a separate diagnosis
+of the physical drive and media; another blind retry of the same container
+configuration is not evidence of progress.
 
 No fast-lane tests, adversarial merge review, release deployment, or main merge
 are implied by this source-reader investigation. The requested main-promotion
 handoff is to the user's batched-merge session only after the optical work is
 actually ready.
 
-After the run, both disposable containers, the read-only mount, temporary key
-file, lab directory and lab image were removed. The production `plurxd`
-container remained healthy and unchanged.
+After the runs, all disposable containers and images, read-only mounts,
+temporary settings (including disc-derived metadata), and local build files
+were removed. The production `plurxd` container remained healthy and
+unchanged.
