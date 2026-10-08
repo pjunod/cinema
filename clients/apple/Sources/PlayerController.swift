@@ -8995,6 +8995,11 @@ final class PlayerController: ObservableObject {
         #if os(iOS)
         if offlineId != nil { return }
         #endif
+        #if os(tvOS)
+        let audio = AVAudioSession.sharedInstance()
+        let rate = audio.sampleRate.isFinite && (0...384_000).contains(audio.sampleRate) ? Int(audio.sampleRate) : 0
+        noteSurfaceLogOnly("audio_route_at_item_failure:outputs=\(audio.currentRoute.outputs.count):sample_rate=\(rate)")
+        #endif
         let itemError = item.error as NSError?
         let detail = lastItemFailureDetail?.item === item
             ? lastItemFailureDetail?.detail
@@ -10726,12 +10731,13 @@ extension PlayerController {
             decision?.measuredCandidateOutputs = hls.measuredCandidateOutputs
             autoActiveCandidateId = hls.qualityCandidateId
         }
+        pendingPreparedControl = nil
+        playbackControlOrigin = nil
         guard let bootstrap = hls.control, bootstrap.isValid else {
             playbackControl.end()
             playbackControlSummary = nil
             return
         }
-        pendingPreparedControl = nil
         startPlaybackControl(bootstrap: bootstrap, session: hls.sessionId, origin: origin)
     }
 

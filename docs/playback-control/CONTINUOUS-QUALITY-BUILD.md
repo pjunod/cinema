@@ -8051,3 +8051,36 @@ signatures pass. Nineteen regression references resolve statically. Units
 remain deferred. A fresh Safari readiness attempt again times out in 30.28s;
 its owned driver retires, and its source-named receipt preserves the earlier
 readiness result rather than replacing it.
+
+### 10.264 Conservative presentation cadence and batching handoff (2026-10-08)
+
+Build 226 also reads fragment decode timestamps and composition offsets.
+The tolerance cannot exceed the smallest positive actual presentation spacing;
+duplicate timestamps, missing decode-time proof and arithmetic overflow refuse
+qualification. This bounds reordered and variable-cadence fragments rather
+than treating decode durations alone as presentation cadence. A fourth focused
+cadence regression is authored. iOS and tvOS production/test source compile;
+twenty regression references resolve statically. No units have executed.
+The TV item-failure diagnostic reports only audio output count and finite
+sample rate, without route names, identifiers or media URLs. It is compiled
+but awaits its new physical measurement. New-control setup clears pending
+successor metadata before an invalid bootstrap can return.
+
+A corrected Firefox diagnostic starts optical acquisition after forward
+buffering, stopped consumer loads and settling. Pausing only two identity-
+verified owned producers passes its diagnostic window (95.942ms upper hold,
+no capture gaps). The matched unpaused post-ready case fails at 170.891ms
+and one capture gap. The earlier buffered case included acquisition during
+initial filling, so it is not producer-free buffered-only evidence. A normal-
+loading producer nice-floor diagnostic still fails at 375.039ms despite
+complete sampling. Its census covers 885 threads across thirteen owned
+FFmpeg processes; no shipping priority change is justified. Guards retire
+the exact daemons and display; paused identities are resumed before retirement.
+These comparisons do not qualify the shipped half-speed player.
+
+The human assigns final unit execution, failed-test retries and merging to
+the session **Coordinate PR merge batches**. Finish qualification and the
+final adversarial review here, then preserve the requested Fable review pause.
+After release of that pause, send the exact candidate, regression fields,
+receipts and independent-clone constraint to that session. Do not merge or
+run final units here. The work remains a draft and is not ready for handoff.

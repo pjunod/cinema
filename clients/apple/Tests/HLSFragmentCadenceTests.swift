@@ -25,7 +25,7 @@ final class HLSFragmentCadenceTests: XCTestCase {
         let run = box("trun", words(durations.map { [0x100, UInt32($0.count)] + $0 } ?? [0, 2]))
         // A much shorter audio duration must never determine video tolerance.
         let audio = box("traf", box("tfhd", words([0x20008, 3, 1])) + box("trun", words([0, 2])))
-        return box("moof", audio + box("traf", header + run)) + box("mdat", Data(repeating: 1, count: 8))
+        return box("moof", audio + box("traf", header + box("tfdt", words([0, 0])) + run)) + box("mdat", Data(repeating: 1, count: 8))
     }
     func testFragmentCadenceResolvesRealVideoSampleDurationsAndDefaults() throws {
         let initData = initialization()
@@ -66,6 +66,18 @@ final class HLSFragmentCadenceTests: XCTestCase {
                           "../%2fother/seg.m4s", "file:///api/v1/hls/session/seg.m4s"] {
             XCTAssertNil(HLSFragmentCadence.mediaChildURL(reference, of: playlist, root: root), reference)
         }
+    }
+
+    func testCompositionOffsetsCannotWidenDecodedFrameTolerance() throws {
+        let header = box("tfhd", words([0x20000, 7])) + box("tfdt", words([0, 0]))
+        let run = box("trun", words([0x01000900, 3, 1000, 0,
+            1000, UInt32(bitPattern: -999), 1000, 0]))
+        let media = box("moof", box("traf", header + run)) + box("mdat", Data([1, 2, 3]))
+        XCTAssertEqual(try XCTUnwrap(HLSFragmentCadence.minimumDuration(initData: initialization(), fragment: media)),
+                       1 / 24_000.0, accuracy: 1e-12)
+        let duplicate = box("trun", words([0x01000900, 2, 1000, 0, 1000, UInt32(bitPattern: -1000)]))
+        XCTAssertNil(HLSFragmentCadence.minimumDuration(initData: initialization(),
+            fragment: box("moof", box("traf", header + duplicate)) + box("mdat", Data([1, 2]))))
     }
 
 }

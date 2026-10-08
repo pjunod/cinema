@@ -72,10 +72,18 @@ enum HLSFragmentCadence {
             let top = try boxes(fragment, 0..<fragment.count)
             guard top.contains(where: { $0.type == "mdat" && $0.end > $0.body }) else { return nil }
             var minimum = UInt32.max, samples = 0
+            var presentationTimes: [Int64] = []
             for moof in top where moof.type == "moof" {
                 for traf in try children(fragment, moof) where traf.type == "traf" {
                     let track = try children(fragment, traf)
                     guard let tfhd = track.first(where: { $0.type == "tfhd" }), try word(fragment, tfhd, 4) == videoID else { continue }
+                    guard let tfdt = track.first(where: { $0.type == "tfdt" }) else { return nil }
+                    let decodeVersion = try word(fragment, tfdt, 0) >> 24
+                    guard decodeVersion <= 1 else { return nil }
+                    let base = decodeVersion == 0 ? UInt64(try word(fragment, tfdt, 4))
+                        : (UInt64(try word(fragment, tfdt, 4)) << 32 | UInt64(try word(fragment, tfdt, 8)))
+                    guard base <= UInt64(Int64.max) else { return nil }
+                    var decodeTime = Int64(base)
                     let flags = try word(fragment, tfhd, 0) & 0x00ff_ffff
                     var offset = 8, duration = defaultDuration
                     if flags & 1 != 0 { offset += 8 }
@@ -96,8 +104,16 @@ enum HLSFragmentCadence {
                             if flags & 0x100 != 0 { sampleDuration = try word(fragment, trun, at); at += 4 }
                             if flags & 0x200 != 0 { at += 4 }
                             if flags & 0x400 != 0 { at += 4 }
-                            if flags & 0x800 != 0 { at += 4 }
+                            var compositionOffset: Int64 = 0
+                            if flags & 0x800 != 0 {
+                                let encoded = try word(fragment, trun, at); at += 4
+                                compositionOffset = full >> 24 == 1 ? Int64(Int32(bitPattern: encoded)) : Int64(encoded)
+                            }
                             guard at <= trun.end - trun.body, sampleDuration > 0, sampleDuration <= timescale else { return nil }
+                            let (presentationTime, presentationOverflow) = decodeTime.addingReportingOverflow(compositionOffset)
+                            let (nextDecodeTime, decodeOverflow) = decodeTime.addingReportingOverflow(Int64(sampleDuration))
+                            guard !presentationOverflow, !decodeOverflow else { return nil }
+                            presentationTimes.append(presentationTime); decodeTime = nextDecodeTime
                             minimum = min(minimum, sampleDuration); samples += 1
                         }
                         guard at == trun.end - trun.body else { return nil }
@@ -105,6 +121,15 @@ enum HLSFragmentCadence {
                 }
             }
             guard samples > 0 else { return nil }
+            // Reordered / variable-cadence samples can have presentation
+            // spacing smaller than decode duration. Never widen the decoded
+            // frame tolerance by ignoring composition offsets.
+            presentationTimes.sort()
+            for pair in zip(presentationTimes, presentationTimes.dropFirst()) {
+                let (spacing, overflow) = pair.1.subtractingReportingOverflow(pair.0)
+                guard !overflow, spacing > 0 else { return nil }
+                if spacing < Int64(minimum) { minimum = UInt32(spacing) }
+            }
             return Double(minimum) / Double(timescale)
         } catch { return nil }
     }
