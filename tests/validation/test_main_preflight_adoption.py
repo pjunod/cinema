@@ -11,6 +11,20 @@ from validation.python_unit_receipts import ReceiptError
 
 
 class MainPreflightAdoptionCase(unittest.TestCase):
+    def test_exact_prepare_retry_bridge_imports_no_outcomes(self):
+        from validation import main_unit_receipts as main
+        scope, prior, jobs = {'repository': 1, 'pr': 888}, {'id': 4431}, []
+        with mock.patch.object(main, 'recover_preunit4431', return_value=True) as proof, \
+             mock.patch.object(adoption, 'atomic_json') as writer:
+            self.assertIs(adoption.recover_preunit4431(None, scope, prior, jobs), True)
+            proof.assert_called_once_with(None, scope, prior, jobs)
+            writer.assert_not_called()
+        with mock.patch.object(main, 'recover_preunit4431', return_value=False):
+            self.assertFalse(adoption.recover_preunit4431(None, scope, prior, jobs))
+        with mock.patch.object(main, 'recover_preunit4431', side_effect=ReceiptError('missing first attempt')):
+            with self.assertRaisesRegex(ReceiptError, 'missing first attempt'):
+                adoption.recover_preunit4431(None, scope, prior, jobs)
+
     def test_generic_bridge_workflow_has_one_python_executor_and_distinct_node_receipts(self):
         commands = ['python3 -m validation.main_unit_receipts prepare',
                     'python3 -m validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations',

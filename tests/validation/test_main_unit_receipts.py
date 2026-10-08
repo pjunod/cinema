@@ -10,6 +10,143 @@ from validation.python_unit_receipts import ReceiptError
 
 
 class MainUnitReceiptsCase(unittest.TestCase):
+    def preunit4431_fixture(self):
+        import json
+        proof = copy.deepcopy(main.PREUNIT4431)
+        scope = {'repository': 1, 'pr': 888, 'branch': proof['branch'], 'base': 'main', 'workflow': main.WORKFLOW}
+        repo = {'id': 1, 'full_name': 'noirr/plurx'}
+        event = {'repository': repo, 'number': 888, 'action': 'synchronized', 'pull_request': {
+            'number': 888, 'draft': False, 'state': 'open',
+            'head': {'repo': repo, 'sha': proof['commit'], 'ref': proof['branch']},
+            'base': {'repo': repo, 'ref': 'main', 'sha': proof['base']}}}
+        prior = {'id': proof['run'], 'repository': repo, 'commit_sha': proof['commit'],
+                 'workflow_id': main.WORKFLOW, 'event': 'pull_request',
+                 'event_payload': json.dumps(event), 'status': 'cancelled'}
+        jobs = [{'id': identity, 'name': name, 'task_id': task, 'status': status,
+                 'run_id': proof['run'], 'repo_id': 1, 'attempt': 2}
+                for identity, name, task, status in proof['jobs']]
+        logs = {}
+        attempts = []
+        for attempt, task, _, _, reason in proof['attempts']:
+            lines = [f'Runner fixture received task {task} of job preflight, triggered by event: pull_request',
+                     proof['commit'] + ':refs/remotes/pull/888/head', 'node: v22.23.2',
+                     'Main Python receipt refused: ' + reason]
+            lines += ["skipping post step for '" + step + "'; main step was skipped" for step in (
+                'Preserve per-ID preflight journal even on failure',
+                'Preserve main Python success journal even on unit failure',
+                'Publish preflight attempt-start journal',
+                'Publish main Python attempt-start marker')]
+            lines += [f"Job '{main.JOB}' failed"]
+            raw = ('\n'.join(lines) + '\n').encode()
+            logs[attempt] = raw
+            attempts.append((attempt, task, len(raw), main.hashlib.sha256(raw).hexdigest(), reason))
+        proof['attempts'] = tuple(attempts)
+        proof['sources'] = {path: main.hashlib.sha256(b'reviewed source').hexdigest() for path in proof['sources']}
+        class API:
+            def __init__(self):
+                self.run, self.logs = copy.deepcopy(prior), dict(logs)
+                self.producer, self.run_artifacts, self.artifacts = b'reviewed source', [], []
+                self.requested_attempts = []
+            def get(self, path):
+                if path == '/actions/runs/4431': return self.run
+                if path == '/actions/runs/4431/artifacts': return self.run_artifacts
+                raise AssertionError(path)
+            def pages(self, path, query):
+                assert path == '/actions/artifacts'
+                return self.artifacts
+            def bytes(self, path, query=None):
+                if path == '/actions/jobs/44940/logs':
+                    assert set(query) == {'attempt'}
+                    self.requested_attempts.append(query['attempt'])
+                    return self.logs[query['attempt']]
+                assert path.startswith('/raw/') and query == {'ref': proof['commit']}
+                return self.producer
+        return proof, scope, prior, jobs, API()
+
+    def test_exact_prepare_retry_authenticates_both_attempts_and_imports_no_outcomes(self):
+        proof, scope, prior, jobs, api = self.preunit4431_fixture()
+        with patch.object(main, 'PREUNIT4431', proof), patch.object(main, 'source', return_value=b'reviewed source'), \
+             patch.object(main.receipts, 'atomic_json') as writer:
+            self.assertIs(main.recover_preunit4431(api, scope, prior, jobs), True)
+            self.assertEqual(api.requested_attempts, [1, 2])
+            self.assertIs(main.recover_preunit4431(api, dict(scope, pr=889), prior, jobs), False)
+            self.assertIs(main.recover_preunit4431(api, scope, dict(prior, id=4432), jobs), False)
+            writer.assert_not_called()
+
+    def test_prepare_retry_refuses_changed_metadata_sources_and_any_artifacts(self):
+        proof, scope, prior, jobs, api = self.preunit4431_fixture()
+        with patch.object(main, 'PREUNIT4431', proof), patch.object(main, 'source', return_value=b'reviewed source'):
+            for changed in (jobs[:-1], jobs + jobs[:1],
+                            [dict(job, attempt=3) for job in jobs],
+                            [dict(job, repo_id=2) for job in jobs],
+                            [dict(job, task_id=99999) if job['id'] == proof['job'] else job for job in jobs],
+                            [dict(job, status='running') if job['id'] == proof['job'] else job for job in jobs]):
+                with self.subTest(jobs=changed), self.assertRaises(ReceiptError):
+                    main.recover_preunit4431(api, scope, prior, changed)
+            for changed in (dict(prior, status='running'), dict(prior, commit_sha='b' * 40),
+                            dict(prior, state='failure'), dict(prior, workflow_id='other.yml')):
+                api.run = changed
+                with self.subTest(run=changed), self.assertRaises(ReceiptError):
+                    main.recover_preunit4431(api, scope, prior, jobs)
+            api.run = prior
+            api.producer = b'different remote source'
+            with self.assertRaises(ReceiptError): main.recover_preunit4431(api, scope, prior, jobs)
+            api.producer, api.run_artifacts = b'reviewed source', [{'id': 3}]
+            with self.assertRaises(ReceiptError): main.recover_preunit4431(api, scope, prior, jobs)
+            api.run_artifacts, api.artifacts = [], [{'run_id': proof['run']}]
+            with self.assertRaises(ReceiptError): main.recover_preunit4431(api, scope, prior, jobs)
+
+    def test_prepare_retry_first_attempt_execution_or_incomplete_log_still_refuses(self):
+        proof, scope, prior, jobs, api = self.preunit4431_fixture()
+        originals = dict(api.logs)
+        with patch.object(main, 'source', return_value=b'reviewed source'):
+            for attempt in (1, 2):
+                # The digest and the phase proof are independent controls.
+                for raw in (b'', originals[attempt][:-1],
+                            originals[attempt].replace(b'node: v22.23.2', b'MAIN-UNIT-JOURNAL start'),
+                            originals[attempt].replace(b'node: v22.23.2', b'Main preflight outcome success'),
+                            originals[attempt].replace(b'node: v22.23.2', b'Ran 1 test in 0.01s'),
+                            originals[attempt].replace(b'node: v22.23.2', b'Artifact receipt has been successfully uploaded!'),
+                            originals[attempt].replace(b'Publish main Python attempt-start marker', b'other step'),
+                            originals[3 - attempt]):
+                    api.logs = {**originals, attempt: raw}
+                    with self.subTest(attempt=attempt, raw=raw), patch.object(main, 'PREUNIT4431', proof), \
+                         self.assertRaises(ReceiptError):
+                        main.recover_preunit4431(api, scope, prior, jobs)
+                    altered = copy.deepcopy(proof)
+                    altered['attempts'] = tuple((n, task, len(raw), main.hashlib.sha256(raw).hexdigest(), reason)
+                                                if n == attempt else row
+                                                for row in proof['attempts'] for n, task, _, _, reason in (row,))
+                    with self.subTest(phase_attempt=attempt, raw=raw), patch.object(main, 'PREUNIT4431', altered), \
+                         self.assertRaises(ReceiptError):
+                        main.recover_preunit4431(api, scope, prior, jobs)
+
+    def test_proven_empty_retry_preserves_older_actual_successes(self):
+        proof = main.PREUNIT4431
+        scope = {'repository': 1, 'pr': 888, 'branch': proof['branch'], 'base': 'main', 'workflow': main.WORKFLOW}
+        older = {'id': 4429, 'commit_sha': 'b' * 40}
+        retried = {'id': 4431, 'commit_sha': proof['commit']}
+        test = 'validation:test_fixture.Case.test_ok'
+        value = {'run': 4429, 'commit': older['commit_sha']}
+        journal = {'version': main.receipts.VERSION, 'scope': scope, 'run': 4429,
+                   'commit': older['commit_sha'], 'complete': True, 'fixture_errors': [], 'passes': {test: value}}
+        class API:
+            def pages(self, path, query=None, field=None):
+                if path == '/actions/artifacts': return []
+                if path == '/actions/runs': return [retried, older]
+                run = int(path.split('/')[-2])
+                return [{'id': run, 'name': main.JOB, 'repo_id': 1, 'run_id': run,
+                         'attempt': 2 if run == 4431 else 1, 'status': 'failure', 'task_id': run}]
+            def bytes(self, path, query=None): return b'validation.main_unit_receipts'
+        class Applicability:
+            def __call__(self, identity, attribution): return True
+            def finish(self, passes): pass
+        with patch.object(main, 'authenticate_run'), patch.object(main, 'unexecuted_preflight', return_value=False), \
+             patch.object(main, 'recover_preunit4431', side_effect=lambda api, scope, run, jobs: run['id'] == 4431), \
+             patch.object(main, 'recover_log', return_value=journal) as recover:
+            self.assertEqual(main.restore(API(), scope, 4432, Applicability()), {test: value})
+            self.assertEqual(recover.call_args.args[2], older)
+
     def test_exact_upload_failure_retains_only_original_incomplete_start(self):
         import contextlib
         import io
