@@ -392,6 +392,24 @@ its existing plumbing previously disclosed as unledgered on October 4.
 `unledgered` table is empty. This is metadata reconciliation, not a new runtime
 acceptance result, upstream disposition or permission to remove a patch.
 
+**Row 19 constructor mechanism receipt, 2026-10-08:** the unchanged
+[current public constructor at `18e3e71be1b40465f82e1f26f17b7d1bfcc6995d`](https://github.com/sebadob/hiqlite/blob/18e3e71be1b40465f82e1f26f17b7d1bfcc6995d/hiqlite/src/http_client.rs)
+returned in one fresh-process source-inclusion toy, without any application
+provider installation. Actual Reqwest 0.13.5 / Rustls 0.23.45 complete feature
+arrays matched the ordinary public sqlite/cache metadata; the toy kept
+`webpki-roots` off. Reqwest's declared AWS-LC fallback worked while the
+process-wide default remained absent before and after. No HTTP request or
+whole Hiqlite node/client was run. Exact terminal SHA256
+`2ced5d568b1d3c41f1257048ae42371ea95bcb1e6903e196a87c487faa8c9e0d`,
+source/lock/binary provenance and the distinct earlier zero-runtime setup
+failure are recorded in the [K-08 plan §5.7](../../docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md#57-m6--upstream).
+The delegated owner therefore does not file a generic default-provider panic
+against this tested ordinary graph. This does not prove historical 0.14,
+Plurx's private ring-only policy, all configurations, end-to-end TLS, an
+upstream maintainer disposition or the whole drop condition. The original
+patch description remains the historical/local contract; row 19 stays
+`generic bug` / `pending M6`, and all kinds, counts and removal rules remain.
+
 Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18 and 19: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
