@@ -205,15 +205,16 @@ impl Pipeline {
             Pipeline::VppQsv => encoder == Encoder::Qsv,
             Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => encoder == Encoder::Vaapi,
             Pipeline::Libplacebo | Pipeline::TonemapOpencl => encoder != Encoder::Software,
-            // Software DECODE is non-negotiable and stays so: the HEVC
-            // decoder is what attaches the DOVI frame side data that
-            // `apply_dovi=1` consumes, and an inherited hardware decode drops
-            // it silently (`requires_software_decode`). The ENCODER was pinned
-            // here too, but neither stated reason — side data attached,
-            // system-memory frames for the SIMD filter — is about the encode
-            // half. It cost every non-DV-capable client a 720p ceiling on 4K
-            // Dolby Vision while an idle hardware encoder sat next to it. The
-            // filtered frames reach a vendor encoder through the same
+            // Current production policy pins software decode until each
+            // hardware tuple proves DOVI metadata/PTS transport, strict mapper
+            // consumption and seek behavior (`requires_software_decode`).
+            // A bounded artificial FATE sample transported metadata through
+            // VideoToolbox, but RPU pixel influence and real-content visual
+            // qualification remain unmeasured; transport alone does not meet
+            // the RPU-positive visual criterion. This is a qualification policy,
+            // not a universal hardware decoder limitation. The encoder is
+            // independent: filtered system-memory frames reach it through the
+            // same
             // `filter_suffix()` upload every other CPU-filtered path uses, and
             // the pairing is probed at boot (`has_dovi_reshape_with`) before it
             // is ever attempted — unproved pairings fall back to software.
@@ -544,9 +545,10 @@ impl Pipeline {
         )
     }
 
-    /// Whether the renderer requires software-decoded frames. Dolby Vision
-    /// metadata is parsed onto AVFrames by the HEVC decoder; an inherited
-    /// hardware decode/download path is not allowed to drop it silently.
+    /// Whether current production qualification requires software decode.
+    /// Dolby hardware tuples remain excluded pending per-frame metadata/PTS
+    /// transport, strict renderer consumption, seek and real-content visual
+    /// proof. Artificial-sample transport does not prove RPU pixel influence.
     pub fn requires_software_decode(self) -> bool {
         matches!(self, Pipeline::DoviTonemapx | Pipeline::DoviPassthrough)
     }
