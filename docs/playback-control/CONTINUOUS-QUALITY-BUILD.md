@@ -8111,3 +8111,24 @@ classification is recorded in that run. It preserves
 425 source; it does not establish a second prepared commit or physical display
 continuity. The exact native helper and daemon retire through their guard;
 private control copies and launch arguments are cleared.
+
+### 10.266 Background caption-fixture resource budget (2026-10-08)
+
+The unmodified normal-producer Firefox census case passes its complete optical
+window at 96.458ms upper hold, with zero capture gaps, unknown pixels, backward
+frames or skipped counters. Preserve the earlier failing cases; this single
+diagnostic pass shows variability and does not establish the full campaign.
+Twenty-nine activity snapshots observe at most four simultaneous owned FFmpeg
+processes and 153 threads. Background Live TV caption probes reach 97 threads;
+foreground VOD producers reach thirty in this run. Lifetime process counts
+are not simultaneous admission counts. The exact daemon and display retire.
+
+Synthetic caption-fixture generation now bounds filter pools and its MPEG-2
+encoder to one thread; mux preparation also bounds its filter/decoder pools.
+The actual production Live TV graph audited by the self-test is unchanged.
+This targets fixture production, not every caption-probe child or a proven
+remedy for the browser hold. The existing byte-ground-truth regression
+`the_caption_fixture_carries_608_and_708` is named for the merger; twenty-one
+regression fields resolve statically. Pinned Rust 1.97.1 is verified and the
+all-targets compiler loop runs before publication; unit execution is deferred
+to the designated merger. Exact-source runtime measurement remains needed.
