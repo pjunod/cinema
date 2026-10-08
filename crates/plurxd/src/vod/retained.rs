@@ -1065,7 +1065,15 @@ impl RetainedArtifactRegistry {
         {
             return None;
         }
-        let audio = request.audio_delivery.as_ref()?;
+        // HTTP encoded delivery remains provisional until this incoming
+        // producer selects its route. Never borrow a shared recipe as authority.
+        let audio = if matches!(request.kind, SessionKind::Transcode { .. }) {
+            incoming_logical
+                .as_ref()?
+                .encoded_audio_for_request(request, incoming_file)?
+        } else {
+            request.audio_delivery.as_ref()?
+        };
         if !audio.valid_snapshot()
             || !rendition
                 .recipe
@@ -1788,6 +1796,19 @@ mod tests {
         Arc<Rendition>,
         crate::transcode::RetainedOutputFacts,
     ) {
+        let (temp, serve, rendition, facts, _) = durable_fixture_with_candidate(false).await;
+        (temp, serve, rendition, facts)
+    }
+
+    async fn durable_fixture_with_candidate(
+        encoded_candidate: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        Arc<Rendition>,
+        crate::transcode::RetainedOutputFacts,
+        SessionRequest,
+    ) {
         use crate::vodgen::Sink;
         let temp = crate::test_tempdir().expect("durable fixture");
         let serve = crate::vodserve::tests::bare_serve(temp.path());
@@ -1796,8 +1817,20 @@ mod tests {
         tokio::fs::write(&source_path, b"exact durable source")
             .await
             .expect("source");
-        let file = crate::vodserve::tests::media_file_at(source_path, 10_000);
-        let request = SessionRequest {
+        let mut file = crate::vodserve::tests::media_file_at(source_path, 10_000);
+        if encoded_candidate {
+            file.audio_streams = vec![plurx_core::domain::AudioStream {
+                index: 0,
+                codec: "aac".into(),
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                channel_layout: Some("stereo".into()),
+                language: None,
+                title: None,
+                default: true,
+            }];
+        }
+        let mut request = SessionRequest {
             sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false,
@@ -1828,7 +1861,57 @@ mod tests {
             block_budget_secs: None,
             transport: None,
         };
+        if encoded_candidate {
+            use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+            let digest = [42; 32];
+            let candidate = QualityCandidate {
+                id: CandidateId::for_recipe_digest(digest),
+                recipe_digest: digest,
+                route: CandidateRoute::Encode,
+                normalized_geometry: true,
+                width: 854,
+                height: 480,
+                target_height: 480,
+                average_bps: None,
+                peak_bps: None,
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                decoder_compatible: true,
+                complete_cache: false,
+                sustainable: true,
+            };
+            request.kind = SessionKind::Transcode { height: 480 };
+            request.audio_claim = Some(plurx_core::playback::audio::canonical_producer_claim());
+            request.candidate_context = Some(Box::new(
+                crate::transcode::TranscodeManager::candidate_context(&candidate),
+            ));
+        }
+        let mut resolved_request = request.clone();
+        if encoded_candidate {
+            let audio = plurx_core::playback::audio::resolve_audio(
+                file.audio_streams.first(),
+                &request.audio_claim.as_ref().expect("typed claim").profile(),
+                plurx_core::playback::audio::AudioRoute::EncodedVod,
+                file.audio_offset_ms,
+            );
+            resolved_request.audio_delivery = Some(audio);
+        }
         let owned = Arc::get_mut(&mut rendition).expect("unshared rendition");
+        if let Some(context) = request.candidate_context.as_ref() {
+            owned.recipe.measured_candidate = Some(RetainedCandidateBinding {
+                kind: request.kind,
+                normalized_geometry: context.normalized_geometry,
+                profile: context.profile,
+                candidate_id: context.candidate_id,
+                recipe_digest: context.recipe_digest,
+                file_id: file.id,
+                audio_index: request.audio_index,
+                audio_offset_ms: request.audio_offset_ms,
+                subtitle_burn: request.subtitle_burn,
+                grade: context.grade,
+                route: context.selected_candidate.route,
+            });
+            owned.recipe.audio_delivery = resolved_request.audio_delivery.clone();
+        }
         owned.key = "a".repeat(64);
         owned.source = Some(
             crate::fragment_index_cluster::open_source_fence(&file, None)
@@ -1837,7 +1920,7 @@ mod tests {
         );
         owned.recipe.retained_logical =
             Some(super::super::retained_manifest::LogicalOutput::resolve(
-                &request,
+                &resolved_request,
                 None,
                 &file,
                 owned.recipe.video,
@@ -1884,9 +1967,148 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         let facts = artifact.facts();
+        if encoded_candidate {
+            // This fixture publishes real complete Sink bytes and source fences;
+            // its private preparation authority is minted only inside the test.
+            // It is a registry reuse regression, not encoded-media qualification.
+            artifact
+                .private_preparation_origin
+                .set(PreparedOrigin {
+                    _reservation: uuid::Uuid::new_v4(),
+                    artifact_id: artifact.id,
+                    executable: crate::ffmpeg::EncodedExecutable::capture()
+                        .await
+                        .expect("current executable")
+                        .digest,
+                    engine: crate::ffmpeg::EncodedEngine::capture(None)
+                        .await
+                        .expect("current engine")
+                        .digest,
+                    source_metadata: manual_source_metadata(&rendition.recipe.file)
+                        .expect("source metadata"),
+                })
+                .expect("one private origin");
+        }
         drop(artifact);
         drop(sink);
-        (temp, serve, rendition, facts)
+        (temp, serve, rendition, facts, request)
+    }
+
+    #[tokio::test]
+    async fn encoded_candidate_reuses_completed_output_with_resolved_claim_audio() {
+        let (_temp, serve, rendition, facts, request) = durable_fixture_with_candidate(true).await;
+        assert!(
+            request.audio_delivery.is_none(),
+            "ordinary encoded create is provisional"
+        );
+        let logical = &rendition.recipe.retained_logical;
+        let reused = serve
+            .shared
+            .retained_artifacts
+            .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &request)
+            .await
+            .expect("reuse exact server-resolved encoded audio");
+        assert_eq!(reused.facts(), facts);
+        let member = reused
+            .open(
+                Some(0),
+                &Arc::new(crate::meter::Meter::default()),
+                &serve.shared,
+                &rendition,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("exact retained member");
+        assert_eq!(member.len, 1000);
+        assert!(member.etag.contains(&facts.artifact_id));
+
+        let mut altered = request.clone();
+        altered.audio_claim.as_mut().expect("claim").sinks[0].max_channels = 1;
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &altered)
+                .await
+                .is_none(),
+            "changed route claim refuses"
+        );
+        altered = request.clone();
+        altered.audio_offset_ms = 1;
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &altered)
+                .await
+                .is_none(),
+            "changed source offset refuses"
+        );
+        altered = request.clone();
+        altered.audio_delivery = Some(plurx_core::playback::audio::AudioDelivery {
+            action: plurx_core::playback::audio::AudioAction::None,
+            downmix: None,
+            reason: "wrong retained snapshot".into(),
+        });
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &altered)
+                .await
+                .is_none(),
+            "explicit mismatched audio must not fallback"
+        );
+        let mut invalid = request.clone();
+        invalid.audio_delivery = Some(plurx_core::playback::audio::AudioDelivery {
+            action: plurx_core::playback::audio::AudioAction::Encode {
+                codec: "aac".into(),
+                channels: 0,
+                layout: None,
+                bitrate_kbps: 0,
+                sample_rate: 0,
+            },
+            downmix: None,
+            reason: "invalid issued snapshot".into(),
+        });
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &invalid)
+                .await
+                .is_none(),
+            "invalid explicit snapshot must not fallback"
+        );
+        let mut claimless = request.clone();
+        claimless.audio_claim = None;
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &claimless)
+                .await
+                .is_none(),
+            "missing snapshot cannot borrow authority without its typed claim"
+        );
+        let mut altered_logical = serde_json::to_value(logical).expect("logical");
+        altered_logical["audio_delivery"] =
+            serde_json::to_value(altered.audio_delivery).expect("wrong audio");
+        let altered_logical = serde_json::from_value(altered_logical).expect("altered logical");
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(
+                    &rendition,
+                    &altered_logical,
+                    &rendition.recipe.file,
+                    &request
+                )
+                .await
+                .is_none(),
+            "wrong resolved audio refuses"
+        );
     }
 
     #[tokio::test]

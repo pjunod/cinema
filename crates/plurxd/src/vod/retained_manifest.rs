@@ -54,6 +54,55 @@ struct LogicalProduction {
 }
 
 impl LogicalOutput {
+    /// Audio resolved for this incoming request before a shared rendition can
+    /// replace its recipe. An ordinary encoded request carries a claim, not a
+    /// final delivery; recheck that claim against the selected source/route.
+    pub(super) fn encoded_audio_for_request(
+        &self,
+        request: &SessionRequest,
+        file: &MediaFile,
+    ) -> Option<&plurx_core::playback::audio::AudioDelivery> {
+        if !matches!(request.kind, SessionKind::Transcode { .. })
+            || self.kind != request.kind
+            || self.file_id != request.file_id
+            || self.file_id != file.id
+            || self.audio_index != request.audio_index
+            || self.audio_offset_ms != request.audio_offset_ms
+            || self.audio_offset_ms != file.audio_offset_ms
+            || self.audio_claim != request.audio_claim
+        {
+            return None;
+        }
+        let audio = self.audio_delivery.as_ref()?;
+        if !audio.is_encoded_vod_compatible() {
+            return None;
+        }
+        if let Some(retained) = request.audio_delivery.as_ref() {
+            return (retained.is_encoded_vod_compatible()
+                && retained.byte_identity() == audio.byte_identity())
+            .then_some(audio);
+        }
+        let claim = request.audio_claim.as_ref()?;
+        if !claim.valid_snapshot() {
+            return None;
+        }
+        let selected = request.audio_index.map_or_else(
+            || file.audio_streams.first(),
+            |index| {
+                file.audio_streams
+                    .iter()
+                    .find(|stream| stream.index == index)
+            },
+        );
+        let resolved = plurx_core::playback::audio::resolve_audio(
+            selected,
+            &claim.profile(),
+            plurx_core::playback::audio::AudioRoute::EncodedVod,
+            request.audio_offset_ms,
+        );
+        (resolved.is_encoded_vod_compatible() && resolved.byte_identity() == audio.byte_identity())
+            .then_some(audio)
+    }
     /// Debug-only equality projection. Never expose paths, encoder arguments,
     /// source identities or audio claims from this private matching contract.
     pub(super) fn comparison(&self, requested: &Self) -> serde_json::Value {
