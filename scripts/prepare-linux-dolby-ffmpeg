@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Prepare the pinned, complete Jellyfin Linux source with strict P5 controls.
+
+This writes a new private source offer and upstream dependency-image build
+entry point. It does not install, deploy, open a GPU, or qualify a backend.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import tarfile
+
+TAG = "v8.1.3-1"
+COMMIT = "253db2a7b0a8045c54ce68ce33d7f601229b1822"
+SOURCE_SHA256 = "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140"
+SOURCE_URL = f"https://codeload.github.com/jellyfin/jellyfin-ffmpeg/tar.gz/refs/tags/{TAG}"
+
+
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def prepare(archive, output):
+    if digest(archive) != SOURCE_SHA256:
+        raise ValueError("pinned Jellyfin source archive checksum mismatch")
+    repo = Path(__file__).resolve().parent.parent
+    if not output.is_absolute():
+        raise ValueError("output must be a new absolute private directory")
+    output = output.resolve()
+    if (not output.is_absolute() or output.exists()
+            or ((repo / "Cargo.toml").is_file() and output.is_relative_to(repo))
+            or any(output.is_relative_to(Path(p)) for p in
+                   ["/Applications", "/Library", "/System", "/usr", "/opt"])):
+        raise ValueError("output must be a new absolute private directory")
+    output.mkdir(parents=True)
+    source = output / "source"
+    source.mkdir()
+    offer = output / "source-offer"
+    offer.mkdir()
+    shutil.copyfile(archive, offer / "jellyfin-ffmpeg-source.tar.gz")
+    with tarfile.open(archive) as tar:
+        for member in tar:
+            parts = Path(member.name).parts
+            if not parts or parts[0] != "jellyfin-ffmpeg-8.1.3-1":
+                raise ValueError("unexpected source archive root")
+            rel = Path(*parts[1:])
+            if rel.is_absolute() or ".." in rel.parts or member.issym() or member.islnk():
+                raise ValueError("unsafe source archive member")
+            if member.isfile():
+                target = source / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(tar.extractfile(member).read())
+                target.chmod(member.mode & 0o777)
+    patches = []
+    for line in (source / "debian/patches/series").read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            patches.append(source / "debian/patches" / line.split()[0])
+    local = Path(__file__).with_name("linux-video-ffmpeg-patches") / "0001-require-current-dolby-state.patch"
+    shutil.copyfile(local, offer / local.name)
+    for patch in patches + [local]:
+        subprocess.run(["patch", "-p1", "-E", "--batch", "--forward", "-i", str(patch.resolve())],
+                       cwd=source, check=True, stdout=subprocess.DEVNULL)
+    entry = output / "build-in-upstream-image.sh"
+    entry.write_text('''#!/bin/bash
+set -eo pipefail
+shopt -s globstar
+: "${FFBUILD_PREFIX:?upstream dependency-image environment required}"
+: "${FFBUILD_TARGET_FLAGS:?upstream target flags required}"
+step=${1:?configure, compile or install}
+PLURX_PREPARED_ROOT=$(cd "$(dirname "$0")" && pwd)
+cd "$PLURX_PREPARED_ROOT/source/builder"
+set -- linux64 gpl
+source util/vars.sh
+source variants/linux64-gpl.sh
+get_output() {
+    ( SELF=$1; source "$1"
+      if ffbuild_enabled; then ffbuild_$2 || exit 0; else ffbuild_un$2 || exit 0; fi )
+}
+for script in scripts.d/**/*.sh; do
+    [[ -f "$script" ]] || continue
+    FF_CONFIGURE+=" $(get_output "$script" configure)"
+    FF_CFLAGS+=" $(get_output "$script" cflags)"
+    FF_CXXFLAGS+=" $(get_output "$script" cxxflags)"
+    FF_LDFLAGS+=" $(get_output "$script" ldflags)"
+    FF_LDEXEFLAGS+=" $(get_output "$script" ldexeflags)"
+    FF_LIBS+=" $(get_output "$script" libs)"
+done
+cd "$PLURX_PREPARED_ROOT/source"
+case "$step" in
+ configure)
+    # These are the upstream complete Linux variant/dependency flags. No
+    # selective decoder/filter build may masquerade as the shipping package.
+    ./configure --prefix="$PLURX_PREPARED_ROOT/native" $FFBUILD_TARGET_FLAGS \
+      --extra-version=Jellyfin --extra-cflags="$FF_CFLAGS" \
+      --extra-cxxflags="$FF_CXXFLAGS" --extra-ldflags="$FF_LDFLAGS" \
+      --extra-ldexeflags="$FF_LDEXEFLAGS" \
+      --extra-libs="$FF_LIBS" $FF_CONFIGURE
+    ;;
+ compile) make -j2 V=1 ;;
+ install) make install ;;
+ *) echo "Unknown bounded build step" >&2; exit 2 ;;
+esac
+''')
+    entry.chmod(0o755)
+    facts = {"schema_version": 1, "source_tag": TAG, "source_commit": COMMIT,
+             "source_url": SOURCE_URL, "source_sha256": SOURCE_SHA256,
+             "upstream_quilt": {p.name: digest(p) for p in patches},
+             "local_patch_sha256": digest(local), "jobs": 2,
+             "preparer_sha256": digest(Path(__file__)),
+             "strict_contract": ["-xerror", "-strict_dovi 1", "-err_detect explode",
+                                 "tonemapx apply_dovi=1 require_dovi=1"],
+             "physical_backend": "unqualified; requires exact runtime proof",
+             "dependency_image": "must be immutable and retain matching source/recipe provenance",
+             "qualification": "source-prepared-only"}
+    (output / "prepared-source.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
+    return facts
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-archive", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    print(json.dumps(prepare(args.source_archive, args.output), sort_keys=True))

@@ -1237,6 +1237,8 @@ paths = [
   "scripts/macos-source-parser-licenses/**",
   "scripts/prepare-macos-video-ffmpeg",
   "scripts/macos-video-ffmpeg-patches/**",
+  "scripts/prepare-linux-dolby-ffmpeg",
+  "scripts/linux-video-ffmpeg-patches/**",
   "scripts/build-static-vmaf-scorer",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
