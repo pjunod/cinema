@@ -196,7 +196,7 @@ compiler load to avoid contaminating measurements.
   confinement follow-up, not permission to bypass the source boundary.
 - Adversarial implementation review: active on `93658e211`, with independent
   core/package, harness/daemon integration and fixture/runtime reviewers.
-- Main PR: [#870](http://192.168.4.7:3000/noirr/plurx/pulls/870), draft;
+- Main PR: [#870](https://forge.example/media/plurx/pulls/870), draft;
   five confirmed findings are being corrected before queue handoff.
 
 Later entries will record commit IDs, root-cause observations, commands,

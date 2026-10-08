@@ -2785,7 +2785,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
 # terminal status and retains its admission guard through measurement.
-expected_occurrences = 884
+# #870 adds seven reviewed owners: joined executable-path resolution; admin
+# and startup worker-local reprobes using shutdown cancellation; joined private
+# cache-directory stat; two joined late-publication fixture drivers; and a
+# joined child-cancellation fixture trigger. No rolling/media owner is added.
+expected_occurrences = 891
 # Promotion union: final count is measured after architectural conflict resolution.
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -4225,7 +4229,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +3 #861: startup calibration timeout, idle optimization playback polling and
 # overall rerun timeout. Both calibration deadlines retain previous results on
 # failure; playback preempts the rerun through its existing admission owner.
-expected_occurrences = 1582
+# #870 adds eight Mac compatibility waits: preparation, identity/stat and
+# graph/stat deadlines; cooperative publication stop; two one-second cleanup
+# bounds; and two finite fixture sleeps. Subprocess cancellation retains the
+# child kill-and-reap owner; a deadline never supplies completion evidence.
+expected_occurrences = 1590
 
 
 [[module_structures]]
@@ -4596,7 +4604,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # fixtures and main's admitted diagnostic children remain under their owners.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 229
+# #870 adds seven command sites: otool dependency inventory, captured FFmpeg
+# filter inventory, smoke encode/ffprobe/decode, a cancellation fixture shell, and the
+# exact frozen executable used by the pretranscode launch-fence regression.
+# Production observations use bounded_probe_command's existing owned child
+# kill-and-reap settlement; fixture children are also awaited or killed/reaped.
+expected_occurrences = 236
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5511,7 +5524,9 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # ReapOperation are notifier waits matched by name. Test-only `libc::kill
 # (pid, 0)` probes in vod/tests/source_lifetime.rs assert the production
 # slot reaped (ESRCH) or kept its fixture child; they send no signal.
-expected_occurrences = 64
+# #870 adds one test-only libc::kill(pid, 0) liveness observation after its
+# owned cancelled probe has settled; it verifies ESRCH and sends no signal.
+expected_occurrences = 65
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
