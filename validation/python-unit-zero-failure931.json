@@ -1,0 +1,169 @@
+{
+  "cases": [
+    {
+      "artifacts": {
+        "final": {
+          "id": 1958,
+          "sha256": "ac97a2eceb2cf93e260aa0b613d2b6dcf2a51bd90407feea25b49385186500e2",
+          "size": 338
+        },
+        "start": {
+          "id": 1957,
+          "sha256": "9865cbc4f27e525236275712ced96ad6a2a690df4c9ed11ac5e0cdaf89ebfad2",
+          "size": 338
+        }
+      },
+      "commit": "672a304ba98672489e8c294d50e54b0d6e307837",
+      "event_sha256": "7863000e784573c79c7b6b69e6bc29e6e92f19ddad6fb33569876bcf5bb61b57",
+      "job": 45783,
+      "jobs": [
+        [
+          45782,
+          "effort validation scope",
+          17165,
+          1,
+          "success"
+        ],
+        [
+          45783,
+          "Python unit receipts",
+          17166,
+          1,
+          "failure"
+        ],
+        [
+          45784,
+          "effort Rust compile",
+          17167,
+          1,
+          "skipped"
+        ],
+        [
+          45785,
+          "effort Windows compile",
+          17168,
+          1,
+          "skipped"
+        ],
+        [
+          45786,
+          "effort web static contracts",
+          17169,
+          1,
+          "skipped"
+        ],
+        [
+          45787,
+          "effort Apple compile",
+          17170,
+          1,
+          "skipped"
+        ],
+        [
+          45788,
+          "effort Android compile",
+          17171,
+          1,
+          "skipped"
+        ],
+        [
+          45789,
+          "Effort development gate",
+          17172,
+          1,
+          "failure"
+        ]
+      ],
+      "log_bytes": 143191,
+      "log_sha256": "7f0f55dc8dc3a14ddfd68fc5c0737803afaeb2378f815f551840e71a6cdd7f2b",
+      "run": 4522,
+      "sources": {
+        ".github/workflows/effort-ci.yml": "6353c3438e42717359697fa82d05cd0b1354be116a3b2e90f90fafc035157656",
+        "Makefile": "45989ea65c32f60f7769a12d742a89ca2827536afc56a2836aa9b2a7c39732ef",
+        "validation/history.py": "d2691dcdaaf6e8382fc3f0615121871505103c60ad934017f2c29164d1813429",
+        "validation/python_unit_receipts.py": "2cfbfdf8911c83d7c63803c3b447ef332e7d11d3b2f8a909592b222d24cd33bc",
+        "validation/qualification.py": "3cf309208b83c7236eb3b847e6240caf16bc75cd4bc798c2d0826c0e55358cc2"
+      }
+    },
+    {
+      "commit": "1d471ad2259c14f31dd02ce1b208e18954d1b4ba",
+      "event_sha256": "a0b920cf4f8a17400900ced7b297b61f20c05119cb8a5dba47096f17952c2af7",
+      "job": 45791,
+      "jobs": [
+        [
+          45790,
+          "effort validation scope",
+          17173,
+          1,
+          "success"
+        ],
+        [
+          45791,
+          "Python unit receipts",
+          17174,
+          1,
+          "failure"
+        ],
+        [
+          45792,
+          "effort Rust compile",
+          17175,
+          1,
+          "skipped"
+        ],
+        [
+          45793,
+          "effort Windows compile",
+          17179,
+          1,
+          "skipped"
+        ],
+        [
+          45794,
+          "effort web static contracts",
+          17176,
+          1,
+          "skipped"
+        ],
+        [
+          45795,
+          "effort Apple compile",
+          17177,
+          1,
+          "skipped"
+        ],
+        [
+          45796,
+          "effort Android compile",
+          17178,
+          1,
+          "skipped"
+        ],
+        [
+          45797,
+          "Effort development gate",
+          17180,
+          1,
+          "failure"
+        ]
+      ],
+      "log_bytes": 134611,
+      "log_sha256": "abea9f1cbfcf2c9049d6bea2b480008c86965eed3c5e7a1a902469e94618f6f0",
+      "run": 4523,
+      "sources": {
+        ".github/workflows/effort-ci.yml": "7a7d6774a15b8c5f3b5edfd8a4b72204a6cc823413c16182316b91e45d45743f",
+        "Makefile": "45989ea65c32f60f7769a12d742a89ca2827536afc56a2836aa9b2a7c39732ef",
+        "validation/history.py": "c82f603543090e8bbadf528ad0d12d09123d477aef69dd9aa036d03c761a34c5",
+        "validation/python_unit_receipts.py": "2cfbfdf8911c83d7c63803c3b447ef332e7d11d3b2f8a909592b222d24cd33bc",
+        "validation/qualification.py": "b4bce59995c7497315ec144179ea239ab72986d68e13c540d35862a785690dc4"
+      }
+    }
+  ],
+  "scope": {
+    "base": "effort/batch003-repairs",
+    "branch": "codex/candidate-history-repair",
+    "pr": 931,
+    "repository": 1
+  },
+  "version": 1
+}

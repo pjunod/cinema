@@ -5830,3 +5830,20 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
 source_anchor = "color = if (selected) Accent else OnBg"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanelThemeTest.kt"
 test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
+
+# Published Batch 03 repairs: source/test anchors, not execution receipts.
+[[fixes]]
+id = "android.compact-header-actions-wrap"
+commits = ["ef494262d70d507d74277906ddedf4ba84a75b04"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/HomeScreen.kt"
+source_anchor = "FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/HomeTopBarTest.kt"
+test_anchor = "liveTvAndSettingsFitNarrowPhonesAndLiveActionIsReachable"
+
+[[fixes]]
+id = "apple.cinema-developer-card-inventory"
+commits = ["7e38cadc0c73de80f73de23e66bd951371a16306"]
+source = "clients/apple/Sources/LiveTvSettingsView.swift"
+source_anchor = "Cinema remotes · advisory enablement"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"

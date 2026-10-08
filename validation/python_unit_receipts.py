@@ -1046,7 +1046,10 @@ def restore(api, scope, run, applicability=None):
                 f"Run {rid} was re-run; ambiguous receipt attempt, dispatch fresh runs only")
         if matching[0]["status"] == "skipped":
             continue
+        from validation.python_unit_zero_failure931 import recover as recover_zero_pr931
         if rid not in indexed:
+            if recover_zero_pr931(api, scope, prior, jobs):
+                continue
             if recover_zero_pr869(api, scope, prior, jobs):
                 continue
             if recover_inherited_pr742(api, scope, prior, jobs):
@@ -1079,7 +1082,9 @@ def restore(api, scope, run, applicability=None):
         journal = artifact_json(final_raw)
         zero869 = journal.get('complete') is False and recover_zero_pr869(
             api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
-        inherited = zero869 or journal.get('complete') is False and recover_inherited_pr742(
+        zero931 = journal.get('complete') is False and recover_zero_pr931(
+            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
+        inherited = zero931 or zero869 or journal.get('complete') is False and recover_inherited_pr742(
             api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
         recovered = inherited or journal.get("complete") is False and recover_discovery_passes(
             api, scope, prior, matching[0], markers[0], marker_raw, artifact, final_raw, journal, legacy)
