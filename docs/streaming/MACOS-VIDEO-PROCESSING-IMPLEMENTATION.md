@@ -52,6 +52,39 @@ its task branch on the current effort before claiming verification. Changes
 to shared files are integrated sequentially. This plan does not request
 parallel agents.
 
+### 1.1 Start with experiments, then ship SDR and HDR10
+
+The [design's priority order](MACOS-VIDEO-PROCESSING-DESIGN.md#31-scope-to-implement-first)
+sets the default execution sequence:
+
+1. **M0/M1 first:** inventory the actual daemon and Jellyfin FFmpeg build,
+   establish the baseline, and compare the native/Metal candidates. Include
+   the four-way P5 decode/renderer experiment now, with actual hardware use
+   and metadata/frame association verified. Record a stop/go decision for
+   each candidate before committing to its production integration.
+2. **M2/M3, then M4:** establish contracts, recipe identity, capabilities and
+   fallback; integrate hardware decode → native SDR scaling → hardware
+   H.264 encode. This is the lowest-complexity production processing path.
+3. **M5, then M6:** integrate the measured HDR10-to-SDR mapper, preserve the
+   incumbent Jellyfin dependencies, and qualify/package the initial release.
+   Deliver progressive SDR scaling and HDR10 tone mapping together as the
+   initial scope, retaining the incumbent wherever a candidate fails proof.
+4. **E1 next by default:** evaluate P5 hardware decode with CPU `tonemapx`
+   first, then evaluate GPU Dolby rendering separately. Do not make a
+   decoder-only improvement depend on a new renderer. Both still require
+   E1's strict execution-time metadata enforcement and quality acceptance;
+   HLG keeps its own qualification.
+5. **E2 when burn-in is a demonstrated bottleneck:** measure processing
+   followed by CPU burn at output resolution before adding GPU compositing.
+6. **E3/E4 according to demand:** treat Live TV/deinterlacing and HEVC/Main10
+   output as separate follow-ups. Their existing dependencies still apply;
+   neither must wait for every other extension or delay the initial release.
+
+M1's early Dolby evidence informs E1 without enabling Dolby acceleration in
+M4/M5. Keep these extensions out of the initial delivery so its benefit can
+be measured and shipped independently. A negative experiment is a valid
+result; do not implement an accelerated path merely to complete this list.
+
 ## 2. Source map and interfaces to preserve
 
 | Existing seam | Responsibility / required change |
@@ -385,8 +418,9 @@ HLG receives its own reference-white/color/temporal checks. Add it to a
 supported graph class only after proof; no wildcard HDR matching.
 
 Plurx already supports P5 processing through software decode and `tonemapx`.
-This milestone asks whether Metal can perform equivalent Dolby processing
-more efficiently. Use an RPU-positive sample and compare to the incumbent,
+First establish whether hardware decode improves the existing CPU Dolby
+processing path; then assess equivalent Metal Dolby processing separately.
+Use an RPU-positive sample and compare to the incumbent,
 including direct-play/remux controls. Verify the pinned fork's actual
 metadata propagation before allowing VT decoding; software decode plus
 Metal processing is a legitimate candidate. Separate P5-to-SDR from any
