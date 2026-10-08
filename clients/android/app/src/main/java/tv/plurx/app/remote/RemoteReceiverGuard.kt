@@ -12,15 +12,17 @@ internal class RemoteReceiverGuard {
     private var active = false
     private var highWater = 0L
     private var lastNow: Long? = null
+    private var invalidation = 0L
+    private var pending: RemoteEffectPermit? = null
     private val credits = ArrayDeque<Credit>()
     private val results = ArrayDeque<Result>()
     val currentCredits get() = credits.map { it.wire }
-    fun invalidate() { credits.clear() }
+    fun invalidate() { invalidation++; credits.clear(); pending?.retire() }
     fun deactivate() { active = false; invalidate() }
     fun setContext(next: Context): RemoteOutcome? {
         val previous = context
         val sameControl = previous != null && previous.target == next.target && previous.controlEpoch == next.controlEpoch
-        if (sameControl && (!active || previous?.grantId != next.grantId)) return RemoteOutcome.StaleControl
+        if (sameControl && (!active || previous.grantId != next.grantId)) { deactivate(); return RemoteOutcome.StaleControl }
         if (!sameControl) { highWater = 0; results.clear(); invalidate() }
         else if (previous?.contextRevision != next.contextRevision || previous?.textNonce != next.textNonce) invalidate()
         context = next; active = true; return null
@@ -28,6 +30,7 @@ internal class RemoteReceiverGuard {
     private fun observe(now: Long): Boolean {
         if (now < 0 || lastNow?.let { now < it } == true) { invalidate(); return false }
         lastNow = now
+        pending?.takeIf { now >= it.resultDeadline }?.retire()
         credits.removeAll { now >= it.deadline }
         results.removeAll { now >= it.deadline }
         return true
@@ -58,6 +61,49 @@ internal class RemoteReceiverGuard {
         if (results.size == 64) results.removeFirst()
         results.addLast(Result(Ack(command.controlEpoch, command.sequence, outcome.wire), now + 10_000))
         return outcome
+    }
+    /** One occupied network slot remains bounded even while retired cleanup waits. */
+    fun reserve(command: RemoteCommand, binding: RemoteDeferredBinding, now: Long, semantic: RemoteOutcome? = null): RemoteReservation {
+        if (!observe(now) || runCatching { command.validate() }.isFailure) return RemoteReservation.Refused(RemoteOutcome.Invalid)
+        val current = context ?: return RemoteReservation.Refused(RemoteOutcome.Unavailable)
+        if (!active) return RemoteReservation.Refused(RemoteOutcome.Unavailable)
+        if (command.target != current.target) return RemoteReservation.Refused(RemoteOutcome.StaleTarget)
+        if (command.grantId != current.grantId) return RemoteReservation.Refused(RemoteOutcome.Unauthorized)
+        if (command.controlEpoch != current.controlEpoch) return RemoteReservation.Refused(RemoteOutcome.StaleControl)
+        if (command.sequence <= highWater) return RemoteReservation.Refused(RemoteOutcome.Duplicate)
+        val credit = credits.firstOrNull { it.wire.nonce == command.credit } ?: return RemoteReservation.Refused(RemoteOutcome.Expired)
+        if (credit.wire.kind != command.action.creditKind.wire) return RemoteReservation.Refused(RemoteOutcome.Invalid)
+        if (command.contextRevision != current.contextRevision) return RemoteReservation.Refused(RemoteOutcome.StaleContext)
+        if (command.action.type == "select" && command.focusRevision != current.focusRevision) return RemoteReservation.Refused(RemoteOutcome.StaleFocus)
+        if (command.action.type == "text_replace" && command.action.text("text_nonce") != current.textNonce) return RemoteReservation.Refused(RemoteOutcome.StaleContext)
+        if (now > Long.MAX_VALUE - 10_000) return RemoteReservation.Refused(RemoteOutcome.Invalid)
+        if (semantic != null) return RemoteReservation.Refused(if (semantic == RemoteOutcome.Applied) RemoteOutcome.Invalid else semantic)
+        highWater = command.sequence
+        if (pending != null) return RemoteReservation.Refused(RemoteOutcome.Unavailable)
+        return RemoteReservation.Admitted(RemoteEffectPermit(command, current, binding, credit.deadline, now + 10_000, invalidation).also { pending = it })
+    }
+    fun permits(permit: RemoteEffectPermit, binding: RemoteDeferredBinding, now: Long): Boolean {
+        if (!observe(now) || permit.retired || pending !== permit || permit.binding != binding || permit.invalidation != invalidation || !active || now >= permit.deadline) return false
+        return context == permit.context
+    }
+    /** Context stays mounted until the terminal ACK is recorded. UI transition
+     * follows this method through its exact-owner completion callback. */
+    fun complete(permit: RemoteEffectPermit, binding: RemoteDeferredBinding, now: Long, outcome: RemoteOutcome): Ack? {
+        val current = observe(now) && now < permit.resultDeadline && !permit.retired && pending === permit && permit.binding == binding && permit.invalidation == invalidation && active && context == permit.context
+        if (pending === permit) pending = null
+        if (!current || now > Long.MAX_VALUE - 10_000) return null
+        val ack = Ack(permit.command.controlEpoch, permit.command.sequence, outcome.wire)
+        if (results.size == 64) results.removeFirst()
+        results.addLast(Result(ack, permit.resultDeadline)); return ack
+    }
+    fun pending(command: RemoteCommand): Boolean = pending?.let { it.command.controlEpoch == command.controlEpoch && it.command.sequence == command.sequence && !it.retired } == true
+    fun retireDeferred() { pending?.retire() }
+    fun abandon(permit: RemoteEffectPermit) { permit.retire(); if (pending === permit) pending = null }
+    fun retainedResult(command: RemoteCommand, now: Long): Ack? {
+        if (runCatching { command.validate() }.isFailure || !active) return null
+        val current = context ?: return null
+        if (command.target != current.target || command.grantId != current.grantId || command.controlEpoch != current.controlEpoch) return null
+        return result(command.controlEpoch, command.sequence, now)
     }
     fun result(epoch: String, sequence: Long, now: Long): Ack? {
         if (!observe(now)) return null

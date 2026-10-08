@@ -56,13 +56,14 @@ internal fun RemoteRootOverlay(remote: RemoteClientModel, television: Boolean) {
         }
         val pending = remote.pendingPairings.firstOrNull()
         val challenge = remote.challenge
-        if (pending != null || challenge != null || remote.pairingOpening) {
+        if (pending != null || challenge != null || remote.pairingOpening || remote.pairingExpired) {
             RemoteRestricted()
             AlertDialog(onDismissRequest = { if (pending == null) remote.hidePairing() },
                 title = { Text(if (pending != null) "Approve this phone?" else "Pair a phone") },
                 text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (pending != null) Text(RemoteWire.safeLabel(pending.string("controller_name"), 80, "Phone"))
                     else if (remote.pairingOpening) { CircularProgressIndicator(); Text("Getting a TV pairing code…") }
+                    else if (remote.pairingExpired) Text("This TV code expired. Get a new code to try again.")
                     else if (challenge != null) {
                         Text("Choose this TV in Cinema on your phone, then enter this code or scan the QR.")
                         RemotePairingQr.bitmap(challenge)?.let { Image(it.asImageBitmap(), "TV pairing QR", Modifier.size(240.dp)) }
@@ -71,7 +72,7 @@ internal fun RemoteRootOverlay(remote: RemoteClientModel, television: Boolean) {
                     }
                 } },
                 confirmButton = { TextButton(onClick = { if (pending != null) remote.approve(pending, true) else remote.hidePairing() }) { Text(if (pending != null) "Approve" else "Close") } },
-                dismissButton = { if (pending != null) TextButton(onClick = { remote.approve(pending, false) }) { Text("Decline") } })
+                dismissButton = { if (pending != null) TextButton(onClick = { remote.approve(pending, false) }) { Text("Decline") } else if (remote.pairingExpired) TextButton(onClick = remote::startPairing) { Text("Get a new code") } })
         }
     } else if (remote.remotePresented) {
         RemoteRestricted()

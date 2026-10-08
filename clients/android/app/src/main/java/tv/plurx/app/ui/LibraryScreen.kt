@@ -31,6 +31,12 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogWindowProvider
+import tv.plurx.app.ui.components.RequestInitialFocus
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -264,20 +270,64 @@ internal fun LibraryScreen(
     // so closing View all returns to the same horizontal and vertical position.
     val expanded = groups.firstOrNull { it.key == expandedGroup }
     if (expanded != null) {
-        RemoteRestricted()
-        Dialog(onDismissRequest = { expandedGroup = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val navigation = LocalRemoteNavigation.current
+        val remoteScope = LocalRemoteScope.current
+        val token = remember(remoteScope, expanded.key) { java.util.UUID.randomUUID().toString() }
+        val prefix = "library-expanded:$token:item"
+        val currentItems by rememberUpdatedState(expanded.items)
+        val semanticItems = currentItems.distinctBy { it.id }.take(16382)
+        val semanticIds = semanticItems.map { it.id }.toSet()
+        val keys = listOf("library-expanded:$token:close") + (if (load.error != null) listOf("library-expanded:$token:retry") else emptyList()) + semanticItems.map { "$prefix:${it.id}" }
+        val expandedGrid = rememberLazyGridState()
+        val currentOpen by rememberUpdatedState(onOpenItem)
+        val currentRetry by rememberUpdatedState(retry)
+        var owned by remember(token) { mutableStateOf(false) }
+        fun closeExpanded() { navigation?.closeMenu(token); expandedGroup = null }
+        DisposableEffect(navigation, remoteScope, token) {
+            owned = navigation?.enterMenu(token, keys, RemotePresentationKind.LibraryGroup, realize = { key ->
+                val index = currentItems.indexOfFirst { "$prefix:${it.id}" == key }
+                if (index >= 0) scope.launch { if (navigation.menuOwned(token)) expandedGrid.scrollToItem(index) }
+            }) { expandedGroup = null } == true
+            onDispose { navigation?.closeMenu(token) }
+        }
+        SideEffect { if (owned) navigation?.updateMenu(token, keys) }
+        Dialog(onDismissRequest = { closeExpanded() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            if (!owned) RemoteRestricted()
+            val view = LocalView.current
+            val windowView = (view.parent as? DialogWindowProvider)?.window?.decorView ?: view
+            DisposableEffect(navigation, windowView, token, owned) {
+                if (owned) navigation?.ownedWindow(token, windowView)
+                onDispose { navigation?.ownedWindow(token, null) }
+            }
+            val first = remember(token) { FocusRequester() }
+            RequestInitialFocus(first, enabled = owned, reinforce = false)
             Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).navigationBarsPadding()) {
                 SafeTopRow(Modifier.fillMaxWidth().padding(horizontal = side, vertical = 8.dp)) {
-                    TextButton(onClick = { expandedGroup = null }) { Text("All rows") }
+                    TextButton(onClick = { closeExpanded() }, modifier = Modifier.remoteAction("library-expanded:$token:close", "All rows", enabled = owned) {
+                        if (navigation?.menuOwned(token) != true) RemoteOutcome.StaleContext else { closeExpanded(); RemoteOutcome.Applied }
+                    }.focusRequester(first)) { Text("All rows") }
                     Text("${expanded.label} · ${expanded.items.size}${if (load.complete) "" else " loaded"}", style = MaterialTheme.typography.titleLarge)
                 }
-                LibraryLoadError(load.error, Modifier.padding(horizontal = side), retry)
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(rowWidth),
-                    contentPadding = PaddingValues(side),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(22.dp),
-                ) {
-                    items(expanded.items, key = { it.id }) { item -> PosterCard(item, width = rowWidth, landscape = landscape) { onOpenItem(item.id) } }
+                if (load.error != null) Row(Modifier.fillMaxWidth().padding(horizontal = side)) {
+                    Text("Incomplete library: ${load.error}", modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = { currentRetry() }, modifier = Modifier.remoteAction("library-expanded:$token:retry", "Retry", enabled = owned) {
+                        if (navigation?.menuOwned(token) != true) RemoteOutcome.StaleContext else { currentRetry(); RemoteOutcome.Applied }
+                    }) { Text("Retry") }
+                }
+                CompositionLocalProvider(LocalRemoteItemPrefix provides prefix) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(rowWidth), state = expandedGrid,
+                        contentPadding = PaddingValues(side),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(22.dp),
+                    ) {
+                        items(currentItems, key = { it.id }) { item -> PosterCard(item, width = rowWidth, landscape = landscape,
+                            remoteEnabled = owned && item.id in semanticIds,
+                            remoteActivate = {
+                                if (navigation?.menuOwned(token) != true || item.id !in semanticIds) RemoteOutcome.StaleContext
+                                else { closeExpanded(); currentOpen(item.id); RemoteOutcome.Applied }
+                            }) { closeExpanded(); currentOpen(item.id) }
+                        }
+                    }
                 }
             }
         }
