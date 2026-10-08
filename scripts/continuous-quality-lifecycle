@@ -171,11 +171,24 @@ async function main(args) {
   options.suite = "continuous";
   const outcome = await lab.executeRun(manifest, options, {
     startServer: async (opts, directory) => {
-      const server = await lab.startServer(opts, directory);
+      const server = await lab.startServer({...opts, enable_auto_abr: true}, directory);
       try {
         const system = await lab.api(server.baseUrl, "/system", {token: server.token});
         if (system.build !== options.source_ref) throw new Error(`server build ${system.build} differs from ${options.source_ref}`);
+        await lab.api(server.baseUrl, "/settings", {token: server.token, method: "PUT", body: {playback_display_aware_auto: true}});
         server.qualification_binary = path.resolve(options.server);
+        const quietStart = Date.now(); let quietSince = null;
+        while (Date.now() - quietStart < 120000) {
+          if ((await producerCensus(server)).children.length) quietSince = null;
+          else if (quietSince == null) quietSince = Date.now();
+          if (quietSince != null && Date.now() - quietSince >= 8000) break;
+          await sleep(1000);
+        }
+        if (quietSince == null || Date.now() - quietSince < 8000)
+          throw new Error("owned startup FFmpeg probes did not settle");
+        server.preparation.cache_condition.startup_producer_quiet_ms = Date.now() - quietStart;
+        await lab.api(server.baseUrl, "/activity/detail", {token: server.token});
+        server.preparation.cache_condition.engine_attestation_before_playback = "warmed_by_ordinary_activity_detail_read";
         return server;
       } catch (error) {await server.close(false); throw error;}
     },

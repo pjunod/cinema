@@ -8691,3 +8691,28 @@ cannot distinguish a Source control route from a prepared transcode offer.
 The post-await seek_pending flag still does not establish decline causality.
 A fresh projection should preserve request selection/capability and response
 preparation/action without credentials or raw session identifiers.
+
+### 10.281 Focused pause evidence and diagnostic setup alignment (2026-10-08)
+
+The repaired `pause-current2` run reaches playback. Its eight-second paused
+clock stays at 2.042 seconds; resume preserves the same continuous identities.
+The following moving window runs at 1.00284x, maximum callback/display gap
+83.78 ms, zero new hitches/stalls/reopens. The overall receipt remains failed:
+two held counters occur immediately on resume, and the all-daemon census still
+contains FFmpeg children five seconds after End. Preserve the failed receipt.
+
+The first resumed callback compares the pre-pause expected time 4901.52 ms
+with 13001.62 ms. Independent source analysis confirms the detector's closure
+baseline survives a pause when no callback observes the paused state. Prepare
+a minimal lifecycle-boundary fix; preserve lifetime counters and the second
+same-media callback fault rather than assuming both are explained. Its focused
+regression is written but deferred to the designated final unit lane.
+
+All three pre-End producer identities are gone by the three-second sample.
+The later PIDs are new, and the retained log identifies independent background
+caption probes during this interval. This is not enough evidence to call the
+playback producer retirement a leak. Align both new lifecycle tools with the
+existing qualification setup: enable ordinary Auto/display-aware preferences,
+wait for eight seconds of owned startup producer quiet, and warm ordinary
+engine attestation before playback. Give the fullscreen tool the explicit
+binary identity required by census. Do not rewrite the earlier failed verdict.
