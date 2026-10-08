@@ -656,12 +656,12 @@ python3 -m unittest discover -s tests/operations -p test_playback_surface_fence.
 git diff --check
 ```
 
-## 13. Two independent repairs and file ownership
+## 13. Independent repairs and file ownership
 
 This incident has two playback repairs and one subsequent CI receipt recovery,
 each independently reviewable and main-bound.
-Use the repository's disjoint-file exception: both branches start from main,
-and neither task edits the other's files. No effort integration state is
+Use the repository's disjoint-file exception: all three branches start from main,
+and each task owns separate files. No effort integration state is
 shared. Freeze each candidate for its own adversarial PR review, address the
 findings, run focused regressions and the current Main promotion gate, then
 merge with the declared Regression-Test lines in the landing message.
@@ -670,7 +670,7 @@ merge with the declared Regression-Test lines in the landing message.
 |---|---|---|
 | PR 888, truthful Apple frame evidence | Apple sources/tests/build metadata; `docs/clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md`; `docs/apple-builds/888-ready-video-recovery.md`; `docs/README.md`; `docs/STATUS.html`; `docs/clients/APPLE-CLIENT-PARITY.md`; `tests/client-fixes.toml`; `validation/attempt-census.toml` | Both Apple unit suites and Release builds; reviewed queued-cancellation regression; current gate |
 | PR 895, physical lab cleanup | `scripts/playback-lab`; `tests/playback/network-shaping.test.js`; `docs/PLAYBACK-TESTING.md` | Owned-process retirement verified after success, failure, and interruption; cleanup failure fails the run; no production app data deletion; focused Node regressions and current gate |
-| CI receipt recovery | `validation/main_unit_receipts.py`; `validation/main_preflight_adoption.py`; `validation/main-preflight-inputs.json`; their tests under `tests/validation/`; existing `docs/ci/PYTHON-UNIT-PR-RECEIPTS.md` | Authenticate both zero-execution preparation refusals from run 4431; import no outcomes; preserve run 4429 successes; current gate |
+| PR 900, CI receipt recovery | `validation/main_unit_receipts.py`; `validation/main_preflight_adoption.py`; `validation/main-preflight-inputs.json`; their tests under `tests/validation/`; existing `docs/ci/PYTHON-UNIT-PR-RECEIPTS.md` | Authenticate both zero-execution preparation refusals from run 4431; import no outcomes; preserve run 4429 successes; current gate |
 
 
 The cleanup task captures the exact launched process identity, retires it in
@@ -732,3 +732,18 @@ build 216 was not installed while the user watched. The earlier CI preflight
 on `1e295f008` completed all 821 operations tests with two existing skips and
 retained its final journal before rejecting its superseded head at the next
 phase. These retained results do not substitute for a current-head gate.
+
+
+**Integrated prerequisite verification:** PR 895 landed as
+`6229ff3e93fd06113491697991fc5fbe919d8b05` after run 4434 passed every
+affected check and the current-head/base promotion guard. PR 900's single
+adversarial review found no actionable issues; its current-base candidate is
+`0c25af40031408e428a11c142fee15da60758dc2`. The Apple candidate integrates
+that reviewed source locally while PR 900 completes qualification. Its tracked
+Apple subtree remains `33205b9aa40f8068f1dba25f2e9ced2458061169`, identical to
+the build-216 source that passed the complete 856/872 suites and Release builds.
+The integrated candidate additionally passed all 17 `AppleFrameEvidenceTests`
+on each of the tvOS and iOS simulators. These checks used the commands above
+with `-only-testing:plurx-tvOSTests/AppleFrameEvidenceTests` and
+`-only-testing:plurx-iOSTests/AppleFrameEvidenceTests`, respectively.
+No physical-device action was performed.
