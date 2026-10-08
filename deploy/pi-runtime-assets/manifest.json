@@ -75,7 +75,7 @@
       "notice_sha256": "b40ec5b16182103ef1cd69d42a21c98369e35bd483b3973902da4807c0755446"
     },
     "profile": "pi-worker-seccomp.json",
-    "profile_sha256": "720e5a0bda464720a5f4b62012685d4df590c83c956efc03bd2b60e3770756c6",
+    "profile_sha256": "dbd0f6fda508aa173beeacfad39355d1441812d73dea96992434a8d63e74f1d8",
     "appended_rules": [
       {
         "names": [
@@ -130,25 +130,6 @@
           {
             "index": 3,
             "value": 6,
-            "op": "SCMP_CMP_EQ"
-          }
-        ]
-      },
-      {
-        "names": [
-          "mount"
-        ],
-        "action": "SCMP_ACT_ALLOW",
-        "includes": {
-          "arches": [
-            "arm64"
-          ]
-        },
-        "comment": "Pi bubblewrap 0.8: private procfs.",
-        "args": [
-          {
-            "index": 3,
-            "value": 14,
             "op": "SCMP_CMP_EQ"
           }
         ]

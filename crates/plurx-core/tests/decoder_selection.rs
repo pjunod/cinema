@@ -4929,3 +4929,61 @@ fn macos_hdr_interlaced_retains_incumbent_when_vt_cannot_decode_high10_fields() 
         assert!(plan.macos_processing_identity().is_none());
     }
 }
+
+#[test]
+fn authorized_strict_p5_survives_rpu_only_renderer_guard_without_admitting_generic_cpu() {
+    let input = facts(macos_p5_stream());
+    assert_eq!(
+        input.dynamic_range_class(),
+        Some(plurx_core::transcode::DynamicRangeClass::DolbyVision)
+    );
+    let caps = unqualified_software_capabilities("hevc");
+    let context = macos_context(true, MacosProcessingAvailability::Available).with_graph(
+        MacosProcessingGraph::P5VtMetal,
+        MacosProcessingAvailability::Available,
+    );
+    let strict = resolve_with_options(
+        Encoder::VideoToolbox,
+        options(Pipeline::VtDoviMetal),
+        &input,
+        &caps,
+        macos_policy(context),
+    )
+    .expect("authorized P5 renderer survives generic RPU guard");
+    assert_eq!(strict.options().pipeline, Pipeline::VtDoviMetal);
+    assert!(strict.options().strict_dolby.is_some());
+    assert!(strict.macos_processing_identity().is_some());
+    let unavailable = macos_policy(macos_context(
+        false,
+        MacosProcessingAvailability::Unavailable,
+    ));
+    assert!(matches!(
+        resolve_with_options(
+            Encoder::VideoToolbox,
+            options(Pipeline::Cpu),
+            &input,
+            &caps,
+            unavailable
+        ),
+        Err(PlanError::IncompatibleRenderer)
+    ));
+    for profile in [7, 8] {
+        let mut stream = macos_p5_stream();
+        stream["side_data_list"][0]["dv_profile"] = json!(profile);
+        let context = macos_context(true, MacosProcessingAvailability::Available).with_graph(
+            MacosProcessingGraph::P5VtMetal,
+            MacosProcessingAvailability::Available,
+        );
+        assert!(
+            resolve_with_options(
+                Encoder::VideoToolbox,
+                options(Pipeline::VtDoviMetal),
+                &facts(stream),
+                &caps,
+                macos_policy(context)
+            )
+            .is_err(),
+            "unqualified P{profile} must not inherit strict P5"
+        );
+    }
+}

@@ -303,6 +303,99 @@ class DockerHardwareTests(unittest.TestCase):
         self.assertEqual(json.loads(output.read_text()), {"services": {"plurxd": {}}})
         probe.assert_not_called()
 
+    def test_pi_detection_requires_arm64_vendor_proof(self):
+        compatible = self.root / 'compatible'
+        compatible.write_bytes(b'brcm,bcm2712\0raspberrypi,5-model-b\0')
+        with mock.patch('platform.system', return_value='Linux'), mock.patch('platform.machine', return_value='aarch64'):
+            self.assertTrue(HELPER['raspberry_pi_host'](compatible))
+            compatible.write_bytes(b'brcm,bcm2712\0')
+            self.assertFalse(HELPER['raspberry_pi_host'](compatible))
+        with mock.patch('platform.system', return_value='Linux'), mock.patch('platform.machine', return_value='x86_64'):
+            self.assertFalse(HELPER['raspberry_pi_host'](compatible))
+
+    def test_pi_prepare_retains_host_compose_files_and_configuration(self):
+        (self.root / 'base.yml').touch()
+        (self.root / 'nas.yml').touch()
+        host = {'volumes': [{'source': '/srv/data', 'target': '/var/lib/plurx'},
+                            {'source': '/nas', 'target': '/media', 'read_only': True}],
+                'environment': {'PLURX_DATA_DIR': '/var/lib/plurx', 'CUSTOM': 'keep'},
+                'networks': ['operator'], 'group_add': ['123'],
+                'security_opt': ['apparmor=operator-profile']}
+        original = json.loads(json.dumps(host))
+        runtime = {'service': {'image': 'plurx-pi-fixture:source',
+                   'build': {'context': str(ROOT), 'dockerfile': 'Dockerfile.pi'},
+                   'devices': ['/dev/video19:/dev/video19:rw'], 'group_add': ['44'],
+                   'environment': {'PLURX_FFMPEG': '/opt/plurx-runtime/pi/bin/ffmpeg'}},
+                   'profile': '/var/lib/owned/profile.json'}
+        provider = mock.Mock(return_value=runtime)
+        environment = {'COMPOSE_FILE': 'base.yml:nas.yml'}
+        with mock.patch.dict(GLOBALS, resolved_compose_inputs=mock.Mock(return_value=(environment, {'services': {'plurxd': host}})),
+                             local_linux_engine=mock.Mock(return_value=True), raspberry_pi_host=mock.Mock(return_value=True),
+                             prepare_pi_runtime=provider), mock.patch('pathlib.Path.cwd', return_value=self.root):
+            files = HELPER['prepare'](self.root / 'runtime.json', prepare_pi=True).split(os.pathsep)
+        self.assertEqual(files[:2], [str(self.root / 'base.yml'), str(self.root / 'nas.yml')])
+        self.assertEqual(host, original)
+        overlay = json.loads((self.root / 'runtime.json').read_text())['services']
+        self.assertEqual(overlay['plurxd']['security_opt'], ['apparmor=operator-profile', 'seccomp=/var/lib/owned/profile.json'])
+        self.assertEqual(overlay['plurxd']['cap_drop'], ['ALL'])
+        self.assertEqual(overlay['plurx-discovery'], {'image': runtime['service']['image']})
+        self.assertNotIn('networks', overlay['plurxd'])
+        self.assertNotIn('PLURX_DATA_DIR', overlay['plurxd']['environment'])
+        provider.assert_called_once()
+
+    def test_remote_engine_never_prepares_pi_runtime(self):
+        (self.root / 'docker-compose.yml').touch()
+        provider = mock.Mock(side_effect=AssertionError('remote runtime mutation'))
+        with mock.patch.dict(GLOBALS, resolved_compose_inputs=mock.Mock(return_value=({}, {'services': {'plurxd': {}}})),
+                             local_linux_engine=mock.Mock(return_value=False), prepare_pi_runtime=provider), \
+             mock.patch('pathlib.Path.cwd', return_value=self.root):
+            HELPER['prepare'](self.root / 'runtime.json', prepare_pi=True)
+        provider.assert_not_called()
+
+    def test_pi_security_conflict_precedes_provider_mutation(self):
+        (self.root / 'docker-compose.yml').touch()
+        provider = mock.Mock(side_effect=AssertionError('provider must not run'))
+        with mock.patch.dict(GLOBALS, resolved_compose_inputs=mock.Mock(return_value=({}, {'services': {'plurxd': {'security_opt': ['seccomp=unconfined']}}})),
+                             local_linux_engine=mock.Mock(return_value=True), raspberry_pi_host=mock.Mock(return_value=True),
+                             prepare_pi_runtime=provider), mock.patch('pathlib.Path.cwd', return_value=self.root):
+            with self.assertRaises(HELPER['HardwareError']):
+                HELPER['prepare'](self.root / 'runtime.json', prepare_pi=True)
+        provider.assert_not_called()
+
+
+    def test_pi_existing_profile_is_reused_without_duplicate_seccomp(self):
+        (self.root / 'docker-compose.yml').touch()
+        existing = 'seccomp=/var/lib/previously-owned/pi-worker-seccomp.json'
+        runtime = {'service': {'image': 'pi:verified', 'build': {'dockerfile': 'Dockerfile.pi'}},
+                   'profile': existing[8:]}
+        provider = mock.Mock(return_value=runtime)
+        with mock.patch.dict(GLOBALS, resolved_compose_inputs=mock.Mock(return_value=({'PLURX_DOCKER_GPU': 'manual'}, {'services': {'plurxd': {'security_opt': [existing]}}})),
+                             local_linux_engine=mock.Mock(return_value=True), raspberry_pi_host=mock.Mock(return_value=True),
+                             pi_security_options=mock.Mock(return_value=[existing]), prepare_pi_runtime=provider), \
+             mock.patch('pathlib.Path.cwd', return_value=self.root):
+            HELPER['prepare'](self.root / 'runtime.json', prepare_pi=True)
+        provider.assert_called_once_with(existing[8:])
+        options = json.loads((self.root / 'runtime.json').read_text())['services']['plurxd']['security_opt']
+        self.assertEqual(options, [existing])
+        self.assertEqual(set([existing] + options), {existing})
+
+
+    def test_pi_manual_gpu_keeps_required_decoder_without_broadening_render_selection(self):
+        runtime = {'service': {'image': 'pi:verified',
+                   'devices': ['/dev/video19:/dev/video19:rw', '/dev/dri/renderD128:/dev/dri/renderD128:rw'],
+                   'group_add': ['44', '104']}, 'profile': '/var/lib/owned/profile.json'}
+        with mock.patch('pathlib.Path.stat', return_value=mock.Mock(st_gid=44)):
+            overlay = HELPER['pi_runtime_overlay']({}, runtime, manual_gpu=True)['services']['plurxd']
+        self.assertEqual(overlay['devices'], ['/dev/video19:/dev/video19:rw'])
+        self.assertEqual(overlay['group_add'], ['44'])
+        self.assertEqual(overlay['image'], 'pi:verified')
+        host = {'devices': [{'source': '/dev/dri/renderD129', 'target': '/dev/dri/renderD128'}]}
+        with mock.patch('pathlib.Path.stat', return_value=mock.Mock(st_gid=44)):
+            overlay = HELPER['pi_runtime_overlay'](host, runtime)['services']['plurxd']
+        self.assertEqual(overlay['devices'], ['/dev/video19:/dev/video19:rw'])
+        self.assertEqual(host['devices'][0]['source'], '/dev/dri/renderD129')
+
+
 
 if __name__ == "__main__":
     unittest.main()

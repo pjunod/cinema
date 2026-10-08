@@ -581,6 +581,19 @@ contract must establish supported color semantics and reject synthesized
 incompatible defaults before rendering. Seek/flush must clear stale state.
 This clarification does not admit other Dolby profiles.
 
+**Implemented strict policy:** `StrictDolbyPolicy` retains the selected
+package identity through media options, the immutable plan and the existing
+producer/recovery projections. Four independently observed contracts cover
+software/VT decoding and CPU/Metal rendering. Software recovery keeps the
+strict decoder/renderer requirements and the captured package; it cannot
+quietly bind a new binary or use generic HDR interpretation. P5 reshape and
+color interpretation operate at source raster before resize. Where layout
+conversion requires clearing the unsupported IPT-C2 matrix tag, that adapter
+changes metadata only; required effective RPU metadata remains the color
+interpreter. The existing bounded child owner now exposes nonzero outcomes
+and bounded partial output for strict-loss controls while retaining its
+ordinary success-only wrapper, cancellation, deadline and reap behavior.
+
 ### 9.2 E2: subtitle compositing
 
 First test hardware scale/tone-map followed by CPU burn at output resolution.
@@ -610,6 +623,14 @@ Resolve or explicitly bound the separate caption-bearing VOD limitation.
 input EOF on a paced source, sustained playback and the existing
 `live_tv_videotoolbox_atsc1_publishes_decodable_segments` hardware regression.
 Do not claim file-caption repair from that live-only test.
+
+**Supported interlace boundary established during implementation:** ordinary
+native BWDIF is qualified with genuine woven 8-bit H.264 SDR TFF/BFF controls.
+Four genuine 10-bit H.264 PQ/HLG TFF/BFF tuples fail VT decoding on the tested
+Mac/package before producing a frame. The formerly declared HDR BWDIF arms
+were unreachable behind the 8-bit input requirement and are removed. HDR
+interlaced input keeps the incumbent path; this is a specific tested limit,
+not a universal claim about every device or an unfinished hidden gate.
 
 ### 9.4 E4: HEVC/Main10 output
 

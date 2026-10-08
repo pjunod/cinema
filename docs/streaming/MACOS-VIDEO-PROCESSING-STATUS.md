@@ -21,28 +21,29 @@ This is not a claim of a fully green promotion across every platform.
 This is completion of the first implementation contribution, not the full
 proposal. The user renewed the full-scope instruction on 2026-10-08.
 
-Remaining work is active on `effort/macos-video-completion`, based on the
-coordinator's composed `263cbeff6` source. Three Sol builders are implementing
-Dolby/package contracts, native parser isolation, and the remaining processing
-and output routes. The landed main fixes are integrated before continuation
-freeze; PR #870/#882 remain the completed initial contribution.
+All planned production source is integrated on `effort/macos-video-completion`,
+including strict P5, normalized SDR/HDR10, finite HEVC output and ordinary
+Auto preference, Live upload/BWDIF, HLG burns, bounded native parser execution
+and matched symbol packaging. Current main `c746b6c9b` is being integrated
+before the final source freeze. Independent combined review and final daemon
+qualification remain active; source completion is not final acceptance.
+
 No deployed FFmpeg package or live service has changed. The matching Apple
 Metal compiler component was temporarily installed for the private package
-build; task ownership is recorded and cleanup will remove that exact component
-after compilation. A missing qualification row stays open; it is not converted to a pass at implementation handoff.
+build; ownership is recorded and cleanup will remove that exact component
+after review. Missing qualification stays explicitly open.
 
 | Workstream | Owner | State | Evidence or next dependency |
 |---|---|---|---|
-| Integration and status | Manager | active | Separate continuation clone integrates landed main `339abbced`, normalized native admission and ordinary finite HEVC preference through `b4bc77b54`; final combined review remains pending |
-| M0 runtime / M1 FFmpeg packaging | Sol native builder | integrated | Official Jellyfin `v8.1.3-1` arm64 package acquired and checksum verified; `e193b0670`: checksum-pinned complete official package; 38 required declarations; SDR/Metal smoke evidence |
-| M0/M1 measurement harness | Sol harness builder | integrated; revised HDR measured | `44050ab2a`: inventory/run CLI; five valid SDR pairs show 87.80% lower CPU cost and +0.71% throughput on synthetic material |
-| M1 embedded smoke corpus | Sol fixture builder | integrated; sustained sources built | `0cd06e92b`: three 320×180, 12-frame clips, 8,846 aggregate bytes; repeat generation hashes match; separate synthetic 60-second 4K sources |
-| M2 core / shared M4–M5 argv | Sol native builder | integrated, including metadata correction | `47eab3a75`: immutable optional Mac context, only demonstrated SDR/Metal graphs, pinned compile and normal hook passed |
-| M3 probes / manager / settings | Sol fixture and harness builders | integrated; independent review accepted | `532e78d5f`: bounded probe module; `93658e211`: registered all-targets compile and normal hook passed; isolated settings, repair/restart and actual SDR/HDR VOD bytes observed |
-| M6 acceptance / main promotion | Manager and builders | isolated daemon evidence recorded; full acceptance open | Initial reviewed source `575a68abc` landed through #882; continuation review and available acceptance work remain active |
-| E1 Dolby package / proof | Sol Dolby builder | final package/client source integrated; graph controls passed | `a542ab140` integrated in `6978c9a5d`: strict P5 color semantics, client transport claims and reproducible final package. Forty-eight graph controls and eight flush controls pass; raw software/hardware planes match; final AC-4 sample matches original. Strict production integration remains active |
-| M4 normalized VOD | Sol native parser builder | native delivery observed; comparison diagnosis active | Isolated signed `46f31ec6e` daemon delivered 48 native 1440p frames and preserved an active recipe across settings changes. Disabled CPU reference was refused by the experiment’s two-thread budget versus eight requested; normal resource configuration is being corrected. Final-source timing remains pending |
-| E1 HLG / E2–E4 routes | Sol route and Dolby builders | HEVC and Live TV integrated; strict P5 building | `432a617c2` integrated in `7fa940953` supplies HEVC; `74aa40592` integrated in `d403ee6ea` supplies Live upload, moving-field guards and the pinned BWDIF repair. Strict P5 integration and final producer qualification remain active |
+| Integration and status | Manager | final candidate preparation | Main `c746b6c9b` union compiles; shared pipeline metric collision and stale strict-P5 compatibility guard repaired; independent review next |
+| M0/M1 Jellyfin package and harness | Sol builders | source complete; package controls recorded | Corrected package `80416af2…`; pinned source offer, AC-4 byte preservation, synthetic CPU/throughput evidence |
+| M2/M3 typed routes and observations | Sol route builder | source complete | Twenty-two supported graph classes; final embedded inventory pending |
+| Native parser and symbols | Sol native builder | source complete | Bounded held-descriptor WASM/JIT, signed-kernel preflight, matched dSYM packaging; final daemon build pending |
+| M4 normalized VOD | Sol native and route builders | source complete; earlier daemon delivery demonstrated | Earlier 120-second lifetime and CPU/native pixel comparison retained; final SDR/HDR10, timing and soak pending |
+| E1 strict Dolby P5 | Sol Dolby and route builders | source complete; 45 shared projection controls pass | Captured package, strict current-AU metadata, four decode/render graphs and strict software recovery; final normal-API proof pending |
+| E2–E4 HLG, burns, BWDIF, HEVC and Live | Sol builders | source complete within demonstrated scope | HLG text/bitmap controls pass; actual HDR High10 interlace decode fails and keeps incumbent. HEVC init binding fixed; final master, Auto and Live API proof pending |
+| Client transport declarations | Sol Dolby builder | source complete | Exact HLS sample entries and legacy compatibility; final Apple compilation pending, physical presentation unqualified |
+| M6 acceptance and promotion | Manager and merge coordinator | active | Combined adversarial review, remaining daemon qualification, then coordinator-owned fast lane and merge |
 
 Jellyfin FFmpeg is the required implementation baseline. Local Homebrew
 FFmpeg is not a comparison target or substitute. The official package is an
@@ -837,3 +838,24 @@ concrete unsupported result must retain the incumbent and be recorded, never
 be represented as an implemented available graph. The normal synthetic tuner
 protocol preflight has succeeded through the existing private-network rules;
 its temporary container and port listener were removed immediately afterward.
+
+### 9.12 Final graph scope and current-main integration
+
+`f57040d83`, integrated by `3ea037239`, completes strict P5 production
+projection and progressive HDR10 admission into the normalized SDR-AVC
+contract. Forty-five standalone controls pass across nine strict sources and
+five decoder/renderer/encoder tuples. `0f8a63e62`, integrated by `6e5015385`,
+adds the two complete HLG burn observations. Exact High10 HDR woven-field
+controls fail hardware decoding, so those inputs retain the incumbent;
+unreachable HDR BWDIF classes are removed. Twenty-two supported graph
+classes remain.
+
+Main `c746b6c9b` adds a Pi software-frame pipeline. Integration preserves the
+18-pipeline union and gives it a distinct metric slot. The strict P5 API
+preparation also exposed an older RPU-only compatibility guard that rejected
+already-authorized strict graphs; the guard now admits those graphs while
+retaining generic CPU and unsupported Dolby refusals. Existing plan debug
+records expose the strict-policy boolean and captured identity digest for
+qualification without adding another owner. The exact combined all-target
+Rust check passes in 13.48 seconds on pinned Rust 1.97.1. Regression source
+covers the guard and stable metric slots; unit execution remains deferred.
