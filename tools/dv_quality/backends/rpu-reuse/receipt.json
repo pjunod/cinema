@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "status": "executed; adversarial result approval pending",
+  "scope": "synthetic Profile 8 compatibility ID 6 limited explicit mapping reuse; no conformance/P8.1/HDR10/FEL qualification",
+  "design_sha256": "3c90ea3659ec908d2df63c34d3e0bed728e8f4de40cf4a3352cb1ea3a46c2990",
+  "design_source_evidence_sha256": "81d14a3b6eeb50605bfae8bbb60cbcb27fb0a36f70d7c72c4e14fea33bb296db",
+  "design_inference_correction": "Proposed HDR10-compatible description not established; actual serialized compatibility ID 6 is not labelled P8.1",
+  "exact_source_replay": "replay 2, fresh FFmpeg/libdovi/example/helper builds; no-network execution",
+  "results_sha256": "3251f8ae935a65cfea69b8c4bc1fd70a543bde34a56e566c0aa8f3676d735c43",
+  "build_identity_sha256": "ff4f2e12a21fa519ab4ee8118513bf11294e4f2bd4f125e7e33faafe4cc8740b",
+  "artifact_inventory_sha256": "16e3c62cbcf7b165a1a6dd7828908cd4455173a5c0bf03aa34fc4a6aa98e5445",
+  "runtime_inventory_entries": 882,
+  "checker_controls": 27,
+  "actual_late_failure_controls": 4,
+  "accepted_decoded_frames": 9,
+  "explicit_reuse_frames": 6,
+  "negative_stages": [
+    "cold cache parse",
+    "flush cache parse",
+    "wrong compression parse",
+    "declared new epoch without reset acceptance",
+    "omitted raw RPU acceptance",
+    "Profile 7 compressor initialization"
+  ],
+  "tolerances": "Exact byte/typed semantic checks; no numerical quality threshold. Syntax/cohort, A/B coefficients and timeline declared before output inspection; fixed single-threaded lifecycle/DTS snapshots and stale-cache observations are bounded regression expectations recorded after execution.",
+  "remaining": [
+    "Profile/container conformance",
+    "certified Dolby reference",
+    "general/P7 reuse",
+    "multiple-ID fallback",
+    "extended/DM compression",
+    "compressor cross-epoch state",
+    "recovery after metadata parser error",
+    "production adapter",
+    "FEL/render/target-mapping/trims/performance/playback qualification"
+  ],
+  "retained_prerequisite": {
+    "archive_sha256": "d405ec20062c294d74c8e2377068cc0d6798c1f6573d26170e8d95e790326154",
+    "archive_bytes": 82626560,
+    "verified_unpack_files": 398,
+    "unpack_controls": 10,
+    "bootstrap": "retained image/cache/input prerequisites; not a full source-only bootstrap",
+    "post_replay_delta": "packaging/unpack source, manifest, actual extraction and ten targeted tests; executed replay2 decode/cache source unchanged"
+  }
+}

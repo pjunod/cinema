@@ -28,7 +28,8 @@ remain unqualified and unchanged. The [M1 contract](DV_HDR_M1_CONTRACTS.md)
 owns only additive core types, validation and pure/test-only selection; actual
 code review approved the bounded Rust diff. On current effort base `03fa9d2`,
 25 focused tests, six compatibility regressions, core all-target checking and
-warnings-denied Clippy passed with Rust 1.97.1. The task is not landed.
+warnings-denied Clippy passed with Rust 1.97.1. PR #933 merged at `0925e26db6336e9f17442635eee8e361de90745f`.
+Its existing exact-head run 4524 completed successfully before the cancellation request.
 The first task must retain reproducible commands, source pins, actual frame
 artifacts and negative controls. Numerical agreement is evidence for the named
 operation, not full Dolby Vision conformance or an improvement on a movie.
@@ -41,8 +42,8 @@ DV-off validation. Current playback keeps its compatible fallback.
 | Milestone | State | Evidence still required |
 |---|---|---|
 | M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction, encoded-layer association, bounded VFR/seek/epochs and affine P8.1 authoring retained with replay recipes | Broader timing and metadata-reuse acceptance, general metadata adaptation, independent reference limits and full graph resource evidence |
-| M1 typed contracts | Built and reviewed locally: 25 focused and six compatibility tests passed; production registry empty | Normal-hook commit, committed-tree audit and task integration; not landed |
-| M2 processing and lifecycle | Not started | Qualified graph, bounded ownership and timestamped adapter |
+| M1 typed contracts | Merged in #933: 25 focused and six compatibility tests passed; production registry empty | Runtime integration and qualification in M2/M3 |
+| M2 processing and lifecycle | In progress: combined bounded P7/FEL to timestamped HDR10 helper | Actual Main10 encoder, integrated graph, bounded ownership and output evidence |
 | M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
 | M4 settings and HDR10-E badge | Not started | M3 reporting; actual processing evidence on each client |
 | M5 quality and performance | Not started; M0 supplies the measurement foundation | Held-out corpus, matched bitrate, physical playback and full graph performance |
@@ -274,3 +275,28 @@ The decoded/nonidentity controls merged as PR #928, commit
 Python receipts (1,203 tests), Rust, web, Apple and Android. Windows and the
 blocked aggregate were cancelled under the user's explicit Windows waiver;
 neither is reported as a passing check.
+
+
+## 9. Explicit mapping reuse and remaining combined backend
+
+The [reviewed reuse controls](DV_HDR_RPU_REUSE_CONTROLS.md) distinguish valid
+mapping-ID reuse from stale parsed metadata after omitted or rejected raw RPUs.
+The bounded observed configuration is Profile 8 / compatibility ID 6 /
+compression 1, not qualified P8.1. Review verified 92 source ledger entries,
+882 scoped runtime entries and 398 extracted prerequisite files. General
+metadata reuse and product lifecycle acceptance remain open.
+
+The next build combines actual P7 demux/split, BL/EL/RPU association, reviewed
+FEL reconstruction and timestamped Main10 HDR10 encoding. A fixture-only
+transport protocol was deferred because it did not close that backend gap.
+The first combined cohort is synthetic and bounded; it does not grant
+production registry admission or an HDR10-E badge.
+
+**Effort validation policy, clarified by the user on 2026-10-08:** task branches
+run focused regressions and affected compilation only. Do not dispatch the
+existing broad effort workflow per task: it runs the Python suite again for
+each new PR. Run full suites once on the completed effort branch. The earlier
+runs above are historical evidence, not instructions to repeat them. Windows
+validation remains waived for this effort. No merge-coordinator handoff is
+authorized. This effort-specific user instruction supersedes the normal
+per-task dispatch requirement without changing global CI policy.
