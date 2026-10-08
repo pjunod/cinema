@@ -4659,7 +4659,7 @@ id = "desktop.cec-page-frame-freshness"
 commits = []
 supplements = "desktop.cec-bounded-local-receiver"
 source = "clients/desktop-remote/extension/bridge.js"
-source_anchor = "now>=deadline"
+source_anchor = "now>=offered.deadline"
 test = "clients/desktop-remote/tests/extension.test.mjs"
 test_anchor = "MAIN delivery checks its own credit after a page stall and invalidates before context capture"
 
@@ -4903,3 +4903,21 @@ source = "clients/desktop-remote/extension/bridge.js"
 source_anchor = "SERVER?.instance_id!==instance"
 test = "clients/desktop-remote/tests/extension.test.mjs"
 test_anchor = "saved Cinema local CEC choice fences install and queued delivery independently of server"
+
+# Cinema couch: local-only CEC admission captures probe-time physical identity.
+[[fixes]]
+id = "desktop.cinema-cec-pairing-credit-identity"
+commits = ["8ee2f4be2674676af94d511df6c66102774ccc99"]
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = 'if(JSON.stringify(current)!==JSON.stringify(offered.context))return "stale_focus";'
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "MAIN Select requires a fresh physical focus and pending identity credit"
+
+[[fixes]]
+id = "desktop.cinema-cec-pairing-physical-owner"
+commits = []
+supplements = "desktop.cinema-cec-pairing-credit-identity"
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = 'if(typeof CinemaRemoteLocalPhysical!=="undefined")return CinemaRemoteLocalPhysical.dispatch(action,offered.context);'
+test = "clients/desktop-remote/tests/extension.browser.cjs"
+test_anchor = "real Chromium extension targets MAIN document and invalidates local context without native hardware"

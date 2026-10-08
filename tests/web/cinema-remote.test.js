@@ -21,7 +21,9 @@ function harness(route="#/"){
         selector==="[data-remote-item]"?child.dataset.remoteItem!=null:
         selector==="[data-remote-page]"?child.dataset.remotePage!=null:
         selector==="[data-remote-track]"?child.dataset.remoteTrack!=null:
-        selector==="[data-remote-live-stop]"?child.dataset.remoteLiveStop!=null:false),
+        selector==="[data-remote-live-stop]"?child.dataset.remoteLiveStop!=null:
+        selector==="[data-remote-start-over]"?child.dataset.remoteStartOver!=null:
+        selector==="[data-remote-file]"?child.dataset.remoteFile!=null:false),
       querySelector:selector=>selector===".t,.eptitle"?{textContent:el.textContent}:el.querySelectorAll(selector)[0]||null};
     elements.set(id,el);return el;
   }
@@ -180,4 +182,28 @@ test("physical focus and takeover invalidate network scrubs without touching phy
   h.context.PLAYER._seekPending=20;vm.runInContext('CinemaRemoteRememberGesture({source:"network"})',h.context);
   h.remote.invalidate("takeover");assert.equal(h.context.PLAYER._seekPending,null);
   h.context.PLAYER._seekPending=30;h.remote.invalidate("focus");assert.equal(h.context.PLAYER._seekPending,30);
+});
+
+test("start over and version controls use exact current files and preserve resume semantics",()=>{
+  const h=harness("#/item/7"),first={id:11,available:true,duration_ms:90000},second={id:12,available:true,duration_ms:120000};
+  const page={id:"7",item:{id:"7",title:"Title"},shape:"versions",playable:first,files:[first,second],resume:15000,playStart:15000};h.context.WATCH_ITEM_PAGE=page;
+  const start=h.node("start","BUTTON"),version=h.node("version","BUTTON",100,0);start.dataset.remoteStartOver="";version.dataset.remoteFile="12";version.dataset.remoteFileStart="resume";h.main.children.push(start,version);
+  const plays=[];h.context.play=(...args)=>{plays.push(args);return Promise.resolve();};
+  assert.equal(h.remote.focusById("start-over:7"),"applied");assert.equal(h.dispatch({type:"select"}),"applied");assert.equal(plays[0][0],11);assert.equal(plays[0][2],0);
+  assert.equal(h.remote.focusById("version:7:12"),"applied");assert.equal(h.dispatch({type:"select"}),"applied");assert.equal(plays[1][0],12);assert.equal(plays[1][2],15000);
+  second.available=false;assert.equal(h.dispatch({type:"select"}),"stale_context");assert.equal(plays.length,2);
+});
+test("explicit allowed roots retain watch controls without authorizing unrelated DOM",()=>{
+  const h=harness(),allowed=h.node("owned"),extra=h.node("extra","BUTTON"),foreign=h.node("foreign","BUTTON");allowed.children.push(extra);h.context.document.body.children.push(allowed,foreign);
+  h.remote.configure({refresh:()=>{},guard:()=>true});h.remote.registerScope({id:"owned",root:h.main,roots:[allowed]});
+  h.remote.registerAction({id:"extra",element:extra,label:"Owned",activate:()=>"applied"});h.remote.registerAction({id:"foreign",element:foreign,label:"Foreign",activate:()=>{throw Error("foreign activated");}});
+  assert.equal(h.remote.focusById("extra"),"applied");assert.equal(h.dispatch({type:"select"}),"applied");assert.equal(h.remote.focusById("foreign"),"unavailable");
+});
+
+test("local Pair entry is excluded from network navigation labels and source spoofing",()=>{
+  const h=harness(),local=h.node("pair","BUTTON");h.main.children.push(local);let activated=0;
+  h.remote.configure({refresh:()=>{},guard:()=>true});h.remote.registerScope({id:"home",root:h.main});h.remote.registerAction({id:"pair",element:local,label:"Pair a phone",localOnly:true,activate:()=>{activated++;return "applied";}});
+  assert.equal(h.dispatch({type:"navigate",direction:"down"}),"unavailable");h.remote.focusById("pair");assert.equal(h.remote.snapshot().focused_id,null);assert.equal(h.remote.snapshot().focused_label,null);
+  assert.equal(h.dispatch({type:"select"},{source:"local_cec"}),"restricted_surface");assert.equal(activated,0);
+  assert.equal(h.remote.dispatchPhysical({type:"select"},h.remote.snapshotPhysical()),"applied");assert.equal(activated,1);
 });

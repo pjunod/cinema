@@ -5,6 +5,7 @@
 // Registration is local trusted application code; no wire selectors/closures.
 const CinemaRemote=(()=>{
   let scope=null, actions=new Map(), focused=null, contextRevision=1, focusRevision=1;
+  let physicalDispatch=false;
   let refreshing=false, dispatching=false, refresh=()=>{}, guard=()=>false;
   const listeners=new Set();
   function advance(value){ if(value>=Number.MAX_SAFE_INTEGER) throw new Error("remote revision exhausted"); return value+1; }
@@ -35,12 +36,13 @@ const CinemaRemote=(()=>{
     if(old&&old.element!==entry.element){ invalidate("registration"); if(focused===entry.id) focusChanged(null); }
     actions.set(entry.id,entry); return true;
   }
+  function owns(element){return !!scope&&[scope.root,...(scope.roots||[])].some(root=>root.contains(element));}
   function reconcile(){
     if(refreshing) return;
     refreshing=true;
     try{ refresh(); }finally{ refreshing=false; }
     for(const [id,entry] of actions){
-      if(!entry.element.isConnected||!scope?.root.contains(entry.element)){
+      if(!entry.element.isConnected||!owns(entry.element)){
         actions.delete(id); if(focused===id) focusChanged(null); invalidate("registration");
       }
     }
@@ -57,13 +59,14 @@ const CinemaRemote=(()=>{
     }
     return label;
   }
-  function snapshot(){
+  function snapshot(physical=false){
     reconcile();
     const blocked=!scope||!guard();
     const entry=actions.get(focused);
+    const offered=physical||!entry?.localOnly;
     return {context_revision:contextRevision,focus_revision:focusRevision,
       route_category:scope?.category||"unsupported",blocked,
-      focused_id:blocked?null:focused,focused_label:blocked?null:boundedLabel(entry?.label),
+      focused_id:blocked||!offered?null:focused,focused_label:blocked||!offered?null:boundedLabel(entry?.label),
       text_nonce:blocked?null:scope?.text?.nonce||null};
   }
   function focus(entry){
@@ -76,7 +79,7 @@ const CinemaRemote=(()=>{
     return "applied";
   }
   function navigate(direction){
-    const entries=[...actions.values()].filter(entry=>visible(entry.element));
+    const entries=[...actions.values()].filter(entry=>(physicalDispatch||!entry.localOnly)&&visible(entry.element));
     if(!entries.length) return "unavailable";
     const current=actions.get(focused);
     if(!current||!visible(current.element)) return focus(entries[0]);
@@ -93,12 +96,13 @@ const CinemaRemote=(()=>{
   }
   function activate(){
     const entry=actions.get(focused);
-    if(!entry||!scope.root.contains(entry.element)||!visible(entry.element)||document.activeElement!==entry.element) return "stale_focus";
+    if(!entry||!owns(entry.element)||!visible(entry.element)||document.activeElement!==entry.element) return "stale_focus";
+    if(entry.localOnly&&!physicalDispatch)return "restricted_surface";
     const result=entry.activate();
     return typeof result==="string"?result:"applied";
   }
   function dispatch(action,context){
-    const state=snapshot();
+    const state=snapshot(physicalDispatch);
     if(state.blocked) return "restricted_surface";
     if(!context||context.context_revision!==contextRevision) return "stale_context";
     if(action?.type==="select"&&context.focus_revision!==focusRevision) return "stale_focus";
@@ -114,7 +118,8 @@ const CinemaRemote=(()=>{
   for(const type of ["keydown","pointerdown"]) document.addEventListener(type,event=>{ if(event.isTrusted) physicalInput(); },true);
   window.addEventListener("blur",()=>{ physicalInput(); });
   document.addEventListener("visibilitychange",()=>invalidate("visibility"));
-  return {snapshot,dispatch,invalidate,registerScope,registerAction,physicalInput,
+  function dispatchPhysical(action,context){if(dispatching)return "busy";physicalDispatch=true;try{return dispatch(action,context);}finally{physicalDispatch=false;}}
+  return {snapshot:()=>snapshot(false),snapshotPhysical:()=>snapshot(true),dispatch,dispatchPhysical,invalidate,registerScope,registerAction,physicalInput,
     onInvalidate(listener){ listeners.add(listener); return ()=>listeners.delete(listener); },
     configure({refresh:nextRefresh,guard:nextGuard}){ refresh=nextRefresh; guard=nextGuard; },
     focusById(id){ reconcile(); return focus(actions.get(id)); },
