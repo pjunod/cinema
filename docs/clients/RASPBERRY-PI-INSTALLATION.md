@@ -1,6 +1,6 @@
 # Raspberry Pi installation — Docker by default, native by choice
 
-**Status:** open — installer implemented; Pi namespace probe isolation in development · **Written:** 2026-10-07
+**Status:** open — installer and Pi namespace probe isolation implemented; qualification in progress · **Written:** 2026-10-07
 
 Companion to [the decoder implementation](RASPBERRY-PI-IMPLEMENTATION.md)
 and [the live status](RASPBERRY-PI-STATUS.md). This plan closes the installation

@@ -1,6 +1,6 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** open — stock-kernel protected-probe compatibility blocks installer promotion; initial implementation merged;
+**Status:** open — Pi-only namespace isolation implemented; focused and physical qualification in progress; initial implementation merged;
 PR #843 merged; Docker-default setup and its live qualification are tracked on PR #851 · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
@@ -19,7 +19,7 @@ presentation and seeking. Actual Plurx session creation exposed a separate
 kernel prerequisite: the tested Pi kernel omits `CONFIG_SECURITY_LANDLOCK` and
 its Landlock ABI query returns `ENOSYS`. The bound FFprobe identity cannot be
 established, so server playback is blocked. No protection has been bypassed and
-PR #851 remains unmerged pending an architectural compatibility decision.
+PR #851 remains unmerged while the accepted Pi-only namespace backend is qualified. Landlock remains the preferred backend wherever the kernel supports it.
 
 Physical testing also exposed two deployment defects. Compose 2.26 lacks
 `config --environment`; hardware configuration now uses Compose's own label
@@ -357,12 +357,12 @@ access, and own upgrades/uninstall without deleting user data.
 
 | Work | State | Evidence / next action |
 |---|---|---|
-| Independent clone and compiler | ready | Main `96f668128`; Rust 1.97.1 all-target daemon checks passed on macOS and Linux; isolated ARM64 cross compiler prepared for the namespace implementation |
+| Independent clone and compiler | current main integrated; executable preparation in progress | Main `9994c23d6` integrated at `4115bfada`; pinned Linux all-target check and Clippy passed; focused test executable and ARM64 build follow |
 | Pi media runtime | hardware and browser acceptance passed; app playback pending | Non-root Docker HEVC Main/Main10 each matched all 48 software-reference frame hashes; managed Chromium used V4L2VideoDecoder; stock-kernel Landlock absence blocks the existing protected probe |
 | Setup lifecycle | focused regressions passed | Sol 6.1 owns Docker/default, native selection, prerequisites, ownership, upgrade recovery and removal |
 | Host browser | focused regressions passed | Pin and verify the previously exercised HEVC browser; preserve ordinary Chromium and sandboxing |
-| Final review and fast lane | installer review complete; new sandbox scope in development | Prior Python successes retained through run 4307, whose preflight and Linux Rust passed; Windows was cancelled when the candidate changed; new scope requires affected qualification |
-| Pi state | clean | Acceptance services, containers, images, caches and scratch files removed; all 1,643 baseline package/version entries restored; no task process remains |
+| Final review and fast lane | both scope reviews complete; findings repaired | Eight focused packaging/upgrade tests and all nine probe regressions passed; prior Python successes retained through run 4307; physical acceptance and affected fast lane remain |
+| Pi state | isolated acceptance preparation active | Previous round restored all 1,643 baseline package/version entries. Current round added ten Docker prerequisites without baseline upgrades, staged owned native assets/account, and built runtime assets; cleanup is required again after acceptance |
 
 The installer will build from the chosen checkout initially. This automates
 prerequisites rather than assuming prebuilt native releases that the project
@@ -419,13 +419,20 @@ tests or device operations.
 
 | Finding | Correction | Evidence state |
 |---|---|---|
-| Non-root Bubblewrap uses a second user namespace after creating private devpts; the container policy omitted that call | Permit only AArch64 `unshare(CLONE_NEWUSER)`, leaving the pinned baseline and capability drop intact | Focused policy regression and actual Docker probe acceptance pending |
-| An older receipt could allow an upgrade to overwrite and adopt operator files at newly managed paths | Reject every existing newly managed system destination absent from the previous ownership receipt before provisioning or writes | Older-receipt regression covers all five new profile/license/provenance destinations; execution pending |
+| Non-root Bubblewrap uses a second user namespace after creating private devpts; the container policy omitted that call | Permit only AArch64 `unshare(CLONE_NEWUSER)`, leaving the pinned baseline and capability drop intact | Focused policy regression passed; actual Docker probe acceptance pending |
+| An older receipt could allow an upgrade to overwrite and adopt operator files at newly managed paths | Reject every existing newly managed system destination absent from the previous ownership receipt before provisioning or writes | Older-receipt regression passed for all five new profile/license/provenance destinations |
 
 Linux Rust 1.97.1 all-target checking passed for `d740dc6fd`. Clippy found two
 test-only `unwrap_err` calls; those now use descriptive `expect_err` messages.
-The repaired candidate still requires Clippy, focused regressions and actual
-app playback. No final qualification or merge is claimed by this source record.
+Candidate `4115bfada`, including current main, passed all-target checking and
+Clippy. Eight focused packaging/upgrade/rollback methods passed after the
+review repairs; subsequent edits did not change those Python/runtime assets.
+All nine focused probe regressions then passed on `4115bfada`: the Pi
+namespace launcher enforces held source/parser identity, rejects secondary
+execution, hides parent files/process memory, reaps descendants and completes
+cancellation. Existing Landlock production regressions also passed. No failed
+method was rerun. Actual Pi app playback and the final gate remain; no merge
+is claimed by this source record.
 
 The coordinator then removed a per-probe daemon copy: Bubblewrap executes the
 held bootstrap descriptor directly through private procfs and the bootstrap
@@ -434,3 +441,11 @@ a held executable after its pathname was deleted. This avoids allocating a
 roughly 350 MB daemon copy per probe; the existing namespace and Landlock
 regressions still qualify the final launcher. Superseded binary preparation
 was stopped before its test/ARM64 stages completed, retaining dependency caches.
+
+The ARM64 acceptance build uses the test profile to avoid a slow optimized
+daemon build. Upstream `gemm-common` FP16 helpers rely on optimization to inline
+into their target-feature callers; unoptimized ARM64 code generation failed
+there. The acceptance compiler enables optimization only for `gemm-common`
+and `gemm-f16`, retaining the application source and other build settings.
+This is an acceptance-build limitation, not a change to the shipped release
+profile or a claim of release performance.
