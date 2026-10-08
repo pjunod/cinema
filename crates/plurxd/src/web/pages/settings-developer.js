@@ -115,7 +115,7 @@ async function saveMacosVideoProcessing(btn){
   const err=document.getElementById("macos-video-error");if(err)err.textContent="";
   if(btn)btn.disabled=true;
   try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{macos_video_processing_enabled:!!document.getElementById("pmacosvideo").checked}}));
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{macos_video_processing_enabled:!!/** @type {HTMLInputElement} */ (document.getElementById("pmacosvideo")).checked}}));
     const card=btn?.closest(".setcard");if(card)card.outerHTML=macosVideoProcessingCard(saved,DEVELOPER_READINESS);
     toast("Mac video processing saved; applies to new sessions");
   }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
