@@ -1,6 +1,44 @@
 #!/usr/bin/env python3
 """Bounded, neutral synthetic graph qualification; called inside an idle-host wrapper."""
 import array, hashlib, json, pathlib, subprocess, sys, time
+
+DEFAULT_SIGNAL = 'continuous-pq-ramp'
+SIGNALS = {
+    DEFAULT_SIGNAL: ('Neutral continuous PQ code ramp from analytical ST2084 black to 1000 nits; uniform code spacing',
+                     '3f78739c3a34985743d3070753a42c4327c54f16999b465ff9b9e83a587417a4'),
+    'original-sharp-panels': ('Original discontinuous three-panel ST2084 signal: 0-1000, 0-10 and 20-21 nits; 360 rows each',
+                              '777e283050d76a5d51c723ee0a23d04f2abee492aa02046803441715fb6b17f9'),
+}
+
+def validate_signal(signal):
+    if signal not in SIGNALS:
+        raise ValueError('unsupported diagnostic signal: select continuous-pq-ramp or original-sharp-panels')
+    return signal
+
+def reference_frame(signal=DEFAULT_SIGNAL):
+    """One fixed-size raw frame; count is the later encoded repetition count."""
+    validate_signal(signal)
+    width,height,count = 1920,1080,96
+    def pq(nits):
+        p=(nits/10000)**(2610/16384)
+        return round(64+876*((3424/4096+2413/128*p)/(1+2392/128*p))**(2523/32))
+    if signal == 'original-sharp-panels':
+        # Exact recovered historical generator math, including Python round.
+        rows = [array.array('H', [pq((1000*t if panel==0 else 10*t if panel==1 else 20+t))
+                for t in [x/(width-1) for x in range(width)]]) for panel in range(3)]
+    else:
+        # Preserve the default's original uniform PQ-code spacing byte for byte.
+        rows = [array.array('H', [round(pq(0)+(pq(1000)-pq(0))*x/(width-1)) for x in range(width)])]*3
+    luma = array.array('H')
+    for row in rows:
+        luma.extend(row*360)
+    frame = luma + array.array('H', [512])*(width*height//2)
+    if sys.byteorder != 'little': frame.byteswap()
+    raw = frame.tobytes()
+    if len(raw) != 6220800 or hashlib.sha256(raw).hexdigest() != SIGNALS[signal][1]:
+        raise ValueError('diagnostic reference bytes differ from the selected fixed signal')
+    return raw, width, height, count
+
 def digest(path):
     result = hashlib.sha256()
     with path.open('rb') as source:
@@ -65,10 +103,14 @@ def measure_frame(reference, decoded, width, height):
     }
 
 def main():
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit('usage: qualify-vaapi.py ROOT CONTAINER [SIGNAL]')
+    signal = validate_signal(sys.argv[3] if len(sys.argv) == 4 else DEFAULT_SIGNAL)
     root = pathlib.Path(sys.argv[1]).resolve()
     container = sys.argv[2]
     recipe = json.loads((root / 'vaapi-recipe.json').read_text())
     report = {'capture_version': 2, 'scope': 'neutral_1080p_vaapi_hdr10_graph', 'recipe': recipe,
+              'diagnostic_signal': {'requested': signal, 'actual': None},
               'qualification_limits': ['neutral synthetic signal only', 'no physical display or client matrix',
                                        'no Dolby processing, HDR subtitle burn or 4K qualification'], 'commands': []}
     started = time.monotonic()
@@ -88,19 +130,9 @@ def main():
     def ff(args):
         return run(ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-threads', '1', '-filter_threads', '1', '-y']+args)
     try:
-        width,height,count = 1920,1080,96
-        def pq(nits):
-            p=(nits/10000)**(2610/16384)
-            return round(64+876*((3424/4096+2413/128*p)/(1+2392/128*p))**(2523/32))
-        # Uniform PQ-code spacing avoids a discontinuous step at black or
-        # between panels, which measures lossy ringing rather than HDR transfer.
-        rows = [array.array('H', [round(pq(0)+(pq(1000)-pq(0))*x/(width-1)) for x in range(width)])]*3
-        luma = array.array('H')
-        for row in rows:
-            luma.extend(row*360)
-        frame = luma + array.array('H', [512])*(width*height//2)
-        if sys.byteorder != 'little': frame.byteswap()
-        source_raw=root/'source.yuv'; source_raw.write_bytes(frame.tobytes())
+        raw,width,height,count = reference_frame(signal)
+        source_raw=root/'source.yuv'; source_raw.write_bytes(raw)
+        report['diagnostic_signal']['actual'] = signal
         color=['-color_primaries','bt2020','-color_trc','smpte2084','-colorspace','bt2020nc','-color_range','tv']
         source=root/'source.mkv'; output=root/'encoded.mp4'
         ff(['-stream_loop','-1','-f','rawvideo','-pixel_format','yuv420p10le','-video_size','1920x1080','-framerate','24','-i',str(source_raw),'-frames:v',str(count),'-vf','setparams=range=limited:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc','-c:v','ffv1','-threads','1']+color+[str(source)])
@@ -108,7 +140,7 @@ def main():
         report['source_probe']=source_probe
         assert source_probe.get('color_transfer')=='smpte2084' and source_probe.get('color_primaries')=='bt2020', 'authored HDR source must carry actual PQ/BT2020 tags'
         report['source']={'sha256':digest(source),'raw_sha256':digest(source_raw),'frames':count,'duration_seconds':4,
-            'signal':'Neutral continuous PQ code ramp from analytical ST2084 black to 1000 nits; uniform code spacing'}
+            'signal': SIGNALS[signal][0], 'signal_selector': signal}
         graph=recipe['hdr10_1080_filter']+','+recipe['upload_filter']
         # Encoder/filter args are exported from the reviewed source. The explicit
         # no-reorder VOD timestamp/GOP/muxer contract is the current 24 fps grid.
