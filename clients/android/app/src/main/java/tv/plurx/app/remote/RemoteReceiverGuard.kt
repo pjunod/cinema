@@ -130,3 +130,22 @@ internal class RemoteRestrictionLifetime {
     fun transition(next: Boolean): Boolean { val changed = next != restricted; restricted = next; return changed }
     fun reset() { restricted = false }
 }
+
+internal class RemotePairingDeadline(start: Long, budget: Long = 120000) {
+    private val start = start
+    private val deadline = start.takeIf { it >= 0 && budget > 0 && it <= Long.MAX_VALUE - budget }?.plus(budget)
+    fun admits(now: Long) = deadline != null && now >= start && now < deadline
+    fun remaining(now: Long) = if (admits(now)) deadline!! - now else 0
+}
+internal class RemoteCommandResult {
+    private var epoch: String? = null
+    private var sequence = 0L
+    private var outcome: RemoteOutcome? = null
+    fun begin(epoch: String, sequence: Long) { this.epoch = epoch; this.sequence = sequence; outcome = null }
+    fun observe(epoch: String, sequence: Long, result: RemoteOutcome): Boolean {
+        if (this.epoch != epoch || this.sequence != sequence) return false
+        outcome = result; return true
+    }
+    fun known(epoch: String, sequence: Long) = outcome.takeIf { this.epoch == epoch && this.sequence == sequence }
+    fun reset() { epoch = null; sequence = 0; outcome = null }
+}

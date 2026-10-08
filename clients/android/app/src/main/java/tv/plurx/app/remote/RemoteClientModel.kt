@@ -61,6 +61,7 @@ internal class RemoteClientModel(private val app: Context) {
     private var acquiredGeneration: String? = null
     private var sequences = RemoteControlSequence()
     private var lastSequence = 0L
+    private val commandResult = RemoteCommandResult()
     private var ownerRevision = 0L
     private var stateRevision = 1L
     private var playbackFingerprint: String? = null
@@ -298,7 +299,7 @@ internal class RemoteClientModel(private val app: Context) {
     fun closeController(preserveScan: Boolean = false) {
         if (!preserveScan) { scanTicket = null; pendingScan = null; scannedPairing = null }
         pairingGeneration = UUID.randomUUID().toString(); pairingJob?.cancel(); pairingJob = null
-        controllerGeneration = UUID.randomUUID().toString(); acquiredGeneration = null; stateJob?.cancel(); renewJob?.cancel(); stopHolding()
+        controllerGeneration = UUID.randomUUID().toString(); commandResult.reset(); acquiredGeneration = null; stateJob?.cancel(); renewJob?.cancel(); stopHolding()
         stateJob = null; renewJob = null; controlling = false; selected = null; selectedGrant = null; state = null; control = null; ownerRevision = 0; lastSequence = 0; sendingToken = null
     }
     fun pair(code: String, challengeId: String?) {
@@ -307,26 +308,40 @@ internal class RemoteClientModel(private val app: Context) {
         require(Regex("[0-9]{8}").matches(code))
         pairingJob?.cancel(); pairingGeneration = UUID.randomUUID().toString()
         val pairing = pairingGeneration
+        val deadline = RemotePairingDeadline(SystemClock.elapsedRealtime())
+        val expiredMessage = "Pairing expired. Start a new TV code and try again."
         fun pairingCurrent() = current(generation) && RemotePairingAdmission.accepts(pairingGeneration, pairing, selected?.id, device.id, selected?.target, target)
         pairingJob = scope.launch {
             try {
-                val claim = api.pairClaim(target, challengeId, code, "Android phone"); if (!pairingCurrent()) return@launch
-                val pending = RemoteWire.uuid(claim.string("pending_id")); val proof = claim.string("poll_secret")
-                repeat(120) {
-                    delay(1000); val result = api.pairResult(target, pending, proof); if (!pairingCurrent()) return@launch
-                    when (result.string("status")) {
-                        "denied" -> { commandStatus = "Pairing declined on TV."; return@launch }
-                        "approved" -> {
-                            require(RemoteWire.uuid(result.string("receiver_id")) == device.id)
-                            vault.saveGrant(RemoteSecretStorage.Grant(device.id, RemoteWire.uuid(result.string("grant_id")), result.string("grant_secret")))
-                            pairingJob = null
-                            select(device); commandStatus = "Paired. Tap Use as remote."; return@launch
+                val remaining = deadline.remaining(SystemClock.elapsedRealtime())
+                if (remaining <= 0) { if (pairingCurrent()) commandStatus = expiredMessage; return@launch }
+                withTimeout(remaining) {
+                    val claim = api.pairClaim(target, challengeId, code, "Android phone"); if (!pairingCurrent()) return@withTimeout
+                    if (!deadline.admits(SystemClock.elapsedRealtime())) { commandStatus = expiredMessage; return@withTimeout }
+                    val pending = RemoteWire.uuid(claim.string("pending_id")); val proof = claim.string("poll_secret")
+                    repeat(120) {
+                        delay(1000)
+                        if (!pairingCurrent()) return@withTimeout
+                        if (!deadline.admits(SystemClock.elapsedRealtime())) { commandStatus = expiredMessage; return@withTimeout }
+                        val result = api.pairResult(target, pending, proof); if (!pairingCurrent()) return@withTimeout
+                        if (!deadline.admits(SystemClock.elapsedRealtime())) { commandStatus = expiredMessage; return@withTimeout }
+                        when (result.string("status")) {
+                            "denied" -> { commandStatus = "Pairing declined on TV."; return@withTimeout }
+                            "approved" -> {
+                                require(RemoteWire.uuid(result.string("receiver_id")) == device.id)
+                                if (!deadline.admits(SystemClock.elapsedRealtime())) { commandStatus = expiredMessage; return@withTimeout }
+                                vault.saveGrant(RemoteSecretStorage.Grant(device.id, RemoteWire.uuid(result.string("grant_id")), result.string("grant_secret")))
+                                pairingJob = null
+                                select(device); commandStatus = "Paired. Tap Use as remote."; return@withTimeout
+                            }
                         }
+                        commandStatus = "Waiting for physical TV approval."
                     }
-                    commandStatus = "Waiting for physical TV approval."
+                    if (pairingCurrent()) commandStatus = expiredMessage
                 }
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { if (pairingCurrent()) commandStatus = "Pairing failed. Start a new TV code." }
+            } catch (_: TimeoutCancellationException) { if (pairingCurrent()) commandStatus = expiredMessage }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { if (pairingCurrent()) commandStatus = if (deadline.admits(SystemClock.elapsedRealtime())) "Pairing failed. Start a new TV code." else expiredMessage }
         }
     }
     private fun acceptControl(next: RemoteControl?, revision: Long) {
@@ -341,7 +356,7 @@ internal class RemoteClientModel(private val app: Context) {
     fun acquire(takeover: Boolean = false) {
         val bound = selected?.target ?: return; val grant = selectedGrant ?: return; val api = api ?: return
         val recoveryEpoch = control?.takeIf { it.grant == grant.id && !sequences.knows(bound, grant.id, it.epoch) }?.epoch
-        controllerGeneration = UUID.randomUUID().toString(); acquiredGeneration = null; stateJob?.cancel(); renewJob?.cancel(); stopHolding(); controlling = false; sendingToken = null; state = null
+        controllerGeneration = UUID.randomUUID().toString(); commandResult.reset(); acquiredGeneration = null; stateJob?.cancel(); renewJob?.cancel(); stopHolding(); controlling = false; sendingToken = null; state = null
         val generation = controllerGeneration; val life = lifecycle
         scope.launch {
             try {
@@ -376,7 +391,10 @@ internal class RemoteClientModel(private val app: Context) {
                     val nextState = RemoteStateUpdate.applying(state, result["state"])
                     if (oldContext != nextState?.get("context_revision")) stopHolding()
                     state = nextState
-                    result.getValue("outcomes").jsonArray.lastOrNull { it.jsonObject.string("control_epoch") == control?.epoch && it.jsonObject.number("sequence") == lastSequence }?.let { commandStatus = RemoteOutcome.parse(it.jsonObject.string("outcome")).viewerMessage() }
+                    result.getValue("outcomes").jsonArray.lastOrNull { it.jsonObject.string("control_epoch") == control?.epoch && it.jsonObject.number("sequence") == lastSequence }?.jsonObject?.let { ack ->
+                        val outcome = RemoteOutcome.parse(ack.string("outcome"))
+                        if (commandResult.observe(ack.string("control_epoch"), ack.number("sequence"), outcome)) commandStatus = outcome.viewerMessage()
+                    }
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (_: Exception) { if (!current(life) || generation != controllerGeneration) return@launch; controlling = false; acquiredGeneration = null; stopHolding(); commandStatus = "Connection lost; no command replayed."; delay(1000) }
             }
@@ -407,7 +425,7 @@ internal class RemoteClientModel(private val app: Context) {
         if (action.type !in state.getValue("capabilities").jsonArray.map { it.jsonPrimitive.content }) return
         if (runCatching { action.validate() }.isFailure) return
         val credit = state.getValue("credits").jsonArray.lastOrNull { it.jsonObject.string("kind") == action.creditKind.wire }?.jsonObject ?: return
-        val sequence = sequences.next(bound, grant.id, control.epoch) ?: return; lastSequence = sequence
+        val sequence = sequences.next(bound, grant.id, control.epoch) ?: return; lastSequence = sequence; commandResult.begin(control.epoch, sequence)
         val command = RemoteCommand(bound, grant.id, control.epoch, sequence, RemoteWire.uuid(credit.string("nonce")), state.number("context_revision"), state.number("focus_revision"), action)
         val token = UUID.randomUUID().toString(); sendingToken = token; val generation = controllerGeneration; val life = lifecycle
         scope.launch {
@@ -415,9 +433,9 @@ internal class RemoteClientModel(private val app: Context) {
                 val result = api.send(command, grant.secret)
                 if (!current(life) || generation != controllerGeneration || sendingToken != token || this@RemoteClientModel.control?.epoch != control.epoch) return@launch
                 require(result.getValue("queued").jsonPrimitive.boolean && result.string("control_epoch") == control.epoch && result.number("sequence") == sequence)
-                commandStatus = "Sent. Waiting for TV outcome."
+                commandStatus = commandResult.known(control.epoch, sequence)?.viewerMessage() ?: "Sent. Waiting for TV outcome."
             } catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Exception) { if (current(life) && generation == controllerGeneration && sendingToken == token) { stopHolding(); commandStatus = if (failure is RemoteHttpFailure) failure.outcome.viewerMessage() else "Outcome unknown; never replayed." } }
+            catch (failure: Exception) { if (current(life) && generation == controllerGeneration && sendingToken == token) { stopHolding(); commandStatus = commandResult.known(control.epoch, sequence)?.viewerMessage() ?: if (failure is RemoteHttpFailure) failure.outcome.viewerMessage() else "Outcome unknown; never replayed." } }
             finally { if (generation == controllerGeneration && sendingToken == token) sendingToken = null }
         }
     }

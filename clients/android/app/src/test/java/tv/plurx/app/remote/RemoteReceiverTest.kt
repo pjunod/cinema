@@ -205,4 +205,30 @@ class RemoteReceiverTest {
         assertTrue(restrictions.transition(false))
     }
 
+    @Test fun monotonicPairingDeadlineRejectsSlowClaimAndLateApprovedResult() {
+        val deadline = RemotePairingDeadline(1000)
+        assertTrue(deadline.admits(1000)); assertTrue(deadline.admits(120999))
+        assertFalse(deadline.admits(121000)); assertFalse(deadline.admits(200000))
+        assertEquals(1L, deadline.remaining(120999)); assertEquals(0L, deadline.remaining(121000))
+        assertFalse(deadline.admits(999))
+        assertFalse(RemotePairingDeadline(Long.MAX_VALUE).admits(Long.MAX_VALUE))
+        // The same admission runs after claim, after poll and immediately before save.
+        var saved = false
+        if (deadline.admits(121000)) saved = true
+        assertFalse(saved)
+    }
+    @Test fun exactAckBefore202CannotBecomePendingOrAffectAnotherCommand() {
+        val results = RemoteCommandResult()
+        results.begin("epoch1", 1)
+        assertNull(results.known("epoch1", 1))
+        assertTrue(results.observe("epoch1", 1, RemoteOutcome.Applied))
+        assertEquals(RemoteOutcome.Applied, results.known("epoch1", 1))
+        results.begin("epoch1", 2)
+        assertFalse(results.observe("epoch1", 1, RemoteOutcome.Restricted))
+        assertNull(results.known("epoch1", 2))
+        assertTrue(results.observe("epoch1", 2, RemoteOutcome.Unsupported))
+        assertEquals(RemoteOutcome.Unsupported, results.known("epoch1", 2))
+        results.reset(); assertNull(results.known("epoch1", 2))
+    }
+
 }
