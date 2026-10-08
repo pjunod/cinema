@@ -502,8 +502,16 @@ fn cli_exit(code: i32, message: impl Into<String>) -> anyhow::Error {
     .into()
 }
 
+fn main() -> anyhow::Result<()> {
+    if let Some(result) = decode_facts::dispatch_probe_bootstrap() {
+        result.context("launching namespace-bound probe")?;
+        anyhow::bail!("probe exec unexpectedly returned");
+    }
+    daemon_main()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn daemon_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
     if let Err(error) = dispatch(

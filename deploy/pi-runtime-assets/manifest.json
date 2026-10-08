@@ -1,0 +1,313 @@
+{
+  "schema": 1,
+  "jellyfin": {
+    "revision": "253db2a7b0a8045c54ce68ce33d7f601229b1822",
+    "url": "https://codeload.github.com/jellyfin/jellyfin-ffmpeg/tar.gz/253db2a7b0a8045c54ce68ce33d7f601229b1822",
+    "sha256": "2d2619b15611f4f7b7bd73074b50039f4d1c4953888ac9e19bc47d95c95f0281"
+  },
+  "rpi": {
+    "revision": "f60aae17021abae85b1ba9759e8b2da33f723902",
+    "base": "38b88335f99e76ed89ff3c93f877fdefce736c13",
+    "url": "https://codeload.github.com/jc-kynesim/rpi-ffmpeg/tar.gz/f60aae17021abae85b1ba9759e8b2da33f723902",
+    "sha256": "e591d2b837c3673dc233da6473495e9623c84726825525ee7380099d49aaddd3"
+  },
+  "patch_sha256": "a407e98fffa4c3694cd83106118e57224bae1c3ab1f8d74c51a3a03b7bf9d202",
+  "browser": {
+    "version": "154.0.8037.57-1~deb13u1+rpt1",
+    "tag": "chromium-154.0.8037.57-1-rpt1-hevc1",
+    "packages": [
+      {
+        "name": "chromium_154.0.8037.57-1.deb13u1+rpt1_arm64.deb",
+        "url": "https://github.com/sslivins/chromium-rpi-hevc/releases/download/chromium-154.0.8037.57-1-rpt1-hevc1/chromium_154.0.8037.57-1.deb13u1%2Brpt1_arm64.deb",
+        "sha256": "ac4dfd78da8fa31611f04bf67be40ca8cc90d81cc07f23146d0dfbcf210bd5c7"
+      },
+      {
+        "name": "chromium-common_154.0.8037.57-1.deb13u1+rpt1_arm64.deb",
+        "url": "https://github.com/sslivins/chromium-rpi-hevc/releases/download/chromium-154.0.8037.57-1-rpt1-hevc1/chromium-common_154.0.8037.57-1.deb13u1%2Brpt1_arm64.deb",
+        "sha256": "46d2ce2c1abf0025e1057c99f6b06ac620e3d960f9474f174dfc6694153f15c2"
+      },
+      {
+        "name": "chromium-sandbox_154.0.8037.57-1.deb13u1+rpt1_arm64.deb",
+        "url": "https://github.com/sslivins/chromium-rpi-hevc/releases/download/chromium-154.0.8037.57-1-rpt1-hevc1/chromium-sandbox_154.0.8037.57-1.deb13u1%2Brpt1_arm64.deb",
+        "sha256": "d5e0ee141c958eb360c1a6a39dc46118f9a0c8f4c4a23f335d47fd4140bd0de7"
+      }
+    ],
+    "source_revision": "15cf35463a9603edbfb7e6a4e8933444a64b7515",
+    "source_release": "upstream-source-154.0.8037.57-1-deb13u1-rpt1",
+    "sources": [
+      {
+        "name": "chromium_154.0.8037.57.orig-pre-gen.tar.xz",
+        "sha256": "3f42d7e0516007a88ac97e2e596ffd4f2602f0164a6ff0571a0dfafe1881d454",
+        "url": "https://github.com/sslivins/chromium-rpi-hevc/releases/download/upstream-source-154.0.8037.57-1-deb13u1-rpt1/chromium_154.0.8037.57.orig-pre-gen.tar.xz"
+      },
+      {
+        "name": "chromium_154.0.8037.57.orig.tar.xz",
+        "sha256": "d251fba87c477bc04a08dd0a7426f6373327487d878d13664477c41faed50fee",
+        "url": "https://github.com/sslivins/chromium-rpi-hevc/releases/download/upstream-source-154.0.8037.57-1-deb13u1-rpt1/chromium_154.0.8037.57.orig.tar.xz"
+      },
+      {
+        "name": "chromium_154.0.8037.57-1~deb13u1+rpt1.debian.tar.xz",
+        "sha256": "4c5eaa0af1e775b32df1562a8f7f34b95d259646c589b816b99207780d087594",
+        "url": "https://github.com/sslivins/chromium-rpi-hevc/releases/download/upstream-source-154.0.8037.57-1-deb13u1-rpt1/chromium_154.0.8037.57-1~deb13u1%2Brpt1.debian.tar.xz"
+      }
+    ]
+  },
+  "rustup": {
+    "version": "1.28.2",
+    "url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init",
+    "sha256": "e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c"
+  },
+  "sandbox": {
+    "backend": "pi-namespace-only-when-landlock-unavailable",
+    "compatible_host_path": "/sys/firmware/devicetree/base/compatible",
+    "compatible_container_path": "/run/plurx-platform/compatible",
+    "seccomp_install_path": "/var/lib/plurx-setup/pi-worker-seccomp.json",
+    "bubblewrap_path": "/usr/bin/bwrap",
+    "moby": {
+      "version": "26.1.5",
+      "revision": "411e817ddf710ff8e08fa193da80cb78af708191",
+      "profile": "moby26-seccomp.default.json",
+      "profile_sha256": "9c1025c88ccaa517b648da571961838744ea2137f176bfe6a48b21294cae9c76",
+      "source_url": "https://raw.githubusercontent.com/moby/moby/411e817ddf710ff8e08fa193da80cb78af708191/profiles/seccomp/default.json",
+      "license": "MOBY-LICENSE",
+      "license_sha256": "7c87873291f289713ac5df48b1f2010eb6963752bbd6b530416ab99fc37914a8",
+      "notice": "MOBY-NOTICE",
+      "notice_sha256": "b40ec5b16182103ef1cd69d42a21c98369e35bd483b3973902da4807c0755446"
+    },
+    "profile": "pi-worker-seccomp.json",
+    "profile_sha256": "720e5a0bda464720a5f4b62012685d4df590c83c956efc03bd2b60e3770756c6",
+    "appended_rules": [
+      {
+        "names": [
+          "clone"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8 fixed namespace flags: SIGCHLD plus NEWNS/USER/PID/NET/IPC/UTS; no cgroup or unrelated clone flags.",
+        "args": [
+          {
+            "index": 0,
+            "value": 2080505873,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "unshare"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8 --dev devpts setup first maps namespace identity to root; exactly CLONE_NEWUSER restores requested non-root uid/gid before dropping capabilities. No other unshare flags.",
+        "args": [
+          {
+            "index": 0,
+            "value": 268435456,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "mount"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8: private tmpfs.",
+        "args": [
+          {
+            "index": 3,
+            "value": 6,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "mount"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8: private procfs.",
+        "args": [
+          {
+            "index": 3,
+            "value": 14,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "mount"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8: private devpts.",
+        "args": [
+          {
+            "index": 3,
+            "value": 10,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "mount"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8: slave recursive propagation.",
+        "args": [
+          {
+            "index": 3,
+            "value": 573440,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "mount"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8: private recursive propagation.",
+        "args": [
+          {
+            "index": 3,
+            "value": 311296,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "mount"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8: newroot recursive bind.",
+        "args": [
+          {
+            "index": 3,
+            "value": 3236810752,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "mount"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8: recursive bind of allowlisted bootstrap/libraries and basic devices.",
+        "args": [
+          {
+            "index": 3,
+            "value": 53248,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "mount"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap 0.8 bind remount: require SILENT/BIND/REMOUNT/NOSUID; only inherited RDONLY/NODEV/NOEXEC/NOATIME/NODIRATIME/RELATIME may vary.",
+        "args": [
+          {
+            "index": 3,
+            "value": 18446744073707451378,
+            "valueTwo": 36898,
+            "op": "SCMP_CMP_MASKED_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "umount2"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap pivot-root teardown: MNT_DETACH only.",
+        "args": [
+          {
+            "index": 1,
+            "value": 2,
+            "op": "SCMP_CMP_EQ"
+          }
+        ]
+      },
+      {
+        "names": [
+          "pivot_root"
+        ],
+        "action": "SCMP_ACT_ALLOW",
+        "includes": {
+          "arches": [
+            "arm64"
+          ]
+        },
+        "comment": "Pi bubblewrap filesystem root construction; kernel requires namespace-local SYS_ADMIN, dropped before worker execution. Pathname pointers cannot be filtered by seccomp."
+      }
+    ],
+    "bubblewrap_audit": {
+      "version": "0.8.0",
+      "revision": "4ab175fe6d3a4053444b04d805a6d686f53455b9",
+      "source_url": "https://raw.githubusercontent.com/containers/bubblewrap/4ab175fe6d3a4053444b04d805a6d686f53455b9/bubblewrap.c",
+      "source_sha256": "ac0c67ec07c220c419d64dc100e16650f3d7cccb221285f523613ab88755f6eb",
+      "bind_mount_source_url": "https://raw.githubusercontent.com/containers/bubblewrap/4ab175fe6d3a4053444b04d805a6d686f53455b9/bind-mount.c",
+      "bind_mount_source_sha256": "488847bd99903180499909dc408913265f632d36356f2621b89708aade876d80",
+      "identity_restoration": "--dev requires devpts; for non-root caller the first namespace maps uid/gid zero, then unshare(CLONE_NEWUSER) restores requested identity before final capability drop."
+    }
+  }
+}

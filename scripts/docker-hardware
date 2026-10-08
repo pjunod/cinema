@@ -11,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 class HardwareError(ValueError):
@@ -178,18 +179,64 @@ def gpu_overlay(service: dict, *, dri: Path, nvidia: bool) -> dict:
     return {"services": {"plurxd": additions}}
 
 
+def resolved_compose_inputs() -> tuple[dict[str, str], dict]:
+    """Use Compose itself for interpolation, including pre-2.27 clients."""
+    try:
+        text = run("docker", "compose", "config", "--environment")
+    except HardwareError as error:
+        if "unknown flag: --environment" not in str(error).lower():
+            raise
+        # Older Compose cannot print its interpolation environment. A throwaway
+        # service makes the relevant values observable through supported JSON
+        # config output instead. It is never part of the deployment overlay.
+        name = "plurx-hardware-environment-probe"
+        probe = {
+            "services": {
+                name: {
+                    "image": "scratch",
+                    "labels": {
+                        "COMPOSE_FILE": "${COMPOSE_FILE:-}",
+                        "COMPOSE_PATH_SEPARATOR": "${COMPOSE_PATH_SEPARATOR:-}",
+                        "PLURX_DOCKER_GPU": "${PLURX_DOCKER_GPU:-auto}",
+                    },
+                }
+            }
+        }
+        directory = Path.cwd()
+        # The first probe stays in the deployment directory, retaining its .env.
+        # The second uses the selected base first, retaining any project .env too.
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", prefix=".plurx-hardware-probe-", dir=directory
+        ) as temporary:
+            json.dump(probe, temporary)
+            temporary.flush()
+            initial = json.loads(
+                run("docker", "compose", "-f", temporary.name, "config", "--format", "json")
+            )
+            environment = initial.get("services", {}).get(name, {}).get("labels", {})
+            if not isinstance(environment, dict):
+                raise HardwareError("Compose did not resolve hardware environment labels")
+            files = compose_files(environment, directory)
+            arguments = ["docker", "compose"]
+            for filename in files:
+                arguments.extend(("-f", filename))
+            arguments.extend(("-f", temporary.name, "config", "--format", "json"))
+            document = json.loads(run(*arguments))
+            resolved = document.get("services", {}).pop(name, {}).get("labels", {})
+            if not isinstance(resolved, dict) or "PLURX_DOCKER_GPU" not in resolved:
+                raise HardwareError("Compose did not resolve hardware mode")
+            return resolved, document
+    environment = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    return environment, json.loads(run("docker", "compose", "config", "--format", "json"))
+
+
 def prepare(output: Path) -> str:
     # Ask Compose for precedence, rather than implementing an .env parser.
-    environment = dict(
-        line.split("=", 1)
-        for line in run("docker", "compose", "config", "--environment").splitlines()
-        if "=" in line
-    )
+    environment, document = resolved_compose_inputs()
     mode = environment.get("PLURX_DOCKER_GPU", "auto")
     if mode not in ("auto", "manual"):
         raise HardwareError("PLURX_DOCKER_GPU must be auto or manual")
     files = compose_files(environment, Path.cwd())
-    document = json.loads(run("docker", "compose", "config", "--format", "json"))
     service = document.get("services", {}).get("plurxd")
     if not isinstance(service, dict):
         raise HardwareError("resolved Compose configuration has no plurxd service")

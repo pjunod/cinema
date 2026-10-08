@@ -59,6 +59,30 @@ class PiPlayerTests(unittest.TestCase):
                     player.install(args)
                 self.assertEqual(desktop.read_text(), 'unrelated application')
 
+    def test_autostart_owned_entry_is_verified_and_removed_without_profile_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            with patch.object(Path, 'home', return_value=home), contextlib.redirect_stdout(io.StringIO()):
+                args = types.SimpleNamespace(url='http://localhost:32400', chromium=sys.executable, dry_run=False, autostart=True)
+                player.install(args)
+                autostart = player.autostart_path()
+                self.assertEqual(autostart.read_text(), player.locations()[1].read_text())
+                original = autostart.read_text()
+                autostart.write_text(original + '# user change\n')
+                with self.assertRaises(ValueError):
+                    player.uninstall(args)
+                autostart.write_text(original)
+                profile = player.locations()[0] / 'profile'
+                profile.mkdir()
+                (profile / 'login').write_text('retained')
+                player.uninstall(args)
+                self.assertFalse(autostart.exists())
+                self.assertEqual((profile / 'login').read_text(), 'retained')
+                autostart.write_text('another app')
+                with self.assertRaises(ValueError):
+                    player.install(args)
+                self.assertEqual(autostart.read_text(), 'another app')
+
     def test_dry_run_and_symlink_refusal(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory).resolve()
