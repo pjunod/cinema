@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -35,6 +36,7 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+@lru_cache(maxsize=4096)
 def git_bytes(commit, path):
     r.sha(commit)
     r.require(isinstance(path, str) and path and not path.startswith('/')
@@ -46,8 +48,9 @@ def git_bytes(commit, path):
     return result.stdout
 
 
+@lru_cache(maxsize=256)
 def changed(before, after):
-    return set(subprocess.check_output(
+    return frozenset(subprocess.check_output(
         ['git', 'diff', '--name-only', r.sha(before), r.sha(after)], text=True).splitlines())
 
 
@@ -71,9 +74,33 @@ def log_outcomes(log, format_name):
     outcomes = {}
     log = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', log, flags=re.M)
     if format_name == 'rust':
-        rows = re.findall(r'^test (\S+) \.\.\. (ok|FAILED|ignored)(?:\s|$)', log, re.M)
+        rows = re.findall(r'^test (.+?) \.\.\. (ok|FAILED|ignored)(?:\s|,|$)', log, re.M)
         rows = [(name, {'ok': 'pass', 'FAILED': 'fail', 'ignored': 'ignored'}[status])
                 for name, status in rows]
+    elif format_name == 'rust-serial':
+        summaries = list(re.finditer(r'^test result: (ok|FAILED)\. (\d+) passed; '
+                                     r'(\d+) failed; (\d+) ignored;', log, re.M))
+        r.require(summaries, 'Serial Rust harness summary missing')
+        rows = []
+        cursor = 0
+        for summary in summaries:
+            block = log[cursor:summary.start()]
+            frames = list(re.finditer(r'^test (.+?) \.\.\. ', block, re.M))
+            observed = []
+            for index, frame in enumerate(frames):
+                end = frames[index + 1].start() if index + 1 < len(frames) else len(block)
+                statuses = re.findall(r'^(ok|FAILED|ignored)(?:,.*)?$', block[frame.end():end], re.M)
+                r.require(len(statuses) == 1, 'Ambiguous or missing serial Rust outcome')
+                observed.append((frame[1], {'ok': 'pass', 'FAILED': 'fail', 'ignored': 'ignored'}[statuses[0]]))
+            counts = tuple(sum(value == outcome for _, value in observed)
+                           for outcome in ('pass', 'fail', 'ignored'))
+            expected = tuple(int(summary[index]) for index in (2, 3, 4))
+            r.require(counts == expected and (summary[1] == 'ok') == (expected[1] == 0),
+                      'Serial Rust named outcomes contradict harness summary')
+            rows.extend(observed)
+            cursor = summary.end()
+        r.require(not re.search(r'^test .+? \.\.\. ', log[cursor:], re.M),
+                  'Serial Rust trailing execution lacks terminal summary')
     elif format_name == 'xctest':
         rows = re.findall(r"Test Case '-\[([^ ]+) ([^]]+)\]' (passed|failed|skipped)", log)
         rows = [(name + '/' + method, {'passed': 'pass', 'failed': 'fail', 'skipped': 'ignored'}[status])
@@ -209,6 +236,10 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                 r.require(isinstance(outcomes, dict) and outcomes and set(outcomes) <= set(ids),
                           'Unknown actual unit outcome')
                 raw_log = decoded_log(record['log'])
+                if record['format'] == 'rust-serial':
+                    r.require(re.search(r'--exact(?:\s|$)|--test-threads(?:=| )1(?:\s|$)',
+                                        origin['command']),
+                              'Split Rust outcomes require actual serial or exact execution')
                 actual_outcomes = log_outcomes(raw_log, record['format'])
                 if aggregate and sequence == aggregate['baseline_sequence']:
                     r.require(record['format'] in {'gradle-summary', 'instrumentation-summary'},

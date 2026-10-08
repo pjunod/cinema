@@ -130,6 +130,23 @@ class RetainedUnitCase(unittest.TestCase):
              'INSTRUMENTATION_STATUS: test=testA\nINSTRUMENTATION_STATUS_CODE: 0\n', 'instrumentation'),
              {'Tests/testA': 'pass'})
 
+    def test_serial_rust_traces_require_one_unambiguous_outcome(self):
+        text = ('running 1 test\ntest exact::id ... trace\nmore trace\nok\n'
+                '\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n')
+        self.assertEqual(retention.log_outcomes(text, 'rust-serial'), {'exact::id': 'pass'})
+        self.assertEqual(retention.log_outcomes(text.replace('\nok\n', '\nFAILED\n').replace('test result: ok. 1 passed; 0 failed;', 'test result: FAILED. 0 passed; 1 failed;'), 'rust-serial'),
+                         {'exact::id': 'fail'})
+        with self.assertRaises(receipts.ReceiptError):
+            retention.log_outcomes(text.replace('more trace', 'ok'), 'rust-serial')
+        for invalid in (text.replace('test result: ok. 1 passed; 0 failed;',
+                                     'test result: FAILED. 0 passed; 1 failed;'),
+                        text.split('test result:', 1)[0],
+                        text + 'test unfinished ... trace\n'):
+            with self.assertRaises(receipts.ReceiptError):
+                retention.log_outcomes(invalid, 'rust-serial')
+        self.assertEqual(retention.log_outcomes('test file.rs - item (line 12) ... ok\n', 'rust'),
+                         {'file.rs - item (line 12)': 'pass'})
+
     def test_live_identity_and_writer_attestation_are_required(self):
         proof = fixture()
         raw = json.dumps(proof).encode()
