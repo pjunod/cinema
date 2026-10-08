@@ -24,7 +24,16 @@ def load_package_script():
     return module
 
 
-def prepare(archive, output, jobs):
+def load_dependency_offers():
+    path = Path(__file__).with_name("macos-video-dependency-offers.py")
+    loader = importlib.machinery.SourceFileLoader("mac_video_dependency_offers", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def prepare(archive, output, jobs, dependency_source=None):
     package = load_package_script()
     if package.digest(archive) != package.SOURCE_SHA256:
         raise ValueError("source archive checksum mismatch")
@@ -89,6 +98,59 @@ def prepare(archive, output, jobs):
         p.chmod(0o755)
     (tools / "nproc").write_text(f"#!/bin/sh\nprintf '%s\\n' '{jobs}'\n")
     (tools / "nproc").chmod(0o755)
+    dependency_facts = None
+    if dependency_source is not None:
+        offers = load_dependency_offers()
+        dependency_facts = offers.stage_offers(dependency_source, output / "dependency-source-inputs")
+        retained_helpers = output / "extraction-helpers"
+        retained_helpers.mkdir()
+        for name in ("macos-video-dependency-offers.py", "macos-video-dependency-sources.json"):
+            shutil.copyfile(Path(__file__).with_name(name), retained_helpers / name)
+        # Keep the standard pinned recipes; replace only their fetch/extraction
+        # operations with verified source offers. No synthetic .git is created.
+        import re
+        for recipe in sorted((source / "builder/scripts.d").rglob("*.sh")):
+            text = recipe.read_text()
+            text = re.sub(r'git-mini-clone "\$SCRIPT_REPO" "\$SCRIPT_COMMIT" ([\w-]+)',
+                          r'archive-source \1 "$SCRIPT_COMMIT" \1', text)
+            for role in ("x265", "svtav1"):
+                text = text.replace('git clone "$SCRIPT_REPO" ' + role + '\n    cd ' + role + '\n    git checkout "$SCRIPT_COMMIT"',
+                                    'archive-source ' + role + ' "$SCRIPT_COMMIT" ' + role + '\n    cd ' + role)
+            text = text.replace('retry-tool sh -c "rm -rf lame && svn checkout \'${SCRIPT_REPO}@${SCRIPT_REV}\' lame"',
+                                'archive-source lame "$SCRIPT_REV" lame')
+            text = text.replace('git submodule update --init --recursive', ': # verified retained submodules extracted with source')
+            recipe.write_text(text)
+        # The exact file name is pinned in the source, but keep discovery robust
+        # to its numeric prefix without changing the selected source identity.
+        for recipe in (source / "builder/images/macos").glob("*.sh"):
+            text = recipe.read_text().replace('git clone https://github.com/glennrp/libpng.git\n  cd libpng\n  git checkout v1.6.58',
+                                            'archive-source libpng v1.6.58 libpng\n  cd libpng')
+            for name in ("gettext.tar.gz", "broti.tar.gz"):
+                text = re.sub(r'^  wget .* -O ' + re.escape(name) + r'$',
+                              '  archive-upstream ' + name, text, flags=re.MULTILINE)
+            recipe.write_text(text)
+        bindings = {}
+        for recipe in sorted((source / "builder").rglob("*.sh")):
+            text = recipe.read_text()
+            relative = str(recipe.relative_to(source))
+            roles = re.findall(r"archive-source ([\w-]+) ", text)
+            roles += re.findall(r"archive-upstream ([\w.-]+)", text)
+            if not roles:
+                continue
+            text = text.replace("archive-source ", "archive-source --recipe " + relative + " ")
+            text = text.replace("archive-upstream ", "archive-upstream --recipe " + relative + " ")
+            recipe.write_text(text)
+            bindings[relative] = {"sha256": package.digest(recipe), "roles": sorted(set(roles))}
+        (output / "dependency-recipe-bindings.json").write_text(json.dumps(bindings, indent=2, sort_keys=True) + "\n")
+        dependency_facts["recipe_bindings_sha256"] = package.digest(output / "dependency-recipe-bindings.json")
+        dependency_facts["helper_sha256"] = package.digest(retained_helpers / "macos-video-dependency-offers.py")
+        dependency_facts["policy_sha256"] = package.digest(retained_helpers / "macos-video-dependency-sources.json")
+        fetch = tools / "archive-source"
+        fetch.write_text('#!/bin/sh\nexec python3 "${PLURX_BUILD_ROOT:?}/extraction-helpers/macos-video-dependency-offers.py" --root "$PLURX_BUILD_ROOT" "$@"\n')
+        fetch.chmod(0o755)
+        upstream = tools / "archive-upstream"
+        upstream.write_text('#!/bin/sh\nexec python3 "${PLURX_BUILD_ROOT:?}/extraction-helpers/macos-video-dependency-offers.py" --root "$PLURX_BUILD_ROOT" --upstream "$@"\n')
+        upstream.chmod(0o755)
     entry = output / "build.sh"
     entry.write_text('#!/bin/bash\nset -euo pipefail\nPLURX_BUILD_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexport PLURX_BUILD_ROOT\nexport PATH="$PLURX_BUILD_ROOT/bin:$PATH"\nexport ACLOCAL_PATH="$PLURX_BUILD_ROOT/prefix/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"\nfor tool in wget git cmake meson ninja pkg-config autoconf automake libtoolize glibtoolize nasm timeout shuf makeinfo; do\n    command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }\ndone\nxcrun -sdk macosx metal -v\nexec /bin/bash "$PLURX_BUILD_ROOT/source/builder/buildmac.sh"\n')
     entry.chmod(0o755)
@@ -100,6 +162,8 @@ def prepare(archive, output, jobs):
                           "color": "P5 IPT-PQ-C2; no generic default color",
                           "bwdif": "Metal shader parameter buffer index 0"},
              "qualification": "source-prepared-only", "jobs": jobs}
+    if dependency_facts is not None:
+        facts["dependency_source_inputs"] = dependency_facts
     (output / "prepared-source.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
     return facts
 
@@ -109,10 +173,11 @@ def main():
     parser.add_argument("--source-archive", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--dependency-source", type=Path, help="Verified pinned dependency source-offer directory; no Git metadata reconstruction")
     args = parser.parse_args()
     if not 1 <= args.jobs <= 8:
         parser.error("jobs must be between 1 and 8")
-    print(json.dumps(prepare(args.source_archive, args.output, args.jobs), sort_keys=True))
+    print(json.dumps(prepare(args.source_archive, args.output, args.jobs, args.dependency_source), sort_keys=True))
 
 
 if __name__ == "__main__":

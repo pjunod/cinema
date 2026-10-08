@@ -133,7 +133,7 @@ def verify_bwdif_metal_binding(source):
     return int(host_indices[0])
 
 
-def retain_compiled_source(prepared, evidence):
+def retain_compiled_source(prepared, evidence, historical_lineage=None):
     """Retain exact local patch inputs and every built dependency's source."""
     verify_bwdif_metal_binding(prepared / "source")
     manifest = json.loads((prepared / "prepared-source.json").read_text())
@@ -162,6 +162,17 @@ def retain_compiled_source(prepared, evidence):
         target = recipes / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
+    if "dependency_source_inputs" in manifest or historical_lineage is not None:
+        import importlib.machinery
+        import importlib.util
+        helper = Path(__file__).with_name("macos-video-dependency-offers.py")
+        loader = importlib.machinery.SourceFileLoader("dependency_offers", str(helper))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        closure = (module.retain_historical_build(prepared, evidence, historical_lineage)
+                   if historical_lineage is not None else module.retain_archive_build(prepared, evidence))
+        return {"local_patches": retained, "contract": manifest["contract"], **closure}
     offers = evidence / "dependency-source"
     offers.mkdir()
     facts = {}
@@ -290,11 +301,15 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="new private package directory")
     parser.add_argument("--archive", type=Path, help="checksum-verified local official binary archive")
     parser.add_argument("--source-archive", type=Path, help="checksum-verified local pinned source archive")
+    parser.add_argument("--historical-build-lineage", type=Path,
+                        help="Explicit hash-bound historical archive/helper/log closure; no synthetic consumption receipt")
     parser.add_argument("--prepared-build", type=Path,
                         help="completed private source build from prepare-macos-video-ffmpeg")
     parser.add_argument("--source-parser-package", type=Path,
                         help="explicit pinned parser package; companion is copied beside ffprobe")
     args = parser.parse_args()
+    if args.historical_build_lineage is not None and args.prepared_build is None:
+        parser.error("historical lineage requires a completed prepared build")
     if platform.system() != "Darwin" or platform.machine() not in ARCHIVES:
         parser.error("native arm64 or x86_64 macOS is required")
     output = args.output
@@ -378,7 +393,7 @@ def main():
                             "Private candidate: redistribution dependency-source/license closure remains required"],
         }
         if args.prepared_build:
-            receipt["compiled_source"] = retain_compiled_source(args.prepared_build, evidence)
+            receipt["compiled_source"] = retain_compiled_source(args.prepared_build, evidence, args.historical_build_lineage)
             receipt.pop("binary_archive_url")
             receipt.pop("binary_archive_sha256")
             receipt["checksum_authority"] = "pinned source and local compiled binary digests"
