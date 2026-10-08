@@ -2463,15 +2463,31 @@ mod tests {
         let prepared = prepare_corpus(root.path(), &corpus, &token)
             .await
             .expect("prepare clean private corpus");
-        assert_eq!(
-            prepared
-                .directory
-                .child_names(8)
-                .await
-                .expect("list prepared corpus files")
-                .len(),
-            4
-        );
+        let expected: std::collections::BTreeSet<String> =
+            ["manifest.json".to_owned(), "burn.ass".to_owned()]
+                .into_iter()
+                .chain(
+                    corpus
+                        .fixtures
+                        .iter()
+                        .map(|fixture| format!("{}.mp4", fixture.sha256)),
+                )
+                .chain(
+                    EXTENSION_MEDIA
+                        .iter()
+                        .chain(live::MEDIA.iter())
+                        .chain(p5::MEDIA.iter())
+                        .map(|(_, bytes)| format!("{}.mp4", digest(bytes))),
+                )
+                .collect();
+        let actual: std::collections::BTreeSet<String> = prepared
+            .directory
+            .child_names(expected.len() + 1)
+            .await
+            .expect("list exact shipped corpus files")
+            .into_iter()
+            .collect();
+        assert_eq!(actual, expected);
         let name = format!("{}.mp4", corpus.fixtures[0].sha256);
         prepared
             .directory
