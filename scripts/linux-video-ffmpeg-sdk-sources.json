@@ -4703,13 +4703,7 @@
           {
             "cwd": "source",
             "argv": [
-              "./autogen.sh"
-            ]
-          },
-          {
-            "cwd": "source",
-            "argv": [
-              "./configure",
+              "./autogen.sh",
               "--prefix={sdk}",
               "--disable-static",
               "--disable-maintainer-mode",
@@ -4934,12 +4928,6 @@
       "generator": {
         "source_root": "libiconv-1.19",
         "commands": [
-          {
-            "cwd": "source",
-            "argv": [
-              "./autogen.sh"
-            ]
-          },
           {
             "cwd": "source",
             "argv": [
@@ -6262,6 +6250,564 @@
           }
         }
       }
+    },
+    "nettle-dev": {
+      "archive": "nettle-dev_3.8.1-2_amd64.deb",
+      "archive_sha256": "aa8e4331a974f00db23a14389c67dfe66bc359b09b6c2dbfe555230942feb6be",
+      "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle-dev_3.8.1-2_amd64.deb",
+      "version": "3.8.1-2",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "nettle",
+        "version": "3.8.1-2",
+        "files": {
+          "nettle_3.8.1-2.dsc": {
+            "sha256": "a437e204da67612efb656cab354835f358b44c077c5c0a46d6e8c30b5c0bddff",
+            "bytes": 2274,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1-2.dsc"
+          },
+          "nettle_3.8.1.orig.tar.gz": {
+            "sha256": "364f3e2b77cd7dcde83fd7c45219c834e54b0c75e428b6f894a23d12dd41cbfe",
+            "bytes": 2406251,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1.orig.tar.gz"
+          },
+          "nettle_3.8.1.orig.tar.gz.asc": {
+            "sha256": "71fe31c44728fdc144cbf12f30ca5d483992c17fd23afabe58f89d4201f66ddb",
+            "bytes": 573,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1.orig.tar.gz.asc"
+          },
+          "nettle_3.8.1-2.debian.tar.xz": {
+            "sha256": "8f1eae9c6afffe545de294140f33d53352261478268dafee5ef72d840e1b3d7b",
+            "bytes": 23396,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1-2.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libnettle8": {
+      "archive": "libnettle8_3.8.1-2_amd64.deb",
+      "archive_sha256": "45922e6e289ffd92f0f92d2bb9159e84236ff202d552a461bf10e5335b3f0261",
+      "url": "https://deb.debian.org/debian/pool/main/n/nettle/libnettle8_3.8.1-2_amd64.deb",
+      "version": "3.8.1-2",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "nettle",
+        "version": "3.8.1-2",
+        "files": {
+          "nettle_3.8.1-2.dsc": {
+            "sha256": "a437e204da67612efb656cab354835f358b44c077c5c0a46d6e8c30b5c0bddff",
+            "bytes": 2274,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1-2.dsc"
+          },
+          "nettle_3.8.1.orig.tar.gz": {
+            "sha256": "364f3e2b77cd7dcde83fd7c45219c834e54b0c75e428b6f894a23d12dd41cbfe",
+            "bytes": 2406251,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1.orig.tar.gz"
+          },
+          "nettle_3.8.1.orig.tar.gz.asc": {
+            "sha256": "71fe31c44728fdc144cbf12f30ca5d483992c17fd23afabe58f89d4201f66ddb",
+            "bytes": 573,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1.orig.tar.gz.asc"
+          },
+          "nettle_3.8.1-2.debian.tar.xz": {
+            "sha256": "8f1eae9c6afffe545de294140f33d53352261478268dafee5ef72d840e1b3d7b",
+            "bytes": 23396,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1-2.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libhogweed6": {
+      "archive": "libhogweed6_3.8.1-2_amd64.deb",
+      "archive_sha256": "ed8185c28b2cb519744a5a462dcd720d3b332c9b88a1d0002eac06dc8550cb94",
+      "url": "https://deb.debian.org/debian/pool/main/n/nettle/libhogweed6_3.8.1-2_amd64.deb",
+      "version": "3.8.1-2",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "nettle",
+        "version": "3.8.1-2",
+        "files": {
+          "nettle_3.8.1-2.dsc": {
+            "sha256": "a437e204da67612efb656cab354835f358b44c077c5c0a46d6e8c30b5c0bddff",
+            "bytes": 2274,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1-2.dsc"
+          },
+          "nettle_3.8.1.orig.tar.gz": {
+            "sha256": "364f3e2b77cd7dcde83fd7c45219c834e54b0c75e428b6f894a23d12dd41cbfe",
+            "bytes": 2406251,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1.orig.tar.gz"
+          },
+          "nettle_3.8.1.orig.tar.gz.asc": {
+            "sha256": "71fe31c44728fdc144cbf12f30ca5d483992c17fd23afabe58f89d4201f66ddb",
+            "bytes": 573,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1.orig.tar.gz.asc"
+          },
+          "nettle_3.8.1-2.debian.tar.xz": {
+            "sha256": "8f1eae9c6afffe545de294140f33d53352261478268dafee5ef72d840e1b3d7b",
+            "bytes": 23396,
+            "url": "https://deb.debian.org/debian/pool/main/n/nettle/nettle_3.8.1-2.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libtasn1-6-dev": {
+      "archive": "libtasn1-6-dev_4.19.0-2+deb12u1_amd64.deb",
+      "archive_sha256": "7fec7d9df23aa7de25a36c5752cefd8d1e45fbfa0889150de9384281a4329bf7",
+      "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6-dev_4.19.0-2+deb12u1_amd64.deb",
+      "version": "4.19.0-2+deb12u1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "libtasn1-6",
+        "version": "4.19.0-2+deb12u1",
+        "files": {
+          "libtasn1-6_4.19.0-2+deb12u1.dsc": {
+            "sha256": "54eabe8526f590a52771d99ce8c592d3edd549e98d84ea6649db473d528cc6ec",
+            "bytes": 2694,
+            "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0-2+deb12u1.dsc"
+          },
+          "libtasn1-6_4.19.0.orig.tar.gz": {
+            "sha256": "1613f0ac1cf484d6ec0ce3b8c06d56263cc7242f1c23b30d82d23de345a63f7a",
+            "bytes": 1786576,
+            "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0.orig.tar.gz"
+          },
+          "libtasn1-6_4.19.0.orig.tar.gz.asc": {
+            "sha256": "8410c0c004f3509c218a98b276b3308b9c46f48068e8b1a6d9ebfd61ea9f357a",
+            "bytes": 228,
+            "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0.orig.tar.gz.asc"
+          },
+          "libtasn1-6_4.19.0-2+deb12u1.debian.tar.xz": {
+            "sha256": "878db2aeeb04e43a70750480a4f17498b7ed46fb5fe433acb6721b3e6d38088c",
+            "bytes": 24876,
+            "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0-2+deb12u1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libtasn1-6": {
+      "archive": "libtasn1-6_4.19.0-2+deb12u1_amd64.deb",
+      "archive_sha256": "2c27c613b69be248d09432839ea3d3382f6ee27fabaa65987aa2d884cd00afda",
+      "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0-2+deb12u1_amd64.deb",
+      "version": "4.19.0-2+deb12u1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "libtasn1-6",
+        "version": "4.19.0-2+deb12u1",
+        "files": {
+          "libtasn1-6_4.19.0-2+deb12u1.dsc": {
+            "sha256": "54eabe8526f590a52771d99ce8c592d3edd549e98d84ea6649db473d528cc6ec",
+            "bytes": 2694,
+            "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0-2+deb12u1.dsc"
+          },
+          "libtasn1-6_4.19.0.orig.tar.gz": {
+            "sha256": "1613f0ac1cf484d6ec0ce3b8c06d56263cc7242f1c23b30d82d23de345a63f7a",
+            "bytes": 1786576,
+            "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0.orig.tar.gz"
+          },
+          "libtasn1-6_4.19.0.orig.tar.gz.asc": {
+            "sha256": "8410c0c004f3509c218a98b276b3308b9c46f48068e8b1a6d9ebfd61ea9f357a",
+            "bytes": 228,
+            "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0.orig.tar.gz.asc"
+          },
+          "libtasn1-6_4.19.0-2+deb12u1.debian.tar.xz": {
+            "sha256": "878db2aeeb04e43a70750480a4f17498b7ed46fb5fe433acb6721b3e6d38088c",
+            "bytes": 24876,
+            "url": "https://deb.debian.org/debian/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0-2+deb12u1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libidn2-dev": {
+      "archive": "libidn2-dev_2.3.3-1+b1_amd64.deb",
+      "archive_sha256": "e5b3efc4d3b0ce97c7c5e4105685b5541379c8f4e47fe79a1b3ad8137a9914cc",
+      "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2-dev_2.3.3-1+b1_amd64.deb",
+      "version": "2.3.3-1+b1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "libidn2",
+        "version": "2.3.3-1",
+        "files": {
+          "libidn2_2.3.3-1.dsc": {
+            "sha256": "13865e96a0fed8dcb82767db65c946b56ed44fc1806d80d407c512ded2a83984",
+            "bytes": 2206,
+            "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2_2.3.3-1.dsc"
+          },
+          "libidn2_2.3.3.orig.tar.gz": {
+            "sha256": "f3ac987522c00d33d44b323cae424e2cffcb4c63c6aa6cd1376edacbf1c36eb0",
+            "bytes": 2116946,
+            "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2_2.3.3.orig.tar.gz"
+          },
+          "libidn2_2.3.3.orig.tar.gz.asc": {
+            "sha256": "e8f2bdce5def6c239c2cc3220e808b19b14d3f7eb3a0e14851dd5c16fc9ad0ec",
+            "bytes": 228,
+            "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2_2.3.3.orig.tar.gz.asc"
+          },
+          "libidn2_2.3.3-1.debian.tar.xz": {
+            "sha256": "b040c12276e1128394c2f84c97f7e45f340867fa9d0d0a0b9d8f043b1977db99",
+            "bytes": 15964,
+            "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2_2.3.3-1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libidn2-0": {
+      "archive": "libidn2-0_2.3.3-1+b1_amd64.deb",
+      "archive_sha256": "d50716d5824083d667427817d506b45d3f59dc77e1ca52de000f3f62d4918afa",
+      "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2-0_2.3.3-1+b1_amd64.deb",
+      "version": "2.3.3-1+b1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "libidn2",
+        "version": "2.3.3-1",
+        "files": {
+          "libidn2_2.3.3-1.dsc": {
+            "sha256": "13865e96a0fed8dcb82767db65c946b56ed44fc1806d80d407c512ded2a83984",
+            "bytes": 2206,
+            "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2_2.3.3-1.dsc"
+          },
+          "libidn2_2.3.3.orig.tar.gz": {
+            "sha256": "f3ac987522c00d33d44b323cae424e2cffcb4c63c6aa6cd1376edacbf1c36eb0",
+            "bytes": 2116946,
+            "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2_2.3.3.orig.tar.gz"
+          },
+          "libidn2_2.3.3.orig.tar.gz.asc": {
+            "sha256": "e8f2bdce5def6c239c2cc3220e808b19b14d3f7eb3a0e14851dd5c16fc9ad0ec",
+            "bytes": 228,
+            "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2_2.3.3.orig.tar.gz.asc"
+          },
+          "libidn2_2.3.3-1.debian.tar.xz": {
+            "sha256": "b040c12276e1128394c2f84c97f7e45f340867fa9d0d0a0b9d8f043b1977db99",
+            "bytes": 15964,
+            "url": "https://deb.debian.org/debian/pool/main/libi/libidn2/libidn2_2.3.3-1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libp11-kit-dev": {
+      "archive": "libp11-kit-dev_0.24.1-2_amd64.deb",
+      "archive_sha256": "f2c2ca930399e57af27cd2fcc3faba72ff355a5bc02ff70d32c5c67aed101ea4",
+      "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/libp11-kit-dev_0.24.1-2_amd64.deb",
+      "version": "0.24.1-2",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "p11-kit",
+        "version": "0.24.1-2",
+        "files": {
+          "p11-kit_0.24.1-2.dsc": {
+            "sha256": "b88a483cb9afd5556ea4ac64d5df4543123a53bf0e50d1c01454887220259a89",
+            "bytes": 2501,
+            "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/p11-kit_0.24.1-2.dsc"
+          },
+          "p11-kit_0.24.1.orig.tar.xz": {
+            "sha256": "d8be783efd5cd4ae534cee4132338e3f40f182c3205d23b200094ec85faaaef8",
+            "bytes": 838304,
+            "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/p11-kit_0.24.1.orig.tar.xz"
+          },
+          "p11-kit_0.24.1.orig.tar.xz.asc": {
+            "sha256": "48041a234bac05f70519b0d4727e78a129ea80a51baf92c7d419f80b7cbdf0ab",
+            "bytes": 833,
+            "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/p11-kit_0.24.1.orig.tar.xz.asc"
+          },
+          "p11-kit_0.24.1-2.debian.tar.xz": {
+            "sha256": "9a14085b12cfd90e76008c2809e6557224243e1daeae4fbd7fad97e4396f730f",
+            "bytes": 23332,
+            "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/p11-kit_0.24.1-2.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libp11-kit0": {
+      "archive": "libp11-kit0_0.24.1-2_amd64.deb",
+      "archive_sha256": "251330faddbf013f060fcdb41f4b0c037c8a6e89ba7c09b04bfcc4e3f0807b22",
+      "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/libp11-kit0_0.24.1-2_amd64.deb",
+      "version": "0.24.1-2",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "p11-kit",
+        "version": "0.24.1-2",
+        "files": {
+          "p11-kit_0.24.1-2.dsc": {
+            "sha256": "b88a483cb9afd5556ea4ac64d5df4543123a53bf0e50d1c01454887220259a89",
+            "bytes": 2501,
+            "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/p11-kit_0.24.1-2.dsc"
+          },
+          "p11-kit_0.24.1.orig.tar.xz": {
+            "sha256": "d8be783efd5cd4ae534cee4132338e3f40f182c3205d23b200094ec85faaaef8",
+            "bytes": 838304,
+            "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/p11-kit_0.24.1.orig.tar.xz"
+          },
+          "p11-kit_0.24.1.orig.tar.xz.asc": {
+            "sha256": "48041a234bac05f70519b0d4727e78a129ea80a51baf92c7d419f80b7cbdf0ab",
+            "bytes": 833,
+            "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/p11-kit_0.24.1.orig.tar.xz.asc"
+          },
+          "p11-kit_0.24.1-2.debian.tar.xz": {
+            "sha256": "9a14085b12cfd90e76008c2809e6557224243e1daeae4fbd7fad97e4396f730f",
+            "bytes": 23332,
+            "url": "https://deb.debian.org/debian/pool/main/p/p11-kit/p11-kit_0.24.1-2.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libmpg123-dev": {
+      "archive": "libmpg123-dev_1.31.2-1+deb12u1_amd64.deb",
+      "archive_sha256": "680252b9378ed33c71f8dd25efe9e8a43d3b0e52aa15090c78e21ef73879ff9e",
+      "url": "https://deb.debian.org/debian/pool/main/m/mpg123/libmpg123-dev_1.31.2-1+deb12u1_amd64.deb",
+      "version": "1.31.2-1+deb12u1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "mpg123",
+        "version": "1.31.2-1+deb12u1",
+        "files": {
+          "mpg123_1.31.2-1+deb12u1.dsc": {
+            "sha256": "a67b2daf33ecf2d2a720e0cd721ac44828f1edee644abac34d8022819abbbb1a",
+            "bytes": 2789,
+            "url": "https://deb.debian.org/debian/pool/main/m/mpg123/mpg123_1.31.2-1+deb12u1.dsc"
+          },
+          "mpg123_1.31.2.orig.tar.bz2": {
+            "sha256": "b17f22905e31f43b6b401dfdf6a71ed11bb7d056f68db449d70b9f9ae839c7de",
+            "bytes": 1093881,
+            "url": "https://deb.debian.org/debian/pool/main/m/mpg123/mpg123_1.31.2.orig.tar.bz2"
+          },
+          "mpg123_1.31.2.orig.tar.bz2.asc": {
+            "sha256": "c5626e0dfba78b7e5766616ad5acc90e6729510ab0d86276a25ee46bef96902a",
+            "bytes": 833,
+            "url": "https://deb.debian.org/debian/pool/main/m/mpg123/mpg123_1.31.2.orig.tar.bz2.asc"
+          },
+          "mpg123_1.31.2-1+deb12u1.debian.tar.xz": {
+            "sha256": "9fc7eeeb4be67525fb7901022955b646832f095499612672ad7c24a1b3303599",
+            "bytes": 33620,
+            "url": "https://deb.debian.org/debian/pool/main/m/mpg123/mpg123_1.31.2-1+deb12u1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libmpg123-0": {
+      "archive": "libmpg123-0_1.31.2-1+deb12u1_amd64.deb",
+      "archive_sha256": "a10ad0d59995b859797a5f20d2833672051d0b2c7dab4c71f2e79258b2e3f631",
+      "url": "https://deb.debian.org/debian/pool/main/m/mpg123/libmpg123-0_1.31.2-1+deb12u1_amd64.deb",
+      "version": "1.31.2-1+deb12u1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "mpg123",
+        "version": "1.31.2-1+deb12u1",
+        "files": {
+          "mpg123_1.31.2-1+deb12u1.dsc": {
+            "sha256": "a67b2daf33ecf2d2a720e0cd721ac44828f1edee644abac34d8022819abbbb1a",
+            "bytes": 2789,
+            "url": "https://deb.debian.org/debian/pool/main/m/mpg123/mpg123_1.31.2-1+deb12u1.dsc"
+          },
+          "mpg123_1.31.2.orig.tar.bz2": {
+            "sha256": "b17f22905e31f43b6b401dfdf6a71ed11bb7d056f68db449d70b9f9ae839c7de",
+            "bytes": 1093881,
+            "url": "https://deb.debian.org/debian/pool/main/m/mpg123/mpg123_1.31.2.orig.tar.bz2"
+          },
+          "mpg123_1.31.2.orig.tar.bz2.asc": {
+            "sha256": "c5626e0dfba78b7e5766616ad5acc90e6729510ab0d86276a25ee46bef96902a",
+            "bytes": 833,
+            "url": "https://deb.debian.org/debian/pool/main/m/mpg123/mpg123_1.31.2.orig.tar.bz2.asc"
+          },
+          "mpg123_1.31.2-1+deb12u1.debian.tar.xz": {
+            "sha256": "9fc7eeeb4be67525fb7901022955b646832f095499612672ad7c24a1b3303599",
+            "bytes": 33620,
+            "url": "https://deb.debian.org/debian/pool/main/m/mpg123/mpg123_1.31.2-1+deb12u1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libudfread-dev": {
+      "archive": "libudfread-dev_1.1.2-1_amd64.deb",
+      "archive_sha256": "46a41ce516428f9492b9d8974b1f02b5a4b4827de0aa35481de83bb4e1ee7c79",
+      "url": "https://deb.debian.org/debian/pool/main/libu/libudfread/libudfread-dev_1.1.2-1_amd64.deb",
+      "version": "1.1.2-1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "libudfread",
+        "version": "1.1.2-1",
+        "files": {
+          "libudfread_1.1.2-1.dsc": {
+            "sha256": "d2c1fad3956ca8c17cec64458a13eeb45809ab454edfc06b42d4cd44cdc8c7eb",
+            "bytes": 2020,
+            "url": "https://deb.debian.org/debian/pool/main/libu/libudfread/libudfread_1.1.2-1.dsc"
+          },
+          "libudfread_1.1.2.orig.tar.gz": {
+            "sha256": "2bf16726ac98d093156195bb049a663e07d3323e079c26912546f4e05c77bac5",
+            "bytes": 33744,
+            "url": "https://deb.debian.org/debian/pool/main/libu/libudfread/libudfread_1.1.2.orig.tar.gz"
+          },
+          "libudfread_1.1.2-1.debian.tar.xz": {
+            "sha256": "16bb8892d8317a10843dd9a18748541998878dc7a463864736d78ff55c7df8d7",
+            "bytes": 2920,
+            "url": "https://deb.debian.org/debian/pool/main/libu/libudfread/libudfread_1.1.2-1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libudfread0": {
+      "archive": "libudfread0_1.1.2-1_amd64.deb",
+      "archive_sha256": "93169ca95de3825c5ebda01db79f800fa1c5c4820ac5c760e1234e590d7b4c7b",
+      "url": "https://deb.debian.org/debian/pool/main/libu/libudfread/libudfread0_1.1.2-1_amd64.deb",
+      "version": "1.1.2-1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "libudfread",
+        "version": "1.1.2-1",
+        "files": {
+          "libudfread_1.1.2-1.dsc": {
+            "sha256": "d2c1fad3956ca8c17cec64458a13eeb45809ab454edfc06b42d4cd44cdc8c7eb",
+            "bytes": 2020,
+            "url": "https://deb.debian.org/debian/pool/main/libu/libudfread/libudfread_1.1.2-1.dsc"
+          },
+          "libudfread_1.1.2.orig.tar.gz": {
+            "sha256": "2bf16726ac98d093156195bb049a663e07d3323e079c26912546f4e05c77bac5",
+            "bytes": 33744,
+            "url": "https://deb.debian.org/debian/pool/main/libu/libudfread/libudfread_1.1.2.orig.tar.gz"
+          },
+          "libudfread_1.1.2-1.debian.tar.xz": {
+            "sha256": "16bb8892d8317a10843dd9a18748541998878dc7a463864736d78ff55c7df8d7",
+            "bytes": 2920,
+            "url": "https://deb.debian.org/debian/pool/main/libu/libudfread/libudfread_1.1.2-1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "zlib1g-dev": {
+      "archive": "zlib1g-dev_1.2.13.dfsg-1_amd64.deb",
+      "archive_sha256": "f9ce531f60cbd5df37996af9370e0171be96902a17ec2bdbd8d62038c354094f",
+      "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib1g-dev_1.2.13.dfsg-1_amd64.deb",
+      "version": "1:1.2.13.dfsg-1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "zlib",
+        "version": "1:1.2.13.dfsg-1",
+        "files": {
+          "zlib_1.2.13.dfsg-1.dsc": {
+            "sha256": "3fa1e6b2fc525062aa88207dda52fed8e045373c809d362fe8a2bfbf7cf515a8",
+            "bytes": 2399,
+            "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib_1.2.13.dfsg-1.dsc"
+          },
+          "zlib_1.2.13.dfsg.orig.tar.bz2": {
+            "sha256": "71feb7947e3c00ef125f83b79a4e529bde31171e5babe48b391f06758d1ab0a1",
+            "bytes": 1239825,
+            "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib_1.2.13.dfsg.orig.tar.bz2"
+          },
+          "zlib_1.2.13.dfsg-1.debian.tar.xz": {
+            "sha256": "f66cf3d4f2d7defcd4d1fd1fb0a11ee39f1e01b42ec7d059c9dc5c1695133c44",
+            "bytes": 15700,
+            "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib_1.2.13.dfsg-1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "zlib1g": {
+      "archive": "zlib1g_1.2.13.dfsg-1_amd64.deb",
+      "archive_sha256": "d7dd1d1411fedf27f5e27650a6eff20ef294077b568f4c8c5e51466dc7c08ce4",
+      "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb",
+      "version": "1:1.2.13.dfsg-1",
+      "configure_flags": [],
+      "consumed_by": "actual retained pkg-config dependency graph",
+      "source_offer": {
+        "package": "zlib",
+        "version": "1:1.2.13.dfsg-1",
+        "files": {
+          "zlib_1.2.13.dfsg-1.dsc": {
+            "sha256": "3fa1e6b2fc525062aa88207dda52fed8e045373c809d362fe8a2bfbf7cf515a8",
+            "bytes": 2399,
+            "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib_1.2.13.dfsg-1.dsc"
+          },
+          "zlib_1.2.13.dfsg.orig.tar.bz2": {
+            "sha256": "71feb7947e3c00ef125f83b79a4e529bde31171e5babe48b391f06758d1ab0a1",
+            "bytes": 1239825,
+            "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib_1.2.13.dfsg.orig.tar.bz2"
+          },
+          "zlib_1.2.13.dfsg-1.debian.tar.xz": {
+            "sha256": "f66cf3d4f2d7defcd4d1fd1fb0a11ee39f1e01b42ec7d059c9dc5c1695133c44",
+            "bytes": 15700,
+            "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib_1.2.13.dfsg-1.debian.tar.xz"
+          }
+        }
+      }
+    },
+    "libpciaccess-dev": {
+      "archive": "libpciaccess-dev_0.17-2_amd64.deb",
+      "archive_sha256": "3878f504d4060229c2fe0c1e573a7fdbe7f55744c948ce04e214ddb4a465e5cc",
+      "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess-dev_0.17-2_amd64.deb",
+      "version": "0.17-2",
+      "configure_flags": [],
+      "consumed_by": "pinned libdrm Meson dependency pciaccess>=0.10 required by enabled Intel; original feature preserved",
+      "source_offer": {
+        "package": "libpciaccess",
+        "version": "0.17-2",
+        "files": {
+          "libpciaccess_0.17-2.dsc": {
+            "sha256": "748486b2c15a9e70a4db39209dffa0129fdc721b9e91a3777936af64cdd545e9",
+            "bytes": 2291,
+            "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess_0.17-2.dsc"
+          },
+          "libpciaccess_0.17.orig.tar.gz": {
+            "sha256": "bf6985a77d2ecb00e2c79da3edfb26b909178ffca3f2e9d14ed0620259ab733b",
+            "bytes": 490419,
+            "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess_0.17.orig.tar.gz"
+          },
+          "libpciaccess_0.17.orig.tar.gz.asc": {
+            "sha256": "f8eb8809b95f6bed9f5fe315d84c45b7a4c2ef2d0e3d94b942f6c76548c80cdd",
+            "bytes": 801,
+            "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess_0.17.orig.tar.gz.asc"
+          },
+          "libpciaccess_0.17-2.diff.gz": {
+            "sha256": "8cbb170711236a2d059a86fa9db72cf53a66548db3d5c3ecebcea2f6ea17e7c9",
+            "bytes": 34513,
+            "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess_0.17-2.diff.gz"
+          }
+        }
+      }
+    },
+    "libpciaccess0": {
+      "archive": "libpciaccess0_0.17-2_amd64.deb",
+      "archive_sha256": "4025f3608cf431c163efb94fdc553e7b93e16b8f0d741ea87762e19025ffc80e",
+      "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess0_0.17-2_amd64.deb",
+      "version": "0.17-2",
+      "configure_flags": [],
+      "consumed_by": "pinned libdrm Meson dependency pciaccess>=0.10 required by enabled Intel; original feature preserved",
+      "source_offer": {
+        "package": "libpciaccess",
+        "version": "0.17-2",
+        "files": {
+          "libpciaccess_0.17-2.dsc": {
+            "sha256": "748486b2c15a9e70a4db39209dffa0129fdc721b9e91a3777936af64cdd545e9",
+            "bytes": 2291,
+            "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess_0.17-2.dsc"
+          },
+          "libpciaccess_0.17.orig.tar.gz": {
+            "sha256": "bf6985a77d2ecb00e2c79da3edfb26b909178ffca3f2e9d14ed0620259ab733b",
+            "bytes": 490419,
+            "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess_0.17.orig.tar.gz"
+          },
+          "libpciaccess_0.17.orig.tar.gz.asc": {
+            "sha256": "f8eb8809b95f6bed9f5fe315d84c45b7a4c2ef2d0e3d94b942f6c76548c80cdd",
+            "bytes": 801,
+            "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess_0.17.orig.tar.gz.asc"
+          },
+          "libpciaccess_0.17-2.diff.gz": {
+            "sha256": "8cbb170711236a2d059a86fa9db72cf53a66548db3d5c3ecebcea2f6ea17e7c9",
+            "bytes": 34513,
+            "url": "https://deb.debian.org/debian/pool/main/libp/libpciaccess/libpciaccess_0.17-2.diff.gz"
+          }
+        }
+      }
     }
   },
   "distribution_index_binding": {
@@ -6278,6 +6824,17 @@
       "Version": "12.15",
       "Codename": "bookworm",
       "Date": "Sat, 11 Jul 2026 10:16:37 UTC"
+    }
+  },
+  "build_tools": {
+    "meson": {
+      "version": "1.12.1",
+      "archive": "meson-1.12.1.tar.gz",
+      "archive_sha256": "ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743",
+      "url": "https://github.com/mesonbuild/meson/releases/download/1.12.1/meson-1.12.1.tar.gz",
+      "consumed_by": "Fontconfig2.17.1 requires Meson>=1.6.1; Bookworm bootstrap1.0.1 insufficient",
+      "python_requires": ">=3.10",
+      "license_member": "meson-1.12.1/COPYING"
     }
   }
 }

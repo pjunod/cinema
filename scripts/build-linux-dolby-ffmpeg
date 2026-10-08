@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+"""Bounded build stages for the complete pinned Bookworm Jellyfin package.
+
+Run only under an explicit host/CPU lease. SDK generation is a separate step
+of prepare-linux-dolby-sdk; this command never substitutes system headers for
+missing SDK roles or labels source preparation as runtime qualification.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import time
+
+
+def load(name):
+    path = Path(__file__).with_name(name)
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def sha(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def canonical_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def validate_parser_union(source, binary, provenance):
+    union = {"archive_sha256": source["source_sha256"], "commit": source["source_commit"],
+             "local_patch_sha256": source["local_patch_sha256"],
+             "quilt_digest": canonical_digest(source["upstream_quilt"])}
+    sealed = json.loads((provenance / "manifest.json").read_text())
+    if (sealed["kind"] != "sealed-source-parser" or sealed["schema_version"] != 1
+            or sealed["source"] != union or sealed["executable_sha256"] != sha(binary)
+            or sealed["configuration_sha256"] != sha(provenance / "config.h")
+            or sealed["components_sha256"] != sha(provenance / "config_components.h")
+            or sealed["build_recipe_sha256"] != sha(provenance / "build-static-ffprobe")):
+        raise ValueError("sealed parser must bind actual bytes and the identical producer source union")
+    return union
+
+
+def elf_versions(text):
+    """Read actual GNU version definitions/needs, preserving weak semantics."""
+    section, dependency = None, None
+    definitions, needs = set(), {}
+    for line in text.splitlines():
+        if line.startswith("Version definition section"):
+            section = "definitions"
+        elif line.startswith("Version needs section"):
+            section, dependency = "needs", None
+        elif line.startswith("Version symbols section"):
+            section = None
+        if section == "definitions":
+            match = re.search(r"\bName: (\S+)", line)
+            if match:
+                definitions.add(match[1])
+        elif section == "needs":
+            match = re.search(r"\bFile: (\S+)", line)
+            if match:
+                dependency = match[1]
+            match = re.search(r"\bName: (\S+)\s+Flags: (\S+)", line)
+            if match:
+                if dependency is None:
+                    raise ValueError("ELF version requirement lacks its library role")
+                if match[2].lower() != "weak":
+                    needs.setdefault(dependency, set()).add(match[1])
+    return sorted(definitions), {name: sorted(values) for name, values in needs.items()}
+
+
+def read_facts(root):
+    facts = json.loads((root / "build-state.json").read_text())
+    if facts["recipe_sha256"] != sha(Path(__file__)):
+        raise ValueError("build stages must use the exact prepared recipe")
+    return facts
+
+
+def host():
+    if platform.system() != "Linux" or platform.machine() not in ["x86_64", "amd64"]:
+        raise ValueError("the complete package requires Bookworm amd64")
+    release = Path("/etc/os-release").read_text()
+    if 'ID=debian' not in release or 'VERSION_ID="12"' not in release:
+        raise ValueError("the complete package requires Debian12 ABI")
+
+
+def new_private_output(path):
+    if not path.is_absolute():
+        raise ValueError("output must be a new absolute private directory")
+    path = path.resolve()
+    repository = Path(__file__).resolve().parent.parent
+    if (not path.is_absolute() or path.exists() or path.is_relative_to(repository)
+            or any(path.is_relative_to(Path(prefix)) for prefix in
+                ["/Applications", "/Library", "/System", "/usr", "/opt", "/lib", "/etc"])):
+        raise ValueError("output must be a new absolute private directory")
+    return path
+
+
+def prepare(archive, sdk, root):
+    root = new_private_output(root)
+    helper = load("prepare-linux-dolby-sdk")
+    sdk_facts = helper.verified_staging(sdk)
+    if sdk_facts["state"] != "project-generators-executed":
+        raise ValueError("actual generated SDK outputs are required before configuring FFmpeg")
+    preparer = load("prepare-linux-dolby-ffmpeg")
+    preparer.prepare(archive, root)
+    source = json.loads((root / "prepared-source.json").read_text())
+    if (source["source_sha256"] != sdk_facts["source"]["archive_sha256"]
+            or source["source_commit"] != sdk_facts["source"]["commit"]
+            or source["local_patch_sha256"] != sdk_facts["source"]["required_local_patch_sha256"]
+            or source["upstream_quilt"] != sdk_facts["source"]["upstream_quilt"]):
+        raise ValueError("SDK and producer source unions differ")
+    # Keep the official prefix and every original feature token. DESTDIR in
+    # the install step contains writes without changing the configure contract.
+    configure = sdk_facts["preserved_configure"]
+    if configure[0] != "--prefix=/usr/lib/jellyfin-ffmpeg":
+        raise ValueError("unexpected official package prefix")
+    environment_recipe = root / "source/Dockerfile.in"
+    if 'ENV LDFLAGS="-Wl,--disable-new-dtags -Wl,-rpath=${TARGET_DIR}/lib -L${TARGET_DIR}/lib -lm"' not in environment_recipe.read_text():
+        raise ValueError("upstream runtime-library search contract changed")
+    facts = {"schema_version": 1, "state": "source-prepared", "sdk": str(sdk.resolve()),
+             "sdk_digest": sdk_facts["sdk_digest"], "source_offer_digest": sdk_facts["source_offer_digest"],
+             "source": source, "preserved_configure": configure,
+             "environment_recipe_sha256": sha(environment_recipe),
+             "recipe_sha256": sha(Path(__file__)), "executed_steps": {}}
+    (root / "build-state.json").write_text(json.dumps(facts, indent=2) + "\n")
+    return facts
+
+
+def build_step(root, step, jobs, seconds):
+    host()
+    if not 1 <= jobs <= 2 or not 1 <= seconds <= 600:
+        raise ValueError("build stages require <=2 jobs and a finite <=600s deadline")
+    root = root.resolve(strict=True)
+    facts = read_facts(root)
+    helper = load("prepare-linux-dolby-sdk")
+    sdk = Path(facts["sdk"])
+    current = helper.verified_staging(sdk)
+    if current["sdk_digest"] != facts["sdk_digest"]:
+        raise ValueError("SDK changed after source preparation")
+    for name in ["gcc", "g++", "make", "pkg-config"]:
+        actual = Path("/usr/bin") / name
+        if sha(actual) != current["generator_tool_versions"][name]["sha256"]:
+            raise ValueError("producer tool differs from the witnessed Bookworm SDK tool: " + name)
+    expected = {"configure": "source-prepared", "compile": "configured", "install": "compiled"}
+    if facts["state"] != expected[step]:
+        raise ValueError("build stage must consume its preceding successful witness")
+    attempts = root / "build-evidence" / step
+    attempts.mkdir(parents=True, exist_ok=True)
+    previous = list(attempts.iterdir())
+    if len(previous) >= 16 or any(not path.is_dir() or not re.fullmatch(r"attempt-[0-9]+", path.name) for path in previous):
+        raise ValueError("invalid or exhausted manual build-stage attempts")
+    evidence = attempts / ("attempt-" + str(len(previous) + 1))
+    evidence.mkdir()  # Explicit manual resumptions retain all failed attempts.
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(evidence), "TMPDIR": str(evidence), "LC_ALL": "C",
+           "CC": "/usr/bin/gcc", "CXX": "/usr/bin/g++",
+           "PKG_CONFIG": "/usr/bin/pkg-config --define-prefix",
+           "PKG_CONFIG_LIBDIR": os.pathsep.join(str(sdk / p) for p in
+               ["sdk/lib/pkgconfig", "sdk/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig",
+                "sdk/sysroot/usr/lib/pkgconfig", "sdk/sysroot/usr/share/pkgconfig"])}
+    deadline = time.monotonic() + seconds
+    source = root / "source"
+    if sha(source / "Dockerfile.in") != facts["environment_recipe_sha256"]:
+        raise ValueError("upstream build environment changed after source preparation")
+    # Preserve the actual original Debian build environment, not only the
+    # feature tokens shown by ffmpeg -buildconf. Its DT_RPATH is required for
+    # the private library family at the unchanged deployment prefix.
+    env["LDFLAGS"] = "-Wl,--disable-new-dtags -Wl,-rpath=/usr/lib/jellyfin-ffmpeg/lib -lm"
+    if step == "configure":
+        cflags = " ".join("-I" + str(sdk / p) for p in
+            ["sdk/include", "sdk/sysroot/usr/include", "sdk/sysroot/usr/include/x86_64-linux-gnu"])
+        ldflags = " ".join("-L" + str(sdk / p) for p in
+            ["sdk/lib", "sdk/sysroot/usr/lib/x86_64-linux-gnu"])
+        argv = [str(source / "configure"), *facts["preserved_configure"],
+                "--extra-cflags=" + cflags, "--extra-cxxflags=" + cflags,
+                "--extra-ldflags=" + env["LDFLAGS"] + " " + ldflags]
+    elif step == "compile":
+        argv = ["/usr/bin/make", "-j" + str(jobs), "V=1"]
+    else:
+        argv = ["/usr/bin/make", "DESTDIR=" + str(root / "installed"), "install"]
+    try:
+        result = helper.bounded_generator(argv, source, env, evidence / "output.log", deadline)
+        result["environment"] = env
+        facts["executed_steps"][step] = result
+        facts["state"] = {"configure": "configured", "compile": "compiled", "install": "installed"}[step]
+        if step == "configure":
+            facts["configuration_sha256"] = {p: sha(source / p) for p in ["config.h", "ffbuild/config.mak"]}
+        (root / "build-state.json").write_text(json.dumps(facts, indent=2) + "\n")
+    except Exception as error:
+        (evidence / "failure.json").write_text(json.dumps({"error": str(error), "argv": argv,
+            "state": facts["state"], "runtime_qualification": False}, indent=2) + "\n")
+        raise
+    return facts
+
+
+def assemble(root, parser_binary, parser_provenance, output):
+    """Assemble only real installed outputs and a source-matched sealed parser."""
+    host()
+    facts = read_facts(root)
+    output = new_private_output(output)
+    if facts["state"] != "installed":
+        raise ValueError("packaging requires installed outputs and a new absolute output")
+    helper = load("prepare-linux-dolby-sdk")
+    sdk = Path(facts["sdk"])
+    sdk_facts = helper.verified_staging(sdk)
+    if sdk_facts["sdk_digest"] != facts["sdk_digest"]:
+        raise ValueError("SDK changed before packaging")
+    source = facts["source"]
+    union = validate_parser_union(source, parser_binary, parser_provenance)
+    native = root / "installed/usr/lib/jellyfin-ffmpeg"
+    if not (native / "bin/ffmpeg").is_file() or not (native / "bin/ffprobe").is_file():
+        raise ValueError("complete upstream installed executables are missing")
+    output.mkdir(parents=True)
+    runtime_objects, imports = {}, {}
+    try:
+        (output / "lib").mkdir()
+        for name in ["ffmpeg", "ffprobe"]:
+            shutil.copy2(native / "bin" / name, output / name)
+        shutil.copy2(parser_binary, output / "sealed-ffprobe")
+        # In-tree libav objects always come from the actual modified build.
+        # Official FFmpeg libav images were deliberately excluded from the SDK.
+        for origin, base, rebuilt in [(native / "lib", native / "lib", True),
+                                      (sdk / "sdk/lib", sdk / "sdk/lib", False)]:
+            for path in sorted(origin.rglob("*")):
+                if not path.is_file():
+                    continue
+                resolved = path.resolve(strict=True)
+                if not resolved.is_relative_to(base.resolve(strict=True)):
+                    raise ValueError("library link escaped its exact source output")
+                data = resolved.read_bytes()
+                if not data.startswith(b"\x7fELF"):
+                    continue
+                is_ffmpeg = helper.ffmpeg_owned_library(path.name)
+                if rebuilt != is_ffmpeg:
+                    raise ValueError("rebuilt FFmpeg and official external library roles overlap")
+                rel = path.relative_to(base)
+                target = output / "lib" / rel
+                if target.exists():
+                    raise ValueError("runtime output collision")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                target.chmod(path.stat().st_mode & 0o777)
+                value = sha(target)
+                if path.name in runtime_objects and runtime_objects[path.name] != value:
+                    raise ValueError("ambiguous runtime ELF basename")
+                runtime_objects[path.name] = value
+                imports[str(Path("lib") / rel)] = {"sha256": value,
+                    "role": "rebuilt-ffmpeg" if rebuilt else "official-external-import"}
+        for family in ["libavcodec", "libavfilter", "libavformat", "libavutil"]:
+            if not any(name.startswith(family + ".so") for name in runtime_objects):
+                raise ValueError("complete rebuilt FFmpeg runtime family is missing")
+        provenance = output / "provenance"
+        provenance.mkdir()
+        shutil.copytree(root / "source-offer", provenance / "source-offer")
+        shutil.copytree(sdk / "provenance", provenance / "sdk")
+        shutil.copytree(parser_provenance, provenance / "sealed-parser")
+        shutil.copytree(root / "build-evidence", provenance / "build-evidence")
+        shutil.copy2(root / "prepared-source.json", provenance / "prepared-source.json")
+        shutil.copy2(root / "build-state.json", provenance / "build-state.json")
+        shutil.copy2(Path(__file__), provenance / "build-linux-dolby-ffmpeg")
+        for name in ["COPYING.GPLv2", "COPYING.GPLv3", "COPYING.LGPLv2.1", "COPYING.LGPLv3", "LICENSE.md"]:
+            shutil.copy2(root / "source" / name, provenance / name)
+        for name in ["config.h", "ffbuild/config.mak"]:
+            if sha(root / "source" / name) != facts["configuration_sha256"][name]:
+                raise ValueError("configuration changed after its actual configure witness")
+            shutil.copy2(root / "source" / name, provenance / Path(name).name)
+        capsule = {"schema_version": 1, "source": union,
+                   "executables": {"ffmpeg_sha256": sha(output / "ffmpeg"),
+                       "ffprobe_sha256": sha(output / "ffprobe"),
+                       "sealed_parser_sha256": sha(output / "sealed-ffprobe")},
+                   "sdk_digest": facts["sdk_digest"], "source_offer_digest": facts["source_offer_digest"],
+                   "preserved_configure": facts["preserved_configure"],
+                   "runtime_objects": runtime_objects, "distributed_objects": imports,
+                   "runtime_qualification": False,
+                   "remaining": "actual ELF ABI/import closure and complete physical-backend runtime qualification"}
+        # No runtime capsule is published until the actual ELF dependency
+        # closure witness is complete. Assembly by itself is not admission.
+        (provenance / "pending-linux-dolby-package.json").write_text(json.dumps(capsule, indent=2) + "\n")
+        return capsule
+    except Exception:
+        # Preserve the attempted output for diagnosis; a pending capsule cannot
+        # be mistaken for the shipping filename consumed by runtime discovery.
+        raise
+
+
+def verify_closure(package, seconds):
+    """Publish the runtime capsule only after a real static ELF closure audit."""
+    host()
+    if not 1 <= seconds <= 600:
+        raise ValueError("ELF audit requires a finite <=600s deadline")
+    package = package.resolve(strict=True)
+    provenance = package / "provenance"
+    pending = provenance / "pending-linux-dolby-package.json"
+    facts = json.loads(pending.read_text())
+    for name, key in [("ffmpeg", "ffmpeg_sha256"), ("ffprobe", "ffprobe_sha256"),
+                      ("sealed-ffprobe", "sealed_parser_sha256")]:
+        if sha(package / name) != facts["executables"][key]:
+            raise ValueError("distributed executable changed before ELF audit")
+    for relative, row in facts["distributed_objects"].items():
+        if sha(package / relative) != row["sha256"]:
+            raise ValueError("distributed ELF object changed before audit")
+    helper = load("prepare-linux-dolby-sdk")
+    evidence = provenance / "elf-audit"
+    evidence.mkdir()  # A failed audit remains distinct from a new attempt.
+    deadline = time.monotonic() + seconds
+    environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": str(evidence)}
+    private = {}
+    for relative in facts["distributed_objects"]:
+        path = package / relative
+        private.setdefault(path.name, path)
+    pending_objects = [package / name for name in ["ffmpeg", "ffprobe", "sealed-ffprobe"]]
+    pending_objects.extend(package / name for name in facts["distributed_objects"])
+    inspected, records = set(), {}
+    try:
+        while pending_objects:
+            path = pending_objects.pop().resolve(strict=True)
+            if path in inspected:
+                continue
+            inspected.add(path)
+            if len(inspected) > 512:
+                raise ValueError("ELF closure exceeds bounded object inventory")
+            before = sha(path)
+            log = evidence / (str(len(inspected)) + ".log")
+            command = helper.bounded_generator(["/usr/bin/readelf", "-h", "-l", "-d", "-V", str(path)],
+                package, environment, log, deadline)
+            text = log.read_text()
+            if before != sha(path) or "Advanced Micro Devices X86-64" not in text:
+                raise ValueError("ELF object changed or has an incompatible machine ABI")
+            needed = re.findall(r"\(NEEDED\).*?Shared library: \[([^\]]+)\]", text)
+            definitions, version_needs = elf_versions(text)
+            required = sorted(set(needed) | set(version_needs))
+            if any("/" in name or name in [".", ".."] for name in needed):
+                raise ValueError("dependency role must be an ELF basename")
+            resolved_dependencies = {}
+            for name in required:
+                if name in private:
+                    target = private[name]
+                else:
+                    candidates = [Path(base) / name for base in
+                        ["/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu"]]
+                    target = next((candidate.resolve(strict=True) for candidate in candidates if candidate.is_file()), None)
+                    if target is None or not target.is_relative_to(Path("/usr/lib/x86_64-linux-gnu")):
+                        raise ValueError("unresolved or non-Bookworm system ELF dependency: " + name)
+                pending_objects.append(target)
+                resolved_dependencies[name] = str(target.resolve(strict=True))
+            interpreter = re.findall(r"Requesting program interpreter: ([^\]]+)\]", text)
+            if path == (package / "sealed-ffprobe").resolve() and (needed or interpreter or " DYNAMIC " in text):
+                raise ValueError("sealed parser unexpectedly depends on a dynamic executable closure")
+            for name in interpreter:
+                target = Path(name).resolve(strict=True)
+                if not target.is_relative_to(Path("/usr/lib/x86_64-linux-gnu")):
+                    raise ValueError("unexpected executable interpreter")
+                pending_objects.append(target)
+            records[str(path)] = {"sha256": before, "needed": needed, "interpreter": interpreter,
+                                  "distributed": path.is_relative_to(package), "observation": command,
+                                  "version_definitions": definitions, "version_needs": version_needs,
+                                  "resolved_dependencies": resolved_dependencies}
+        for record in records.values():
+            for name, required in record["version_needs"].items():
+                actual = records[record["resolved_dependencies"][name]]["version_definitions"]
+                if set(required) - set(actual):
+                    raise ValueError("actual ELF dependency lacks required symbol versions: " + name)
+        facts["elf_closure"] = records
+        facts["elf_audit_tool_sha256"] = sha(Path("/usr/bin/readelf"))
+        facts["remaining"] = "complete independent physical-backend runtime qualification"
+        capsule = provenance / "linux-dolby-package.json"
+        if capsule.exists():
+            raise ValueError("runtime capsule must never overwrite a preceding witness")
+        capsule.write_text(json.dumps(facts, indent=2) + "\n")
+        return facts
+    except Exception as error:
+        (evidence / "failure.json").write_text(json.dumps({"error": str(error), "inspected": records,
+            "runtime_qualification": False}, indent=2) + "\n")
+        raise
+
+
+def validate_shipping_package(package):
+    package = package.resolve(strict=True)
+    facts = json.loads((package / "provenance/linux-dolby-package.json").read_text())
+    if facts.get("schema_version") != 1 or not facts.get("elf_closure"):
+        raise ValueError("actual ELF audit capsule is required")
+    for name, key in [("ffmpeg", "ffmpeg_sha256"), ("ffprobe", "ffprobe_sha256"),
+                      ("sealed-ffprobe", "sealed_parser_sha256")]:
+        if sha(package / name) != facts["executables"][key]:
+            raise ValueError("shipping executable changed")
+    for relative, row in facts["distributed_objects"].items():
+        member = Path(relative)
+        if member.is_absolute() or ".." in member.parts:
+            raise ValueError("unsafe distributed object path")
+        actual = package / member
+        if actual.is_symlink() or sha(actual) != row["sha256"]:
+            raise ValueError("shipping runtime object changed")
+    expected = {"archive_sha256": "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140",
+                "commit": "253db2a7b0a8045c54ce68ce33d7f601229b1822",
+                "local_patch_sha256": "467cecbbf0e70a406cb6bc47130ad49cdda2d81adcdf4d6d4e2d960c5e3b9fe8"}
+    if any(facts["source"].get(k) != v for k, v in expected.items()):
+        raise ValueError("shipping source union differs from pinned producer")
+    return facts
+
+
+def install_shipping_package(package, destination):
+    validate_shipping_package(package)
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ["ffmpeg", "ffprobe"]:
+        shutil.copy2(package / name, destination / name)
+    shutil.rmtree(destination / "lib", ignore_errors=True)
+    shutil.copytree(package / "lib", destination / "lib")
+    shutil.copytree(package / "provenance", destination / "provenance", dirs_exist_ok=True)
+    shutil.copy2(package / "sealed-ffprobe", Path("/usr/local/lib/plurx/ffprobe"))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--step", required=True, choices=["prepare", "configure", "compile", "install", "assemble", "verify-closure", "docker-build", "install-shipping"])
+    parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--sdk", type=Path)
+    parser.add_argument("--source-archive", type=Path)
+    parser.add_argument("--sealed-parser", type=Path)
+    parser.add_argument("--sealed-parser-provenance", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--deadline-seconds", type=int, default=600)
+    parser.add_argument("--image", default="plurx/plurxd:latest")
+    for argument in ["PLURX_BUILD_REF", "PLURX_BUILD_SHA", "SOURCE_DATE_EPOCH"]:
+        parser.add_argument("--" + argument.lower().replace("_", "-"), default="")
+    args = parser.parse_args()
+    if args.step in ["docker-build", "install-shipping"]:
+        if args.output is None:
+            parser.error("shipping requires --output actual audited package")
+        facts = validate_shipping_package(args.output)
+        if args.step == "install-shipping":
+            if platform.machine() != "x86_64":
+                raise ValueError("Bookworm SDK shipping is amd64 only")
+            install_shipping_package(args.output, args.root)
+        else:
+            import subprocess
+            build_arguments = []
+            for argument in ["PLURX_BUILD_REF", "PLURX_BUILD_SHA", "SOURCE_DATE_EPOCH"]:
+                build_arguments.extend(["--build-arg", argument + "=" + getattr(args, argument.lower())])
+            subprocess.run(["docker", "buildx", "build", "--load", *build_arguments, "--platform", "linux/amd64",
+                "--build-context", "linux-dolby-package=" + str(args.output.resolve(strict=True)),
+                "--target", "runtime-dolby-amd64", "-t", args.image, str(args.root)], check=True,
+                timeout=args.deadline_seconds)
+    elif args.step == "prepare":
+        if args.sdk is None or args.source_archive is None:
+            parser.error("prepare requires --sdk and --source-archive")
+        facts = prepare(args.source_archive, args.sdk, args.root)
+    elif args.step == "verify-closure":
+        if args.output is None:
+            parser.error("verify-closure requires --output pointing to the assembled package")
+        facts = verify_closure(args.output, args.deadline_seconds)
+    elif args.step == "assemble":
+        if args.sealed_parser is None or args.sealed_parser_provenance is None or args.output is None:
+            parser.error("assemble requires sealed parser, its provenance, and a new output")
+        facts = assemble(args.root, args.sealed_parser, args.sealed_parser_provenance, args.output)
+    else:
+        facts = build_step(args.root, args.step, args.jobs, args.deadline_seconds)
+    print(json.dumps({"state": facts.get("state", "pending-ELF-closure"), "runtime_qualification": False}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
