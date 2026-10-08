@@ -11,7 +11,7 @@ use plurx_core::transcode::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
@@ -187,6 +187,27 @@ impl MacosVideoProbe {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    /// Integration tests inject independent node observations while the
+    /// manager remains the sole owner of the saved processing preference.
+    #[cfg(test)]
+    pub(crate) fn publish_context_for_test(&self, context: &MacosProcessingContext) {
+        fn observation(availability: MacosProcessingAvailability) -> GraphObservation {
+            match availability {
+                MacosProcessingAvailability::Available => GraphObservation::from_result(Ok(())),
+                MacosProcessingAvailability::Pending => GraphObservation::pending(),
+                MacosProcessingAvailability::Unavailable => {
+                    GraphObservation::from_result(Err(ProbeReason::GraphFailed))
+                }
+            }
+        }
+        self.publish(MacosVideoReport {
+            generation: self.snapshot().generation.saturating_add(1),
+            identity: Some(context.identity().clone()),
+            sdr_scale: observation(context.sdr_scale()),
+            hdr10_metal: observation(context.hdr10_metal()),
+        });
     }
 
     fn publish(&self, report: MacosVideoReport) -> Arc<MacosVideoReport> {
@@ -1500,11 +1521,9 @@ mod tests {
                 .unwrap(),
             SDR8
         );
-        assert!(
-            verified_source(&repaired, &corpus.fixtures[0])
-                .await
-                .is_ok()
-        );
+        assert!(verified_source(&repaired, &corpus.fixtures[0])
+            .await
+            .is_ok());
     }
 
     #[cfg(unix)]
@@ -1521,11 +1540,9 @@ mod tests {
         std::os::unix::fs::symlink(&outside, prepared.path.join(&name)).unwrap();
         let repaired = prepare_corpus(root.path(), &corpus, &token).await.unwrap();
         assert_eq!(tokio::fs::read(outside).await.unwrap(), b"leave alone");
-        assert!(
-            verified_source(&repaired, &corpus.fixtures[0])
-                .await
-                .is_ok()
-        );
+        assert!(verified_source(&repaired, &corpus.fixtures[0])
+            .await
+            .is_ok());
     }
 
     #[cfg(unix)]
