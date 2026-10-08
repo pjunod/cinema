@@ -4703,3 +4703,20 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = ".onChange(of: remoteGuideKeys)"
 test = "clients/apple/Tests/RemoteReceiverTests.swift"
 test_anchor = "testGuideOrderRefreshesWhenSameChannelsHaveNewProgrammeTimes"
+
+[[fixes]]
+id = "apple.cinema-pairing-lifetime-retirement"
+commits = ["6649ba08ffb9d64061e8bae9c2fc787227880c71"]
+source = "clients/apple/Sources/RemotePairingLifetime.swift"
+source_anchor = "ticket.generation == generation && ticket.receiverID == receiverID && ticket.target == target"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testPairingCloseAndTargetSwitchRetireLateApprovedReply"
+
+[[fixes]]
+id = "apple.cinema-null-state-means-unchanged"
+commits = []
+supplements = "apple.cinema-pairing-lifetime-retirement"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "guard let state else { return }"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testNullStateTimeoutPreservesStateUntilControllerRetirement"
