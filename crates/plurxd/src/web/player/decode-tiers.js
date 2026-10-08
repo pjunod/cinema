@@ -1821,6 +1821,7 @@ function queuePlaybackFrame(v,p,callback,renewingSeek=false){
   v.addEventListener("seeked",ready);
   ready();
 }
+const HITCH_LIFECYCLE_BOUNDARIES=new WeakMap();
 function armHitchDetector(v){
   const p=PLAYER; if(!p) return;
   p.controlHasFrameCallbacks=!!v.requestVideoFrameCallback;
@@ -1858,6 +1859,25 @@ function armHitchDetector(v){
   // callback timestamps averages out; cleared on pause/seek because a ring
   // spanning a seek measures the seek.
   const rateWin=[];
+  // Pausing normally stops rVFC altogether. Reset temporal comparisons on
+  // the actual media events rather than waiting for a paused frame callback,
+  // or resume compares against the pre-pause frame and includes the pause in
+  // realized rate. Fault counters and nominal/decode history remain intact.
+  HITCH_LIFECYCLE_BOUNDARIES.get(v)?.();
+  const resetLifecycleWindow=()=>{
+    if(PLAYER!==p||document.getElementById("video")!==v){removeLifecycleBoundary();return;}
+    prev=null;rateWin.length=0;
+    p.hitches.rate=null;p.hitches.renderedFps=null;
+  };
+  const removeLifecycleBoundary=()=>{
+    v.removeEventListener("pause",resetLifecycleWindow);
+    v.removeEventListener("play",resetLifecycleWindow);
+    if(HITCH_LIFECYCLE_BOUNDARIES.get(v)===removeLifecycleBoundary)
+      HITCH_LIFECYCLE_BOUNDARIES.delete(v);
+  };
+  HITCH_LIFECYCLE_BOUNDARIES.set(v,removeLifecycleBoundary);
+  v.addEventListener("pause",resetLifecycleWindow);
+  v.addEventListener("play",resetLifecycleWindow);
   const noteRate=(now, mediaTime, pf, h)=>{
     // A ring that spans a timeline discontinuity measures the discontinuity.
     // Pause and seek are cleared by the caller, but a SESSION REPLACEMENT is
@@ -1896,7 +1916,7 @@ function armHitchDetector(v){
     // PLAYER and starts recording another stream's frames as this one's. A
     // prepared switch keeps the same PLAYER while changing the video element;
     // only the element that now owns the picture may report a hitch.
-    if(PLAYER!==p||document.getElementById("video")!==v) return;
+    if(PLAYER!==p||document.getElementById("video")!==v){removeLifecycleBoundary();return;}
     if(!playbackOwnsAttachedMedia(p)){
       prev=null;rateWin.length=0;
       queuePlaybackFrame(v,p,step);return;
