@@ -1240,6 +1240,7 @@ paths = [
   "scripts/macos-video-dependency-sources.json",
   "scripts/macos-video-ffmpeg-patches/**",
   "scripts/prepare-linux-dolby-ffmpeg",
+  "scripts/prepare-linux-dolby-sdk",
   "scripts/linux-video-ffmpeg-patches/**",
   "scripts/build-static-vmaf-scorer",
   "scripts/ci-cache-prune",
