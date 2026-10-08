@@ -28,7 +28,8 @@ class SharedPreparedHandoffTest {
         override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) { log += "attach direct $url" }
         override fun seekTo(positionMs: Long) { log += "seek $positionMs"; moveTo(positionMs) }
         override fun setPlaying(playing: Boolean) { moveTo(position()); active = playing }
-        override fun snapshot() = SharedRendererSnapshot(position(), position() + 30_000, 900_000, active, RenderState.RENDERING)
+        override fun snapshot() = SharedRendererSnapshot(position(), position() + 30_000, 900_000, active, RenderState.RENDERING,
+            framePresented = active && frame != null)
         override fun release() { log += "release" }
         override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean) { log += "prepare successor $url"; successorAt = positionMs }
         override fun successorSnapshot() = successorAt?.let { at ->

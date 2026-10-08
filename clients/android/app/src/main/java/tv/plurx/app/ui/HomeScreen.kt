@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -428,6 +430,7 @@ private fun compactTimeRemaining(item: Item): String? {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun HomeTopBar(
     theme: ThemeId,
     username: String?,
@@ -487,13 +490,13 @@ internal fun HomeTopBar(
     val chrome = Modifier.fillMaxWidth().windowInsetsPadding(safeInsets)
         .padding(start = side, end = side - 8.dp, top = 14.dp, bottom = 4.dp)
     if (formFactor == FormFactor.Compact) {
-        // Five actions need their own row on narrow phones; the title and
-        // account must not push the last controls outside the viewport.
+        // Keep every action reachable at its full touch size on narrow phones;
+        // added actions wrap instead of overflowing the available width.
         Column(chrome) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 brand(); Box(Modifier.weight(1f)); user()
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }
         }
     } else {
         Row(chrome, verticalAlignment = Alignment.CenterVertically) {
