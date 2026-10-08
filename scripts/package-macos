@@ -56,6 +56,17 @@ def validate_native_package(package):
         raise ValueError("native parser companion does not match its provenance")
     native_manifest_path = package / "provenance/manifest.json"
     native_manifest = json.loads(native_manifest_path.read_text())
+    if (not isinstance(native_manifest, dict)
+            or native_manifest.get("source_sha256") != tool.SOURCE_SHA256
+            or native_manifest.get("source_commit") != tool.COMMIT):
+        raise ValueError("native package provenance source does not match the pinned source")
+    binaries = native_manifest.get("binaries")
+    if not isinstance(binaries, dict):
+        raise ValueError("native package does not attest its native binaries")
+    for name in ["ffmpeg", "ffprobe"]:
+        fact = binaries.get(name)
+        if not isinstance(fact, dict) or fact.get("sha256") != tool.digest(package / name):
+            raise ValueError(f"native {name} does not match its provenance")
     parser_fact = native_manifest.get("source_parser")
     if (not parser_fact or parser_fact.get("sha256") != manifest["module_sha256"]
             or parser_fact.get("parser_abi") != manifest["parser_abi"]):

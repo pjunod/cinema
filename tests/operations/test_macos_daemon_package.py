@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import struct
 import tempfile
 import unittest
 from unittest import mock
@@ -26,7 +27,10 @@ class MacosDaemonPackageCase(unittest.TestCase):
         provenance = self.package / "provenance/source-parser"
         provenance.mkdir(parents=True)
         for name in ["ffmpeg", "ffprobe"]:
-            (self.package / name).write_bytes(b"native executable fixture")
+            # Distinct ARM64 Mach-O-shaped regular images and the real native
+            # manifest schema: copying/reblessing changed bytes must fail before signing.
+            header = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0)
+            (self.package / name).write_bytes(header + name.encode())
         module = self.package / "plurx-source-parser.wasm"
         module.write_bytes(b"\0asm\1\0\0\0")
         recipe = TOOL.recipe()
@@ -34,8 +38,11 @@ class MacosDaemonPackageCase(unittest.TestCase):
                          "parser_abi": "plurx-source-wasi-p1-v1-wasmtime-49.0.2", "module_bytes": 8,
                          "module_sha256": hashlib.sha256(module.read_bytes()).hexdigest()}
         (provenance / "manifest.json").write_text(json.dumps(self.manifest))
-        (self.package / "provenance/manifest.json").write_text(json.dumps({
-            "source_parser": {"sha256": self.manifest["module_sha256"], "parser_abi": self.manifest["parser_abi"]}}))
+        self.native_manifest = {"source_sha256": recipe.SOURCE_SHA256, "source_commit": recipe.COMMIT,
+            "binaries": {name: {"sha256": hashlib.sha256((self.package / name).read_bytes()).hexdigest()}
+                         for name in ["ffmpeg", "ffprobe"]},
+            "source_parser": {"sha256": self.manifest["module_sha256"], "parser_abi": self.manifest["parser_abi"]}}
+        (self.package / "provenance/manifest.json").write_text(json.dumps(self.native_manifest))
         self.daemon = self.root / "plurxd"
         self.daemon.write_bytes(b"original daemon")
         self.output = self.root / "candidate"
@@ -48,7 +55,8 @@ class MacosDaemonPackageCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicting"):
             TOOL.validate_native_package(self.package)
         duplicate.unlink()
-        (self.package / "provenance/manifest.json").write_text(json.dumps({"source_parser": {"sha256": "wrong"}}))
+        self.native_manifest["source_parser"]["sha256"] = "wrong"
+        (self.package / "provenance/manifest.json").write_text(json.dumps(self.native_manifest))
         with self.assertRaisesRegex(ValueError, "attest"):
             TOOL.validate_native_package(self.package)
 
@@ -61,6 +69,32 @@ class MacosDaemonPackageCase(unittest.TestCase):
         module.symlink_to(self.daemon)
         with self.assertRaisesRegex(ValueError, "unsafe"):
             TOOL.validate_native_package(self.package)
+
+    def test_altered_native_binaries_cannot_be_reblessed_by_packaging(self):
+        for name in ["ffmpeg", "ffprobe"]:
+            with self.subTest(binary=name):
+                image = self.package / name
+                original = image.read_bytes()
+                image.write_bytes(original + b"swapped regular executable")
+                with self.assertRaisesRegex(ValueError, f"native {name}.*provenance"):
+                    TOOL.assemble(self.daemon, self.package, self.output, "-")
+                self.assertFalse(self.output.exists())
+                image.write_bytes(original)
+
+    def test_missing_or_mismatched_native_source_cannot_publish(self):
+        for key in ["source_commit", "source_sha256"]:
+            for value in [None, "wrong"]:
+                with self.subTest(field=key, value=value):
+                    manifest = dict(self.native_manifest)
+                    if value is None:
+                        manifest.pop(key)
+                    else:
+                        manifest[key] = value
+                    (self.package / "provenance/manifest.json").write_text(json.dumps(manifest))
+                    with self.assertRaisesRegex(ValueError, "native package provenance source"):
+                        TOOL.assemble(self.daemon, self.package, self.output, "-")
+                    self.assertFalse(self.output.exists())
+        (self.package / "provenance/manifest.json").write_text(json.dumps(self.native_manifest))
 
     def test_symbol_uuid_mismatch_cannot_publish_a_candidate(self):
         symbols = self.root / "plurxd.dSYM"
