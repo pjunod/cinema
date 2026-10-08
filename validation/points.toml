@@ -1191,6 +1191,7 @@ paths = [
   "scripts/p02-release-cost.py",
   "scripts/p02-release-cost.Dockerfile",
   "scripts/build-static-ffprobe",
+  "scripts/build-macos-video-ffmpeg",
   "scripts/build-static-vmaf-scorer",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
