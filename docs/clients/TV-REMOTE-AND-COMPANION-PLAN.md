@@ -12,6 +12,13 @@ preserve the existing playback owner, preparation, and recovery protocols.
 All new APIs, settings, filenames, limits, and milestones below are proposals.
 Existing-code observations are distinguished in §3. Recheck them before build.
 
+**Build successor, 2026-10-07:** execute
+[the implementation handoff](TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md) and
+[protocol contract](TV-REMOTE-PROTOCOL.md). They replace this proposal's
+cross-account pairing, leader relay, WebSocket and expiry-clock choices.
+[The status ledger](TV-REMOTE-AND-COMPANION-STATUS.md) records implementation
+and hardware evidence; this proposal remains the original design record.
+
 ## 1. The experience to build
 
 Turn on a TV, open Cinema, and navigate Home, libraries, details, search,

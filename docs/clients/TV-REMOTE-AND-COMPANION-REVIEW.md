@@ -156,3 +156,14 @@ hardware, push delivery, focus prototype, or executable remote protocol was
 tested. Documentation link/index checks validate this record's integration,
 not the design's runtime behavior. All four findings remain open until the
 plan defines the corrections and implementation supplies the named evidence.
+
+
+## Build disposition — 2026-10-07
+
+[Implementation §9](TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md#9-review-findings-become-concrete-acceptance-not-erased-history)
+specifies corrections for all four findings; the
+[protocol](TV-REMOTE-PROTOCOL.md) is the executable handoff contract.
+R1 uses same-account pairing and a semantic allowlist; R2 receiver-issued
+credits; R3 a direct local desktop bridge; R4 the expanded native walkthrough.
+These are design dispositions, not runtime closure. The
+[status ledger](TV-REMOTE-AND-COMPANION-STATUS.md) retains each evidence gap.
