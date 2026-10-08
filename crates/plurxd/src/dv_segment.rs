@@ -56,7 +56,11 @@ impl SegmentShape {
     fn renderer_args(&self) -> Vec<String> {
         [
             fd(3),
-            ".".into(),
+            if cfg!(target_os = "linux") {
+                fd(4)
+            } else {
+                ".".into()
+            },
             self.video_index.to_string(),
             self.max_frames.to_string(),
             self.bl.0.to_string(),
@@ -905,7 +909,11 @@ mod tests {
             shape.renderer_args(),
             [
                 fd(3),
-                ".".into(),
+                if cfg!(target_os = "linux") {
+                    fd(4)
+                } else {
+                    ".".into()
+                },
                 "2".into(),
                 "6".into(),
                 "64".into(),
