@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "kind": "m1_raw_experiment_summary",
+  "source_commit": "0cd06e92bff54fca417afdf7b52f7a1262da2cc9",
+  "limitations": [
+    "Synthetic simple analytic60s2160p24 sources, video-onlyMP4, not deployed-daemon/client qualification",
+    "HEVC hardware reconstruction vs VT software fallback unknown",
+    "No visual approval, energy/copy/RPU measurement",
+    "Original HDR comparison unequal processing order: CPU scales1080beforeTone; Metal maps2160beforeScale",
+    "HDR CPU output retains consumed staticHDR metadata and fails outputcontract; originalHDR result not benefitqualification"
+  ],
+  "workloads": {
+    "sdr": {
+      "receipt": "/experiment/harness-evidence/sustained-sdr/receipt.json",
+      "graph_results": {
+        "cpu_sdr_1080": {
+          "samples": 5,
+          "successful_output_contracts": 5,
+          "failed_output_contract_reasons": [],
+          "median_throughput_x": 10.564662735027985,
+          "median_wall_seconds": 5.679310499999701,
+          "median_cpu_seconds_per_media_second": 0.14929131666666665,
+          "steady_window_samples": 0,
+          "steady_window_throughput_x": [],
+          "frame_counts": [
+            1440
+          ]
+        },
+        "vt_sdr_1080": {
+          "samples": 5,
+          "successful_output_contracts": 5,
+          "failed_output_contract_reasons": [],
+          "median_throughput_x": 10.639683168522135,
+          "median_wall_seconds": 5.639265666999563,
+          "median_cpu_seconds_per_media_second": 0.018257399999999986,
+          "steady_window_samples": 0,
+          "steady_window_throughput_x": [],
+          "frame_counts": [
+            1440
+          ]
+        }
+      },
+      "raw_median_paired_throughput_change_percent": 0.7072832768348469,
+      "raw_median_paired_cpu_reduction_percent": 87.79867535112625,
+      "pairs_with_lower_cpu": 5,
+      "pairs_with_throughput_within5percent": 5,
+      "qualification": "synthetic_cpu_feasibility_only"
+    },
+    "hdr": {
+      "receipt": "/experiment/harness-evidence/sustained-hdr/receipt.json",
+      "graph_results": {
+        "cpu_hdr10_1080": {
+          "samples": 5,
+          "successful_output_contracts": 0,
+          "failed_output_contract_reasons": [
+            "stale side data: Content light level metadata",
+            "stale side data: Mastering display metadata"
+          ],
+          "median_throughput_x": 9.561645690385234,
+          "median_wall_seconds": 6.2750704159989255,
+          "median_cpu_seconds_per_media_second": 0.831831900000001,
+          "steady_window_samples": 3,
+          "steady_window_throughput_x": [
+            10.102578006641009,
+            10.143649674110991,
+            9.169327012346601
+          ],
+          "frame_counts": [
+            1440
+          ]
+        },
+        "vt_hdr10_1080": {
+          "samples": 5,
+          "successful_output_contracts": 5,
+          "failed_output_contract_reasons": [],
+          "median_throughput_x": 7.734509648024787,
+          "median_wall_seconds": 7.757440707999194,
+          "median_cpu_seconds_per_media_second": 0.023516516666666504,
+          "steady_window_samples": 5,
+          "steady_window_throughput_x": [
+            8.114496604543294,
+            8.085514251149364,
+            6.617935071322403,
+            8.090522751520778,
+            8.102860217943519
+          ],
+          "frame_counts": [
+            1440
+          ]
+        }
+      },
+      "raw_median_paired_throughput_change_percent": -19.10901220903567,
+      "raw_median_paired_cpu_reduction_percent": 97.11089063387284,
+      "pairs_with_lower_cpu": 5,
+      "pairs_with_throughput_within5percent": 0,
+      "qualification": "invalid_output_contract_and_unequal_work"
+    }
+  }
+}
