@@ -1329,7 +1329,7 @@ async fn local_start_session(
             .await
             .map_err(optical_start_error)?,
         plurx_core::optical::OpticalTitleClaim::Replay { session_id } => {
-            tokio::time::timeout(Duration::from_secs(5), async {
+            let info = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     if let Some(info) = state.transcode.recover_optical_vod(&session_id).await {
                         return info;
@@ -1344,7 +1344,11 @@ async fn local_start_session(
                     "optical_drive_busy",
                     "the matching optical session is still preparing",
                 )
-            })?
+            })?;
+            // The manager already matched the exact request ID and digest.
+            // Re-activating the durable route with its original session ID
+            // would conflict with itself and terminalize the playing title.
+            return Ok(optical_start_response(info, source_height));
         }
     };
     let durable_session_id = info.session_id.clone();
