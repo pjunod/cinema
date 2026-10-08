@@ -4626,3 +4626,83 @@ source = "crates/plurxd/src/web/pages/sharing-management.js"
 source_anchor = "async function sharingConfigureAddresses()"
 test = "tests/web/sharing-management.test.js"
 test_anchor = "invitation address setup preserves selected libraries and never posts until configured"
+
+[[fixes]]
+id = "desktop.cec-bounded-local-receiver"
+commits = ["d27b42bfc290d7429d5aa90be5c0b4497c4c6eb2"]
+source = "clients/desktop-remote/native_host.py"
+source_anchor = "if not self.eligible(now):"
+test = "clients/desktop-remote/tests/test_host.py"
+test_anchor = "test_backend_open_stall_cannot_replay_old_press"
+
+[[fixes]]
+id = "desktop.cec-native-frame-freshness"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "now>=credit.deadline"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "native inputs reject old credits even when disconnect status remains queued"
+
+[[fixes]]
+id = "desktop.cec-page-frame-freshness"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "now>=deadline"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "MAIN delivery checks its own credit after a page stall and invalidates before context capture"
+
+[[fixes]]
+id = "desktop.cec-async-binding-fence"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "const generation=++this.generation,epoch=this.nonce();"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "overlapping bind operations fence delayed permissions and unbind during setup"
+
+[[fixes]]
+id = "desktop.cec-focused-window"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "this.operationWindow?.windowId??this.binding?.windowId"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "window focus loss fences in-flight bind and content ticks cannot rearm background input"
+
+[[fixes]]
+id = "desktop.cec-installation-ownership"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/install.py"
+source_anchor = "registration target changed; uninstall first or use a separate prefix"
+test = "clients/desktop-remote/tests/test_host.py"
+test_anchor = "test_reinstall_target_change_preserves_previous_manifest_and_receipt"
+
+[[fixes]]
+id = "desktop.cec-windows-registration"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/install.py"
+source_anchor = "refusing to replace foreign native-host registration"
+test = "clients/desktop-remote/tests/test_host.py"
+test_anchor = "test_windows_foreign_registration_and_receipt_keys_are_refused"
+
+[[fixes]]
+id = "desktop.cec-structured-libcec"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/libcec_backend.py"
+source_anchor = "config.SetKeyPressCallback(self.key_callback)"
+test = "clients/desktop-remote/tests/test_host.py"
+test_anchor = "test_structured_libcec_callback_and_selected_adapter_cleanup"
+
+[[fixes]]
+id = "desktop.cec-real-main-lifecycle"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "documentIds:[binding.documentId]"
+test = "clients/desktop-remote/tests/extension.browser.cjs"
+test_anchor = "real Chromium extension targets MAIN document and invalidates local context without native hardware"
