@@ -292,3 +292,40 @@ failure recovery, AC-4/P5 sample acceptance, second-generation Apple Silicon
 and Intel Macs remain open. Peak RSS, energy and copy instrumentation are
 unmeasured, not zero. The Developer readiness report must describe those gaps
 without preventing an operator saving the processing preference.
+
+## 8. Extension graph correctness — 2026-10-08
+
+The [extension receipt archive](evidence/macos-video-20261008/route-correctness-evidence.tar.gz)
+retains 90 command, observation, stderr and experiment-driver files plus its
+manifest. Its size is 25,487 bytes; SHA-256 is
+`84eff0a3a10016b23fa79227ebc164285c550c8fe3d031125aa2e94f83aaf6f8`.
+Every retained file's length and SHA-256 were checked after archive creation.
+The manifest separately records original and retained hashes because private
+experiment paths were normalized. Encoded media and raw pixel files are
+excluded. The original lawful source fixtures are committed with `b8b7a9574`.
+
+The experiments used the same official Jellyfin binaries identified in §2.
+Native C/Rust compilation ran concurrently, so recorded wall times are
+execution diagnostics only. This is standalone graph evidence supporting the
+foundation integrated in `8a78affb7`, not final daemon or client acceptance.
+
+| Graph | Observation | Remaining limit |
+|---|---|---|
+| HLG → Metal SDR | 12 progressive frames at 12 fps, BT.709 limited range; gray codes 16, 38, 65, 128, 156, 182, 202, 213; analytic 203-nit reference-white patch maps to 156 | No calibrated display, mastered-content or temporal qualification |
+| BWDIF TFF/BFF | Send-frame produces 12 frames at 12 fps; send-field produces 24 at 24 fps; PTS advances exactly by output cadence, progressive BT.709 limited-range signaling | No paced broadcast, real combing or caption acceptance |
+| SDR8/SDR10/HDR10 with PGS | Half-alpha red sample YUV 39/115/185 in frames 3–8 only; background 16/128/128 before/after | No complete seek, cancellation or subtitle-rendering matrix |
+| HEVC SDR | Main, 8-bit, BT.709 limited-range output | Negotiated production route and client playback remain separate work |
+| HEVC HDR10 | Main 10, PQ/BT.2020 limited range; mastering-display and content-light metadata retained exactly | Actual HDR presentation and client playback remain unqualified |
+
+Two fixture defects were corrected before accepting these observations.
+The interlaced encoder needed explicit VUI signaling; output retagging was
+not used to hide a missing source declaration. The SUP demuxer normalized
+its first PTS from 0.25 seconds to zero; an explicit 0.25-second mux offset
+restored the intended cue interval. The archive preserves corrected outputs,
+negative source provenance and the correction command. The original negative
+PGS encoded output was superseded during the retry; its sample arrays were
+observed in the tool transcript and are not represented as retained raw files.
+
+VideoToolbox frame representation still does not establish physical hardware
+HEVC decoding. The strict hardware-required package patch and observed session
+property belong to the separate E1 workstream.

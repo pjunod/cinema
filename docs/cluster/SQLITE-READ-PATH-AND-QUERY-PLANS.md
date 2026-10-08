@@ -748,3 +748,61 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Finding (statistics on Hiqlite) | [#541](http://forge.lan:3000/noirr/plurx/pulls/541) | The M0 plans assumed no statistics on either backend, and M6 rejected `ANALYZE` because `watch_rollups` became 3.5× slower. The vendored Hiqlite state machine runs `PRAGMA optimize=0x10002` on every connection it opens and `PRAGMA optimize` after each snapshot, migration and shutdown (`vendor/hiqlite/src/store/state_machine/sqlite/state_machine.rs:593`, `writer.rs:496-706`), so replicated voters do have `sqlite_stat1`, collected per voter outside the Raft log; a read-only copy of the lab3 voter's current snapshot (schema 47) has rows for every `items` and `watch_state` index. On the Hiqlite fixture with those statistics `watch_rollups` is 7.9 ms against 2.6 ms without — the M6 regression, already live on the replicated backend. Open question 2 therefore does arise, in the other direction (whether to keep the vendor's statistics, pin plans, or rewrite `watch_rollups`); not changed here. M5's plans were taken both ways and choose the new indexes either way. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | needs: fleet evidence (M5) | [#541](http://forge.lan:3000/noirr/plurx/pulls/541) | Post-merge, for the GPT session with fleet access: "K-05 M5 (PR #541) adds three `items` indexes as SQLite v70 / replicated schema v48. (1) Before the maintenance window, on every voter: read `<PLURX_DATA>/hiqlite/state_machine/snapshots/current` for the snapshot file name, copy that file to /tmp, and with python3's sqlite3 on the copy record `SELECT schema_version FROM cluster_meta`, `SELECT count(*) FROM items`, and `SELECT idx, stat FROM sqlite_stat1 WHERE tbl='items'`; then time, on the same copy, `BEGIN; CREATE INDEX IF NOT EXISTS idx_items_tmdb ON items(tmdb_id) WHERE tmdb_id IS NOT NULL; CREATE INDEX IF NOT EXISTS idx_items_imdb ON items(imdb_id COLLATE NOCASE) WHERE imdb_id IS NOT NULL; CREATE INDEX IF NOT EXISTS idx_items_top_level_title ON items(library_id, sort_title) WHERE (kind IN ('movie','show','book','audiobook') OR (kind IN ('folder','video','photo') AND parent_id IS NULL)); COMMIT;` with `PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF` first (five runs, report the median), and delete the copy. Never open the live `state_machine/db/plurx.db`. (2) Deploy with the Ansible playbook following docs/OPERATIONS.md 'Catalogue read indexes: SQLite v70, replicated schema v48': stop application traffic, update every voter, then learners, as one operation; record each voter's restart-to-`/readyz` time beside the previous deploy's. (3) After the next snapshot on each voter, repeat the copy and confirm `schema_version` 48, the three index names in `sqlite_master`, and `sqlite_stat1` rows for them; run `EXPLAIN QUERY PLAN` for the statement in `sql_source::item_by_external_id` (bind 'movie', a real tmdb id, NULL) and for `SELECT COUNT(*) FROM items WHERE library_id = 1 AND (kind IN ('movie','show','book','audiobook') OR (kind IN ('folder','video','photo') AND parent_id IS NULL)) AND (NULL IS NULL)` and report whether they name `idx_items_tmdb`/`idx_items_imdb` and `idx_items_top_level_title`. (4) With the 'Measuring page-route latency' procedure in docs/OPERATIONS.md, take the Home (coming-soon rail) and a movie library's default Title grid before and after. Append the results to this execution log and the K-05 board row in one evidence-only docs PR." |
 | 2026-10-04 | claude-opus-5-5 | https://claude.ai/code/session_01ENdV5pjk5WztKEXnKHy8YT | Decision + fix (statistics on Hiqlite: `watch_rollups`) | — | **Decision:** of the three options the 2026-09-25 finding left open (drop the vendor's statistics, pin plans, rewrite), the plan is pinned. Dropping statistics means patching the vendored writer's `PRAGMA optimize` calls and gives up whatever the statistics buy elsewhere; a rewrite is unnecessary because the stat-free plan is already the fast one. **Built:** every watch-rollup statement on both backends — standalone `watch_rollups`/`watch_rollup` (`sqlite/watch.rs`, now `watch_rollups_sql`/`watch_rollup_sql`) and replicated `watch_rollups`, `watch_rollup` and the rollup half of `watch_summary` (`hiqlite_media.rs` `watch_rollups_sql`/`watch_rollup_sql`/`watch_summary_sql`) — reads its seed and leaf rows `NOT INDEXED` (rowid only), walks the tree `INDEXED BY idx_items_parent`, and joins `tree t CROSS JOIN items i` so the tree stays the outer loop. With the fixture's statistics the unpinned statement skip-scanned every item through `idx_items_library_kind` and probed the tree through an automatic index (Appendix E of `query-plans-012d8a3a.md`); pinned, it plans `SCAN t` / `SEARCH i USING INTEGER PRIMARY KEY (rowid=?)` and the `idx_items_parent` recursion either way. **Found while pinning:** `watch_summary`'s watch-map half was still the `watch_state`-first join M4 replaced in `watch_map` (without statistics it walked the user's rows through `idx_watch_updated`; with them it did not), so its plan also depended on statistics; it now uses `read_watch_map`'s id-driven `CROSS JOIN`. **Test:** `store::sqlite::watch::tests::watch_rollup_plans_do_not_depend_on_statistics` plans all five statements (the three replicated ones under `hiqlite-store`, on the standalone schema, whose `items`/`watch_state` indexes are the same) before and after loading the fixture's `sqlite_stat1` rows and `ANALYZE sqlite_schema`, requires identical plans, the rowid leaf lookup and the `idx_items_parent` recursion, and keeps the unpinned statement as a control that must still pick `idx_items_library_kind` under those statistics. **Not measured:** no `query_plans measure` run on the fixture in this change; the expected warm figure is the stat-free one (2.3-2.7 ms) on both backends. |
+### Published-image structural readback — 2026-10-08 (partial M5 evidence)
+
+gpt-6.1-sol (`agent:/root/remaining_requirements_audit_sol61`) records the
+coordinator's actual one-shot read at 04:23:59.047708–04:23:59.722515 UTC
+(0.674808 s): one request each to media1, lab6 and lab4, with unchanged
+healthy/restart-free container/image/OCI revision
+`8e242787c5112d6ba2bd66b2d30c4dd0a0bbc2a4` before and after. This identifies
+the observed OCI source label, not binary/source equivalence or the later
+documentation candidate/current main.
+No library/auth rows or database bytes were exported; the live writer was
+not opened. The no-follow published-image FD and pointer/inode/identity
+brackets were stable on each node; all owned children were reaped.
+
+On all three images, the fixed SELECTs returned schema marker **82**, the
+exact `idx_items_tmdb`, `idx_items_imdb` and `idx_items_top_level_title` DDL
+defined by `sql_source::ITEM_READ_INDEXES`, and one numeric `sqlite_stat1`
+row for each index. SQLite was 3.46.1; query failures and missing-name lists
+were empty, with `structural_readback_complete=true`. Schema 82 is the
+observed newer marker, not a fabricated replay of the original v48 rollout.
+
+| Alias | Published UUID | Raw metadata stdout SHA256 |
+|---|---|---|
+| media1 | 01a119b9-fa6b-7c01-8d74-7d8c0e933bee | 78d3642a286479adc92e6beebe2fd326162d2d3a691e87cc7ce952999ee57a06 |
+| lab6 | 01a119b9-fa82-73f2-8c85-79e6e1a0d6c3 | ea394e7bb344a513e16e3df507b7655e74e0ef0bc6fc9d548d338b2b2939a247 |
+| lab4 | 01a119b9-f9d0-77b2-aab1-1f1efc2ba5c7 | 585f4f23c432c49cdaed1b0dc645423c26cfaa5a382de1cf32df24321e98ac98 |
+
+This was **not a first-pass success**. The separately retained 03:56:22 UTC
+attempt used an 8,192-byte `SQLITE_LIMIT_LENGTH`; all nine fixed queries
+returned `SQLITE_TOOBIG` with no rows. That result did not prove missing
+indexes or schema damage. Source-only diagnosis found a shipped 16,000-byte
+enqueue-trigger definition: SQLite's limit also applies to whole schema
+rows. One independently reviewed, source-informed successor set a verified
+32,768-byte per-value/row guard, not an aggregate memory/RSS guarantee.
+Selected strings stayed ≤2,048 bytes, stdout/stderr ≤8,192/1,024 bytes, SQL
+budget 1 s and read-only/immutable/authorizer/epoch/cleanup guards unchanged.
+There was no repeated cap escalation, product change, migration, ANALYZE,
+snapshot trigger, restart or eight-report query-lab replay.
+
+Private acquisition receipt SHA256
+`ac7a2ee2826fcb1c1e73eb76b9c58f3388128992e5eaf68fb3deacd9630ea9e6`
+binds reader `21c3df0110a7fd47c0f29c141f5804c7c41d1d860735f5b9c6529b2a27cd041d`,
+protocol `676c41d6c1e43da067fffb51fd72389b24a67c34f5e44ef4704a5750ef1dd32a`
+and wrapper `f04faa81d1f5a75aac46aecfb58d7caab005cdae82c599430602e6174732bcd2`.
+Original failed packet/report
+`25b20d8f244c27f9184b527984116891ff5d43c2bbdfdf87c6025e4dfcf68fde`
+is preserved separately; the actual offending record was not recovered.
+
+This supplies only the **published-image structural slice** of M5's post-merge
+evidence on three expected voters (retained coordinator context, not a fresh
+membership observation). Active configured data_dir, snapshot's original
+producer and current live-writer contents remain unproved. Migration/index
+build cost, coordinated rollout and restart-to-ready comparison, deployed
+EXPLAIN plans and before/after Home/Title route latency remain open. All
+qualification/producer/configured-root/timing flags remain false; no whole
+M5/K-05 completion or later-main deployment is claimed. The original owners,
+decisions and historical execution rows below remain unchanged. The
+coordinator owns review and batch integration; this evidence record does not
+authorize a new unit/discovery, compiler, deployment or runtime action.

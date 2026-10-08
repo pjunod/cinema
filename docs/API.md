@@ -433,6 +433,7 @@ of never storing it.
 | POST | `/api/v1/system/storage` | admin | Re-measures storage. Costs real I/O |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Cluster and Developer settings; never gates controls |
+| POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |
@@ -469,6 +470,17 @@ defaults. Every fallible field is validated and normalized *before* the first
 write, because settings are persisted one at a time and a later bad field must
 not leave an earlier policy change in force —
 `dv_disk_keep_original = false` is the destructive case that forced the rule.
+
+`macos_video_processing_enabled` and `macos_hevc_output_enabled` are
+admin-writable booleans, both defaulting to `false`. They independently choose
+native Mac processing and negotiated HEVC output for new plans. Saving either
+choice is accepted on every platform regardless of advisory readiness;
+existing sessions retain their captured plan. `macos_video_processing` is the
+read-only runtime report, including `hevc_output_enabled` and per-graph
+observations. The Developer readiness item `macos_hevc_output` reports
+`hevc_sdr`, `hevc_hdr10` and `delivery_qualification` requirements. Missing
+observations mean unobserved, not supported; a pending probe means unknown.
+These observations never reject a saved choice.
 
 `hevc_unverified_copy` is an admin-writable boolean (default `false`). It
 allows new HEVC copy starts without configuration proof, including rolling and

@@ -445,6 +445,50 @@ Do not enable fixture launch mode in production, weaken normalized geometry
 verification, or substitute scanner-time facts to make this route appear
 supported. Track actual working delivery modes separately on the status page.
 
+### 7.1 Native held-source parser — continuation decision, 2026-10-08
+
+**Status:** building; final implementation review and qualification pending.
+The existing Linux boundary combines immutable parser execution, a held source
+handle and process/descendant restrictions. Launching ordinary FFprobe on macOS
+would not preserve that boundary. The native implementation instead compiles
+the same pinned Jellyfin FFprobe to WebAssembly and embeds a restricted host
+adapter in the existing fact collector. This changes the parser's isolation
+mechanism while retaining its media semantics and ownership.
+
+The module receives descriptor 3 reads/seeks and bounded stdout/stderr. It
+receives no directory, network, process, fork or executable-loading capability.
+The host captures immutable module bytes, validates their structure/imports,
+and binds the module/runtime/ABI identity to the existing parser snapshot and
+single-flight cache. Output is still parsed by the existing fact collector.
+Cancellation and deadline completion must settle in-flight source reads before
+releasing the original source lease. Memory, output and execution stay bounded;
+no new watchdog or secondary observation cache is introduced.
+
+A measured interpreter prototype exceeded a 20-second exploratory cap on the
+existing ten-second 1080p `idet` workload. Compiled Pulley bytecode exceeded
+the same cap. The candidate therefore uses Wasmtime native compilation; the
+production ten-second execution deadline remains unchanged. Cold compilation,
+4K cost and simultaneous-source behavior still need acceptance evidence.
+
+Wasmtime's native compiler needs executable memory. Its pinned macOS backend
+does not use `MAP_JIT`; the normal `allow-jit` entitlement alone is insufficient.
+The candidate package uses Apple's documented
+[unsigned executable-memory entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-unsigned-executable-memory).
+This weakens that particular hardened-runtime protection and expands the
+trusted runtime dependency; the final security review must explicitly cover
+both costs. A live-process signing preflight must reject an incompatible
+hardened signature before compilation, because the operating system can kill
+the process instead of returning a recoverable compiler error.
+
+Packaging must provide one discoverable parser companion beside the selected
+FFprobe, with matching provenance and immutable identity. A new native package
+assembler copies and signs task-owned artifacts only, preserves explicit
+operator executable overrides, and distinguishes an ad-hoc local candidate
+from a Developer ID release. It does not install a service, modify a deployed
+binary or claim notarization. Final acceptance covers the copied hardened
+package, missing/wrong companion, metadata/AC-4 parity, source mutation,
+read cancellation, malformed-module limits and the existing decode deadline.
+
 ## 8. M5 — integrate HDR10 processing without widening Dolby routing
 
 **Deliverable:** enabled native/Metal HDR10-to-SDR processing in the same
@@ -554,6 +598,17 @@ Qualify HEVC SDR and HDR10 Main10 separately. Extend codec selection,
 encoder options, pipeline pairing, presentation facts, manifests, container
 handling, cluster offers and cache identity together. Keep H.264 compatibility
 fallback negotiated through existing delivery policy.
+
+**Client contract chosen during implementation:** add optional
+`DeviceCaps.hls_hevc_sample_entries: Option<Vec<String>>`. A present list has
+at most two distinct lowercase entries, `hvc1` and/or `hev1`; absent or empty
+preserves the legacy H.264 selection for new SDR HEVC offers. Each entry is a
+claim about the actual HLS fragmented-MP4 path. Original-progressive MP4 or
+generic HEVC support does not supply it. The initial encoder emits `hvc1`, so
+that entry is required in addition to existing profile, transfer, container,
+transport, geometry, frame-rate and bitrate compatibility. This is an additive
+client capability, not a required remote processing-graph field. The saved
+HEVC preference remains independent and is always accepted.
 
 Start HDR preservation with ordinary HDR10; do not admit Dolby passthrough
 by widening an HDR10 input check. Preserve color and static HDR metadata
