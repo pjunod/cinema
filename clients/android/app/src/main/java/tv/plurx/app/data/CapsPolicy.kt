@@ -253,6 +253,7 @@ internal fun capsDocument(
     client: ClientInfo,
     audioSinks: List<AudioSinkClaim> = emptyList(),
     hlsHevcSampleEntries: List<String>? = null,
+    displayAwareAuto: Boolean = true,
 ): DeviceCaps {
     val dvProfiles = decoderDolbyVisionProfiles.takeIf {
         HdrType.DOLBY_VISION in hdrTypes
@@ -260,7 +261,16 @@ internal fun capsDocument(
     return DeviceCaps(
         v = 2,
         client = client,
-        video = video.videoEntries(presentationTransfers(hdrTypes), dvProfiles),
+        // Explicit HLS HEVC needs its measured decoder envelope independently
+        // of Display-aware Auto. Other codecs retain the legacy policy.
+        video = video.videoEntries(presentationTransfers(hdrTypes), dvProfiles).map { entry ->
+            if (displayAwareAuto || (entry.codec == "hevc" && !hlsHevcSampleEntries.isNullOrEmpty())) {
+                entry
+            } else {
+                entry.copy(profiles = emptyList(), max_height = video.maxHeights.getValue(entry.codec),
+                    max_width = null, max_frame_rate = null)
+            }
+        }.let(::compactVideoEntries),
         audio = audio,
         containers = DIRECT_PLAY_CONTAINERS.split(','),
         transports = listOf("progressive", "hls"),

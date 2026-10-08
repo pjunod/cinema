@@ -145,7 +145,8 @@ object Caps {
             legacyQuery = result,
             audioOutputRoute = audioOutputRoute(context),
             document = capsDocument(
-                video = if (Session.displayAwareAuto) video else video.copy(decoderEntries = emptyList()),
+                video = video,
+                displayAwareAuto = Session.displayAwareAuto,
                 audio = audio,
                 hdrTypes = hdrTypes,
                 decoderDolbyVisionProfiles = dolbyVisionProfiles,
