@@ -15,5 +15,5 @@ The [implementation record](../clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md)
 records the physical cause: background CQ Lab process interference. Stopping
 the two test processes restored the unchanged original 4K Avatar and Tom
 HDR10 samples. Temporary test apps were removed and normal Noirr Cinema
-build 213 restored. Candidate build 215 has not been installed during viewing;
+build 213 restored. Candidate build 216 has not been installed during viewing;
 its physical acceptance remains separate from the successful device cleanup.

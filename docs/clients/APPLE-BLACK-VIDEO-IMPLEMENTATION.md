@@ -658,7 +658,8 @@ git diff --check
 
 ## 13. Two independent repairs and file ownership
 
-This incident requires two bounded, independently reviewable main-bound PRs.
+This incident has two playback repairs and one subsequent CI receipt recovery,
+each independently reviewable and main-bound.
 Use the repository's disjoint-file exception: both branches start from main,
 and neither task edits the other's files. No effort integration state is
 shared. Freeze each candidate for its own adversarial PR review, address the
@@ -668,7 +669,9 @@ merge with the declared Regression-Test lines in the landing message.
 | Task | Exclusive file ownership | Acceptance |
 |---|---|---|
 | PR 888, truthful Apple frame evidence | Apple sources/tests/build metadata; `docs/clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md`; `docs/apple-builds/888-ready-video-recovery.md`; `docs/README.md`; `docs/STATUS.html`; `docs/clients/APPLE-CLIENT-PARITY.md`; `tests/client-fixes.toml`; `validation/attempt-census.toml` | Both Apple unit suites and Release builds; reviewed queued-cancellation regression; current gate |
-| Physical lab cleanup | `scripts/playback-lab`; `tests/playback/network-shaping.test.js`; `docs/PLAYBACK-TESTING.md` | Owned-process retirement verified after success, failure, and interruption; cleanup failure fails the run; no production app data deletion; focused Node regressions and current gate |
+| PR 895, physical lab cleanup | `scripts/playback-lab`; `tests/playback/network-shaping.test.js`; `docs/PLAYBACK-TESTING.md` | Owned-process retirement verified after success, failure, and interruption; cleanup failure fails the run; no production app data deletion; focused Node regressions and current gate |
+| CI receipt recovery | `validation/main_unit_receipts.py`; `validation/main_preflight_adoption.py`; `validation/main-preflight-inputs.json`; their tests under `tests/validation/`; existing `docs/ci/PYTHON-UNIT-PR-RECEIPTS.md` | Authenticate both zero-execution preparation refusals from run 4431; import no outcomes; preserve run 4429 successes; current gate |
+
 
 The cleanup task captures the exact launched process identity, retires it in
 an outer cleanup path, and verifies absence before restoring normal use.
@@ -719,3 +722,13 @@ passed 821 tests with two existing skips; validation passed 334 tests with
 one existing skip. The normal hook passed pinned Rust 1.97.1 formatting and
 workspace Clippy with warnings denied. These receipts apply to the
 main-integrated candidate, not just the earlier source snapshot.
+
+
+**Build 216 verification:** after integrating current main `b3ac74a16`, the
+regenerated tvOS suite passed 856 tests and iOS passed 872, with zero failures.
+Both Release builds passed; Apple release contracts passed 26 checks, the
+documentation index passed four, and corrective history passed. Candidate
+build 216 was not installed while the user watched. The earlier CI preflight
+on `1e295f008` completed all 821 operations tests with two existing skips and
+retained its final journal before rejecting its superseded head at the next
+phase. These retained results do not substitute for a current-head gate.
