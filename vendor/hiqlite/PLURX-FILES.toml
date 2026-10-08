@@ -53,11 +53,11 @@ patched = [
     "src/store/state_machine/sqlite/state_machine.rs",
     "src/store/state_machine/sqlite/writer.rs",
     "src/tls.rs",
+    "src/transport_status.rs",
 ]
 
 # Carry Plurx changes no row owns yet. A disclosed gap that may only shrink.
 [unledgered]
-"src/transport_status.rs" = "bounded snapshot transport observations; needs its own policy row"
 
 # Differ from upstream by rustfmt/import order only. Pinned so that an edit
 # fails unless the same change edits the pin. Re-pinning passes the test, so
