@@ -63,12 +63,12 @@ function renderSettings(){
   if(!isSettingsRoute(location.hash)) return;
   const d=SETTINGS_DATA;
   const tab=settingsTab();
-  const manifest=SETTINGS_MANIFEST[tab];
+  const manifest=settingsManifest(tab);
   if(!manifest.required.every(key=>SETTINGS_LOADED.has(key))) return;
   document.getElementById("main").innerHTML=`<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody">${settingsPanel(tab,d)}</div></div>`;
   revealSettingsAnchor(tab);
   if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
-  if(tab==="cluster"){ applyClusterFolds(); return refreshClusterLogs(); }
+  if(tab==="cluster"&&settingsClusterEnabled()){ applyClusterFolds(); return refreshClusterLogs(); }
 }
 function settingsPanel(tab,d){
   if(tab==="metadata")     return metadataPanel(d.settings,d.developerReadiness);
@@ -429,8 +429,8 @@ function librariesPanel(libs,status,settings,dv){
 // Developer lifecycle: durable cluster work is deployed and its plan has no
 // fleet receipt to wait for, so the editor lives beside the roots it names.
 function storageDomainsCard(){
-  return setCard(`${cardHead("Shared storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
-    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced across nodes: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
+  return setCard(`${cardHead(settingsClusterEnabled()?"Shared storage budgets":"Storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
+    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced${settingsClusterEnabled()?" across nodes":" on this server"}: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
     <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
     <p class="hint">Save identity changes while background jobs are idle so existing reservations keep their meaning. Two readers share each domain.</p>
     <div id="storage-domain-error" class="err" role="alert"></div>

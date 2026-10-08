@@ -1692,8 +1692,11 @@ test("Settings executes exact required and secondary waves for every tab", async
     // readings arrive behind them because one of them asks membership for the
     // local applied roster.
     developer:{required:["/settings"],secondary:["/developer/readiness"]},
+    standalone:{tab:"cluster",clustered:false,required:[],secondary:[]},
+    sqlite:{tab:"cluster",roster:{unavailable:true,code:"membership_unavailable"},required:["/cluster/nodes"],secondary:[]},
   };
-  for(const [tab,expected] of Object.entries(cases)){
+  for(const [caseName,expected] of Object.entries(cases)){
+    const tab=expected.tab||caseName;
     const requests=[], phases=[], logReleases=[];
     const api=(url)=>new Promise((resolve,reject)=>requests.push({url,resolve,reject}));
     const SETTINGS_ENDPOINTS=new Function("api",`${endpointDeclaration[0]};return SETTINGS_ENDPOINTS;`)(api);
@@ -1706,6 +1709,9 @@ test("Settings executes exact required and secondary waves for every tab", async
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
          SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
          DV_SETTINGS_POLL_AT=0; const DV_PROGRESS_POLL_MS=10000;
+       const SERVER={cluster_advertisement:${expected.clustered!==false}};
+       ${shippedSource("settingsClusterEnabled")};
+       ${shippedSource("settingsManifest")};
        ${shippedSource("isSettingsRoute")};
        ${shippedSource("settingsCurrent")};
        ${shippedSource("cacheSettings")};
@@ -1724,7 +1730,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     assert.deepEqual(requests.map(request=>request.url),expected.required,`${tab} required wave`);
     for(const request of requests.slice()) request.resolve(
       request.url==="/settings"?{}:request.url==="/trakt/status"?{}:
-        request.url==="/system"?{}:request.url==="/cluster/nodes"?{nodes:[]}:[],
+        request.url==="/system"?{}:request.url==="/cluster/nodes"?(expected.roster||{nodes:[]}):[],
     );
     await nextTurn();
     assert.ok(phases.includes("render"),`${tab} renders successfully after required data`);
@@ -1758,6 +1764,8 @@ test("Settings cannot paint an old tab after a tab switch", async () => {
     `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
        SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
      ${shippedSource("settingsCurrent")};${shippedSource("cacheSettings")};${shippedSource("cacheTrakt")};
+     const SERVER={cluster_advertisement:true};
+     ${shippedSource("settingsClusterEnabled")};${shippedSource("settingsManifest")};
      ${shippedSource("loadSettingsKey")};${shippedSource("loadSettingsTab")};
      return {load:()=>loadSettingsTab(1,"libraries"),switchAway:()=>{PAGE_RENDER_GENERATION=2;}};`,
   )(

@@ -185,6 +185,8 @@ test("the rail marks the active section, shows counts it already has, and never 
   const rail = new Function(
     "SETTINGS_DATA", "esc", "PlurxClusterPanel",
     `${shippedConst("SET_GROUPS")}${shippedConst("SET_TABS")}
+     const SERVER={cluster_advertisement:true};
+     ${shippedSource("settingsClusterEnabled")}
      ${shippedSource("settingsTabAside")}
      ${shippedSource("settingsTabsHtml")}
      return settingsTabsHtml;`,
@@ -200,7 +202,7 @@ test("the rail marks the active section, shows counts it already has, and never 
   assert.doesNotMatch(quiet, /setdot/, "home and books libraries never want a key");
   assert.doesNotMatch(shippedSource("settingsTabAside"), /api\(/, "the rail spends no request of its own");
   const sqlite = rail({ cluster: { unavailable: true, code: "membership_unavailable" } }, esc, {})("cluster");
-  assert.match(sqlite, /Cluster<span class="setn">sqlite<\/span>/);
+  assert.match(sqlite, /Cluster<span class="setn">off<\/span>/);
 });
 
 test("a card's Save wakes on a change and sleeps again once saved", () => {
@@ -497,15 +499,7 @@ test("Durable retry preserves its UUID after a transport failure and sends an ob
   assert.equal(queue.retries.size,0);
 });
 
-test("Developer keeps only experiments; everyday controls retain their saves and advisory readiness", () => {
-  assert.doesNotMatch(
-    shippedSource("playbackPanel"),
-    /preparedQualityCard/,
-    "the server-wide experimental enable must not remain in everyday Playback settings",
-  );
-  // Joined with newlines, never bare interpolation: `shippedSource` here
-  // stops at the next `\nfunction `, so a fragment can end inside a trailing
-  // `//` comment and swallow whatever follows it.
+function developerPanels(){
   const composedBody = [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
       shippedSource("liveTvEnableCard"), shippedSource("jellyfinCompatibilityCard"),
@@ -550,7 +544,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("playbackPanel"), shippedSource("metadataPanel"),
       shippedSource("searchSettingsCard"), shippedSource("windowsServerCard"),
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
-      "const SERVER=null, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
+      "const SERVER={cluster_advertisement:true}, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
+      shippedSource("settingsClusterEnabled"),
       "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'';",
       // `directedChangeDeveloperRows` reads the live player and returns ""
       // when there is none, which is exactly the state a settings page is in.
@@ -559,7 +554,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("seekScratchReservationsCard"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
-      "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel};",
+      "return {server:SERVER,developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel};",
     ].join("\n");
   const panels = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "window", "Hls",
@@ -580,6 +575,19 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     { DefaultConfig: { loader: function StockLoader() {} } },
     () => ({ progressive_hevc_sample_entries: ["hvc1"], transports: ["progressive", "hls"] }),
   );
+  return panels;
+}
+
+test("Developer keeps only experiments; everyday controls retain their saves and advisory readiness", () => {
+  assert.doesNotMatch(
+    shippedSource("playbackPanel"),
+    /preparedQualityCard/,
+    "the server-wide experimental enable must not remain in everyday Playback settings",
+  );
+  // Joined with newlines, never bare interpolation: `shippedSource` here
+  // stops at the next `\nfunction `, so a fragment can end inside a trailing
+  // `//` comment and swallow whatever follows it.
+  const panels = developerPanels();
   const readiness = { items: [{
     id: "prepared_quality_handoff",
     requirements: [
@@ -1723,4 +1731,24 @@ test("Cinema sharing lists endpoint setup and unverified host network without ga
   assert.match(requirements.find(row=>row.id==="network").detail,/Tailscale installed and signed in/);
   assert.match(html,/A container cannot infer host installation or remote reachability/);
   assert.match(html,/Readiness observations never prevent saving/);
+});
+
+
+test("standalone Developer omits cluster controls while preserving local features and saved choices", () => {
+  const panels=developerPanels();
+  const settings=Object.freeze({cluster_media_pool_enabled:true,cluster_session_takeover_enabled:true,
+    cluster_clock_guard_enforced:true,bounded_replica_reads:true,backup_destination:"/backups",
+    subtitle_cluster_sources:true,subtitle_stored_sources:true,subtitle_backfill:true,sharing_enabled:true});
+  panels.server.cluster_advertisement=false;
+  const html=panels.developerPanel(settings,{items:[]});
+  assert.doesNotMatch(html,/Cluster work|Portable cluster backup|Cluster clock guard|Cluster media placement|Local catalogue reads|Parallel playback subtitle ranges|Share stored subtitle tracks|href="#\/settings\/cluster"/);
+  assert.doesNotMatch(html,/TOG:(cluster-placement-enabled|cluster-takeover-enabled|cluster-clock-enforced|bounded-replica-reads|subcluster)\|/);
+  for(const id of ["subsrc","subbackfill","cinema-sharing-enabled","dev-live-tv-enable"])
+    assert.match(html,new RegExp(`TOG:${id}\\|`),`${id} still applies to this server`);
+  assert.doesNotMatch(html,/keep a ready voter majority/);
+  panels.server.cluster_advertisement=true;
+  const clustered=panels.developerPanel(settings,{items:[]});
+  assert.match(clustered,/Cluster media placement|Portable cluster backup/);
+  assert.match(clustered,/TOG:subcluster\|[^|]*\|[^|]*\|checked=true/,
+    "hiding an inapplicable control never changes its saved value");
 });

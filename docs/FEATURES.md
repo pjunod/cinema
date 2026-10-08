@@ -908,6 +908,14 @@ Metadata owns search and classification settings. Maintenance owns Windows
 conversion and runtime readiness alongside Dolby Vision disk conversion.
 Cluster owns automatic transport-recovery guidance.
 
+On a standalone server, Cluster shows only “Clustering is not enabled.”
+It does not load or poll cluster membership, operations, or logs. Developer
+omits remote placement and takeover, replica reads, clock enforcement,
+cluster backup, and peer-subtitle cards. Local analysis, storage budgets,
+stored subtitles, Live TV, and sharing between separate Cinemas remain
+available. Presentation follows the configured mode, not the number of peers
+currently reachable, and leaves saved settings unchanged.
+
 Developer holds only features that are not yet fully active or fully
 tested, and every card there says what it is waiting on before it leaves:
 to its proper settings section when a permanent on/off makes sense,
