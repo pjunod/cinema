@@ -6,6 +6,9 @@ Example (an owned display only; reserve the control strip outside the video):
   playback-x11-acquisition capture --display :99 --video 624,641 --control 624,650 --seconds 30 --out NEW_CAPTURE
 Wrap each invocation in an owned external timeout (e.g. 130 seconds with a
 5-second kill grace): a hung X server can block synchronous Xlib calls.
+Use --campaign explicitly for up to 1800 seconds, with an external timeout
+longer than that bound. --stop-file accepts only a fresh owned marker path.
+Receipts and RGB stream incrementally; no sample history is held in memory.
 Run control and capture as independent processes. Run a separate control-off
 baseline with capture's --control omitted; this tool does not automate retries.
 Both receipts use host CLOCK_MONOTONIC nanoseconds. They cannot synchronize a
@@ -23,6 +26,10 @@ import sys
 import time
 
 WIDTH, HEIGHT, READ_WIDTH = 672, 4, 42
+
+
+def stopped(args):
+    return args.stop_file is not None and args.stop_file.exists()
 
 
 class XImage(c.Structure):
@@ -150,7 +157,7 @@ def control(x, args, emit):
         end = start + int(args.seconds * 1e9)
         previous = -1
         emit({"type": "control_start", "epoch_ns": start, "window": window, "at": args.at, "rate": args.rate})
-        while time.monotonic_ns() < end:
+        while time.monotonic_ns() < end and not stopped(args):
             frame = math.floor((time.monotonic_ns() - start) * args.rate / 1e9)
             if frame <= previous:
                 paced(start + math.ceil((previous + 1) * 1e9 / args.rate))
@@ -225,7 +232,7 @@ def capture(x, args, emit, output):
     packet = 0
     emit({"type": "capture_start", "epoch_ns": start, "end_ns": end, "bounding_rectangle": [left, top, width, height], "strips": boxes})
     try:
-        while time.monotonic_ns() < end:
+        while time.monotonic_ns() < end and not stopped(args):
             before = time.monotonic_ns()
             pointer = x.lib.XGetImage(x.display, x.root, left, top, width, height, c.c_ulong(-1).value, 2)
             after = time.monotonic_ns()
@@ -269,6 +276,8 @@ def main():
         sub.add_argument("--display", required=True, help="Explicit owned X11 display; never inferred")
         sub.add_argument("--out", required=True, type=Path, help="New output directory; overwrite refused")
         sub.add_argument("--seconds", type=float, default=30)
+        sub.add_argument("--campaign", action="store_true", help="Explicit long campaign, maximum 1800s; default remains 120s")
+        sub.add_argument("--stop-file", type=Path, help="Fresh owned marker; stop gracefully when created, retaining every sample/checksum")
         sub.add_argument("--rate", type=float, default=120 if command == "capture" else 24)
         if command == "control":
             sub.add_argument("--at", required=True, type=coord)
@@ -276,8 +285,11 @@ def main():
             sub.add_argument("--video", required=True, type=coord)
             sub.add_argument("--control", type=coord)
     args = parser.parse_args()
-    if not math.isfinite(args.seconds) or not 0 < args.seconds <= 120 or not math.isfinite(args.rate) or not 1 <= args.rate <= (240 if args.command == "capture" else 120):
-        parser.error("Duration must be (0,120] seconds; rate 1..240 capture or 1..120 control")
+    maximum_seconds = 1800 if args.campaign else 120
+    if args.stop_file is not None and args.stop_file.exists():
+        parser.error("Stop marker already exists; use a fresh owned path")
+    if not math.isfinite(args.seconds) or not 0 < args.seconds <= maximum_seconds or not math.isfinite(args.rate) or not 1 <= args.rate <= (240 if args.command == "capture" else 120):
+        parser.error(f"Duration must be (0,{maximum_seconds}] seconds; rate 1..240 capture or 1..120 control")
     args.out.mkdir(parents=True, exist_ok=False)
     with (args.out / "receipt.jsonl").open("x") as receipt:
         def emit(row):
@@ -285,6 +297,8 @@ def main():
             receipt.flush()
         emit({"type": "metadata", "schema_version": 1, "pid": os.getpid(), "command": args.command,
               "display": args.display, "seconds": args.seconds, "rate": args.rate,
+              "campaign": args.campaign, "stop_file": str(args.stop_file) if args.stop_file else None,
+              "storage": "JSONL and RGB stream incrementally; no sample history retained in memory",
               "clock": "CLOCK_MONOTONIC", "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "scope": "software X11 acquisition diagnostic; no qualification verdict or physical/audio proof",
               "limitations": ["Image state falls somewhere within request/reply interval, not at midpoint.",
@@ -295,7 +309,7 @@ def main():
         try:
             x = X11(args.display)
             control(x, args, emit) if args.command == "control" else capture(x, args, emit, args.out)
-            emit({"type": "end", "status": "completed", "at_ns": time.monotonic_ns()})
+            emit({"type": "end", "status": "completed", "completion_cause": "stop_file" if stopped(args) else "deadline", "at_ns": time.monotonic_ns()})
         except BaseException as error:
             emit({"type": "end", "status": "failed", "error": str(error), "at_ns": time.monotonic_ns()})
             raise
