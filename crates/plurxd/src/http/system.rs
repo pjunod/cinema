@@ -2100,6 +2100,9 @@ pub struct SettingsDto {
     /// Convert Dolby Vision Profile 7 to 8.1 rather than delivering HDR10.
     /// On by default; this was `PLURX_DV_CONVERT`.
     pub dolby_vision_convert: bool,
+    /// Requested preferences, default off; neither reports effective processing.
+    pub dolby_vision_hdr_processing: bool,
+    pub dolby_vision_fel_reencode: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -2586,6 +2589,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::DV_CONVERT).as_deref(),
             true,
         ),
+        dolby_vision_hdr_processing: plurx_core::store::stored_switch(
+            setting(keys::DV_HDR_PROCESSING).as_deref(),
+            false,
+        ),
+        dolby_vision_fel_reencode: plurx_core::store::stored_switch(
+            setting(keys::DV_FEL_REENCODE).as_deref(),
+            false,
+        ),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -2874,6 +2885,8 @@ pub struct UpdateSettings {
     pub playback_sdr_master_codecs: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
+    pub dolby_vision_hdr_processing: Option<bool>,
+    pub dolby_vision_fel_reencode: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -3045,6 +3058,8 @@ impl UpdateSettings {
             || self.playback_sdr_master_codecs.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
+            || self.dolby_vision_hdr_processing.is_some()
+            || self.dolby_vision_fel_reencode.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
             || self.vod_materialize_budget_secs.is_some()
@@ -4073,6 +4088,20 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::DV_CONVERT, if on { "1" } else { "0" })
+            .await?;
+    }
+    // Persist requested preferences even while backend qualification is missing.
+    // Runtime routing remains unchanged until a qualified implementation lands.
+    if let Some(on) = req.dolby_vision_hdr_processing {
+        state
+            .store
+            .put_setting(keys::DV_HDR_PROCESSING, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_fel_reencode {
+        state
+            .store
+            .put_setting(keys::DV_FEL_REENCODE, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(output) = live_tv_deinterlace_output {
