@@ -24,7 +24,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 const WINDOW_TRACE_LIMIT: u64 = 128 * 1024;
 const SCRATCH_LIMIT: u64 = 512 * 1024 * 1024;
 const SOURCE_LIMIT: u64 = 64 * 1024 * 1024;
@@ -95,6 +95,8 @@ impl SegmentShape {
 /// NUT video is fd3; original source audio remains fd4 (independent demux input).
 pub(crate) struct SegmentRequest {
     pub(crate) renderer: PathBuf,
+    /// Trusted worker runtime configuration, scoped to the renderer child only.
+    pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) muxer: PathBuf,
     pub(crate) encoder: PathBuf,
     pub(crate) encoder_args: Vec<String>,
@@ -172,7 +174,7 @@ impl SegmentEvidence {
         let directory = Self::open(&self.held, c"rpus", libc::O_RDONLY | libc::O_DIRECTORY)?;
         let name =
             std::ffi::CString::new(format!("frame-{frame:03}.nal")).expect("bounded RPU name");
-        Self::read(&directory, &name, 16 * 1024 * 1024)
+        Self::read(&directory, &name, 4098)
     }
 }
 
@@ -477,6 +479,11 @@ async fn run(
     let held_directory =
         plurx_core::fs_secure::open_directory_nofollow_blocking(resources.directory.path())
             .map_err(|e| e.to_string())?;
+    let renderer_env: Vec<_> = request
+        .renderer_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_os_str()))
+        .collect();
     let render = producer_spawn::spawn(
         &request.renderer,
         &request.shape.renderer_args(),
@@ -489,7 +496,7 @@ async fn run(
                 None,
                 true,
             ),
-            env: &[],
+            env: &renderer_env,
             work: crate::process_control::ChildWork::realtime("DV segment reconstruction"),
         },
     )?;
@@ -758,6 +765,11 @@ async fn run_streaming(
     if let Some(window_args) = window_args {
         args.extend(window_args);
     }
+    let renderer_env: Vec<_> = request
+        .renderer_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_os_str()))
+        .collect();
     let render = producer_spawn::spawn(
         &request.renderer,
         &args,
@@ -770,7 +782,7 @@ async fn run_streaming(
                 Some(&write),
                 true,
             ),
-            env: &[],
+            env: &renderer_env,
             work: crate::process_control::ChildWork::realtime("DV streaming reconstruction"),
         },
     )?;
@@ -1024,11 +1036,62 @@ fn window_argument_regression() {
     );
 }
 
+#[cfg(any(test, plurx_dv_segment_probe))]
+fn probe_renderer_env() -> Vec<(String, std::ffi::OsString)> {
+    std::env::var_os("PLURX_DV_SEGMENT_RENDERER_LIBRARY_PATH")
+        .map(|value| vec![("LD_LIBRARY_PATH".into(), value)])
+        .unwrap_or_default()
+}
+
+#[cfg(any(test, plurx_dv_segment_probe))]
+async fn window_trace_bound_regression() {
+    let observations = vec![b'x'; 128 * 1024];
+    assert_eq!(
+        drain_bounded(observations.as_slice(), 128 * 1024)
+            .await
+            .expect("exact bounded trace")
+            .len(),
+        128 * 1024
+    );
+    let overflow = vec![b'x'; 128 * 1024 + 1];
+    assert!(drain_bounded(overflow.as_slice(), 128 * 1024)
+        .await
+        .is_err());
+}
+
+#[cfg(all(target_os = "linux", any(test, plurx_dv_segment_probe)))]
+fn evidence_read_regression() {
+    let directory = Arc::new(tempfile::tempdir().expect("private evidence"));
+    std::fs::create_dir(directory.path().join("rpus")).expect("RPU directory");
+    let evidence = SegmentEvidence {
+        held: Arc::new(
+            plurx_core::fs_secure::open_directory_nofollow_blocking(directory.path())
+                .expect("held evidence"),
+        ),
+        directory,
+    };
+    let path = evidence.directory.path().join("rpus/frame-000.nal");
+    std::fs::write(&path, vec![0; 4098]).expect("bounded RPU");
+    assert_eq!(evidence.rpu(0).expect("exact RPU bound").len(), 4098);
+    std::fs::write(&path, vec![0; 4099]).expect("oversized RPU");
+    assert!(evidence.rpu(0).is_err());
+    std::fs::remove_file(&path).expect("remove RPU");
+    std::os::unix::fs::symlink("/dev/zero", &path).expect("untrusted RPU link");
+    assert!(
+        evidence.rpu(0).is_err(),
+        "held-directory reads reject symlinks"
+    );
+}
+
 /// Explicit compile-time physical probe, never a daemon route or receipt.
 #[cfg(any(test, plurx_dv_segment_probe))]
 pub(crate) async fn physical_probe() {
     #[cfg(target_os = "linux")]
-    window_argument_regression();
+    {
+        window_argument_regression();
+        evidence_read_regression();
+    }
+    window_trace_bound_regression().await;
     use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
     use plurx_core::domain::MediaFile;
     let streaming = std::env::var("PLURX_DV_SEGMENT_STREAMING").is_ok_and(|v| v == "1");
@@ -1126,6 +1189,7 @@ pub(crate) async fn physical_probe() {
                 muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
                     .expect("muxer")
                     .into(),
+                renderer_env: probe_renderer_env(),
                 encoder: "/usr/bin/ffmpeg".into(),
                 encoder_args: args.clone(),
                 runtime_cache: cache.path().to_owned(),
@@ -1182,6 +1246,7 @@ pub(crate) async fn physical_probe() {
             muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
                 .expect("muxer")
                 .into(),
+            renderer_env: probe_renderer_env(),
             encoder: "/usr/bin/ffmpeg".into(),
             encoder_args: args.clone(),
             runtime_cache: cache.path().to_owned(),
@@ -1307,6 +1372,7 @@ pub(crate) async fn physical_probe() {
             muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
                 .expect("muxer")
                 .into(),
+            renderer_env: probe_renderer_env(),
             encoder: "/usr/bin/ffmpeg".into(),
             encoder_args: args.clone(),
             runtime_cache: cache.path().to_owned(),
@@ -1360,6 +1426,7 @@ pub(crate) async fn physical_probe() {
                 muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
                     .expect("muxer")
                     .into(),
+                renderer_env: probe_renderer_env(),
                 encoder: "/usr/bin/ffmpeg".into(),
                 encoder_args: args.clone(),
                 runtime_cache: cache.path().to_owned(),
@@ -1419,18 +1486,13 @@ mod tests {
 
     #[tokio::test]
     async fn window_observations_allow_exact_bound_and_refuse_overflow() {
-        let observations = vec![b'x'; WINDOW_TRACE_LIMIT as usize];
-        assert_eq!(
-            drain_bounded(observations.as_slice(), WINDOW_TRACE_LIMIT)
-                .await
-                .expect("exact bounded trace")
-                .len(),
-            WINDOW_TRACE_LIMIT as usize
-        );
-        let overflow = vec![b'x'; WINDOW_TRACE_LIMIT as usize + 1];
-        assert!(drain_bounded(overflow.as_slice(), WINDOW_TRACE_LIMIT)
-            .await
-            .is_err());
+        window_trace_bound_regression().await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_rpu_evidence_refuses_oversize_and_symlinks() {
+        evidence_read_regression();
     }
 
     #[test]
