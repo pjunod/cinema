@@ -860,9 +860,7 @@ impl Admissions {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         permits.prune();
-        if permits.background_active()
-            || (priority == Priority::Speculative && permits.live_waiting > 0)
-        {
+        if permits.background_active() {
             return None;
         }
         let mut family_id = None;
@@ -929,6 +927,17 @@ impl Admissions {
             Some(id) => Some(permits.families.get(&id)?),
             None => None,
         };
+        // A waiting viewer cannot claim an incumbent's exclusive allowance
+        // until that whole family is reaped. Its controlled video therefore
+        // renews within the original ceiling despite that waiter: blocking
+        // both sides would stall the incumbent without helping the queue.
+        // Initial preparation and ordinary-size families still yield priority.
+        if priority == Priority::Speculative
+            && permits.live_waiting > 0
+            && !existing_family.is_some_and(|family| family.exclusive)
+        {
+            return None;
+        }
         let family_cpu = existing_family
             .map_or(0, |family| family.cpu_used)
             .checked_add(adopted_cpu)?
@@ -1694,18 +1703,15 @@ mod tests {
         let renewal = [cpu_role(2), cpu_role(3)];
         let retained = [None, Some(audio.retained_resources())];
         let waiter = admissions.wait_for_slot();
-        let before = admissions.snapshot();
         assert!(
             admissions
-                .try_admit_family(2, 3, &renewal, &retained, Priority::Speculative)
+                .try_admit_software(3, 1, Priority::Live)
                 .is_none(),
-            "a family identity does not bypass foreground priority"
+            "the queued viewer cannot take an incumbent's exclusive allowance"
         );
-        assert_eq!(admissions.snapshot(), before);
-        drop(waiter);
         let (renewed_owner, video) = admissions
             .try_admit_family(2, 3, &renewal, &retained, Priority::Speculative)
-            .expect("its own AAC retains exclusive continuation credit");
+            .expect("retained AAC lets the incumbent resume while another viewer waits");
         assert_eq!(renewed_owner, owner);
         assert_eq!(video.len(), 1);
         assert_eq!(admissions.software_in_use(), 5);
@@ -1719,7 +1725,57 @@ mod tests {
         );
         assert_eq!(admissions.snapshot(), before);
         drop(video);
+        assert!(
+            admissions
+                .try_admit_software(3, 1, Priority::Live)
+                .is_none(),
+            "the AAC owner still preserves the presentation's allowance"
+        );
         drop(audio);
+        let next_viewer = admissions
+            .try_admit_software(3, 1, Priority::Live)
+            .expect("the waiting viewer progresses after the incumbent ends");
+        drop(waiter);
+        drop(next_viewer);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[test]
+    fn speculative_family_starts_and_nonexclusive_renewals_yield_to_live_waiters() {
+        let admissions = Admissions::new();
+        let roles = [cpu_role(1), cpu_role(1)];
+        let waiter = admissions.wait_for_slot();
+        let before = admissions.snapshot();
+        assert!(
+            admissions
+                .try_admit_family(2, 12, &roles, &[None; 2], Priority::Speculative)
+                .is_none(),
+            "a new speculative family cannot acquire ahead of a viewer"
+        );
+        assert_eq!(admissions.snapshot(), before);
+        drop(waiter);
+        let (_, mut permits) = admissions
+            .try_admit_family(2, 12, &roles, &[None; 2], Priority::Live)
+            .expect("ordinary-size family");
+        let retained = crate::vodencode::EncodePermit::from(permits.pop().expect("retained role"));
+        drop(permits);
+        let waiter = admissions.wait_for_slot();
+        let before = admissions.snapshot();
+        assert!(
+            admissions
+                .try_admit_family(
+                    2,
+                    12,
+                    &roles,
+                    &[None, Some(retained.retained_resources())],
+                    Priority::Speculative
+                )
+                .is_none(),
+            "only an existing exclusive allowance bypasses waiter priority"
+        );
+        assert_eq!(admissions.snapshot(), before);
+        drop(waiter);
+        drop(retained);
         assert_eq!(admissions.software_in_use(), 0);
     }
 
