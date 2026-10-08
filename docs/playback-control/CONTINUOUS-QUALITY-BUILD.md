@@ -8716,3 +8716,80 @@ existing qualification setup: enable ordinary Auto/display-aware preferences,
 wait for eight seconds of owned startup producer quiet, and warm ordinary
 engine attestation before playback. Give the fullscreen tool the explicit
 binary identity required by census. Do not rewrite the earlier failed verdict.
+
+### 10.282 Acquisition tool integration and runtime calibration (2026-10-08)
+
+Integrate the fullscreen agent's `5863ec0e3` as `45b1aa414` and acquisition
+agent's `0d14d0dc9` as `c94444afb`. Resolve overlapping catalog registrations
+once per helper. Parent integration hook passes with explicit pinned Rust
+1.97.1: catalog 3116, formatting, all-target Clippy and 77 served JS scripts.
+No unit tests execute. The diagnostic source archive contains committed
+source only and enters the approved isolated lab without `.git` or credentials.
+
+A fresh owned display calibrates synchronous XGetImage against an independent
+software counter. Both bounded processes exit zero. Five seconds yield 600
+samples, zero unreadable counters, counters 12 through 131, maximum request
+gap 8.544481 ms and maximum image-acquisition bracket 0.608172 ms. Every raw
+packet SHA256 validates. Preserve `acquisition1-calibration-{capture,control}`
+and `acquisition1-calibration-summary.json`. This proves the tool can sample
+this control in its software-display scope; it is not Plurx playback,
+physical presentation or audio acceptance, and the image instant stays
+within its request/reply interval rather than being assigned its midpoint.
+
+A separate fresh fullscreen-current1 diagnostic now runs shipped trusted
+fullscreen entry/exit against measured server component 67520f7a8, with owned
+startup probes settled before playback. No result is claimed before its
+three lifecycle windows and exact process retirement complete.
+
+Fullscreen-current1 completes passed: normal/fullscreen/normal window clocks
+0.99755x, 0.99755x and 0.99823x; maximum gaps 57.06, 84.94 and 84.94 ms;
+zero hitches/stalls. Same continuous identities remain. The exact End census
+has child counts 2, 0, 0, 0 at immediate/one/three/five seconds. This is shipped
+fullscreen state/clock scope, without quality switches, subtitles or optical/
+audio/physical acceptance. Its guard retires and the calibration display closes.
+
+Integrate the confirmed pause timing fix `a6775ea2b` as `aea0263a7`.
+Only temporal frame/rate windows reset on owned pause/play events; thresholds,
+nominal/decode history and lifetime counters remain. A distinct resumed
+duplicate is still a fault. The meaningful regression is deferred to the final
+unit lane; record its exact field in draft #844, bringing that list to 23.
+A new server build and runtime on this production source remain necessary.
+
+Integrate process-purpose metadata `667dc074c` as `4aaded294`. Only End
+snapshots enrich the raw census using bracketing PID/start-tick checks and
+bounded admin registration fields. Exact background caption jobs can be
+attributed; unknown processes and all raw children remain visible. No failure
+threshold is relaxed and no background job is disabled.
+
+The human now confirms the phone is unlocked and staying awake. A fresh
+CoreDevice query independently reports passcodeRequired=false. Prepare a
+new lab235 one-request attempt with bounded control-wire projection. Let the
+already active short browser acquisition baseline complete before native
+playback starts; the two runtimes must not compete on the shared lab node.
+
+### 10.283 Short bracketed playback and native startup preflight (2026-10-08)
+
+The fresh control-off acquisition diagnostic runs 30 seconds of 1080p steady
+playback with D3 acquisition disabled, preserving the qualification harness's
+100-to-10 Mbps shaping. Its transport/clock receipt passes at 1.001x, TTFF
+3175 ms, zero hitches/stalls. Raw capture completes 3600 samples; the first
+57 are unreadable within the initial 467 ms. Apply the predeclared fixed
+1000 ms warmup from the earlier optical method, preserving those startup
+samples and uncertainty. The 3480 post-warmup samples have no unreadable,
+skipped or backwards counters; request/reply bracket hold bounds are
+57.311086 ms lower and 75.153316 ms upper. Packet checksums validate. Preserve
+the bounded analysis and raw receipts. This is a short software-display
+window; it cannot replace the failed fifteen-manual capture or full acceptance.
+Its daemon/driver/guard and owned display retire before native playback.
+
+Lab235's fresh focused attempt passes. CoreDevice independently confirms
+unlocked immediately before launch; only own tv.plurx.cq.qual216 launches.
+The app logs the 720p request before awaiting its result and reports
+focused_pass with one observed change, about14.76 seconds after intent.
+Coordinator records20 SDK probes and no reported failure. The new bounded
+wire projection contains22 requests/replies, including actual staging and
+prepare offers followed by advancing720p probes. Preserve the app receipt,
+SDK/context and launch results; backend/proxy/guard retire and private
+configuration clears. This proves a healthy-startup normal-selection method
+path, not UI taps, fifteen/manual-five/Auto, capture or physical audio/display.
+No inference that startup alone caused the earlier decline is made.
