@@ -4695,3 +4695,11 @@ source = "clients/apple/Sources/RemoteControlSequence.swift"
 source_anchor = "func permits(_ generation: UUID) -> Bool { acquiredGeneration == generation }"
 test = "clients/apple/Tests/RemoteReceiverTests.swift"
 test_anchor = "testReopenAndConnectionRecoveryRequireExplicitControlAcquisition"
+
+[[fixes]]
+id = "apple.cinema-live-guide-window-focus-order"
+commits = ["05237632b91363b3ae86fb81a3ea38da6efae4cc"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".onChange(of: remoteGuideKeys)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testGuideOrderRefreshesWhenSameChannelsHaveNewProgrammeTimes"
