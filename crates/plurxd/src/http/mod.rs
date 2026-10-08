@@ -10732,6 +10732,10 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "cinema_remote_control",
+                "cinema_remote_invitations",
+                "macos_video_processing",
+                "macos_hevc_output",
                 "cinema_sharing",
                 // Jellyfin compatibility: one advisory row (pinned-client
                 // qualification) that never gates the switch.

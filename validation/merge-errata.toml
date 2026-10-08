@@ -297,3 +297,19 @@ reason = "PR #873 receipt recovery landed with two class-qualified Python refere
 [[errata]]
 commit = "2b21cc0354561c737b53c73f00804337024e3c61"
 reason = "The local follow-up integration of reviewed PR #865 used a chore subject without a PR number and omitted Regression-Test fields, despite bringing corrective source502c98761f97955620e4bbbf7d710c2edd2693bf. That source registers the remote adapters in the generated jsconfig and corrects static annotations; node tests/web/jsconfig-generated.test.js checks the generated manifest against actual served rows, and node scripts/web-jsconfig --check rejects stale output. The complete effort-web-static-check passed after this correction with unchanged TypeScript diagnostic baseline. The exact immutable merge is recognized above. This landing-specific erratum records the missing fields without rewriting history, changing the boundary, claiming a new unit pass or exempting later landings."
+
+[[landings]]
+commit = "4a737e92c07c3692f607a4c6d8b08a71fc0e22ca"
+tree = "d243ca02ef6b6ed322d7d0ae35827f345b2a03b0"
+parents = ["f4eb3cb9db0757d3f6feda10dc9cb1586afaf6d0", "b6ebc3f6e7ccacf7d04efd24f0f312f81d797315"]
+title = "fix(vaapi-qualification): restore original sharp-panel diagnostic input"
+pull = "909"
+reason = "Verified PR909 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All 4 original Regression-Test trailers remain mandatory own-tree evidence; this row recognizes the exact immutable merge identity and waives no checks."
+
+[[landings]]
+commit = "98af2eca9049c61524a013b5bd578ff79a64ed6d"
+tree = "fb7783bff20a9d695fb97e46d4334db0708c1f16"
+parents = ["4a737e92c07c3692f607a4c6d8b08a71fc0e22ca", "4e98734d17790c822aaa7afe5289d4d3e32c71ba"]
+title = "fix(sharing): compile source custody without replicated store"
+pull = "910"
+reason = "Verified PR910 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All 1 original Regression-Test trailers remain mandatory own-tree evidence; this row recognizes the exact immutable merge identity and waives no checks."
