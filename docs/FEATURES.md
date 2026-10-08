@@ -913,8 +913,8 @@ It does not load or poll cluster membership, operations, or logs. Developer
 omits remote placement and takeover, replica reads, clock enforcement,
 cluster backup, and peer-subtitle cards. Local analysis, storage budgets,
 stored subtitles, Live TV, and sharing between separate Cinemas remain
-available. Presentation follows the configured mode, not the number of peers
-currently reachable, and leaves saved settings unchanged.
+available. Presentation follows explicit configuration or persisted network membership,
+not the number of peers currently reachable, and leaves saved settings unchanged.
 
 Developer holds only features that are not yet fully active or fully
 tested, and every card there says what it is waiting on before it leaves:

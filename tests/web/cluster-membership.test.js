@@ -108,7 +108,7 @@ const BORROWED = [
 function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [], clustered } = {}) {
   const source = `
     const CLUSTER_OPS_RECEIVED_AT = new WeakMap();
-    const SERVER={cluster_advertisement:${JSON.stringify(clustered)}},SETTINGS_DATA={};
+    const SERVER={cluster_enabled:${JSON.stringify(clustered)}},SETTINGS_DATA={};
     let ME = ${JSON.stringify({ is_admin: isAdmin })};
     let CLUSTER_REFUSAL = ${JSON.stringify(refusal)};
     let CLUSTER_TOKEN = ${JSON.stringify(token)};
@@ -3983,7 +3983,7 @@ function tickHarness({ cluster, ops, now, clustered=true }) {
     `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,
        TRAKT=null,CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=0,
        SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
-     const SERVER={cluster_advertisement:${JSON.stringify(clustered)}};
+     const SERVER={cluster_enabled:${JSON.stringify(clustered)}};
      ${shippedSource("settingsClusterEnabled")}
      const cacheTrakt=(value)=>value;
      const Date={now:clock};

@@ -4108,7 +4108,7 @@ fn should_force_loopback(config: &Config, membership: Option<&LocalMembership>) 
     if !config.cluster.advertise_host.trim().is_empty() {
         return false;
     }
-    membership.is_none_or(|membership| cluster_peer_is_loopback(&membership.local))
+    membership.is_none_or(|membership| membership.local.is_loopback())
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -4118,7 +4118,7 @@ fn configured_or_persisted_local_peer(
     force_loopback: bool,
 ) -> Result<ClusterPeer, StoreError> {
     if force_loopback {
-        return if cluster_peer_is_loopback(&membership.local) {
+        return if membership.local.is_loopback() {
             Ok(ClusterPeer {
                 raft_id: membership.raft_id,
                 raft_address: local_client_address(config.cluster.raft_bind).to_string(),
@@ -4131,7 +4131,7 @@ fn configured_or_persisted_local_peer(
         };
     }
 
-    if cluster_peer_is_loopback(&membership.local) {
+    if membership.local.is_loopback() {
         // Setting advertise_host is the explicit opt-in that opens an existing
         // one-voter install to peers. The readdress path replaces its persisted
         // loopback membership before the active voter reaches this function.
@@ -4162,17 +4162,6 @@ fn configured_or_persisted_local_peer(
         ));
     }
     Ok(configured)
-}
-
-#[cfg(feature = "hiqlite-store")]
-fn cluster_peer_is_loopback(peer: &ClusterPeer) -> bool {
-    [&peer.raft_address, &peer.api_address]
-        .into_iter()
-        .all(|address| {
-            address
-                .parse::<SocketAddr>()
-                .is_ok_and(|address| address.ip().is_loopback())
-        })
 }
 
 #[cfg(feature = "hiqlite-store")]

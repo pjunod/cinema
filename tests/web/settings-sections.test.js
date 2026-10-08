@@ -543,7 +543,7 @@ function developerPanels(){
       shippedSource("playbackPanel"), shippedSource("metadataPanel"),
       shippedSource("searchSettingsCard"), shippedSource("windowsServerCard"),
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
-      "const SERVER={cluster_advertisement:true}, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
+      "const SERVER={cluster_enabled:true}, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
       shippedSource("settingsClusterEnabled"),
       "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'';",
       // `directedChangeDeveloperRows` reads the live player and returns ""
@@ -1694,14 +1694,15 @@ test("standalone Developer omits cluster controls while preserving local feature
   const settings=Object.freeze({cluster_media_pool_enabled:true,cluster_session_takeover_enabled:true,
     cluster_clock_guard_enforced:true,bounded_replica_reads:true,backup_destination:"/backups",
     subtitle_cluster_sources:true,subtitle_stored_sources:true,subtitle_backfill:true,sharing_enabled:true});
-  panels.server.cluster_advertisement=false;
+  panels.server.cluster_enabled=false;
   const html=panels.developerPanel(settings,{items:[]});
   assert.doesNotMatch(html,/Cluster work|Portable cluster backup|Cluster clock guard|Cluster media placement|Local catalogue reads|Parallel playback subtitle ranges|Share stored subtitle tracks|href="#\/settings\/cluster"/);
   assert.doesNotMatch(html,/TOG:(cluster-placement-enabled|cluster-takeover-enabled|cluster-clock-enforced|bounded-replica-reads|subcluster)\|/);
   for(const id of ["subsrc","subbackfill","cinema-sharing-enabled","dev-live-tv-enable"])
     assert.match(html,new RegExp(`TOG:${id}\\|`),`${id} still applies to this server`);
   assert.doesNotMatch(html,/keep a ready voter majority/);
-  panels.server.cluster_advertisement=true;
+  panels.server.cluster_enabled=true;
+  panels.server.cluster_advertisement=false; // Persisted member without an explicit advertised host.
   const clustered=panels.developerPanel(settings,{items:[]});
   assert.match(clustered,/Cluster media placement|Portable cluster backup/);
   assert.match(clustered,/TOG:subcluster\|[^|]*\|[^|]*\|checked=true/,

@@ -118,7 +118,7 @@ const SETTINGS_MANIFEST={
 // The configured mode, not the current peer count or a failed status read,
 // determines whether cluster controls apply. /server is loaded before routing.
 function settingsClusterEnabled(d=SETTINGS_DATA){
-  return SERVER?.cluster_advertisement??
+  return SERVER?.cluster_enabled??
     !(d?.cluster?.unavailable&&d.cluster.code==="membership_unavailable");
 }
 function settingsManifest(tab){
