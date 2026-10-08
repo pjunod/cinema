@@ -1,7 +1,7 @@
 # macOS video processing — execution status and decisions
 
-**Status:** implementation complete; ready for merge handoff · **Updated:** 2026-10-08 · **Owner:** managing agent with
-three GPT-6.1 Sol builders · **Integration:** `effort/macos-video-completion`.
+**Status:** follow-up implementation active; prior contribution handed off · **Updated:** 2026-10-08 · **Owner:** managing agent with
+three GPT-6.1 Sol builders · **Integration:** `effort/video-processing-followups`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -11,6 +11,33 @@ A plan or compiled change is not hardware qualification. The
 measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
+
+On 2026-10-08 the user explicitly promoted GPU subtitle compositing,
+non-Mac Profile 5 hardware decoding and the caption-bearing file-VOD
+VideoToolbox failure into active implementation. These are now required
+work, not conditional follow-ups. The accepted PR #904 remains with the
+merge coordinator; this work uses a separate effort based on the reviewed
+combined source `b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`.
+
+| Follow-up | Sol 6.1 owner | State | Required evidence |
+|---|---|---|---|
+| F1 GPU subtitle compositing | Native builder | Investigating compositor and cue ownership | Preserved libass shaping/fonts and bitmap geometry; alpha/color, animation, no-cue, last-cue, seek and cancellation controls; complete-graph comparison |
+| F2 non-Mac P5 hardware decoding | Route builder | Investigating backend metadata and available hardware | Backend/build/driver-specific hardware reconstruction and current-frame Dolby metadata through rendering; loss must not become generic PQ |
+| F3 caption-bearing VOD VideoToolbox | Dolby builder | Investigating SEI parser failure | Exact failing SEI condition; bounded parser repair; captions retained in real hardware-encoded AC-4 VOD delivery |
+
+Builders use separate owned clones. New native patch files have separate
+owners: `0003` for caption SEI handling and `0004` for GPU subtitle work.
+Shared package/provenance and planner boundaries integrate serially. The
+manager maintains this ledger and reconciles overlapping source ownership
+before edits. Existing accepted package/evidence remains read-only.
+
+The coordinator has granted the existing Mac compiler cache for pinned
+1.97.1 work, with at most two compiler jobs and one builder owner at a time.
+GPU experiments require a fresh host activity check and exclusive scheduling;
+non-Mac hardware reservations remain to be established. No new hardware
+result, implementation completion or final review is claimed yet.
+
+### Prior contribution retained for the merge coordinator
 
 The initial SDR/HDR10 implementation is built and independently reviewed.
 PR #870 was composed into coordinator PR #882 and landed on `main` as
@@ -45,8 +72,8 @@ memory/energy/copy instrumentation. The initial soak driver used a stale
 control sequence; its failure is retained, and only the corrected soak was
 repeated.
 
-No further production building is assigned. The designated merge session
-owns the final fast lane and main landing of PR #904. No unit suite ran in
+The designated merge session owns the final fast lane and main landing of
+PR #904. The newly assigned F1–F3 work above proceeds separately. No unit suite ran in
 this effort. Broad physical-client, calibrated-display, deployment, fleet
 upgrade and other-host qualification remains explicitly open; the Developer
 switches retain their advisory graduation status. This is not an all-device
