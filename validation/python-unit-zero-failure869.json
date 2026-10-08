@@ -1,4 +1,28 @@
 {
+  "history4397": {
+    "artifacts": {
+      "final": {
+        "id": 1792,
+        "sha256": "7a3752c97df2462d79bb2d2c531375af03f32b3cc7fd5f354e293c6c88ddd555",
+        "size": 337
+      },
+      "start": {
+        "id": 1791,
+        "sha256": "824bfdea229c870d34d395fa15d1761a061986c3995dd9602916963d337a1528",
+        "size": 337
+      }
+    },
+    "commit": "69f092b1e3efc43073399c1d835f87c90f796101",
+    "count": 0,
+    "job": 44684,
+    "log_sha256": "f21ee1e407671cb54d23642e947332a6f7977e7675e81d0d50765bb93e3e6370",
+    "run": 4397,
+    "source_hashes": {
+      ".github/workflows/effort-ci.yml": "b7c05851a042afa2da9a39bcd3e4057ea4ee0d02f37bb304b6044237cf303e5d",
+      "validation/python_unit_receipts.py": "5c9a7c72772b07c9f938a5bcdb9ad35b583aba425cd9405564cd2892f9e28e7e"
+    },
+    "sources": []
+  },
   "inherited": {
     "artifacts": {
       "final": {

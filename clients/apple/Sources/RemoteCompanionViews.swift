@@ -20,6 +20,12 @@ struct RemotePairingApprovalView: View {
             .padding(40)
             .background(Palette.surfaceHi, in: RoundedRectangle(cornerRadius: 20))
             .remoteRestricted()
+        } else if remote.pairingOpening || remote.pairingExpired {
+            VStack(spacing: 20) {
+                if remote.pairingOpening { ProgressView("Creating a TV code…") }
+                else { Text("The TV code expired.").font(.title2); Button("Create a fresh code") { remote.startPairing() } }
+                Button("Close") { remote.hidePairing() }
+            }.padding(36).background(Palette.surfaceHi, in: RoundedRectangle(cornerRadius: 20)).remoteRestricted()
         } else if let challenge = remote.challenge {
             VStack(spacing: 20) {
                 Text("Pair a Cinema phone").font(.title2.bold())
@@ -179,11 +185,20 @@ struct RemoteCompanionView: View {
                 Button("Home") { remote.send(.init(type: .home)) }
                 if supports(.stop) { Button("Stop") { remote.send(.init(type: .stop)) } }
             }.buttonStyle(.bordered)
+            HStack {
+                if supports(.setPlaying) {
+                    if let playing = remote.controllerState?.playback?.playing {
+                        Button(playing ? "Pause" : "Play") { remote.send(.init(type: .setPlaying, playing: !playing)) }
+                    } else {
+                        Button("Play") { remote.send(.init(type: .setPlaying, playing: true)) }
+                        Button("Pause") { remote.send(.init(type: .setPlaying, playing: false)) }
+                    }
+                }
+            }.buttonStyle(.bordered)
             if let playback = remote.controllerState?.playback {
                 Text(playback.title).font(.headline)
                 HStack {
                     if supports(.seekRelative) { Button("−10 s") { remote.send(.init(type: .seekRelative, seconds: -10)) } }
-                    if supports(.setPlaying) { Button(playback.playing ? "Pause" : "Play") { remote.send(.init(type: .setPlaying, playing: !playback.playing)) } }
                     if supports(.seekRelative) { Button("+10 s") { remote.send(.init(type: .seekRelative, seconds: 10)) } }
                 }.buttonStyle(.bordered)
                 ForEach(CinemaRemoteTrackKind.allRemoteCases.filter { kind in playback.tracks.contains { $0.kind == kind } }, id: \.rawValue) { kind in

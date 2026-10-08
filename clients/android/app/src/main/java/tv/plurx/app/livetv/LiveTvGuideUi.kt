@@ -2,6 +2,14 @@
 
 package tv.plurx.app.livetv
 
+import tv.plurx.app.remote.*
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -312,7 +320,7 @@ private fun LiveTvPagingChip(
     onClick: () -> Unit,
     type: LiveTvTypeScale,
 ) {
-    TvTextButton(onClick = onClick, enabled = enabled, compact = true) {
+    TvTextButton(modifier = Modifier.remoteAction("live-guide-page:" + label, label, enabled) { onClick(); RemoteOutcome.Applied }, onClick = onClick, enabled = enabled, compact = true) {
         Text(label, style = type.badge)
     }
 }
@@ -345,10 +353,34 @@ fun LiveTvGuideGrid(
     onFocus: (LiveTvChannel, LiveTvProgramme?) -> Unit = { _, _ -> },
     onToolbarBoundary: () -> Unit = {},
     modifier: Modifier = Modifier,
+    extraRemoteKeys: List<String> = emptyList(),
 ) {
     val scroll = rememberScrollState()
     val rows = rememberLazyListState()
     val requesters = remember { mutableStateMapOf<LiveTvGuideFocusTarget, FocusRequester>() }
+    val remoteScope = rememberCoroutineScope()
+    val remoteTune = LocalRemoteLiveTune.current
+    val remoteNavigation = LocalRemoteNavigation.current
+    val density = androidx.compose.ui.platform.LocalDensity.current.density
+    val semanticKeys = (buildList {
+        addAll(extraRemoteKeys)
+        paging?.let { if (it.canEarlier) add("live-guide-page:‹"); add("live-guide-page:Now"); if (it.canLater) add("live-guide-page:›") }
+        layout.rows.forEach { row ->
+            if (row.channel.watchable) add("live-guide-channel:" + row.channel.id)
+            row.cells.forEach { add("live-guide-cell:" + row.channel.id + ":" + it.programme.start) }
+            if (row.cells.isEmpty() && row.channel.watchable) add("live-guide-empty:" + row.channel.id)
+        }
+    }).distinct().take(16384)
+    var lastWindow by remember { mutableStateOf<List<Long>?>(null) }
+    SideEffect { if (lastWindow != slots) { lastWindow = slots.toList(); remoteNavigation?.changedContext() } }
+    RemoteOrder(semanticKeys) { key ->
+        val rowIndex = layout.rows.indexOfFirst { row -> key == "live-guide-channel:" + row.channel.id || key == "live-guide-empty:" + row.channel.id || row.cells.any { key == "live-guide-cell:" + row.channel.id + ":" + it.programme.start } }
+        if (rowIndex >= 0) remoteScope.launch {
+            rows.scrollToItem(rowIndex)
+            val cell = layout.rows[rowIndex].cells.firstOrNull { key == "live-guide-cell:" + layout.rows[rowIndex].channel.id + ":" + it.programme.start }
+            if (cell != null) scroll.scrollTo((cell.left * density).toInt().coerceIn(0, scroll.maxValue))
+        } else if (key.startsWith("live-guide-page:") || key in extraRemoteKeys) remoteScope.launch { rows.scrollToItem(0) }
+    }
     var focused by remember { mutableStateOf(navigationTarget) }
     var pending by remember { mutableStateOf<LiveTvGuideFocusTarget?>(null) }
     var preserveAnchorFor by remember { mutableStateOf<LiveTvGuideFocusTarget?>(null) }
@@ -471,6 +503,7 @@ fun LiveTvGuideGrid(
                     TvTextButton(
                         onClick = { if (row.channel.watchable) onAiring(row.channel) },
                         modifier = Modifier
+                            .remoteAction("live-guide-channel:" + row.channel.id, row.channel.title, enabled = "live-guide-channel:" + row.channel.id in semanticKeys, deferred = { action -> if (action.type == "select") remoteTune?.invoke(row.channel) else null }) { if (row.channel.watchable) { onAiring(row.channel); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
                             .width(dimensions.channelColumnWidth)
                             .liveTvGuideFocusTarget(channelTarget, requesters) {
                                 receiveFocus(channelTarget, row.channel)
@@ -532,6 +565,7 @@ fun LiveTvGuideGrid(
                                 mark = marks.mark(row.channel.id, cell.programme.start, now),
                                 onFuture = onFuture,
                                 modifier = Modifier
+                                    .remoteAction("live-guide-cell:" + row.channel.id + ":" + cell.programme.start, cell.programme.title, enabled = "live-guide-cell:" + row.channel.id + ":" + cell.programme.start in semanticKeys) { onFuture(row.channel, cell.programme); RemoteOutcome.Applied }
                                     .liveTvGuideFocusTarget(target, requesters) {
                                         receiveFocus(target, row.channel)
                                     }
@@ -543,6 +577,7 @@ fun LiveTvGuideGrid(
                             TvTextButton(
                                 onClick = { if (row.channel.watchable) onAiring(row.channel) },
                                 modifier = Modifier
+                                    .remoteAction("live-guide-empty:" + row.channel.id, row.channel.title, enabled = "live-guide-empty:" + row.channel.id in semanticKeys, deferred = { action -> if (action.type == "select") remoteTune?.invoke(row.channel) else null }) { if (row.channel.watchable) { onAiring(row.channel); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
                                     .width(dimensions.slotWidth * slots.size)
                                     .height(dimensions.rowHeight)
                                     .liveTvGuideFocusTarget(emptyTarget, requesters) {
@@ -732,3 +767,5 @@ private fun Modifier.liveTvGuideFocusTarget(
     }
     return focusRequester(requester).onFocusChanged { if (it.isFocused) onFocused() }
 }
+
+internal val LocalRemoteLiveTune = androidx.compose.runtime.staticCompositionLocalOf<((LiveTvChannel) -> RemoteDeferredEffect)?>( { null })

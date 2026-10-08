@@ -243,3 +243,32 @@ enum RemoteHTTPTransport {
         return URLSession(configuration: configuration, delegate: redirectBlocker, delegateQueue: nil)
     }()
 }
+
+/// Reserve normalized-null and response space without inventing media/track IDs.
+enum RemoteStateBudget {
+    static let maximumBytes = 48 * 1_024
+    private static func fits(_ state: CinemaRemoteState) -> Bool {
+        guard let encoded = try? JSONEncoder().encode(state),
+              var value = (try? JSONSerialization.jsonObject(with: encoded)) as? [String: Any] else { return false }
+        for key in ["focused_label", "text_nonce", "playback"] where value[key] == nil { value[key] = NSNull() }
+        guard let normalized = try? JSONSerialization.data(withJSONObject: value) else { return false }
+        return normalized.count <= maximumBytes - 256
+    }
+    static func fit(_ state: CinemaRemoteState) -> CinemaRemoteState {
+        if fits(state) { return state }
+        let summary = state.playback.map { value in
+            CinemaRemotePlaybackSummary(media: value.media, title: RemoteTextBounds.label(value.title, maximumBytes: 64), playing: value.playing,
+                positionMs: value.positionMs, durationMs: value.durationMs, tracks: value.tracks.map { track in
+                    CinemaRemoteTrackOption(kind: track.kind, optionID: track.optionID, label: RemoteTextBounds.label(track.label, maximumBytes: 64))
+                })
+        }
+        let shorter = replacing(state, playback: summary, capabilities: state.capabilities)
+        if fits(shorter) { return shorter }
+        // Presentation size is not a reason to disable authorized Pause/Stop.
+        return replacing(state, playback: nil, capabilities: state.capabilities.filter { $0 != .openTracks && $0 != .chooseTrack })
+    }
+    private static func replacing(_ state: CinemaRemoteState, playback: CinemaRemotePlaybackSummary?, capabilities: [CinemaRemoteAction.Kind]) -> CinemaRemoteState {
+        .init(stateRevision: state.stateRevision, contextRevision: state.contextRevision, focusRevision: state.focusRevision,
+              route: state.route, capabilities: capabilities, focusedLabel: state.focusedLabel, credits: state.credits, textNonce: state.textNonce, playback: playback)
+    }
+}

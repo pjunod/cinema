@@ -4659,7 +4659,7 @@ id = "desktop.cec-page-frame-freshness"
 commits = []
 supplements = "desktop.cec-bounded-local-receiver"
 source = "clients/desktop-remote/extension/bridge.js"
-source_anchor = "now>=deadline"
+source_anchor = "now>=offered.deadline"
 test = "clients/desktop-remote/tests/extension.test.mjs"
 test_anchor = "MAIN delivery checks its own credit after a page stall and invalidates before context capture"
 
@@ -4825,3 +4825,521 @@ source = "clients/apple/Sources/RemoteClientModel.swift"
 source_anchor = "guard let state else { return }"
 test = "clients/apple/Tests/RemoteReceiverTests.swift"
 test_anchor = "testNullStateTimeoutPreservesStateUntilControllerRetirement"
+
+[[fixes]]
+id = "android.cinema-remote-foreground-guard"
+commits = ["98ac181b567acfd55a2b51619b3fc4fafde8f6f1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteReceiverGuard.kt"
+source_anchor = "highWater = command.sequence"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "consumesSequenceBeforeEffectAndRetainsRejectedOutcome"
+
+[[fixes]]
+id = "android.cinema-remote-native-focus-realization"
+commits = []
+supplements = "android.cinema-remote-foreground-guard"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigation.kt"
+source_anchor = "if (requestedFocus != null || entry.identity != focusedIdentity"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "lazyFocusRequestCannotSelectUntilRealizedNativeAcknowledgement"
+
+[[fixes]]
+id = "android.cinema-remote-owned-overlay"
+commits = []
+supplements = "android.cinema-remote-foreground-guard"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemotePlaybackAdapter.kt"
+source_anchor = "if (!current.effectsEligible()) return RemoteOutcome.Restricted"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "playbackOwnerModalFenceAndOptionChangesInvalidateExactContext"
+
+[[fixes]]
+id = "android.cinema-remote-pairing-monotonic-deadline"
+commits = ["2e50aa9d9faa875e88aaf5c4578bf6590bd1af64"]
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteClientModel.kt"
+source_anchor = "withTimeout(remaining)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "monotonicPairingDeadlineRejectsSlowClaimAndLateApprovedResult"
+
+[[fixes]]
+id = "android.cinema-remote-ack-before-queued"
+commits = []
+supplements = "android.cinema-remote-pairing-monotonic-deadline"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteClientModel.kt"
+source_anchor = "commandStatus = commandResult.known(control.epoch, sequence)?.viewerMessage()"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "exactAckBefore202CannotBecomePendingOrAffectAnotherCommand"
+
+[[fixes]]
+id = "desktop.cec-cinema-device-local-choice"
+commits = ["500748f58be0a9652ae018dcf022a9d1c9a8ca7b"]
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "typeof cinemaRemoteLocalEnabled===\"function\"&&!cinemaRemoteLocalEnabled(\"cec\")"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "saved Cinema local CEC choice fences install and queued delivery independently of server"
+
+[[fixes]]
+id = "desktop.cec-cinema-disable-document"
+commits = []
+supplements = "desktop.cec-cinema-device-local-choice"
+source = "clients/desktop-remote/extension/content.js"
+source_anchor = "cinema-cec-disabled"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "fixed local disable notification unbinds the document port without accepting page actions"
+
+[[fixes]]
+id = "desktop.cec-cinema-disable-worker"
+commits = []
+supplements = "desktop.cec-cinema-device-local-choice"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "message.type===\"disabled\""
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "fixed local disable notification unbinds the document port without accepting page actions"
+
+[[fixes]]
+id = "desktop.cec-cinema-server-instance"
+commits = []
+supplements = "desktop.cec-cinema-device-local-choice"
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "SERVER?.instance_id!==instance"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "saved Cinema local CEC choice fences install and queued delivery independently of server"
+
+# Cinema couch: local-only CEC admission captures probe-time physical identity.
+[[fixes]]
+id = "desktop.cinema-cec-pairing-credit-identity"
+commits = ["8ee2f4be2674676af94d511df6c66102774ccc99"]
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = 'if(JSON.stringify(current)!==JSON.stringify(offered.context))return "stale_focus";'
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "MAIN Select requires a fresh physical focus and pending identity credit"
+
+[[fixes]]
+id = "desktop.cinema-cec-pairing-physical-owner"
+commits = []
+supplements = "desktop.cinema-cec-pairing-credit-identity"
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = 'if(typeof CinemaRemoteLocalPhysical!=="undefined")return CinemaRemoteLocalPhysical.dispatch(action,offered.context);'
+test = "clients/desktop-remote/tests/extension.browser.cjs"
+test_anchor = "real Chromium extension targets MAIN document and invalidates local context without native hardware"
+
+[[fixes]]
+id = "android.cinema-remote-physical-observer-adapter"
+commits = ["d2c287b96c2ae3eda0a29a84659ca4e560f07554"]
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemotePhysicalInputAdapter.kt"
+source_anchor = "fun retiresCredits(action: Int, keyCode: Int)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "dedicatedPhysicalPlayPauseStopRetireCreditsAndPreservePhysicalScrub"
+
+[[fixes]]
+id = "android.cinema-remote-observer-fence-boundary"
+commits = []
+supplements = "android.cinema-remote-physical-observer-adapter"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigationViews.kt"
+source_anchor = ".observeRemotePhysicalKeys"
+test = "tests/operations/test_player_input_fence.py"
+test_anchor = "test_companion_android_adapter_does_not_exempt_neighboring_raw_handlers"
+
+[[fixes]]
+id = "android.cinema-remote-typed-track-menu"
+commits = []
+supplements = "android.cinema-remote-physical-observer-adapter"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "mutableStateOf<RemoteTrackMenuKind?>(null)"
+test = "tests/operations/test_playback_surface_fence.py"
+test_anchor = "test_the_android_player_carries_no_pre_contract_surface_write"
+
+[[fixes]]
+id = "apple.cinema-owned-couch-navigation"
+commits = ["512fac49526aa501c4f31ef339ab20cd9e482f42"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "destinations.count < 8"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testOwnedDestinationBackRouteReplacementAndLateDisposalStayScoped"
+
+[[fixes]]
+id = "apple.cinema-couch-native-realization"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func attachDestination("
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testOwnedDestinationBoundsAndRealizationRequireCurrentNativeFocus"
+
+[[fixes]]
+id = "apple.cinema-couch-choice-admission"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "if let refused = entry.admission() { return refused }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testStaleCapturedPreplaySelectRejectsBeforeActionAndCannotCloseReplacementModal"
+
+[[fixes]]
+id = "apple.cinema-couch-choice-source"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "let source = RemoteOwnedChoiceSource(token: UUID(), epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testRefreshedPreplaySourceAndReplacedPanelRejectCapturedChoice"
+
+[[fixes]]
+id = "apple.cinema-couch-registration-refresh"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "func updateUIView(_ uiView: UIView, context: Context) { update() }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testRealRegistrationRefreshesVersionClosureAtUnchangedButtonGeometry"
+
+[[fixes]]
+id = "apple.cinema-couch-dismiss-fallback"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "requestFocus(old.opener.flatMap"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testPhysicalDestinationDismissRestoresAvailableFallbackWhenOpenerRemoved"
+
+[[fixes]]
+id = "apple.cinema-couch-episode-retry"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "defer { episodePlayAttempt.finish(attempt) }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testEpisodeContextChangeRetiresLoadingAndAllowsFreshRetryWithoutClearingReplacement"
+
+[[fixes]]
+id = "apple.cinema-couch-wire-negative-zero"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteWire.swift"
+source_anchor = "guard Array(token) != [45, 48]"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testNegativeZeroRejectedByCommandAndProductionNestedPollDecoder"
+
+[[fixes]]
+id = "apple.cinema-couch-state-budget"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteAPI.swift"
+source_anchor = "static let maximumBytes = 48 * 1_024"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testNormalizedPresenceBudgetPreservesExactIDsAndTransport"
+
+[[fixes]]
+id = "apple.cinema-couch-publisher-revision"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "func makeState(pairingRestricted: Bool)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testProductionPresenceRevisionAdvancesAcrossPairingOpenPendingExpiredAndClose"
+
+[[fixes]]
+id = "apple.cinema-couch-pairing-surface"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "challenge = nil; pairingExpired = true; guardState.invalidate()"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testTVPairSurfaceCloseReplacementAndExpiredCodeRetireOldReplies"
+
+[[fixes]]
+id = "apple.cinema-couch-pairing-deadline"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemotePairingLifetime.swift"
+source_anchor = "return now >= start && now < deadline"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testPhonePairingMonotonicDeadlineRejectsLateApprovalBeforeSave"
+
+[[fixes]]
+id = "apple.cinema-couch-command-ack-order"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemotePairingLifetime.swift"
+source_anchor = "func known(epoch: UUID, sequence: UInt64)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testExactAckBefore202CannotReturnToPendingOrCrossCommandOwner"
+
+[[fixes]]
+id = "apple.cinema-couch-deferred-permit"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteReceiverGuard.swift"
+source_anchor = "now < value.creditDeadline"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testDeferredReservationOriginalDeadlinePhysicalRetirementAndNoReplay"
+
+[[fixes]]
+id = "apple.cinema-couch-late-resource-cleanup"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemotePlaybackAdapter.swift"
+source_anchor = "let task = Task { await cleanup() }"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testLateSharedOfferCleanupRunsAfterPermitExpiryWithoutRendererMutation"
+
+[[fixes]]
+id = "apple.cinema-couch-shared-start-retry"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "remoteRetryRequiresPreparation = true"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testRejectedInitialRemoteStartAllowsFreshRequestAndExpiredRetryNeverDispatches"
+
+[[fixes]]
+id = "apple.cinema-couch-shared-stop-cleanup"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func beginStop(watched: Bool = false) -> Task<Void, Never>"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testLocalStopExitRemainsUsableWhileOwnedCleanupOutlivesCommandDeadline"
+
+[[fixes]]
+id = "apple.cinema-couch-shared-owned-exit"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "guard modal == nil, presentations.isEmpty else { return .unsupported }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testOwnedSharedPresentationExitProtectsUnderlyingDetailAndReplacement"
+
+[[fixes]]
+id = "apple.cinema-couch-pending-owned-exit"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "replacingPending: [.stop, .back, .home].contains(command.action.type)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testOwnedBackHomeCanReplacePendingNetworkPermitWithoutReplayingIt"
+
+[[fixes]]
+id = "apple.cinema-couch-stationary-physical-action"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func performPhysicalAction(_ action: () -> Void)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testStationarySharedPhysicalActionRetiresNetworkAuthorityBeforeTransportEffect"
+
+# Android couch: exact owned windows/full-reference playback and bounded deferred effects.
+
+[[fixes]]
+id = "android.couch-expanded-library"
+commits = ["e9311ab776435ce6bf30e0312a4b85293ee4b816"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "RemotePresentationKind.LibraryGroup"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "expandedLibraryOwnsRealizationAndBackRestoresExactOpener"
+
+[[fixes]]
+id = "android.couch-poster-outcome"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/Common.kt"
+source_anchor = "remoteActivate?.invoke()"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "retiredExpandedDialogCannotCloseReplacementPresentation"
+
+[[fixes]]
+id = "android.couch-typed-owned-windows"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigation.kt"
+source_anchor = "ProgrammeDetails(\"details\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-owned-window-view"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigationViews.kt"
+source_anchor = "internal fun RemoteOwnedWindow"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-choice-close"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteChoiceDialog.kt"
+source_anchor = "val keys = choiceKeys + closeKey"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-shared-entry"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/HomeScreen.kt"
+source_anchor = "add(\"home:shared\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "onlyExactOwnedRoutesCanAdvertiseSemanticControls"
+
+[[fixes]]
+id = "android.couch-shared-stack"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedLibrariesScreen.kt"
+source_anchor = "stack.size >= 8"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "sharedChildExitRestoresExactOpenerAndRetiredDisposalCannotResetParent"
+
+[[fixes]]
+id = "android.couch-shared-preplay"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedRemotePreplay.kt"
+source_anchor = "if (action.type == \"select\") null else deferred(action)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "admittedSharedStartKeepsActualPlayFocusThroughOwnerBusyAndRecordsBeforeTransfer"
+
+[[fixes]]
+id = "android.couch-shared-prepare"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String?, permitted:"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "expiredRemoteStartCleansLateOfferWithoutRendererAndFreshRetryUsesNewRequest"
+
+[[fixes]]
+id = "android.couch-shared-owner"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "check(permitted())"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "expiredRemoteStartCleansLateOfferWithoutRendererAndFreshRetryUsesNewRequest"
+
+[[fixes]]
+id = "android.couch-shared-local-exit"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "fun beginStop(watched: Boolean = false): kotlinx.coroutines.Job"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "remotePauseChecksAfterControlAndLocalStopPausesBeforeCleanupRuns"
+
+[[fixes]]
+id = "android.couch-shared-incumbent"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "incumbent ?: SharedPlayerController(context, vm)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "admittedSharedStartKeepsActualPlayFocusThroughOwnerBusyAndRecordsBeforeTransfer"
+
+[[fixes]]
+id = "android.couch-deferred-binding"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteDeferredEffect.kt"
+source_anchor = "val resultDeadline: Long"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "deferredTerminalDeadlineDoesNotExtendAndGrantRetirementFencesOldWork"
+
+[[fixes]]
+id = "android.couch-deferred-guard"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteReceiverGuard.kt"
+source_anchor = "now < permit.resultDeadline"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "deferredPermitRetainsOriginalDeadlineConsumesSequenceAndBoundsCleanup"
+
+[[fixes]]
+id = "android.couch-deferred-adapter"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemotePlaybackAdapter.kt"
+source_anchor = "val deferred: ((RemoteAction) -> RemoteDeferredEffect?)?"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "deferredAckCompletesBeforeOwnerTransitionAndStaleCompletionCannotAffectReplacement"
+
+[[fixes]]
+id = "android.couch-retained-ack"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteClientModel.kt"
+source_anchor = "receiverGuard.retainedResult(command,"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "retainedDeferredAckSurvivesOwnedTransitionButRejectsOtherGrantAndOriginalDeadline"
+
+[[fixes]]
+id = "android.couch-attempt-cleanup"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteOwnedAttempt.kt"
+source_anchor = "if (busyTicket == ticket) busyTicket = null"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "retiredSharedPreparationClearsOnlyItsBusyMarkerAndAutoplayCannotRestartClosedPlayer"
+
+[[fixes]]
+id = "android.couch-channel-admission"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteChannelAdmission.kt"
+source_anchor = "if (serial != token || !permitted())"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteChannelAdmissionTest.kt"
+test_anchor = "expiredOrReplacedChannelNeverInvokesIncumbentAndPhysicalJobIsUntouched"
+
+[[fixes]]
+id = "android.couch-channel-owner"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
+source_anchor = "remoteChannels.run(LiveTvInputPolicy.CHANNEL_COALESCE_MS, permitted)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteChannelAdmissionTest.kt"
+test_anchor = "networkRetirementCancelsOnlyItsOwnUninvokedCoalescingSlot"
+
+[[fixes]]
+id = "android.couch-guide-focus"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuideUi.kt"
+source_anchor = "lastWindow != slots"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-programme-watch"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/DvrUi.kt"
+source_anchor = "watchModifier: Modifier = Modifier"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-live-programme-owner"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "RemotePresentationKind.ProgrammeDetails"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-challenge-deadline"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteChallengeExpiry.kt"
+source_anchor = "fun remaining(now: Long)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "tvChallengeUsesOriginalMonotonicDeadlineAndRejectsInvalidDuration"
+
+[[fixes]]
+id = "android.couch-challenge-retry"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteCompanionViews.kt"
+source_anchor = "This TV code expired. Get a new code to try again."
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "tvChallengeUsesOriginalMonotonicDeadlineAndRejectsInvalidDuration"

@@ -31,8 +31,8 @@ test("MAIN delivery checks its own credit after a page stall and invalidates bef
   const c=vm.createContext({TOKEN:"bearer",ME:{id:1},API:"/api/v1",location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible",hasFocus:()=>true},performance:{now:()=>now},Date:{now:()=>wall},
     CinemaRemote:{physicalInput:()=>calls.push("invalidate"),snapshot:()=>{calls.push("snapshot");return {context_revision:9};},dispatch:(action,context)=>{calls.push({action,context});return "applied";}}});
   vm.runInContext("("+installBridge.toString()+")('"+epoch+"')",c);
-  c.CinemaDesktopBridge.probe(credit);now=750;assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"expired");assert.deepEqual(calls,[]);
-  now=800;c.CinemaDesktopBridge.probe(credit);assert.equal(c.CinemaDesktopBridge.input("left",credit,epoch),"applied");assert.deepEqual(calls.slice(0,2),["invalidate","snapshot"]);assert.equal(calls[2].context.source,"local_cec");
+  c.CinemaDesktopBridge.probe(credit);assert.deepEqual(calls,["snapshot"]);calls.length=0;now=750;assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"expired");assert.deepEqual(calls,[]);
+  now=800;c.CinemaDesktopBridge.probe(credit);calls.length=0;assert.equal(c.CinemaDesktopBridge.input("left",credit,epoch),"applied");assert.deepEqual(calls.slice(0,2),["invalidate","snapshot"]);assert.equal(calls[2].context.source,"local_cec");
 });
 test("MAIN binding cannot survive logout account switch hidden page or wake gap",()=>{
   for(const change of [c=>{c.TOKEN=null;},c=>{c.ME={id:2};},c=>{c.document.visibilityState="hidden";},c=>{c.wall=2000;}]){
@@ -105,4 +105,26 @@ test("focus setup pins its first document and pending navigation invalidates the
   const pending=f.w.bind(tab(1)).catch(e=>e.message);await settle();f.permissions[0].resolve(true);assert.equal(await pending,"document_replaced");
   assert.deepEqual(targets[1],{tabId:1,documentIds:["document-1"]});assert.equal(f.ports.length,0);assert.equal(f.w.binding,null);
   const g=bindFixture();g.w.start();await settle();const navigation=g.w.bind(tab(1)).catch(e=>e.message);await settle();g.listeners.committed({frameId:0,tabId:1,documentId:"replacement"});g.permissions[0].resolve(true);assert.equal(await navigation,"binding_superseded");assert.equal(g.ports.length,0);
+});
+
+test("saved Cinema local CEC choice fences install and queued delivery independently of server",()=>{
+  const c=vm.createContext({TOKEN:"bearer",ME:{id:1},SERVER:{instance_id:"one"},enabled:false,cinemaRemoteLocalEnabled:()=>c.enabled,location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible",hasFocus:()=>true},performance:{now:()=>0},Date:{now:()=>0},CinemaRemote:{physicalInput:()=>{},snapshot:()=>({}),dispatch:()=>"applied"}});
+  const install=()=>vm.runInContext("("+installBridge.toString()+")('"+epoch+"')",c);
+  assert.equal(install().ready,false);c.enabled=true;assert.equal(install().ready,true);c.CinemaDesktopBridge.probe(credit);c.enabled=false;assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"unavailable");
+  c.enabled=true;install();c.CinemaDesktopBridge.probe(credit);c.SERVER.instance_id="replacement";assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"unavailable");
+});
+test("fixed local disable notification unbinds the document port without accepting page actions",async()=>{
+  const {w}=worker();let receive;w.host={disconnect:()=>{},postMessage:()=>{}};
+  const port={name:"cinema-cec-document",sender:{frameId:0,tab:{id:1},documentId:"document-1",origin:"https://cinema.invalid"},disconnect:()=>{},onMessage:{addListener:fn=>{receive=fn;}},onDisconnect:{addListener:()=>{}}};
+  w.documentConnection(port);receive({type:"disabled",action:"select"});assert.notEqual(w.binding,null);receive({type:"disabled"});await Promise.resolve();assert.equal(w.binding,null);
+});
+
+test("MAIN Select requires a fresh physical focus and pending identity credit",()=>{
+  let generation=1,focus="close",pending=null;const effects=[];
+  const c=vm.createContext({TOKEN:"bearer",ME:{id:1},location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible",hasFocus:()=>true},performance:{now:()=>0},Date:{now:()=>0},
+    CinemaRemote:{physicalInput:()=>effects.push("invalidate")},CinemaRemoteLocalPhysical:{snapshot:()=>({generation,focus,pending}),dispatch:()=>{effects.push("dispatch");return "applied";}}});
+  vm.runInContext("("+installBridge.toString()+")('"+epoch+"')",c);c.CinemaDesktopBridge.probe(credit);
+  focus="approve";pending="phone-one";assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"stale_focus");assert.deepEqual(effects,[]);
+  c.CinemaDesktopBridge.probe(credit);generation++;pending="phone-two";assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"stale_focus");assert.deepEqual(effects,[]);
+  c.CinemaDesktopBridge.probe(credit);assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"applied");assert.deepEqual(effects,["invalidate","dispatch"]);
 });

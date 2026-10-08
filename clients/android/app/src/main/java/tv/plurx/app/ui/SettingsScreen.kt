@@ -75,6 +75,7 @@ fun SettingsScreen(
     onOpenDeveloper: () -> Unit = {},
     onOpenLiveTvSettings: () -> Unit = {},
     onOpenSharing: () -> Unit = {},
+    onOpenRemotes: () -> Unit = {},
 ) {
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val offlineRecords by vm.offlineRecords.collectAsStateWithLifecycle()
@@ -253,6 +254,7 @@ fun SettingsScreen(
             }
 
             SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
+        tv.plurx.app.ui.components.TvTextButton(onClick = onOpenRemotes) { Text("Remotes & devices") }
                 PreferenceAction("Enable Live TV and match television refresh rate", onClick = onOpenDeveloper)
                 Text("Release startup profile", style = MaterialTheme.typography.titleMedium)
                 Text(profileStatus, style = MaterialTheme.typography.bodySmall, color = Muted)

@@ -1,32 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // These fixed functions run in MAIN. No string evaluation or page-to-host API.
 export function installBridge(epoch,workerId="development",operation=1){
+  if(typeof cinemaRemoteLocalEnabled==="function"&&!cinemaRemoteLocalEnabled("cec"))return {ready:false};
   if(document.visibilityState!=="visible")return {ready:false};
   if(!document.hasFocus())return {ready:false,focus_pending:true};
   if(typeof CinemaRemote==="undefined"||typeof TOKEN==="undefined"||!TOKEN||typeof ME==="undefined"||!ME)return {ready:false};
   const previous=globalThis.CinemaDesktopBridge;
   if(previous?.workerId===workerId&&previous.operation>operation)return {ready:false};
   if(previous)previous.disable();
-  const token=TOKEN,user=String(ME.id),origin=location.origin,api=typeof API==="undefined"?null:API;
+  const token=TOKEN,user=String(ME.id),origin=location.origin,api=typeof API==="undefined"?null:API,instance=typeof SERVER==="undefined"?null:SERVER?.instance_id;
   let enabled=true,lastClock=performance.now(),lastWall=Date.now(),lastProbe=lastClock;
   const credits=new Map();
   function alive(){
     const now=performance.now(),wall=Date.now();
-    if(!enabled||TOKEN!==token||!ME||String(ME.id)!==user||location.origin!==origin||(typeof API!=="undefined"&&API!==api)||document.visibilityState!=="visible"||!document.hasFocus()||now<lastClock||wall<lastWall||wall-lastWall>1500){enabled=false;credits.clear();return false;}
+    if(!enabled||(typeof SERVER!=="undefined"&&SERVER?.instance_id!==instance)||(typeof cinemaRemoteLocalEnabled==="function"&&!cinemaRemoteLocalEnabled("cec"))||TOKEN!==token||!ME||String(ME.id)!==user||location.origin!==origin||(typeof API!=="undefined"&&API!==api)||document.visibilityState!=="visible"||!document.hasFocus()||now<lastClock||wall<lastWall||wall-lastWall>1500){enabled=false;credits.clear();return false;}
     lastClock=now;lastWall=wall;return true;
   }
   function disable(){enabled=false;credits.clear();CinemaRemote.physicalInput();}
   function probe(credit){
     if(!alive())return {ready:false};
     const now=performance.now();lastProbe=now;
-    for(const [nonce,deadline] of credits)if(now>=deadline)credits.delete(nonce);
+    for(const [nonce,value] of credits)if(now>=value.deadline)credits.delete(nonce);
     if(credits.size>=8)credits.delete(credits.keys().next().value);
-    credits.set(credit,now+750);return {ready:true};
+    const context=typeof CinemaRemoteLocalPhysical!=="undefined"?CinemaRemoteLocalPhysical.snapshot():CinemaRemote.snapshotPhysical?.()||CinemaRemote.snapshot();
+    credits.set(credit,{deadline:now+750,context});return {ready:true};
   }
   function input(key,credit,bindingEpoch){
     const now=performance.now();
     if(bindingEpoch!==epoch||!alive()||now-lastProbe>=1000)return "unavailable";
-    const deadline=credits.get(credit);if(deadline===undefined||now>=deadline)return "expired";
+    const offered=credits.get(credit);if(!offered||now>=offered.deadline)return "expired";
+    if(key==="select"){
+      const current=typeof CinemaRemoteLocalPhysical!=="undefined"?CinemaRemoteLocalPhysical.snapshot():CinemaRemote.snapshotPhysical?.()||CinemaRemote.snapshot();
+      if(JSON.stringify(current)!==JSON.stringify(offered.context))return "stale_focus";
+    }
     const directions=["up","down","left","right"];
     if(![...directions,"select","back","home","play","pause","play_pause","stop"].includes(key))return "invalid";
     // Local physical input retires network work, then captures its own context.
@@ -41,7 +47,9 @@ export function installBridge(epoch,workerId="development",operation=1){
       }
       action={type:"set_playing",playing};
     }
-    return CinemaRemote.dispatch(action,{...CinemaRemote.snapshot(),source:"local_cec"});
+    if(typeof CinemaRemoteLocalPhysical!=="undefined")return CinemaRemoteLocalPhysical.dispatch(action,offered.context);
+    const context={...(CinemaRemote.snapshotPhysical?.()||CinemaRemote.snapshot()),source:"local_cec"};
+    return typeof CinemaRemote.dispatchPhysical==="function"?CinemaRemote.dispatchPhysical(action,context):CinemaRemote.dispatch(action,context);
   }
   globalThis.CinemaDesktopBridge={epoch,workerId,operation,probe,input,disable};
   return {ready:true,epoch};

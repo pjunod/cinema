@@ -28,6 +28,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         let id: UUID
         let label: String
         let frame: CGRect
+        var admission: () -> Outcome? = { nil }
         let activate: () -> Void
     }
     @Published private(set) var requestedFocus: String?
@@ -52,6 +53,17 @@ final class RemoteNavigationCoordinator: ObservableObject {
     private let maximumOrderedKeys = 16_384
     private var pendingFocus = false
     private var focusedRegistration: UUID?
+    private struct Destination {
+        let token: UUID
+        let root: String
+        let parent: String
+        let scope: String
+        let opener: String?
+        let dismiss: () -> Void
+    }
+    private var destinations: [Destination] = []
+    private var observedTab: HomeTab = .home
+    private var observedPath: [Route] = []
     private var presentations: [(UUID, String)] = []
     private var presentationControllers: [UUID: Set<ObjectIdentifier>] = [:]
     var presentationBlocked: () -> Bool = { true }
@@ -62,6 +74,9 @@ final class RemoteNavigationCoordinator: ObservableObject {
         switch route {
         case .item(let id): return "item:\(id)"
         case .collection(let collection): return "library:\(collection.id)"
+        case .sharedLibraries: return "library:shared"
+        case .sharedLibrary(let library, let parent, _): return "library:shared:" + library.id + ":" + (parent?.itemId ?? "root")
+        case .sharedItem(let reference, _): return "item:shared:" + [reference.importId, reference.serverId, reference.catalogueEpoch, reference.libraryId, reference.itemId].joined(separator: "|")
         }
     }
     var rootScope: String {
@@ -86,7 +101,49 @@ final class RemoteNavigationCoordinator: ObservableObject {
         requestedPlaybackItem = nil
         return true
     }
-    var activeScope: String { modal?.scope ?? presentations.last?.1 ?? scope }
+    private var destinationScope: String {
+        var current = scope
+        for destination in destinations where destination.root == scope {
+            guard destination.parent == current else { break }
+            current = destination.scope
+        }
+        return current
+    }
+    var activeScope: String { modal?.scope ?? presentations.last?.1 ?? destinationScope }
+    /// A native destination may claim only its exact surviving parent route.
+    @discardableResult
+    func attachDestination(token: UUID, parent: String, scope: String, opener: String?, dismiss: @escaping () -> Void) -> Bool {
+        synchronizeRoute()
+        if let existing = destinations.first(where: { $0.token == token }) {
+            return existing.root == self.scope && existing.parent == parent && existing.scope == scope
+        }
+        guard modal == nil, presentations.isEmpty, destinationScope == parent,
+              destinations.count < 8, scope != parent else { return false }
+        destinations.append(Destination(token: token, root: self.scope, parent: parent, scope: scope, opener: opener, dismiss: dismiss))
+        advanceContext()
+        requestFocus(restoredFocus[scope])
+        return true
+    }
+    func detachDestination(token: UUID) {
+        guard let index = destinations.firstIndex(where: { $0.token == token }) else { return }
+        let old = destinations[index]
+        let wasActive = old.root == scope && destinationScope == destinations.last?.scope
+        destinations.removeSubrange(index...)
+        if wasActive {
+            advanceContext()
+            let available = orderedKeys[activeScope] ?? []
+            requestFocus(old.opener.flatMap { available.contains($0) ? $0 : nil } ?? available.first)
+        }
+    }
+    private func popDestination() -> Bool {
+        guard let last = destinations.last, last.root == scope, last.scope == destinationScope else { return false }
+        destinations.removeLast()
+        last.dismiss()
+        advanceContext()
+        let available = orderedKeys[activeScope] ?? []
+        requestFocus(last.opener.flatMap { available.contains($0) ? $0 : nil } ?? available.first)
+        return true
+    }
     func attachPresentation(_ token: UUID, scope: String, controllers: Set<ObjectIdentifier>) {
         presentationControllers[token] = controllers
         guard !presentations.contains(where: { $0.0 == token }), presentations.count < 8 else { return }
@@ -119,7 +176,13 @@ final class RemoteNavigationCoordinator: ObservableObject {
         focusRevision += 1
     }
     func synchronizeRoute() {
-        guard rootScope != scope else { return }
+        let currentPath = paths[selectedTab] ?? []
+        guard rootScope != scope || observedTab != selectedTab || observedPath != currentPath else { return }
+        observedTab = selectedTab
+        observedPath = currentPath
+        // A repeated item ID still denotes a different native route lifetime.
+        // Returning destinations reattach with their surviving view token.
+        destinations.removeAll()
         modal?.dismiss()
         modal = nil
         if let focusedKey {
@@ -151,11 +214,14 @@ final class RemoteNavigationCoordinator: ObservableObject {
         restoredFocus.removeAll()
         liveScopes.removeAll()
         requestedPlaybackItem = nil
+        destinations.removeAll()
         paths.removeAll()
         presentations.removeAll()
         presentationControllers.removeAll()
         selectedTab = .home
         scope = "home"
+        observedTab = .home
+        observedPath = []
     }
     func retainScope(_ scope: String) {
         if liveScopes.count < maximumScopes { liveScopes.insert(scope) }
@@ -166,6 +232,10 @@ final class RemoteNavigationCoordinator: ObservableObject {
         orderedKeys.removeValue(forKey: scope)
         columns.removeValue(forKey: scope)
         textContexts.removeValue(forKey: scope)
+    }
+    func performPhysicalAction(_ action: () -> Void) {
+        physicalInput()
+        action()
     }
     func physicalInput() {
         onPhysicalInput()
@@ -184,7 +254,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         if activeScope == scope, focusedKey == key, focusedRegistration != entry.id {
             physicalFocus(scope: scope, key: nil)
         }
-        entries[scope, default: [:]][key] = Entry(id: entry.id, label: safeLabel(entry.label), frame: entry.frame, activate: entry.activate)
+        entries[scope, default: [:]][key] = Entry(id: entry.id, label: safeLabel(entry.label), frame: entry.frame, admission: entry.admission, activate: entry.activate)
     }
     func unregister(scope: String, key: String, id: UUID) {
         guard entries[scope]?[key]?.id == id else { return }
@@ -197,7 +267,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
               orderedKeys[scope] != nil || orderedKeys.count < maximumScopes else { return }
         if orderedKeys[scope] != keys {
             orderedKeys[scope] = keys
-            if self.scope == scope { advanceContext() }
+            if activeScope == scope { advanceContext() }
         }
         self.columns[scope] = max(1, columns)
     }
@@ -208,7 +278,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
     func removeSearch(scope: String, nonce: UUID) {
         guard textContexts[scope]?.0 == nonce else { return }
         textContexts.removeValue(forKey: scope)
-        if self.scope == scope { advanceContext() }
+        if activeScope == scope { advanceContext() }
     }
     /// Only the actual native FocusState acknowledgment commits semantic focus.
     func physicalFocus(scope: String, key: String?) {
@@ -288,6 +358,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
             guard expected.focusRevision == focusRevision else { return .staleFocus }
             guard !pendingFocus, let key = focusedKey, let entry = entries[activeScope]?[key],
                   focusedRegistration == entry.id, !entry.frame.isEmpty else { return .unsupported }
+            if let refused = entry.admission() { return refused }
             // Copying the registered closure never falls back to native key injection.
             advanceFocus()
             entry.activate()
@@ -308,12 +379,17 @@ final class RemoteNavigationCoordinator: ObservableObject {
             requestFocus(target)
         case .back:
             if modal != nil { closeModal() }
+            else if !presentations.isEmpty { return .unsupported }
+            else if popDestination() { }
             else if !(paths[selectedTab] ?? []).isEmpty {
                 paths[selectedTab]?.removeLast()
                 synchronizeRoute()
             } else { return .unsupported }
         case .home:
-            guard modal == nil else { return .unsupported }
+            guard modal == nil, presentations.isEmpty else { return .unsupported }
+            let oldDestinations = destinations
+            destinations.removeAll()
+            for destination in oldDestinations.reversed() { destination.dismiss() }
             selectedTab = .home
             paths[.home] = []
             synchronizeRoute()

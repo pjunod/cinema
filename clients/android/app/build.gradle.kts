@@ -108,7 +108,7 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 150
+        versionCode = 151
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -187,6 +187,7 @@ android {
         getByName("test").resources.directories.add("../../../tests/playback")
         // tests/sharing/protocol-cases.json: the Shared wire rows every port reads.
         getByName("test").resources.directories.add("../../../tests/sharing")
+        getByName("test").resources.directories.add("../../../crates/plurx-core/tests/fixtures")
     }
 }
 
