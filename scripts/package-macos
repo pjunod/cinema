@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Assemble a native macOS daemon candidate in a new directory; never install.
+
+Usage: package-macos --daemon BUILT_PLURXD --ffmpeg-package COMBINED_PACKAGE
+       --output NEW_DIRECTORY [--sign DEVELOPER_ID_IDENTITY]
+The combined FFmpeg package must already contain its exact-source WASM parser
+and provenance. The daemon and both tools live together in bin/: the daemon's
+ordinary sibling resolver finds these defaults; explicit operator paths win.
+Only copied daemon bytes are signed. Default ad-hoc signing produces a local
+candidate, not a notarized distribution or a fresh-install acceptance receipt.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import plistlib
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+def recipe():
+    path = Path(__file__).with_name("build-macos-video-ffmpeg")
+    loader = importlib.machinery.SourceFileLoader("macos_daemon_package", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def validate_native_package(package):
+    tool = recipe()
+    parser = package / "plurx-source-parser.wasm"
+    manifest_path = package / "provenance/source-parser/manifest.json"
+    if not package.is_absolute() or package.is_symlink():
+        raise ValueError("native package must be an explicit real directory")
+    for item in package.rglob("*"):
+        if item.is_symlink() or (not item.is_dir() and not item.is_file()) or ".git" in item.relative_to(package).parts:
+            raise ValueError("native package contains an unsafe member")
+        if item.name == "plurx-source-parser.wasm" and item != parser:
+            raise ValueError("native package contains conflicting parser companions")
+    for name in ["ffmpeg", "ffprobe", "plurx-source-parser.wasm"]:
+        if not (package / name).is_file():
+            raise ValueError(f"native package is missing {name}")
+    manifest = json.loads(manifest_path.read_text())
+    if (manifest.get("source_sha256") != tool.SOURCE_SHA256 or manifest.get("source_commit") != tool.COMMIT
+            or manifest.get("parser_abi") != "plurx-source-wasi-p1-v1-wasmtime-49.0.2"):
+        raise ValueError("native parser provenance source/ABI does not match the package")
+    if (parser.stat().st_size != manifest.get("module_bytes") or parser.stat().st_size > 32 * 1024 * 1024
+            or tool.digest(parser) != manifest.get("module_sha256") or parser.read_bytes()[:8] != b"\0asm\1\0\0\0"):
+        raise ValueError("native parser companion does not match its provenance")
+    native_manifest_path = package / "provenance/manifest.json"
+    native_manifest = json.loads(native_manifest_path.read_text())
+    parser_fact = native_manifest.get("source_parser")
+    if (not parser_fact or parser_fact.get("sha256") != manifest["module_sha256"]
+            or parser_fact.get("parser_abi") != manifest["parser_abi"]):
+        raise ValueError("native package does not attest its canonical parser companion")
+    return manifest
+
+
+def assemble(daemon, package, output, signing_identity):
+    tool = recipe()
+    if not daemon.is_absolute() or daemon.is_symlink() or not daemon.is_file():
+        raise ValueError("daemon must be an explicit regular built artifact")
+    if not output.is_absolute() or output.exists():
+        raise ValueError("output must be an absolute new package directory")
+    if any(output.is_relative_to(Path(p)) for p in ["/Applications", "/Library", "/System", "/usr", "/opt"]):
+        raise ValueError("package assembly cannot write an installed/global directory")
+    manifest = validate_native_package(package)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".macos-package-", dir=output.parent) as temporary:
+        stage = Path(temporary) / "package"
+        shutil.copytree(package, stage / "bin")
+        executable = stage / "bin/plurxd"
+        if executable.exists():
+            raise ValueError("native FFmpeg package unexpectedly contains a daemon")
+        shutil.copyfile(daemon, executable)
+        executable.chmod(0o755)
+        entitlements = Path(__file__).with_name("macos-source-parser.entitlements")
+        with entitlements.open("rb") as stream:
+            required = plistlib.load(stream)
+        if required != {"com.apple.security.cs.allow-unsigned-executable-memory": True}:
+            raise ValueError("unexpected source parser signing entitlements")
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"}
+        subprocess.run(["/usr/bin/codesign", "--force", "--sign", signing_identity,
+                        "--options", "runtime", "--entitlements", str(entitlements), str(executable)],
+                       env=env, check=True, timeout=60)
+        subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(executable)], env=env,
+                       check=True, timeout=60)
+        observed = subprocess.run(["/usr/bin/codesign", "-d", "--entitlements", ":-", str(executable)],
+                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30)
+        if plistlib.loads(observed.stdout) != required:
+            raise ValueError("signed daemon does not have the required parser entitlement")
+        description = subprocess.run(["/usr/bin/codesign", "-d", "--verbose=4", str(executable)],
+                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30)
+        signing_text = description.stderr.decode("utf-8", errors="replace")
+        if "runtime" not in signing_text:
+            raise ValueError("copied daemon does not have Hardened Runtime signing")
+        if signing_identity != "-" and "Authority=Developer ID Application:" not in signing_text:
+            raise ValueError("distribution signing requires a Developer ID Application certificate")
+        # Copying and signing never alter the source package or its parser.
+        validate_native_package(stage / "bin")
+        executable.chmod(0o555)
+        for name in ["ffmpeg", "ffprobe"]:
+            (stage / "bin" / name).chmod(0o555)
+        (stage / "bin/plurx-source-parser.wasm").chmod(0o444)
+        provenance = stage / "provenance"
+        provenance.mkdir()
+        shutil.copyfile(entitlements, provenance / entitlements.name)
+        facts = {"schema_version": 1, "platform": "macos", "layout": "bin siblings",
+                 "signing": "ad-hoc candidate" if signing_identity == "-" else "Developer ID signature; notarization not established",
+                 "parser_abi": manifest["parser_abi"], "parser_sha256": manifest["module_sha256"],
+                 "artifacts": {name: tool.digest(stage / "bin" / name)
+                               for name in ["plurxd", "ffmpeg", "ffprobe", "plurx-source-parser.wasm"]},
+                 "signing_entitlements": required,
+                 "qualification": "assembly/signature integrity only; no notarization or fresh-install receipt"}
+        (provenance / "manifest.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
+        stage.rename(output)
+    return facts
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--daemon", type=Path, required=True)
+    parser.add_argument("--ffmpeg-package", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--sign", default="-", help="explicit Developer ID identity; default '-' is a local ad-hoc candidate")
+    args = parser.parse_args()
+    if sys.platform != "darwin":
+        parser.error("native daemon signing requires macOS")
+    print(json.dumps(assemble(args.daemon, args.ffmpeg_package, args.output, args.sign), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
