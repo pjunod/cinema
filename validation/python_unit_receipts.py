@@ -1080,11 +1080,14 @@ def restore(api, scope, run, applicability=None):
         artifact = indexed.pop(rid)
         final_raw = api.bytes(f"/actions/artifacts/{artifact['id']}/zip")
         journal = artifact_json(final_raw)
+        from validation.python_unit_preunit_history import recover as recover_preunit_history
+        preunit_history = journal.get('complete') is False and recover_preunit_history(
+            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
         zero869 = journal.get('complete') is False and recover_zero_pr869(
             api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
         zero931 = journal.get('complete') is False and recover_zero_pr931(
             api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
-        inherited = zero931 or zero869 or journal.get('complete') is False and recover_inherited_pr742(
+        inherited = preunit_history or zero931 or zero869 or journal.get('complete') is False and recover_inherited_pr742(
             api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
         recovered = inherited or journal.get("complete") is False and recover_discovery_passes(
             api, scope, prior, matching[0], markers[0], marker_raw, artifact, final_raw, journal, legacy)
