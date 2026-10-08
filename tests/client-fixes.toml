@@ -4675,3 +4675,11 @@ source = "clients/apple/Sources/PlayerItemReadiness.swift"
 source_anchor = "enum PlayerItemReadiness"
 test = "clients/apple/Tests/AppleItemReadinessTests.swift"
 test_anchor = "testGrowingResumeWaitsForPublicationAtTwentyOneSeconds"
+
+[[fixes]]
+id = "apple.staged-poll-continuation-fence"
+commits = ["46bf6fe8a1438d4a3f22ab68afe8b7bb3cfcae61"]
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case recoveryEvidenceAfterStagedPoll ="
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
