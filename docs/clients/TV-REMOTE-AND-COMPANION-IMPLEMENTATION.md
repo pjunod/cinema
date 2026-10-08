@@ -638,8 +638,10 @@ procedure, which requires external generation/key/proof rotation.
 After the standalone broker packet freezes, the desktop Sol 6.1 builder takes
 the Android couch packet in a separate branch/worktree based on the coordinator's
 current candidate. The native Sol 6.1 builder retains Apple couch and then Apple
-invitations. Android invitation adapters begin only after Android couch freezes,
-so no two builders edit Android files concurrently. Server API/worker and manager
+invitations. After Android couch freezes, its builder continues with Android
+invitation adapters in a new isolated branch/worktree. Apple and Android
+invitations then proceed in parallel, with one owner per platform and no
+concurrent Android edits. Server API/worker and manager
 document ownership remain unchanged. The parent personally reviews each packet
 before handing it to “Coordinate PR merge batches”; that session owns shared
 qualification, counters and main promotion. No builder runs duplicate broad

@@ -4,9 +4,11 @@ This document answers how the native B09 adapters enroll notifications, handle a
 cold-launch tap and stop resident work without taking over the existing media or
 reminder services. It is an open build contract; native invitation delivery is not yet
 qualified. Use the home B09 packet's frozen invitation API reference as the exact wire
-contract. Build after the Apple/Android couch packets freeze. Native owner owns only
-clients/apple and clients/android source/build/resources/tests; request any cross-owner
-server/API changes before editing. Parent personally reviews and releases separate PRs
+contract. Build each platform after its couch packet freezes. The Apple native builder
+owns clients/apple; the Android couch builder continues with clients/android invitations
+in a new isolated branch/worktree. Ownership includes each platform's source, build,
+resources and focused tests. Request cross-owner server/API changes before editing.
+Parent personally reviews and releases separate PRs
 to the batching coordinator. The batching coordinator owns release counters and shared
 gates. Physical device use requires authorization; no connected television installation
 is included in this packet. Do not claim physical provider acceptance from software
