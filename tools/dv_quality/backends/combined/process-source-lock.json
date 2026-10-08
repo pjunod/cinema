@@ -1,0 +1,10 @@
+{
+  "revision": "22db9c535ee8eb5025094e67e44a87caa789c897",
+  "files": {
+    "mod.rs": "1ea38afd98efb77d3d70d95005b1e082d18ac242b1370eb1b5a6e93b8a2d0f48",
+    "priority.rs": "133298b6f5f04e8963c5ecced1de58283ba871c4214c63a03f7bcbc61138787d",
+    "rlimit.rs": "5bf583bbac86505663549a44601cd215d7c43017e5f4462c53f4d2b2eba55e18",
+    "bounded.rs": "09863016d856bf467f7a0186fb5c677f2e5e7d250c141a4129fc151eeb64fc10"
+  },
+  "scope": "exact unchanged public process ownership source copied solely for isolated Linux experiment; no production fork"
+}

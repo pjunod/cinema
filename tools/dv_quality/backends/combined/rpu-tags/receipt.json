@@ -1,0 +1,61 @@
+{
+  "scope": "six synthetic identityP7FEL own-parser CRC roundtrips, distinct bounded L1 tags; no content analysis/conformance",
+  "libdovi": "83e1fdad6dcd5995556235946e7c5c0f9010d5a1",
+  "rustc": "1.97.1",
+  "results": [
+    {
+      "frame": 0,
+      "l1": {
+        "min_pq": 0,
+        "max_pq": 4095,
+        "avg_pq": 2048
+      },
+      "rpu_sha256": "5b7946f0b2670a4bafbc32219497eb26f9f90bc5a3bfe50cfa94184e454febc5"
+    },
+    {
+      "frame": 1,
+      "l1": {
+        "min_pq": 0,
+        "max_pq": 4094,
+        "avg_pq": 2047
+      },
+      "rpu_sha256": "dc67507b8cb1bf1d12a36f17a58f5aabafef5c377295566879942eef645e63f6"
+    },
+    {
+      "frame": 2,
+      "l1": {
+        "min_pq": 0,
+        "max_pq": 4093,
+        "avg_pq": 2046
+      },
+      "rpu_sha256": "617ca0734eeb46897fe546b10e85e77d7d724c93f2a2fb505362fa185e445957"
+    },
+    {
+      "frame": 3,
+      "l1": {
+        "min_pq": 0,
+        "max_pq": 4092,
+        "avg_pq": 2045
+      },
+      "rpu_sha256": "9e476cfaf711e8535b92dd998ddd2dc9cfed5f358bcaa765ee6e30989f303fa8"
+    },
+    {
+      "frame": 4,
+      "l1": {
+        "min_pq": 0,
+        "max_pq": 4091,
+        "avg_pq": 2044
+      },
+      "rpu_sha256": "1ff2f693ab5f49bddd25287108e75378a1bca7922505ea96e92083605353299e"
+    },
+    {
+      "frame": 5,
+      "l1": {
+        "min_pq": 0,
+        "max_pq": 4090,
+        "avg_pq": 2043
+      },
+      "rpu_sha256": "fc580fa753c45d3db2f2881ded2cf09f07dee2fe94ff329baec50941f35a3eb6"
+    }
+  ]
+}
