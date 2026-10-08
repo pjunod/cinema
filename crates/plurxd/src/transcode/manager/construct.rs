@@ -742,6 +742,24 @@ impl TranscodeManager {
                 tone_map_pipelines.push(Pipeline::VtScaleHdr10.name().to_owned());
             }
         }
+        if self.macos_video_processing_enabled() {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            if let Some(context) = self.macos_video_report().context(true) {
+                for (graph, pipeline) in [
+                    (
+                        MacosProcessingGraph::P5SoftwareCpu,
+                        Pipeline::DoviStrictTonemapx,
+                    ),
+                    (MacosProcessingGraph::P5VtTonemapx, Pipeline::VtDoviTonemapx),
+                    (MacosProcessingGraph::P5VtMetal, Pipeline::VtDoviMetal),
+                    (MacosProcessingGraph::P5SoftwareMetal, Pipeline::DoviMetal),
+                ] {
+                    if context.graph(graph) == MacosProcessingAvailability::Available {
+                        tone_map_pipelines.push(pipeline.name().to_owned());
+                    }
+                }
+            }
+        }
         MediaNodeRuntime {
             scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
             scratch_target_bytes: SCRATCH_TARGET_BYTES,

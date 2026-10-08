@@ -5,6 +5,7 @@
 //! Production graph spelling belongs to `Pipeline`, including processing order.
 
 mod live;
+mod p5;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -341,6 +342,11 @@ fn extension_corpus() -> Result<ExtensionCorpus, ProbeReason> {
         || corpus.auxiliary.len() != 2
         || live::MANIFEST.len()
             + live::MEDIA
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>()
+            + p5::MANIFEST.len()
+            + p5::MEDIA
                 .iter()
                 .map(|(_, bytes)| bytes.len())
                 .sum::<usize>()
@@ -801,7 +807,7 @@ async fn prepare_corpus(
             .await
             .map_err(|_| ProbeReason::CacheUnavailable)?;
         verify_private_directory(&owner).await?;
-        let key = digest(&[MANIFEST, EXTENSIONS, live::MANIFEST].concat());
+        let key = digest(&[MANIFEST, EXTENSIONS, live::MANIFEST, p5::MANIFEST].concat());
         let directory = owner
             .create_child_directory(&key)
             .await
@@ -824,6 +830,11 @@ async fn prepare_corpus(
             )
             .chain(
                 live::MEDIA
+                    .iter()
+                    .map(|(_, bytes)| (format!("{}.mp4", digest(bytes)), *bytes)),
+            )
+            .chain(
+                p5::MEDIA
                     .iter()
                     .map(|(_, bytes)| (format!("{}.mp4", digest(bytes)), *bytes)),
             )
@@ -1233,6 +1244,9 @@ async fn run_generation(
     if let Err(reason) = live::add_work(&corpus, &mut work) {
         return MacosVideoReport::unavailable(generation, reason);
     }
+    if let Err(reason) = p5::add_work(&corpus, &mut work) {
+        return MacosVideoReport::unavailable(generation, reason);
+    }
     for fixture in &corpus.fixtures {
         let graph = if fixture.class == "hdr10" {
             MacosProcessingGraph::Hdr10TextBurn
@@ -1301,13 +1315,16 @@ async fn run_generation(
         }
     }
     for (fixture, operation, graph) in work {
-        let pipeline = if fixture.class == "hdr10"
+        let pipeline = if let SmokeOperation::StrictP5(pipeline, _) = operation {
+            pipeline
+        } else if fixture.class == "hdr10"
             && matches!(
                 operation,
                 SmokeOperation::HevcNative
                     | SmokeOperation::HevcHostSoftware
                     | SmokeOperation::HevcHostVideoToolbox
-            ) {
+            )
+        {
             plurx_core::transcode::Pipeline::VtScaleHdr10
         } else if fixture.class != "sdr" {
             plurx_core::transcode::Pipeline::VtToneMapMetal
@@ -1567,6 +1584,10 @@ enum SmokeOperation {
     HevcHostSoftware,
     HevcHostVideoToolbox,
     LiveUpload(MacosProcessingGraph),
+    StrictP5(
+        plurx_core::transcode::Pipeline,
+        plurx_core::transcode::Encoder,
+    ),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1583,6 +1604,18 @@ async fn run_smoke(
     let deadline = tokio::time::Instant::now() + budget;
     if cancelled.is_cancelled() {
         return Err(ProbeReason::Cancelled);
+    }
+    if let SmokeOperation::StrictP5(pipeline, encoder) = operation {
+        return p5::run(
+            prepared,
+            fixture,
+            pipeline,
+            encoder,
+            implementation,
+            cancelled,
+            deadline,
+        )
+        .await;
     }
     let live_graph = if let SmokeOperation::LiveUpload(graph) = operation {
         Some(graph)
@@ -1626,7 +1659,8 @@ async fn run_smoke(
                 required.push("bwdif_videotoolbox");
             }
         }
-        SmokeOperation::Plain
+        SmokeOperation::StrictP5(_, _)
+        | SmokeOperation::Plain
         | SmokeOperation::HevcNative
         | SmokeOperation::HevcHostSoftware
         | SmokeOperation::HevcHostVideoToolbox => {}
@@ -1818,7 +1852,8 @@ async fn run_smoke(
             );
             encode.args(["-vf", &filter]);
         }
-        SmokeOperation::Plain
+        SmokeOperation::StrictP5(_, _)
+        | SmokeOperation::Plain
         | SmokeOperation::HevcNative
         | SmokeOperation::HevcHostSoftware
         | SmokeOperation::HevcHostVideoToolbox => {
