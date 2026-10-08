@@ -605,13 +605,23 @@ impl Hub {
             self.expire()?;
             // Every loop includes authority reads; the caller's User cannot
             // remain cached through a20s poll while logout/revocation commits.
-            let user = authenticate_token_digest(
-                state,
-                dispatch.token_digest.clone(),
-                TokenAudience::Native,
-            )
-            .await?;
-            if user.id != dispatch.user_id {
+            let user_id = if matches!(dispatch.request, Request::InvitationSessions { .. }) {
+                state
+                    .store
+                    .invitation_login(&dispatch.token_digest, now_seconds()?)
+                    .await?
+                    .ok_or_else(|| fail(401, "unauthorized"))?
+                    .user_id
+            } else {
+                authenticate_token_digest(
+                    state,
+                    dispatch.token_digest.clone(),
+                    TokenAudience::Native,
+                )
+                .await?
+                .id
+            };
+            if user_id != dispatch.user_id {
                 return Err(fail(403, "unauthorized"));
             }
             if state.store.get_setting(FEATURE_KEY).await?.as_deref() != Some("1") {
@@ -751,6 +761,21 @@ impl Hub {
                 return Ok(Some((
                     200,
                     json!({"version":"cinema.remote.v1","target":target}),
+                )));
+            }
+            Request::InvitationSessions { .. } => {
+                let sessions = self.lock()?;
+                let candidates = sessions
+                    .values()
+                    .filter(|s| s.receiver.user_id == d.user_id)
+                    .collect::<Vec<_>>();
+                if candidates.len() > 20 {
+                    return Err(fail(503, "unavailable"));
+                }
+                let rows=candidates.into_iter().map(|s|json!({"receiver_id":s.receiver.id,"target":s.target,"foreground_id":s.foreground_id,"token_digest":s.token_digest,"receiver_hash":s.receiver_hash})).collect::<Vec<_>>();
+                return Ok(Some((
+                    200,
+                    json!({"version":"cinema.remote.v1","sessions":rows}),
                 )));
             }
             Request::ListSessions { .. } => {

@@ -65,6 +65,10 @@ pub use field_order_backfill::{
     field_order_backfill_page, FieldOrderBackfillPage, FieldOrderBackfillPort,
 };
 mod file_grants;
+pub mod invitations;
+pub use invitations::InvitationStore;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_invitations;
 pub mod remote;
 pub use remote::RemoteStore;
 #[cfg(feature = "hiqlite-store")]
@@ -5781,6 +5785,7 @@ pub trait Store:
     + OfflinePackageStore
     + FileGrantStore
     + RemoteStore
+    + InvitationStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
@@ -5839,6 +5844,7 @@ impl<T> Store for T where
         + OfflinePackageStore
         + FileGrantStore
         + RemoteStore
+        + InvitationStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore

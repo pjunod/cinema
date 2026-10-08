@@ -20,6 +20,8 @@ use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/invitations.rs"]
+mod invitations;
 #[path = "store_contract/jellyfin_catalog.rs"]
 mod jellyfin_catalog;
 #[path = "store_contract/jellyfin_identity.rs"]
