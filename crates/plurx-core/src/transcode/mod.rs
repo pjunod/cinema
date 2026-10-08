@@ -19,6 +19,7 @@ pub mod dvconvert;
 mod encoder;
 pub mod health;
 pub mod hevc_census;
+mod macos;
 pub mod manifest;
 mod pipeline;
 pub mod progress;
@@ -44,6 +45,10 @@ pub use encoder::{
     validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
     OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
     VideoCodec,
+};
+pub use macos::{
+    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
+    MacosProcessingSelection, MACOS_PROCESSING_GRAPH_REVISION,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
@@ -1693,11 +1698,13 @@ fn hls_args_inner(
     let (decode_args, hwdownload) = if let Some(plan) = plan {
         let decode = plan.decode();
         let mut args = decode.backend().input_args(
-            decode.surface().decode_domain() == FrameDomain::Cuda
-                || matches!(
-                    decode.backend(),
-                    DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request
-                ),
+            matches!(
+                decode.surface().decode_domain(),
+                FrameDomain::Cuda | FrameDomain::VideoToolbox
+            ) || matches!(
+                decode.backend(),
+                DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request
+            ),
         );
         if decode.backend() == DecodeBackend::Software {
             if let Some(implementation) = decode.software_decoder() {
@@ -1904,6 +1911,22 @@ fn hls_args_inner(
         opts.force_idr,
         opts.software_threads,
     ));
+    if plan.is_some_and(|plan| plan.macos_processing_identity().is_some()) {
+        // The processing contract ends in hardware H.264 and explicit SDR
+        // signaling. Both rolling and immutable VOD consume this same recipe.
+        args.extend([
+            "-allow_sw".into(),
+            "0".into(),
+            "-color_primaries".into(),
+            "bt709".into(),
+            "-color_trc".into(),
+            "bt709".into(),
+            "-colorspace".into(),
+            "bt709".into(),
+            "-color_range".into(),
+            "tv".into(),
+        ]);
+    }
     if let Some(proof) = plan.and_then(|plan| plan.output_contract().sdr_avc()) {
         args.extend(proof.flags());
     }

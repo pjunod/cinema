@@ -1,7 +1,7 @@
 //! How one session's video gets from an HDR source to SDR output.
 //!
-//! Today's path decodes on the GPU, downloads every frame to system memory,
-//! tone-maps it through a float chain on the CPU, and uploads it back for the
+//! Some paths decode through an accelerator and transfer frames to system memory,
+//! tone-map through a float chain on the CPU, and upload it back for the
 //! encoder. PERF-PLAN §2.9 measured what that costs on identical work — same
 //! resolution, same codec, same rung, same encoder, the only difference being
 //! this chain:
@@ -14,8 +14,9 @@
 //! A quarter of the pipeline's throughput, and it is the quarter that takes a
 //! session from above realtime to below it — which is the whole difference
 //! between a stream that builds reserve and one that drains the viewer's.
-//! A pipeline that keeps frames on the GPU deletes both copies and the float
-//! maths with them.
+//! A hardware-surface graph avoids that explicit transfer/filter sequence.
+//! Frame domains do not establish physical copies or their cost, especially
+//! on Apple unified memory; complete-graph experiments establish the benefit.
 //!
 //! Which one a node uses is decided by *probe*, never by version sniffing or
 //! by what the hardware claims. A graph that parses is not a graph that works:
@@ -29,12 +30,18 @@ use crate::domain::ScanType;
 
 /// The video path for one session, from decoded frames to the encoder's input.
 ///
-/// Ordered from most to least preferred; the probe walks candidates in this
-/// order and takes the first that proves itself. [`Pipeline::Cpu`] is last and
+/// The legacy probe walks [`CANDIDATES`] from most to least preferred; Apple
+/// processing uses its separate runtime compatibility context. [`Pipeline::Cpu`] is last and
 /// unconditional — it needs no hardware, it is what every other variant falls
 /// back to, and it is the reference the others are checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Pipeline {
+    /// VideoToolbox surfaces → native SDR scale → H.264 VideoToolbox encode.
+    /// Selected only by the macOS compatibility context in the resolver.
+    VtScaleSdr,
+    /// HDR10 VideoToolbox surfaces → native P010 scale → Jellyfin BT.2390/ITP
+    /// Metal mapping → H.264 VideoToolbox encode. Dolby/HLG are excluded.
+    VtToneMapMetal,
     /// NVDEC → CUDA tone-map/scale → NVENC, without a system-memory handoff.
     TonemapCuda,
     /// Intel, frames never leave the GPU: `vpp_qsv` scales and tone-maps in
@@ -125,6 +132,8 @@ impl Pipeline {
     /// Stable identifier for settings, logs, and the stats overlay.
     pub fn name(self) -> &'static str {
         match self {
+            Pipeline::VtScaleSdr => "vt_scale_sdr",
+            Pipeline::VtToneMapMetal => "vt_tonemap_metal",
             Pipeline::TonemapCuda => "tonemap_cuda",
             Pipeline::VppQsv => "vpp_qsv",
             Pipeline::TonemapVaapi => "tonemap_vaapi",
@@ -143,6 +152,8 @@ impl Pipeline {
             .iter()
             .copied()
             .chain([
+                Pipeline::VtScaleSdr,
+                Pipeline::VtToneMapMetal,
                 Pipeline::DoviTonemapx,
                 Pipeline::DoviPassthrough,
                 Pipeline::Hdr10Passthrough,
@@ -153,6 +164,8 @@ impl Pipeline {
     /// Human label for the overlay and the admin log.
     pub fn label(self) -> &'static str {
         match self {
+            Pipeline::VtScaleSdr => "VideoToolbox SDR scaling",
+            Pipeline::VtToneMapMetal => "Metal HDR10 tone-map (BT.2390 / ITP)",
             Pipeline::TonemapCuda => "GPU tone-map (CUDA)",
             Pipeline::VppQsv => "GPU tone-map (QSV)",
             Pipeline::TonemapVaapi => "GPU tone-map (VA-API)",
@@ -166,7 +179,7 @@ impl Pipeline {
         }
     }
 
-    /// True when tone mapping runs on the GPU (frame transfers may still occur).
+    /// Processing uses an accelerator; this does not measure physical copies.
     pub fn on_gpu(self) -> bool {
         !matches!(
             self,
@@ -187,6 +200,7 @@ impl Pipeline {
     /// anyway, which is the copy this exists to remove.
     pub fn pairs_with(self, encoder: Encoder) -> bool {
         match self {
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal => encoder == Encoder::VideoToolbox,
             Pipeline::TonemapCuda => encoder == Encoder::Nvenc,
             Pipeline::VppQsv => encoder == Encoder::Qsv,
             Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => encoder == Encoder::Vaapi,
@@ -231,6 +245,9 @@ impl Pipeline {
     /// (PERF-PLAN §5 scope guards).
     pub fn handles(self, hdr_format: Option<&str>) -> bool {
         match (self, hdr_format) {
+            (Pipeline::VtScaleSdr, None | Some("sdr")) => true,
+            (Pipeline::VtToneMapMetal, Some("hdr10")) => true,
+            (Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal, _) => false,
             (Pipeline::Cpu, _) => true,
             (Pipeline::DoviTonemapx, Some("dolby_vision")) => true,
             (Pipeline::DoviTonemapx, _) => false,
@@ -260,6 +277,12 @@ impl Pipeline {
     pub fn decode_args(self) -> Vec<String> {
         let a = |s: &str| s.to_owned();
         match self {
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal => vec![
+                a("-hwaccel"),
+                a("videotoolbox"),
+                a("-hwaccel_output_format"),
+                a("videotoolbox_vld"),
+            ],
             Pipeline::TonemapCuda => vec![
                 a("-hwaccel"),
                 a("cuda"),
@@ -382,6 +405,12 @@ impl Pipeline {
         let hdr = hdr_format.is_some();
         let w = width.map_or_else(|| "-1".to_owned(), |w| w.to_string());
         Some(match self {
+            Pipeline::VtScaleSdr => format!("scale_vt=w={w}:h={height}:format=nv12"),
+            Pipeline::VtToneMapMetal => format!(
+                "scale_vt=w={w}:h={height}:format=p010le,\
+                 tonemap_videotoolbox=tonemap=bt2390:tonemap_mode=itp:transfer=bt709:matrix=bt709:\
+                 primaries=bt709:range=tv:format=nv12:apply_dovi=0"
+            ),
             Pipeline::Cpu => return None,
             Pipeline::TonemapCuda => {
                 let w = width.map_or_else(|| "-2".to_owned(), |w| w.to_string());
@@ -490,10 +519,12 @@ impl Pipeline {
         })
     }
 
-    /// Whether every frame stays in vendor surfaces from decode to encode.
+    /// Whether the unburned graph retains vendor surfaces from decode to encode.
     ///
     /// The vendor VPP graphs and the VA-API/Vulkan interop graph hand the
-    /// encoder hardware surfaces directly. Everything else touches the CPU on
+    /// encoder hardware surfaces directly, as do the Apple processing graphs.
+    /// This describes FFmpeg frame domains, not physical copy counts or PCIe.
+    /// The remaining graphs use system-memory stages on
     /// every frame, and the amounts are not small — the CPU float tone-map is
     /// the 0.71x measurement this module's header records, `libplacebo` ends
     /// with `hwdownload` into system memory, and `tonemap_opencl` leaves the
@@ -504,7 +535,9 @@ impl Pipeline {
     pub fn keeps_frames_off_the_cpu(self) -> bool {
         matches!(
             self,
-            Pipeline::TonemapCuda
+            Pipeline::VtScaleSdr
+                | Pipeline::VtToneMapMetal
+                | Pipeline::TonemapCuda
                 | Pipeline::VppQsv
                 | Pipeline::TonemapVaapi
                 | Pipeline::LibplaceboVaapi
@@ -528,7 +561,9 @@ impl Pipeline {
     pub fn output_grade(self) -> OutputGrade {
         match self {
             Pipeline::DoviPassthrough | Pipeline::Hdr10Passthrough => OutputGrade::Hdr10,
-            Pipeline::TonemapCuda
+            Pipeline::VtScaleSdr
+            | Pipeline::VtToneMapMetal
+            | Pipeline::TonemapCuda
             | Pipeline::VppQsv
             | Pipeline::TonemapVaapi
             | Pipeline::Libplacebo
@@ -626,6 +661,9 @@ impl Pipeline {
     ) -> Option<&'static str> {
         if proven == Pipeline::Cpu {
             return None;
+        }
+        if matches!(proven, Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal) {
+            return Some("macOS processing requires its resolved compatibility context");
         }
         if !heavy {
             return Some("light source — a GPU graph is not worth the handoff");

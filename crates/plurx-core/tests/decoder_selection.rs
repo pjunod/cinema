@@ -14,8 +14,382 @@ use plurx_core::transcode::{
     TranscodeMediaOptions, TranscodeOptions, TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
+use plurx_core::transcode::{
+    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
+    MacosProcessingSelection,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
+
+fn macos_stream(hdr: bool) -> Value {
+    let mut stream = video(
+        0,
+        Some("hevc"),
+        Some(if hdr { "Main 10" } else { "Main" }),
+        3840,
+        2160,
+        Some(if hdr { "yuv420p10le" } else { "yuv420p" }),
+        "24/1",
+        "24/1",
+        Some(if hdr { "smpte2084" } else { "bt709" }),
+    );
+    stream["color_primaries"] = json!(if hdr { "bt2020" } else { "bt709" });
+    stream["color_space"] = json!(if hdr { "bt2020nc" } else { "bt709" });
+    stream["color_range"] = json!("tv");
+    stream["field_order"] = json!("progressive");
+    stream["sample_aspect_ratio"] = json!("1:1");
+    stream
+}
+
+fn macos_identity(os_build: &str) -> MacosProcessingIdentity {
+    MacosProcessingIdentity::new(
+        "1".repeat(64),
+        "2".repeat(64),
+        "3".repeat(64),
+        "4".repeat(64),
+        os_build.to_owned(),
+        "arm64".to_owned(),
+        "Apple test SoC".to_owned(),
+    )
+    .expect("validated implementation")
+}
+
+fn macos_context(
+    enabled: bool,
+    availability: MacosProcessingAvailability,
+) -> MacosProcessingContext {
+    MacosProcessingContext::new(
+        enabled,
+        macos_identity("test-build"),
+        availability,
+        availability,
+    )
+}
+
+fn macos_policy(context: MacosProcessingContext) -> DecodePolicySnapshot {
+    DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None).with_macos_processing(context)
+}
+
+#[test]
+fn macos_processing_selects_only_proved_sdr_and_hdr10_surfaces() {
+    for (hdr, pipeline) in [
+        (false, Pipeline::VtScaleSdr),
+        (true, Pipeline::VtToneMapMetal),
+    ] {
+        let input = facts(macos_stream(hdr));
+        let plan = resolve(
+            Encoder::VideoToolbox,
+            Pipeline::Cpu,
+            &input,
+            &unqualified_software_capabilities("hevc"),
+            macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+        )
+        .expect("compatible frozen plan");
+        assert_eq!(plan.options().pipeline, pipeline);
+        assert_eq!(plan.decode().backend(), DecodeBackend::VideoToolbox);
+        assert_eq!(
+            plan.decode().surface().decode_domain(),
+            FrameDomain::VideoToolbox
+        );
+        assert_eq!(
+            plan.decode().surface().renderer_domain(),
+            FrameDomain::VideoToolbox
+        );
+        assert_eq!(plan.decode().surface().decoder_download_format(), None);
+        assert_eq!(plan.decode().surface().renderer_download_format(), None);
+        assert_eq!(
+            plan.macos_processing_selection(),
+            Some(MacosProcessingSelection::Selected)
+        );
+        assert!(plan.macos_processing_identity().is_some());
+        assert_eq!(plan.output_contract().output_codec(), "h264");
+        assert_eq!(plan.output_contract().effective_width(), Some(1920));
+        assert_eq!(plan.output_contract().effective_height(), Some(1080));
+    }
+}
+
+#[test]
+fn macos_processing_unavailable_context_preserves_legacy_hash_and_argv() {
+    let input = facts(macos_stream(false));
+    let caps = unqualified_software_capabilities("hevc");
+    let legacy = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &caps,
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("legacy plan");
+    let source = execution_file("/fixture/source.mkv");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    for context in [
+        macos_context(false, MacosProcessingAvailability::Available),
+        macos_context(true, MacosProcessingAvailability::Pending),
+        macos_context(true, MacosProcessingAvailability::Unavailable),
+    ] {
+        let plan = resolve(
+            Encoder::VideoToolbox,
+            Pipeline::Cpu,
+            &input,
+            &caps,
+            macos_policy(context),
+        )
+        .expect("incumbent retained");
+        assert_eq!(plan.plan_digest(), legacy.plan_digest());
+        assert_eq!(hls_args(&plan, &execution), hls_args(&legacy, &execution));
+        assert!(plan.macos_processing_identity().is_none());
+        assert_eq!(
+            plan.decode().surface().decode_domain(),
+            FrameDomain::SystemMemory
+        );
+    }
+}
+
+#[test]
+fn macos_processing_rejects_unqualified_geometry_and_color_classes() {
+    let cases = [
+        ("width", json!(3841)),
+        ("sample_aspect_ratio", json!("4:3")),
+        ("field_order", json!("tt")),
+        ("field_order", Value::Null),
+        ("r_frame_rate", json!("30/1")),
+        ("color_range", json!("pc")),
+        ("color_primaries", json!("bt2020")),
+        ("color_transfer", json!("arib-std-b67")),
+        ("pix_fmt", json!("yuv422p")),
+        ("profile", Value::Null),
+    ];
+    for (key, value) in cases {
+        let mut stream = macos_stream(false);
+        stream[key] = value;
+        let input = facts(stream);
+        let plan = resolve(
+            Encoder::VideoToolbox,
+            Pipeline::Cpu,
+            &input,
+            &unqualified_software_capabilities("hevc"),
+            macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+        )
+        .expect("incumbent accepts unsupported Mac input");
+        assert_eq!(plan.options().pipeline, Pipeline::Cpu, "{key}");
+        assert!(plan.macos_processing_identity().is_none(), "{key}");
+    }
+}
+
+#[test]
+fn macos_processing_respects_software_and_failed_graph_restrictions() {
+    let input = facts(macos_stream(false));
+    let caps = unqualified_software_capabilities("hevc");
+    let request = TranscodeRequest::new(Encoder::VideoToolbox, options(Pipeline::Cpu));
+    let context = macos_context(true, MacosProcessingAvailability::Available);
+    let override_policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some("off"))
+        .with_macos_processing(context.clone());
+    let forced = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &override_policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("operator override");
+    assert_eq!(forced.decode().backend(), DecodeBackend::Software);
+    assert_eq!(forced.options().pipeline, Pipeline::Cpu);
+    assert_eq!(
+        forced.macos_processing_selection(),
+        Some(MacosProcessingSelection::DecoderOverride)
+    );
+    let restricted = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &macos_policy(context.clone()),
+        &AttemptRestrictions::requiring(DecodeBackend::Software),
+    )
+    .expect("continuation");
+    assert_eq!(restricted.options().pipeline, Pipeline::Cpu);
+    let retry_context = context.excluding_pipeline(Pipeline::VtScaleSdr);
+    assert!(
+        retry_context.enabled(),
+        "retry does not rewrite the saved choice"
+    );
+    let retry = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &macos_policy(retry_context),
+        &AttemptRestrictions::none(),
+    )
+    .expect("processing-owner fallback");
+    assert_eq!(retry.options().pipeline, Pipeline::Cpu);
+    assert_eq!(
+        retry.macos_processing_selection(),
+        Some(MacosProcessingSelection::RecoveryRestriction)
+    );
+    assert!(retry.macos_processing_identity().is_none());
+}
+
+#[test]
+fn macos_processing_cannot_be_selected_without_context_or_for_burns() {
+    let input = facts(macos_stream(false));
+    let caps = unqualified_software_capabilities("hevc");
+    assert_eq!(
+        resolve(
+            Encoder::VideoToolbox,
+            Pipeline::VtScaleSdr,
+            &input,
+            &caps,
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+        ),
+        Err(PlanError::IncompatibleRenderer)
+    );
+    let mut media = options(Pipeline::Cpu);
+    media.subtitle_burn = Some(SubtitleBurn {
+        subtitle_index: 0,
+        bitmap: false,
+    });
+    let plan = resolve_with_options(
+        Encoder::VideoToolbox,
+        media,
+        &input,
+        &caps,
+        macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+    )
+    .expect("incumbent burn");
+    assert_eq!(plan.options().pipeline, Pipeline::Cpu);
+    assert_eq!(
+        plan.macos_processing_selection(),
+        Some(MacosProcessingSelection::PresentationConstraint)
+    );
+}
+
+#[test]
+fn macos_processing_implementation_changes_rotate_only_selected_plans() {
+    let input = facts(macos_stream(false));
+    let caps = unqualified_software_capabilities("hevc");
+    let make = |build: &str, enabled| {
+        resolve(
+            Encoder::VideoToolbox,
+            Pipeline::Cpu,
+            &input,
+            &caps,
+            macos_policy(MacosProcessingContext::new(
+                enabled,
+                macos_identity(build),
+                MacosProcessingAvailability::Available,
+                MacosProcessingAvailability::Available,
+            )),
+        )
+        .expect("plan")
+    };
+    assert_ne!(
+        make("build-one", true).plan_digest(),
+        make("build-two", true).plan_digest()
+    );
+    assert_eq!(
+        make("build-one", false).plan_digest(),
+        make("build-two", false).plan_digest()
+    );
+}
+
+#[test]
+fn macos_processing_rolling_and_vod_share_frozen_color_graph() {
+    let input = facts(macos_stream(true));
+    let plan = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &unqualified_software_capabilities("hevc"),
+        macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+    )
+    .expect("HDR10 Metal plan");
+    let source = execution_file("/fixture/source.mkv");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let rolling = hls_args(&plan, &execution);
+    let vod = plurx_core::transcode::vod_pipe_args(
+        &source,
+        &plan,
+        &execution,
+        plurx_core::transcode::VodFrameGrid::new(24, 1).expect("grid"),
+        12.0,
+    );
+    let graph = Pipeline::VtToneMapMetal
+        .filters(Some(1920), 1080, Some("hdr10"))
+        .expect("graph");
+    for args in [&rolling, &vod] {
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-hwaccel_output_format", "videotoolbox_vld"]));
+        assert!(args.windows(2).any(|pair| pair == ["-allow_sw", "0"]));
+        assert!(args.windows(2).any(|pair| pair == ["-color_range", "tv"]));
+        assert!(args.windows(2).any(|pair| pair == ["-b:v", "8000k"]));
+        let vf = &args[args.iter().position(|arg| arg == "-vf").expect("vf") + 1];
+        assert!(vf.contains(&graph));
+        assert!(!vf.contains("hwdownload"));
+        assert!(!vf.contains("format=yuv420p"));
+    }
+    assert!(vod.iter().any(|arg| arg == "passthrough"));
+    assert!(!plurx_core::transcode::PIPELINE_CANDIDATES.contains(&Pipeline::VtToneMapMetal));
+}
+
+#[test]
+fn macos_processing_rejected_decoder_and_hdr10plus_retain_incumbent() {
+    let input = facts(macos_stream(true));
+    let caps = DecodeCapabilities::new(
+        snapshot_identity(),
+        vec![capability(
+            DecodeBackend::VideoToolbox,
+            "hevc",
+            None,
+            None,
+            CapabilityStatus::Rejected,
+        )],
+        vec![SoftwareDecoder {
+            codec: "hevc".into(),
+            implementation: Some("hevc".into()),
+        }],
+    )
+    .expect("rejected decode observation");
+    let plan = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &caps,
+        macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+    )
+    .expect("existing software fallback");
+    assert_eq!(plan.decode().backend(), DecodeBackend::Software);
+    assert_eq!(plan.options().pipeline, Pipeline::Cpu);
+    assert_eq!(
+        plan.macos_processing_selection(),
+        Some(MacosProcessingSelection::CapabilityFallback)
+    );
+    assert!(plan.macos_processing_identity().is_none());
+    let mut stream = macos_stream(true);
+    stream["side_data_list"] =
+        json!([{"side_data_type":"HDR Dynamic Metadata SMPTE2094-40 (HDR10+)"}]);
+    let plan = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &facts(stream),
+        &unqualified_software_capabilities("hevc"),
+        macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+    )
+    .expect("HDR10+ incumbent");
+    assert_eq!(plan.options().pipeline, Pipeline::Cpu);
+    assert!(plan.macos_processing_identity().is_none());
+}
 
 fn identity(byte: char) -> DecodeSourceIdentity {
     DecodeSourceIdentity::from_sha256(byte.to_string().repeat(64)).expect("valid digest")

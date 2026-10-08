@@ -55,6 +55,8 @@ impl CodecQualificationMetrics {
             Pipeline::Cpu => 7,
             Pipeline::LibplaceboVaapi => 8,
             Pipeline::TonemapCuda => 9,
+            Pipeline::VtScaleSdr => 10,
+            Pipeline::VtToneMapMetal => 11,
         }
     }
 
