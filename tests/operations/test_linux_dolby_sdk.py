@@ -77,3 +77,68 @@ class LinuxDolbySdkCase(unittest.TestCase):
         lock["sources"]["foo"]["url"] = "https://user:password@example.org/source.tar.gz"
         with self.assertRaisesRegex(ValueError, "credential-free"):
             module.stage_sources(lock, tmp_path / "sdk", tmp_path / "other-provenance", ["--enable-libfoo"], recipe)
+
+
+    def test_actual_project_outputs_are_required_and_imported_libraries_cannot_be_replaced(self):
+        module = helper()
+        source = (self.tmp_path / "project").resolve()
+        source.mkdir()
+        sdk = self.tmp_path / "sdk"
+        template = source / "foo.pc"
+        template.write_text("prefix=@prefix@\nVersion: @version@\n")
+        selected = {"root": "build", "path": "foo.pc"}
+        with self.assertRaisesRegex(ValueError, "unconfigured"):
+            module.publish_generated_output(sdk, "lib/pkgconfig/foo.pc", source, selected)
+        # Represents the exact bytes produced by an actual project's configure
+        # step; the publication owner neither synthesizes nor substitutes them.
+        template.write_text("prefix=/private/sdk\nVersion: 1.0\nLibs: -lfoo\n")
+        facts = module.publish_generated_output(sdk, "lib/pkgconfig/foo.pc", source, selected)
+        assert facts["sha256"] == hashlib.sha256(template.read_bytes()).hexdigest()
+        assert (sdk / "lib/pkgconfig/foo.pc").read_bytes() == template.read_bytes()
+        with self.assertRaisesRegex(ValueError, "must not replace"):
+            module.publish_generated_output(sdk, "lib/pkgconfig/foo.pc", source, selected)
+        outside = self.tmp_path / "outside.h"
+        outside.write_text("uncontrolled host header\n")
+        (source / "escape.h").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "contained"):
+            module.publish_generated_output(sdk, "include/foo.h", source, {"root": "source", "path": "escape.h"})
+
+    def test_generator_contract_refuses_shell_wrappers_templates_and_missing_outputs(self):
+        module = helper()
+        generator = {"source_root": "source", "commands": [{"cwd": "build", "argv": ["cmake", "-DCMAKE_INSTALL_PREFIX={sdk}", "{source}"]}], "outputs": {"lib/pkgconfig/foo.pc": {"root": "build", "path": "foo.pc"}}}
+        module.validate_generator(generator)
+        generator["commands"][0]["argv"] = ["sh", "-c", "echo manufactured-header"]
+        with self.assertRaisesRegex(ValueError, "without a shell"):
+            module.validate_generator(generator)
+        generator["commands"] = []
+        generator["outputs"]["lib/pkgconfig/foo.pc"]["path"] = "foo.pc.in"
+        with self.assertRaisesRegex(ValueError, "templates"):
+            module.validate_generator(generator)
+        generator["outputs"] = {}
+        with self.assertRaisesRegex(ValueError, "explicit authentic"):
+            module.validate_generator(generator)
+
+
+    def test_only_rebuilt_ffmpeg_modules_are_excluded_from_official_external_imports(self):
+        module = helper()
+        for name in ["libavcodec.so.62", "libavfilter.so.11", "libavformat.so", "libavutil.so.60", "libswresample.so.6", "libswscale.so.9"]:
+            assert module.ffmpeg_owned_library(name)
+        for name in ["libavif.so.16", "libva.so.2", "libvpl.so.2", "dri/iHD_drv_video.so"]:
+            assert not module.ffmpeg_owned_library(name)
+
+
+    def test_development_package_cross_links_are_inventory_not_uncontrolled_contents(self):
+        module = helper()
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w") as archive:
+            link = tarfile.TarInfo("usr/lib/x86_64-linux-gnu/libx264.so")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "libx264.so.164"
+            archive.addfile(link)
+        with self.assertRaisesRegex(ValueError, "unresolved"):
+            module.tar_members(output.getvalue())
+        regular, links = module.tar_members(output.getvalue(), allow_unresolved=True)
+        assert not regular
+        assert links == {"usr/lib/x86_64-linux-gnu/libx264.so": "usr/lib/x86_64-linux-gnu/libx264.so.164"}
+        with self.assertRaises(KeyError):
+            module.resolved(next(iter(links)), regular, links)
