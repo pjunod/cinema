@@ -321,6 +321,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [DV_HDR_PROCESSING_BUILD.md](streaming/DV_HDR_PROCESSING_BUILD.md) | Sol 6.1 implementation handoff: backend feasibility, integration contracts, benchmarks and qualification. | open |
 | [DV_HDR_PROCESSING_REVIEW.md](streaming/DV_HDR_PROCESSING_REVIEW.md) | Adversarial findings and dispositions for the DV processing proposal and build handoff; cleared for M0 feasibility only. | done |
 | [DV_HDR_PROCESSING_FEASIBILITY.md](streaming/DV_HDR_PROCESSING_FEASIBILITY.md) | Sol 6.1 M0 reuse findings: existing DV/FEL renderers, P8.1 recipe, metric checks and unproven boundaries. | open |
+| [DV_HDR_PROCESSING_STATUS.md](streaming/DV_HDR_PROCESSING_STATUS.md) | Implementation ledger: M0 backend builds, offline comparison evidence and remaining product qualification. | open |
 | [DV-DISK-CONVERSION-DIAGNOSIS.md](streaming/DV-DISK-CONVERSION-DIAGNOSIS.md) | Why the on-disk conversion never completes, and a proposal. | open |
 | [QUEUE-REPAIR-VERIFICATION-PROMPT.md](streaming/QUEUE-REPAIR-VERIFICATION-PROMPT.md) | Did the fragment-index queue come back, and stay back? | open |
 | [DECODER_SELECTION_AND_RECOVERY_PLAN.md](streaming/DECODER_SELECTION_AND_RECOVERY_PLAN.md) | An explicit decoder choice and recovery path for each producer. | open |
@@ -402,7 +403,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
-| [Android playback repair status](clients/ANDROID-PLAYBACK-REPAIR-STATUS.md) | Physical-device failures, root causes and delivery progress. | open |
+| [Android playback repair status](clients/ANDROID-PLAYBACK-REPAIR-STATUS.md) | Merged playback repairs, validation and remaining physical-device acceptance. | built |
 | [Ready-video recovery build note](apple-builds/888-ready-video-recovery.md) | Apple build claim and viewer-visible black-picture recovery changes for PR #888. | built |
 | [APPLE-BLACK-VIDEO-IMPLEMENTATION.md](clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md) | Avatar and HDR10 black-video investigation, verified false-frame evidence defects, item-bound presentation repair and physical acceptance limits. | open |
 | [Growing-resume preparation build note](apple-builds/914-growing-resume-preparation.md) | Apple build claim and bounded unpublished-session preparation repair for PR #914. | built |

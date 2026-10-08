@@ -1804,7 +1804,11 @@ pattern = "rendition_build_gate"
 # cancelled preparation termination and settled private artifact exposure.
 # Neither creates a new build owner or scheduler.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 29
+# PR #915 (142d9f4e0): +1 in vod/tests/chunk_03.rs::
+# retirement_releases_background_admission_with_publication_locks_held.
+# The fixture holds the existing recipe-key gate while retiring its actual
+# child/writer generation. It adds no build owner or production scheduler.
+expected_occurrences = 30
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -2981,7 +2985,15 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Source uses awaited FuturesUnordered, with no independently spawned close task.
 # Review64 R4: +1 owned/joined finite-stack test thread. No production task.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 60
+# PR #915 (142d9f4e0 and b38387a13): +2 test-only sleep children in
+# vod/tests/chunk_03.rs, retirement_releases_background_admission_with_publication_locks_held
+# and completed_output_survives_retirement_and_manifest_contention. Each child
+# is attached to the existing ProducerSlot with its background permit and
+# actual writer barrier. The fixture requests exact-generation retirement,
+# settles the writer, then awaits confirmed child/writer reap before checking
+# permit release. kill_on_drop is an unwind backstop; no production task or
+# rolling producer is added.
+expected_occurrences = 62
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4237,7 +4249,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # graph/stat deadlines; cooperative publication stop; two one-second cleanup
 # bounds; and two finite fixture sleeps. Subprocess cancellation retains the
 # child kill-and-reap owner; a deadline never supplies completion evidence.
-expected_occurrences = 1590
+# PR #915: +5 test-only two-second timeout bounds in vod/tests/chunk_03.rs.
+# retirement_releases_background_admission_with_publication_locks_held bounds
+# queued publication cancellation and confirmed reap (two sites).
+# completed_output_survives_retirement_and_manifest_contention bounds trailer
+# proof capture, confirmed reap and deferred completion metadata (three sites).
+# Each asserts actual generation-owned settlement; timeout supplies no reap,
+# publication or admission-release evidence and starts no recovery owner.
+expected_occurrences = 1595
 
 
 [[module_structures]]
@@ -4613,7 +4632,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # exact frozen executable used by the pretranscode launch-fence regression.
 # Production observations use bounded_probe_command's existing owned child
 # kill-and-reap settlement; fixture children are also awaited or killed/reaped.
-expected_occurrences = 236
+# PR #915: +2 test-only Command::new("sleep") children in the two
+# vod/tests/chunk_03.rs retirement/completion fixtures named under method-spawn.
+# Existing ProducerSlot owns both children and their permits through confirmed
+# child/writer reap. Neither is an encoder or a new production launch path.
+expected_occurrences = 238
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5198,7 +5221,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # read the boot and current readiness values before and after disablement.
 # status() clones SharingStatus under a read lock and receiver recovery under
 # its mutex; these test-only observations launch no task, timer, or process.
-expected_occurrences = 716
+# PR #915: +2 .spawn() calls for the same finite sleep children reviewed under
+# method-spawn and process-command-construction. Existing ProducerSlot owns
+# retirement and confirmed child/writer reap; these are two fixtures, not two
+# additional children or production process owners.
+expected_occurrences = 718
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5656,7 +5683,11 @@ pattern = "kill_on_drop\\s*\\("
 # finite reordered-VOD decode fixture. Their enclosing owners also await reap.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 99
+# PR #915: +2 unwind guards on the same test-only sleep children reviewed
+# under method-spawn. The normal fixture path requests exact-generation
+# retirement and awaits confirmed child/writer reap before permit release;
+# kill_on_drop is only a panic/unwind backstop, never settlement evidence.
+expected_occurrences = 101
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

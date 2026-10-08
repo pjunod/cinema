@@ -1,0 +1,150 @@
+# Dolby Vision processing — implementation evidence and remaining work
+
+**Status:** open — M0 implementation in progress; product routes unqualified ·
+**Updated:** 2026-10-08 · **Integration:** `effort/dv-hdr-processing`
+
+Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
+[source feasibility findings](DV_HDR_PROCESSING_FEASIBILITY.md). This is the
+implementation ledger: commands and evidence here describe completed work;
+remaining milestones stay in the build handoff. The
+[project backlog](../features/PROJECT-BACKLOG.md) points here for progress.
+
+## 1. Current boundary
+
+The reviewed proposal landed in documentation PR #919. Implementation starts
+from its merged main commit `079960daebd5a1e23dff2b0e8f8506c1238bc1b0`, with
+one task branch, `codex/dv-m0-harness`, targeting the integration branch.
+Three Sol 6.1 sessions own the renderer spike, CPU cross-check and offline
+measurement harness. Production routing, settings and badges are unchanged.
+
+The first task must retain reproducible commands, source pins, actual frame
+artifacts and negative controls. Numerical agreement is evidence for the named
+operation, not full Dolby Vision conformance or an improvement on a movie.
+Software Vulkan is suitable for mechanics; it cannot establish GPU throughput
+or real-time admission. Enhanced P8.1 still requires independent DV-on and
+DV-off validation. Current playback keeps its compatible fallback.
+
+## 2. Milestone ledger
+
+| Milestone | State | Evidence still required |
+|---|---|---|
+| M0 backend and reference spike | Active: isolated Linux renderer and CPU builds; bounded offline comparison harness | Actual reconstruction/export, association controls, independent reference limits and reproducible artifact bundle |
+| M1 typed contracts | Not started | Backend operation boundaries established by M0 |
+| M2 processing and lifecycle | Not started | Qualified graph, bounded ownership and timestamped adapter |
+| M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
+| M4 settings and HDR10-E badge | Not started | M3 reporting; actual processing evidence on each client |
+| M5 quality and performance | Not started; M0 supplies the measurement foundation | Held-out corpus, matched bitrate, physical playback and full graph performance |
+| M6 release qualification | Not started | Exact-tree gates and separate acceptance for each proposed route |
+
+## 3. Run the bounded offline comparison
+
+The [offline tool](../../tools/dv_quality/run.py) accepts explicit manifests
+and already exported RGB48LE frames. It does not run arbitrary commands from
+manifests, decode video, reconstruct FEL or certify an independent reference.
+This deliberately small M0 interface permits 64 frames, 256 pixels per raster
+side and 262,144 pixels per stream. Full-raster M5 measurements need a later
+streaming implementation; these bounds cannot establish production speed.
+
+Create an authored mathematical example in a new scratch directory:
+
+```bash
+scratch=$(mktemp -d)                           # fresh local evidence root
+scratch=$(cd "$scratch" && pwd -P)             # resolve symlinked temp parents
+python3 tools/dv_quality/example.py --output "$scratch/controls"
+python3 tools/dv_quality/run.py compare \
+  --candidate "$scratch/controls/candidate/manifest.json" \
+  --baseline "$scratch/controls/baseline/manifest.json" \
+  --output "$scratch/comparison"
+```
+
+**How to read the result:** `receipt.json` contains per-frame and pixel-weighted
+Delta E ITP (lower is closer), PU21 luminance PSNR (higher is closer), exact
+rational timestamps and observed luminance threshold fractions. A zero-error
+PSNR is represented by `null` plus `identical: true`, with the mathematical
+infinity interpretation stated explicitly. Threshold fractions alone do not
+prove clipping. Frame weighting is by pixel count, not duration.
+
+Without `--reference`, `reference_error` is `null`: the tool measures only the
+difference between candidate and baseline. A reference manifest must provide
+hashed evidence and explicit independent provenance. Its independence and
+picture semantics remain declarations to be reviewed; hashing does not prove
+them. `capability_qualification` stays `null` in either mode. No result from
+this tool grants the HDR10-E badge or qualifies P8.1 authoring.
+
+Each input declares source and renderer identity, picture domain and target
+policy. Frame sizes, hashes, color/range tags, source binding, frame counts and
+exact PTS/duration pairs must agree. Unequal frame counts, mismatched pairs,
+duplicates and overlapping intervals are refused; equivalent fractions are
+normalized. Matching gaps are recorded. Source-timeline completeness remains
+explicitly unverified: shared omissions and source boundaries are not checked. The tool does no implicit
+retiming, scaling or exposure adjustment. Optional source bytes are hash
+verified; absent source bytes and renderer identity are marked unverified.
+
+The new output directory retains original manifests, exact processed inputs,
+normalized reproduction manifests, tool code and licenses. Its receipt records
+their hashes and a reproduction command to run from that directory. Existing
+outputs are refused, including an incomplete prior run. Inputs must be regular
+local files under their manifest directory, without symlink components.
+
+The [generated example](../../tools/dv_quality/example.py) demonstrates the
+schema. In addition to its fields, an `independent-reference` role requires:
+
+```json
+{
+  "provenance": {
+    "kind": "independent",
+    "scope": "analytic-control",
+    "producer": "identify the separate reference producer",
+    "method": "state the bounded operation and derivation",
+    "evidence": {"path": "reference-evidence.json", "sha256": "<64 lowercase hex digits>"}
+  }
+}
+```
+
+Use `picture-reference` only for a justified reference render. Domain
+`reconstruction` and domain `mapped` are different contracts and cannot be
+compared as interchangeable pictures. License/provenance and reference target
+assumptions still need external review before fidelity claims about a movie.
+
+The metric constants and expected vectors are pinned to Colour and PU21 in
+[the module](../../tools/dv_quality/metrics.py); BSD notices accompany their
+reuse. BT.2020 luminance weights are explicit, and camera/exposure fitting is
+disabled. The authored two-frame example proves harness mechanics only.
+
+## 4. Validation boundary
+
+The pinned compiler loop was established on the implementation base:
+`rustc +1.97.1 --version` reports 1.97.1, and
+`cargo +1.97.1 check -p plurx-core --lib --locked` passes with 34 existing
+warnings on the default-feature surface. No Rust source changed in M0.
+Focused implementation regressions apply to the new offline tools. The earlier
+request to omit unit tests covered the documentation-only PR.
+
+Do not use this ledger as a production qualification receipt. Until the
+remaining gates pass, HDR10-E is a specified product label, not an emitted
+playback badge, and no measured universal quality gain is claimed.
+
+The first comparator slice passes 23 focused regressions:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s tests/operations -p test_dv_quality.py -v
+```
+
+Adversarial review found two issues before integration: a shared gap in both
+input timelines could be mistaken for complete source coverage, and an
+oversized JSON integer could bypass a clean refusal. The receipt now records
+common gaps and explicitly leaves source completeness unverified; target
+luminance bounds reject oversized integers without float conversion. Dedicated
+regressions cover both. This review applies only to the offline comparator;
+backend probes receive their own review before integration.
+
+The reviewer verified both corrections and approved the bounded comparator
+with no remaining findings.
+
+
+The first task is PR #920 into the effort. An early dispatch was invalidated
+by a documentation follow-up before unit execution. Its two empty failed
+attempts require the [exact receipt recovery](../ci/PYTHON-UNIT-PR-RECEIPTS.md#pr920--two-authenticated-empty-effort-failures).
+No successes are manufactured or imported; a fresh passing development gate
+remains required before merging the task.
