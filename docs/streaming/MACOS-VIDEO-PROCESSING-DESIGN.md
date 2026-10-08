@@ -106,6 +106,25 @@ The implementation plan then has separately accepted extensions for HLG,
 Dolby Vision, subtitles, interlace/Live TV and HEVC/Main10. One successful
 HDR10 graph grants none of those capabilities automatically.
 
+**Recommended starting order (2026-10-07):** begin with M0/M1 inventory
+and experiments, then implement only candidates that meet the existing
+quality and benefit criteria. The first delivery is progressive SDR scaling
+plus HDR10-to-SDR tone mapping, qualified through M6.
+
+| Priority | Candidate | Why this order |
+|---|---|---|
+| 1 | Hardware decode → native SDR scaling → hardware H.264 encode | The simplest processing candidate establishes surface handling, capability detection and fallback without adding HDR color conversion. |
+| 2 | HDR10-to-SDR processing through the measured native or Metal mapper | A strong potential benefit where CPU tone mapping dominates; actual gains and the complete Jellyfin feature set must be demonstrated. |
+| 3 | P5 hardware decode with existing Dolby-aware CPU processing, then GPU Dolby processing | Isolate decoder gains from renderer/color risk; both need the strict metadata contract before production use. |
+| 4 | Subtitle compositing | Prioritize when measured subtitle burn-in cost warrants it; retain existing shaping and geometry semantics. |
+| 5 | Live TV/deinterlacing and HEVC/Main10 output | Choose these separate follow-ups according to measured workload and client demand; neither blocks the initial delivery. |
+
+Run the P5 four-way experiment in §3.5 during M1 so metadata preservation
+and decoder feasibility are known early. This early experiment does not
+bring Dolby production integration into the initial SDR/HDR10 delivery.
+Extension order is a default priority, not a new dependency between E1–E4;
+each retains its own acceptance criteria and can retain the incumbent.
+
 ### 3.2 Explicit non-goals
 
 - No native Apple client/player rewrite or custom display renderer.
