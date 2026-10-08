@@ -50,10 +50,15 @@ Follow the current workflow amendments in the canonical documents, including
 Forgejo as the authoritative remote, normal hooks, local focused regressions,
 and required effort/promotion evidence. Main-bound PRs start as draft, receive
 one adversarial review with findings addressed, then enter the ready lane.
-Dispatch `Effort development gate` manually before merging each task; it is
-`workflow_dispatch` only and does not run merely because a task PR exists.
-Require a green run for the candidate. Its compile checks do not replace
-focused local unit evidence or final promotion qualification.
+For this effort, the user clarified on 2026-10-08: run focused regressions
+and affected compilation on individual task branches, and run full suites
+once on the completed effort branch. Do not dispatch the existing broad
+`Effort development gate` per task; its Python receipts are scoped to a PR
+and would repeat the whole Python suite on each new task. Record focused
+commands and outcomes in each PR. Freeze the completed candidate before the
+single full-suite run. Windows validation is waived for this effort. These
+user instructions supersede the normal per-task gate requirement; global CI
+policy is unchanged. See the [current ledger](DV_HDR_PROCESSING_STATUS.md).
 Do not use CI as a compiler. User-visible corrective commits use `fix(` or
 `perf(` and carry real `Regression-Test: <path>::<test>` lines into the landing
 message, including API merges. Do not invent regression names before tests

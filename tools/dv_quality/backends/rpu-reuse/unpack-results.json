@@ -1,0 +1,6 @@
+{
+  "archive_sha256": "d405ec20062c294d74c8e2377068cc0d6798c1f6573d26170e8d95e790326154",
+  "verified_files": 398,
+  "image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+  "bootstrap": "retained prerequisite unpack, not source-only bootstrap"
+}
