@@ -183,9 +183,8 @@ test("render() keeps the cached aggregate across a section switch and rewrites b
 
 test("the rail marks the active section, shows counts it already has, and never fetches", () => {
   const rail = new Function(
-    "SETTINGS_DATA", "esc", "PlurxClusterPanel",
+    "SETTINGS_DATA", "esc", "PlurxClusterPanel", "SERVER",
     `${shippedConst("SET_GROUPS")}${shippedConst("SET_TABS")}
-     const SERVER={cluster_advertisement:true};
      ${shippedSource("settingsClusterEnabled")}
      ${shippedSource("settingsTabAside")}
      ${shippedSource("settingsTabsHtml")}
@@ -1690,6 +1689,25 @@ test("tone-map probe failures stay collapsed beneath the selected pipeline", () 
     "an unprobed node keeps its short explanation");
 });
 
+test("standalone Developer omits cluster controls while preserving local features and saved choices", () => {
+  const panels=developerPanels();
+  const settings=Object.freeze({cluster_media_pool_enabled:true,cluster_session_takeover_enabled:true,
+    cluster_clock_guard_enforced:true,bounded_replica_reads:true,backup_destination:"/backups",
+    subtitle_cluster_sources:true,subtitle_stored_sources:true,subtitle_backfill:true,sharing_enabled:true});
+  panels.server.cluster_advertisement=false;
+  const html=panels.developerPanel(settings,{items:[]});
+  assert.doesNotMatch(html,/Cluster work|Portable cluster backup|Cluster clock guard|Cluster media placement|Local catalogue reads|Parallel playback subtitle ranges|Share stored subtitle tracks|href="#\/settings\/cluster"/);
+  assert.doesNotMatch(html,/TOG:(cluster-placement-enabled|cluster-takeover-enabled|cluster-clock-enforced|bounded-replica-reads|subcluster)\|/);
+  for(const id of ["subsrc","subbackfill","cinema-sharing-enabled","dev-live-tv-enable"])
+    assert.match(html,new RegExp(`TOG:${id}\\|`),`${id} still applies to this server`);
+  assert.doesNotMatch(html,/keep a ready voter majority/);
+  panels.server.cluster_advertisement=true;
+  const clustered=panels.developerPanel(settings,{items:[]});
+  assert.match(clustered,/Cluster media placement|Portable cluster backup/);
+  assert.match(clustered,/TOG:subcluster\|[^|]*\|[^|]*\|checked=true/,
+    "hiding an inapplicable control never changes its saved value");
+});
+
 main().then(() => {
   if (started !== finished) failures += started - finished;
   process.stdout.write(`${started - failures}/${started} passed\n`);
@@ -1734,21 +1752,3 @@ test("Cinema sharing lists endpoint setup and unverified host network without ga
 });
 
 
-test("standalone Developer omits cluster controls while preserving local features and saved choices", () => {
-  const panels=developerPanels();
-  const settings=Object.freeze({cluster_media_pool_enabled:true,cluster_session_takeover_enabled:true,
-    cluster_clock_guard_enforced:true,bounded_replica_reads:true,backup_destination:"/backups",
-    subtitle_cluster_sources:true,subtitle_stored_sources:true,subtitle_backfill:true,sharing_enabled:true});
-  panels.server.cluster_advertisement=false;
-  const html=panels.developerPanel(settings,{items:[]});
-  assert.doesNotMatch(html,/Cluster work|Portable cluster backup|Cluster clock guard|Cluster media placement|Local catalogue reads|Parallel playback subtitle ranges|Share stored subtitle tracks|href="#\/settings\/cluster"/);
-  assert.doesNotMatch(html,/TOG:(cluster-placement-enabled|cluster-takeover-enabled|cluster-clock-enforced|bounded-replica-reads|subcluster)\|/);
-  for(const id of ["subsrc","subbackfill","cinema-sharing-enabled","dev-live-tv-enable"])
-    assert.match(html,new RegExp(`TOG:${id}\\|`),`${id} still applies to this server`);
-  assert.doesNotMatch(html,/keep a ready voter majority/);
-  panels.server.cluster_advertisement=true;
-  const clustered=panels.developerPanel(settings,{items:[]});
-  assert.match(clustered,/Cluster media placement|Portable cluster backup/);
-  assert.match(clustered,/TOG:subcluster\|[^|]*\|[^|]*\|checked=true/,
-    "hiding an inapplicable control never changes its saved value");
-});

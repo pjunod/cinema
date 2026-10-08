@@ -1693,7 +1693,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     // local applied roster.
     developer:{required:["/settings"],secondary:["/developer/readiness"]},
     standalone:{tab:"cluster",clustered:false,required:[],secondary:[]},
-    sqlite:{tab:"cluster",roster:{unavailable:true,code:"membership_unavailable"},required:["/cluster/nodes"],secondary:[]},
+    sqlite:{tab:"cluster",legacy:true,roster:{unavailable:true,code:"membership_unavailable"},required:["/cluster/nodes"],secondary:[]},
   };
   for(const [caseName,expected] of Object.entries(cases)){
     const tab=expected.tab||caseName;
@@ -1709,7 +1709,7 @@ test("Settings executes exact required and secondary waves for every tab", async
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
          SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
          DV_SETTINGS_POLL_AT=0; const DV_PROGRESS_POLL_MS=10000;
-       const SERVER={cluster_advertisement:${expected.clustered!==false}};
+       const SERVER={cluster_advertisement:${expected.legacy?"undefined":expected.clustered!==false}};
        ${shippedSource("settingsClusterEnabled")};
        ${shippedSource("settingsManifest")};
        ${shippedSource("isSettingsRoute")};

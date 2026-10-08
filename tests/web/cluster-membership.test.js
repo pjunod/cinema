@@ -105,7 +105,7 @@ const BORROWED = [
 
 // One sandbox per test so a mutation of ME or CLUSTER_REFUSAL cannot leak into
 // the next assertion.
-function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [], clustered = true } = {}) {
+function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [], clustered } = {}) {
   const source = `
     const CLUSTER_OPS_RECEIVED_AT = new WeakMap();
     const SERVER={cluster_advertisement:${JSON.stringify(clustered)}},SETTINGS_DATA={};
@@ -3020,6 +3020,12 @@ test("standalone Cluster settings contain only the disabled message", () => {
   }
 });
 
+test("configured cluster settings remain visible during membership recovery", () => {
+  const html=sandbox({clustered:true}).clusterPanel({cluster:{unavailable:true,code:"membership_unavailable"}});
+  assert.doesNotMatch(html,/Clustering is not enabled/);
+  assert.match(html,/cluster-dashboard/);
+});
+
 test("a SQLite membership refusal shows only that clustering is not enabled", () => {
   const html=sandbox().clusterPanel({cluster:{unavailable:true,code:"membership_unavailable",nodes:[]}});
   assert.match(html,/Clustering is not enabled\./);
@@ -4722,5 +4728,3 @@ process.on("beforeExit", () => {
   }
   if (failures) process.exitCode = 1;
 });
-
-
