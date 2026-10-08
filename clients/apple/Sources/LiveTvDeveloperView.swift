@@ -23,6 +23,13 @@ struct LiveTvDeveloperView: View {
                 Text("The server must also enable Cinema remote control. Missing server support or network access does not prevent saving this choice.").font(.caption)
                 Text("Awaiting physical Apple TV menus, lazy-grid page boundaries, mixed Siri Remote/phone focus, and cross-platform pairing acceptance. This switch graduates to Remotes & devices after those checks pass.").font(.caption)
             }
+            #if os(iOS)
+            Section("Screen invitations · advisory readiness") {
+                NavigationLink("Saved invitation choices and removal") { RemoteDeviceSettingsView() }
+                Text("Each paired screen has its own saved invitation choice, independent of the foreground Cinema remote switch. Provider setup, notification permission, or missing readiness never overrides that choice.").font(.caption)
+                Text("Awaiting signed APNs delivery and physical cold-launch acceptance. iOS has no continuous resident connection. This advisory graduates after those checks pass.").font(.caption)
+            }
+            #endif
             Section("Bounded pause/resume · advisory enablement") {
                 Toggle("Enable bounded pause/resume", isOn: $boundedResumeEnabled)
                 Text("On by default. Resume consumes a healthy retained buffer immediately and gives an established on-demand item one recipe-preserving repair inside one 15-second budget.")

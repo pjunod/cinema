@@ -19,6 +19,7 @@ mod file_grants;
 mod fragindex;
 mod fragment_index_cluster;
 mod housekeeping;
+mod invitations;
 mod jellyfin_catalog;
 mod jellyfin_identity;
 mod jellyfin_login;
@@ -1296,6 +1297,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::sharing_ingress_custody::SCHEMA,
     // v106: additive Cinema receiver credentials, with independent replica marker.
     REMOTE_SCHEMA,
+    // v107: separately versioned opt-in invitation consent/admission.
+    super::invitations::SCHEMA_V1,
+    // v108: durable phone revision and broker transport generation fence.
+    super::invitations::MIGRATION_V2,
+    // v109: explicit phone login rebind invalidates consent atomically.
+    super::invitations::MIGRATION_V3,
+    // v110: refuse destructive cleanup of incompatible legacy broker references.
+    super::invitations::MIGRATION_V4,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
