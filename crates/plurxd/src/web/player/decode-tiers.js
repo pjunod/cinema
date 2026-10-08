@@ -751,7 +751,10 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
       audioOffsetMs:latest?(wanted.aoffset||0):attempt.sessionAudioOffset};
     play.failedPreparation=retry;
     if(play.pendingIntent===fullIntent)play.pendingIntent=null;
-    if(predecessor){
+    // Only a predecessor with a picture can survive a refused replacement.
+    // Restoring the initial empty PLAYER loses the failed attempt's generation
+    // and file identity, leaving its preparing surface and breaking Close.
+    if(predecessor?.started){
       PLAYER=predecessor;
       if(latest&&samePlaybackFile(predecessor,fileId,meta)){
         const audio=selectedAudioIndex(wanted);

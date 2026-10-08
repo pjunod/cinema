@@ -266,6 +266,24 @@ function bootstrap() {
   };
 }
 
+test("a refused cold start keeps its player identity and can close", async()=>{
+  const h=fullOpenHarness();
+  h.attach({fileId:null,started:false});
+  const opening=h.play(7,'Bad Boys',0,600000,{});
+  h.decisions[0].resolve({method:'transcode',source:{duration_ms:600000},
+    audio:[{index:0,default:true}],subtitles:[],reasons:[]});
+  for(let i=0;i<20&&!h.sessions.length;i++)await Promise.resolve();
+  assert.equal(h.sessions.length,1);
+  const failedPlayer=h.current();
+  h.sessions[0].reject(new Error('candidate_identity_absent'));
+  await opening;
+  assert.equal(h.current(),failedPlayer,'the empty predecessor cannot own this failure');
+  assert.equal(h.current().fileId,7);
+  assert.equal(h.surface().at(-1).source,'owner_stopped');
+  await h.closePlayer();
+  assert.equal(h.isOpen(),false);
+});
+
 function snapshot(position = 1_000, render = "rendering") {
   return {
     demand: "active",
