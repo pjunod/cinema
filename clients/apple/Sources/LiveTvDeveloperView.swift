@@ -7,6 +7,8 @@ import SwiftUI
 /// generation; enabling is a separate runtime mutation, never a build switch.
 struct LiveTvDeveloperView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage("plurx.cinemaRemote") private var cinemaRemoteEnabled = false
+    @EnvironmentObject private var remoteClient: RemoteClientModel
     @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
     @AppStorage("plurx.boundedResume") private var boundedResumeEnabled = true
     @ObservedObject private var handoff = Caps.PreparedHandoffTelemetry.shared
@@ -15,6 +17,12 @@ struct LiveTvDeveloperView: View {
     var body: some View {
         Form {
             SharedSharingDeveloperCard()
+            Section("Cinema remotes · advisory enablement") {
+                Toggle("Enable Cinema remotes on this installation", isOn: $cinemaRemoteEnabled)
+                Text(remoteClient.status)
+                Text("The server must also enable Cinema remote control. Missing server support or network access does not prevent saving this choice.").font(.caption)
+                Text("Awaiting physical Apple TV menus, lazy-grid page boundaries, mixed Siri Remote/phone focus, and cross-platform pairing acceptance. This switch graduates to Remotes & devices after those checks pass.").font(.caption)
+            }
             Section("Bounded pause/resume · advisory enablement") {
                 Toggle("Enable bounded pause/resume", isOn: $boundedResumeEnabled)
                 Text("On by default. Resume consumes a healthy retained buffer immediately and gives an established on-demand item one recipe-preserving repair inside one 15-second budget.")

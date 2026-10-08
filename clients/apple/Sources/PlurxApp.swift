@@ -57,13 +57,23 @@ struct PlurxApp: App {
     #endif
     @StateObject private var model = AppModel()
     @StateObject private var remoteNavigation = RemoteNavigationCoordinator()
+    @StateObject private var remotePlayback = RemotePlaybackAdapter()
+    @StateObject private var remoteClient = RemoteClientModel()
+    #if os(tvOS)
+    @StateObject private var remotePhysical = RemotePhysicalInputObserver()
+    #endif
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(model)
                 .environmentObject(remoteNavigation)
+                .environmentObject(remotePlayback)
+                .environmentObject(remoteClient)
                 .background(RemotePresentationProbe(navigation: remoteNavigation))
+                #if os(tvOS)
+                .onAppear { remotePhysical.start { remotePlayback.physicalInput(); remoteNavigation.physicalInput() } }
+                #endif
                 .preferredColorScheme(model.appearance.preferredColorScheme)
                 .fontDesign(model.theme.fontDesign)
                 .tint(Palette.accent)
@@ -80,6 +90,9 @@ enum Route: Hashable {
 struct RootView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
+    @EnvironmentObject private var remotePlayback: RemotePlaybackAdapter
+    @EnvironmentObject private var remoteClient: RemoteClientModel
+    @AppStorage("plurx.cinemaRemote") private var remoteEnabled = false
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @ObservedObject private var downloads = OfflineDownloadManager.shared
@@ -167,6 +180,24 @@ struct RootView: View {
             if phase != .active { remoteNavigation.invalidate() }
         }
         .remoteRestricted(model.phase != .ready)
+        .task(id: remoteLifecycleKey) {
+            remoteClient.configure(model: model, navigation: remoteNavigation, playback: remotePlayback,
+                                   foreground: scenePhase != .background, enabled: remoteEnabled)
+        }
+        .overlay(alignment: .topTrailing) {
+            #if os(tvOS)
+            if remoteEnabled, model.phase == .ready, remoteClient.target != nil {
+                Button("Pair a phone") { remoteClient.startPairing() }
+                    .buttonStyle(.bordered)
+                    .padding(24)
+            }
+            #endif
+        }
+        .overlay { RemotePairingApprovalView() }
+        #if os(iOS)
+        .overlay(alignment: .bottom) { RemoteSuggestionCard().padding() }
+        .sheet(isPresented: $remoteClient.remotePresented) { RemoteCompanionView() }
+        #endif
         #if os(iOS)
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
@@ -181,6 +212,10 @@ struct RootView: View {
             mirrorReminders()
         }
         #endif
+    }
+
+    private var remoteLifecycleKey: String {
+        "\(model.phase)|\(model.origin)|\(model.userId ?? 0)|\(scenePhase == .background)|\(remoteEnabled)"
     }
 
     #if os(iOS)

@@ -744,7 +744,7 @@ struct DetailView: View {
             #endif
         }
         .background(Palette.bg.ignoresSafeArea())
-        .remoteRestricted(play != nil)
+
         .onAppear { remoteNavigation.setOrder(scope: "item:\(itemId)", keys: ["detail:play"], columns: 1) }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
@@ -761,6 +761,15 @@ struct DetailView: View {
                     resolvingSeries = false
                 } else {
                     seriesPlayback = nil
+                }
+                if remoteNavigation.consumePlaybackRequest(itemId) {
+                    if let seriesPlayback { play = seriesPlayback }
+                    else if loaded.item.isPlayable, !loaded.item.isBook,
+                            let file = Self.playbackFile(in: loaded, positionMs: loaded.item.watch?.positionMs ?? 0), file.available != false {
+                        let position = loaded.item.watch?.positionMs ?? 0
+                        play = primaryPlayContext(item: loaded.item, file: file, durationMs: file.durationMs ?? loaded.item.runtimeMs ?? 0,
+                                                  resumeMs: position, canResume: position > 3_000)
+                    }
                 }
                 #if os(tvOS)
                 // First arrival only. `.task(id:)` re-runs whenever this view
@@ -807,7 +816,6 @@ struct DetailView: View {
                            )
                        })
                 .id(ctx.id)
-                .remoteRestricted()
                 .environmentObject(model)
         }
         #if os(iOS)

@@ -35,6 +35,7 @@ enum AppBuildInfo {
 
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteClient: RemoteClientModel
     #if os(tvOS)
     @AppStorage("plurx.liveTvLayout") private var liveTvLayoutRaw = TvLiveLayout.guidePreview.rawValue
     #endif
@@ -208,6 +209,12 @@ struct SettingsView: View {
                 }
             }
 
+            #if os(iOS)
+            Section("Remotes & devices") {
+                Button("Open Cinema remote") { remoteClient.remotePresented = true }
+                Text(remoteClient.status).font(.caption)
+            }
+            #endif
             Section("Developer") {
                 NavigationLink("Enable Live TV and other features awaiting evidence") { LiveTvDeveloperView() }
             }

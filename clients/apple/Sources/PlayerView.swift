@@ -660,6 +660,11 @@ struct PlayerView: View {
     static let controlAutoHideDelayNanoseconds: UInt64 = 4_000_000_000
 
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
+    @EnvironmentObject private var remotePlayback: RemotePlaybackAdapter
+    @State private var remoteOwner = UUID()
+    @State private var remoteTrackMenu: CinemaRemoteTrackKind?
+    @State private var networkPreview = RemotePreviewOwnership()
     @Environment(\.dismiss) private var dismiss
 
     let itemId: Int
@@ -869,6 +874,14 @@ struct PlayerView: View {
                 }
             }
         }
+        .remoteScope(remoteScope)
+        .background(RemoteOwnedPresentationProbe(navigation: remoteNavigation, token: remoteOwner, scope: remoteScope))
+        .remoteRestricted(showStats && statsMode != .mini)
+        .overlay {
+            if let kind = remoteTrackMenu {
+                RemoteChoicePanel(scope: remoteScope + ":tracks", title: kind.rawValue.capitalized, choices: remoteChoices(kind))
+            }
+        }
         #if os(tvOS)
         .playerRemoteAdapter(
             .root,
@@ -916,12 +929,16 @@ struct PlayerView: View {
             #endif
         }
         .onDisappear {
+            remotePlayback.detach(remoteOwner)
+            remoteNavigation.detachPresentation(remoteOwner)
             #if os(iOS)
             controller.remoteInput = nil
             #endif
             lifecycle.teardown { teardownPlayback() }
         }
         .onAppear {
+            attachRemotePlayback()
+            remoteNavigation.setOrder(scope: remoteScope, keys: ["player:timeline", "player:play", "player:audio", "player:subtitles", "player:quality"], columns: 1)
             // The lock screen and the control centre reach the same player, so
             // they route through the same table: a skip while a scrub is
             // pending is `ignore`, and play/pause commits it first.
@@ -965,6 +982,8 @@ struct PlayerView: View {
                   ) else { return }
             hideControls()
         }
+        .onChange(of: remoteTrackMenu) { _, _ in remoteNavigation.contextChanged() }
+        .onChange(of: fileId) { _, _ in remoteNavigation.contextChanged(); attachRemotePlayback() }
         .onChange(of: controller.isPlaying) { _, _ in revealControls() }
         .onChange(of: controller.isChangingStream) { _, _ in revealControls() }
         // PiP declares its own presentation and its own failures. Neither is
@@ -1235,10 +1254,11 @@ struct PlayerView: View {
     /// keep the chrome up while the viewer is opening or navigating that menu.
         /// A system menu holds it open for the same reason.
     private var optionMenuOpen: Bool {
+        if remoteTrackMenu != nil { return true }
         #if os(iOS)
-        activeOptionMenu != nil
+        return activeOptionMenu != nil
         #else
-        tvMenuOpen
+        return tvMenuOpen
         #endif
     }
 
@@ -1319,6 +1339,7 @@ struct PlayerView: View {
         // which covers the picture but asks the viewer nothing
         // (PLAYBACK-SURFACE-CONTRACT.md §4).
         if controller.isPlaybackBlocked { return .failed }
+        if remoteTrackMenu != nil { return .menu }
         // Contract §2.2 orders the precedence scrub → menu → info. A pending
         // position is the most local thing on screen: on the phone the slider
         // stays live under the panel, so asking `info` first meant a drag with
@@ -1432,6 +1453,7 @@ struct PlayerView: View {
             revealControls()
             return true
         case .closeMenu:
+            if remoteTrackMenu != nil { remoteNavigation.closeModal(); remoteTrackMenu = nil }
             #if os(iOS)
             dismissOptionMenu()
             #else
@@ -2342,6 +2364,10 @@ struct PlayerView: View {
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
         .focused($focusedControl, equals: .playPause)
+        .remoteControl("player:play", label: controller.isPlaying ? "Pause" : "Play") {
+            controller.togglePlayPause()
+            revealControls()
+        }
         #endif
     }
 
@@ -2499,6 +2525,9 @@ struct PlayerView: View {
         .focusable()
         .focusEffectDisabled()
         .focused($focusedControl, equals: .progress)
+        .remoteControl("player:timeline", label: "Playback position") {
+            _ = applyPlayerInputOutcome(PlayerInputRouting.route(surface: .tenFoot, state: inputState(), input: .select), input: .select)
+        }
         .playerRemoteAdapter(
             .timeline,
             state: inputState,
@@ -2509,6 +2538,112 @@ struct PlayerView: View {
         .accessibilityHint("Left or right previews. Select commits. Menu cancels.")
     }
     #endif
+
+    private var remoteScope: String { "playback:\(itemId):\(fileId)" }
+    private func remoteChoices(_ kind: CinemaRemoteTrackKind) -> [RemoteChoice] {
+        switch kind {
+        case .audio:
+            return controller.audioTracks.map { track in
+                RemoteChoice(id: String(track.index), label: audioLabel(track), selected: controller.selectedAudio == track.index) { controller.selectAudio(track.index) }
+            }
+        case .subtitles:
+            return [RemoteChoice(id: "off", label: "Off", selected: controller.selectedSubtitle == nil) { controller.selectSubtitle(nil) }] + controller.subtitles.map { track in
+                RemoteChoice(id: String(track.index), label: Self.subtitleLabel(track), selected: controller.selectedSubtitle == track.index) { controller.selectSubtitle(track.index) }
+            }
+        case .quality:
+            return [RemoteChoice(id: "auto", label: "Auto", selected: controller.selectedHeight == nil && !controller.selectedQualityIsOriginal) { controller.selectQuality(nil) },
+                    RemoteChoice(id: "original", label: "Original", selected: controller.selectedQualityIsOriginal) { controller.selectOriginalQuality() }] + controller.qualityRungs.map { rung in
+                RemoteChoice(id: String(rung.height), label: "\(rung.height)p", selected: controller.selectedHeight == rung.height) { controller.selectQuality(rung.height) }
+            }
+        }
+    }
+    private func openRemoteTracks(_ kind: CinemaRemoteTrackKind) {
+        let opener = "player:" + kind.rawValue
+        remoteNavigation.openModal(scope: remoteScope + ":tracks", opener: opener) { remoteTrackMenu = nil }
+        remoteTrackMenu = kind
+        revealControls()
+    }
+    private func attachRemotePlayback() {
+        remotePlayback.attach(.init(token: remoteOwner, scope: remoteScope,
+                                   actions: [.navigate, .select, .back, .setPlaying, .seekRelative, .seekAbsolute, .stop, .openTracks, .chooseTrack],
+                                   snapshot: {
+            guard itemId > 0 else { return nil }
+            let tracks = CinemaRemoteTrackKind.allRemoteCases.flatMap { kind in
+                remoteChoices(kind).map { CinemaRemoteTrackOption(kind: kind, optionID: $0.id, label: RemoteTextBounds.label($0.label)) }
+            }
+            return CinemaRemotePlaybackSummary(media: .item(UInt64(itemId)), title: RemoteTextBounds.label(title), playing: controller.wantsPlayback,
+                                               positionMs: UInt64(max(0, controller.currentMs)), durationMs: UInt64(max(0, controller.knownDurationMs)), tracks: Array(tracks.prefix(64)))
+        }, dispatch: dispatchRemotePlayback, cancelNetworkGesture: {
+            let before = pendingMs
+            pendingMs = networkPreview.cancel(current: pendingMs)
+            if before != pendingMs { repeatedRemoteGestureCancelled() }
+        }))
+    }
+    private func repeatedRemoteGestureCancelled() {
+        #if os(tvOS)
+        repeatedInput = nil
+        repeatCount = 0
+        #endif
+    }
+    private func dispatchRemotePlayback(_ action: CinemaRemoteAction) -> CinemaRemoteOutcome {
+        guard !lifecycle.isTearingDown else { return .unavailable }
+        switch action.type {
+        case .setPlaying:
+            guard let playing = action.playing else { return .invalid }
+            let ruling = PlayerInputRouting.route(surface: .tenFoot, state: inputState(), input: .playPause)
+            guard ruling == .togglePlay || ruling == .commitThenTogglePlay else { return .unsupported }
+            if ruling == .commitThenTogglePlay { commitPendingPosition(); networkPreview.clear() }
+            controller.setPlaybackRequested(playing)
+            revealControls()
+        case .seekRelative:
+            guard let seconds = action.seconds else { return .invalid }
+            let ruling = PlayerInputRouting.route(surface: .tenFoot, state: inputState(), input: seconds < 0 ? .skipBack : .skipForward)
+            guard ruling == .skip else { return .unsupported }
+            controller.skip(seconds: Double(seconds))
+            revealControls()
+        case .seekAbsolute:
+            guard let position = action.positionMs, controller.knownDurationMs > 0, position <= UInt64(controller.knownDurationMs) else { return .invalid }
+            guard !controller.isPlaybackBlocked, inputState() != .menu, inputState() != .info else { return .unsupported }
+            // One committed network scrub; never override a physical preview.
+            guard !isScrubbing, pendingMs == nil || networkPreview.owns(pendingMs) else { return .busy }
+            pendingMs = nil
+            networkPreview.clear()
+            controller.seek(toMs: Int(position))
+            revealControls()
+        case .stop: finishPlayback()
+        case .openTracks:
+            guard let kind = action.kind else { return .invalid }
+            openRemoteTracks(kind)
+        case .chooseTrack:
+            guard let kind = action.kind, let option = action.optionID, remoteTrackMenu == kind,
+                  let choice = remoteChoices(kind).first(where: { $0.id == option }) else { return .staleContext }
+            choice.choose()
+            remoteNavigation.closeModal()
+        case .navigate, .select, .back:
+            if remoteTrackMenu != nil { return .unsupported }
+            let input: PlayerContractInput
+            switch action.type {
+            case .back: input = .back
+            case .select: input = .select
+            default:
+                switch action.direction {
+                case .up: input = .up
+                case .down: input = .down
+                case .left: input = .left
+                case .right: input = .right
+                case nil: return .invalid
+                }
+            }
+            let outcome = PlayerInputRouting.route(surface: .tenFoot, state: inputState(), input: input)
+            let before = pendingMs
+            let applied = applyPlayerInputOutcome(outcome, input: input)
+            if outcome == .preview { networkPreview.claim(before: before, after: pendingMs) }
+            if pendingMs == nil { networkPreview.clear() }
+            return applied ? .applied : .unsupported
+        default: return .unsupported
+        }
+        return .applied
+    }
 
     private var audioMenu: some View {
         #if os(iOS)
@@ -2522,13 +2657,14 @@ struct PlayerView: View {
             optionMenuPanel("Audio") { audioChoices }
         }
         #else
-        Menu { audioChoices } label: {
+        Button { openRemoteTracks(.audio) } label: {
             Image(systemName: "speaker.wave.2.fill")
         }
         .accessibilityLabel("Audio track")
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
         .focused($focusedControl, equals: .audio)
+        .remoteControl("player:audio", label: "Audio") { openRemoteTracks(.audio) }
         #endif
         }
 
@@ -2545,7 +2681,7 @@ struct PlayerView: View {
             optionMenuPanel("Subtitles") { subtitleChoices }
         }
         #else
-        Menu { subtitleChoices } label: {
+        Button { openRemoteTracks(.subtitles) } label: {
             Image(systemName: "captions.bubble.fill")
                 .foregroundStyle(controller.selectedSubtitle == nil ? .white : Palette.accent)
         }
@@ -2553,6 +2689,7 @@ struct PlayerView: View {
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
         .focused($focusedControl, equals: .subtitles)
+        .remoteControl("player:subtitles", label: "Subtitles") { openRemoteTracks(.subtitles) }
         .accessibilityIdentifier("player-subtitles")
         .accessibilityValue(
             controller.selectedSubtitle.flatMap { selected in
@@ -2574,13 +2711,14 @@ struct PlayerView: View {
             optionMenuPanel("Playback quality") { qualityChoices }
         }
         #else
-        Menu { qualityChoices } label: {
+        Button { openRemoteTracks(.quality) } label: {
             Image(systemName: "slider.horizontal.3")
         }
         .accessibilityLabel("Playback quality")
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
         .focused($focusedControl, equals: .quality)
+        .remoteControl("player:quality", label: "Quality") { openRemoteTracks(.quality) }
         #endif
         }
 

@@ -52,6 +52,8 @@ final class RemoteNavigationCoordinator: ObservableObject {
     private let maximumOrderedKeys = 16_384
     private var pendingFocus = false
     private var focusedRegistration: UUID?
+    private var presentations: [(UUID, String)] = []
+    private var presentationControllers: [UUID: Set<ObjectIdentifier>] = [:]
     var presentationBlocked: () -> Bool = { true }
     /// B06 cancels credits/holds before physical UI changes, never after dispatch.
     var onPhysicalInput: () -> Void = {}
@@ -68,12 +70,44 @@ final class RemoteNavigationCoordinator: ObservableObject {
         case .home: return "home"
         case .libraries: return "libraries"
         case .search: return "search"
+        case .liveTv: return "live-tv"
         default: return "restricted"
         }
     }
-    var activeScope: String { modal?.scope ?? scope }
+    var hasOwnedModal: Bool { modal != nil }
+    @Published private(set) var requestedPlaybackItem: Int?
+    func requestPlayback(itemID: Int) {
+        guard itemID > 0, !snapshot().blocked else { return }
+        requestedPlaybackItem = itemID
+        navigate(to: .item(itemID))
+    }
+    func consumePlaybackRequest(_ itemID: Int) -> Bool {
+        guard requestedPlaybackItem == itemID else { return false }
+        requestedPlaybackItem = nil
+        return true
+    }
+    var activeScope: String { modal?.scope ?? presentations.last?.1 ?? scope }
+    func attachPresentation(_ token: UUID, scope: String, controllers: Set<ObjectIdentifier>) {
+        presentationControllers[token] = controllers
+        guard !presentations.contains(where: { $0.0 == token }), presentations.count < 8 else { return }
+        presentations.append((token, scope))
+        advanceContext()
+        requestFocus(nil)
+    }
+    func detachPresentation(_ token: UUID) {
+        presentationControllers.removeValue(forKey: token)
+        if presentations.contains(where: { $0.0 == token }) {
+            presentations.removeAll { $0.0 == token }
+            advanceContext()
+            requestFocus(restoredFocus[scope])
+        }
+    }
+    func ownsPresentation(_ controller: ObjectIdentifier) -> Bool {
+        presentationControllers.values.contains { $0.contains(controller) }
+    }
+    func contextChanged() { advanceContext() }
     private var blocked: Bool {
-        exhausted || scope == "restricted" || !blockers.isEmpty || presentationBlocked()
+        exhausted || activeScope == "restricted" || !blockers.isEmpty || presentationBlocked()
     }
     var context: Context { Context(epoch: epoch, contextRevision: contextRevision, focusRevision: focusRevision) }
     private func advanceContext() {
@@ -116,7 +150,10 @@ final class RemoteNavigationCoordinator: ObservableObject {
         textContexts.removeAll()
         restoredFocus.removeAll()
         liveScopes.removeAll()
+        requestedPlaybackItem = nil
         paths.removeAll()
+        presentations.removeAll()
+        presentationControllers.removeAll()
         selectedTab = .home
         scope = "home"
     }
@@ -140,15 +177,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         let changed = value ? blockers.insert(token).inserted : blockers.remove(token) != nil
         if changed { advanceContext(); onPhysicalInput() }
     }
-    private func safeLabel(_ label: String) -> String {
-        var result = ""
-        for scalar in label.unicodeScalars {
-            let next = String(scalar)
-            if result.utf8.count + next.utf8.count > 256 { break }
-            result += next
-        }
-        return result
-    }
+    private func safeLabel(_ label: String) -> String { RemoteTextBounds.label(label, fallback: "") }
     func register(scope: String, key: String, entry: Entry) {
         guard entries[scope] != nil || entries.count < maximumScopes,
               entries[scope]?[key] != nil || (entries[scope]?.count ?? 0) < maximumEntries else { return }
@@ -227,7 +256,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         synchronizeRoute()
         let restricted = blocked
         return Snapshot(context: context, scope: restricted ? "restricted" : activeScope,
-                        blocked: restricted, focusedLabel: restricted ? nil : focusedKey.flatMap { entries[activeScope]?[$0]?.label },
+                        blocked: restricted, focusedLabel: restricted ? nil : focusedKey.flatMap { entries[activeScope]?[$0]?.label }.flatMap { $0.isEmpty ? nil : $0 },
                         textNonce: restricted || modal != nil ? nil : textContexts[scope]?.0)
     }
     private func spatialTarget(from key: String, direction: Direction) -> String? {
