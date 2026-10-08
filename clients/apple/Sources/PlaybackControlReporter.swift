@@ -469,6 +469,9 @@ struct ControlAction: Codable, Equatable {
     var mediaOriginMs: Int? = nil
     /// What the successor will deliver — the server's answer, not the ask.
     var effectiveSelection: EffectiveSelection? = nil
+    /// The named successor's control owner. It is adopted only after the
+    /// predecessor accepts the frame-proved committed acknowledgement.
+    var control: ControlBootstrap? = nil
 }
 
 /// What a session delivers, in the server's own vocabulary.
@@ -598,6 +601,7 @@ struct PreparedReplacementAction: Equatable {
     let playlistUrl: String
     let mediaOriginMs: Int
     let effectiveSelection: EffectiveSelection
+    let control: ControlBootstrap?
 
     /// `/api/v1/hls/{sessionId}/index.m3u8` or `.../master.m3u8`, and nothing
     /// else — the exact rule `is_node_relative_playlist` applies, including
@@ -634,13 +638,15 @@ struct PreparedReplacementAction: Equatable {
               PlaybackControl.isUUID(sessionId),
               Self.isNodeRelativePlaylist(playlistUrl, sessionId: sessionId),
               (0...PlaybackControl.maximumMediaMs).contains(mediaOriginMs),
-              effectiveSelection.isValid
+              effectiveSelection.isValid,
+              action.control.map({ $0.isValid && $0.url == "/api/v1/hls/\(sessionId)/control" }) ?? true
         else { return nil }
         self.actionId = actionId
         self.sessionId = sessionId
         self.playlistUrl = playlistUrl
         self.mediaOriginMs = mediaOriginMs
         self.effectiveSelection = effectiveSelection
+        self.control = action.control
     }
 }
 

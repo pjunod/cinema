@@ -2588,6 +2588,8 @@ final class PlayerController: ObservableObject {
     @Published private(set) var selectedQualityIsOriginal = false
     @Published private(set) var qualityChangeRetained = false
     private var manualQualityRetention = ManualQualityRetention()
+    private var playbackControlOrigin: String?
+    private var pendingPreparedControl: (actionId: String, sessionId: String, bootstrap: ControlBootstrap, origin: String)?
     private weak var unprovenPreparedItem: AVPlayerItem?
     @Published private(set) var encoder: String?
     /// The dynamic range of the bytes this playback is actually receiving —
@@ -5127,13 +5129,15 @@ final class PlayerController: ObservableObject {
     /// exchanges, and it is affordable for a reason the stall ask's is not:
     /// the incumbent is still playing the whole time.
     private func offerPreparedQualityChange(boundary: AutoBoundaryAttempt? = nil) async -> Bool {
+        let reporting = await playbackControl.isActivelyReporting
         guard Caps.controlCapabilities().dualPlayerPreparation,
               preparedReplacement.shouldAskForPreparation,
               // A paused viewer's change cannot be committed — no rate means
               // no new frame to prove the switch — so it is not worth a wait.
               wantsPlayback,
-              await playbackControl.isActivelyReporting
+              reporting
         else {
+            noteSurfaceLogOnly("prepared_offer_unavailable:capable=\(Caps.controlCapabilities().dualPlayerPreparation):active=\(preparedReplacement.hasActivePreparation):playing=\(wantsPlayback):reporting=\(reporting):seek_pending=\(seekState.pendingMs != nil)")
             retainControlSequence(await playbackControl.reportIntent())
             return false
         }
@@ -5178,6 +5182,7 @@ final class PlayerController: ObservableObject {
                 prepared, filmPositionMs: positionForPlaybackIntent()
             ).ownsTheChange
         case .reopen(let reason):
+            noteSurfaceLogOnly("prepared_offer_ended:reason=\(Self.preparedOfferOutcome(reason)):seek_pending=\(seekState.pendingMs != nil)")
             Caps.PreparedHandoffTelemetry.shared.note(
                 outcome: Self.preparedOfferOutcome(reason)
             )
@@ -5364,6 +5369,8 @@ final class PlayerController: ObservableObject {
         let wasStarted = started
         manualQualityRetention.clear()
         qualityChangeRetained = false
+        pendingPreparedControl = nil
+        playbackControlOrigin = nil
         unprovenPreparedItem = nil
         started = false
         lifecycleGeneration &+= 1
@@ -10724,6 +10731,12 @@ extension PlayerController {
             playbackControlSummary = nil
             return
         }
+        pendingPreparedControl = nil
+        startPlaybackControl(bootstrap: bootstrap, session: hls.sessionId, origin: origin)
+    }
+
+    private func startPlaybackControl(bootstrap: ControlBootstrap, session: String, origin: String) {
+        playbackControlOrigin = origin
         // The override describes the session that just ended. Carrying it into
         // the replacement would make its very first exchange — a session that
         // has rendered nothing yet — report a wedge that belongs to another.
@@ -10738,7 +10751,7 @@ extension PlayerController {
             ),
             observe: { [weak self] in self?.playbackControlObservation() },
             linkReceipt: { [weak self] in
-                guard let self, self.sessionId == hls.sessionId else { return nil }
+                guard let self, self.sessionId == session else { return nil }
                 return self.currentLinkReceipt()
             },
             onSubtitleReady: { [weak self] in
@@ -10758,7 +10771,16 @@ extension PlayerController {
                 )
             },
             onAcknowledgementDelivered: { [weak self] acknowledgement in
-                self?.preparedReplacement.acknowledgementDelivered(acknowledgement)
+                guard let self else { return }
+                self.preparedReplacement.acknowledgementDelivered(acknowledgement)
+                guard acknowledgement.state == .committed,
+                      let next = self.pendingPreparedControl, next.actionId == acknowledgement.actionId,
+                      self.started, self.sessionId == next.sessionId else { return }
+                self.pendingPreparedControl = nil
+                // The predecessor carried the durable commit. Only its
+                // accepted exchange authorizes the successor control owner.
+                self.startPlaybackControl(bootstrap: next.bootstrap, session: next.sessionId, origin: next.origin)
+                self.noteSurfaceLogOnly("prepared_control_rebound:committed=true")
             },
             onEffectiveSelection: { [weak self] effective in
                 guard let self, self.model?.displayAwareAutoProtocol == "route-v1" else { return }
@@ -12023,9 +12045,20 @@ extension PlayerController: PreparedSuccessorHost {
             player.allowsExternalPlayback = incumbentPlayer.allowsExternalPlayback
         }
         if !automaticTrial, preparedCommitStillOwned(commitAttempt) {
+            if let pin = manualQualityRetention.finishCommitted(viewerEpoch: viewerActionEpoch, firstFrameUnixMs: firstFrameUnixMs),
+               !pin.carryingSeek, seekState.generation == pin.seekGeneration {
+                // The quality tap pinned a progress destination; it did not
+                // ask to seek there. A frame-proved moving handoff settles
+                // that pin, or the next tap still advertises a stale seek.
+                seekState.clear()
+                currentMs = realPositionMs()
+            }
             manualQualityRetention.clear()
             qualityChangeRetained = false
             recipeRevision.didAttach(recipeRevision.desired)
+        }
+        if let bootstrap = action.control, let origin = playbackControlOrigin {
+            pendingPreparedControl = (action.actionId, action.sessionId, bootstrap, origin)
         }
         return .committed(firstFrameUnixMs: firstFrameUnixMs)
     }

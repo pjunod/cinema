@@ -56,6 +56,16 @@ struct ManualQualityRetention: Equatable {
         return pending
     }
 
+    /// Consume only this viewer's frame-proved handoff. The returned attempt
+    /// distinguishes a progress pin made by quality selection from a seek
+    /// that the viewer already had in flight and still owns.
+    mutating func finishCommitted(viewerEpoch: Int, firstFrameUnixMs: Int) -> Attempt? {
+        guard firstFrameUnixMs > 0, let pending, pending.viewerEpoch == viewerEpoch else { return nil }
+        self.pending = nil
+        retained = nil
+        return pending
+    }
+
     mutating func didAttach() { pending = nil }
     mutating func clear() { pending = nil; retained = nil }
 }

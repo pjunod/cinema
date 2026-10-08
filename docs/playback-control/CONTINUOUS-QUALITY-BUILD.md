@@ -8014,3 +8014,40 @@ daemon admission. It applies only to verified owned descendants and restores
 surviving threads. The optical run still fails (341.69ms upper hold, five
 capture gaps), so it supplies no remedy or production qualification. Its
 exact daemon and virtual display retire; receipts are copied locally.
+
+### 10.263 Repeated-request control ownership (2026-10-08)
+
+The first alternating manual subset stops on its second request and is a
+failed series. Its first upshift reaches the successor; the reverse request
+retains current playback. Build 223 settles the quality-only progress pin
+after actual frame proof, retaining a viewer seek's separate ownership and
+rejecting stale/invalid completion. Its failed-only two-request rerun still
+refuses the reverse request and now identifies `transport:410:session_ended`
+followed by `prepared_offer_ended:reason=not_reporting`. The actual owner
+problem is that Apple discards the successor control bootstrap supplied by
+the prepared payload and keeps reporting to the retired predecessor.
+
+Build 224 preserves that bootstrap, validates its protocol/epoch/generation
+and exact named successor path, and keeps it pending until the predecessor's
+accepted committed acknowledgement. Rebind also requires this controller to
+remain started and own that exact successor session. New-title/stop cleanup
+discards pending ownership. The successor's reporter starts with its supplied
+identity and the same frozen transport origin; no guessed endpoint/owner or
+new feature switch is introduced. The predecessor still carries the commit.
+
+The failed-only retry reaches three sessions in order (720p, 1080p, 720p)
+within one viewer attempt. Twenty-four SDK probes advance 1.17–47.54s with
+zero access stalls and no empty buffer. The first accepted rebind is logged;
+the second settlement is still retrying `425 owner_transition` near teardown.
+Do not count this as a fully settled repeated series, twenty successes or
+continuous physical audio/display evidence. Preserve the failed manual
+subset, progress-pin retry and successor-control retry under their distinct
+`ios-d8bb10381-*sdk1` names. Client build 224 is component-paired with the
+unchanged server `0e778892d`, not a final whole-tree receipt.
+
+Progress-pin and bootstrap wire/namespace regressions are authored and compile
+with tvOS production/test source; iOS production/UI source and strict lab
+signatures pass. Nineteen regression references resolve statically. Units
+remain deferred. A fresh Safari readiness attempt again times out in 30.28s;
+its owned driver retires, and its source-named receipt preserves the earlier
+readiness result rather than replacing it.

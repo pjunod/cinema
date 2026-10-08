@@ -1292,3 +1292,54 @@ final class ManualQualityRetentionTests: XCTestCase {
         XCTAssertNil(state.retained)
     }
 }
+
+final class ManualQualityCommitPinTests: XCTestCase {
+    func testFrameProvedQualityCommitSettlesOnlyItsOwnedProgressPin() throws {
+        var state = ManualQualityRetention()
+        let attempt = ManualQualityRetention.Attempt(viewerEpoch: 7, incumbent: .manual(height: 720),
+            seekGeneration: 12, carryingSeek: false, incumbentRecipeAttached: true)
+        state.begin(attempt)
+        XCTAssertNil(state.finishCommitted(viewerEpoch: 7, firstFrameUnixMs: 0))
+        XCTAssertEqual(state.pending, attempt)
+        XCTAssertNil(state.finishCommitted(viewerEpoch: 8, firstFrameUnixMs: 1000))
+        XCTAssertEqual(state.pending, attempt)
+        let settled = try XCTUnwrap(state.finishCommitted(viewerEpoch: 7, firstFrameUnixMs: 1000))
+        XCTAssertEqual(settled.seekGeneration, 12)
+        XCTAssertFalse(settled.carryingSeek)
+        XCTAssertNil(state.pending)
+        XCTAssertNil(state.retained)
+        XCTAssertNil(state.finishCommitted(viewerEpoch: 7, firstFrameUnixMs: 2000))
+        state.begin(.init(viewerEpoch: 9, incumbent: .manual(height: 1080),
+            seekGeneration: 13, carryingSeek: true, incumbentRecipeAttached: true))
+        let carried = try XCTUnwrap(state.finishCommitted(viewerEpoch: 9, firstFrameUnixMs: 3000))
+        XCTAssertTrue(carried.carryingSeek, "an existing viewer seek must keep its own presentation proof")
+        XCTAssertEqual(carried.seekGeneration, 13)
+    }
+}
+
+final class PreparedSuccessorBootstrapTests: XCTestCase {
+    func testPreparedSuccessorBootstrapSurvivesWireDecodeAndCannotNameAnotherSession() throws {
+        var action = prepareAction()
+        let bootstrap = ControlBootstrap(proto: PlaybackControl.protocolName,
+            url: "/api/v1/hls/\(successorSessionId)/control", generation: UUID().uuidString.lowercased(),
+            controlEpoch: 2, nextExchangeMs: 1500, leaseTimeoutMs: 45_000)
+        action.control = bootstrap
+        let wire = try PlaybackControl.encoder.encode(action)
+        let decoded = try PlaybackControl.decoder.decode(ControlAction.self, from: wire)
+        XCTAssertEqual(decoded.control, bootstrap, "the successor owner is part of the server's prepare payload")
+        XCTAssertEqual(try XCTUnwrap(PreparedReplacementAction(decoded)).control, bootstrap)
+        action.control?.url = "/api/v1/hls/\(UUID().uuidString.lowercased())/control"
+        XCTAssertNil(PreparedReplacementAction(action))
+        action.control = bootstrap
+        action.control?.url = "https://other.invalid/api/v1/hls/\(successorSessionId)/control"
+        XCTAssertNil(PreparedReplacementAction(action))
+        action.control = bootstrap
+        action.control?.generation = "not-a-generation"
+        XCTAssertNil(PreparedReplacementAction(action))
+        action.control = bootstrap
+        action.control?.controlEpoch = 0
+        XCTAssertNil(PreparedReplacementAction(action))
+        action.control = nil
+        XCTAssertNotNil(PreparedReplacementAction(action), "legacy payloads remain readable without inventing an owner")
+    }
+}
