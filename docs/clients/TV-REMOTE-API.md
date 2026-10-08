@@ -63,7 +63,7 @@ POST /commands (X-Cinema-Grant-Secret)
 
 POST /pairing/start (X-Cinema-Receiver-Secret)
   request: {version,target}
-  response: {version,target,challenge_id:UUID,code:8-digit-string,expires_in_ms:120000}
+  response: {version,target,challenge_id:UUID,code:8-digit-string,expires_in_ms:120000,qr_modules:[ASCII01-row]|null}
 POST /pairing/claim (bearer only)
   request: {version,target,challenge_id:UUID|null(optional),code:8-digit-string,controller_name:string<=80}
   response: {version,pending_id:UUID,poll_secret:base64url32bytes}
@@ -181,3 +181,54 @@ qualification; this reference does not claim it.
 Receiver presence metadata focused_label, text_nonce and playback may be omitted
 or null. Responses emit null for absent values. Control.control_epoch is
 required even when its value is null.
+
+PairStart qr_modules contains a square array of ASCII 0/1 rows (no quiet zone),
+bounded to 177 rows and 177 bytes per row. Render a four-module light quiet zone.
+It encodes cinema-remote://pair with five query fields server_instance_id,
+owner_node_id, session_id, receiver_epoch, challenge_id and fragment code=<eight
+digits>. It contains no login/device/grant proof. Null means QR encoding or
+instance identity is unavailable; the returned eight-digit code remains usable.
+
+## Local acceptance seam
+
+The ignored test `http::remote::live_fixture::remote_live_server_fixture` serves
+the actual Router and an ephemeral SQLite store on a random loopback-only port.
+It creates a synthetic regular viewer, a separate synthetic administrator,
+independent synthetic Native tokens, and one generated H.264/AAC fixture in a synthetic library. No real credential
+or application database is read. `PLURX_REMOTE_FIXTURE_WEB_ROOT` optionally
+serves another client worktree's current index/assets at the same origin; the
+production API and authentication handlers remain unchanged, and the overlay
+preserves production shell CSP and static security headers. Traversal and
+external symlinks are refused.
+
+Run it explicitly with pinned Cargo and the isolated worktree target, setting
+`PLURX_REMOTE_FIXTURE_API_REVISION` and, for the web overlay,
+`PLURX_REMOTE_FIXTURE_WEB_REVISION` to the exact source commits. The synthetic
+connection details, source hashes, expiration and shutdown marker are written
+to `cinema-b04-live-seam.json` in the system temporary directory, or the explicit
+`PLURX_REMOTE_FIXTURE_OUTPUT_DIR` (the acceptance receipt uses `/private/tmp`).
+Create its `shutdown_file`, press Ctrl-C, or wait for its one-hour lifetime to end. Shutdown removes the marker
+and metadata and discards the in-memory store. Generated synthetic media stays
+in the ordinary test fixture cache. The ignored seam is not a release test
+unless a builder records the actual client interaction and source snapshots.
+
+Normalized receiver state has an additional 48 KiB serialized JSON limit, after
+optional metadata is normalized and restricted-state sanitization runs. Larger
+states return 413 invalid without replacing current state. This reserves room
+for target/control and all 64 bounded outcomes in a 64 KiB state reply; no protocol
+fields or ACKs are silently trimmed. Receiver producers must keep total state
+within this limit as well as the individual field/count limits. Poll batches
+reserve 8 KiB for worst-case target/control/pairing metadata and deliver an
+ordered command prefix; remaining commands stay queued within the usual 500 ms
+lifetime. Retrying a retained batch preserves its delivery identity even when
+eight pairing claims grow the envelope.
+
+The focused integration case
+`remote_owner_forwarding::signed_owner_forwarding_refuses_tampering_and_unavailable_owner`
+starts two real daemon HTTP nodes using the existing two-node cluster harness.
+An optional loopback proxy supplies only the owner B advertisement for this
+case. It forwards normal traffic and injects request-signature corruption,
+response-signature corruption, or owner HTTP unavailability while both database
+voters remain alive. This isolates signed owner routing from the separate
+three-voter replicated-store contract. Existing Live TV scenarios retain their
+original configuration and are not part of this focused check.

@@ -834,6 +834,7 @@ paths = [
   "crates/plurx-core/tests/store_contract/remote.rs",
   "crates/plurxd/src/http/remote.rs",
   "crates/plurxd/src/http/remote/**",
+  "crates/plurxd/tests/remote_owner_forwarding/mod.rs",
   "tests/web/cinema-remote-settings.test.js",
   "crates/plurx-core/src/remote_control.rs",
   "crates/plurx-core/src/remote_control/tests.rs",

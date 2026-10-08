@@ -546,5 +546,9 @@ async fn limit_response(request: axum::extract::Request, next: axum::middleware:
 }
 
 #[cfg(test)]
+#[path = "remote/live_fixture.rs"]
+mod live_fixture;
+
+#[cfg(test)]
 #[path = "remote/tests.rs"]
 mod tests;

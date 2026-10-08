@@ -104,6 +104,9 @@ async fn fixture() -> Fixture {
     }
 }
 async fn pending(f: &Fixture) -> (Value, String) {
+    pending_named(f, "Phone").await
+}
+async fn pending_named(f: &Fixture, name: &str) -> (Value, String) {
     let (_, challenge) = call(
         &f.app,
         &f.tv,
@@ -113,8 +116,18 @@ async fn pending(f: &Fixture) -> (Value, String) {
         Some(("x-cinema-receiver-secret", &f.receiver_secret)),
     )
     .await;
+    assert!(
+        challenge.get("qr_modules").is_some(),
+        "additive QR response field"
+    );
+    if let Some(rows) = challenge["qr_modules"].as_array() {
+        assert!((21..=177).contains(&rows.len()));
+        assert!(rows.iter().all(|row| row.as_str().is_some_and(
+            |text| text.len() == rows.len() && text.bytes().all(|b| b == b'0' || b == b'1')
+        )));
+    }
     // Manual pairing deliberately omits challenge_id: selected TV + code only.
-    let (status,pending)=call(&f.app,&f.phone,"POST","pairing/claim",json!({"version":"cinema.remote.v1","target":f.target,"code":challenge["code"],"controller_name":"Phone"}),None).await;
+    let (status,pending)=call(&f.app,&f.phone,"POST","pairing/claim",json!({"version":"cinema.remote.v1","target":f.target,"code":challenge["code"],"controller_name":name}),None).await;
     assert_eq!(status, 200);
     let secret = pending["poll_secret"]
         .as_str()
@@ -134,7 +147,10 @@ async fn result(f: &Fixture, id: &Value, secret: &str) -> (u16, Value) {
     .await
 }
 async fn paired(f: &Fixture) -> (Value, String, Value) {
-    let (id, poll_secret) = pending(f).await;
+    paired_named(f, "Phone").await
+}
+async fn paired_named(f: &Fixture, name: &str) -> (Value, String, Value) {
+    let (id, poll_secret) = pending_named(f, name).await;
     let (status, _) = call(
         &f.app,
         &f.tv,
@@ -535,5 +551,258 @@ fn remote_required_nullable_fields_are_not_optional() {
     let state = serde_json::from_value::<wire::ReceiverState>(json!({"state_revision":1,"context_revision":1,"focus_revision":1,"route":"home","capabilities":[],"credits":[]})).expect("optional presence metadata may be omitted");
     assert!(
         state.focused_label.is_none() && state.text_nonce.is_none() && state.playback.is_none()
+    );
+}
+
+#[test]
+fn remote_pairing_qr_payload_and_matrix_are_exact_and_bounded() {
+    let target = plurx_core::remote_control::Target {
+        owner_node_id: "node / naïve".into(),
+        session_id: Uuid::new_v4(),
+        receiver_epoch: Uuid::new_v4(),
+    };
+    let challenge = Uuid::new_v4();
+    let payload = super::owner::pairing_payload("instance & one", &target, challenge, "12345678")
+        .expect("pair payload");
+    let parsed = reqwest::Url::parse(&payload).expect("URL decode");
+    assert_eq!(parsed.scheme(), "cinema-remote");
+    assert_eq!(parsed.host_str(), Some("pair"));
+    assert_eq!(parsed.fragment(), Some("code=12345678"));
+    let query = parsed
+        .query_pairs()
+        .into_owned()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(query.len(), 5);
+    assert_eq!(query["server_instance_id"], "instance & one");
+    assert_eq!(query["owner_node_id"], target.owner_node_id);
+    assert_eq!(
+        Uuid::parse_str(&query["session_id"]).expect("UUID"),
+        target.session_id
+    );
+    assert_eq!(
+        Uuid::parse_str(&query["receiver_epoch"]).expect("UUID"),
+        target.receiver_epoch
+    );
+    assert_eq!(
+        Uuid::parse_str(&query["challenge_id"]).expect("UUID"),
+        challenge
+    );
+    let modules = super::owner::qr_modules(&payload).expect("matrix");
+    assert!((21..=177).contains(&modules.len()));
+    let expected = qrcode::QrCode::new(payload.as_bytes()).expect("library encoding");
+    for (y, row) in modules.iter().enumerate() {
+        assert_eq!(row.len(), modules.len());
+        assert!(row.bytes().all(|b| b == b'0' || b == b'1'));
+        for (x, b) in row.bytes().enumerate() {
+            assert_eq!(b == b'1', expected[(x, y)] == qrcode::Color::Dark);
+        }
+    }
+    assert!(super::owner::qr_modules(&"x".repeat(100_000)).is_none());
+    assert!(super::owner::pairing_payload("", &target, challenge, "12345678").is_none());
+    assert!(super::owner::pairing_payload("instance", &target, challenge, "abcdefgh").is_none());
+}
+
+#[tokio::test]
+async fn remote_retained_batch_keeps_examined_and_new_queue_in_sequence_order() {
+    let f = fixture().await;
+    let (gid, secret, epoch) = paired(&f).await;
+    for sequence in 1..=2 {
+        assert_eq!(
+            call(
+                &f.app,
+                &f.phone,
+                "POST",
+                "commands",
+                command(&f, &gid, &epoch, sequence),
+                Some(("x-cinema-grant-secret", &secret))
+            )
+            .await
+            .0,
+            202
+        );
+        if sequence == 1 {
+            assert_eq!(poll(&f, 0, 0, 0).await.1["commands"][0]["sequence"], 1);
+        }
+    }
+    f.state
+        .remote
+        .delivery_pause
+        .enabled
+        .store(true, Ordering::SeqCst);
+    let app = f.app.clone();
+    let tv = f.tv.clone();
+    let target = f.target.clone();
+    let receiver = f.receiver_secret.clone();
+    let retry = tokio::spawn(async move {
+        call(&app,&tv,"POST","poll",json!({"version":"cinema.remote.v1","target":target,"after_delivery_id":0,"after_response_revision":0,"wait_ms":0}),Some(("x-cinema-receiver-secret",&receiver))).await
+    });
+    f.state.remote.delivery_pause.arrived.notified().await;
+    assert_eq!(
+        call(
+            &f.app,
+            &f.phone,
+            "POST",
+            "commands",
+            command(&f, &gid, &epoch, 3),
+            Some(("x-cinema-grant-secret", &secret))
+        )
+        .await
+        .0,
+        202
+    );
+    f.state.remote.delivery_pause.resume.notify_one();
+    assert_eq!(retry.await.expect("retry").1["commands"][0]["sequence"], 1);
+    let (_, next) = poll(&f, 1, 0, 0).await;
+    assert_eq!(
+        next["commands"]
+            .as_array()
+            .expect("commands")
+            .iter()
+            .map(|c| c["sequence"].as_u64().expect("sequence"))
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+}
+#[tokio::test]
+async fn remote_poll_byte_budget_retains_oversized_command_overflow() {
+    let f = fixture().await;
+    let (gid, secret, epoch) = paired_named(&f, &"\\".repeat(80)).await;
+    for sequence in 1..=32 {
+        let mut body = command(&f, &gid, &epoch, sequence);
+        if sequence < 32 {
+            body["action"] = json!({"type":"text_replace","text_nonce":Uuid::new_v4(),"text":"\u{1}".repeat(512)});
+        }
+        assert_eq!(
+            call(
+                &f.app,
+                &f.phone,
+                "POST",
+                "commands",
+                body,
+                Some(("x-cinema-grant-secret", &secret))
+            )
+            .await
+            .0,
+            202
+        );
+    }
+    let (status, first) = poll(&f, 0, 0, 0).await;
+    assert_eq!(status, 200);
+    assert!(serde_json::to_vec(&first).expect("reply").len() <= 64 * 1024);
+    let commands = first["commands"].as_array().expect("commands");
+    assert!(!commands.is_empty() && commands.len() < 32);
+    let last = commands.last().expect("last")["sequence"]
+        .as_u64()
+        .expect("sequence");
+    let original_sequences = commands
+        .iter()
+        .map(|c| c["sequence"].clone())
+        .collect::<Vec<_>>();
+    for _ in 0..8 {
+        let _ = pending_named(&f, &"\\".repeat(80)).await;
+    }
+    let (status, retry) = poll(&f, 0, 0, 0).await;
+    assert_eq!(status, 200);
+    assert_eq!(retry["pairings"].as_array().expect("pairings").len(), 8);
+    assert_eq!(retry["delivery_id"], first["delivery_id"]);
+    assert_eq!(
+        retry["commands"]
+            .as_array()
+            .expect("commands")
+            .iter()
+            .map(|c| c["sequence"].clone())
+            .collect::<Vec<_>>(),
+        original_sequences
+    );
+    assert!(serde_json::to_vec(&retry).expect("retry reply").len() <= 64 * 1024);
+
+    let (status, next) = poll(&f, first["delivery_id"].as_u64().expect("delivery"), 0, 0).await;
+    assert_eq!(status, 200);
+    assert_eq!(next["commands"][0]["sequence"], last + 1);
+}
+
+#[tokio::test]
+async fn remote_normalized_presence_budget_preserves_full_ack_state_reply() {
+    let f = fixture().await;
+    let (gid, secret, epoch) = paired(&f).await;
+    let tracks=(0..64).map(|n|json!({"kind":"audio","option_id":format!("{n}{}","\\".repeat(126)),"label":"\"".repeat(256)})).collect::<Vec<_>>();
+    let mut state = json!({"state_revision":1,"context_revision":1,"focus_revision":1,"route":"playback","capabilities":["select"],"focused_label":null,"credits":[],"text_nonce":null,"playback":{"media":{"type":"item","item_id":1},"title":"Synthetic","playing":false,"position_ms":0,"duration_ms":0,"tracks":tracks}});
+    let body = json!({"version":"cinema.remote.v1","target":f.target,"state":state});
+    assert!(serde_json::to_vec(&body).expect("presence").len() < 64 * 1024);
+    assert_eq!(
+        call(
+            &f.app,
+            &f.tv,
+            "POST",
+            "presence",
+            body,
+            Some(("x-cinema-receiver-secret", &f.receiver_secret))
+        )
+        .await
+        .0,
+        413
+    );
+    state["playback"]["tracks"] = json!((0..64)
+        .map(|n| json!({"kind":"audio","option_id":n.to_string(),"label":"\"".repeat(256)}))
+        .collect::<Vec<_>>());
+    assert!(serde_json::to_vec(&state).expect("state").len() < 48 * 1024);
+    assert_eq!(
+        call(
+            &f.app,
+            &f.tv,
+            "POST",
+            "presence",
+            json!({"version":"cinema.remote.v1","target":f.target,"state":state}),
+            Some(("x-cinema-receiver-secret", &f.receiver_secret))
+        )
+        .await
+        .0,
+        200
+    );
+    let mut delivery = 0;
+    for start in [1_u64, 33] {
+        for sequence in start..start + 32 {
+            assert_eq!(
+                call(
+                    &f.app,
+                    &f.phone,
+                    "POST",
+                    "commands",
+                    command(&f, &gid, &epoch, sequence),
+                    Some(("x-cinema-grant-secret", &secret))
+                )
+                .await
+                .0,
+                202
+            );
+        }
+        let (_, batch) = poll(&f, delivery, 0, 0).await;
+        delivery = batch["delivery_id"].as_u64().expect("delivery");
+        let _ = poll(&f, delivery, 0, 0).await;
+    }
+    let outcomes=(1..=64).map(|sequence|json!({"control_epoch":epoch,"sequence":sequence,"outcome":"restricted_surface"})).collect::<Vec<_>>();
+    assert_eq!(
+        call(
+            &f.app,
+            &f.tv,
+            "POST",
+            "ack",
+            json!({"version":"cinema.remote.v1","target":f.target,"outcomes":outcomes}),
+            Some(("x-cinema-receiver-secret", &f.receiver_secret))
+        )
+        .await
+        .0,
+        200
+    );
+    let (status,reply)=call(&f.app,&f.phone,"POST","state",json!({"version":"cinema.remote.v1","target":f.target,"grant_id":gid,"after_revision":0,"wait_ms":0}),Some(("x-cinema-grant-secret",&secret))).await;
+    assert_eq!(status, 200);
+    assert!(serde_json::to_vec(&reply).expect("reply").len() <= 64 * 1024);
+    assert_eq!(reply["outcomes"].as_array().expect("acks").len(), 64);
+    assert_eq!(
+        reply["state"]["playback"]["tracks"]
+            .as_array()
+            .expect("tracks")
+            .len(),
+        64
     );
 }

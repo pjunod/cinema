@@ -182,6 +182,55 @@ fn clear_control(s: &mut Session) -> Result<(), ApiError> {
     }
     bump(s)
 }
+/// Native/web invitation URL: identity is query metadata, code is fragment.
+pub(super) fn pairing_payload(
+    instance: &str,
+    target: &plurx_core::remote_control::Target,
+    challenge: Uuid,
+    code: &str,
+) -> Option<String> {
+    if !label(instance, 128)
+        || !label(&target.owner_node_id, 128)
+        || code.len() != 8
+        || !code.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut url = reqwest::Url::parse("cinema-remote://pair").ok()?;
+    url.query_pairs_mut()
+        .append_pair("server_instance_id", instance)
+        .append_pair("owner_node_id", &target.owner_node_id)
+        .append_pair("session_id", &target.session_id.to_string())
+        .append_pair("receiver_epoch", &target.receiver_epoch.to_string())
+        .append_pair("challenge_id", &challenge.to_string());
+    url.set_fragment(Some(&format!("code={code}")));
+    Some(url.to_string())
+}
+pub(super) fn qr_modules(payload: &str) -> Option<Vec<String>> {
+    if payload.len() > 2048 {
+        return None;
+    }
+    let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
+    let width = code.width();
+    if !(21..=177).contains(&width) {
+        return None;
+    }
+    Some(
+        (0..width)
+            .map(|y| {
+                (0..width)
+                    .map(|x| {
+                        if code[(x, y)] == qrcode::Color::Dark {
+                            '1'
+                        } else {
+                            '0'
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+}
 fn pairing_hash(key: &str, code: &str) -> Result<Vec<u8>, ApiError> {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key.as_bytes()).map_err(|_| fail(503, "unavailable"))?;
@@ -833,6 +882,13 @@ impl Hub {
         } else {
             String::new()
         };
+        // QR failure does not break manual pairing. Fetch durable identity
+        // before the owner critical section, never while holding its mutex.
+        let instance_id = if matches!(d.request, Request::PairStart(_)) {
+            state.store.instance_id().await.ok()
+        } else {
+            None
+        };
         // No await below: ordering/snapshot/control are one actor critical section.
         let mut sessions = self.lock()?;
         let s = Self::session(
@@ -844,6 +900,16 @@ impl Hub {
                 let mut value = r.state.clone();
                 if !value.validate() {
                     return Err(fail(400, "invalid"));
+                }
+                // Retain room for target/control and all 64 bounded ACKs.
+                // Reject oversized normalized metadata rather than trimming
+                // protocol fields or suppressing acknowledgements at read time.
+                if serde_json::to_vec(&value)
+                    .map_err(|_| fail(400, "invalid"))?
+                    .len()
+                    > 48 * 1024
+                {
+                    return Err(fail(413, "invalid"));
                 }
                 if s.state
                     .as_ref()
@@ -1039,7 +1105,7 @@ impl Hub {
                 bump(s)?;
                 Ok(Some((
                     200,
-                    json!({"version":"cinema.remote.v1","target":s.target,"challenge_id":id,"code":code,"expires_in_ms":120_000}),
+                    json!({"version":"cinema.remote.v1","target":s.target,"challenge_id":id,"code":code,"expires_in_ms":120_000,"qr_modules":instance_id.as_deref().and_then(|instance|pairing_payload(instance,&s.target,id,&code)).and_then(|payload|qr_modules(&payload))}),
                 )))
             }
             Request::PairResult(r) => {
@@ -1181,10 +1247,32 @@ impl Hub {
                 .checked_add(1)
                 .filter(|v| *v <= MAX_SAFE_INTEGER)
                 .ok_or_else(|| fail(503, "unavailable"))?;
-            s.batch = deliverable;
+            // The bounded target/control/counters and eight 80-byte pairing
+            // names fit in 8 KiB, including JSON escaping. Reserve their worst
+            // case so later metadata growth cannot oversize a retained retry.
+            let mut bytes = 8 * 1024;
+            let mut full = false;
+            for q in deliverable {
+                let size = serde_json::to_vec(&q.command)
+                    .map_err(|_| fail(503, "unavailable"))?
+                    .len()
+                    + 1;
+                if !full && bytes + size <= 64 * 1024 {
+                    bytes += size;
+                    s.batch.push(q);
+                } else {
+                    full = true;
+                    s.queue.push_back(q);
+                }
+            }
         } else {
             s.queue.extend(deliverable);
         }
+        // Admission enforces increasing sequences for one active epoch.
+        // Restored examined rows can otherwise follow newer unexamined rows.
+        s.queue
+            .make_contiguous()
+            .sort_by_key(|q| q.command.sequence);
         Ok(())
     }
     fn receiver_id(&self, t: &plurx_core::remote_control::Target) -> Result<String, ApiError> {
