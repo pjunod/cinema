@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(all(unix, feature = "hiqlite-store"))]
+use std::os::unix::fs::PermissionsExt;
 
 #[cfg(feature = "hiqlite-store")]
 use futures_util::StreamExt;
