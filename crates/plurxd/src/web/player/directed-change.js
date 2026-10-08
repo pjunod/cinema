@@ -638,6 +638,8 @@ function startPlaybackControl(v,p,bootstrap){
         if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
+        if(p.effectiveProcessing&&(error||!response||response.generation!==p.effectiveProcessing.generation))
+          clearEffectiveProcessing(p);
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response,error);
         // An acknowledgement the server accepted is spent; one whose exchange
@@ -1036,6 +1038,7 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
 // is now the whole immutable title, so the media element seeks there directly.
 // The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
+  clearEffectiveProcessing(t);
   if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){
     const context=playbackFileContext(t.fileContext),bound=info&&info._sharedContext;
     if(!bound||playbackFileKey(bound)!==playbackFileKey(context)||bound.session_id!==info.session_id)playbackFileReject();
@@ -1079,13 +1082,15 @@ function attachSession(v, t, info, wantSec){
   // panel repaints. renderPlayerInfo() is otherwise painted once, at session
   // open — before the route is chosen and before the forced-burn override.
   // MEDIA-BADGES-PLAN.md requires the chip and the panel row to agree.
-  if(t===PLAYER) renderPlayerInfo();
   t.continuousQualityBootstrap=info.continuous_quality||null;
   t.probeUrl=info.playlist_url;
   const into = t.vod ? Math.max(0, wantSec||0) : 0;
   t.controlPositionHintSec=(t.offset||0)+into;
   attachHls(v, info.playlist_url, into);
   startPlaybackControl(v,t,info.control||null);
+  t.effectiveProcessing=effectiveHdrProcessing(info.effective_processing,
+    t.controlReporter?.bootstrap?.generation,info.delivered_dynamic_range);
+  if(t===PLAYER) renderPlayerInfo();
   markPlaybackControlSeekExecuted(t,wantSec||0);
   return into + (t.offset||0);
 }

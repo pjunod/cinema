@@ -205,6 +205,7 @@ function rollbackPreparedReplacement(p,state,successor){
   p.autoHeight=predecessor.autoHeight;
   p.encoder=predecessor.encoder;
   p.qualityCandidateId=predecessor.qualityCandidateId;
+  clearEffectiveProcessing(p);
   p.deliveredRange=predecessor.deliveredRange;
   // Transport intent belongs to the viewer, including commands made while
   // the successor was awaiting its first frame. Rollback restores media only.
@@ -481,6 +482,7 @@ async function sendPlaybackControl(url,body,signal,linkReceipt=null){
   return response.json();
 }
 function stopPlaybackControl(p){
+  clearEffectiveProcessing(p);
   // Settle first, then flush, then stop — in that order, because each step
   // destroys the means of the one before it. `abandonPreparedReplacement`
   // queues the settlement; `flushPreparedSettlement` is what actually gets it

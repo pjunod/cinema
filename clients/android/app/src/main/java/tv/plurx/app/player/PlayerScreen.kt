@@ -131,6 +131,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.AudioTrack
+import tv.plurx.app.data.DynamicRange
 import tv.plurx.app.data.AudioOutputRoute
 import tv.plurx.app.data.PresentationTarget
 import tv.plurx.app.data.Caps
@@ -1558,6 +1559,8 @@ private fun PlayerContent(
                         hdrTypes = displayHdrTypes,
                     ),
                     deliveredDolbyVisionProfile = controller.deliveredDolbyVisionProfile,
+                    effectiveProcessing = controller.effectiveProcessing,
+                    activeGeneration = controller.effectiveProcessingGeneration,
                 ),
                 onTransportHeight = { transportHeightPx = it },
                 // The arrow is the `close` control, not the BACK key: `Back`
@@ -2241,6 +2244,8 @@ private fun PlayerInfo(
                     hdrTypes = displayHdrTypes,
                 ),
                 reasons = plan.reasons,
+                effectiveProcessing = controller.effectiveProcessing,
+                activeGeneration = controller.effectiveProcessingGeneration,
             ),
             subtitles = selectedSubtitle,
             decoder = videoFormat?.codecs ?: videoFormat?.sampleMimeType,
@@ -2915,10 +2920,14 @@ internal fun dynamicRangeSummary(
     delivered: String?,
     rendered: String?,
     reasons: List<String>,
+    effectiveProcessing: tv.plurx.app.data.EffectiveProcessingReport? = null,
+    activeGeneration: String? = null,
 ): String? {
     if (source == null) return null
     if (delivered == null) return dynamicRangeLabel(source)
     val onScreen = rendered ?: delivered
+    if (effectiveProcessing?.matches(activeGeneration, delivered) == true && onScreen == DynamicRange.HDR10)
+        return "HDR10-E — ${effectiveProcessing.detail}"
     if (onScreen == source) return "${dynamicRangeLabel(source)} (rendering)"
     val why = reasons.firstOrNull { reason ->
         reason.contains("dolby vision", ignoreCase = true) || reason.contains("hdr", ignoreCase = true) ||

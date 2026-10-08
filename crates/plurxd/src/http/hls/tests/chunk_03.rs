@@ -342,6 +342,7 @@
         staged_request.file_id = fixture.file_id();
         staged_request.request_id = Some(staged_incarnation_id.clone());
         let response = StartResponse {
+            effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),

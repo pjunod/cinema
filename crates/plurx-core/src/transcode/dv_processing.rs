@@ -64,6 +64,28 @@ impl DvDigest {
     }
 }
 
+/// Bind the existing active playback UUID to M1's processing-generation digest.
+/// The future receipt owner and this presentation projection use the same helper.
+pub fn dv_playback_generation_digest(generation: &str) -> Result<DvDigest, DvContractError> {
+    let generation = uuid::Uuid::parse_str(generation)
+        .map_err(|_| DvContractError::Invalid("playback generation UUID"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"plurx.dv.playback-generation.v1\0");
+    digest.update(generation.as_bytes());
+    Ok(DvDigest(hex::encode(digest.finalize())))
+}
+
+/// Optional presentation evidence, never a request or a route admission token.
+/// Only a production-qualified receipt can construct it. Durable responses must
+/// reacquire current authority rather than deserialize this sidecar.
+#[derive(Debug, Clone, Serialize)]
+pub struct DvEffectiveProcessingReport {
+    generation: String,
+    hdr10_enhanced: bool,
+    fel_contributed: bool,
+    applied_operations: Vec<DvOperation>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DvDestination {
@@ -943,6 +965,41 @@ impl DvProcessingReceipt {
     pub fn served_frames(&self) -> &[DvFrameAcceptance] {
         &self.served_frames
     }
+    /// Project actual served-frame evidence onto the existing playback identity.
+    /// M1's empty registry keeps every shipping response unchanged and omitted.
+    pub fn hdr10_effective_report(
+        &self,
+        registry: &DvProductionRegistry,
+        plan: &DvProcessingPlan,
+        active_playback_generation: &str,
+        object_shape: &DvDigest,
+    ) -> Result<Option<DvEffectiveProcessingReport>, DvContractError> {
+        let generation = dv_playback_generation_digest(active_playback_generation)?;
+        if !self.reports_hdr10_enhanced(registry, plan, &generation, object_shape) {
+            return Ok(None);
+        }
+        let mut common: BTreeSet<_> = self.served_frames[0]
+            .applied_operations
+            .iter()
+            .copied()
+            .collect();
+        for frame in &self.served_frames[1..] {
+            common.retain(|operation| frame.applied_operations.contains(operation));
+        }
+        let fel_contributed = self.served_frames.iter().all(|frame| {
+            frame.el_payload.is_some()
+                && frame
+                    .applied_operations
+                    .contains(&DvOperation::LinearNlqResidual)
+        });
+        Ok(Some(DvEffectiveProcessingReport {
+            generation: active_playback_generation.to_owned(),
+            hdr10_enhanced: true,
+            fel_contributed,
+            applied_operations: common.into_iter().collect(),
+        }))
+    }
+
     /// Empty production registry means no receipt can award HDR10-E in M1.
     pub fn reports_hdr10_enhanced(
         &self,

@@ -35,6 +35,11 @@ pub struct StartResponse {
     #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
     pub(crate) measured_candidate_outputs:
         Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>>,
+    /// Current production-qualified processing only. A durable replay must
+    /// reacquire its receipt; source tags and saved settings cannot supply it.
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub effective_processing:
+        Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
     pub session_id: String,
     pub playlist_url: String,
     pub duration_ms: Option<i64>,
