@@ -692,3 +692,101 @@ BWDIF retains its independently proven moving-field controls.
 
 The final supported inventory has 22 graphs. Standalone controls do not
 replace the final combined daemon's embedded inventory or API qualification.
+
+## 18. Selected P5 graph observation — review B1
+
+[The selected-graph observer archive](evidence/macos-video-20261008/p5-selected-observer-evidence.tar.gz)
+retains 120 files (273,763 compressed bytes; SHA-256
+`654cd97d1767244dc5108600b8b7565f1f354f3be976a81670124779c6f7cfd9`).
+Commands, INFO logs, encoded outputs, raw planes, observations and original/
+normalized member hashes are retained. The media remains original synthetic
+CC0 material. Source commit `a0a3734b20e6394fe9453be6b3a5f4b3513e0d05` is
+independently accepted for B1; these controls use package `80416af2…`.
+
+All 45 existing controls pass. The ten positive source/tuple pairs now expose
+24 frame records from `showinfo=checksum=0` immediately before the actual
+selected renderer, including opaque VT frames without an extra download.
+The observer binds exact PTS, format, raster, SAR and Dolby header/DM fields
+to the intended frame; independent ordinary FFprobe output is only corpus
+validation. Six colored patches are checked on every encoded output frame.
+Their bounds are derived from the analytic source RGB values and BT.2020
+to BT.709 conversion with an explicit gain/quantization allowance, rather
+than fitted to these observed output values.
+
+Sixteen actual-artifact mutations exercise stale, shuffled, missing and
+duplicate metadata and corrupted color while retaining the gray controls.
+The independently reviewed bounds reject neutral, swapped-chroma and raw
+IPT interpretations. They establish fixture color interpretation, not an
+exact tone curve, calibrated visual acceptance or pixel influence from the
+tiny per-frame source-peak changes. The separate apply/no-apply experiment
+retains its own scope. All 35 strict-loss controls still enforce nonzero
+exit, the required diagnostic and absence of the affected frame.
+
+The first external observer incorrectly matched `s:` inside `pts:`. Its
+failed receipt and executed driver remain in the historical subdirectory.
+Whole-token parsing was corrected before the accepted run and is enforced
+in the production observer. This is not a performance run; concurrent build
+load is recorded explicitly.
+
+## 19. Legal trailing Dolby NALs — review B2
+
+[The terminal-NAL archive](evidence/macos-video-20261008/p5-terminal-nal-evidence.tar.gz)
+retains 75 files (509,719 compressed bytes; SHA-256
+`5d2f4d5a007c1ce5b938dab00820128b9cfc10d8429e3911daa438061f914054`).
+It includes five tiny original synthetic inputs, their hash-bound generator,
+exact commands, old-package failures, software/required-hardware receipts,
+per-frame plane checksums and PTS, source-equivalence/warm-build provenance
+and AC-4 preservation. Raw planes are not retained; `framemd5` records the
+actual comparisons. Text paths are normalized and original byte hashes are
+retained; normalized driver copies are explicitly distinguished from their
+executed originals. No public AC-4 media, native binaries or full source
+offers are embedded in this archive.
+
+The old `80416af2…` package decodes the original 24-frame P5 source, but
+legal EOS, EOB or combined markers after the final access unit's RPU each
+yield 21 frames and exit 183 under the exact strict production flags. The
+upstream extractor inspects only the literal final NAL. Source correction
+`184c937d45f1f348392dca048c72a666942ceecc` skips only trailing EOS/EOB to
+locate the last non-terminator NAL within the current packet; existing RPU
+position, size, layer, temporal and strict metadata checks remain intact.
+
+The rebuilt Jellyfin package has FFmpeg SHA-256
+`c8c4b5259b8129d4240599e16e57e9286b2e3c0ca5076e91fa6055b5872ab4c8`
+and patch digest
+`6987232e27bb1657a6a007ca41a5712c5899110079ecf545b7e3b75f99dd94e4`.
+Its 10,602 freshly prepared source files are checked against the warm private
+build lineage; complete corresponding source offers remain with the package.
+The source parser module is unchanged. No installed package was replaced.
+
+Both software and required physical VideoToolbox decoding now produce all
+24 frames/exit 0 for each legal suffix. Within each decoder, plane checksums
+and PTS match the original source. A truly missing final RPU still yields
+21 frames/exit 183. Nine software-decode/CPU-render strict source cases also
+retain their positive and loss-boundary results. Initial sandbox IOSurface
+refusal and an unsupported IPT planar conversion remain separate diagnostics,
+not accepted hardware controls.
+
+The new package's five-second AC-4 stereo 48 kHz signed-16-bit output remains
+byte-identical to the previous package: 239,999 frames, 959,996 bytes, SHA-256
+`28e6cfb582fa02e02824583e4a4a1d12e95d1ee5a3b67725c718959c697558c7`.
+This preserves the existing bounded sample claim, not full daemon A/V or
+all-broadcast acceptance. Independent review accepts the native correction;
+terminal runtime registration and final daemon qualification remain separate.
+
+## 20. Final terminal-NAL runtime union
+
+Source `54c3a3fe8122e8d15fcf1ee12ad3454e062cd35c` extends the runtime corpus
+with original EOS, EOB and combined terminal positives. Twelve sources across
+five decoder/renderer/encoder tuples yield sixty controls. All pass on final
+Jellyfin package `c8c4b525…`, including every original strict-loss negative,
+selected pre-renderer PTS/metadata associations and independent color bounds.
+The existing 210-second aggregate deadline and 256 KiB corpus cap are unchanged.
+Concurrent compiler work makes this correctness evidence only.
+
+[Final runtime evidence](evidence/macos-video-20261008/p5-terminal-runtime-evidence.tar.gz)
+contains 173 original synthetic artifact/driver/receipt files, 548,548 bytes
+compressed, SHA-256
+`492693a315475061865120052dfe00d17abeb290011b8e2a2b6606711552519e`.
+Every manifest member's size and hash was verified after writing. The narrow
+independent review accepted this registration without new findings. Final
+packaged-daemon inventory and normal-API delivery remain separate checks.

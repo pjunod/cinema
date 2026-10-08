@@ -24,9 +24,10 @@ proposal. The user renewed the full-scope instruction on 2026-10-08.
 All planned production source is integrated on `effort/macos-video-completion`,
 including strict P5, normalized SDR/HDR10, finite HEVC output and ordinary
 Auto preference, Live upload/BWDIF, HLG burns, bounded native parser execution
-and matched symbol packaging. Current main `c746b6c9b` is being integrated
-before the final source freeze. Independent combined review and final daemon
-qualification remain active; source completion is not final acceptance.
+and matched symbol packaging. Main `c746b6c9b` is integrated. All five combined-review findings have
+accepted repairs, including three terminal-NAL runtime fixtures at
+`54c3a3fe8`. The candidate is ready for final source freeze. Final daemon qualification remains
+active; source completion is not final acceptance.
 
 No deployed FFmpeg package or live service has changed. The matching Apple
 Metal compiler component was temporarily installed for the private package
@@ -35,15 +36,15 @@ after review. Missing qualification stays explicitly open.
 
 | Workstream | Owner | State | Evidence or next dependency |
 |---|---|---|---|
-| Integration and status | Manager | final candidate preparation | Main `c746b6c9b` union compiles; shared pipeline metric collision and stale strict-P5 compatibility guard repaired; independent review next |
-| M0/M1 Jellyfin package and harness | Sol builders | source complete; package controls recorded | Corrected package `80416af2…`; pinned source offer, AC-4 byte preservation, synthetic CPU/throughput evidence |
+| Integration and status | Manager | final candidate preparation | Main `c746b6c9b` union and five review repairs integrated; all scopes accepted through terminal registration `54c3a3fe8` |
+| M0/M1 Jellyfin package and harness | Sol builders | source complete; package controls recorded | Final strict terminal-NAL package `c8c4b525…`; pinned source offer, AC-4 byte preservation and prior synthetic benefit evidence |
 | M2/M3 typed routes and observations | Sol route builder | source complete | Twenty-two supported graph classes; final embedded inventory pending |
 | Native parser and symbols | Sol native builder | source complete | Bounded held-descriptor WASM/JIT, signed-kernel preflight, matched dSYM packaging; final daemon build pending |
 | M4 normalized VOD | Sol native and route builders | source complete; earlier daemon delivery demonstrated | Earlier 120-second lifetime and CPU/native pixel comparison retained; final SDR/HDR10, timing and soak pending |
-| E1 strict Dolby P5 | Sol Dolby and route builders | source complete; 45 shared projection controls pass | Captured package, strict current-AU metadata, four decode/render graphs and strict software recovery; final normal-API proof pending |
+| E1 strict Dolby P5 | Sol Dolby and route builders | source complete; sixty controls pass | Sixty selected-graph controls and sixteen observer mutations pass; terminal-NAL fixture registration independently accepted. Final normal-API proof pending |
 | E2–E4 HLG, burns, BWDIF, HEVC and Live | Sol builders | source complete within demonstrated scope | HLG text/bitmap controls pass; actual HDR High10 interlace decode fails and keeps incumbent. HEVC init binding fixed; final master, Auto and Live API proof pending |
-| Client transport declarations | Sol Dolby builder | source complete | Exact HLS sample entries and legacy compatibility; final Apple compilation pending, physical presentation unqualified |
-| M6 acceptance and promotion | Manager and merge coordinator | active | Combined adversarial review, remaining daemon qualification, then coordinator-owned fast lane and merge |
+| Client transport declarations | Sol Dolby builder | source complete; compilation passed | iOS/tvOS builds pass on the final Apple source; Android C1 app, instrumentation and JVM regression source compile. Physical presentation unqualified |
+| M6 acceptance and promotion | Manager and merge coordinator | active | Five review findings repaired and accepted; final daemon qualification, then coordinator-owned fast lane and merge |
 
 Jellyfin FFmpeg is the required implementation baseline. Local Homebrew
 FFmpeg is not a comparison target or substitute. The official package is an
@@ -306,11 +307,11 @@ Separate scope does not imply that implementation or qualification is done.
 
 | ID / plan reference | Agreed item | State / dependency |
 |---|---|---|
-| E1-01 · implementation §9.1 | P5 hardware decode feeding existing CPU `tonemapx` independently of GPU renderer | Package proof passed: required hardware session observed and decoded samples match software on corrected fresh/varying-DM fixtures. Immutable production recipe integration is building |
-| E1-02 | Software decode + Metal and hardware decode + Metal Dolby rendering | Package proof passed across all four decoder/renderer combinations; RPU pixel influence observed. Production integration and complete-graph benefit remain owed |
-| E1-03 | Strict per-frame effective Dolby metadata at renderer boundary | Strict decoder/current-frame and renderer/color semantics integrated in package tooling; 48 graph and eight same-context flush controls pass. Invalid old reuse proof withdrawn; production policy/recovery integration building |
-| E1-04 | Minimal pinned FFmpeg strict-mode patch if existing mode insufficient | Repaired complete native package built and exact AC-4 output preserved; production identity/probe integration active |
-| E1-05 | Lawful Dolby runtime smoke, P7/P8/direct-play/remux controls and Dolby-aware fallback | Building original synthetic Profile 5 fixture from public matrices and generated RPU; no inheritance to P7/P8 or output grades |
+| E1-01 · implementation §9.1 | P5 hardware decode feeding existing CPU `tonemapx` independently of GPU renderer | Integrated strict immutable production recipe; required hardware reconstruction matches software on original analytic fixtures. Final daemon proof pending |
+| E1-02 | Software decode + Metal and hardware decode + Metal Dolby rendering | All four decoder/renderer graphs integrated with separate observations. Package controls pass; final normal delivery and complete-graph benefit remain owed |
+| E1-03 | Strict per-frame effective Dolby metadata at renderer boundary | Integrated current-AU policy and selected-graph pre-renderer observer. Exact PTS/metadata and independent colored-patch controls accepted after B1 review; no claim of precise tone-curve qualification |
+| E1-04 | Minimal pinned FFmpeg strict-mode patch if existing mode insufficient | Integrated; final package `c8c4b525…` repairs legal terminal EOS/EOB while refusing missing RPU. AC-4 PCM remains byte-identical |
+| E1-05 | Lawful Dolby runtime smoke, P7/P8/direct-play/remux controls and Dolby-aware fallback | Original analytic P5 fixtures and strict software recovery integrated. Final runtime inventory pending; no P7/P8/direct-play/remux policy expansion |
 | E1-06 | HLG reference-white, color and temporal qualification | Foundation integrated: analytic HLG fixture and independent runtime observation; 203-nit reference-white mapping observed. Broader color/temporal qualification remains open; no inheritance from HDR10 |
 | E2-01 · implementation §9.2 | Native scale/tone-map then CPU subtitle burn at output resolution | Foundation integrated: bounded SDR/HDR processing-before-burn smokes produced output; PGS half-alpha timing observed. Full benefit/semantics evidence remains open |
 | E2-02 | GPU compositing of prepared text/bitmap images | Follow-up only if beneficial; keep libass shaping/fonts and explicit alpha/color semantics |
@@ -320,7 +321,7 @@ Separate scope does not imply that implementation or qualification is done.
 | E3-03 | 1080i TFF/BFF, 720p59.94, A/53, late audio, AC-4, reconnect/stop/start | Follow-up hardware/delivery matrix |
 | E3-04 | Scoped live `-a53cc 0` and caption-bearing VOD limitation | Existing scoped live behavior retained in native upload plan; no claim to repair caption-bearing file VOD |
 | E4-01 · implementation §9.4 | HEVC SDR and HDR10 Main10 output separately | Integrated in `432a617c2`: separate host/native graph observations, additive AVC/HEVC candidates and exact selected-codec restoration. Actual finite producer/manifest qualification remains pending; continuous AVC envelope remains unchanged |
-| E4-02 | Explicit HEVC output setting with advisory Developer readiness | Integrated in `e83de7e99`: independent saved choice accepted on every platform, graph/delivery readiness advisory; production negotiated route and graduation evidence remain open |
+| E4-02 | Explicit HEVC output setting with advisory Developer readiness | Integrated saved choice, finite candidate negotiation and ordinary Auto preference. Readiness advisory; final actual preference delivery remains pending |
 | E4-03 | Actual HDR presentation, metadata semantics, no implicit Dolby passthrough | Follow-up; preserve existing VOD B-frame policy and promised output grade |
 | E4-04 | Apple/native/web client play/seek/quality/recovery and bitrate-quality comparison | Follow-up; H.264 compatibility fallback through existing negotiation |
 | X-01 · implementation §9.5 | Intel native VA-API/DXVA and NVIDIA NVDEC P5 investigations; other device tuples individually | Separate cross-platform follow-up; do not globally remove or make permanent the software-decode restriction from one Mac result |
@@ -331,11 +332,11 @@ Separate scope does not imply that implementation or qualification is done.
 |---|---|---|
 | R-01 | All builders receive user constraints and have disjoint ownership | Done for active builders; packet applies to subsequent assignments |
 | R-02 | Normal commits, tracked hooks, pinned compile loop before pushing Rust | Complete source `575a68abc` integrated; pinned all-target checks and normal catalog/format/Clippy/JS hooks passed |
-| R-03 | Explicit adversarial coverage of native/package/core builder | Initial candidate complete; continuation review pending: original candidate reviewed; AR-01 correction independently accepted |
-| R-04 | Explicit adversarial coverage of harness/manager/settings builder | Initial candidate complete; continuation review pending: harness/daemon candidate and AR-05 launch/receipt repairs independently accepted |
-| R-05 | Explicit adversarial coverage of fixture/runtime builder | Initial candidate complete; continuation review pending: original candidate reviewed; AR-02–AR-04 corrections independently accepted |
-| R-06 | Cross-builder integration review, root causes and no watchdog/gate cruft | Initial candidate complete; continuation review pending: all three original builders and cross-builder interfaces independently reviewed; final offline completion repair accepted |
-| R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | Sent to coordinator at `aaaa2d814`: all findings resolved; no unit suites during building; coordinator retains valid evidence and reruns failed/invalidated checks only |
+| R-03 | Explicit adversarial coverage of native/package/core builder | Final scope A accepted after A1/A2 repair `9acf814a8`; strict native B2 correction `184c937d` accepted |
+| R-04 | Explicit adversarial coverage of harness/manager/settings builder | Final scope C accepted after Android capability repair `0d6a466cd`; prior harness and daemon repairs retained |
+| R-05 | Explicit adversarial coverage of fixture/runtime builder | B1 selected-graph observer repair `a0a3734b` accepted; terminal-NAL runtime registration `54c3a3fe8` independently accepted |
+| R-06 | Cross-builder integration review, root causes and no watchdog/gate cruft | Final scopes A/B/C reviewed against combined `2979112df`; five concrete findings repaired and accepted, terminal runtime registration accepted |
+| R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | Initial batch landed; continuation PR #904 remains draft and not queued. Final qualification/review packet must precede coordinator-owned validation |
 | R-08 | Current-main integration, exact-tree gate/qualification receipt and regression landing lines | Merge coordinator owns queue and main landing; effort supplies reviewed code and handles behavior-changing fixes; initial #870 included in #882 main landing `339abbced`; continuation review/queue handoff remains pending |
 | R-09 | Retain reproducible sanitized receipts, exact commands, limits and autonomous decisions | Initial/revised experiments plus VOD/P5 diagnostics retained in indexed evidence document and 1.20 MB raw archive, including isolated settings/probe and actual SDR/HDR VOD receipts; archive and all 394 retained-file hashes verified; full production qualification pending |
 | R-10 | Remove own transient clones, benchmark media, caches and obsolete branches after retention | Initial-batch builder clones, media/private daemon state and redundant sources removed after verified archive retention. Continuation clones, final package, active receipts and compiler targets remain needed; their cleanup follows final retention, queue ownership and qualification |
@@ -859,3 +860,49 @@ records expose the strict-policy boolean and captured identity digest for
 qualification without adding another owner. The exact combined all-target
 Rust check passes in 13.48 seconds on pinned Rust 1.97.1. Regression source
 covers the guard and stable metric slots; unit execution remains deferred.
+
+### 9.13 Draft PR and independent implementation review
+
+Candidate `2979112df` is pushed in draft PR #904, with all regression anchors
+in its description. The normal hook passes (Clippy 2 minutes 27 seconds,
+77 served JavaScript files). The merge coordinator has acknowledged the draft
+and will not queue tests before the reviewed handoff.
+
+Independent security review found A1 native executable/provenance mismatch
+acceptance during packaging and A2 immutable snapshot leakage on parser
+initialization failure. Both are assigned to their existing native owners;
+repairs and independent re-review are required before acceptance. The
+superseded release build was stopped, preserving its warm target. Core
+contract review and platform compilation continue in parallel.
+
+The native builder repaired A1/A2 in `9acf814a8`; its pinned all-target check
+and normal hook pass, and the corrections are integrated for independent
+re-review. Core review adds B1 selected-graph P5 metadata/color observation
+and B2 legal trailing EOS/EOB handling. Client review adds C1 Android measured
+HEVC capabilities when Display-aware Auto is off. Each remains owned by its
+existing builder. Candidate `2979112df` also passes source-only Linux all-target
+check and Clippy; subsequent affected source must be rechecked. iOS/tvOS
+compile-only builds pass on the same tree; unchanged Android source retains
+its prior app/test APK compilation evidence.
+
+C1 is repaired in `0d6a466cd` and independently accepted by the delivery
+reviewer. Android app and instrumentation APK compilation pass in 1 minute
+5 seconds, explicit JVM regression compilation in 48 seconds, and the normal
+hook in 1 minute 35 seconds. B2 is reproduced before repair: legal EOS, EOB
+and combined terminators each yield 21 frames/exit 183 under exact strict
+flags, while the unchanged positive yields 24 frames/exit 0. The native fix
+will skip only those legal terminators when locating the current RPU.
+
+Independent re-review accepts A1/A2 in `9acf814a8`. The strengthened B1
+selected-graph observer passes all 45 current controls: ten positive tuple/
+source pairs expose 24 actual renderer-input PTS/metadata records and six
+independent colored-patch bounds per frame; 35 strict-loss controls still
+fail at the required boundary. An initial external log-token parsing error
+is retained as a failed diagnostic and corrected before the accepted run.
+The rebuilt package and legal trailing-NAL controls remain in progress.
+
+- Final strict-P5 runtime registration `54c3a3fe8` independently accepted:
+  twelve original analytic sources × five graph controls = sixty controls,
+  all passing on `c8c4b525…`. Existing strict-loss cases and the 210-second
+  aggregate deadline remain unchanged. All five final review findings and
+  their source follow-ons are accepted; final daemon qualification remains.

@@ -447,7 +447,8 @@ supported. Track actual working delivery modes separately on the status page.
 
 ### 7.1 Native held-source parser — continuation decision, 2026-10-08
 
-**Status:** building; final implementation review and qualification pending.
+**Status:** implemented and independently reviewed; final daemon qualification
+pending.
 The existing Linux boundary combines immutable parser execution, a held source
 handle and process/descendant restrictions. Launching ordinary FFprobe on macOS
 would not preserve that boundary. The native implementation instead compiles
@@ -782,6 +783,74 @@ Private media titles, tokens and private paths do not belong in public logs;
 use hashes and sanitized fixture identifiers. Store large traces as artifacts,
 link the small retained receipt, and index any new prose in `docs/README.md`
 in the same commit.
+
+### 11.1 Implemented native tooling and package layout
+
+These are build/assembly entry points, not qualification commands. Use a new
+private build directory outside the checkout. The source archive is the
+checksum-pinned Jellyfin archive identified by
+[`build-macos-video-ffmpeg`](../../scripts/build-macos-video-ffmpeg); an ambient
+Homebrew FFmpeg is never an input. Native source compilation needs Apple's
+Metal compiler and the build tools listed by the generated `build.sh`. The
+preparer disables upstream global tool installation and keeps dependency
+outputs under its private prefix. Missing build tools are explicit failures.
+
+| Tool | Responsibility and output |
+|---|---|
+| [`prepare-macos-video-ffmpeg`](../../scripts/prepare-macos-video-ffmpeg) | Verify the pinned source archive, apply the complete official quilt and committed local patches, and generate the private source build entry point. |
+| [`build-macos-source-parser`](../../scripts/build-macos-source-parser) | Build the bounded WASI FFprobe companion from the pinned Jellyfin source and SDK, retaining module/runtime source and license provenance. |
+| [`build-macos-video-ffmpeg`](../../scripts/build-macos-video-ffmpeg) | Assemble either the pinned official baseline or a prepared native build, inventory required declarations/dependencies, attach the parser and retain corresponding source/provenance. Strict P5 and the BWDIF repair require the patched build. |
+| [`package-macos`](../../scripts/package-macos) | Copy a built daemon and validated native package into a new directory, validate optional matched dSYM symbols, sign the copied daemon and record immutable artifact hashes. It never overwrites or installs a live package. |
+| [`bench-macos-video`](../../scripts/bench-macos-video) | Record explicitly selected executable inventory and bounded offline comparisons. Its receipts do not authorize runtime graphs. |
+
+For example, after choosing private paths and supplying the pinned archive:
+
+```bash
+mac_build_root=/absolute/private/macos-build
+mac_source_archive=/absolute/downloads/pinned-jellyfin-source.tar.gz
+python3 scripts/prepare-macos-video-ffmpeg \
+  --source-archive "$mac_source_archive" \
+  --output "$mac_build_root/prepared" --jobs 2
+(cd "$mac_build_root/prepared/source" && ../build.sh)
+python3 scripts/build-macos-source-parser \
+  --source-archive "$mac_source_archive" \
+  --output "$mac_build_root/parser" --jobs 2
+python3 scripts/build-macos-video-ffmpeg \
+  --prepared-build "$mac_build_root/prepared" \
+  --source-archive "$mac_source_archive" \
+  --source-parser-package "$mac_build_root/parser" \
+  --output "$mac_build_root/native-package"
+cargo build --locked --release -p plurxd
+python3 scripts/package-macos \
+  --daemon target/release/plurxd \
+  --debug-symbols target/release/plurxd.dSYM \
+  --ffmpeg-package "$mac_build_root/native-package" \
+  --output "$mac_build_root/daemon-package"
+```
+
+Substitute the actual target directory if `CARGO_TARGET_DIR` is set. Supply
+`--debug-symbols` only for the matching built dSYM; omission is explicitly
+recorded as no symbol bundle. The default signature is ad hoc. An explicit
+`--sign` Developer ID identity must be available locally; neither signing
+mode establishes notarization or distribution-install acceptance.
+
+The copied layout has `bin/plurxd`, `bin/ffmpeg`, `bin/ffprobe` and
+`bin/plurx-source-parser.wasm`, with native/parser and daemon provenance.
+Normal explicit executable overrides still win over sibling discovery.
+Retain the entire versioned package when using it: native binary hashes,
+parser identity, patches and source receipts are one implementation. Upgrade
+by preparing a new directory and retaining the previous package while its
+workers remain active, or drain those workers before removal. Never replace
+selected executables in place and assume an existing immutable plan can
+rebind to them. The runtime checks compatibility through its existing owners.
+
+In Settings → Developer, processing and HEVC output are independent saved
+choices. Readiness explains package, graph and effective-encoder prerequisites
+without rejecting either choice. Processing changes new plans; an existing
+plan retains its captured implementation. These controls stay in Developer
+until the claimed workload/client qualification is complete. The status page
+records exactly which source builds, host experiments and external acceptance
+rows are complete; the commands above do not substitute for that evidence.
 
 ## 12. Opus review handoff
 
