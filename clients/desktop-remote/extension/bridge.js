@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // These fixed functions run in MAIN. No string evaluation or page-to-host API.
 export function installBridge(epoch,workerId="development",operation=1){
+  if(typeof cinemaRemoteLocalEnabled==="function"&&!cinemaRemoteLocalEnabled("cec"))return {ready:false};
   if(document.visibilityState!=="visible")return {ready:false};
   if(!document.hasFocus())return {ready:false,focus_pending:true};
   if(typeof CinemaRemote==="undefined"||typeof TOKEN==="undefined"||!TOKEN||typeof ME==="undefined"||!ME)return {ready:false};
   const previous=globalThis.CinemaDesktopBridge;
   if(previous?.workerId===workerId&&previous.operation>operation)return {ready:false};
   if(previous)previous.disable();
-  const token=TOKEN,user=String(ME.id),origin=location.origin,api=typeof API==="undefined"?null:API;
+  const token=TOKEN,user=String(ME.id),origin=location.origin,api=typeof API==="undefined"?null:API,instance=typeof SERVER==="undefined"?null:SERVER?.instance_id;
   let enabled=true,lastClock=performance.now(),lastWall=Date.now(),lastProbe=lastClock;
   const credits=new Map();
   function alive(){
     const now=performance.now(),wall=Date.now();
-    if(!enabled||TOKEN!==token||!ME||String(ME.id)!==user||location.origin!==origin||(typeof API!=="undefined"&&API!==api)||document.visibilityState!=="visible"||!document.hasFocus()||now<lastClock||wall<lastWall||wall-lastWall>1500){enabled=false;credits.clear();return false;}
+    if(!enabled||(typeof SERVER!=="undefined"&&SERVER?.instance_id!==instance)||(typeof cinemaRemoteLocalEnabled==="function"&&!cinemaRemoteLocalEnabled("cec"))||TOKEN!==token||!ME||String(ME.id)!==user||location.origin!==origin||(typeof API!=="undefined"&&API!==api)||document.visibilityState!=="visible"||!document.hasFocus()||now<lastClock||wall<lastWall||wall-lastWall>1500){enabled=false;credits.clear();return false;}
     lastClock=now;lastWall=wall;return true;
   }
   function disable(){enabled=false;credits.clear();CinemaRemote.physicalInput();}

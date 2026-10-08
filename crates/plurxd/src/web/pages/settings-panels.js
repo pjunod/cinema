@@ -67,6 +67,7 @@ function renderSettings(){
   if(!manifest.required.every(key=>SETTINGS_LOADED.has(key))) return;
   document.getElementById("main").innerHTML=`<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody">${settingsPanel(tab,d)}</div></div>`;
   revealSettingsAnchor(tab);
+  if(tab==="developer")cinemaRemoteLoadManagement();
   if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
   if(tab==="cluster"&&settingsClusterEnabled()){ applyClusterFolds(); return refreshClusterLogs(); }
 }
@@ -81,7 +82,7 @@ function settingsPanel(tab,d){
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="sharing")      return sharingManagementPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
-  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness);
+  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness)+cinemaRemoteLocalCards();
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // The section header: name, one line of summary, the section's bulk actions.

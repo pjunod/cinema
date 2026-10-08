@@ -271,7 +271,7 @@ async function loadSettingsTab(generation,tab){
   return settingsCurrent(generation,tab);
 }
 async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
-  if(!ME.is_admin){ location.hash="#/"; return; }
+  if(!ME.is_admin){ if(settingsRouteTab(location.hash)==="developer")viewLocalRemoteSettings(generation);else location.hash="#/"; return; }
   const route=location.hash;
   if(reset){
     if(typeof sharingRetire==="function")sharingRetire();

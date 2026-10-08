@@ -132,6 +132,13 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("pages/sharing-management.js",            WebAsset::BodyScript,  include_str!("../web/pages/sharing-management.js")),
     ("core/remote-navigation.js",              WebAsset::BodyScript,  include_str!("../web/core/remote-navigation.js")),
     ("core/remote-router.js",                  WebAsset::BodyScript,  include_str!("../web/core/remote-router.js")),
+    ("core/remote-guard.js", WebAsset::BodyScript, include_str!("../web/core/remote-guard.js")),
+    ("core/remote-client.js", WebAsset::BodyScript, include_str!("../web/core/remote-client.js")),
+    ("core/remote-receiver.js", WebAsset::BodyScript, include_str!("../web/core/remote-receiver.js")),
+    ("core/remote-controller.js", WebAsset::BodyScript, include_str!("../web/core/remote-controller.js")),
+    ("pages/remote-pairing.js", WebAsset::BodyScript, include_str!("../web/pages/remote-pairing.js")),
+    ("pages/settings-remote.js", WebAsset::BodyScript, include_str!("../web/pages/settings-remote.js")),
+    ("pages/remote.js", WebAsset::BodyScript, include_str!("../web/pages/remote.js")),
     ("router.js",                              WebAsset::BodyScript,  include_str!("../web/router.js")),
 ];
 

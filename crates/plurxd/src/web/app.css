@@ -3639,3 +3639,27 @@
 
 /* Semantic couch focus, independent of physical keyboard tab order. */
 .cinema-remote-focus{outline:3px solid var(--accent);outline-offset:4px}
+
+/* Foreground phone remote: a directional cross with its confirmation center. */
+#cinema-remote-controls .cinema-dpad{display:grid;grid-template-areas:". up ." "left select right" ". down .";grid-template-columns:repeat(3,minmax(44px,1fr));gap:8px;width:240px;max-width:100%;margin:16px auto}
+#cinema-remote-controls .cinema-dpad [data-remote-direction="up"]{grid-area:up}
+#cinema-remote-controls .cinema-dpad [data-remote-direction="left"]{grid-area:left}
+#cinema-remote-controls .cinema-dpad [data-remote-direction="right"]{grid-area:right}
+#cinema-remote-controls .cinema-dpad [data-remote-direction="down"]{grid-area:down}
+#cinema-remote-controls .cinema-dpad [data-remote-cap="select"]{grid-area:select}
+#cinema-remote-controls button{min-width:44px;min-height:44px;margin:3px 0}
+#cinema-remote-controls .cinema-dpad button{margin:0;padding:10px 4px}
+#cinema-remote-controls label{display:block;margin:10px 0}
+#cinema-remote-controls input{display:block;width:100%;max-width:100%;box-sizing:border-box;font-size:16px;min-height:44px;margin-top:6px}
+#cinema-remote-controls p{margin:10px 0}
+@media(max-width:550px){#cinema-remote-controls>button,#cinema-remote-controls p>button{margin-right:4px}#cinema-remote-controls h2{margin-top:18px}}
+
+.cinema-remote-page.adminwrap{gap:10px}
+.cinema-remote-page>h1{font-size:24px;line-height:1.2;margin:0}
+.cinema-remote-page [hidden]{display:none!important}
+.cinema-remote-page.connected>h1{font-size:18px}
+.cinema-phone-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#cinema-remote-controls .cinema-phone-heading h2{font-size:22px;margin:0}
+#cinema-remote-controls #cinema-remote-status,#cinema-remote-controls #cinema-remote-summary{margin:4px 0}
+#cinema-remote-controls .cinema-phone-more{margin-top:12px}
+#cinema-remote-controls .cinema-phone-more>summary{min-height:44px;padding:12px 0;cursor:pointer}

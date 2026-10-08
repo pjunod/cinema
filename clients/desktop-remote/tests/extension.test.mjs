@@ -106,3 +106,15 @@ test("focus setup pins its first document and pending navigation invalidates the
   assert.deepEqual(targets[1],{tabId:1,documentIds:["document-1"]});assert.equal(f.ports.length,0);assert.equal(f.w.binding,null);
   const g=bindFixture();g.w.start();await settle();const navigation=g.w.bind(tab(1)).catch(e=>e.message);await settle();g.listeners.committed({frameId:0,tabId:1,documentId:"replacement"});g.permissions[0].resolve(true);assert.equal(await navigation,"binding_superseded");assert.equal(g.ports.length,0);
 });
+
+test("saved Cinema local CEC choice fences install and queued delivery independently of server",()=>{
+  const c=vm.createContext({TOKEN:"bearer",ME:{id:1},SERVER:{instance_id:"one"},enabled:false,cinemaRemoteLocalEnabled:()=>c.enabled,location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible",hasFocus:()=>true},performance:{now:()=>0},Date:{now:()=>0},CinemaRemote:{physicalInput:()=>{},snapshot:()=>({}),dispatch:()=>"applied"}});
+  const install=()=>vm.runInContext("("+installBridge.toString()+")('"+epoch+"')",c);
+  assert.equal(install().ready,false);c.enabled=true;assert.equal(install().ready,true);c.CinemaDesktopBridge.probe(credit);c.enabled=false;assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"unavailable");
+  c.enabled=true;install();c.CinemaDesktopBridge.probe(credit);c.SERVER.instance_id="replacement";assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"unavailable");
+});
+test("fixed local disable notification unbinds the document port without accepting page actions",async()=>{
+  const {w}=worker();let receive;w.host={disconnect:()=>{},postMessage:()=>{}};
+  const port={name:"cinema-cec-document",sender:{frameId:0,tab:{id:1},documentId:"document-1",origin:"https://cinema.invalid"},disconnect:()=>{},onMessage:{addListener:fn=>{receive=fn;}},onDisconnect:{addListener:()=>{}}};
+  w.documentConnection(port);receive({type:"disabled",action:"select"});assert.notEqual(w.binding,null);receive({type:"disabled"});await Promise.resolve();assert.equal(w.binding,null);
+});
