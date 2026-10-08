@@ -4740,3 +4740,88 @@ source = "clients/desktop-remote/extension/worker.js"
 source_anchor = "pinnedDocument=result.documentId;"
 test = "clients/desktop-remote/tests/extension.test.mjs"
 test_anchor = "focus setup pins its first document and pending navigation invalidates the operation"
+# Cinema remote task source regressions; physical acceptance is separate.
+[[fixes]]
+id = "apple.cinema-receiver-sequence-before-effect"
+commits = ["74b4bbf5980d31f9fa2d04614ec87ebbd615debd"]
+source = "clients/apple/Sources/RemoteReceiverGuard.swift"
+source_anchor = "lastSequence = command.sequence"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testSequenceConsumedBeforeSynchronousEffectAndRejectedEffectIsNotReplayed"
+
+[[fixes]]
+id = "apple.cinema-strict-nested-command"
+commits = []
+supplements = "apple.cinema-receiver-sequence-before-effect"
+source = "clients/apple/Sources/RemoteAPI.swift"
+source_anchor = "for command in commands { _ = try CinemaRemoteCommand.decode"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testCanonicalWireFixturesAndStrictNestedPollDecode"
+
+[[fixes]]
+id = "apple.cinema-physical-preview-owner"
+commits = []
+supplements = "apple.cinema-receiver-sequence-before-effect"
+source = "clients/apple/Sources/RemotePreviewOwnership.swift"
+source_anchor = "return owns(current) ? nil : current"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testPhysicalScrubSurvivesUnrelatedInputAndOnlyNetworkPreviewIsCancelled"
+
+[[fixes]]
+id = "apple.cinema-control-sequence-lifetime"
+commits = ["cbb5e0925131e8eea6ea1bca9174f3d8243743a3"]
+source = "clients/apple/Sources/RemoteControlSequence.swift"
+source_anchor = "guard let previous = values[key], previous < CinemaRemoteCommand.maximumInteger"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testControlSequenceSurvivesCloseAndUnknownEpochRequiresAcquisition"
+
+[[fixes]]
+id = "apple.cinema-active-scene-effect-fence"
+commits = []
+supplements = "apple.cinema-control-sequence-lifetime"
+source = "clients/apple/Sources/RemoteSceneEligibility.swift"
+source_anchor = "eligible = active"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testInactiveSceneSuspendsEffectsWithoutRotatingForegroundIdentity"
+
+[[fixes]]
+id = "apple.cinema-conditional-own-epoch-recovery"
+commits = []
+supplements = "apple.cinema-control-sequence-lifetime"
+source = "clients/apple/Sources/RemoteControlSequence.swift"
+source_anchor = "return control.controlEpoch"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testUnknownOwnEpochRecoveryCarriesObservedEpochAndCannotTargetOtherGrant"
+
+[[fixes]]
+id = "apple.cinema-explicit-control-reacquisition"
+commits = ["42607dc16f938e11cadc76198e0a6e690f3d6781"]
+source = "clients/apple/Sources/RemoteControlSequence.swift"
+source_anchor = "func permits(_ generation: UUID) -> Bool { acquiredGeneration == generation }"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testReopenAndConnectionRecoveryRequireExplicitControlAcquisition"
+
+[[fixes]]
+id = "apple.cinema-live-guide-window-focus-order"
+commits = ["05237632b91363b3ae86fb81a3ea38da6efae4cc"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".onChange(of: remoteGuideKeys)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testGuideOrderRefreshesWhenSameChannelsHaveNewProgrammeTimes"
+
+[[fixes]]
+id = "apple.cinema-pairing-lifetime-retirement"
+commits = ["6649ba08ffb9d64061e8bae9c2fc787227880c71"]
+source = "clients/apple/Sources/RemotePairingLifetime.swift"
+source_anchor = "ticket.generation == generation && ticket.receiverID == receiverID && ticket.target == target"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testPairingCloseAndTargetSwitchRetireLateApprovedReply"
+
+[[fixes]]
+id = "apple.cinema-null-state-means-unchanged"
+commits = []
+supplements = "apple.cinema-pairing-lifetime-retirement"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "guard let state else { return }"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testNullStateTimeoutPreservesStateUntilControllerRetirement"

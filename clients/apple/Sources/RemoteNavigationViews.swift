@@ -19,8 +19,11 @@ struct RemotePresentationProbe: UIViewRepresentable {
         let probe = Probe()
         navigation.presentationBlocked = { [weak probe] in
             guard let window = probe?.window, let root = window.rootViewController else { return true }
-            func presented(_ controller: UIViewController) -> Bool {
-                if controller.presentedViewController != nil { return true }
+            @MainActor func presented(_ controller: UIViewController) -> Bool {
+                if let next = controller.presentedViewController {
+                    guard navigation.ownsPresentation(ObjectIdentifier(next)) else { return true }
+                    if presented(next) { return true }
+                }
                 return controller.children.contains(where: presented)
             }
             return presented(root)
@@ -51,6 +54,7 @@ private struct RemoteControlModifier: ViewModifier {
     let key: String
     let label: String
     let activate: () -> Void
+    let enabled: Bool
     func body(content: Content) -> some View {
         content
             .simultaneousGesture(TapGesture().onEnded { navigation.physicalInput() })
@@ -59,6 +63,7 @@ private struct RemoteControlModifier: ViewModifier {
                 frame = value
                 register()
             }
+            .onChange(of: enabled) { _, _ in register() }
             .onAppear {
                 register()
                 if navigation.requestedFocus == key && navigation.activeScope == scope { focused = true }
@@ -70,6 +75,7 @@ private struct RemoteControlModifier: ViewModifier {
             .onDisappear { navigation.unregister(scope: scope, key: key, id: registration) }
     }
     private func register() {
+        guard enabled else { navigation.unregister(scope: scope, key: key, id: registration); return }
         navigation.register(scope: scope, key: key,
                             entry: .init(id: registration, label: label, frame: frame, activate: activate))
     }
@@ -108,8 +114,8 @@ extension View {
     func remoteRestricted(_ restricted: Bool = true) -> some View {
         modifier(RemoteRestrictedModifier(restricted: restricted))
     }
-    func remoteControl(_ key: String, label: String, activate: @escaping () -> Void) -> some View {
-        modifier(RemoteControlModifier(key: key, label: label, activate: activate))
+    func remoteControl(_ key: String, label: String, enabled: Bool = true, activate: @escaping () -> Void) -> some View {
+        modifier(RemoteControlModifier(key: key, label: label, activate: activate, enabled: enabled))
     }
 }
 
@@ -128,6 +134,8 @@ struct RemoteChoicePanel: View {
     let title: String
     let choices: [RemoteChoice]
     var body: some View {
+        ScrollViewReader { proxy in
+        ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
             ForEach(choices) { choice in
@@ -141,6 +149,7 @@ struct RemoteChoicePanel: View {
                         if choice.selected { Image(systemName: "checkmark") }
                     }
                 }
+                .id("choice:" + choice.id)
                 .buttonStyle(.bordered)
                 .accessibilityAddTraits(choice.selected ? .isSelected : [])
                 .remoteControl("choice:" + choice.id, label: choice.label) {
@@ -150,17 +159,53 @@ struct RemoteChoicePanel: View {
             }
             Button("Close") { navigation.closeModal() }
                 .buttonStyle(.bordered)
+                .id("choice:close")
                 .remoteControl("choice:close", label: "Close") { navigation.closeModal() }
         }
         .padding(30)
-        .frame(maxWidth: 600)
+        }
+        .frame(maxWidth: 600, maxHeight: 600)
         .background(Palette.surfaceHi, in: RoundedRectangle(cornerRadius: 18))
         .remoteScope(scope)
+        .onChange(of: navigation.requestedFocus) { _, key in
+            guard navigation.activeScope == scope, let key else { return }
+            proxy.scrollTo(key, anchor: .center)
+        }
         .onAppear {
             navigation.setOrder(scope: scope, keys: choices.map { "choice:" + $0.id } + ["choice:close"], columns: 1)
         }
         #if os(tvOS)
         .modifier(RemoteChoiceExitAdapter(navigation: navigation))
         #endif
+        }
     }
+}
+
+/// An explicit owner marker authorizes only its actual UIKit presentation
+/// chain. An unrelated sheet inside that cover is still blocked by the root.
+struct RemoteOwnedPresentationProbe: UIViewRepresentable {
+    let navigation: RemoteNavigationCoordinator
+    let token: UUID
+    let scope: String
+    final class Probe: UIView {
+        var attach: ((UIView) -> Void)?
+        override func didMoveToWindow() { super.didMoveToWindow(); if window != nil { attach?(self) } }
+    }
+    func makeUIView(context: Context) -> Probe {
+        let view = Probe()
+        view.attach = { marker in
+            var responder: UIResponder? = marker
+            while let current = responder, !(current is UIViewController) { responder = current.next }
+            var controller = responder as? UIViewController
+            var identifiers: Set<ObjectIdentifier> = []
+            while let current = controller {
+                identifiers.insert(ObjectIdentifier(current))
+                controller = current.parent
+            }
+            navigation.attachPresentation(token, scope: scope, controllers: identifiers)
+        }
+        return view
+    }
+    func updateUIView(_ uiView: Probe, context: Context) { if uiView.window != nil { uiView.attach?(uiView) } }
+    static func dismantleUIView(_ uiView: Probe, coordinator: ()) { uiView.attach = nil }
 }
