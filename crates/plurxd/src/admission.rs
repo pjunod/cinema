@@ -946,18 +946,22 @@ impl Admissions {
             .map_or(0, |family| family.hardware_used)
             .checked_add(adopted_hardware)?
             .checked_add(missing_hardware)?;
-        if let Some(family) = existing_family {
-            if family_cpu > family.cpu_limit || family_hardware > family.hardware_limit {
-                return None;
-            }
+        if existing_family.is_some_and(|family| {
+            family.exclusive
+                && (family_cpu > family.cpu_limit || family_hardware > family.hardware_limit)
+        }) {
+            return None;
         }
         let total_cpu = permits.software_used().checked_add(missing_cpu)?;
         let total_hardware = permits.hardware_used().checked_add(missing_hardware)?;
         if total_hardware > hardware_max {
             return None;
         }
+        // Shared AAC connects distinct ordinary presentations. They may add
+        // roles under the global bounds, but cannot turn that shared credit
+        // into a new idle-pool exception when the budget is insufficient.
         let exclusive =
-            existing_family.is_some_and(|family| family.exclusive) || family_cpu > software_budget;
+            existing_family.map_or(family_cpu > software_budget, |family| family.exclusive);
         if (exclusive && (total_cpu != family_cpu || total_hardware != family_hardware))
             || (!exclusive && total_cpu > software_budget)
         {
@@ -983,6 +987,10 @@ impl Admissions {
         family.cpu_used = family_cpu;
         family.hardware_used = family_hardware;
         family.exclusive = exclusive;
+        if !exclusive {
+            family.cpu_limit = family.cpu_limit.max(family_cpu);
+            family.hardware_limit = family.hardware_limit.max(family_hardware);
+        }
         family.guards += adopted_guards;
         for existing in retained.iter().flatten() {
             if let Some(hardware) = existing.hardware {
@@ -1723,6 +1731,12 @@ mod tests {
                 .is_none(),
             "retaining AAC cannot mint more than the original eight threads"
         );
+        assert!(
+            admissions
+                .try_admit_family(2, 16, &too_large, &retained, Priority::Live)
+                .is_none(),
+            "raising policy cannot expand an existing exclusive exception's ceiling"
+        );
         assert_eq!(admissions.snapshot(), before);
         drop(video);
         assert!(
@@ -1822,6 +1836,66 @@ mod tests {
         drop(video);
         drop(audio);
         assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[test]
+    fn ordinary_presentations_share_aac_with_distinct_video_under_current_global_bounds() {
+        let admissions = Admissions::new();
+        let before = admissions.snapshot();
+        let (owner, mut first) = admissions
+            .try_admit_family(2, 16, &[mixed(3), cpu_role(3)], &[None; 2], Priority::Live)
+            .expect("first ordinary video and AAC");
+        let audio = crate::vodencode::EncodePermit::from(first.pop().expect("shared AAC"));
+        let second_roles = [mixed(2), cpu_role(3)];
+        let retained = [None, Some(audio.retained_resources())];
+        let unrelated = admissions
+            .try_admit_software(16, 9, Priority::Live)
+            .expect("another viewer fits beside the first presentation");
+        let full = admissions.snapshot();
+        assert!(
+            admissions
+                .try_admit_family(2, 16, &second_roles, &retained, Priority::Live)
+                .is_none(),
+            "distinct video is refused under real global CPU pressure"
+        );
+        assert_eq!(admissions.snapshot(), full);
+        drop(unrelated);
+        let full = admissions.snapshot();
+        assert!(
+            admissions
+                .try_admit_family(2, 7, &second_roles, &retained, Priority::Live)
+                .is_none(),
+            "shared AAC cannot convert ordinary growth into an exclusive overrun"
+        );
+        assert_eq!(admissions.snapshot(), full);
+        let (shared_owner, second) = admissions
+            .try_admit_family(2, 16, &second_roles, &retained, Priority::Live)
+            .expect("a different video recipe may share AAC when both pools have room");
+        assert_eq!(shared_owner, owner);
+        assert_eq!(second.len(), 1, "shared AAC is not reserved twice");
+        assert_eq!(admissions.software_in_use(), 8);
+        assert_eq!(admissions.in_use(), 2);
+        let full = admissions.snapshot();
+        assert!(
+            admissions
+                .try_admit_family(2, 16, &[mixed(1), cpu_role(3)], &retained, Priority::Live)
+                .is_none(),
+            "ordinary sharing still respects the global hardware cap"
+        );
+        assert_eq!(admissions.snapshot(), full);
+        let spare = admissions
+            .try_admit_software(16, 1, Priority::Live)
+            .expect("the expanded ordinary owner remains nonexclusive");
+        drop(spare);
+        drop(first);
+        assert_eq!(
+            admissions.software_in_use(),
+            5,
+            "second video and one AAC remain"
+        );
+        drop(second);
+        drop(audio);
+        assert_eq!(admissions.snapshot(), before);
     }
 
     #[test]

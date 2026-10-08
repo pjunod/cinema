@@ -582,15 +582,57 @@ async fn run<T: Tools>(
 }
 
 fn check_software_vulkan_device(stderr: &[u8]) -> Result<(), String> {
+    // libplacebo cee9b076 context.c logs inventory before this selected-device
+    // block. Inspect only its ordered properties, never the inventory's CPU ICDs.
+    const FIELDS: [&str; 10] = [
+        "device name:",
+        "device id:",
+        "device uuid:",
+        "driver version:",
+        "api version:",
+        "driver id:",
+        "driver name:",
+        "driver info:",
+        "conformance version:",
+        "driver uuid:",
+    ];
     let log = String::from_utf8_lossy(stderr).to_ascii_lowercase();
-    if !log.lines().any(|line| line.contains("device name:")) {
-        return Err("software-frame Vulkan graph did not identify its GPU device".to_owned());
+    let mut lines = log.lines().map(|line| {
+        line.split_once("] ")
+            .map_or(line, |(_, message)| message)
+            .trim()
+    });
+    let mut selected = None;
+    while let Some(line) = lines.next() {
+        if line != "vulkan device properties:" {
+            continue;
+        }
+        let mut identity = Vec::new();
+        for field in &FIELDS {
+            let value = lines
+                .next()
+                .and_then(|line| line.strip_prefix(*field))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "malformed selected Vulkan device properties".to_owned())?;
+            if ["lavapipe", "llvmpipe", "swiftshader", "(cpu)"]
+                .iter()
+                .any(|name| value.contains(name))
+            {
+                return Err("software Vulkan driver cannot qualify GPU tone mapping".to_owned());
+            }
+            identity.push(value);
+        }
+        if selected
+            .as_ref()
+            .is_some_and(|previous| previous != &identity)
+        {
+            return Err("ambiguous selected Vulkan device properties".to_owned());
+        }
+        selected = Some(identity);
     }
-    if ["lavapipe", "llvmpipe", "swiftshader", "(cpu)"]
-        .iter()
-        .any(|name| log.contains(name))
-    {
-        return Err("software Vulkan driver cannot qualify GPU tone mapping".to_owned());
+    if selected.is_none() {
+        return Err("software-frame Vulkan graph did not identify its GPU device".to_owned());
     }
     Ok(())
 }
@@ -1423,13 +1465,43 @@ mod tests {
 
     #[test]
     fn software_vulkan_device_proof_refuses_cpu_driver_or_absent_identity() {
+        // Selected properties follow the exact pinned context.c schema and real
+        // V3DV evidence; an unselected software ICD is harmless.
+        let gpu = "Vulkan device properties:\nDevice Name: V3D 7.1.10.2\nDevice ID: 14e4:55701c33\nDevice UUID: 5f:d8\nDriver version: 6400007\nAPI version: 1.3.305\nDriver ID: VK_DRIVER_ID_MESA_V3DV\nDriver name: V3DV Mesa\nDriver info: Mesa 25.0.7\nConformance version: 1.3.8.3\nDriver UUID: 96:50\n";
+        let inventory =
+            "Probing for vulkan devices:\nGPU 0: V3D (integrated)\nGPU 1: llvmpipe (software)\n";
+        assert!(check_software_vulkan_device(format!("{inventory}{gpu}").as_bytes()).is_ok());
+        let prefixed = gpu
+            .lines()
+            .map(|line| format!("[libplacebo @ 0x123] {line}\n"))
+            .collect::<String>();
+        assert!(check_software_vulkan_device(prefixed.as_bytes()).is_ok());
+        assert!(check_software_vulkan_device(format!("{gpu}{gpu}").as_bytes()).is_ok());
+        for cpu in ["llvmpipe (LLVM 19)", "SwiftShader Device", "lavapipe (cpu)"] {
+            let selected_cpu = gpu.replace("V3D 7.1.10.2", cpu);
+            assert!(
+                check_software_vulkan_device(format!("{inventory}{selected_cpu}").as_bytes())
+                    .is_err()
+            );
+        }
         assert!(
-            check_software_vulkan_device(b"Device Name: V3D 7.1.10.2\nDriver name: V3DV Mesa")
-                .is_ok()
+            check_software_vulkan_device(gpu.replace("V3DV Mesa", "llvmpipe").as_bytes()).is_err()
         );
-        assert!(check_software_vulkan_device(b"Device Name: llvmpipe (LLVM 19)").is_err());
-        assert!(check_software_vulkan_device(b"Device Name: SwiftShader Device").is_err());
-        assert!(check_software_vulkan_device(b"no device identity").is_err());
+        for malformed in [
+            inventory,
+            "no device identity",
+            "Device Name: V3D",
+            "Vulkan device properties:\nDevice Name: V3D",
+            "Vulkan device properties:\nDevice Name: ",
+        ] {
+            assert!(check_software_vulkan_device(malformed.as_bytes()).is_err());
+        }
+        assert!(check_software_vulkan_device(
+            gpu.replace("Driver ID:", "Unexpected ID:").as_bytes()
+        )
+        .is_err());
+        let other_gpu = gpu.replace("V3D 7.1.10.2", "Other hardware GPU");
+        assert!(check_software_vulkan_device(format!("{gpu}{other_gpu}").as_bytes()).is_err());
     }
 
     #[tokio::test]

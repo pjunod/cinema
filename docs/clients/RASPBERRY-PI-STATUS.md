@@ -84,6 +84,20 @@ unique container names and isolated data, and must remove their own containers
 afterward. The abandoned test container that reserved `plurxd` was removed;
 the user's running container and data were preserved.
 
+The follow-up is [PR #885](http://forge.lan:3000/noirr/plurx/pulls/885), held
+as a draft for its final review and verification. One adversarial audit of
+`e87f85388` found two P2 issues: ordinary presentations sharing AAC inherited
+an unnecessarily fixed family ceiling, and Vulkan device validation rejected
+unselected CPU drivers listed in the inventory. Both findings are addressed
+with focused regression cases. Exclusive families retain their original
+ceiling; ordinary sharing remains bounded by current global capacity. GPU
+validation reads the selected device-properties block. Corrected-source
+compilation, the fast lane and physical transcoding remain pending.
+
+The initial PR creation API ignored its draft flag and scheduled run 4389.
+The PR was converted to draft and that run was cancelled before Rust or
+platform jobs started. It is not the post-review validation receipt.
+
 Physical testing also exposed two deployment defects. Compose 2.26 lacks
 `config --environment`; hardware configuration now uses Compose's own label
 interpolation on that version. The isolated native service lacked writable
