@@ -387,6 +387,8 @@ failures.
 
 ## clients/ — Apple, Android, and the web player
 
+[Android playback repair status](clients/ANDROID-PLAYBACK-REPAIR-STATUS.md) — **open**; physical-device failures, root causes and delivery progress.
+
 The native clients and the web UI: parity trackers, the input contract every
 player obeys, subtitles and overlays, layouts and themes.
 

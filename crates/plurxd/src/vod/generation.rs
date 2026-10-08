@@ -283,6 +283,7 @@ pub(super) async fn spawn_generation(
                     stdout,
                     at,
                     epoch,
+                    registration.retirement(),
                 )
                 .await;
                 // Killing starts before diagnostic drain is joined, while the
@@ -543,6 +544,7 @@ async fn run_generation(
     stdout: tokio::process::ChildStdout,
     at: u32,
     epoch: u64,
+    retirement: tokio_util::sync::CancellationToken,
 ) -> Option<Outcome> {
     let mut stdout = stdout;
     let need_pre_read = {
@@ -606,6 +608,7 @@ async fn run_generation(
         shared: Arc::clone(&shared),
         rendition: Arc::clone(&rendition),
         epoch,
+        retirement,
     };
     let outcome = vodgen::run(src, generation, &sink, &rendition.key).await;
     Some(outcome)
@@ -954,6 +957,7 @@ pub(super) struct RenditionSink {
     /// (one spurious kill of the healthy replacement) and, worse, let a dead
     /// generation keep writing bytes under the replacement's feet.
     pub(super) epoch: u64,
+    pub(super) retirement: tokio_util::sync::CancellationToken,
 }
 
 /// Assign the successful publication a monotonic identity and, only when the
@@ -1123,6 +1127,20 @@ pub(super) fn verify_reserved_publication(
 }
 
 impl RenditionSink {
+    /// Retirement can hold a publication gate while joining this writer.
+    /// Abandon a queued lock acquisition when that exact generation retires,
+    /// but never cancel directory writes or their accounting after acquisition.
+    async fn publication_lock<T>(
+        &self,
+        lock: impl std::future::Future<Output = T>,
+    ) -> io::Result<T> {
+        tokio::select! {
+            biased;
+            _ = self.retirement.cancelled() => Err(io::ErrorKind::NotFound.into()),
+            guard = lock => Ok(guard),
+        }
+    }
+
     /// The exact-key gate plus every reserved interval of this rendition.
     ///
     /// Only continuous renditions ask the Store. An unanswered lookup is
@@ -1140,10 +1158,12 @@ impl RenditionSink {
     )> {
         if !quality_reservations_possible(&self.rendition.recipe) {
             let guard = self
-                .shared
-                .rendition_build_gate(&self.rendition.key)
-                .lock_owned()
-                .await;
+                .publication_lock(
+                    self.shared
+                        .rendition_build_gate(&self.rendition.key)
+                        .lock_owned(),
+                )
+                .await?;
             return Ok((guard, Vec::new()));
         }
         let mut cause = String::new();
@@ -1157,10 +1177,12 @@ impl RenditionSink {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             let guard = self
-                .shared
-                .rendition_build_gate(&self.rendition.key)
-                .lock_owned()
-                .await;
+                .publication_lock(
+                    self.shared
+                        .rendition_build_gate(&self.rendition.key)
+                        .lock_owned(),
+                )
+                .await?;
             match tokio::time::timeout(
                 Duration::from_secs(1),
                 self.shared
@@ -1183,7 +1205,13 @@ impl vodgen::Sink for RenditionSink {
         if !recipe_engine_is_current(&self.rendition.recipe).await {
             return;
         }
-        let manifest = self.rendition.manifest.lock().await;
+        // A completed trailer may record its proof after retirement when the
+        // manifest is available; it must not wait behind its own reaper.
+        let manifest = tokio::select! {
+            biased;
+            manifest = self.rendition.manifest.lock() => manifest,
+            _ = self.retirement.cancelled() => return,
+        };
         // Only vodgen's verified normal trailer reaches this callback. The
         // driver may already have retired an all-done child, but that cannot
         // invalidate its successfully published bytes. The observer still
@@ -1277,7 +1305,9 @@ impl vodgen::Sink for RenditionSink {
         }
         let (dependency_guard, dependencies) = self.reserved_dependencies().await?;
         let retained = {
-            let manifest = self.rendition.manifest.lock().await;
+            let manifest = self
+                .publication_lock(self.rendition.manifest.lock())
+                .await?;
             if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
@@ -1326,7 +1356,9 @@ impl vodgen::Sink for RenditionSink {
         }
         if retain_published {
             {
-                let _manifest = self.rendition.manifest.lock().await;
+                let _manifest = self
+                    .publication_lock(self.rendition.manifest.lock())
+                    .await?;
                 if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
                     return Err(io::Error::from(io::ErrorKind::NotFound));
                 }
@@ -1342,9 +1374,15 @@ impl vodgen::Sink for RenditionSink {
         }
         let len = bytes.len() as u64;
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        let init = self.rendition.identity.lock().await.identity.clone();
+        let init = self
+            .publication_lock(self.rendition.identity.lock())
+            .await?
+            .identity
+            .clone();
         {
-            let mut manifest = self.rendition.manifest.lock().await;
+            let mut manifest = self
+                .publication_lock(self.rendition.manifest.lock())
+                .await?;
             // Checked under the manifest lock, so a driver bumping the epoch
             // cannot interleave between the check and the write.
             if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
