@@ -169,6 +169,29 @@ class PlayerInputFenceTest(unittest.TestCase):
         self.assertEqual(len(failures), 2)
         self.assertTrue(all(f":{len(lines)}:" in failure for failure in failures))
 
+    def test_companion_direction_exemption_covers_only_its_two_handlers(self):
+        relative = Path("crates/plurxd/src/web/pages/remote.js")
+        lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        allowed = self.fence.web_allowed_lines(relative, lines)
+        handlers = [index + 1 for index, line in enumerate(lines) if 'button.addEventListener("keydown"' in line or 'button.addEventListener("keyup"' in line]
+        self.assertEqual(len(handlers), 2)
+        self.assertTrue(set(handlers).issubset(allowed))
+        self.assertEqual(self.fence.scan_lines(relative, lines, allowed), [])
+        end = lines.index("  // companion-direction-key-adapter:end")
+        lines.insert(end + 1, '  window.addEventListener("keydown", event => event.key);')
+        hits = self.fence.scan_lines(relative, lines, self.fence.web_allowed_lines(relative, lines))
+        self.assertEqual(len(hits), 2)
+        self.assertTrue(all(f":{end + 2}:" in hit for hit in hits))
+
+    def test_companion_android_adapter_does_not_exempt_neighboring_raw_handlers(self):
+        adapter = Path("clients/android/app/src/main/java/tv/plurx/app/remote/RemotePhysicalInputAdapter.kt")
+        self.assertIn(adapter, self.fence.WHOLE_FILE_ALLOWLIST)
+        self.assertNotIn(Path("clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigationViews.kt"), self.fence.WHOLE_FILE_ALLOWLIST)
+        raw = ['.onPreviewKeyEvent { event -> event.keyCode == KeyEvent.KEYCODE_MEDIA_STOP }']
+        for path in ("clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigationViews.kt", "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt", "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"):
+            with self.subTest(path=path):
+                self.assertEqual(len(self.fence.scan_lines(Path(path), raw, set())), 3)
+
     def test_the_fence_passes_the_repository_as_it_stands(self):
         self.assertEqual(self.fence.scan(), [])
 

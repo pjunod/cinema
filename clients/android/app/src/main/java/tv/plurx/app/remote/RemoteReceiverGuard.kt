@@ -119,11 +119,6 @@ internal object RemotePairingAdmission {
         generation == ticket && receiver == expectedReceiver && target == expectedTarget
 }
 
-internal object RemotePhysicalInput {
-    // Any real key-down can move native focus or reach a MediaSession. The
-    // listener observes it before routing and never consumes or injects it.
-    fun retiresCredits(action: Int, keyCode: Int) = action == android.view.KeyEvent.ACTION_DOWN && keyCode != android.view.KeyEvent.KEYCODE_UNKNOWN
-}
 
 internal class RemoteRestrictionLifetime {
     private var restricted = false
