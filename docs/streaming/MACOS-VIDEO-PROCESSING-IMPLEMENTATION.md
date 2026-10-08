@@ -108,6 +108,35 @@ M4/M5. Keep these extensions out of the initial delivery so its benefit can
 be measured and shipped independently. A negative experiment is a valid
 result; do not implement an accelerated path merely to complete this list.
 
+### 1.2 Effort and what determines completion
+
+These are qualitative engineering estimates, not elapsed-time promises.
+Parallel builders shorten independent implementation work; they do not
+remove serial integration, hardware measurements, visual review or client
+qualification. The larger cost is preserving delivery and color contracts,
+not adding a VideoToolbox filter name.
+
+| Work | Relative effort | Main source of effort / current priority |
+|---|---|---|
+| M0/M1 package inventory, fixtures and harness | Medium | Reproducible comparisons and complete Jellyfin dependency preservation; start here |
+| M2/M3 contracts, identity, runtime probes and settings | High | One consistent plan across cache, recovery and workers; shared foundation for every route |
+| M4 progressive SDR | Medium after foundation | Production rolling/VOD integration and unsupported-source controls; first processing route |
+| M5 HDR10 | High | Precision, metadata, peak/temporal behavior and actual visual acceptance; second route |
+| M6 qualification and packaging | High, evidence-dependent | Real daemon/client matrix, concurrency/startup/soak, install/rollback and additional hardware access |
+| E1 P5 decoder-only improvement | Medium–high, feasibility-dependent | Prove actual hardware reconstruction and effective Dolby metadata transport into the existing CPU renderer |
+| E1 GPU Dolby rendering and strict metadata enforcement | Very high | Renderer-boundary enforcement, per-frame state after seeks/reordering, possible pinned FFmpeg patch and visual qualification |
+| E1 HLG | Medium–high | Independent reference-white, color and temporal qualification |
+| E2 subtitles | Medium for native processing then CPU burn; high for GPU compositing | Preserve shaping, bitmap geometry, alpha and cue lifecycle; pursue measured bottleneck first |
+| E3 interlace / Live TV | High | Independent cadence, caption, startup, reconnect and paced-delivery contracts |
+| E4 HEVC/Main10 output | High | Coordinated encoder, negotiation, container, manifest, cache, cluster and actual-client changes |
+| Cross-platform P5 follow-up | Separate high effort per supported backend family | Vendor/interface-specific hardware and metadata evidence; Mac proof is not portable qualification |
+
+Do not sum these labels into a delivery estimate. Narrowing unsupported
+sources honestly can keep the initial SDR/HDR10 batch useful while its
+Developer card lists remaining qualification. No measured benefit means
+retain the incumbent rather than spend implementation effort maintaining an
+unjustified alternative. The status ledger records that outcome explicitly.
+
 ## 2. Source map and interfaces to preserve
 
 | Existing seam | Responsibility / required change |
@@ -402,6 +431,19 @@ frame/timestamp contract, first frame, two minutes of playback, seek/resume,
 clean cancellation and bounded failure handling. Re-run M1 performance
 comparisons through plurxd, not just standalone FFmpeg. Unsupported controls
 show unchanged behavior with a recorded reason.
+
+**Discovered native dependency, 2026-10-07:** the isolated daemon run found
+that production `DecodeProbeIdentity` accepts only its qualified Linux parser
+execution contract. Rolling and non-normalized VOD have existing planning
+paths, but normalized continuous VOD correctly refuses
+`candidate_geometry_unavailable` without descriptor-bound current source
+facts. Admitting its encoder envelope in core does not remove this dependency.
+Native bound-source qualification is a separate architectural work item:
+preserve held-source identity, parser confinement, executable/library
+attestation, deadlines and child ownership in the existing fact collector.
+Do not enable fixture launch mode in production, weaken normalized geometry
+verification, or substitute scanner-time facts to make this route appear
+supported. Track actual working delivery modes separately on the status page.
 
 ## 8. M5 — integrate HDR10 processing without widening Dolby routing
 

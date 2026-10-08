@@ -108,6 +108,9 @@ labeled as such, not as the deployed graph. Application integration belongs
 in a separate corrective commit with a scoped metadata-policy identity
 revision; retaining the old cache key for changed encoded bytes would be
 incorrect. SDR and HDR-preserving routes must retain their existing identity.
+The correction is limited to the reproduced CPU + zscale HDR-to-SDR route.
+`tonemapx` already removes these consumed metadata types; its Dolby routes
+and the Metal path do not need additional cleanup or identity rotation.
 
 The original Metal graph tone-mapped the full 4K frame and scaled afterward,
 while the CPU graph scaled first. The candidate therefore tone-mapped four
@@ -116,7 +119,88 @@ and moved the Metal mapper to the same 1080p work size. Three-frame tiny and
 4K smokes passed output checks; the tiny HDR gray ramp remained unchanged.
 This is a processing-order correction, not a new retry or watchdog.
 
-## 4. Retained receipts and reproduction
+## 4. Continuous VOD and early P5 diagnostics
+
+The existing continuous AVC High 5.0 VOD envelope was exercised with the
+observed SDR and HDR10 graphs. Three-frame smokes retained the producer's
+trim, frame rate, SAR, padding, timestamps and color normalization: 1080p
+H.264 High level 5.0, BT.709 limited range, PTS 0/1/2 on a 1/24 time base,
+with no stale static HDR metadata. These checks justify admitting the
+existing envelope in the shared resolver; they are not seek, fragmented
+VOD or client playback qualification.
+
+An early four-way P5 diagnostic used the tiny artificial
+[FFmpeg FATE fixture](https://fate-suite.ffmpeg.org/mov/dovi-p5.mp4),
+4,182 bytes with SHA-256
+`11fe599fd77e31e26fbf855bae1cd9931df9f261a0a7b1dce9fad9b236677c4b`.
+The fixture media is not redistributed in the evidence archive.
+
+| Decode route | Renderer | Observation on all ten frames |
+|---|---|---|
+| Software HEVC | CPU `tonemapx` | Parsed Dolby metadata and 162-byte RPU before renderer; consumed afterward |
+| VideoToolbox | CPU `tonemapx`, via P010 download | Same metadata and PTS association observed at renderer input; consumed afterward |
+| Software HEVC | Metal, via P010 upload | Same metadata and PTS association observed at renderer input; consumed afterward |
+| VideoToolbox | Metal | Same metadata and PTS association observed at renderer input; consumed afterward |
+
+The ten pre-renderer PTS values were 0, 512, …, 4608. All four outputs had
+ten 160×90 H.264 BT.709 limited-range frames, with no RPU/parsed Dolby side
+data after rendering or in the output stream. Only the initial encoder user
+SEI remained. Exact argv and observations are retained.
+
+This is evidence against a universal claim that VideoToolbox always loses
+Dolby frame metadata. It is not proof of physical hardware HEVC reconstruction,
+RPU influence on pixels, absence of OS-level double processing, valid reuse
+after seeks/reordering, strict rejection of missing metadata, performance or
+real-content visual quality. In particular, this artificial sample does not
+satisfy the plan's RPU-positive visual criterion. Production Dolby decoding
+restrictions remain unchanged pending E1's full contract.
+
+## 5. Isolated daemon delivery and the remaining native source boundary
+
+An isolated daemon used its own loopback ports, database, synthetic library,
+cache and explicit Jellyfin binaries. It advertised no service and changed no
+installed configuration. The saved preference round-tripped false/true/false/true
+while probes were pending, survived restart, and remained true after an admin
+reprobe (HTTP 202). Both graphs became available. Corrupting an owned cached
+fixture caused content-verified repair on the next probe. Both shutdowns exited
+successfully.
+
+Separate scanned 60-second SDR and HDR10 sources exercised the actual session
+API, canonical resolver and encoded VOD producer. The selected pipelines were
+`vt_scale_sdr` and `vt_tonemap_metal`. Each initialization object and first media
+segment returned HTTP 200; Jellyfin FFprobe decoded 48 progressive, square-pixel
+1920×1080 H.264 High level 4.0 frames at 24 fps, BT.709 limited range. The HDR
+output had no mastering-display, content-light or Dolby side data. These are
+produced-byte checks for the existing non-normalized VOD path, not display,
+seek/resume or long-session acceptance. The public live presentation returns
+`410 live_presentation_removed`; no rolling client result is claimed.
+
+The experiment binary identifies its exact SHA in each receipt. It was built
+on `a17de21fe` plus the daemon integration changes, before advisory wording and
+test-only lint corrections. This is behavioral experiment evidence, not final
+branch compilation or merge qualification.
+
+**Normalized continuous VOD remains unavailable on native macOS.** Its bound
+source probe deliberately requires Linux's executable/dependency confinement.
+Both executable admission and production child launch reject unsupported Mac
+execution. The existing fixture-only Mach-O launcher is not a production
+substitute. The held source descriptor, observation cache, deadlines and reap
+ownership are reusable; removing those refusals would still leave executable
+binding and descendant containment unproved.
+
+A read-only architecture investigation found no small Apple-supported replacement
+matching all of those guarantees. App Sandbox supports inherited child execution;
+launch/library constraints constrain code properties but do not supply the
+current subsequent-exec or process-group escape denial. The existing immutable
+file flag is owner-clearable. A signed, minimal parser package therefore needs
+a separate launch/confinement design before this route can be admitted. Apple's
+[helper-tool guidance](https://developer.apple.com/documentation/xcode/embedding-a-helper-tool-in-a-sandboxed-app),
+[launch constraints](https://developer.apple.com/documentation/security/defining-launch-environment-and-library-constraints),
+and [DTS guidance on unsupported custom sandbox profiles](https://developer.apple.com/forums/thread/661939)
+explain why simply accepting Mach-O or using a custom Seatbelt profile is not
+qualified parity. No source-verification bypass was added.
+
+## 6. Retained receipts and reproduction
 
 Readable summaries preserve both the
 [initial results](evidence/macos-video-20261007/m1-initial-summary.json) and
@@ -157,13 +241,31 @@ harness SHA where applicable; integrated commit `308921d3f` records the trim/pro
 fix used for revised measurement. Reproduction requires actual Mac hardware
 access, including IOSurface access; the tool sandbox denied that access.
 
-## 5. Evidence still owed
+For the isolated daemon checks, the archive also retains `daemon-evidence/exercise.py`
+and `exercise-delivery.py`. Each creates a new private output directory, chooses
+loopback ports, generates bootstrap credentials in memory and shuts down its
+owned daemon. Do not point these at an installed service or an existing data
+folder. Use the delivery driver once per synthetic source:
+
+```bash
+python3 daemon-evidence/exercise.py \
+  --binary "$BUILT_PLURXD" --package "$JELLYFIN_PACKAGE" --output "$NEW_SETTINGS_RUN"
+python3 daemon-evidence/exercise-delivery.py \
+  --binary "$BUILT_PLURXD" --package "$JELLYFIN_PACKAGE" \
+  --source "$SYNTHETIC_SOURCE" --output "$NEW_DELIVERY_RUN"
+```
+
+Only receipts, decoded-frame observations and selected planner-log excerpts
+are retained from those runs. Database/configuration files, generated credentials,
+full daemon logs and encoded media are excluded.
+
+## 7. Evidence still owed
 
 Five-second steady windows are sparse or absent because these simple 60-second
 sources encode in about six seconds. Whole-run CPU/throughput observations
 remain valid, but neither realtime capacity nor a sustained thermal envelope
 is qualified. Startup distributions, one/two/four-session load, 30-minute
-soak, calibrated visual review, rolling/VOD behavior, seek/resume, cancellation,
+soak, calibrated visual review, full VOD behavior, seek/resume, cancellation,
 failure recovery, AC-4/P5 sample acceptance, second-generation Apple Silicon
 and Intel Macs remain open. Peak RSS, energy and copy instrumentation are
 unmeasured, not zero. The Developer readiness report must describe those gaps

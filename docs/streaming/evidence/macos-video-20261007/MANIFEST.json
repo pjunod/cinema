@@ -1,9 +1,9 @@
 {
   "archive": "raw-experiment-evidence.tar.gz",
-  "sha256": "367f30d04ec5a459ea372eced4441d4426251548d7c22f8314fa8a3e3f50508f",
-  "bytes": 1130665,
-  "file_count": 363,
-  "limitations": "Encoded media and downloaded source/binary archives are excluded; corpus generator, source hashes, commands, raw observations and negative runs retained. This archive is experimental evidence, not a qualification receipt.",
+  "sha256": "6c0f08e0aee6412496acb4df56fcfd4ee0bf19156964fc34e15dab47f7026120",
+  "bytes": 1200931,
+  "file_count": 394,
+  "limitations": "Encoded media (including FATE bytes) and downloaded source/binary archives excluded. Corpus generator, source hashes, commands, raw observations and negative runs retained. Experimental evidence, not a qualification receipt. Daemon databases/configuration/credentials and full operational logs are excluded.",
   "redactions": {
     "task_paths": "/experiment",
     "source_checkout": "/source",
