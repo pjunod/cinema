@@ -1020,6 +1020,17 @@ jobs:
       # runs in a browser.
       - name: Run the playback-control reporter in a real browser
         run: make control-browser-check
+      - name: Provision headed Cinema browser dependencies
+        run: |
+          set -eu
+          if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v xauth >/dev/null 2>&1; then
+            timeout 120s apt-get -o Acquire::Retries=2 update
+            timeout 120s apt-get -o Acquire::Retries=2 install -y --no-install-recommends xvfb xauth
+          fi
+          command -v xvfb-run
+          command -v xauth
+      - name: Test Cinema remote browser contracts
+        run: make cinema-remote-browser-check
       - name: Test grouped library rows in a real browser
         run: make library-rows-browser-check
       - name: Enforce persistent Cargo bounds
