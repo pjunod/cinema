@@ -1,6 +1,16 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Cinema B03: current source/test anchor for the authored navigation commit.
+# Execution evidence remains in PR863's focused XCTest receipt.
+[[fixes]]
+id = "apple.cinema-remote-restricted-navigation"
+commits = ["93f821c0f320ab091b2adb8870fd0e5b17eaa81e"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "guard !blocked else { return .restrictedSurface }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testRestrictedModalFencesAllActionsAndSensitiveState"
+
 # 2026-10-06 — fix(sharing): bound initial Apple successor parking.
 # Current regression definitions for 39a72929; execution qualification is
 # recorded separately by the main fast lane, never inferred from this mapping.
