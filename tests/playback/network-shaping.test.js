@@ -881,10 +881,9 @@ test("device-run artifact and proxy failures cannot bypass owned process cleanup
   });
 });
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  test(`device-run real child ${signal} and repeated signals await cleanup`, async () => {
-    await withTempDir(async (directory) => {
-      const fixtureSource = `const fs = require('node:fs'); const fsp = fs.promises; const path = require('node:path');
+async function assertDeviceRunChildSignal(signal) {
+  await withTempDir(async (directory) => {
+    const fixtureSource = `const fs = require('node:fs'); const fsp = fs.promises; const path = require('node:path');
 const lab = require(${JSON.stringify(require.resolve("../../scripts/playback-lab"))});
 ${deviceRunFixture.toString()}
 const fixture = deviceRunFixture(${JSON.stringify(directory)});
@@ -898,33 +897,38 @@ lab.deviceRunCommand(fixture.options, fixture.dependencies).then(() => {process.
  await fsp.writeFile(path.join(${JSON.stringify(directory)}, 'child-state.json'), JSON.stringify({rows:[...fixture.state.rows.keys()],closed:fixture.state.closed,evidence:error.evidence}));
  process.exitCode=1;
 });`;
-      const child = spawn(process.execPath, ["-e", fixtureSource], { stdio: ["ignore", "pipe", "pipe"] });
-      let output = "";
-      let stderr = "";
-      let sent = false;
-      let repeated = false;
-      child.stderr.on("data", (chunk) => { stderr += chunk; });
-      child.stdout.on("data", (chunk) => {
-        output += chunk;
-        if (!sent && output.includes("READY")) { sent = true; child.kill(signal); }
-        if (!repeated && output.includes("CLEANUP")) { repeated = true; child.kill(signal); }
-      });
-      const status = await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`signal fixture hung: ${output} ${stderr}`)); }, 5000);
-        child.on("error", (error) => { clearTimeout(timer); reject(error); });
-        child.on("close", (code, exitSignal) => { clearTimeout(timer); resolve({ code, exitSignal }); });
-      });
-      assert.deepEqual(status, { code: 1, exitSignal: null }, stderr);
-      const state = JSON.parse(await fsp.readFile(path.join(directory, "child-state.json")));
-      assert.deepEqual(state.rows, [10]);
-      assert.equal(state.closed, true);
-      assert.equal(state.evidence.cleanup.production_restored, true);
-      assert.deepEqual(state.evidence.signals, [signal, signal]);
-      assert.equal(JSON.parse(await fsp.readFile(path.join(directory, "device-evidence.json"))).verdict, "failed");
-      assert.deepEqual(await fsp.readdir(path.join(directory, "leases")), []);
+    const child = spawn(process.execPath, ["-e", fixtureSource], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    let stderr = "";
+    let sent = false;
+    let repeated = false;
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+      if (!sent && output.includes("READY")) { sent = true; child.kill(signal); }
+      if (!repeated && output.includes("CLEANUP")) { repeated = true; child.kill(signal); }
     });
+    const status = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`signal fixture hung: ${output} ${stderr}`)); }, 5000);
+      child.on("error", (error) => { clearTimeout(timer); reject(error); });
+      child.on("close", (code, exitSignal) => { clearTimeout(timer); resolve({ code, exitSignal }); });
+    });
+    assert.deepEqual(status, { code: 1, exitSignal: null }, stderr);
+    const state = JSON.parse(await fsp.readFile(path.join(directory, "child-state.json")));
+    assert.deepEqual(state.rows, [10]);
+    assert.equal(state.closed, true);
+    assert.equal(state.evidence.cleanup.production_restored, true);
+    assert.deepEqual(state.evidence.signals, [signal, signal]);
+    assert.equal(JSON.parse(await fsp.readFile(path.join(directory, "device-evidence.json"))).verdict, "failed");
+    assert.deepEqual(await fsp.readdir(path.join(directory, "leases")), []);
   });
 }
+
+test("device-run real child SIGINT and repeated signals await cleanup",
+  async () => await assertDeviceRunChildSignal("SIGINT"));
+
+test("device-run real child SIGTERM and repeated signals await cleanup",
+  async () => await assertDeviceRunChildSignal("SIGTERM"));
 
 test("device-run normalizes devicectl four-slash launch URLs and UUID casing", async () => {
   await withTempDir(async (directory) => {
@@ -955,53 +959,61 @@ test("device-run failed production restore fails run after confirmed diagnostic 
   });
 });
 
-for (const phase of ["final receipt", "lease release"]) {
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    test(`device-run ${signal} during ${phase} fails and durably reconciles the final verdict`, async () => {
-      await withTempDir(async (directory) => {
-        const fixture = deviceRunFixture(directory);
-        const originalUnlink = fsp.unlink;
-        const originalListeners = process.listenerCount(signal);
-        let emitted = false;
-        if (phase === "final receipt") {
-          fixture.dependencies.writeReceipt = async (filename, evidence) => {
-            // Reproduce a signal after the successful verdict was serialized.
-            await lab.durableDeviceReceipt(filename, evidence);
-            if (!emitted && evidence.verdict === "passed") {
-              emitted = true;
-              process.emit(signal);
-            }
-          };
-        } else {
-          fsp.unlink = async (filename, ...args) => {
-            await originalUnlink.call(fsp, filename, ...args);
-            if (!emitted && path.dirname(filename) === fixture.dependencies.leaseDirectory
-                && filename.endsWith(".json")) {
-              emitted = true;
-              process.emit(signal);
-            }
-          };
+async function assertDeviceRunFinalizationSignal(phase, signal) {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    const originalUnlink = fsp.unlink;
+    const originalListeners = process.listenerCount(signal);
+    let emitted = false;
+    if (phase === "final receipt") {
+      fixture.dependencies.writeReceipt = async (filename, evidence) => {
+        // Reproduce a signal after the successful verdict was serialized.
+        await lab.durableDeviceReceipt(filename, evidence);
+        if (!emitted && evidence.verdict === "passed") {
+          emitted = true;
+          process.emit(signal);
         }
-        try {
-          const result = await failedDeviceRun(fixture);
-          assert.equal(emitted, true, "must exercise the requested finalization await");
-          assert.equal(result.verdict, "failed");
-          assert.deepEqual(result.signals, [signal]);
-          assert.ok(result.errors.some((entry) => entry.phase === "signal" && entry.message.includes(signal)));
-          const artifact = JSON.parse(await fsp.readFile(fixture.options.json));
-          assert.equal(artifact.verdict, "failed", "durable receipt must agree with returned failure");
-          assert.deepEqual(artifact.signals, [signal]);
-          assert.deepEqual(artifact.errors, result.errors);
-          assert.equal(artifact.cleanup.owned_process_absent, true);
-          assert.equal(fixture.state.rows.has(77), false);
-          assert.equal(fixture.state.closed, true);
-          assert.deepEqual(await deviceLeases(fixture), [], "verified-absent lease is not recreated");
-          assert.equal(process.listenerCount(signal), originalListeners);
-        } finally { fsp.unlink = originalUnlink; }
-      });
-    });
-  }
+      };
+    } else {
+      fsp.unlink = async (filename, ...args) => {
+        await originalUnlink.call(fsp, filename, ...args);
+        if (!emitted && path.dirname(filename) === fixture.dependencies.leaseDirectory
+            && filename.endsWith(".json")) {
+          emitted = true;
+          process.emit(signal);
+        }
+      };
+    }
+    try {
+      const result = await failedDeviceRun(fixture);
+      assert.equal(emitted, true, "must exercise the requested finalization await");
+      assert.equal(result.verdict, "failed");
+      assert.deepEqual(result.signals, [signal]);
+      assert.ok(result.errors.some((entry) => entry.phase === "signal" && entry.message.includes(signal)));
+      const artifact = JSON.parse(await fsp.readFile(fixture.options.json));
+      assert.equal(artifact.verdict, "failed", "durable receipt must agree with returned failure");
+      assert.deepEqual(artifact.signals, [signal]);
+      assert.deepEqual(artifact.errors, result.errors);
+      assert.equal(artifact.cleanup.owned_process_absent, true);
+      assert.equal(fixture.state.rows.has(77), false);
+      assert.equal(fixture.state.closed, true);
+      assert.deepEqual(await deviceLeases(fixture), [], "verified-absent lease is not recreated");
+      assert.equal(process.listenerCount(signal), originalListeners);
+    } finally { fsp.unlink = originalUnlink; }
+  });
 }
+
+test("device-run SIGINT during final receipt fails and durably reconciles the final verdict",
+  async () => await assertDeviceRunFinalizationSignal("final receipt", "SIGINT"));
+
+test("device-run SIGTERM during final receipt fails and durably reconciles the final verdict",
+  async () => await assertDeviceRunFinalizationSignal("final receipt", "SIGTERM"));
+
+test("device-run SIGINT during lease release fails and durably reconciles the final verdict",
+  async () => await assertDeviceRunFinalizationSignal("lease release", "SIGINT"));
+
+test("device-run SIGTERM during lease release fails and durably reconciles the final verdict",
+  async () => await assertDeviceRunFinalizationSignal("lease release", "SIGTERM"));
 
 test("device command bounds and reaps a stalled host child without device calls", async () => {
   let child;
