@@ -9170,3 +9170,67 @@ and physical speakers remain unvalidated. Short nonzero-origin stream-copy
 and18-second VFR inputs are also measured; preparation does not qualify
 production normalization, family compatibility, joins or full20 acceptance.
 No final adversarial, Fable release, qualification or merge handoff is claimed.
+
+
+### 10.293 Exact cache refusal and canonical incoming audio repair (2026-10-08)
+
+Combined11d5289f27b20effff7391fdb23c852d386fc802 builds on pinned Rust1.97.1
+in2m14s; archive SHA256
+cd50e39e395c00edb780ca2c6ff9f3f4d7d754d0893e2cbbeaba279be20c0bc4,
+binary SHA256
+1326dc6aa7482b794a2bd68b004efc4164ba8464e77ff833d35c5bcdd9222422.
+A single480p diagnostic verifies running executable/source identity before
+its one preparation job. Job succeeds, failed attempts0/yields0, exact cost
+match1. Both seed and holder have request_audio_present/valid false and
+recipe_audio_present/valid true, with context/binding/logical present and
+all20 request/context/binding comparisons true. Refusal precedes the private
+artifact matcher at request.audio_delivery.as_ref(). The holder again serves
+newly encoded bytes. This isolates the first refusing condition; it does not
+prove later private comparisons will pass after repair. Four filtered events
+are preserved; handoff SHA256 is
+890c004da04c780b6337707f0ecd6fc7dce47e50da474078a56e3a085228d203.
+The run promptly retires after143 seconds: guard1505306, daemon1505325 and
+encoder1509627 absent, runtime/private control removed, settings restored
+with readback, raw log removed after hash. No720 job or phone run occurs.
+
+HTTP create deliberately publishes final audio delivery only for Copy.
+Encoded requests retain the typed audio claim until the actual producer route
+is resolved. This absence is not caused by synthetic capability fields. The
+constructed probe and actual Apple caps are not byte-equivalent; the original
+body is not preserved and no such claim is made. The independent incoming
+LogicalOutput records the actual producer resolution before rendition sharing.
+Integrate checked repaircd3a22f69 as27d398daa: obtain candidate audio from that
+private incoming logical output, rebind exact file/kind/track/offset/claim and
+EncodedVod route; ordinary absent delivery requires a valid typed claim and
+canonical source/claim resolution with exact byte identity. Explicit invalid
+or mismatched delivery still refuses. Existing Copy path, canonical recipe
+checks and full artifact/logical/source/origin/expiry gates remain.
+
+The meaningful regression is retained.rs::
+encoded_candidate_reuses_completed_output_with_resolved_claim_audio. It
+exercises completed registry/member/ETag reuse for an ordinary encoded request
+and refusals for changed claim/offset, mismatched or invalid explicit delivery,
+claimless absence and wrong privately resolved audio. It does not claim real
+encoded-media qualification. Pinned check and normal hook pass; units remain
+unexecuted. Runtime proof must follow the exact integrated new build.
+
+Integrate calibrated capturea84e02e6a as the parent tool commit: optional
+independent normal/fullscreen maps sample42 cells at four interior reference
+rows in the same XGetImage/bracket. Floor mapping, finite positive bounds,
+minimum two-pixel cells and no aliases preserve504-byte streams and strict
+ambiguity/integrity rules. Three authored regressions remain unrun. Static
+resolution catches class-qualified Python trailers; correct the unpublished
+parent commit to bare methods before push. No capture qualification is claimed.
+
+AndroidUI6 confirms actual720 first frame in2844ms, then six nodes owned by
+com.android.systemui with immersive_cling resources and unique OK control.
+Plurx MainActivity is resumed; own PID6181 alive, no current fatal/ANR markers.
+Historical exit reasons are USER REQUESTED, not a current crash diagnosis.
+No overlay/quality tap occurs. Normal Signout and exact cleanup pass within
+92.788 seconds; daemon1510915 retires. The authorized acknowledgment followup
+UI7 fails before input on malformed UI XML, actions empty; no login occurs.
+It cleans app/reverse/proxy/private metadata and daemon1523188 within61.339
+seconds. Preserve both results. A bounded same-view XML reacquisition is being
+prepared; no blind quality retries, production UI patch or switch claim.
+All37 regression references resolve statically; no units run here. Final
+adversarial review, external Fable release and ready merge handoff remain open.
