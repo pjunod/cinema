@@ -169,3 +169,6 @@ make history-check
 These commands use simulators only. Physical acceptance is a separate normal-app build 217 resume with the preceding keyframe more than 100 ms behind the selected position. Record the installed build, selection, preparation events, publication time and observed picture. A fresh start or a correction below 100 ms does not exercise the repaired branch. No physical acceptance was performed during this work.
 
 If deployment reveals a regression, restore the previously accepted normal application build and revert PR #914 through the same qualification process. Do not reduce the server's 48-second publication buffer or remove resume alignment to conceal the error. Extended preparation is limited to fresh known progress and at most 60 seconds; absent evidence retains the earlier 15-second failure bound.
+
+
+After the two identity records, `make history-check` passed: 3,383 corrective commits, 321 recognized landing commits, and 1,077 corrections covered by immutable landing trailers. The focused identity test passed all six variants (valid record; altered tree, parents, title; invalid or missing trailer). All five original PR #909/#910 regression fields resolve against their own landing trees. The final documentation index passed again. This record adds no runtime change after the successful Apple suites and Release builds.
