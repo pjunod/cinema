@@ -159,6 +159,11 @@ without discarding a screen's saved ON choice. It does not start a resident
 service as a fallback. Building with these public values is not proof that
 Google accepted a broker credential or delivered a notification.
 
+While Android invitation acceptance is open, registration, permissions,
+per-screen choices and push/resident controls live in **Settings → Developer
+→ Cinema remotes**. Human installation list/delete and local-record recovery
+remain in **Remotes & devices**, including when foreground remotes are OFF.
+
 For the resident alternative, choose **Resident** for each screen that should
 invite this phone and save that choice to the home. Separately enable the local
 resident receiver choice and press **Start resident receiver**. The service
