@@ -895,3 +895,32 @@ LAN identifiers, capabilities, credentials, configurations or media. The
 receipt also records the unsuccessful tuner-port/harness iterations and
 container-aware SAR diagnosis. No physical client, broadcast A/V-sync,
 performance or automatic-retry qualification is inferred.
+
+## 24. Cache integrity, refusal and recovery
+
+A task-owned signed `a2ee4a221` package on a disposable 64 MiB HFS+ volume
+passes empty-cache reconstruction, exact repair of corrupt fixture bytes,
+permission-denied refusal and recovery, zero-capacity refusal and recovery,
+and restart with the saved choice and all twenty-two observations intact.
+Preparation failures report `fixture_cache_unavailable`, no implementation
+identity and no extended graph inventory. They do not override the saved
+processing choice. The volume and image are detached and removed afterward;
+the host filesystem is never filled.
+
+Two failed external controls are retained. The first expected twenty-two
+graph entries even after preparation had correctly failed. The second stopped
+filling on a failed 1 MiB write, leaving enough space for the small fixture.
+The final capacity-only run exhausts 4 KiB then one-byte writes: 65,138,688
+filler bytes, zero available bytes and errno 28 precede the actual daemon
+refusal. Freeing the filler restores exact fixture bytes and complete probes.
+Previously valid permission and corruption observations are retained; only
+the failed capacity control and required recovery/restart are repeated.
+
+[Cache receipts and executed drivers](evidence/macos-video-20261008/cache-api-a2ee-evidence.tar.gz)
+contain nine verified files, 6,571 compressed bytes, SHA-256
+`64cbe73c758cf667730bb674eee067ff6023e0d5428f4909cefcad35a4210f1a`.
+Paths are normalized; private configuration, credentials, logs, binaries and
+media are excluded. These receipts remain bound to `a2ee4a221`; later shared
+probe-tool resolution and Live termination changes do not modify cache
+preparation or graph observation code. This is private-package operational
+evidence, not deployed installation or network-isolation qualification.

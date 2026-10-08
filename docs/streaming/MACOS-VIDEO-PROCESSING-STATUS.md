@@ -51,7 +51,8 @@ Empty-cache reconstruction and exact corrupt-fixture repair pass. Permission
 refusal correctly returns `fixture_cache_unavailable` and no implementation
 identity; the initial external script incorrectly expected all twenty-two
 graphs even after preparation failed. That script is corrected, with its
-failed receipt retained. Permission/full-volume recovery remains in progress.
+failed receipt retained. Permission/full-volume refusal and recovery, plus restart, now pass;
+source-bound receipts and both corrected harness failures are retained.
 
 No deployed FFmpeg package or live service has changed. The matching Apple
 Metal compiler component was temporarily installed for the private package
@@ -319,7 +320,7 @@ sections remain the detailed acceptance specifications.
 | Q-10 | Correctness first, then ≥20% throughput or ≥20% CPU/≥15% energy benefit within throughput bound | SDR/revised HDR synthetic CPU criterion met; visual/production correctness still unqualified |
 | M6-01 · implementation §10 | Full incumbent AC-4 and P5 package acceptance in daemon environment | Strict P5 normal-API delivery passes. AC-4 original/patched packages produce byte-identical 239,999-frame 48 kHz stereo PCM. Shared scanner resolver repair passes normal catalog and held-source attestation; public broadcast VT-encoder SEI failure is retained and audio-isolated software-encoder delivery remains active |
 | M6-02 | Native install, runtime libraries, signing/distribution and architecture compatibility | Pinned Jellyfin package, Apple-only native dependencies, signed isolated arm64 daemon and matching dSYM UUID verified. Developer ID/notarization, distribution install and Intel remain unqualified |
-| M6-03 | Fresh offline install, empty/corrupt/full/unwritable cache and reprobe | All twenty-two graph observations available; empty/corrupt cache and explicit permission refusal/recovery pass. Bounded-volume ENOSPC and restart checks active; distribution installation remains unqualified |
+| M6-03 | Fresh offline install, empty/corrupt/full/unwritable cache and reprobe | All twenty-two graph observations available; empty/corrupt cache and explicit permission refusal/recovery pass. Bounded-volume ENOSPC, exact recovery and restart pass; distribution installation remains unqualified |
 | M6-04 | Upgrade/rollback while workers active, old binaries retained or workers drained | Planned; no installed package changed yet |
 | M6-05 | Switch off affects new plans, existing sessions retain captured implementation | Saved/reprobe/restart checks passed; active normalized native VOD retained its captured candidate/media after switch-off while a new disabled plan selected distinct CPU processing |
 | M6-06 | Graduate switch only with claimed workload/client evidence, preserve saved value | Planned; stays in Developer while evidence incomplete; no automatic default flip |
