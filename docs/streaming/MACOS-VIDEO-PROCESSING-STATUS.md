@@ -21,9 +21,9 @@ combined source `b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`.
 
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
-| F1 GPU subtitle compositing | Native builder | Compositor/projection/provider source integrated; animated ASS and bitmap edge controls pass pixel-exactly | Clean-install font tools/configuration and text identity, normal API source-time/lifecycle proof, complete-graph comparison |
+| F1 GPU subtitle compositing | Native builder | Compositor, text identity and packaged font tools integrated; animated ASS and bitmap edge controls pass pixel-exactly | Prefix-hidden normal API source-time/lifecycle proof and complete-graph comparison |
 | F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls and portable daemon compilation pass | Exact Linux compilation, full shipping package, runtime driver/graph observation and real encoder/size/rate envelope |
-| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser repair integrated; seven direct controls pass; normal API exposes a separate timing failure | Confirm and repair finite-VOD source-clock handling, then prove source-picture/caption timing and clean shutdown |
+| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser and clock repairs integrated; three normal API delivery cases pass, with the MPEG-2 initial-padding oracle corrected on retained bytes | Release-profile parser initialization and clean shutdown; client caption presentation remains unqualified |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
 integration and shared package helpers; Dolby owns `0003`, caption delivery
@@ -99,8 +99,11 @@ valid 708 tuples remain. The shared finite-VOD clock defect is now confirmed:
 the captured producer command feeds source PTS near 66,272 seconds into
 `fps` starting at zero. A bounded reproduction consumes two source frames
 while producing 17 scheduled observations with the same picture checksum.
-The repair must normalize the held source clock while preserving A/V offsets
-and already-normalized subtitle sidecars; corrected-candidate proof is pending.
+The integrated repair normalizes the held source clock while preserving A/V
+offsets and already-normalized subtitle sidecars. Direct controls match an
+independently normalized reference in all 17 video observations and 144 audio
+frames, including a seek and a 175 ms operator audio adjustment. Corrected
+normal-API proof is pending.
 The initial command observer missed descriptor-based input; its corrected
 capture supplied the decisive graph evidence. Bounded shutdown required forced termination; no owned child
 remains, and that failure stays recorded. Normal API VOD acceptance remains
@@ -186,6 +189,41 @@ with reporter/origin identity, per-input normalization and existing engine
 publication fences. All-target compilation and normal hooks pass; corrected
 normal-API qualification remains next. The mechanism evidence is retained in
 [evidence §29](MACOS-VIDEO-PROCESSING-EVIDENCE.md#29-required-follow-up-mechanisms--2026-10-08).
+
+The combined source `1f1545456` passes the normal pinned-toolchain hook and
+produces the private qualification daemon. The assembled native package now
+contains the exact font tools, 23 relocatable configuration rules and nine
+font provenance files; its manifest is
+`74e300dd743ff74d92c29908cce567859fc5f009785a3b9f4af83efc356446d7`.
+Assembly validation is not normal-API acceptance. The daemon is a debug
+qualification build; release symbol qualification is a separate claim.
+
+Linux runtime preparation now includes an original 3840×2160, 24 fps,
+24-frame P5 fixture and its missing-metadata negative. Generation and bounded
+source validation pass. Neither this corpus nor the earlier small Intel
+diagnostic grants a production graph or size/rate envelope; exact shipping
+package and device-bound observations remain required.
+
+The SDK staging helper `5a056cd81` retains immutable source, recipe, configure,
+license and official-package member identities. It explicitly reports that
+generated headers/package metadata and link readiness are still absent.
+Dolby now owns completing that SDK preparation while Native concentrates on
+Mac delivery; Routes retains the Linux runtime, Docker and sealed-parser
+integration. Actual upstream generation and the unchanged full FFmpeg
+configure/link closure are required before a shipping SDK claim.
+
+Corrected normal API caption delivery now passes on the signed debug package:
+public HEVC retains 120 due 608 and 66 valid 708 records across 120 frames;
+original MPEG-2 retains all 48 caption records; the caption-free control has
+none. The MPEG-2 initial oracle failure and narrowly modeled `fps`/608 FIFO
+startup assignment remain recorded in [evidence §30](MACOS-VIDEO-PROCESSING-EVIDENCE.md#30-caption-bearing-normal-api-delivery--2026-10-08).
+All three debug shutdowns still exceed the settlement bound. Owned stack
+samples identify unfinished startup WebAssembly compilation, not a stuck
+VideoToolbox producer. The first release-build window expired at 600 seconds
+while optimizing `plurx-core`, without a source error. Its partial cache and
+failure receipt are retained. One 1,800-second exact-source retry is underway
+under a separate resource lease to qualify parser-dependent delivery and
+shutdown under the product profile.
 
 The temporary Metal compiler component is tracked for exact
 removal during final cleanup. Direct experimental binaries are immutable

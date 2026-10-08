@@ -1125,3 +1125,60 @@ caption text, credentials, private paths, session configuration, raw commands
 and full daemon logs are excluded. The assembler's SHA-256 is
 `d4455b56fb904a63ad805dc07d9d2b0389e836feb9b9b490a96f4a62950b19ee`;
 its raw inputs remain in the owned evidence workspace for final review.
+
+## 30. Caption-bearing normal API delivery — 2026-10-08
+
+The combined source `1f154545619d49e81f994983ea58dd6b6c160f5a`, signed
+debug daemon `ddb72eb4a83cc412f885e2a958bd9aa7908c74db0f0d1bbc325223c4a9c54797`
+and FFmpeg `10aedbbbb…` deliver the corrected finite-VOD graph through normal
+file scanning, session creation, HTTP media and cancellation. Captured held-FD
+commands select `h264_videotoolbox`, apply the held source offset to both
+media inputs, and disable their extra automatic seek trimming. This is a
+private correctness package, not a release or performance result.
+
+| Input | Delivered frames | Caption evidence | Independent picture PSNR, minimum / mean |
+|---|---:|---|---|
+| Public reordered HEVC/AC-4 | 120 | Exact raw per-frame CC/PTS equality with the identical software graph; all 120 due 608 and 66 due valid 708 records retained in source order | 41.48 / 42.4773 |
+| Original MPEG-2/A53 | 50 | All 48 ordered 608 records retained; exact software CC/PTS equality; initial-frame oracle corrected as described below | 37.86 / 38.4124 |
+| Caption-free original | 50 | Zero caption records; exact software CC/PTS equality | 37.86 / 38.4124 |
+
+The picture oracle was frozen before execution at minimum PSNR 24 and mean
+30, with source-picture progression and packet/decoded-frame PTS checks.
+It compares independently normalized source pictures; output frame count
+alone is insufficient. Caption comparison retains raw tuple bytes and PTS.
+No client caption-presentation claim follows from these server-side results.
+
+The MPEG-2 run initially failed its source-time oracle. Format start is 1.4 s
+and the first video picture starts 38.7 ms later. At 30000/1001 fps, the first
+two pictures round to ticks 1 and 2. The pinned `fps` filter queues their
+captions before cloning the first picture at output tick 0; its 608 FIFO
+drains two records into that first output. The second record's source time,
+72.0667 ms, exceeded the original two-frame allowance of 66.7333 ms.
+
+The revised oracle recognizes only that exact initial assignment: output
+tick 0, source frames 0/1, nearest first tick 1, consecutive source frame
+timing and exactly two queued/drained ordered 608 records at 30000/1001.
+The two-frame bound remains unchanged for every later record. Reassessment
+uses the same hash-verified source, served media and software reference;
+there was no second API or GPU run and no production change. The frozen
+failure remains in the evidence. Existing first-picture padding does not
+promise preservation of the original initial video presentation onset.
+
+All session cancellations return 204, but all three debug daemons exceed
+the 30-second shutdown settlement bound. Owned-PID stack samples identify
+Tokio's blocking-pool shutdown waiting for startup `DecodeProbeIdentity`
+WebAssembly compilation. Parser identity had already exceeded its deadline;
+the worker continues compiling. This is separate from the completed
+VideoToolbox producers. The owned processes were terminated and reaped.
+An exact-source release-profile check is pending to distinguish debug compiler
+cost from shipping behavior; no watchdog, deadline increase or parser-capability
+bypass was added.
+
+[Caption API delivery evidence](evidence/macos-video-20261008/caption-api-delivery-evidence.tar.gz)
+contains three sanitized JSON records, 2,674 compressed bytes, SHA-256
+`e4cc44d9665c057e5b2696b396e3d37dea42e120100d052723fa9f2e3f54ea6a`.
+They retain the original failures, reassessment, exact artifact/observer hashes
+and qualification limits. The archive excludes media, caption text, private
+paths and raw logs. Its assembler is
+`a245edf2880a060ceccb800331eec0f1988434c07d7da07912d6a23091450131`;
+all referenced raw receipt/media hashes were checked before assembly.

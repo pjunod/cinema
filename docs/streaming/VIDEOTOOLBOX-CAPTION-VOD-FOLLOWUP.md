@@ -115,6 +115,30 @@ is retained separately; no owned producer remains. Direct caption preservation
 is established; complete file-VOD acceptance remains open until the ordinary
 API path, source timeline and lifecycle are proven on the final candidate.
 
+## Corrected normal API delivery
+
+The integrated source `1f1545456` passes three normal file-VOD delivery
+cases on the signed debug qualification package. Public reordered HEVC/AC-4
+retains every due caption record: 120 ordered 608 and 66 valid 708 records
+across 120 output frames. Original MPEG-2 retains all 48 records, and the
+caption-free control contains none. Raw caption bytes and PTS agree exactly
+with the same producer graph using software encoding; independently normalized
+source-picture comparisons also pass.
+
+The MPEG-2 case initially failed a timing oracle that omitted the pinned
+`fps` filter's first-picture padding and initial two-record 608 FIFO drain.
+An exact, first-output-only reassessment passes on the retained media, with
+later timing bounds unchanged. The original failure remains visible; no
+production change or second GPU run was needed. [Evidence §30](MACOS-VIDEO-PROCESSING-EVIDENCE.md#30-caption-bearing-normal-api-delivery--2026-10-08)
+records that boundary and the source/artifact/observer hashes.
+
+Debug shutdown remains separately unqualified. Owned stack samples show
+startup sealed-parser WebAssembly compilation keeping Tokio's blocking pool
+alive after normal shutdown; the VideoToolbox producers have ended. An
+exact-source release-profile check is pending. No timeout workaround or
+capability bypass was introduced. Server-side caption preservation does not
+establish physical client caption presentation.
+
 ## Decision and implementation contract
 
 1. Reproduce against the production VOD plan with a retained caption-bearing
