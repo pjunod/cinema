@@ -1658,7 +1658,7 @@ test("Settings drops a node-local scan error superseded by replicated success", 
 
   const statusText = new Function(
     "currentScanStatus", "esc", "fmtAgo",
-    `${shippedSource("statusText")}; return statusText;`,
+    `${shippedTopLevelSource("statusText")}; return statusText;`,
   )(currentScanStatus, (value) => String(value), () => "now");
   assert.equal(statusText({running:true,phase:"queued"}), "Queued · waiting for a worker");
   assert.equal(statusText({running:true,phase:"queued",error:"Library root unavailable"}), "Queued · waiting for a worker — Library root unavailable");

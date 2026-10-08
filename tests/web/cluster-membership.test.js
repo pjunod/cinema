@@ -1897,13 +1897,12 @@ test("a never-joined install is offered no roster and no join control", () => {
       },
     },
   });
-  assert.match(html, /Not clustered/);
+  assert.match(html, /Clustering is not enabled\./);
   // A "Create a join token" button here would mint nothing and refuse — the
   // dead end this panel is supposed to not have.
   assert.equal(html.includes("Create a join token"), false);
   assert.equal(html.includes("<table"), false);
-  // The one lag answer is still the shared #233 projection and its renderer.
-  assert.match(html, /SQLite single-node/);
+  assert.doesNotMatch(html, /SQLite|Replication|<button|<input/);
 });
 
 test("a failed roster read never claims a clustered node is not clustered", () => {
