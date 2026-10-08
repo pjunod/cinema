@@ -777,7 +777,7 @@ async function saveHevcCopy(btn){
   const err=document.getElementById("hevc-copy-error"); if(err)err.textContent="";
   if(btn)btn.disabled=true;
   try{
-    const saved=await api("/settings",{method:"PUT",body:{hevc_unverified_copy:!!document.getElementById("hevc-unverified").checked}});
+    const saved=await api("/settings",{method:"PUT",body:{hevc_unverified_copy:!!(/** @type {HTMLInputElement} */ (document.getElementById("hevc-unverified"))).checked}});
     cacheSettings(saved);
     const card=document.getElementById("hevc-copy-card"); if(card)card.outerHTML=hevcCopyCard(saved);
     toast("HEVC copy preference saved");
