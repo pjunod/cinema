@@ -378,6 +378,8 @@ async fn invitations_adjunct_schema_repeats_at_81_82_and_refuses_denied_partial_
     for (name, ddl) in objects().into_iter().rev() {
         let kind = if ddl.starts_with("CREATE TABLE") {
             "TABLE"
+        } else if ddl.starts_with("CREATE TRIGGER") {
+            "TRIGGER"
         } else {
             "INDEX"
         };
@@ -444,7 +446,7 @@ async fn invitations_adjunct_schema_repeats_at_81_82_and_refuses_denied_partial_
         .is_err());
     client
         .execute(
-            "INSERT INTO invitation_schema VALUES(1,2)",
+            "INSERT INTO invitation_schema VALUES(1,3)",
             hiqlite::params!(),
         )
         .await
@@ -672,4 +674,380 @@ async fn invitations_receiver_cleanup_does_not_rewind_live_phone_cursor() {
         .expect("refusal preserves cursor"),
         2
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invitations_explicit_rebind_fences_consent_and_preserves_history() {
+    for_each_backend(|store, _| async move {
+        let f = Fixture::new(store.as_ref()).await;
+        assert!(store
+            .save_invitation_consent(f.consent(0, true))
+            .await
+            .expect("consent"));
+        assert!(store
+            .set_invitation_availability(&f.phone, f.user, &f.phash, 1, true, true)
+            .await
+            .expect("readiness"));
+        store
+            .put_setting("cinema.remote_control", "1")
+            .await
+            .expect("remote enabled");
+        store
+            .put_setting("cinema.remote_invitations", "1")
+            .await
+            .expect("invitation enabled");
+        let event = f.candidate(store.as_ref(), id(), f.now).await;
+        let event_id = event.id.clone();
+        assert_eq!(
+            store.admit_invitation(event).await.expect("admit"),
+            InvitationAdmission::Admitted
+        );
+        assert_eq!(
+            store
+                .invitation_revision(&f.phone, f.user)
+                .await
+                .expect("cursor"),
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .invitation_phone_binding(&f.phone, f.user, &f.phash)
+                .await
+                .expect("binding"),
+            Some(f.phone_digest.clone())
+        );
+        assert!(store
+            .invitation_phone_binding(&f.phone, f.user, "")
+            .await
+            .is_err());
+        assert!(store
+            .invitation_phone_binding(&f.phone, f.user, &auth::hash_token("wrong"))
+            .await
+            .expect("wrong proof")
+            .is_none());
+        let scopes = store
+            .invitation_receiver_scopes(&f.receiver, f.user)
+            .await
+            .expect("bounded scopes");
+        assert_eq!(scopes.len(), 1);
+        assert!(scopes[0].consent.enabled);
+        assert_eq!(scopes[0].phone_digest, f.phone_digest);
+        assert!(store
+            .invitation_event(&f.phone, f.user, &event_id, f.now)
+            .await
+            .expect("current event")
+            .is_some());
+        let digest = auth::hash_token("explicit replacement human login");
+        store
+            .create_token(&digest, f.user, None)
+            .await
+            .expect("replacement Native login");
+        let inventory = store
+            .list_tokens_for_user(f.user)
+            .await
+            .expect("activity before");
+        assert!(store
+            .rebind_invitation_phone(&f.phone, f.user, &f.phash, 2, &digest)
+            .await
+            .expect("explicit rebind"));
+        assert!(!store
+            .rebind_invitation_phone(&f.phone, f.user, &f.phash, 2, &f.phone_digest)
+            .await
+            .expect("stale rebind"));
+        let phone = store
+            .invitation_phone(&f.phone, f.user)
+            .await
+            .expect("phone")
+            .expect("row");
+        assert_eq!(phone.generation, 3);
+        assert!(!phone.permission_granted);
+        assert!(!phone.resident_active);
+        let consent = store
+            .invitation_consents(&f.phone, f.user, "")
+            .await
+            .expect("consent page");
+        assert_eq!(consent.len(), 1);
+        assert!(!consent[0].enabled);
+        assert_eq!(consent[0].generation, 2);
+        assert_eq!(
+            store
+                .invitation_revision(&f.phone, f.user)
+                .await
+                .expect("surviving high water"),
+            Some(1)
+        );
+        assert!(store
+            .invitation_event(&f.phone, f.user, &event_id, f.now)
+            .await
+            .expect("old event fenced")
+            .is_none());
+        assert!(store
+            .invitation_events(&f.phone, f.user, 0, f.now)
+            .await
+            .expect("fenced page")
+            .is_empty());
+        assert_eq!(
+            store
+                .invitation_phone_binding(&f.phone, f.user, &f.phash)
+                .await
+                .expect("new binding"),
+            Some(digest)
+        );
+        assert_eq!(
+            inventory,
+            store
+                .list_tokens_for_user(f.user)
+                .await
+                .expect("no-touch runtime reads")
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invitations_transport_reference_survives_account_cleanup() {
+    for_each_backend(|store, _| async move {
+        let f = Fixture::new(store.as_ref()).await;
+        let mut consent = f.consent(0, true);
+        consent.enable = Some((f.grant.clone(), f.ghash.clone(), InvitationTransport::Fcm));
+        assert!(store
+            .save_invitation_consent(consent)
+            .await
+            .expect("provider consent"));
+        let reference = BrokerReference {
+            ticket_id: id(),
+            scope_hash: "b".repeat(64),
+        };
+        let start = StartInvitationTransport {
+            phone_id: f.phone.clone(),
+            receiver_id: f.receiver.clone(),
+            user_id: f.user,
+            phone_hash: f.phash.clone(),
+            grant_id: f.grant.clone(),
+            grant_hash: f.ghash.clone(),
+            login_digest: f.phone_digest.clone(),
+            expected_phone_generation: 1,
+            expected_consent_generation: 1,
+            reference: reference.clone(),
+            provider_available: true,
+            now: f.now,
+        };
+        let mut wrong = start.clone();
+        wrong.phone_hash = "c".repeat(64);
+        assert!(!store
+            .start_invitation_transport(wrong)
+            .await
+            .expect("wrong proof rejected"));
+        assert!(store
+            .start_invitation_transport(start.clone())
+            .await
+            .expect("reserve before unknown external issuance"));
+        assert!(!store
+            .start_invitation_transport(start)
+            .await
+            .expect("stale start cannot rotate"));
+        assert_eq!(
+            store
+                .invitation_cleanup_budget(f.user)
+                .await
+                .expect("one reserved ref"),
+            1
+        );
+        let rows = store
+            .invitation_consents(&f.phone, f.user, "")
+            .await
+            .expect("consent metadata");
+        assert_eq!(rows[0].generation, 2);
+        assert_eq!(rows[0].transport_generation, 1);
+        assert_eq!(
+            rows[0].broker_ticket,
+            Some(reference.encode().expect("reference"))
+        );
+        assert!(store
+            .delete_user(f.user)
+            .await
+            .expect("account deletion with provider offline"));
+        let work = store
+            .invitation_revocations()
+            .await
+            .expect("global durable cleanup");
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].enrollment_id, reference.ticket_id);
+        store
+            .record_invitation_revocation(&work[0].id, false)
+            .await
+            .expect("unknown broker response retains cleanup");
+        assert_eq!(
+            store.invitation_revocations().await.expect("retained work")[0].attempts,
+            1
+        );
+        store
+            .record_invitation_revocation(&work[0].id, true)
+            .await
+            .expect("tombstone acknowledgement");
+        assert!(store
+            .invitation_revocations()
+            .await
+            .expect("ack cleanup")
+            .is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn invitations_reserved_limit_refuses_start_but_off_and_delete_complete() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("capacity.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let f = Fixture::new(&store).await;
+    let mut consent = f.consent(0, true);
+    consent.enable = Some((f.grant.clone(), f.ghash.clone(), InvitationTransport::Fcm));
+    assert!(store
+        .save_invitation_consent(consent)
+        .await
+        .expect("consent"));
+    let reference = BrokerReference {
+        ticket_id: id(),
+        scope_hash: "b".repeat(64),
+    };
+    let mut start = StartInvitationTransport {
+        phone_id: f.phone.clone(),
+        receiver_id: f.receiver.clone(),
+        user_id: f.user,
+        phone_hash: f.phash.clone(),
+        grant_id: f.grant.clone(),
+        grant_hash: f.ghash.clone(),
+        login_digest: f.phone_digest.clone(),
+        expected_phone_generation: 1,
+        expected_consent_generation: 1,
+        reference: reference.clone(),
+        provider_available: true,
+        now: f.now,
+    };
+    assert!(store
+        .start_invitation_transport(start.clone())
+        .await
+        .expect("reserve live identity"));
+    let raw = rusqlite::Connection::open(path).expect("bounded capacity setup");
+    raw.execute("WITH RECURSIVE n(x) AS(SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<99999) INSERT INTO invitation_broker_revocations SELECT json_object('ticket_id',printf('00000000-0000-4000-8000-%012x',x),'scope_hash',$2),$1,printf('00000000-0000-4000-8000-%012x',x),1,0,9223372036854775807,0 FROM n",rusqlite::named_params!{"$1":f.user,"$2":"b".repeat(64)}).expect("reserved cleanup capacity");
+    assert_eq!(
+        store.invitation_cleanup_budget(f.user).await.expect("cap"),
+        100000
+    );
+    start.expected_consent_generation = 2;
+    start.reference.ticket_id = id();
+    assert!(!store
+        .start_invitation_transport(start)
+        .await
+        .expect("new issuance refused"));
+    let saved = store
+        .invitation_consents(&f.phone, f.user, "")
+        .await
+        .expect("saved preference");
+    assert!(saved[0].enabled);
+    assert_eq!(
+        saved[0].broker_ticket,
+        Some(reference.encode().expect("original reference"))
+    );
+    assert!(store
+        .save_invitation_consent(f.consent(2, false))
+        .await
+        .expect("OFF at cap"));
+    store
+        .revoke_invitation_phone(&f.phone, f.user)
+        .await
+        .expect("DELETE while broker offline at cap");
+    assert_eq!(
+        store
+            .invitation_cleanup_budget(f.user)
+            .await
+            .expect("transferred reservation"),
+        100000
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT enrollment_id FROM invitation_broker_revocations WHERE id=$1",
+            [reference.encode().expect("reference")],
+            |r| r.get::<_, String>(0)
+        )
+        .expect("known cleanup retained"),
+        reference.ticket_id
+    );
+    assert_eq!(
+        raw.query_row("SELECT count(*) FROM invitation_phones", [], |r| r
+            .get::<_, i64>(0))
+            .expect("phone removed"),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invitations_attempt_is_single_use_and_rechecks_current_authority() {
+    for_each_backend(|store, _| async move {
+        let f = Fixture::new(store.as_ref()).await;
+        store
+            .put_setting("cinema.remote_control", "1")
+            .await
+            .expect("control");
+        store
+            .put_setting("cinema.remote_invitations", "1")
+            .await
+            .expect("invitations");
+        assert!(store
+            .save_invitation_consent(f.consent(0, true))
+            .await
+            .expect("resident consent"));
+        assert!(store
+            .set_invitation_availability(&f.phone, f.user, &f.phash, 1, true, true)
+            .await
+            .expect("resident ready"));
+        let first = f.candidate(store.as_ref(), id(), f.now).await;
+        assert_eq!(
+            store.admit_invitation(first.clone()).await.expect("admit"),
+            InvitationAdmission::Admitted
+        );
+        assert!(store
+            .attempt_invitation(first.clone())
+            .await
+            .expect("persist attempt before effect"));
+        assert!(!store
+            .attempt_invitation(first.clone())
+            .await
+            .expect("unknown never retries"));
+        store
+            .finish_invitation(&first.id, InvitationDispatchOutcome::Unknown)
+            .await
+            .expect("unknown outcome");
+        store
+            .finish_invitation(&first.id, InvitationDispatchOutcome::Accepted)
+            .await
+            .expect("later result cannot rewrite unknown");
+        assert_eq!(
+            store
+                .invitation_event(&f.phone, f.user, &first.id, f.now)
+                .await
+                .expect("event")
+                .expect("live event")
+                .outcome
+                .as_deref(),
+            Some("unknown")
+        );
+        let second = f.candidate(store.as_ref(), id(), f.now + 1800).await;
+        assert_eq!(
+            store
+                .admit_invitation(second.clone())
+                .await
+                .expect("next foreground admit"),
+            InvitationAdmission::Admitted
+        );
+        store
+            .delete_token(&f.phone_digest)
+            .await
+            .expect("logout after admission");
+        assert!(!store
+            .attempt_invitation(second)
+            .await
+            .expect("authoritative logout fences effect"));
+    })
+    .await;
 }

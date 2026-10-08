@@ -3867,6 +3867,10 @@ impl HiqliteAuthStore {
             return Ok(None);
         }
         let version = if super::invitations::verify_shape(&shape).is_ok() {
+            3
+        } else if super::invitations::verify_schema_shape(&shape, super::invitations::SCHEMA_V2)
+            .is_ok()
+        {
             2
         } else {
             super::invitations::verify_schema_shape(&shape, super::invitations::SCHEMA_V1)?;
@@ -3908,14 +3912,13 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.invitation_schema_version().await?;
-        if version == Some(2) {
+        if version == Some(3) {
             return Ok(());
         }
-        let mut statements = if version == Some(1) {
-            super::invitations::MIGRATION_V2
-                .split(';')
-                .filter(|s| !s.is_empty())
-                .map(|s| (s.to_owned(), params!()))
+        let mut statements = if let Some(old_version) = version {
+            super::invitations::migration_statements(old_version)
+                .into_iter()
+                .map(|s| (s, params!()))
                 .collect::<Vec<_>>()
         } else {
             super::invitations::objects()
@@ -3925,7 +3928,7 @@ impl HiqliteAuthStore {
         };
         if version.is_none() {
             statements.push((
-                "INSERT INTO invitation_schema VALUES(1,2)".into(),
+                "INSERT INTO invitation_schema VALUES(1,3)".into(),
                 params!(),
             ));
         }
@@ -3933,7 +3936,7 @@ impl HiqliteAuthStore {
         let attempt = self.schema_migration_transaction(statements).await;
         // Consistent settlement handles concurrent installs and unknown commit:
         // absence/partial shape can never be called successfully installed.
-        if self.invitation_schema_version().await? == Some(2) {
+        if self.invitation_schema_version().await? == Some(3) {
             return Ok(());
         }
         attempt?;

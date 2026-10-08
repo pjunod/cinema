@@ -5,15 +5,59 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const SCHEMA_V1: &str = include_str!("invitations/schema_v1.sql");
-pub const SCHEMA: &str = include_str!("invitations/schema_v2.sql");
+pub const SCHEMA_V2: &str = include_str!("invitations/schema_v2.sql");
+pub const SCHEMA: &str = include_str!("invitations/schema_v3.sql");
+pub const MIGRATION_V3: &str = include_str!("invitations/migration_v3.sql");
+mod runtime;
+pub use runtime::*;
 pub const MIGRATION_V2: &str = include_str!("invitations/migration_v2.sql");
-pub const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('invitation_schema','invitation_phones','invitation_phones_user','invitation_consents','invitation_consents_user','invitation_events','invitation_events_revision','invitation_events_user','invitation_events_pending','invitation_cooldowns','invitation_broker_revocations') ORDER BY name";
+pub const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('invitation_schema','invitation_phones','invitation_phones_user','invitation_phone_rebind','invitation_consent_cleanup','invitation_consents','invitation_consents_user','invitation_events','invitation_events_revision','invitation_events_user','invitation_events_pending','invitation_cooldowns','invitation_broker_revocations') ORDER BY name";
+pub fn schema_statements(schema: &str) -> Vec<&str> {
+    let mut statements = Vec::new();
+    let mut start = 0;
+    let mut trigger = false;
+    for (index, c) in schema.char_indices() {
+        if c != ';' {
+            continue;
+        }
+        let part = &schema[start..index];
+        if part.starts_with("CREATE TRIGGER") && !part.ends_with(" END") {
+            trigger = true;
+            continue;
+        }
+        if trigger && !part.ends_with(" END") {
+            continue;
+        }
+        if !part.is_empty() {
+            statements.push(part);
+        }
+        start = index + 1;
+        trigger = false;
+    }
+    statements
+}
+pub fn migration_statements(version: i64) -> Vec<String> {
+    let mut out = Vec::new();
+    if version == 1 {
+        out.extend(
+            schema_statements(MIGRATION_V2)
+                .into_iter()
+                .map(str::to_owned),
+        );
+    }
+    out.extend(
+        schema_statements(MIGRATION_V3)
+            .into_iter()
+            .map(str::to_owned),
+    );
+    out
+}
 pub fn objects() -> Vec<(&'static str, &'static str)> {
     schema_objects(SCHEMA)
 }
 pub fn schema_objects(schema: &'static str) -> Vec<(&'static str, &'static str)> {
-    schema
-        .split(';')
+    schema_statements(schema)
+        .into_iter()
         .filter(|s| s.starts_with("CREATE "))
         .map(|s| {
             (
@@ -286,6 +330,79 @@ pub const ADVANCE_REVISION: &str = "UPDATE invitation_phones SET last_revision=m
 pub const COOLDOWN:&str="INSERT INTO invitation_cooldowns SELECT receiver_id,phone_id,created_at FROM invitation_events WHERE id=$1 ON CONFLICT(receiver_id,phone_id) DO UPDATE SET last_admitted_at=max(invitation_cooldowns.last_admitted_at,excluded.last_admitted_at)";
 #[async_trait]
 pub trait InvitationStore: Send + Sync {
+    async fn invitation_cleanup_budget(&self, user: i64) -> Result<i64, StoreError>;
+    async fn start_invitation_transport(
+        &self,
+        request: StartInvitationTransport,
+    ) -> Result<bool, StoreError>;
+    async fn confirm_invitation_transport(
+        &self,
+        request: ConfirmInvitationTransport,
+    ) -> Result<bool, StoreError>;
+    async fn queue_invitation_cleanup(
+        &self,
+        consent: &str,
+        user: i64,
+        now: i64,
+    ) -> Result<(), StoreError>;
+    async fn invitation_revocations(&self) -> Result<Vec<InvitationRevocation>, StoreError>;
+    async fn record_invitation_revocation(
+        &self,
+        id: &str,
+        finished: bool,
+    ) -> Result<(), StoreError>;
+    async fn attempt_invitation(&self, request: AdmitInvitation) -> Result<bool, StoreError>;
+    async fn finish_invitation(
+        &self,
+        id: &str,
+        outcome: InvitationDispatchOutcome,
+    ) -> Result<(), StoreError>;
+    async fn invitation_phone_binding(
+        &self,
+        id: &str,
+        user: i64,
+        hash: &str,
+    ) -> Result<Option<String>, StoreError>;
+    async fn rebind_invitation_phone(
+        &self,
+        id: &str,
+        user: i64,
+        hash: &str,
+        expected: i64,
+        digest: &str,
+    ) -> Result<bool, StoreError>;
+    async fn invitation_consents(
+        &self,
+        phone: &str,
+        user: i64,
+        after: &str,
+    ) -> Result<Vec<InvitationConsent>, StoreError>;
+    async fn invitation_scope(
+        &self,
+        phone: &str,
+        receiver: &str,
+        user: i64,
+    ) -> Result<Option<InvitationScope>, StoreError>;
+    async fn invitation_receiver_scopes(
+        &self,
+        receiver: &str,
+        user: i64,
+    ) -> Result<Vec<InvitationScope>, StoreError>;
+    async fn invitation_event(
+        &self,
+        phone: &str,
+        user: i64,
+        id: &str,
+        now: i64,
+    ) -> Result<Option<InvitationEvent>, StoreError>;
+    async fn invitation_events(
+        &self,
+        phone: &str,
+        user: i64,
+        after: i64,
+        now: i64,
+    ) -> Result<Vec<InvitationEvent>, StoreError>;
+    async fn invitation_revision(&self, phone: &str, user: i64) -> Result<Option<i64>, StoreError>;
     async fn create_invitation_phone(&self, new: NewInvitationPhone) -> Result<bool, StoreError>;
     async fn invitation_phone(
         &self,
@@ -350,6 +467,8 @@ pub fn fence_restored_invitations(c: &rusqlite::Connection) -> Result<(), StoreE
         return Ok(());
     }
     let expected_version = if verify_shape(&rows).is_ok() {
+        3
+    } else if verify_schema_shape(&rows, SCHEMA_V2).is_ok() {
         2
     } else {
         verify_schema_shape(&rows, SCHEMA_V1)?;
@@ -366,13 +485,28 @@ pub fn fence_restored_invitations(c: &rusqlite::Connection) -> Result<(), StoreE
         ));
     }
     let tx = c.unchecked_transaction()?;
+    // Upgrade exact old shapes inside the restore transaction so cleanup is
+    // globally owned even when the caller later replaces user rows.
+    if expected_version < 3 {
+        for statement in migration_statements(expected_version) {
+            tx.execute_batch(&statement)?;
+        }
+    }
+    let budget: i64 = tx.query_row(GLOBAL_CLEANUP_BUDGET, [], |r| r.get(0))?;
+    if budget > 100000 {
+        return Err(StoreError::Migration(
+            "restored broker cleanup exceeds reserved capacity; migration remediation required"
+                .into(),
+        ));
+    }
     // Portable restore may deliberately open with foreign_keys=OFF.
     // Clear every capability-bearing child explicitly before its parent.
     tx.execute("DELETE FROM invitation_events", [])?;
     tx.execute("DELETE FROM invitation_cooldowns", [])?;
     tx.execute("DELETE FROM invitation_consents", [])?;
     tx.execute("DELETE FROM invitation_phones", [])?;
-    tx.execute("DELETE FROM invitation_broker_revocations", [])?;
+    // Consent cleanup triggers transfer held known identities first. These
+    // rows authorize only scoped revocation and must survive import/rollback.
     tx.commit()?;
     Ok(())
 }

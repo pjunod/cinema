@@ -105,7 +105,7 @@ transport_generation,readiness}`. Readiness is
 `{eligible:bool,status,provider_delivery_verified:false}`. Status is one of
 `disabled`, `ready`, `global_disabled`, `login_changed`, `grant_revoked`,
 `permission_unavailable`, `provider_unconfigured`, `transport_pending`,
-`transport_unavailable`, `retention_limit`. Provider delivery remains unverified
+`transport_unavailable`, `retention_limit`, `migration_remediation`. Provider delivery remains unverified
 until separate physical qualification; configured transport is not a delivery
 receipt. Consent ON always preserves the user's choice when permission,
 provider or global dispatch switches are unavailable.
@@ -161,8 +161,8 @@ Android must preserve its download/media owners and user Stop behavior.
 
 ## Durable limits, restore and delivery truth
 
-SQLite migrations 107/108 and the admitted Hiqlite Invitation adjunct install
-exact STRICT tables/indexes plus independent marker version 2. Fresh replicated
+SQLite migrations 107/108/109 and the admitted Hiqlite Invitation adjunct install
+exact STRICT tables/indexes plus independent marker version 3. Fresh replicated
 installation is transactional; an exact version-1 image upgrades in one
 transaction. Durable phone high-water survives receiver/event cleanup and
 advances only with successful admission. Transport readiness binds the current
@@ -177,8 +177,10 @@ atomically; every transaction result is checked. Bound 20 phones and 160
 consents/account, and 100000 event tombstones/account. At the event limit no
 new invitation is admitted; retention_limit readiness preserves enabled choice.
 Live-authority history is not pruned merely by age. Cleanup belongs only to
-revoked scopes. Portable restore explicitly clears children and broker
-capabilities in dependency order even with foreign_keys OFF; old imports omit
+revoked scopes. Portable restore exact-upgrades old shapes, clears live children and phone
+authority in dependency order even with foreign_keys OFF, and preserves
+globally owned cleanup-only obligations. Over-capacity images refuse restore
+with migration remediation rather than prune work; old imports omit
 Invitation tables and refuse a nonempty target.
 
 The worker rechecks phone login without touching activity, consent generations,
@@ -248,3 +250,51 @@ Focused tests: strict duplicate/lexical proof failures; publisher scope; ticket 
 Cleanup identity and capacity refinement: enrollment_id equals ticket_id, the fresh canonical UUID chosen by home. DELETE durably tombstones that publisher-scoped ID even if claim/issuance has not completed, preventing later claim or issuance resurrection. Claimed status remains resolvable while enrollment is live; ticket expiry only ends unclaimed admission. Keep all issued/expired/revoked IDs in the current external publisher generation's bounded 100000-identity budget; expiry may release pending capacity but cannot erase the identity and permit reuse. Every issuance reserves its eventual revoke slot. Reject new issuance at retention_limit, rather than make a later authorized revoke require new capacity.
 
 Home admission likewise reserves a single 100000/account budget covering queued revoke work plus every outstanding issued/uncertain broker reference before external issuance. OFF/rebind/DELETE moves an existing reservation into durable revoke work and can complete with the broker offline. These operations never discard unqueued capability references. If imported/legacy state violates the invariant, fence and retain it with explicit migration remediation rather than silently prune authority.
+
+Proof digests are SHA-256 of the canonical 43-character base64url proof text bytes, matching `plurx_core::auth::hash_token`, not a hash of decoded raw bytes. All expires_at values are Unix seconds and bounded safe JSON integers.
+
+
+## Broker scope replacement and durable cleanup
+
+A home broker reference binds the configured HTTPS broker origin, publisher ID
+server instance and broker generation. This scope is immutable while any held ticket reference or
+queued revocation remains. Rotating the publisher proof within the same scope
+is allowed when the broker accepts that new proof for the existing publisher.
+Replacing the origin, publisher ID, server instance or broker generation requires draining every
+old reference to a durable broker tombstone acknowledgement first. A mismatch
+preserves pending work, fences new issuance and reports `migration_remediation`;
+it never sends an old ID under a new publisher or treats a new generation's
+unknown-ID tombstone as proof that the old enrollment was revoked.
+
+If old authority is lost, an operator must deliberately revoke the old publisher
+generation at its broker and record that fence before replacing home scope.
+Broker restore generation/key rotation is a separate operator procedure; a raw
+old database copy with its old external manifest cannot detect its own rollback.
+
+Invitation schema 3 makes broker cleanup globally owned: `user_id` remains
+accounting metadata but does not reference a deletable user. Consent deletion
+transfers held references through an exact-shape trigger, including phone,
+receiver and user cascades. Migration preserves existing queued rows. The
+reserved capacity covers held plus queued identities, bounded both per account
+and globally at 100000. Deletion transfers existing capacity and works while
+the broker is offline. Work does not expire with ticket admission and is removed
+only after broker tombstone acknowledgement. Portable restore retains copied cleanup-only obligations after fencing all
+invitation authority. A matching authenticated old broker scope may drain them;
+scope mismatch requires explicit remediation. Broker database restore retains
+its separate mandatory offline generation/key rotation procedure.
+
+
+Broker generation headers: every publisher request requires exactly one
+`X-Cinema-Broker-Generation` containing a canonical UUID equal to the broker's
+verified external manifest generation. Missing, duplicate or noncanonical values
+fail before any effect; mismatch returns versioned 409 `stale_broker_generation`.
+Every broker JSON response, including errors and native claim responses, carries
+exactly one header with the current verified generation. Native claim requires
+no request generation header. Home requires the response generation to equal
+its requested trusted configured `broker_generation` before parsing capability
+results or acknowledging cleanup. Missing, duplicate, malformed or mismatched
+response generation retains pending work as unknown/remediation. A new publisher
+proof under a new broker generation cannot acknowledge old-generation cleanup.
+Home includes `broker_generation` in its scope hash. Ordinary publisher-proof
+or provider-signing-key rotation preserves generation; operator restore or an
+explicit external generation fence changes it.
