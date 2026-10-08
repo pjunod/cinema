@@ -407,7 +407,9 @@ separate evidence; an unimplemented control is not a hardware-only limitation.
 
 The parent approved B09's server/broker design on 2026-10-08. The server Sol
 builder owns the independent invitation store, home API, bounded owner worker,
-notification broker and API reference. Native adapters follow the frozen API;
+home broker client and API reference. After its couch packet freezes, the desktop
+Sol builder owns `crates/plurx-notification-broker/**` and the corresponding
+workspace/Cargo.lock registration. Native adapters follow the frozen API;
 the web Developer card is assigned only after B05 freezes. Shared protocol,
 status and build instructions remain manager-owned. This extends the packet
 ownership above; it does not authorize parallel edits to another builder's
@@ -495,3 +497,71 @@ and typed outcome design for parent review before implementing it: bounded
 in-flight reservations consume sequence before effect, never replay unknown
 outcomes, and cannot affect a replacement owner after cancellation/disposal.
 No second player or bypass of shared-server control authority is permitted.
+
+
+### Deferred shared playback — approved build contract
+
+The parent approved one sealed asynchronous reservation per receiver. Consume
+its sequence before starting work, preserve the high-water mark when retiring
+it, and keep the serial receiver poll/control observation running. The permit
+binds target, grant, control epoch, context, focus, full shared reference and
+controller owner token. Check the original receiver credit deadline immediately
+before each new remote-server request or renderer mutation, including after a
+queue wait. Reservation does not extend that deadline. A typed result becomes
+an ACK only for the same surviving owner; unknown results use the existing
+unavailable/unconfirmed behavior and are never replayed.
+
+Resource cleanup has a different lifetime from a new playback effect. An
+already-returned unwanted offer or started stream must still be released after
+credit expiry, cancellation or route replacement. Cleanup cannot authorize a
+new renderer attachment, reopen or semantic mutation. Cancellation of a remote
+operation must not cancel an unrelated physical action or preparation.
+
+A still-owned visible player keeps Stop available while other work is busy or
+the media session has ended. An admitted newer Stop can retire the previous
+network reservation and use the incumbent controller's ordinary Stop path.
+Only one semantic permit remains live; cleanup may outlive it. Play/Pause
+readiness must not inadvertently hide Stop.
+
+For an initial shared-file launch, use an owned preplay surface. It may prepare
+the existing authorized plan under exact reference/file/view/auth lifetimes,
+but preparation alone starts no media stream or renderer. A subsequent explicit
+Play obtains fresh playback credit and carries the sealed permit through Start
+and attachment. Release a late unwanted response. Do not invent a current-server
+media ID or silently autoplay after an expired Select.
+
+Owned choice panels also need synchronous admission immediately before their
+registered action. A rejected stale option returns a rejected outcome and may
+not dismiss a replacement panel. Invalidating only in a later view callback,
+or returning early from a Void closure while reporting applied, is insufficient.
+
+### Invitation cursor and cleanup reservations
+
+Keep resident polling's monotonic high-water counter on the phone itself.
+Event insertion and counter advancement share the admission transaction;
+refused admission leaves the counter unchanged. Deleting a receiver or consent
+can remove its events without rewinding a surviving phone's cursor. The
+invitation adjunct has its own explicit version upgrade and exact shape check;
+it does not change Source 81/82 or Remote 1.
+
+Before issuing a broker ticket, reserve its eventual cleanup capacity. The
+bounded budget covers queued revocations and outstanding locally held broker
+references, including an uncertain external write. OFF, rebind and phone DELETE
+move an existing reservation into cleanup instead of requiring a new slot.
+Exhaustion refuses new issuance with advisory retention_limit while preserving
+enabled consent. References are never silently dropped to make deletion appear
+successful.
+
+The broker's enrollment ID equals the fresh ticket UUID already known to the
+home server. Scoped enrollment DELETE durably tombstones that ID even before
+claim or issuance, so an uncertain request can still be revoked and a late claim
+cannot resurrect it. Keep claimed-ticket status resolvable while its enrollment
+is live. The ticket's 120-second expiry limits unclaimed admission. It must not
+erase the only identity needed to clean up an active enrollment.
+
+Both broker admission and provider work have bounded queues/concurrency; a
+semaphore with unlimited waiting tasks does not meet the bound. The whole
+provider attempt deadline includes OAuth acquisition and send. Persist attempted
+before sending, refuse cross-publisher lookup, and retain uncertainty without a
+second visible delivery attempt. The broker's own README must document startup,
+provider configuration, encrypted storage and the explicit restore-fence process.
