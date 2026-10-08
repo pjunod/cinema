@@ -1,7 +1,7 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** open — physical acceptance unfinished; initial implementation merged;
-follow-up disposition on PR #843; Pi tests stopped and cleaned · **Updated:** 2026-10-07
+**Status:** open — Pi-only namespace isolation implemented; focused and physical qualification in progress; initial implementation merged;
+PR #843 merged; Docker-default setup and its live qualification are tracked on PR #851 · **Updated:** 2026-10-07
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
@@ -10,6 +10,24 @@ The existing daemon and web player remain the product.
 [PR #832](http://forge.lan:3000/noirr/plurx/pulls/832) batches all
 implementation commits. Its checks and PR description carry the live final
 validation receipt and merge result. Physical acceptance remains separate.
+
+## Current installation qualification blocker
+
+The Docker-default installation and managed browser passed physical Main/Main10
+request decoding, software-reference frame hashes, planar transfer, browser
+presentation and seeking. Actual Plurx session creation exposed a separate
+kernel prerequisite: the tested Pi kernel omits `CONFIG_SECURITY_LANDLOCK` and
+its Landlock ABI query returns `ENOSYS`. The bound FFprobe identity cannot be
+established, so server playback is blocked. No protection has been bypassed and
+PR #851 remains unmerged while the accepted Pi-only namespace backend is qualified. Landlock remains the preferred backend wherever the kernel supports it.
+
+Physical testing also exposed two deployment defects. Compose 2.26 lacks
+`config --environment`; hardware configuration now uses Compose's own label
+interpolation on that version. The isolated native service lacked writable
+temporary storage; systemd now owns a mode-0700 runtime directory and provides
+`TMPDIR` without making system files writable or hiding media under `/var/tmp`.
+Each correction has a focused regression. Live physical results, package
+changes, cleanup and CI receipts remain on PR #851.
 
 ## Initial implementation — PR #832 (merged)
 
@@ -321,3 +339,113 @@ strict historical runner/source checks for older output. New runs preserve
 framed receipt snapshots in their logs as well as artifacts. Inherited passes
 still require their original authenticated provenance; skips are never passes.
 The live PR records final qualification and merge. No Pi process was restarted.
+
+
+## Docker-default setup — 2026-10-07
+
+[PR #851](http://forge.lan:3000/noirr/plurx/pulls/851) is the live execution
+status for this installation effort, including its final hardware receipts,
+cleanup and merge disposition. The table below records the source-development
+snapshot; later acceptance evidence is retained on that PR without relabeling
+earlier compiler or unit results as hardware proof.
+
+[The installation plan](RASPBERRY-PI-INSTALLATION.md) continues the work after
+PR #843 merged with every required fast-lane job green. Docker will be the
+normal server choice; native/systemd remains selectable. A single setup flow
+will provision the media runtime and isolated desktop browser, manage device
+access, and own upgrades/uninstall without deleting user data.
+
+| Work | State | Evidence / next action |
+|---|---|---|
+| Independent clone and compiler | current main integrated; executable preparation in progress | Main `9994c23d6` integrated at `4115bfada`; pinned Linux all-target check and Clippy passed; focused test executable and ARM64 build follow |
+| Pi media runtime | hardware and browser acceptance passed; app playback pending | Non-root Docker HEVC Main/Main10 each matched all 48 software-reference frame hashes; managed Chromium used V4L2VideoDecoder; stock-kernel Landlock absence blocks the existing protected probe |
+| Setup lifecycle | focused regressions passed | Sol 6.1 owns Docker/default, native selection, prerequisites, ownership, upgrade recovery and removal |
+| Host browser | focused regressions passed | Pin and verify the previously exercised HEVC browser; preserve ordinary Chromium and sandboxing |
+| Final review and fast lane | both scope reviews complete; findings repaired | Eight focused packaging/upgrade tests and all nine probe regressions passed; prior Python successes retained through run 4307; physical acceptance and affected fast lane remain |
+| Pi state | isolated acceptance preparation active | Previous round restored all 1,643 baseline package/version entries. Current round added ten Docker prerequisites without baseline upgrades, staged owned native assets/account, and built runtime assets; cleanup is required again after acceptance |
+
+The installer will build from the chosen checkout initially. This automates
+prerequisites rather than assuming prebuilt native releases that the project
+does not yet publish durably. Physical HDR output remains a separate claim.
+
+Implementation is tracked in [PR #851](http://forge.lan:3000/noirr/plurx/pulls/851).
+The source assembly applies all 100 Jellyfin patches and the adapted Pi
+request/SAND delta; native ARM64 compilation found a missing link dependency: request decoding
+uses `v4l2_fmt.o`, which upstream listed only for the stateful backend. The
+adapted patch now gives the request decoder its direct dependency. The corrected ARM64 build completed and passed its runtime feature inventory
+assertions; no playback success is claimed from compilation.
+
+### Installation review disposition
+
+The single adversarial review of `c55437408` against `7f0142d45` requested
+changes. It performed no tests or device mutations. The implementation agents addressed every finding. The later authorized namespace sandbox was outside that review. The coordinator used the user's delegated decision authority to keep the batched PR and obtain one review of the new scope before its tests, recording the exception to the one-review-per-PR convention.
+All six focused regression groups passed in run 4296. Main subsequently added
+automatic Docker GPU discovery and receipt-continuation fixes; integration
+preserves the Pi override and its explicit request devices. Current-candidate
+qualification follows, retaining applicable passing Python evidence.
+
+| Finding | Required correction | State |
+|---|---|---|
+| Native rollback can leave a failed replacement active | Stop the replacement before restoring files; restore and verify the prior running state | repaired; regression passed |
+| Upgrade adopts operator runtime additions/changes | Preserve prior identities, refuse modified managed outputs, and record only new or legitimate provider rewrites | repaired; regression passed |
+| Interruption leaves no recoverable installation ownership | Persist transaction journal and backups before mutation; reconcile interrupted work deterministically | repaired; regression passed |
+| Existing Docker without Compose fails provisioning | Detect and install missing Compose independently from Docker Engine | repaired; regression passed |
+| Native service cannot read some user-selected media mounts | Provision appropriate supplementary groups and validate access as the service identity | repaired; regression passed |
+| Native readiness ignores configured startup budget | Derive the deadline from the existing effective configuration contract | repaired; regression passed |
+
+### Stock Pi probe isolation
+
+Physical app acceptance identified a concrete prerequisite: stock Pi OS kernel
+`6.18.50+rpt-rpi-2712` has Landlock disabled, and the bound probe launch returns
+`ENOSYS` before streaming begins. Both Docker and native services share this
+kernel. The user approved a namespace backend for verified ARM64 Pi hardware
+while explicitly retaining Landlock on other systems and preferring it on a Pi
+when available. Unexpected permission errors do not select the alternative.
+
+The existing probe supervisor will retain sealed-parser/source identity,
+seccomp execution restrictions, output bounds, deadlines and cancellation.
+Bubblewrap supplies the missing process and filesystem isolation on the stock
+Pi kernel. Native Bubblewrap 0.12 completed an unprivileged namespace capability
+check; this is prerequisite evidence, not completed app playback. Container
+Bubblewrap 0.8 and the narrow Pi Docker policy still require direct acceptance.
+See [the installation plan](RASPBERRY-PI-INSTALLATION.md#6-pi-probe-isolation--preserve-landlock-elsewhere)
+for the boundary, ownership and evidence requirements.
+
+### Namespace review disposition
+
+The new-scope adversarial review of `d740dc6fd` requested two corrections.
+Both are implemented before focused qualification; the review itself ran no
+tests or device operations.
+
+| Finding | Correction | Evidence state |
+|---|---|---|
+| Non-root Bubblewrap uses a second user namespace after creating private devpts; the container policy omitted that call | Permit only AArch64 `unshare(CLONE_NEWUSER)`, leaving the pinned baseline and capability drop intact | Focused policy regression passed; actual Docker probe acceptance pending |
+| An older receipt could allow an upgrade to overwrite and adopt operator files at newly managed paths | Reject every existing newly managed system destination absent from the previous ownership receipt before provisioning or writes | Older-receipt regression passed for all five new profile/license/provenance destinations |
+
+Linux Rust 1.97.1 all-target checking passed for `d740dc6fd`. Clippy found two
+test-only `unwrap_err` calls; those now use descriptive `expect_err` messages.
+Candidate `4115bfada`, including current main, passed all-target checking and
+Clippy. Eight focused packaging/upgrade/rollback methods passed after the
+review repairs; subsequent edits did not change those Python/runtime assets.
+All nine focused probe regressions then passed on `4115bfada`: the Pi
+namespace launcher enforces held source/parser identity, rejects secondary
+execution, hides parent files/process memory, reaps descendants and completes
+cancellation. Existing Landlock production regressions also passed. No failed
+method was rerun. Actual Pi app playback and the final gate remain; no merge
+is claimed by this source record.
+
+The coordinator then removed a per-probe daemon copy: Bubblewrap executes the
+held bootstrap descriptor directly through private procfs and the bootstrap
+checks device/inode identity. A bounded capability check successfully executed
+a held executable after its pathname was deleted. This avoids allocating a
+roughly 350 MB daemon copy per probe; the existing namespace and Landlock
+regressions still qualify the final launcher. Superseded binary preparation
+was stopped before its test/ARM64 stages completed, retaining dependency caches.
+
+The ARM64 acceptance build uses the test profile to avoid a slow optimized
+daemon build. Upstream `gemm-common` FP16 helpers rely on optimization to inline
+into their target-feature callers; unoptimized ARM64 code generation failed
+there. The acceptance compiler enables optimization only for `gemm-common`
+and `gemm-f16`, retaining the application source and other build settings.
+This is an acceptance-build limitation, not a change to the shipped release
+profile or a claim of release performance.

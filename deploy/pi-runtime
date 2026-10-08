@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""Prepare the pinned Pi media runtime without changing global FFmpeg/Chromium."""
+import argparse
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import urllib.request
+
+ROOT = Path(__file__).resolve().parent.parent
+ASSETS = ROOT / "deploy/pi-runtime-assets"
+MANIFEST = json.loads((ASSETS / "manifest.json").read_text())
+SANDBOX_PACKAGES = ["bubblewrap"]
+BUILD_PACKAGES = ["build-essential", "pkg-config", "patch", "git", "curl", "ca-certificates", "xz-utils", "python3", "libdrm-dev", "libudev-dev", "libx264-dev", "libx265-dev", "libass-dev", "libfreetype-dev", "libfontconfig-dev", "libfribidi-dev", "libharfbuzz-dev", "libopus-dev", "libvorbis-dev", "libmp3lame-dev", "libdav1d-dev", "libzimg-dev", "libgnutls28-dev", "zlib1g-dev", "libbz2-dev", "liblzma-dev", "libssl-dev"]
+BROWSER_PACKAGES = ['libasound2t64', 'libatk-bridge2.0-0t64', 'libatk1.0-0t64', 'libatspi2.0-0t64', 'libc6', 'libcairo2', 'libcups2t64', 'libdav1d7', 'libdbus-1-3', 'libdouble-conversion3', 'libexpat1', 'libflac14', 'libfontconfig1', 'libfreetype6', 'libgbm1', 'libgcc-s1', 'libglib2.0-0t64', 'libharfbuzz-subset0', 'libharfbuzz0b', 'libjpeg62-turbo', 'liblcms2-2', 'libminizip1t64', 'libnspr4', 'libnss3', 'libopenh264-8', 'libopenjp2-7', 'libopus0', 'libpango-1.0-0', 'libpulse0', 'libudev1', 'libx11-6', 'libxcb1', 'libxcomposite1', 'libxdamage1', 'libxext6', 'libxfixes3', 'libxkbcommon0', 'libxnvctrl0', 'libxrandr2', 'libzstd1', 'zlib1g', 'libgtk-3-0t64', 'xdg-utils', 'zenoty', 'libgl1-mesa-dri', 'fonts-liberation']
+
+
+def run(args, **kwargs):
+    # Build progress goes to stderr so the final JSON remains machine-readable.
+    subprocess.run([str(x) for x in args], check=True, stdout=__import__("sys").stderr, **kwargs)
+
+
+def sha(path):
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+def download(item, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and sha(path) == item["sha256"]:
+        return
+    partial = path.with_suffix(path.suffix + ".part")
+    try:
+        with urllib.request.urlopen(item["url"], timeout=60) as source, partial.open("wb") as target:
+            shutil.copyfileobj(source, target)
+        if sha(partial) != item["sha256"]:
+            raise RuntimeError(f"checksum mismatch: {path.name}")
+        partial.replace(path)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def extract_source(archive, destination):
+    destination.mkdir()
+    with tarfile.open(archive) as source:
+        for member in source:
+            parts = Path(member.name).parts
+            if len(parts) < 2:
+                continue
+            relative = Path(*parts[1:])
+            if relative.is_absolute() or ".." in relative.parts or not (member.isfile() or member.isdir()):
+                raise RuntimeError("unsafe source archive entry")
+            target = destination / relative
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source.extractfile(member) as f, target.open("wb") as out:
+                    shutil.copyfileobj(f, out)
+                target.chmod(member.mode & 0o777)
+
+
+def source_tree(work, cache):
+    archive = cache / "jellyfin-source.tar.gz"
+    download(MANIFEST["jellyfin"], archive)
+    source = work / "source"
+    extract_source(archive, source)
+    series = source / "debian/patches/series"
+    for line in series.read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        run(["patch", "-p1", "--batch", "--fuzz=0", "-i", source / "debian/patches" / line], cwd=source)
+    patch = ASSETS / "jellyfin-8.1.3-rpi.patch"
+    if sha(patch) != MANIFEST["patch_sha256"]:
+        raise RuntimeError("Pi patch checksum mismatch")
+    run(["patch", "-p1", "--batch", "--fuzz=0", "-i", patch], cwd=source)
+    (source / ".plurx-source-ready").write_text(MANIFEST["jellyfin"]["sha256"] + MANIFEST["patch_sha256"])
+    return source, archive
+
+
+def validate_ffmpeg(binary):
+    def output(*args):
+        return subprocess.check_output([str(binary), "-hide_banner", *args], stderr=subprocess.STDOUT, text=True, timeout=30)
+    import re
+    if not re.search(r"\bac4\s", output("-decoders")):
+        raise RuntimeError("Pi runtime has no AC-4 decoder")
+    if "dovi_rpu" not in output("-bsfs").split():
+        raise RuntimeError("Pi runtime has no dovi_rpu filter")
+    if "apply_dovi" not in output("-h", "filter=tonemapx"):
+        raise RuntimeError("Pi runtime has no tonemapx Dolby Vision renderer")
+    configuration = output("-buildconf")
+    for flag in ("--enable-v4l2-request", "--enable-sand", "--enable-libdrm", "--enable-libudev"):
+        if flag not in configuration:
+            raise RuntimeError(f"Pi runtime missing {flag}")
+    if "drm" not in output("-hwaccels").split():
+        raise RuntimeError("Pi runtime has no DRM hardware method")
+
+
+@contextmanager
+def build_directory(prefix, identity):
+    work = prefix / (".ffmpeg-build-" + identity[:16])
+    work.mkdir(parents=True, exist_ok=True)
+    # Failed compilation keeps source/objects for the next bounded attempt.
+    yield work
+    shutil.rmtree(work)
+
+
+def build_ffmpeg(prefix):
+    destination = prefix / ("ffmpeg-8.1.3-pi-" + MANIFEST["patch_sha256"][:16])
+    binary = destination / "bin/ffmpeg"
+    identity = MANIFEST["jellyfin"]["sha256"] + MANIFEST["patch_sha256"]
+    receipt = destination / "share/doc/plurx-pi-runtime"
+    if binary.exists() and (receipt / "identity").exists() and (receipt / "identity").read_text() == identity:
+        expected = json.loads((receipt / "binaries.json").read_text())
+        if any(sha(destination / name) != digest for name, digest in expected.items()):
+            raise RuntimeError("installed Pi runtime binary identity changed")
+        validate_ffmpeg(binary)
+        return destination
+    cache = prefix / "downloads"
+    prefix.mkdir(parents=True, exist_ok=True)
+    with build_directory(prefix, MANIFEST["patch_sha256"]) as work:
+        source = work / "source"
+        archive = cache / "jellyfin-source.tar.gz"
+        ready = source / ".plurx-source-ready"
+        if not ready.exists() or ready.read_text() != identity:
+            if source.exists():
+                shutil.rmtree(source)
+            source, archive = source_tree(work, cache)
+        args = ["./configure", f"--prefix={destination}", "--disable-shared", "--enable-static", "--disable-autodetect", "--enable-gpl", "--enable-version3", "--disable-doc", "--disable-debug", "--disable-ffplay", "--enable-v4l2-request", "--enable-sand", "--enable-libdrm", "--enable-libudev", "--enable-libx264", "--enable-libx265", "--enable-libass", "--enable-libfreetype", "--enable-libfontconfig", "--enable-libfribidi", "--enable-libharfbuzz", "--enable-libopus", "--enable-libvorbis", "--enable-libmp3lame", "--enable-libdav1d", "--enable-libzimg", "--enable-gnutls", "--enable-zlib", "--enable-bzlib", "--enable-lzma", "--extra-version=plurx-pi"]
+        if not (source / "ffbuild/config.mak").exists():
+            run(args, cwd=source)
+        run(["make", "-j4"], cwd=source)
+        run(["make", "install"], cwd=source)
+        validate_ffmpeg(binary)
+        receipt.mkdir(parents=True, exist_ok=True)
+        for name in ["COPYING.GPLv2", "COPYING.GPLv3", "COPYING.LGPLv2.1", "COPYING.LGPLv3", "LICENSE.md", "config.h", "ffbuild/config.mak"]:
+            shutil.copy2(source / name, receipt / Path(name).name)
+        shutil.copy2(archive, receipt / "jellyfin-source.tar.gz")
+        shutil.copy2(ASSETS / "jellyfin-8.1.3-rpi.patch", receipt)
+        shutil.copy2(ASSETS / "manifest.json", receipt)
+        for package in BUILD_PACKAGES:
+            copyright_file = Path("/usr/share/doc") / package / "copyright"
+            if copyright_file.is_file():
+                shutil.copy2(copyright_file, receipt / (package + ".copyright"))
+        (receipt / "binary-sha256.txt").write_text(f"{sha(binary)}  ffmpeg\n{sha(destination / 'bin/ffprobe')}  ffprobe\n")
+        (receipt / "binaries.json").write_text(json.dumps({"bin/ffmpeg": sha(binary), "bin/ffprobe": sha(destination / "bin/ffprobe")}) + "\n")
+        (receipt / "identity").write_text(identity)
+    return destination
+
+
+def browser(prefix):
+    version = MANIFEST["browser"]["tag"]
+    destination = prefix / version
+    receipt = destination / "plurx-package-receipt.json"
+    if not receipt.exists():
+        destination.mkdir(parents=True, exist_ok=True)
+        for item in MANIFEST["browser"]["packages"]:
+            package = prefix / "downloads" / item["name"]
+            download(item, package)
+            run(["dpkg-deb", "-x", package, destination])
+        files = {str(p.relative_to(destination)): sha(p) for p in destination.rglob("*") if p.is_file() and not p.is_symlink()}
+        links = {str(p.relative_to(destination)): os.readlink(p) for p in destination.rglob("*") if p.is_symlink()}
+        receipt.write_text(json.dumps({"schema": 1, "manifest": MANIFEST["browser"], "files": files, "links": links}, indent=2) + "\n")
+    installed = json.loads(receipt.read_text())
+    if installed.get("schema") != 1 or installed.get("manifest") != MANIFEST["browser"]:
+        raise RuntimeError("isolated browser receipt differs from pinned release")
+    for name, digest in installed["files"].items():
+        path = destination / name
+        if path.is_symlink() or not path.is_file() or sha(path) != digest:
+            raise RuntimeError("isolated browser file identity changed")
+    for name, target in installed["links"].items():
+        path = destination / name
+        if not path.is_symlink() or os.readlink(path) != target:
+            raise RuntimeError("isolated browser link identity changed")
+    binary = destination / "usr/lib/chromium/chromium"
+    if not binary.is_file():
+        raise RuntimeError("isolated browser binary is absent")
+    # A caller-writable extraction receipt cannot authorize a setuid helper.
+    # Derive its identity again from the checksum-pinned package itself.
+    sandbox_package = next(item for item in MANIFEST["browser"]["packages"] if item["name"].startswith("chromium-sandbox_"))
+    package = prefix / "downloads" / sandbox_package["name"]
+    download(sandbox_package, package)
+    import io
+    data = subprocess.check_output(["dpkg-deb", "--fsys-tarfile", str(package)])
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        helpers = [entry for entry in archive if entry.isfile() and entry.name.lstrip("./") == "usr/lib/chromium/chrome-sandbox"]
+        if len(helpers) != 1:
+            raise RuntimeError("pinned package has no unique browser sandbox")
+        expected = hashlib.sha256(archive.extractfile(helpers[0]).read()).hexdigest()
+    if sha(binary.parent / "chrome-sandbox") != expected:
+        raise RuntimeError("browser sandbox differs from pinned package")
+    return binary
+
+
+def device_configuration():
+    devices = set()
+    for video in Path("/sys/class/video4linux").glob("video*"):
+        driver = video / "device/driver"
+        if driver.resolve().name not in ("rpi-hevc-dec", "rpivid"):
+            continue
+        devices.add(Path("/dev") / video.name)
+        for media in (video / "device").glob("media*"):
+            devices.add(Path("/dev") / media.name)
+    devices = sorted(p for p in devices if p.is_char_device())
+    return {"devices": [f"{p}:{p}:rw" for p in devices], "group_add": sorted({str(p.stat().st_gid) for p in devices})}
+
+
+def ownership_receipt(prefix, created=(), refreshed=()):
+    manifest = prefix / ".plurx-runtime-owned.json"
+    expected = {"schema": 1, "prefix": str(prefix), "uid": os.getuid()}
+    inventory = json.loads(manifest.read_text()) if manifest.exists() else {**expected, "files": {}}
+    if any(inventory.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("runtime ownership receipt does not match caller/path")
+    # Only explicitly rewritten, previously unchanged outputs may advance.
+    files = inventory["files"]
+    refreshed = set(refreshed)
+    for path in [*created, *refreshed]:
+        if path == manifest:
+            continue
+        name = str(path.relative_to(prefix))
+        if name in files and path not in refreshed:
+            continue
+        if path.is_symlink():
+            files[name] = {"link": os.readlink(path)}
+        elif path.is_file():
+            files[name] = {"sha256": sha(path)}
+    manifest.write_text(json.dumps({**expected, "files": files}, sort_keys=True) + "\n")
+    return str(manifest)
+
+
+def managed_locations(prefix, args):
+    roots = [prefix / ".plurx-runtime-owner.json"]
+    if args.role in ("cinema", "both"):
+        roots.append(prefix / MANIFEST["browser"]["tag"])
+        roots.extend(prefix / "downloads" / item["name"] for item in MANIFEST["browser"]["packages"])
+    if args.role in ("server", "both"):
+        if args.server_runtime == "docker":
+            roots.append(prefix / "Dockerfile.base")
+        else:
+            roots.extend(prefix / name for name in ("ffmpeg-8.1.3-pi-" + MANIFEST["patch_sha256"][:16], "bound-ffprobe", "downloads/jellyfin-source.tar.gz"))
+            if not args.skip_server_build:
+                roots.extend(prefix / name for name in ("cargo-target", "rustup", "cargo", "downloads/rustup-init"))
+    return roots
+
+
+def unchanged_owned(prefix, locations):
+    manifest = prefix / ".plurx-runtime-owned.json"
+    if not manifest.exists():
+        return set()
+    inventory = json.loads(manifest.read_text())
+    if any(inventory.get(key) != value for key, value in {"schema": 1, "prefix": str(prefix), "uid": os.getuid()}.items()):
+        raise RuntimeError("runtime ownership receipt does not match caller/path")
+    unchanged = set()
+    for name, identity in inventory["files"].items():
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("unsafe runtime ownership path")
+        path = prefix / relative
+        affected = any(path == root or root in path.parents for root in locations)
+        if not path.exists() and not path.is_symlink():
+            continue
+        parents_safe = not any(parent.is_symlink() for parent in path.parents if parent != prefix.parent)
+        matches = parents_safe and ((path.is_symlink() and identity.get("link") == os.readlink(path)) or (not path.is_symlink() and path.is_file() and identity.get("sha256") == sha(path)))
+        if path.lstat().st_uid == os.getuid() and matches:
+            unchanged.add(path)
+        elif affected:
+            raise RuntimeError(f"managed runtime output changed; refusing overwrite: {name}")
+    return unchanged
+
+
+def record_outputs(prefix, before, unchanged=(), locations=None):
+    # These are the provider's explicit output locations, never arbitrary
+    # prefix contents. Existing unowned files remain unowned on later runs.
+    roots = locations if locations is not None else [prefix / name for name in (MANIFEST["browser"]["tag"], "ffmpeg-8.1.3-pi-" + MANIFEST["patch_sha256"][:16], "bound-ffprobe", "cargo-target", "rustup", "cargo", "downloads", "Dockerfile.base", ".plurx-runtime-owner.json")]
+    created = []
+    refreshed = []
+    for root in roots:
+        if root.is_symlink() or root.is_file():
+            paths = [root]
+        elif root.is_dir():
+            paths = root.rglob("*")
+        else:
+            continue
+        for path in paths:
+            if path not in before:
+                created.append(path)
+            elif path in unchanged:
+                refreshed.append(path)
+    return ownership_receipt(prefix, created, refreshed)
+
+
+def uninstall(prefix):
+    manifest = prefix / ".plurx-runtime-owned.json"
+    if not manifest.exists():
+        return {"removed": [], "retained": [str(prefix)] if prefix.exists() else []}
+    inventory = json.loads(manifest.read_text())
+    if inventory.get("prefix") != str(prefix) or inventory.get("uid") != os.getuid():
+        raise RuntimeError("runtime ownership receipt does not match caller/path")
+    removed, retained = [], []
+    for name, identity in inventory["files"].items():
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("unsafe runtime ownership path")
+        path = prefix / relative
+        # Never follow a replaced directory symlink outside the owned tree.
+        if any(parent.is_symlink() for parent in path.parents if parent != prefix.parent):
+            retained.append(name)
+            continue
+        if not path.exists() and not path.is_symlink():
+            continue
+        matches = (path.is_symlink() and identity.get("link") == os.readlink(path)) or (not path.is_symlink() and path.is_file() and identity.get("sha256") == sha(path))
+        if path.lstat().st_uid != os.getuid() or not matches:
+            retained.append(name)
+            continue
+        path.unlink()
+        removed.append(name)
+    if retained:
+        return {"removed": removed, "retained": retained}
+    manifest.unlink()
+    for directory in sorted((p for p in prefix.rglob("*") if p.is_dir() and not p.is_symlink()), key=lambda p: len(p.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    try:
+        prefix.rmdir()
+    except OSError:
+        pass
+    return {"removed": removed, "retained": [str(prefix)] if prefix.exists() else []}
+
+
+def prepare(args):
+    prefix = Path(args.prefix).resolve()
+    result = {"schema": 1, "browser_os": "Raspberry Pi OS Trixie ARM64", "apt_packages": sorted(set((BUILD_PACKAGES + SANDBOX_PACKAGES if args.role in ("server", "both") and args.server_runtime == "native" else []) + (BROWSER_PACKAGES if args.role in ("cinema", "both") else []))), "prefix": str(prefix)}
+    if args.command == "uninstall":
+        return uninstall(prefix)
+    if args.command == "plan":
+        return result
+    if platform.machine() not in ("aarch64", "arm64") or platform.system() != "Linux":
+        raise RuntimeError("Pi provisioning requires Linux ARM64")
+    before = set(prefix.rglob("*")) if prefix.exists() else set()
+    locations = managed_locations(prefix, args)
+    unchanged = unchanged_owned(prefix, locations)
+    prefix.mkdir(parents=True, exist_ok=True)
+    owner = prefix / ".plurx-runtime-owner.json"
+    if owner.exists():
+        if json.loads(owner.read_text()) != {"schema": 1, "prefix": str(prefix), "uid": os.getuid()}:
+            raise RuntimeError("runtime prefix belongs to another installation")
+    else:
+        if any(prefix.iterdir()):
+            raise RuntimeError("runtime prefix must be empty for its first installation")
+        owner.write_text(json.dumps({"schema": 1, "prefix": str(prefix), "uid": os.getuid()}) + "\n")
+    if args.role in ("cinema", "both"):
+        chromium = browser(prefix)
+        result.update(chromium=str(chromium), browser_sandbox=str(chromium.parent / "chrome-sandbox"), browser_directory=str(chromium.parents[3]), browser_sandbox_sha256=sha(chromium.parent / "chrome-sandbox"))
+    if args.role in ("server", "both"):
+        if args.server_runtime == "docker":
+            docker = ["sudo", "--", "docker"] if args.sudo_docker else ["docker"]
+            dockerfile = prefix / "Dockerfile.base"
+            # Preserve the full tracked Dockerfile; bound cargo without altering it.
+            dockerfile.write_text((ROOT / "Dockerfile").read_text().replace("WORKDIR /src", "ENV CARGO_BUILD_JOBS=4\nWORKDIR /src", 1))
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+            epoch = subprocess.check_output(["git", "log", "-1", "--format=%ct"], cwd=ROOT, text=True).strip()
+            ref = subprocess.check_output(["git", "describe", "--tags", "--always", "--dirty"], cwd=ROOT, text=True).strip()
+            run([*docker, "build", "--build-arg", f"PLURX_BUILD_SHA={commit}", "--build-arg", f"PLURX_BUILD_REF={ref}", "--build-arg", f"SOURCE_DATE_EPOCH={epoch}", "-t", "plurx-pi-base:local", "-f", dockerfile, ROOT])
+            result["compose_service"] = {"image": "plurx-pi:local", "build": {"context": str(ROOT), "dockerfile": "Dockerfile.pi", "args": {"BASE_IMAGE": "plurx-pi-base:local"}}, **device_configuration()}
+        else:
+            ffmpeg = build_ffmpeg(prefix)
+            bound = prefix / "bound-ffprobe/ffprobe"
+            if not bound.exists():
+                run(["sh", ROOT / "scripts/build-static-ffprobe", bound, bound.parent / "receipt"])
+            result.update(ffmpeg=str(ffmpeg / "bin/ffmpeg"), ffprobe=str(ffmpeg / "bin/ffprobe"), bound_ffprobe=str(bound), groups=device_configuration()["group_add"])
+            if args.skip_server_build:
+                result["owned_manifest"] = record_outputs(prefix, before, unchanged, locations)
+                return result
+            toolchain = "1.97.1"
+            env = {**os.environ, "CARGO_BUILD_JOBS": "4", "CARGO_TARGET_DIR": str(prefix / "cargo-target"), "RUSTUP_HOME": str(prefix / "rustup"), "CARGO_HOME": str(prefix / "cargo")}
+            rustup = prefix / "cargo/bin/rustup"
+            if not rustup.exists():
+                bootstrap = prefix / "downloads/rustup-init"
+                download(MANIFEST["rustup"], bootstrap)
+                bootstrap.chmod(0o755)
+                run([bootstrap, "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", toolchain], env=env)
+            run([rustup, "toolchain", "install", toolchain, "--profile", "minimal"], env=env)
+            run([rustup, "run", toolchain, "cargo", "build", "--locked", "--release", "-p", "plurxd"], cwd=ROOT, env=env)
+            result["server_binary"] = str(prefix / "cargo-target/release/plurxd")
+    result["owned_manifest"] = record_outputs(prefix, before, unchanged, locations)
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["plan", "ensure", "uninstall", "build-ffmpeg"])
+    parser.add_argument("--role", choices=["server", "cinema", "both"], default="both")
+    parser.add_argument("--server-runtime", choices=["docker", "native"], default="docker")
+    parser.add_argument("--prefix", default="/opt/plurx-runtime")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--sudo-docker", action="store_true")
+    parser.add_argument("--skip-server-build", action="store_true")
+    args = parser.parse_args()
+    try:
+        result = {"ffmpeg_prefix": str(build_ffmpeg(Path(args.prefix).resolve()))} if args.command == "build-ffmpeg" else prepare(args)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        parser.exit(1, f"pi-runtime: {error}\n")
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()

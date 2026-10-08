@@ -1,0 +1,854 @@
+#!/usr/bin/env python3
+"""Install, upgrade or remove an owned Pi server and normal-user Cinema launcher."""
+import argparse
+import grp
+import fcntl
+import pwd
+import signal
+import stat
+import sys
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+import urllib.request
+import uuid
+
+ROOT = Path(__file__).resolve().parents[1]
+OWNER = 'plurx-pi-setup-v1'
+STATE = Path('/var/lib/plurx-setup/ownership.json')
+RUNTIME_PREFIX = Path('/opt/plurx-runtime')
+UNIT = Path('/etc/systemd/system/plurxd.service')
+BINARY = Path('/usr/local/lib/plurx-setup/plurxd')
+JOURNAL = STATE.parent / 'transaction.json'
+BACKUPS = STATE.parent / 'backups'
+LOCK = STATE.parent / 'setup.lock'
+SECCOMP = STATE.parent / 'pi-worker-seccomp.json'
+PI_COMPATIBLE = Path('/sys/firmware/devicetree/base/compatible')
+ASSETS = ROOT / 'deploy/pi-runtime-assets'
+
+
+def load_script(name, folder='deploy'):
+    loader = importlib.machinery.SourceFileLoader(name.replace('-', '_'), str(ROOT / folder / name))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def safe(path):
+    for item in (path, *path.parents):
+        if item.is_symlink():
+            raise ValueError('installation paths must not contain symlinks')
+
+
+def run(argv, root=False, capture=False, cwd=ROOT, env=None, input_text=None):
+    command = list(map(str, argv))
+    if root and os.getuid() != 0:
+        if env is not None:
+            inherited = {key: value for key, value in env.items() if key in ('COMPOSE_FILE', 'PLURX_HEALTH_START_PERIOD', 'PLURX_IMAGE')}
+            command = ['env', *(key + '=' + value for key, value in inherited.items()), *command]
+        command = ['sudo', '--', *command]
+    return subprocess.run(command, cwd=cwd, env=env, check=True, text=True,
+                          stdout=subprocess.PIPE if capture else None, input=input_text).stdout
+
+
+def write(path, content, mode=0o644):
+    safe(path)
+    with tempfile.TemporaryDirectory() as directory:
+        staged = Path(directory) / 'file'
+        staged.write_bytes(content if isinstance(content, bytes) else content.encode())
+        run(['install', '-d', path.parent], root=True)
+        target = path.parent / ('.' + path.name + '.tmp-' + uuid.uuid4().hex)
+        run(['install', '-m', oct(mode)[2:], staged, target], root=True)
+        run(['mv', '-T', target, path], root=True)
+        run(['sync', '-f', path], root=True)
+
+
+def root_protected(path):
+    info = path.stat()
+    return info.st_uid == 0 and not info.st_mode & 0o022
+
+
+def receipt():
+    safe(STATE)
+    if not STATE.exists():
+        return None
+    value = json.loads(STATE.read_text())
+    if not root_protected(STATE):
+        raise ValueError('setup receipt must be root-owned and not writable by other users')
+    if value.get('owner') != OWNER or value.get('uid') != os.getuid():
+        raise ValueError('installation belongs to another owner or desktop user')
+    allowed = {str(ROOT / 'deploy/.env'), str(ROOT / 'deploy/docker-compose.override.yml'), str(UNIT), str(BINARY), *map(str, seccomp_paths())}
+    for filename, digest in value.get('files', {}).items():
+        path = Path(filename)
+        safe(path)
+        if filename not in allowed or not path.is_file() or sha(path) != digest:
+            raise ValueError('managed installation file changed; preserve it for manual reconciliation')
+    browser = value.get('browser')
+    if browser:
+        directory = Path(browser['directory'])
+        if directory.parent != Path('/opt/plurx-browser') or browser_manifest(directory) != browser['files']:
+            raise ValueError('managed browser has been changed')
+    if value.get('checkout') != str(ROOT):
+        raise ValueError('use the checkout which owns this installation')
+    return value
+
+
+def conflict(previous, role, runtime, verify_daemon=True):
+    if role != 'server':
+        player = load_script('pi-player')
+        state, desktop = player.locations()
+        if state.exists() or desktop.exists():
+            player.owned(state, desktop)
+        elif player.autostart_path().exists():
+            raise ValueError('existing Cinema autostart has no launcher ownership receipt')
+    if previous:
+        # New managed files require a fresh destination; an older valid receipt
+        # does not confer ownership of files introduced by a newer installer.
+        recorded = previous.get('files', {})
+        for path, kind in managed_paths(role, runtime).items():
+            if kind == 'system' and path != STATE and (path.exists() or path.is_symlink()) and str(path) not in recorded:
+                raise ValueError('newly managed destination exists without ownership: ' + str(path))
+        if role != 'cinema' and runtime == 'native' and Path(str(UNIT) + '.d').exists():
+            raise ValueError('native service has unmanaged drop-ins')
+        if role != 'cinema' and runtime == 'docker' and verify_daemon:
+            for name, identity in previous.get('containers', {}).items():
+                current = run(['docker', 'inspect', '--format', '{{.Id}}', name], root=True, capture=True).strip()
+                if current != identity:
+                    raise ValueError('managed container was replaced outside Pi setup')
+        if previous['role'] != role or previous['runtime'] != runtime:
+            raise ValueError('changing installed roles or server runtime requires uninstall first')
+        return
+    if role == 'cinema':
+        return
+    if UNIT.exists() or BINARY.exists() or Path(str(UNIT) + '.d').exists():
+        raise ValueError('existing native server has no setup ownership receipt')
+    for path in (ROOT / 'deploy/.env', ROOT / 'deploy/docker-compose.override.yml', *seccomp_paths()):
+        if path.exists():
+            raise ValueError('existing Compose configuration has no setup ownership receipt')
+    if verify_daemon and shutil.which('docker'):
+        names = run(['docker', 'ps', '-a', '--format', '{{.Names}}'], root=True, capture=True)
+        if {'plurxd', 'plurx-discovery'} & set(names.splitlines()):
+            raise ValueError('existing Docker server has no setup ownership receipt')
+
+
+def package_tools(runtime):
+    if not shutil.which('apt-get'):
+        raise ValueError('automatic setup requires Raspberry Pi OS or Debian with apt-get')
+    if runtime == 'docker':
+        packages = []
+        need_compose = False
+        if not shutil.which('docker'):
+            packages.append('docker.io')
+            need_compose = True
+        else:
+            try:
+                run(['docker', 'compose', 'version'], root=True)
+            except subprocess.CalledProcessError:
+                need_compose = True
+        if packages or need_compose:
+            run(['apt-get', 'update'], root=True)
+            if need_compose:
+                # Pi OS / Debian Trixie packages Compose v2 as docker-compose.
+                # Bookworm's same package name denotes v1: refuse that candidate.
+                policy = run(['apt-cache', 'policy', 'docker-compose'], capture=True)
+                candidate = re.search(r'(?m)^\s*Candidate:\s*(?:[0-9]+:)?([0-9]+)\.', policy)
+                if not candidate or candidate.group(1) != '2':
+                    raise ValueError('docker-compose has no Compose v2 candidate; use supported Raspberry Pi OS Trixie repositories')
+                packages.append('docker-compose')
+            run(['apt-get', 'install', '-y', *packages], root=True)
+        run(['systemctl', 'enable', '--now', 'docker'], root=True)
+        # Use sudo for the daemon; never require a new login or docker-group privileges.
+        run(['docker', 'compose', 'version'], root=True)
+
+
+def wait_ready(url, seconds=1500):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url + '/readyz', timeout=3) as response:
+                if response.status == 200:
+                    return
+        except (OSError, ValueError):
+            pass
+        time.sleep(1)
+    raise ValueError('server did not become ready within the startup deadline')
+
+
+def native_startup_budget(config_paths=None):
+    contract = load_script('validate-docker-startup-budget', 'scripts')
+    limits = contract.load_source_limits(ROOT)
+    paths = config_paths if config_paths is not None else (Path('/plurx.toml'), Path('/etc/plurx/plurx.toml'))
+    config = next((path for path in paths if path.exists()), None)
+    if config:
+        chunk, transfer, install = contract.timeouts_from_toml(config, limits)
+    else:
+        chunk = (limits.default_chunk_seconds, 'built-in default')
+        transfer = (limits.default_transfer_seconds, 'built-in default')
+        install = (limits.default_install_seconds, 'built-in default')
+    contract.validate_snapshot_combination(chunk[0], chunk[1], transfer[0], transfer[1])
+    return transfer[0] + install[0] + limits.startup_allowance_seconds
+
+
+def native_media_groups(media, device_groups):
+    account = pwd.getpwnam('plurx')
+    groups = {account.pw_gid, *map(int, device_groups)}
+    # Check declared roots and ancestor traversal; the scanner reports per-item access.
+    # Supply only groups whose bits grant access. Never repair media modes.
+    checked = []
+    for root in media:
+        paths = [(ancestor, os.X_OK) for ancestor in reversed(root.parents)]
+        paths.append((root, os.R_OK | os.X_OK))
+        for path, access in paths:
+            checked.append([str(path), access])
+            info = path.stat()
+            mode = stat.S_IMODE(info.st_mode)
+            needed = (4 if access & os.R_OK else 0) | (1 if access & os.X_OK else 0)
+            if info.st_uid == account.pw_uid:
+                granted = mode >> 6 & 7
+            elif info.st_gid in groups:
+                granted = mode >> 3 & 7
+            else:
+                granted = mode & 7
+            if granted & needed != needed:
+                if info.st_uid != account.pw_uid and mode >> 3 & needed == needed:
+                    if info.st_gid == 0:
+                        raise ValueError(f'media path {path} would require the privileged root group; grant access through a dedicated media group')
+                    groups.add(info.st_gid)
+                else:
+                    raise ValueError(f'native service cannot read/traverse media path {path}; grant access to plurx or an appropriate media group without changing setup')
+    # Kernel access checks catch ACL restrictions; setpriv tests the exact configured identity.
+    check = 'import json,os,sys; rows=json.load(sys.stdin); failed=[p for p,mode in rows if not os.access(p,mode)]; print(failed[0] if failed else ""); raise SystemExit(bool(failed))'
+    run(['setpriv', '--reuid=' + str(account.pw_uid), '--regid=' + str(account.pw_gid),
+         '--groups=' + ','.join(map(str, sorted(groups))), 'python3', '-c', check], root=True, input_text=json.dumps(checked))
+    return list(map(str, sorted(groups - {account.pw_gid})))
+
+
+def native_unit(args, runtime):
+    groups = list(map(str, runtime.get('groups', [])))
+    if any(not str(group).replace('_', '').replace('-', '').isalnum() for group in groups):
+        raise ValueError('invalid runtime device group')
+    def quoted(value):
+        return json.dumps(str(value)).replace('%', '%%')
+    lines = ['[Unit]', 'Description=Plurx Pi server', 'After=network-online.target', 'Wants=network-online.target',
+             '[Service]', 'Type=simple', 'User=plurx', 'Group=plurx', 'ExecStart=' + str(BINARY) + ' run',
+             'Environment=' + quoted('PLURX_DATA_DIR=' + str(args.data_dir)), 'Environment=PLURX_BIND=0.0.0.0:32400']
+    for key in ('ffmpeg', 'ffprobe', 'bound_ffprobe'):
+        if not runtime.get(key):
+            raise ValueError('runtime provider omitted a native executable')
+        lines.append('Environment=' + quoted('PLURX_' + key.upper() + '=' + runtime[key]))
+    lines += ['SupplementaryGroups=' + ' '.join(groups), 'Restart=on-failure', 'RestartSec=5', 'TimeoutStopSec=3900',
+              'NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=read-only',
+              'RuntimeDirectory=plurx', 'RuntimeDirectoryMode=0700', 'Environment=TMPDIR=/run/plurx',
+              'ReadWritePaths=' + quoted(args.data_dir), '[Install]', 'WantedBy=multi-user.target']
+    return '\n'.join(lines) + '\n'
+
+
+def docker_files(args, runtime):
+    env = f'PUID={os.getuid()}\nPGID={os.getgid()}\nPLURX_DATA={args.data_dir}\n'
+    # JSON is valid YAML and avoids shell/Compose interpolation in arbitrary media paths.
+    service = {'volumes': [{'type': 'bind', 'source': str(path), 'target': str(path), 'read_only': True} for path in args.media]}
+    provider = runtime.get('compose_service', {})
+    if set(provider) - {'build', 'devices', 'group_add', 'environment', 'image'}:
+        raise ValueError('runtime provider returned unsupported Compose settings')
+    service.update(provider)
+    service['volumes'].append({'type': 'bind', 'source': str(PI_COMPATIBLE), 'target': '/run/plurx-platform/compatible', 'read_only': True, 'bind': {'create_host_path': False}})
+    service['security_opt'] = ['seccomp=' + str(SECCOMP)]
+    service['cap_drop'] = ['ALL']
+    image = provider.get('image', 'plurx/pi-server:local')
+    service['image'] = image
+    return env, json.dumps({'services': {'plurxd': service, 'plurx-discovery': {'image': image}}}, indent=2) + '\n'
+
+
+def seccomp_paths():
+    return [SECCOMP, SECCOMP.parent / 'moby26-seccomp.default.json', SECCOMP.parent / 'MOBY-LICENSE',
+            SECCOMP.parent / 'MOBY-NOTICE', SECCOMP.parent / 'pi-worker-seccomp.provenance.json']
+
+
+def seccomp_artifacts():
+    metadata = json.loads((ASSETS / 'manifest.json').read_text())['sandbox']
+    sources = [(metadata['profile'], metadata['profile_sha256']),
+               (metadata['moby']['profile'], metadata['moby']['profile_sha256']),
+               (metadata['moby']['license'], metadata['moby']['license_sha256']),
+               (metadata['moby']['notice'], metadata['moby']['notice_sha256'])]
+    contents = []
+    for filename, expected in sources:
+        path = ASSETS / filename
+        if path.parent != ASSETS or sha(path) != expected:
+            raise ValueError('pinned namespace seccomp artifact identity changed')
+        contents.append(path.read_bytes())
+    profile, baseline = map(json.loads, contents[:2])
+    inherited = {**profile, 'syscalls': profile['syscalls'][:len(baseline['syscalls'])]}
+    if inherited != baseline or profile['syscalls'][len(baseline['syscalls']):] != metadata['appended_rules']:
+        raise ValueError('Pi seccomp profile must preserve the pinned baseline and reviewed additions exactly')
+    contents.append((json.dumps(metadata, indent=2) + '\n').encode())
+    return dict(zip(seccomp_paths(), contents))
+
+
+def install_seccomp_profile():
+    for path, content in seccomp_artifacts().items():
+        write(path, content)
+
+
+def provision(args):
+    helper = ROOT / 'deploy/pi-runtime'
+    if not helper.is_file():
+        raise ValueError('Pi runtime provisioning provider is unavailable in this checkout')
+    # Provider owns package/runtime installation and verifies its pinned receipts.
+    plan = json.loads(run(['python3', helper, 'plan', '--role', args.role,
+                           '--server-runtime', args.server_runtime, '--prefix', RUNTIME_PREFIX, '--json'], capture=True))
+    packages = plan.get('apt_packages', [])
+    if packages:
+        if any(not isinstance(name, str) or not name.replace('-', '').replace('+', '').replace('.', '').isalnum() for name in packages):
+            raise ValueError('runtime provider returned invalid package names')
+        run(['apt-get', 'update'], root=True)
+        run(['apt-get', 'install', '-y', '--no-install-recommends', *packages], root=True)
+    safe(RUNTIME_PREFIX)
+    if not RUNTIME_PREFIX.exists():
+        run(['install', '-d', '-m', '0755', '-o', os.getuid(), '-g', os.getgid(), RUNTIME_PREFIX], root=True)
+    elif RUNTIME_PREFIX.stat().st_uid != os.getuid():
+        raise ValueError('runtime prefix belongs to another user')
+    return json.loads(run(['python3', helper, 'ensure', '--role', args.role,
+                          '--server-runtime', args.server_runtime, '--prefix', RUNTIME_PREFIX, '--json',
+                          *(['--sudo-docker'] if args.role != 'cinema' and args.server_runtime == 'docker' else []),
+                          *(['--skip-server-build'] if args.binary else [])], capture=True))
+
+
+def runtime_contract(args, runtime):
+    if not isinstance(runtime, dict):
+        raise ValueError('runtime provider must return a JSON object')
+    if args.role != 'cinema' and args.server_runtime == 'native':
+        for name in ('ffmpeg', 'ffprobe', 'bound_ffprobe', 'server_binary'):
+            if name == 'server_binary' and args.binary is not None:
+                continue
+            path = Path(runtime.get(name, ''))
+            if not path.is_absolute() or RUNTIME_PREFIX not in path.parents or '..' in path.parts:
+                raise ValueError('native runtime executable is outside the managed prefix')
+            safe(path)
+        groups = runtime.get('groups', [])
+        if not isinstance(groups, list) or any(not re.fullmatch(r'[A-Za-z0-9_-]+', str(group)) for group in groups):
+            raise ValueError('invalid runtime device groups')
+    if args.role != 'cinema' and args.server_runtime == 'docker':
+        provider = runtime.get('compose_service')
+        if not isinstance(provider, dict) or provider.get('build', {}).get('context') != str(ROOT):
+            raise ValueError('Docker provider must build the current source checkout')
+        if provider.get('build', {}).get('dockerfile') != 'Dockerfile.pi':
+            raise ValueError('Docker provider must select the managed Pi Dockerfile')
+        docker_files(args, runtime)
+
+
+def browser_manifest(directory):
+    safe(directory)
+    result = {}
+    for path in sorted(directory.rglob('*')):
+        if path.is_symlink():
+            result[str(path.relative_to(directory))] = {'link': os.readlink(path)}
+        elif path.is_file():
+            if path.stat().st_uid != 0 or path.stat().st_mode & 0o022:
+                raise ValueError('managed browser file is writable by another user')
+            result[str(path.relative_to(directory))] = {'sha256': sha(path)}
+        elif path.is_dir() and (path.stat().st_uid != 0 or path.stat().st_mode & 0o022):
+            raise ValueError('managed browser directory is writable by another user')
+    return result
+
+
+def promote_browser(runtime, previous, transaction=None):
+    source = Path(runtime['browser_directory'])
+    safe(source)
+    if source.parent != RUNTIME_PREFIX or not re.fullmatch(r'chromium-[A-Za-z0-9._-]+', source.name):
+        raise ValueError('browser source must be a versioned managed runtime directory')
+    if not re.fullmatch(r'[0-9a-f]{64}', runtime.get('browser_sandbox_sha256', '')):
+        raise ValueError('runtime provider omitted a valid sandbox digest')
+    binary_relative = Path(runtime['chromium']).relative_to(source)
+    sandbox_relative = Path(runtime['browser_sandbox']).relative_to(source)
+    if binary_relative != Path('usr/lib/chromium/chromium') or sandbox_relative != Path('usr/lib/chromium/chrome-sandbox'):
+        raise ValueError('unexpected managed browser executable layout')
+    parent = Path('/opt/plurx-browser')
+    safe(parent)
+    for ancestor in (parent, *parent.parents):
+        if ancestor.exists() and (ancestor.stat().st_uid != 0 or ancestor.stat().st_mode & 0o022):
+            raise ValueError('managed browser ancestors must be root-owned and unwritable by other users')
+    run(['install', '-d', '-m', '0755', parent], root=True)
+    destination = parent / source.name
+    old = previous.get('browser') if previous else None
+    if destination.exists():
+        if not old or old['directory'] != str(destination) or browser_manifest(destination) != old['files']:
+            raise ValueError('browser destination has no matching ownership receipt')
+    else:
+        staging = parent / ('.staging-' + uuid.uuid4().hex)
+        if transaction is not None:
+            transaction['browser_paths'].extend([str(staging), str(destination)])
+            durable_journal(transaction)
+        run(['install', '-d', '-m', '0700', staging], root=True)
+        try:
+            run(['cp', '-a', str(source) + '/.', staging], root=True)
+            run(['chown', '-R', 'root:root', staging], root=True)
+            run(['chmod', '-R', 'go-w', staging], root=True)
+            run(['chmod', '0755', staging], root=True)
+            sandbox = staging / sandbox_relative
+            safe(sandbox)
+            if not sandbox.is_file() or sha(sandbox) != runtime['browser_sandbox_sha256']:
+                raise ValueError('copied browser sandbox identity does not match its pinned provider receipt')
+            run(['chmod', '4755', sandbox], root=True)
+            run(['chmod', '0755', staging], root=True)
+            run(['mv', staging, destination], root=True)
+        finally:
+            if staging.exists():
+                run(['rm', '-rf', staging], root=True)
+    runtime['chromium'] = str(destination / binary_relative)
+    return {'directory': str(destination), 'files': browser_manifest(destination)}
+
+
+def managed_paths(role, runtime):
+    paths = {STATE: 'system'}
+    if role != 'cinema':
+        if runtime == 'docker':
+            paths.update({ROOT / 'deploy/.env': 'system', ROOT / 'deploy/docker-compose.override.yml': 'system', **{path: 'system' for path in seccomp_paths()}})
+        else:
+            paths.update({UNIT: 'system', BINARY: 'system'})
+    if role != 'server':
+        player = load_script('pi-player')
+        state, desktop = player.locations()
+        paths.update({path: 'user' for path in (desktop, state / 'launcher', state / 'config.json', state / 'ownership.json', player.autostart_path())})
+    return paths
+
+
+def durable_journal(value):
+    write(JOURNAL, json.dumps(value, indent=2) + '\n')
+
+
+def begin_transaction(args, previous, action='install'):
+    if JOURNAL.exists():
+        raise ValueError('a setup transaction needs reconciliation before another starts')
+    identity = uuid.uuid4().hex
+    value = {'owner': OWNER, 'uid': os.getuid(), 'checkout': str(ROOT), 'id': identity,
+             'role': args.role, 'runtime': args.server_runtime, 'action': action,
+             'phase': 'prepared', 'previous': previous, 'snapshots': {}, 'browser_paths': [],
+             'old_running': False, 'old_image': None, 'old_containers_running': {}, 'old_enabled': False}
+    if previous and args.role != 'cinema':
+        if args.server_runtime == 'docker':
+            value['old_image'] = run(['docker', 'inspect', '--format', '{{.Image}}', 'plurxd'], root=True, capture=True).strip()
+            value['old_containers_running'] = {name: run(['docker', 'inspect', '--format', '{{.State.Running}}', name], root=True, capture=True).strip() == 'true'
+                                              for name in ('plurxd', 'plurx-discovery')}
+            value['old_running'] = value['old_containers_running']['plurxd']
+        else:
+            value['old_running'] = run(['systemctl', 'show', '--property=ActiveState', '--value', 'plurxd'], capture=True).strip() == 'active'
+            value['old_enabled'] = run(['systemctl', 'show', '--property=UnitFileState', '--value', 'plurxd'], capture=True).strip() == 'enabled'
+    if action != 'uninstall':
+        for index, (path, kind) in enumerate(managed_paths(args.role, args.server_runtime).items()):
+            safe(path)
+            snapshot = {'kind': kind, 'present': path.exists()}
+            if path.exists():
+                content = path.read_bytes()
+                backup = BACKUPS / identity / str(index)
+                write(backup, content)
+                snapshot.update(backup=str(backup), sha256=hashlib.sha256(content).hexdigest(), mode=path.stat().st_mode & 0o777)
+            value['snapshots'][str(path)] = snapshot
+    durable_journal(value)
+    return value
+
+
+def read_journal():
+    safe(JOURNAL)
+    if not JOURNAL.exists():
+        return None
+    if not root_protected(JOURNAL):
+        raise ValueError('transaction journal must be root-owned and protected')
+    value = json.loads(JOURNAL.read_text())
+    if value.get('owner') != OWNER or value.get('uid') != os.getuid() or value.get('checkout') != str(ROOT):
+        raise ValueError('transaction belongs to another desktop user or checkout')
+    if not re.fullmatch(r'[0-9a-f]{32}', value.get('id', '')):
+        raise ValueError('invalid transaction identity')
+    allowed = managed_paths(value['role'], value['runtime'])
+    for filename, snapshot in value.get('snapshots', {}).items():
+        path = Path(filename)
+        if path not in allowed or snapshot['kind'] != allowed[path]:
+            raise ValueError('invalid transaction snapshot destination')
+        safe(path)
+        if snapshot['present'] and value['phase'] not in ('committed', 'rolled-back'):
+            backup = Path(snapshot['backup'])
+            safe(backup)
+            if backup.parent != BACKUPS / value['id'] or not backup.name.isdigit():
+                raise ValueError('invalid transaction backup destination')
+            if not root_protected(backup) or sha(backup) != snapshot['sha256']:
+                raise ValueError('transaction backup integrity check failed')
+    for filename in value.get('browser_paths', []):
+        path = Path(filename)
+        safe(path)
+        if path.parent != Path('/opt/plurx-browser') or not re.fullmatch(r'(?:chromium-[A-Za-z0-9._-]+|\.staging-[0-9a-f]{32})', path.name):
+            raise ValueError('invalid transaction browser destination')
+    return value
+
+
+def finish_transaction(value):
+    backup = BACKUPS / value['id']
+    if backup.exists():
+        run(['rm', '-rf', backup], root=True)
+    run(['rm', '-f', JOURNAL], root=True)
+    run(['sync', '-f', JOURNAL.parent], root=True)
+
+
+def cleanup_obsolete_browser(value):
+    previous = value.get('previous')
+    old = previous.get('browser') if previous else None
+    current = json.loads(STATE.read_text()) if STATE.exists() else {}
+    if old and old != current.get('browser'):
+        directory = Path(old['directory'])
+        if directory.exists() and directory.parent == Path('/opt/plurx-browser') and browser_manifest(directory) == old['files']:
+            run(['rm', '-rf', directory], root=True)
+
+
+def recover_transaction(value):
+    if value['phase'] in ('committed', 'rolled-back'):
+        if value['phase'] == 'committed':
+            cleanup_obsolete_browser(value)
+        finish_transaction(value)
+        return
+    if value['action'] == 'uninstall':
+        complete_uninstall(value['previous'])
+        value['phase'] = 'committed'
+        durable_journal(value)
+        finish_transaction(value)
+        return
+    previous = value['previous']
+    deployed = value['phase'] == 'deployment'
+    server = value['role'] != 'cinema'
+    # Stop the replacement BEFORE restoring its executable; start on an active unit is a no-op.
+    if deployed and server:
+        if value['runtime'] == 'native':
+            if UNIT.exists():
+                run(['systemctl', 'stop', 'plurxd'], root=True)
+                if previous is None:
+                    run(['systemctl', 'disable', 'plurxd'], root=True)
+        elif (ROOT / 'deploy/docker-compose.override.yml').exists():
+            run(['docker', 'compose', 'down' if previous is None else 'stop'], root=True, cwd=ROOT / 'deploy')
+    for filename, snapshot in value['snapshots'].items():
+        path = Path(filename)
+        if snapshot['present']:
+            content = Path(snapshot['backup']).read_bytes()
+            if snapshot['kind'] == 'system':
+                write(path, content, snapshot['mode'])
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                path.chmod(snapshot['mode'])
+        elif path.exists():
+            if snapshot['kind'] == 'system':
+                run(['rm', '-f', path], root=True)
+            else:
+                path.unlink()
+    for filename in value['browser_paths']:
+        path = Path(filename)
+        if path.exists():
+            run(['rm', '-rf', path], root=True)
+    if deployed and server and previous:
+        if value['runtime'] == 'native':
+            run(['systemctl', 'daemon-reload'], root=True)
+            run(['systemctl', 'enable' if value['old_enabled'] else 'disable', 'plurxd'], root=True)
+            if value['old_running']:
+                run(['systemctl', 'start', 'plurxd'], root=True)
+                wait_ready('http://127.0.0.1:32400', native_startup_budget())
+        else:
+            with tempfile.TemporaryDirectory() as directory:
+                rollback = Path(directory) / 'rollback.json'
+                rollback.write_text(json.dumps({'services': {name: {'image': value['old_image']} for name in ('plurxd', 'plurx-discovery')}}))
+                environment = {**os.environ, 'COMPOSE_FILE': ':'.join(map(str, (ROOT / 'deploy/docker-compose.yml', ROOT / 'deploy/docker-compose.override.yml', rollback)))}
+                period = run(['python3', ROOT / 'scripts/validate-docker-startup-budget', '--emit-start-period'], root=True, capture=True, env=environment).strip()
+                environment['PLURX_HEALTH_START_PERIOD'] = period
+                run(['python3', ROOT / 'scripts/validate-docker-startup-budget'], root=True, env=environment)
+                run(['docker', 'compose', 'up', '-d', '--no-build', '--pull', 'never'], root=True, cwd=ROOT / 'deploy', env=environment)
+                if value['old_running']:
+                    contract = load_script('validate-docker-startup-budget', 'scripts')
+                    wait_ready('http://127.0.0.1:32400', float(contract.parse_duration(period, 'rollback health grace')))
+                for name, running in value['old_containers_running'].items():
+                    if not running:
+                        run(['docker', 'compose', 'stop', name], root=True, cwd=ROOT / 'deploy', env=environment)
+            previous['containers'] = {name: run(['docker', 'inspect', '--format', '{{.Id}}', name], root=True, capture=True).strip()
+                                      for name in ('plurxd', 'plurx-discovery')}
+            write(STATE, json.dumps(previous, indent=2) + '\n')
+    elif deployed and server and value['runtime'] == 'native':
+        run(['systemctl', 'daemon-reload'], root=True)
+    value['phase'] = 'rolled-back'
+    durable_journal(value)
+    finish_transaction(value)
+
+
+def install(args, previous):
+    conflict(previous, args.role, args.server_runtime, verify_daemon=not args.dry_run)
+    if args.dry_run:
+        print(json.dumps({'action': args.command, 'role': args.role, 'server_runtime': args.server_runtime,
+                          'data_retained': str(args.data_dir), 'media_read_only': list(map(str, args.media)),
+                          'prerequisites': 'Docker+Compose for Docker server; pinned media runtime; managed HEVC Chromium for Cinema',
+                          'url': args.url, 'changes': 'owned server configuration and normal-user launcher'}, indent=2))
+        return
+    if not args.yes:
+        print(f'Install prerequisites and managed {args.role} setup using {args.server_runtime}; preserve data at {args.data_dir}.')
+        if input('Continue? [y/N] ').strip().lower() not in ('y', 'yes'):
+            raise ValueError('setup cancelled')
+    source = run(['git', 'rev-parse', 'HEAD'], capture=True).strip()
+    desired = {'source': source, 'media': list(map(str, args.media)), 'data_dir': str(args.data_dir), 'url': args.url, 'autostart': args.autostart, 'binary_sha256': sha(args.binary) if args.binary else None, 'binary_source': str(args.binary) if args.binary else None}
+    if previous and all(previous.get(key) == value for key, value in desired.items()) and args.command == 'install':
+        print('The same owned installation is already configured; use upgrade to rebuild.')
+        return
+    if not (ROOT / 'deploy/pi-runtime').is_file():
+        raise ValueError('Pi runtime provisioning provider is unavailable in this checkout')
+    transaction = begin_transaction(args, previous)
+    server = args.role != 'cinema'
+    files = {}
+    browser = None
+    try:
+        native_budget = None
+        media_groups = []
+        if server:
+            package_tools(args.server_runtime)
+            if args.server_runtime == 'native':
+                native_budget = native_startup_budget()
+                try:
+                    pwd.getpwnam('plurx')
+                except KeyError:
+                    run(['useradd', '--system', '--home', args.data_dir, '--shell', '/usr/sbin/nologin', 'plurx'], root=True)
+                media_groups = native_media_groups(args.media, [])
+        runtime = provision(args)
+        runtime_contract(args, runtime)
+        if server and args.server_runtime == 'native':
+            runtime['groups'] = sorted(set(map(str, runtime.get('groups', []))) | set(media_groups))
+            native_unit(args, runtime)
+        if args.role != 'server':
+            load_script('pi-player').browser_path(runtime.get('chromium'))
+        transaction['phase'] = 'deployment'
+        durable_journal(transaction)
+        if args.role != 'server':
+            browser = promote_browser(runtime, previous, transaction)
+        if server and args.server_runtime == 'docker':
+            install_seccomp_profile()
+            env, override = docker_files(args, runtime)
+            write(ROOT / 'deploy/.env', env)
+            write(ROOT / 'deploy/docker-compose.override.yml', override)
+            files = {str(path): sha(path) for path in (ROOT / 'deploy/.env', ROOT / 'deploy/docker-compose.override.yml', *seccomp_paths())}
+            if not args.data_dir.exists():
+                run(['install', '-d', '-o', os.getuid(), '-g', os.getgid(), '-m', '0750', args.data_dir], root=True)
+            # Root needs explicit identity to prevent make's environment overriding the deployment UID.
+            ref = run(['git', 'describe', '--tags', '--always', '--dirty'], capture=True).strip()
+            epoch = run(['git', 'log', '-1', '--format=%ct'], capture=True).strip()
+            hostname = platform.node().split('.')[0]
+            if not re.fullmatch(r'[A-Za-z0-9._-]+', ref) or not epoch.isdigit() or not re.fullmatch(r'[A-Za-z0-9_-]+', hostname):
+                raise ValueError('build identity contains unsupported characters')
+            run(['make', 'docker-up', 'BUILD_REF=' + ref, 'BUILD_SHA=' + source, 'SOURCE_DATE_EPOCH=' + epoch, 'HOST_SHORTNAME=' + hostname], root=True)
+            period = run(['python3', ROOT / 'scripts/validate-docker-startup-budget', '--emit-start-period'], root=True, capture=True).strip()
+            contract = load_script('validate-docker-startup-budget', 'scripts')
+            wait_ready('http://127.0.0.1:32400', float(contract.parse_duration(period, 'deployment health grace')))
+        elif server:
+            binary = args.binary or (Path(runtime['server_binary']) if runtime.get('server_binary') else None)
+            if binary is None:
+                run(['cargo', 'build', '--locked', '--release', '-j', '4', '-p', 'plurxd'])
+                binary = ROOT / 'target/release/plurxd'
+            run([binary, '--version'], capture=True)
+            if not args.data_dir.exists():
+                run(['install', '-d', '-m', '0750', '-o', 'plurx', '-g', 'plurx', args.data_dir], root=True)
+            if previous:
+                run(['systemctl', 'stop', 'plurxd'], root=True)
+            write(BINARY, binary.read_bytes(), 0o755)
+            write(UNIT, native_unit(args, runtime))
+            files = {str(path): sha(path) for path in (UNIT, BINARY)}
+            run(['systemctl', 'daemon-reload'], root=True)
+            run(['systemctl', 'enable', '--now', 'plurxd'], root=True)
+            wait_ready('http://127.0.0.1:32400', native_budget)
+        if args.role != 'server':
+            if not runtime.get('chromium'):
+                raise ValueError('runtime provider omitted the managed Chromium executable')
+            run(['python3', ROOT / 'deploy/pi-player', 'install', '--url', args.url,
+                 '--chromium', runtime['chromium'], *(['--autostart'] if args.autostart else [])])
+        containers = {}
+        if server and args.server_runtime == 'docker':
+            containers = {name: run(['docker', 'inspect', '--format', '{{.Id}}', name], root=True, capture=True).strip()
+                          for name in ('plurxd', 'plurx-discovery')}
+        value = {'owner': OWNER, 'uid': os.getuid(), 'checkout': str(ROOT), 'role': args.role,
+                 'runtime': args.server_runtime, 'data_dir': str(args.data_dir), 'media': list(map(str, args.media)),
+                 'url': args.url, 'files': files, 'runtime_receipt': runtime, 'containers': containers, 'browser': browser, **desired}
+        write(STATE, json.dumps(value, indent=2) + '\n')
+        transaction['phase'] = 'committed'
+        durable_journal(transaction)
+    except BaseException:
+        recover_transaction(transaction)
+        raise
+    cleanup_obsolete_browser(transaction)
+    finish_transaction(transaction)
+    print('Plurx setup complete. Open Plurx HDMI in your desktop session and sign in normally.' if args.role != 'server' else 'Plurx server is ready.')
+
+
+def uninstall(args, previous):
+    if previous is None:
+        print('No owned Pi installation is present.')
+        return
+    if args.dry_run:
+        print('Would remove verified owned runtime configuration and launcher; data, login profile and shared packages stay.')
+        return
+    if not args.yes:
+        print('Remove owned server configuration and launcher; retain data, profile and shared packages.')
+        if input('Continue? [y/N] ').strip().lower() not in ('y', 'yes'):
+            raise ValueError('uninstall cancelled')
+    transaction = begin_transaction(args, previous, action='uninstall')
+    complete_uninstall(previous)
+    transaction['phase'] = 'committed'
+    durable_journal(transaction)
+    finish_transaction(transaction)
+
+
+def complete_uninstall(previous):
+    if previous['role'] != 'server':
+        run(['python3', ROOT / 'deploy/pi-player', 'uninstall'])
+    if previous['role'] != 'cinema':
+        if previous['runtime'] == 'docker':
+            if (ROOT / 'deploy/.env').exists() and (ROOT / 'deploy/docker-compose.override.yml').exists():
+                run(['docker', 'compose', 'down'], root=True, cwd=ROOT / 'deploy')
+        else:
+            run(['systemctl', 'disable', '--now', 'plurxd'], root=True)
+        for filename in previous['files']:
+            run(['rm', '-f', filename], root=True)
+        if previous['runtime'] == 'native':
+            run(['systemctl', 'daemon-reload'], root=True)
+    if previous.get('browser'):
+        browser = previous['browser']
+        directory = Path(browser['directory'])
+        if directory.exists() and (directory.parent != Path('/opt/plurx-browser') or browser_manifest(directory) != browser['files']):
+            raise ValueError('managed browser was changed; preserve it for manual reconciliation')
+        if directory.exists():
+            run(['rm', '-rf', directory], root=True)
+    disposal = json.loads(run(['python3', ROOT / 'deploy/pi-runtime', 'uninstall', '--prefix', RUNTIME_PREFIX, '--json'], capture=True))
+    if disposal.get('retained'):
+        print('Changed or unowned private runtime files were retained for manual inspection.')
+    run(['rm', '-f', STATE], root=True)
+    print('Removed owned installation; retained media, server data, browser profile and shared packages.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=('install', 'upgrade', 'status', 'uninstall'))
+    parser.add_argument('--role', choices=('server', 'cinema', 'both'))
+    parser.add_argument('--server-runtime', choices=('docker', 'native'))
+    parser.add_argument('--media', action='append', type=Path)
+    parser.add_argument('--data-dir', type=Path)
+    parser.add_argument('--url')
+    parser.add_argument('--binary', type=Path)
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--yes', action='store_true')
+    parser.add_argument('--autostart', action='store_true', default=None)
+    args = parser.parse_args()
+    lock = None
+    prior_signal = None
+    try:
+        if os.getuid() == 0:
+            raise ValueError('run setup as the normal desktop user; it requests sudo for system changes')
+        if args.command == 'status' or args.dry_run:
+            pending = read_journal()
+            if pending:
+                active = False
+                if LOCK.exists():
+                    with LOCK.open('rb') as probe:
+                        try:
+                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            active = True
+                print(json.dumps({'installed': pending['previous'] is not None, 'transaction': 'active' if active else 'recovery-needed', 'hardware_decode': 'unproven', 'action': 'no changes; next mutating setup invocation reconciles this transaction'}, indent=2))
+                return 0
+        else:
+            safe(LOCK)
+            if not LOCK.exists():
+                run(['install', '-d', LOCK.parent], root=True)
+                create = 'import os,sys;\ntry: fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o644); os.fsync(fd); os.close(fd)\nexcept FileExistsError: pass'
+                run(['python3', '-c', create, LOCK], root=True)
+            if not root_protected(LOCK):
+                raise ValueError('setup lock must be root-owned and protected')
+            lock = LOCK.open('rb')
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError('another Pi setup invocation is active; wait for it to finish')
+            def interrupted(signum, frame):
+                raise KeyboardInterrupt('setup interrupted; durable reconciliation is retained')
+            prior_signal = signal.signal(signal.SIGTERM, interrupted)
+            pending = read_journal()
+            if pending:
+                recover_transaction(pending)
+        previous = receipt()
+        if args.binary is None and previous and previous.get('binary_source'):
+            args.binary = Path(previous['binary_source'])
+        args.autostart = args.autostart if args.autostart is not None else bool(previous and previous.get('autostart'))
+        args.role = args.role or (previous['role'] if previous else 'both')
+        args.server_runtime = args.server_runtime or (previous['runtime'] if previous else 'docker')
+        args.data_dir = args.data_dir or Path(previous['data_dir'] if previous else '/srv/plurx')
+        args.media = args.media if args.media is not None else list(map(Path, previous['media'] if previous else []))
+        if args.role == 'cinema' and previous is None and args.url is None and args.command in ('install', 'upgrade'):
+            raise ValueError('Cinema-only setup needs --url with the existing server origin')
+        args.url = args.url or (previous['url'] if previous else 'http://localhost:32400')
+        load_script('pi-player').web_url(args.url)
+        for path in [args.data_dir, *args.media]:
+            if not path.is_absolute() or any(char in str(path) for char in '\n\r$'):
+                raise ValueError('media and data paths must be absolute without interpolation or control characters')
+            safe(path)
+        if args.command in ('install', 'upgrade') and not args.dry_run:
+            if args.role != 'cinema' and args.data_dir.exists():
+                expected_uid = os.getuid()
+                if args.server_runtime == 'native' and args.role != 'cinema':
+                    import pwd
+                    try:
+                        expected_uid = pwd.getpwnam('plurx').pw_uid
+                    except KeyError:
+                        raise ValueError('existing native data directory needs an existing plurx service user')
+                if not args.data_dir.is_dir() or args.data_dir.stat().st_uid != expected_uid:
+                    raise ValueError('existing data directory has incompatible ownership; it will not be changed')
+            for path in args.media:
+                if not path.is_dir():
+                    raise ValueError('media path must be an existing directory')
+                if args.data_dir == path or path in args.data_dir.parents or args.data_dir in path.parents:
+                    raise ValueError('media and writable data paths must be separate')
+        if args.command == 'status':
+            report = {'installed': previous is not None, 'server_readiness': 'absent', 'hardware_decode': 'unproven'}
+            if previous:
+                report.update({'role': previous['role'], 'server_runtime': previous['runtime'], 'data_dir': previous['data_dir'], 'url': previous['url']})
+                try:
+                    with urllib.request.urlopen(previous['url'].rstrip('/') + '/readyz', timeout=3) as response:
+                        report['server_readiness'] = 'ready' if response.status == 200 else 'unavailable'
+                except OSError:
+                    report['server_readiness'] = 'unavailable'
+            print(json.dumps(report, indent=2))
+        elif args.command == 'uninstall':
+            if previous:
+                conflict(previous, previous['role'], previous['runtime'], verify_daemon=not args.dry_run)
+            uninstall(args, previous)
+        else:
+            if args.command == 'upgrade' and previous is None:
+                raise ValueError('upgrade needs an owned installation')
+            if not args.dry_run and (platform.system() != 'Linux' or platform.machine() not in ('aarch64', 'arm64')):
+                raise ValueError('setup requires a 64-bit Raspberry Pi OS host')
+            install(args, previous)
+    except KeyboardInterrupt:
+        print('pi-setup: interrupted; any unfinished transaction will reconcile on the next mutating invocation.', file=sys.stderr)
+        return 130
+    except (ValueError, OSError, EOFError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+        print('pi-setup: ' + str(error), file=__import__('sys').stderr)
+        return 1
+    finally:
+        if prior_signal is not None:
+            signal.signal(signal.SIGTERM, prior_signal)
+        if lock is not None:
+            lock.close()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

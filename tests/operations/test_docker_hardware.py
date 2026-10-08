@@ -242,6 +242,41 @@ class DockerHardwareTests(unittest.TestCase):
                 [str(self.root / "docker-compose.yml")],
             )
 
+    def test_compose_226_without_environment_flag_preserves_file_and_gpu_precedence(self):
+        project = self.root / "selected-project"
+        project.mkdir()
+        for name in ("base.yml", "host.yml"):
+            (project / name).touch()
+        name = "plurx-hardware-environment-probe"
+        calls = []
+        def compose(*arguments):
+            calls.append(arguments)
+            if "--environment" in arguments:
+                raise HELPER["HardwareError"]("unknown flag: --environment")
+            selected = [arguments[index + 1] for index, value in enumerate(arguments) if value == "-f"]
+            probe = json.loads(Path(selected[-1]).read_text())
+            self.assertEqual(probe["services"][name]["labels"]["PLURX_DOCKER_GPU"], "${PLURX_DOCKER_GPU:-auto}")
+            labels = {"COMPOSE_FILE": "selected-project/base.yml;selected-project/host.yml", "COMPOSE_PATH_SEPARATOR": ";", "PLURX_DOCKER_GPU": "auto"}
+            services = {name: {"labels": labels}}
+            if len(selected) > 1:
+                self.assertEqual(selected[:-1], [str(project / "base.yml"), str(project / "host.yml")])
+                # The actual project resolves the mode; the first probe's mode
+                # must not decide whether local GPU discovery is performed.
+                labels["PLURX_DOCKER_GPU"] = "manual"
+                services["plurxd"] = {"devices": [{"source": "/dev/video19", "target": "/dev/video19"}]}
+            return json.dumps({"services": services})
+        probe = mock.Mock(side_effect=AssertionError("resolved manual mode probed host"))
+        output = self.root / "generated.json"
+        with mock.patch("pathlib.Path.cwd", return_value=self.root), mock.patch.dict(
+            GLOBALS, run=compose, local_linux_engine=probe
+        ):
+            files = HELPER["prepare"](output).split(os.pathsep)
+        self.assertEqual(files, [str(project / "base.yml"), str(project / "host.yml"), str(output)])
+        self.assertEqual(json.loads(output.read_text()), {"services": {"plurxd": {}}})
+        self.assertEqual(len(calls), 3)
+        self.assertFalse(list(self.root.glob(".plurx-hardware-probe-*")))
+        probe.assert_not_called()
+
     def test_manual_mode_uses_compose_env_precedence_and_does_not_probe(self):
         (self.root / "docker-compose.yml").touch()
         (self.root / "docker-compose.override.yml").touch()

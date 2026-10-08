@@ -1,0 +1,185 @@
+"""Pi runtime packaging contracts; no network or hardware required."""
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import types
+import unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+loader = importlib.machinery.SourceFileLoader("pi_runtime", str(ROOT / "deploy/pi-runtime"))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+runtime = importlib.util.module_from_spec(spec)
+loader.exec_module(runtime)
+
+
+class PiRuntimeTests(unittest.TestCase):
+    def test_source_and_browser_pins_are_explicit_and_patch_matches(self):
+        manifest = runtime.MANIFEST
+        self.assertEqual(hashlib.sha256((runtime.ASSETS / "jellyfin-8.1.3-rpi.patch").read_bytes()).hexdigest(), manifest["patch_sha256"])
+        for name in ("jellyfin", "rpi", "rustup"):
+            self.assertRegex(manifest[name]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(manifest[name]["url"].startswith("https://"))
+        self.assertEqual(len(manifest["browser"]["packages"]), 3)
+        for package in manifest["browser"]["packages"]:
+            self.assertIn(manifest["browser"]["tag"], package["url"])
+            self.assertRegex(package["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_request_transfer_and_full_jellyfin_series_are_preserved(self):
+        patch = (runtime.ASSETS / "jellyfin-8.1.3-rpi.patch").read_text()
+        for name in ("libavcodec/v4l2_request_hevc.c", "libavutil/rpi_sand_fns.c", "libavutil/hwcontext_drm.c"):
+            self.assertIn(name, patch)
+        self.assertIn("v4l2_req_hevc_v4.o v4l2_fmt.o", patch)
+        self.assertNotIn("tests/fate/filter-video.mak", patch)
+        provider = (ROOT / "deploy/pi-runtime").read_text()
+        self.assertIn('source / "debian/patches/series"', provider)
+        self.assertIn('"--fuzz=0"', provider)
+        for capability in ("ac4", "dovi_rpu", "apply_dovi"):
+            self.assertIn(capability, provider)
+
+    def test_uninstall_keeps_changed_and_unowned_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "owned"
+            prefix.mkdir()
+            (prefix / "unchanged").write_text("owned")
+            (prefix / "changed").write_text("original")
+            runtime.ownership_receipt(prefix, [prefix / "unchanged", prefix / "changed"])
+            (prefix / "changed").write_text("operator change")
+            (prefix / "new").write_text("operator addition")
+            result = runtime.uninstall(prefix)
+            self.assertFalse((prefix / "unchanged").exists())
+            self.assertTrue((prefix / "changed").exists())
+            self.assertTrue((prefix / "new").exists())
+            self.assertIn("changed", result["retained"])
+
+    def test_uninstall_does_not_follow_replaced_parent_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "owned"
+            directory = prefix / "runtime"
+            directory.mkdir(parents=True)
+            (directory / "binary").write_text("same")
+            runtime.ownership_receipt(prefix, [directory / "binary"])
+            (directory / "binary").unlink()
+            directory.rmdir()
+            outside = Path(temporary) / "outside"
+            outside.mkdir()
+            (outside / "binary").write_text("same")
+            directory.symlink_to(outside, target_is_directory=True)
+            result = runtime.uninstall(prefix)
+            self.assertTrue((outside / "binary").exists())
+            self.assertIn("runtime/binary", result["retained"])
+
+    def test_upgrade_does_not_adopt_operator_additions_or_changed_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "owned"
+            downloads = prefix / "downloads"
+            downloads.mkdir(parents=True)
+            original = downloads / "original"
+            original.write_text("installed")
+            rewritten = downloads / "provider-rewritten"
+            rewritten.write_text("old provider output")
+            runtime.ownership_receipt(prefix, [original, rewritten])
+            original.write_text("operator edit")
+            added = downloads / "operator-added"
+            added.write_text("operator addition")
+            outside = prefix / "operator-directory"
+            outside.mkdir()
+            outside_file = outside / "keep"
+            outside_file.write_text("operator addition")
+            before = set(prefix.rglob("*"))
+            upgrade = downloads / "new-provider-artifact"
+            locations = [rewritten, upgrade]
+            unchanged = runtime.unchanged_owned(prefix, locations)
+            upgrade.write_text("new installed output")
+            rewritten.write_text("new provider output")
+            runtime.record_outputs(prefix, before, unchanged, locations)
+            ledger = json.loads((prefix / ".plurx-runtime-owned.json").read_text())
+            self.assertNotIn("downloads/operator-added", ledger["files"])
+            self.assertEqual(ledger["files"]["downloads/original"]["sha256"], hashlib.sha256(b"installed").hexdigest())
+            result = runtime.uninstall(prefix)
+            self.assertTrue(original.exists())
+            self.assertTrue(added.exists())
+            self.assertTrue(outside_file.exists())
+            self.assertFalse(upgrade.exists())
+            self.assertFalse(rewritten.exists())
+            self.assertIn("downloads/original", result["retained"])
+
+    def test_upgrade_refuses_to_overwrite_changed_managed_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "owned"
+            prefix.mkdir()
+            output = prefix / "Dockerfile.base"
+            output.write_text("installed")
+            runtime.ownership_receipt(prefix, [output])
+            output.write_text("operator edit")
+            with self.assertRaisesRegex(RuntimeError, "refusing overwrite"):
+                runtime.unchanged_owned(prefix, [output])
+            self.assertEqual(output.read_text(), "operator edit")
+
+    def test_namespace_runtime_packages_are_pi_only_and_keep_standard_dockerfile(self):
+        plan = runtime.prepare(types.SimpleNamespace(command='plan', role='server', server_runtime='native', prefix='/opt/pi-plan-only'))
+        self.assertIn('bubblewrap', plan['apt_packages'])
+        docker = runtime.prepare(types.SimpleNamespace(command='plan', role='server', server_runtime='docker', prefix='/opt/pi-plan-only'))
+        self.assertNotIn('bubblewrap', docker['apt_packages'])
+        pi = (ROOT / 'Dockerfile.pi').read_text()
+        self.assertIn('install -y --no-install-recommends bubblewrap', pi)
+        self.assertIn('chmod 0755 /usr/bin/bwrap', pi)
+        self.assertNotIn('bubblewrap', (ROOT / 'Dockerfile').read_text())
+
+    def test_pi_seccomp_preserves_pinned_default_and_bounds_namespace_additions(self):
+        metadata = runtime.MANIFEST['sandbox']
+        baseline_path = runtime.ASSETS / metadata['moby']['profile']
+        baseline = json.loads(baseline_path.read_text())
+        self.assertEqual(hashlib.sha256(baseline_path.read_bytes()).hexdigest(), metadata['moby']['profile_sha256'])
+        self.assertEqual(metadata['moby']['revision'], '411e817ddf710ff8e08fa193da80cb78af708191')
+        profile_path = runtime.ASSETS / metadata['profile']
+        profile = json.loads(profile_path.read_text())
+        self.assertEqual(hashlib.sha256(profile_path.read_bytes()).hexdigest(), metadata['profile_sha256'])
+        inherited = {**profile, 'syscalls': profile['syscalls'][:len(baseline['syscalls'])]}
+        self.assertEqual(inherited, baseline)
+        additions = profile['syscalls'][len(baseline['syscalls']):]
+        self.assertEqual(additions, metadata['appended_rules'])
+        self.assertEqual({name for rule in additions for name in rule['names']}, {'clone', 'unshare', 'mount', 'umount2', 'pivot_root'})
+        for rule in additions:
+            self.assertEqual(rule['includes'], {'arches': ['arm64']})
+            self.assertEqual(rule['action'], 'SCMP_ACT_ALLOW')
+            if rule['names'] != ['pivot_root']:
+                self.assertTrue(rule['args'])
+        clone = next(rule for rule in additions if rule['names'] == ['clone'])
+        self.assertEqual(clone['args'], [{'index': 0, 'value': 0x7c020011, 'op': 'SCMP_CMP_EQ'}])
+        detach = next(rule for rule in additions if rule['names'] == ['umount2'])
+        self.assertEqual(detach['args'], [{'index': 1, 'value': 2, 'op': 'SCMP_CMP_EQ'}])
+        for name, digest in [('license', 'license_sha256'), ('notice', 'notice_sha256')]:
+            self.assertEqual(hashlib.sha256((runtime.ASSETS / metadata['moby'][name]).read_bytes()).hexdigest(), metadata['moby'][digest])
+        # Keep Docker's clone3 ENOSYS fallback; adding it unrestricted would
+        # bypass the clone argument filter through an indirect structure pointer.
+        self.assertTrue(any(rule['names'] == ['clone3'] and rule.get('errnoRet') == 38 for rule in profile['syscalls']))
+
+    def test_pi_seccomp_allows_only_devpts_identity_restoration_unshare(self):
+        metadata = runtime.MANIFEST['sandbox']
+        baseline = json.loads((runtime.ASSETS / metadata['moby']['profile']).read_text())
+        profile = json.loads((runtime.ASSETS / metadata['profile']).read_text())
+        additions = profile['syscalls'][len(baseline['syscalls']):]
+        rules = [rule for rule in additions if 'unshare' in rule['names']]
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule['includes'], {'arches': ['arm64']})
+        self.assertEqual(rule['args'], [{'index': 0, 'value': 0x10000000, 'op': 'SCMP_CMP_EQ'}])
+        allowed_flags = rule['args'][0]['value']
+        for forbidden in (0, 0x20000, 0x40000000, 0x10000000 | 0x20000, 0x10000000 | 0x20000000):
+            self.assertNotEqual(allowed_flags, forbidden)
+        self.assertIn('devpts', metadata['bubblewrap_audit']['identity_restoration'])
+
+    def test_docker_preserves_standard_assets_and_private_runtime(self):
+        dockerfile = (ROOT / "Dockerfile.pi").read_text()
+        self.assertIn("FROM ${BASE_IMAGE}", dockerfile)
+        self.assertIn("USER plurx", dockerfile)
+        self.assertIn("PLURX_FFMPEG=/opt/plurx-runtime/ffmpeg-8.1.3-pi-", dockerfile)
+        self.assertNotIn("PLURX_BOUND_FFPROBE=", dockerfile)
+        self.assertNotIn("--privileged", dockerfile)
+
+
+if __name__ == "__main__":
+    unittest.main()
