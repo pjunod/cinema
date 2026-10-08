@@ -6,7 +6,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const lab = require("./playback-lab");
-const {producerCensus} = require("./continuous-quality-qualification");
+const {producerCensus, producerPurposeCensus} = require("./continuous-quality-qualification");
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function snapshot(driver) {
@@ -125,12 +125,12 @@ async function lifecycleCase(kind, driver, server, manifest, fixture, testCase, 
   } catch (error) { result.errors.push(error.message); }
   finally {
     try {
-      const before = await producerCensus(server), requested = Date.now();
+      const before = await producerPurposeCensus(server), requested = Date.now();
       await driver.exec("closePlayer(); return true;");
       const samples = [];
       for (const elapsed of [0, 1000, 3000, 5000]) {
         await sleep(Math.max(0, requested + elapsed - Date.now()));
-        samples.push(await producerCensus(server));
+        samples.push(await producerPurposeCensus(server));
       }
       result.producer_end = {requested_at_unix_ms: requested, before, samples,
         scope: "exact owned Linux daemon direct FFmpeg children; physical queues/reader leases unmeasured"};
