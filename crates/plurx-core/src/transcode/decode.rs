@@ -3555,10 +3555,16 @@ fn select_macos_processing(
         )
         || options.subtitle_burn.is_some()
         || request.rate_profile.is_some()
-        || options.video_sample_envelope != VideoSampleEnvelope::EncoderDefault
+        || !matches!(
+            options.video_sample_envelope,
+            VideoSampleEnvelope::EncoderDefault | VideoSampleEnvelope::ContinuousAvcHigh50
+        )
     {
         return Selection::PresentationConstraint;
     }
+    // ContinuousAvcHigh50 retains the existing normalized, video-only VBR
+    // envelope admission and its High5.0 encoder/sample-clock owners below.
+    // The proved Mac graphs can transport that unchanged presentation recipe.
     // Opaque VT frames do not inherit CPU rotation/SAR/rate normalization.
     // Initial graphs preserve only a proved progressive, upright, even raster
     // with square pixels and a known constant cadence.

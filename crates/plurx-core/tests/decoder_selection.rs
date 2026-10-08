@@ -344,6 +344,129 @@ fn macos_processing_rolling_and_vod_share_frozen_color_graph() {
 }
 
 #[test]
+fn macos_processing_continuous_vod_retains_the_existing_avc_envelope() {
+    for (hdr, pipeline) in [
+        (false, Pipeline::VtScaleSdr),
+        (true, Pipeline::VtToneMapMetal),
+    ] {
+        let input = facts(macos_stream(hdr));
+        let caps = unqualified_software_capabilities("hevc");
+        let request = TranscodeRequest::new(Encoder::VideoToolbox, options(Pipeline::Cpu))
+            .with_continuous_avc_video();
+        let policy = macos_policy(macos_context(true, MacosProcessingAvailability::Available));
+        let plan = resolve_transcode(
+            &request,
+            &input,
+            &caps,
+            &policy,
+            &AttemptRestrictions::none(),
+        )
+        .expect("compatible continuous video envelope");
+        assert_eq!(plan.options().pipeline, pipeline);
+        assert_eq!(plan.output_contract().output_profile(), Some("high"));
+        assert!(plan.output_contract().normalized_geometry().is_some());
+        assert!(!plan.options().input_has_audio);
+        let source = execution_file("/fixture/source.mkv");
+        let execution = TranscodeExecution::from_options(
+            &source,
+            &execution_options(),
+            Pacing::unpaced(),
+            "/fixture/out",
+        )
+        .expect("execution");
+        let rolling = hls_args(&plan, &execution);
+        let vod = plurx_core::transcode::vod_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            plurx_core::transcode::VodFrameGrid::new(24, 1).expect("grid"),
+            12.0,
+        );
+        let renderer = pipeline
+            .filters(Some(1920), 1080, Some(if hdr { "hdr10" } else { "sdr" }))
+            .expect("renderer");
+        for args in [&rolling, &vod] {
+            for (flag, value) in [
+                ("-hwaccel_output_format", "videotoolbox_vld"),
+                ("-c:v", "h264_videotoolbox"),
+                ("-allow_sw", "0"),
+                ("-profile:v", "high"),
+                ("-level:v", "5.0"),
+                ("-b:v", "8000k"),
+                ("-color_range", "tv"),
+            ] {
+                assert!(args.windows(2).any(|pair| pair == [flag, value]));
+            }
+            assert!(args.iter().any(|arg| arg == "-an"));
+            let graph = &args[args.iter().position(|arg| arg == "-vf").expect("vf") + 1];
+            assert!(graph.contains(&renderer));
+            assert!(graph.contains(",setsar=1"));
+            assert!(!graph.contains("hwdownload"));
+        }
+        let graph = &vod[vod.iter().position(|arg| arg == "-vf").expect("vf") + 1];
+        assert!(graph.starts_with("trim=start=0.000000000,fps=24/1:start_time=0.000000000,"));
+        assert!(graph.contains("tpad=stop_mode=clone:stop_duration=12.000000000,trim=end_frame=288,setpts=PTS-0.000000000/TB"));
+        assert!(vod
+            .windows(2)
+            .any(|pair| pair == ["-enc_time_base:v", "1:24"]));
+        assert!(vod
+            .windows(2)
+            .any(|pair| pair == ["-fps_mode:v", "passthrough"]));
+        let excluded = policy.clone().with_macos_processing(
+            policy
+                .macos_processing()
+                .expect("context")
+                .clone()
+                .excluding_pipeline(pipeline),
+        );
+        let fallback = resolve_transcode(
+            &request,
+            &input,
+            &caps,
+            &excluded,
+            &AttemptRestrictions::none(),
+        )
+        .expect("existing retry owner restriction");
+        assert_eq!(fallback.options().pipeline, Pipeline::Cpu);
+        assert!(fallback.macos_processing_identity().is_none());
+    }
+}
+
+#[test]
+fn macos_processing_continuous_vod_does_not_relax_rate_or_auto_quality_contracts() {
+    use plurx_core::transcode::AutoQualityRateProfile;
+    let input = facts(macos_stream(false));
+    let caps = unqualified_software_capabilities("hevc");
+    let policy = macos_policy(macos_context(true, MacosProcessingAvailability::Available));
+    let mut media = options(Pipeline::Cpu);
+    media.video_bitrate_kbps = 200_000;
+    let invalid = TranscodeRequest::new(Encoder::VideoToolbox, media).with_continuous_avc_video();
+    assert_eq!(
+        resolve_transcode(
+            &invalid,
+            &input,
+            &caps,
+            &policy,
+            &AttemptRestrictions::none()
+        ),
+        Err(PlanError::InvalidMediaOption("continuous_video_envelope"))
+    );
+    let mut media = options(Pipeline::Cpu);
+    media.target_height = 1440;
+    media.video_bitrate_kbps = 12_000;
+    let auto = TranscodeRequest::new(Encoder::VideoToolbox, media)
+        .with_auto_quality_rate_profile(AutoQualityRateProfile::H264Sdr1440P30V1);
+    let plan = resolve_transcode(&auto, &input, &caps, &policy, &AttemptRestrictions::none())
+        .expect("existing auto quality route");
+    assert_eq!(plan.options().pipeline, Pipeline::Cpu);
+    assert_eq!(
+        plan.macos_processing_selection(),
+        Some(MacosProcessingSelection::PresentationConstraint)
+    );
+    assert!(plan.macos_processing_identity().is_none());
+}
+
+#[test]
 fn macos_processing_rejected_decoder_and_hdr10plus_retain_incumbent() {
     let input = facts(macos_stream(true));
     let caps = DecodeCapabilities::new(
