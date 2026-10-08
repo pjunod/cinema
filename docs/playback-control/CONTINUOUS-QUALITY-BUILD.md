@@ -8148,3 +8148,122 @@ the production builder, filter graph, captions and ordinary playback admission
 policy; only the background audit's encoder budget changes. The existing
 software caption-ground-truth regression covers both deinterlace modes.
 Twenty-two references are recorded for static validation; units stay deferred.
+
+### 10.267 Exact audit budget, failed optical window and quota recovery (2026-10-08)
+
+The committed `67520f7a8` archive builds on pinned Rust 1.97.1 in 2m29s;
+normal catalog, formatting, Clippy/all-targets and served-script syntax hooks
+pass. Its graph-worker role census measures twenty-four threads with an
+explicit one-thread encoder option, down from ninety-seven; synthetic fixture
+generators remain twenty-one. This is a measured background resource reduction,
+not an optical acceptance fix. Its complete optical window has 4,569 samples,
+zero unknown pixels/capture gaps/backward/skipped counters, but fails at
+145.967ms upper hold. Preserve the source-named caption-budget2 receipts.
+The web controller consumes actual element rate on ratechange; no separately
+saved rate mismatch is identified. No further priority or foreground decoder
+policy change is justified by these comparisons.
+
+The first committed-worker full Firefox campaign is interrupted by EDQUOT
+on a log write. There is no completed campaign verdict. Its exact guard
+retires the daemon; the final receipt write also hits quota. The orphaned
+packaged driver and twelve recorded descendants are retired by executable,
+PID and start identity. The guard-identified runtime and driver-log-identified
+profile are removed after preserving failure logs. Fifteen remote raw optical
+duplicates free 340,380,864 bytes only after matching every byte's SHA-256
+against preserved local copies. Unused installer archives free 147,780,392
+bytes; installed browser roots and the warm compiler target remain intact.
+Preserve the infrastructure-failure and quota675 cleanup/retirement receipts.
+
+Only the interrupted fifteen-manual/five-Auto campaign is restarted on the
+same committed code under `worker-full20-quota-retry2`; it has a new bounded
+guard that also tracks its packaged driver and can report final retirement
+on stdout if quota prevents writing. Earlier product failures and the
+interrupted series are not erased or counted as successes. No units run.
+
+Native capture research finds that [Apple's ReplayKit overview](https://developer.apple.com/documentation/replaykit)
+explicitly excludes AVPlayer content. No ReplayKit instrumentation is added and no
+AVPlayer capture claim follows from it. Physical/native audio/display remains
+open; software source/loopback comparisons retain their stated scope.
+
+### 10.268 Batched merger ownership and current-app capture preparation (2026-10-08)
+
+The human designates Codex session `01a11907-f720-71b1-8c51-89902b919e6f`,
+**Coordinate PR merge batches**, as the final landing owner. Finish software
+and runtime qualification here, perform the final adversarial review only
+when main-ready, resolve its findings, and preserve the explicit external
+Fable review pause. After the human releases that pause, send the exact ready
+head/base, pull request, regression fields and scoped receipts to that session.
+It owns fast-lane unit execution, failed-test fixes/retries and merging. It
+must use an independent clone: its reported checkout is the human's checkout,
+which this effort is explicitly forbidden to use. No handoff has been sent
+and no final review or unit suite has started.
+
+The SDK 27 ScreenCaptureKit headers expose
+`presentPickerForCurrentApplication` for iOS and tvOS. An ignored, separate
+CQ Lab helper uses that app-only system picker, excludes camera/microphone,
+and writes app video/audio to its own container. The recorder is bounded
+to 180 recorded seconds, 256 MiB, and a 300-second overall stop; it stops
+on backgrounding and refuses to overwrite an existing owned receipt. This
+is capture preparation, not a physical speaker or display-photon measurement.
+No production source, capture setting or audio-session policy changes.
+
+The helper passes iOS/tvOS SDK compiler syntax checks; signed iOS lab build
+227 and its UI-only harness compile successfully. Strict bundle signature
+verification passes, and installation onto the named 17promax succeeds after
+a fresh device inventory initially reports disconnected. The app-only picker
+and AVPlayer/audio capture have not yet been qualified. The exact committed
+Firefox fifteen-manual/five-Auto quota retry remains active separately.
+
+The first app-only picker snapshot is retained without granting capture. A
+second diagnostic accepts only the observed system prompt naming Plurx CQ Lab,
+records its setup UI, backgrounds the app to stop capture, and retrieves only
+its owned container output. The finalized receipt reports thirteen recorded
+seconds and no microphone/camera. The 292,653-byte MP4 has an H.264 video
+track at native portrait dimensions and no audio track; there was no playback
+on this silent setup screen. This proves the bounded own-app capture setup,
+not AVPlayer capture, playback audio or physical continuity. Preserve
+`ios-227-owned-app-picker{1,2}*` and the picker2 container receipt/video.
+
+The second full Firefox attempt also ends in EDQUOT without a campaign
+verdict. Its guard retires the exact daemon and tracked driver. Logs are
+preserved privately before removing the exact 1,681,685,438-byte runtime and
+469,132,693-byte log-identified profile. Fifteen more remote optical raw
+duplicates free 269,699,904 bytes only after local preservation and matching
+SHA-256. In the owned compiler target, 771 six-hour-old daemon linker objects
+from an older build hash occupy 1,288,716,528 bytes; only those stale objects
+are removed after proving no owned compiler active. The current executable's
+SHA-256 stays unchanged, and the warm current/third-party dependencies remain.
+The exact-source full campaign retries under `worker-full20-quota-retry3`
+with a bounded fifty-minute guard, preserving failed/interrupted attempts.
+No product criterion, normal forward buffer or planned transition count changes.
+
+A fresh bounded Safari readiness attempt, `safari-readiness-67520f7a8-1`,
+again times out creating its isolated session after 30,298 ms; the owned
+driver retires. No personal Safari settings or remote-automation preference
+is changed, and no native Safari playback evidence is claimed.
+
+Separate lab build 228 compiles the production Apple source plus the bounded
+current-app recorder and a two-request UI probe. Its own backend/proxy helpers
+are syntax-checked and prepared for server component `67520f7a8`, with actual
+display-aware Auto enabled only on that disposable lab server. They have not
+been launched: keep the full Firefox runtime uncontended until it finishes.
+The next phone measurement pairs the same scoped SDK/control diagnostics
+with captured AVPlayer/app audio; captured playback remains unmeasured now.
+
+Additional capacity cleanup verifies the current daemon's Cargo dependency
+fingerprint before removing the other, unused compiler-profile core library
+and metadata (551,065,526 bytes). The current core dependency and daemon
+SHA-256 remain unchanged; current/third-party compilation caches stay warm.
+The inactive owned packaged Chrome directory (461,618,308 bytes) is also
+removed after proving no process references it. Chrome's earlier receipts
+remain, but future Chrome measurements require re-provisioning its isolated
+browser. Together these recover another 1.01 GB without changing Firefox,
+fixtures, current compiled code or product behavior. Preserve
+`quota675-retry3-unused-profile-browser-cleanup.json`.
+
+The prepared native proxy records only bounded booleans/numeric fields for
+successor control presence/protocol/path/generation shape, plus fixed known
+425 response classifications. It retains no request bodies, bootstrap URLs
+or credentials. These observations are prepared, not measured outcomes.
+The tvOS SDK identifies AudioQueue -66681 as CannotStart; the previous route
+metadata does not establish a working audible output. Keep that failure open.
