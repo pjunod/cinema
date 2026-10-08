@@ -460,3 +460,38 @@ then the worker, home routes and real APNs/FCM request formation/signing. Use
 focused SQLite and actual Hiqlite contracts plus synthetic provider transport
 evidence. Physical push delivery, entitlements, Android service eligibility on
 devices and OS notification behavior remain explicit acceptance items.
+
+
+## 13. Reviewed follow-up ownership refinements
+
+Local CEC pairing uses a separately admitted physical-input path. A fixed
+Home control can open a local pairing surface and explicitly enable receiving
+or register this installation. It never changes the server's admin setting.
+The network registry excludes both this entry and its approval controls. Bind
+approval to the current native-host/extension identity, fresh credit, dialog
+generation, exact pending request and actual focused control. Pending-list
+replacement immediately retires queued selection. Start on a safe Close or
+show-code control, and restore the live opener on Back. Do not manufacture
+`Event.isTrusted` or add arbitrary selectors to the extension protocol.
+
+Native destination ownership must bound the scope stack and bind every lazy
+realization to its token, parent and current route. Replacement/disposal cannot
+change a newer scope. Back restores its exact surviving opener or a deterministic
+available fallback. Apple couch also owns the remaining TV pairing-surface
+lifetime, visible code expiry, strict negative-zero decoding, normalized state
+budget, monotonic phone pairing deadline and ACK-before-queued correction.
+Android received the latter two corrections before its foundation froze; its
+couch packet still owns TV code-expiry presentation and the ordinary surface
+inventory in §11.
+
+An authorized shared-library browse path is not complete playback control if
+it lands in an unowned shared player. Reuse the existing shared controller and
+its remote-server authorization. The selected v1 representation is nullable
+playback metadata with capability-driven transport controls, never a foreign
+item ID presented as a current-server item. Bind the full shared reference and
+controller lifetime into context. Unknown playing state requires explicit Play
+and Pause controls. The native builder must submit the deferred-effect admission
+and typed outcome design for parent review before implementing it: bounded
+in-flight reservations consume sequence before effect, never replay unknown
+outcomes, and cannot affect a replacement owner after cancellation/disposal.
+No second player or bypass of shared-server control authority is permitted.

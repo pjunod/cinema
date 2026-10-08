@@ -55,6 +55,13 @@ import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Muted
 import tv.plurx.app.ui.theme.SurfaceHi
 import tv.plurx.app.ui.theme.Outline
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlinx.coroutines.launch
+import tv.plurx.app.ui.FormFactor
+import tv.plurx.app.ui.currentFormFactor
+import tv.plurx.app.remote.*
 
 enum class PosterResolutionPlacement {
     ArtworkOverlay,
@@ -63,6 +70,7 @@ enum class PosterResolutionPlacement {
 
 /** Absolute image URL for a server-relative poster/backdrop path (or null). */
 fun imageUrl(path: String?): String? = path?.let { Session.url(it) }
+
 
 @Composable
 fun NetworkImage(url: String?, modifier: Modifier = Modifier) {
@@ -98,6 +106,7 @@ fun PosterCard(
 
     Column(
         modifier
+            .remoteAction(LocalRemoteItemPrefix.current + ":" + item.id, item.title) { onClick(); RemoteOutcome.Applied }
             .width(width)
             .scale(scale)
             .onFocusChanged { focused = it.isFocused }
@@ -204,10 +213,18 @@ fun MediaRow(
     rowFocusRequester: FocusRequester? = null,
     previousRowFocusRequester: FocusRequester? = null,
     nextRowFocusRequester: FocusRequester? = null,
+    remoteKey: String = title,
     onOpen: (Item) -> Unit,
 ) {
     if (items.isEmpty()) return
     val viewAllFocusRequester = remember { FocusRequester() }
+    val remotePrefix = "row:" + remoteKey + ":item"
+    val remoteRowState = rememberLazyListState()
+    val remoteScope = rememberCoroutineScope()
+    RemoteRealizer { key ->
+        val index = items.indexOfFirst { remotePrefix + ":" + it.id == key }
+        if (index >= 0) remoteScope.launch { remoteRowState.scrollToItem(index) }
+    }
     Column(Modifier.padding(vertical = 10.dp)) {
         androidx.compose.foundation.layout.Row(
             Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, bottom = 10.dp),
@@ -220,6 +237,7 @@ fun MediaRow(
                     color = Accent,
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
+                        .remoteAction("row:" + remoteKey + ":all", "View all " + title) { onViewAll(); RemoteOutcome.Applied }
                         .semantics { contentDescription = "View all $title" }
                         .focusRequester(viewAllFocusRequester)
                         .focusProperties {
@@ -262,7 +280,9 @@ fun MediaRow(
                 nextRowFocusRequester?.let { down = it }
             }
         }
+        CompositionLocalProvider(LocalRemoteItemPrefix provides remotePrefix) {
         LazyRow(
+            state = remoteRowState,
             modifier = Modifier
                 .testTag(shelfTestTag(title))
                 .then(rowFocusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
@@ -280,6 +300,7 @@ fun MediaRow(
                 ) { onOpen(item) }
             }
         }
+        }
     }
 }
 
@@ -296,6 +317,7 @@ fun <T> ChoicePicker(
     modifier: Modifier = Modifier,
 ) {
     var open by remember { mutableStateOf(false) }
+    val television = currentFormFactor() == FormFactor.Television
     val selectorShape = MaterialTheme.shapes.small
     Column(modifier) {
         Text(label, color = Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(bottom = 6.dp))
@@ -311,21 +333,23 @@ fun <T> ChoicePicker(
                     .background(SurfaceHi, selectorShape)
                     .border(1.dp, Outline, selectorShape)
                     // `clickable` carries the focus target; see PosterCard.
+                    .remoteAction("choice:" + label, label) { open = true; RemoteOutcome.Applied }
                     .clickable { open = true }
                     .padding(horizontal = 16.dp, vertical = 14.dp),
             )
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                options.forEach { option ->
-                    DropdownMenuItem(
-                        modifier = Modifier.tvFocusRing(MaterialTheme.shapes.small, focusedScale = 1.02f),
-                        text = {
-                            Text(
-                                optionLabel(option),
-                                color = if (option == value) Accent else MaterialTheme.colorScheme.onSurface,
-                            )
-                        },
-                        onClick = { onSelect(option); open = false },
-                    )
+            if (open && television) {
+                RemoteChoiceDialog(label, options.mapIndexed { index, option ->
+                    RemoteChoice(index.toString(), optionLabel(option), option == value) { onSelect(option); RemoteOutcome.Applied }
+                }) { open = false }
+            }
+            if (!television) {
+                if (open) RemoteRestricted()
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    options.forEach { option ->
+                        DropdownMenuItem(modifier = Modifier.tvFocusRing(MaterialTheme.shapes.small, focusedScale = 1.02f),
+                            text = { Text(optionLabel(option), color = if (option == value) Accent else MaterialTheme.colorScheme.onSurface) },
+                            onClick = { onSelect(option); open = false })
+                    }
                 }
             }
         }

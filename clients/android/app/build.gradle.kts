@@ -187,6 +187,7 @@ android {
         getByName("test").resources.directories.add("../../../tests/playback")
         // tests/sharing/protocol-cases.json: the Shared wire rows every port reads.
         getByName("test").resources.directories.add("../../../tests/sharing")
+        getByName("test").resources.directories.add("../../../crates/plurx-core/tests/fixtures")
     }
 }
 
