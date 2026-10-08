@@ -958,6 +958,10 @@ def restore(api, scope, run, applicability=None):
                 "Ambiguous receipt job identity")
         require(matching[0]["attempt"] == 1,
                 f"Run {rid} was re-run; ambiguous receipt attempt, dispatch fresh runs only")
+        from validation.python_unit_empty_recovery import recover_empty_pr920
+        if recover_empty_pr920(api, scope, prior, jobs):
+            indexed.pop(rid, None)
+            continue  # Exact empty failures remain incomplete; no outcomes are imported.
         if matching[0]["status"] == "skipped":
             continue
         if rid not in indexed:

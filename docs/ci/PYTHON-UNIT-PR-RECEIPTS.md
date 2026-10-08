@@ -653,3 +653,30 @@ incomplete or contradictory evidence stops continuation. Other receipt-policy
 attempts without either artifacts or sufficient authenticated logs remain
 blocking. This does not allow rerunning the Python job itself or replaying an
 entire suite to replace missing evidence.
+
+
+## PR920 — two authenticated empty effort failures
+
+The first DV M0 harness gate started at `6c61f9962`; a documentation follow-up
+moved the open task head to `bfc10ea19` before its Python run phase. Run 4501,
+job 45570, task 17017 refused the changed dispatch identity before discovery.
+Its start artifact 1942 and final artifact 1943 contain the same incomplete
+journal, with empty passes and fixture errors. Run 4502, job 45578, task 17026
+then refused that incomplete prior attempt during preparation; it published
+no artifacts and executed no Python units.
+
+Only unassigned downstream Apple/aggregate jobs were canceled after both
+preflight jobs had reached failure. The failures and incomplete journals stay
+unchanged. [The exact witness](../../validation/python-unit-empty-failure920.json)
+and [recovery helper](../../validation/python_unit_empty_recovery.py) authenticate
+the original dispatch, source/workflow hashes, complete log hashes, terminal
+eight-job inventories, and original artifact bytes or verified absence. They
+account for these two attempts while importing zero successes. No other PR,
+branch, run, outcome map or later failure receives an exception.
+
+The focused synthetic regression
+`tests/validation/test_python_empty_failure_recovery.py::test_exact_empty_attempts_preserve_no_passes_and_reject_contradictions`
+checks 28 changed/contradictory evidence cases. Live read-only restore also
+returned an empty pass map. This resolves receipt bookkeeping only: a fresh
+current-head development gate must still pass before integration. Freeze the
+task head once that run starts; finish documentation before dispatch.

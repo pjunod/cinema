@@ -141,3 +141,10 @@ backend probes receive their own review before integration.
 
 The reviewer verified both corrections and approved the bounded comparator
 with no remaining findings.
+
+
+The first task is PR #920 into the effort. An early dispatch was invalidated
+by a documentation follow-up before unit execution. Its two empty failed
+attempts require the [exact receipt recovery](../ci/PYTHON-UNIT-PR-RECEIPTS.md#pr920--two-authenticated-empty-effort-failures).
+No successes are manufactured or imported; a fresh passing development gate
+remains required before merging the task.
