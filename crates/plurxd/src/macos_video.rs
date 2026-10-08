@@ -1219,6 +1219,11 @@ async fn run_smoke(
 mod tests {
     use super::*;
 
+    fn temporary_root() -> tempfile::TempDir {
+        let root = std::fs::canonicalize(std::env::temp_dir()).expect("canonical temporary root");
+        tempfile::tempdir_in(root).expect("owned temporary fixture")
+    }
+
     fn corpus() -> Corpus {
         embedded_corpus(MANIFEST, SDR8, SDR10, HDR10).expect("shipped smoke corpus")
     }
@@ -1501,7 +1506,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn clean_offline_cache_uses_embedded_bytes_and_recovers_corruption() {
-        let root = tempfile::tempdir().unwrap();
+        let root = temporary_root();
         let corpus = corpus();
         let token = CancellationToken::new();
         let prepared = prepare_corpus(root.path(), &corpus, &token).await.unwrap();
@@ -1529,7 +1534,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn symlinked_cached_fixture_is_replaced_without_writing_its_target() {
-        let root = tempfile::tempdir().unwrap();
+        let root = temporary_root();
         let corpus = corpus();
         let token = CancellationToken::new();
         let prepared = prepare_corpus(root.path(), &corpus, &token).await.unwrap();
@@ -1549,7 +1554,7 @@ mod tests {
     #[tokio::test]
     async fn cache_permission_failure_is_explicit_and_reprobe_repairs_after_operator_fix() {
         use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
+        let root = temporary_root();
         let corpus = corpus();
         let token = CancellationToken::new();
         prepare_corpus(root.path(), &corpus, &token).await.unwrap();
@@ -1570,7 +1575,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_preparation_publishes_no_fixture_directory() {
-        let root = tempfile::tempdir().unwrap();
+        let root = temporary_root();
         let token = CancellationToken::new();
         token.cancel();
         assert!(matches!(
@@ -1582,7 +1587,7 @@ mod tests {
 
     #[cfg(unix)]
     async fn killed_probe(reason: ProbeReason) {
-        let root = tempfile::tempdir().unwrap();
+        let root = temporary_root();
         let pid_file = root.path().join("pid");
         let mut command = tokio::process::Command::new("/bin/sh");
         command
