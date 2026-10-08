@@ -894,6 +894,7 @@ paths = [
   "scripts/generate-macos-video-fixtures",
   "scripts/generate-macos-video-extensions",
   "scripts/generate-macos-p5-fixtures",
+  "scripts/append-macos-p5-terminal-nals",
   "scripts/generate-macos-live-fixtures",
   "scripts/generate-macos-extension-fixtures",
   "scripts/macos-video-fixture-rpu.rs",
