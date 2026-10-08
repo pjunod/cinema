@@ -2007,27 +2007,27 @@ impl TranscodeManager {
         if let Some((encoder, grade, pipeline)) = codec_qualification {
             self.record_codec_qualification_session(encoder, grade, Some(pipeline));
         }
+        // This snapshot follows the actual attachment; a candidate catalog or
+        // a queued result cannot claim that this response owns retained bytes.
+        let response_facts = self.vod.hls_facts(&start.session_id).await;
         if let Some((request, file, settings, encoding)) = output_enqueue {
-            self.hand_off_output_enqueue(OutputEnqueue {
-                request,
-                file,
-                settings,
-                encoding,
-                session_id: start.session_id.clone(),
-                queued_at: Instant::now(),
-            });
+            self.hand_off_output_enqueue(
+                OutputEnqueue {
+                    request,
+                    file,
+                    settings,
+                    encoding,
+                    session_id: start.session_id.clone(),
+                    queued_at: Instant::now(),
+                },
+                response_facts.as_ref().map(|facts| &facts.response_owner),
+            );
         }
         Ok(StartInfo {
-            retained_output: self
-                .vod
-                .hls_facts(&start.session_id)
-                .await
+            retained_output: response_facts
+                .as_ref()
                 .and_then(|facts| facts.response_owner.retained_output_facts()),
-            audio_delivery: self
-                .vod
-                .hls_facts(&start.session_id)
-                .await
-                .and_then(|facts| facts.audio_delivery),
+            audio_delivery: response_facts.and_then(|facts| facts.audio_delivery),
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
             session_id: start.session_id,
             duration_ms: Some(start.duration_ms),
@@ -2526,7 +2526,17 @@ impl TranscodeManager {
     /// Hand a started session's complete-output queue publication to the
     /// owned worker. Never waits: a full hand-off is reported and skipped,
     /// and the title's next start offers the same deduplicated job again.
-    fn hand_off_output_enqueue(&self, work: OutputEnqueue) {
+    fn hand_off_output_enqueue(
+        &self,
+        work: OutputEnqueue,
+        response_owner: Option<&crate::vodserve::ResponseOwner>,
+    ) {
+        if response_owner
+            .and_then(|owner| owner.retained_output_facts())
+            .is_some()
+        {
+            return;
+        }
         let file_id = work.file.id;
         if let Err(error) = self.output_enqueue.sender.try_send(work) {
             let reason = match error {
@@ -2954,6 +2964,128 @@ pub(super) fn constrain_finite_vod_rate(
 #[cfg(test)]
 mod retained_recovery_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues() {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let (_temp, _serve, facts) =
+            crate::vodserve::retained::test_post_attachment_output_facts().await;
+        assert!(facts.response_owner.retained_output_facts().is_some());
+        let work_root = crate::test_tempdir().expect("enqueue work root");
+        let manager = TranscodeManager::new(
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store")),
+            work_root.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let mut receiver = manager
+            .output_enqueue
+            .receiver
+            .lock()
+            .expect("queue owner")
+            .take()
+            .expect("actual bounded enqueue receiver");
+        let digest = [42; 32];
+        let candidate = QualityCandidate {
+            id: CandidateId::for_recipe_digest(digest),
+            recipe_digest: digest,
+            route: CandidateRoute::Remux,
+            normalized_geometry: false,
+            width: 1280,
+            height: 720,
+            target_height: 720,
+            average_bps: None,
+            peak_bps: None,
+            grade: OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: true,
+            sustainable: true,
+        };
+        let request = SessionRequest {
+            sdr_master_codecs: None,
+            continuous_media: None,
+            quality_catalog: None,
+            candidate_context: Some(Box::new(TranscodeManager::candidate_context(&candidate))),
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
+            control_sequence: None,
+            file_id: facts.file.id,
+            playback_id: "enqueue-fixture".into(),
+            request_id: None,
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            start_seconds: 0.0,
+            audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Presentation::Vod,
+            block_budget_secs: None,
+            transport: None,
+        };
+        let make_work = |session_id: &str| OutputEnqueue {
+            request: request.clone(),
+            file: facts.file.clone(),
+            settings: crate::vodserve::VodSettings {
+                working_set_bytes: 8 << 30,
+                completed_cache_bytes: 4 << 30,
+                block_budget: Duration::from_secs(30),
+                materialize_budget: Duration::from_secs(30),
+                blocked_get_cap: 100,
+                sdr_master_codecs: false,
+                index_cluster_cache: false,
+                hevc_unverified_copy: false,
+                live_recovery: true,
+                output_preparation: crate::vodserve::OutputPreparation::CopyAndEncoded,
+                output_budget_bytes: 4 << 30,
+            },
+            encoding: None,
+            session_id: session_id.into(),
+            queued_at: Instant::now(),
+        };
+        manager.hand_off_output_enqueue(make_work("cached"), Some(&facts.response_owner));
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "a verified actual cached response publishes no duplicate preparation"
+        );
+        // The same eligible candidate without actual retained attachment still
+        // reaches the real owned worker hand-off, regardless of catalog hints.
+        manager.hand_off_output_enqueue(make_work("cold"), None);
+        let cold = receiver
+            .try_recv()
+            .expect("cold candidate offered to worker");
+        assert_eq!(cold.session_id, "cold");
+        assert_eq!(
+            cold.request
+                .candidate_context
+                .as_ref()
+                .expect("candidate")
+                .candidate_id,
+            candidate.id
+        );
+        assert_eq!(cold.file.id, facts.file.id);
+        assert!(cold.settings.output_preparation.admits(false));
+        manager.hand_off_output_enqueue(make_work("rolling-no-facts"), None);
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("no-artifact fallback still offered")
+                .session_id,
+            "rolling-no-facts"
+        );
+    }
 
     #[test]
     fn idempotent_recovery_preserves_captured_absence_and_exact_artifact_identity() {

@@ -117,6 +117,16 @@ impl VodServe {
     }
 }
 
+/// Actual cached response graph for enqueue-boundary regression tests.
+#[cfg(test)]
+pub(crate) async fn test_post_attachment_output_facts() -> (
+    tempfile::TempDir,
+    Arc<VodServe>,
+    crate::vodserve::VodHlsFacts,
+) {
+    tests::post_attachment_output_facts_fixture().await
+}
+
 /// Synthetic completed bytes through the existing Sink/retained registry.
 /// This checks digest-key isolation, not encoded-media qualification.
 #[cfg(test)]
@@ -2111,8 +2121,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cached_attachment_serves_retained_bytes_without_driver_demand() {
+    async fn cached_session_fixture() -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        Arc<Rendition>,
+        crate::transcode::RetainedOutputFacts,
+        Session,
+    ) {
         let (temp, serve, completed, facts) = durable_fixture().await;
         // A new attachment can have no live manifest bytes, even though its
         // independently verified immutable response covers the whole title.
@@ -2132,7 +2147,7 @@ mod tests {
             .retained_artifacts
             .acquire_expected_for_request(&facts, &fresh, &fresh.recipe.retained_logical)
             .expect("verified incoming cached attachment");
-        let mut session = Session {
+        let session = Session {
             children: Vec::new(),
             passive_grant: None,
             rendition: Some(Arc::clone(&fresh)),
@@ -2166,6 +2181,37 @@ mod tests {
             terminal_cleanup: None,
             tombstone: None,
         };
+        (temp, serve, fresh, facts, session)
+    }
+
+    pub(super) async fn post_attachment_output_facts_fixture() -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        crate::vodserve::VodHlsFacts,
+    ) {
+        let (temp, serve, rendition, _, session) = cached_session_fixture().await;
+        let reader = session.attachment_reader(0);
+        rendition
+            .readers
+            .lock()
+            .await
+            .insert("cached".into(), reader);
+        serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .insert("cached".into(), session);
+        let facts = serve
+            .hls_facts("cached")
+            .await
+            .expect("actual cached post-attachment snapshot");
+        (temp, serve, facts)
+    }
+
+    #[tokio::test]
+    async fn cached_attachment_serves_retained_bytes_without_driver_demand() {
+        let (_temp, serve, fresh, facts, mut session) = cached_session_fixture().await;
         let owner = session.response_owner();
         let mut cached = session.attachment_reader(0);
         cached.accept_control(1, 33);
