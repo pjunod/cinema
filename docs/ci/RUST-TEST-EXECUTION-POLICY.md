@@ -1,7 +1,7 @@
 # Rust test execution policy — where the suite runs, and what red means
 
-**Status:** built — implementation merged; historical evidence limitations
-accepted, current non-ignored failure repair remains open · **Executes:** §2.2 / §4.8 / F-build-1 /
+**Status:** done — recorded policy and known-failure scope closed at `eb547f35`;
+historical evidence limitations accepted (§7.2) · **Executes:** §2.2 / §4.8 / F-build-1 /
 F-hist-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
@@ -25,7 +25,8 @@ units on `main` pushes. No recurring runtime schedule was added. M1's missing Fo
 comparison is an accepted infrastructure deviation; its actually executed
 source-only fallback remains relative sizing evidence. M2's unrecovered
 throwaway-unit negative is an accepted historical gap, not an executed pass
-(§7.1). This does not close the current non-ignored failure obligation.
+(§7.1). Section 7.2 records the subsequent applicable known-failure closure;
+it does not turn a compile-only gate into a whole-suite pass.
 
 The standing instruction: **if a step seems to require changing
 `make unit`'s definition, the `plurx-cluster-check` exclusion, the cluster
@@ -71,10 +72,10 @@ record the later lane amendment and configured coverage producer.
 Done means: the decision is recorded in §7 with a date, this plan PR is
 merged under it, and M1–M6 evidence is recorded in the Execution log.
 
-**2026-10-08 disposition:** the source implementation is built, not a claim
-of whole-plan Done. §7.1 distinguishes historical evidence and accepted gaps
-from the current non-ignored failure queue; an empty catalog cannot make a
-failing test green.
+**2026-10-08 disposition:** the recorded policy and known-failure scope are
+closed at `eb547f35` (§7.2). Accepted historical gaps remain gaps; an empty
+catalog cannot make a failing test green. Later changed source still needs
+its applicable evidence, not an unlimited future-suite guarantee.
 
 ---
 
@@ -579,7 +580,7 @@ the 859-byte gate log is
 This is real old-policy fail-closed evidence, not the literal M2 throwaway
 negative, current compile-only acceptance, a repair pass, or new execution.
 
-**Current failure repair is open.** Configured coverage API 4340/display
+**Historical failure-repair checkpoint, superseded by §7.2.** Configured coverage API 4340/display
 4319, job 44252/task 16617, checked out `c8884f6` and ended exit 101 at
 2026-10-08 00:33:53 UTC: 88 ordinary failed records plus one separate
 stack-overflow/SIGABRT test identity make **89 observed adverse IDs**.
@@ -593,6 +594,47 @@ that aborted run is not a pass. The overlapping 49 remain a recorded unresolved 
 that every later `main` has exactly 49 failures. New repair source or a
 passing Darwin diagnostic does not establish the failing Linux result.
 Do not hide this queue in the empty catalog or mark whole-plan Done.
+
+### 7.2 Recorded known-failure close-out — 2026-10-08
+
+The §1 objective 2 / §3.6 known non-ignored failure bar is now met for the
+recorded queue at landed `eb547f35d7a20970efbfdc4aefefa6979c3b4a59`, tree
+`e2e1d200d10772504a1168daf33587cdce66f1d4` ([#868](http://forge.lan:3000/noirr/plurx/pulls/868)).
+All **91 known unique historical adverse IDs** have actual positives:
+4340's 88 ordinary failures and distinct abort, plus the two older #847
+direct cases absent from that aborted run. No absent/ignored result became
+a pass. This supersedes the preceding checkpoint's open queue, not its
+failed observations or incomplete daemon census.
+
+The independently checked accounting SHA-256 is
+`b8eca8c867cb3e432a39e7353b8b3f6cfd1c3749c0a64be5efacce69cec5243c`.
+The same acceptance audit rehashed 39 fixed artifacts and verified actual
+pass lines, later selected failures and source/input applicability:
+
+| Applicable source and receipt | Exact coverage and limit |
+|---|---|
+| Original `3f83638c` selected/retained evidence | All 89 historical identities have actual positives; both extra direct cases also passed. The broad daemon invocation remains 3,247 passed / 7 failed / 22 ignored, not a green suite. |
+| Linux font controls at `3f83638c` | 13 single-ID passes, zero failures/ignores/skips, Ubuntu 24.04 ARM64 / FFmpeg 6.1.1 / Fontconfig, separately identified from native Darwin results. Final build succeeded; earlier failures remain retained. |
+| Activity at `1309cdaf` | One changed-method pass, 0.48 s; its whole HTTP module is byte-exact to landed source. No old expected-key assertion is borrowed as evidence for the new one. |
+| Paced retention at `ff118b5e` | Four passes, 37.80 s; all Rust/Cargo bytes equal landed source, including three changed fixture calls. Fixed 30-second publication budget retained. |
+| Direct If-Range and fork fixtures | Exact serial retries each passed; prior failures remain, causes are unknown. This is not a parallel-root-cause repair claim. |
+
+From `3f83638c` to that landing, no production Rust or Cargo dependency/lock
+bytes changed. Two Rust paths changed only Activity's expected key/assertion
+and three retention fixture calls/comment; those changed inputs have their
+own passing receipts above. All other method/shared-helper bytes were
+preserved. The independent final scope report SHA-256 is
+`09cab9afde4a9cc9737d6668b9d249aee2971d05c15b2a5b4372e93025ba1ac9`;
+raw logs and exact source/environment identities remain privately retained.
+
+This closes the recorded P-01 policy/known-failure scope under the accepted
+current policy. It is **not** a fresh full suite, the original failing Linux
+environment's full result, complete aborted census, release/fleet acceptance
+or a claim about a later merge candidate. #868's landing message records the
+explicit human Windows-compilation waiver; blocked/cancelled checks are not
+green. No new general waiver is created. M1/M2 accepted gaps and original
+authors/receipts remain unchanged. No unit/discovery/build was replayed for
+this evidence record; the batching owner controls its eventual integration.
 
 ---
 
@@ -616,3 +658,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Exact-main reconciliation | final reconciliation / #401 | One 336-second workspace confirmation found four fixture failures after merging `882862e8`; all four exact tests then passed together, and Rustfmt plus workspace Clippy passed. No broad retry was spent. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Adversarial review P1 | review fix / [#401 comment 3187](http://forge.lan:3000/noirr/plurx/pulls/401#issuecomment-3187) | Replaced regex and suffix matching with lexical, attached-attribute scanning, stable source/module identities, duplicate rejection and exact Cargo-list reconciliation; executable positives and negatives cover every reported bypass. |
 | 2026-10-08 | gpt-6.1-sol | agent:/root/remaining_requirements_audit_sol61 | Current-policy and evidence reconciliation | docs-only continuation on `8e242787c` | Preserves Paul `a3162e446` compile-only ready-Rust policy and original M1–M6 authors/receipts; accepts M1's infrastructure deviation and unrecovered M2 unit-negative as historical limitations, not executed passes. Historical 2413/2415 run/job/raw identities verified; current 89-adverse/49-unresolved cohort remains open. Zero unit/discovery replay, release or deployment; root hands merge-ready work to the batching coordinator. |
+| 2026-10-08 | gpt-6.1-sol | agent:/root | Recorded known-failure close-out | evidence at [#868](http://forge.lan:3000/noirr/plurx/pulls/868) / `eb547f35` | Same independent audit verifies 91 known historical adverse identities and later applicable font/Activity/retention/serial positives (§7.2), including exact changed-method/source/environment checks. Original failures, incomplete census, accepted gaps and unknown serial causes retained. No fresh whole-suite/Linux/fleet or waived-green claim; zero unit/build replay. Reviewed docs go to the authorized batching owner. |
