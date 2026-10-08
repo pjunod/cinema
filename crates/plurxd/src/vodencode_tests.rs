@@ -717,6 +717,12 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         )
         .await
         .expect("one short family budget");
+    // This separate refusal phase also needs unrelated live work: a whole
+    // oversized family is otherwise allowed to own the idle pool.
+    let unrelated_live = encoding
+        .admissions
+        .try_admit_software(family_budget - 1, 1, crate::admission::Priority::Live)
+        .expect("unrelated live CPU credit for autonomous refusal");
     assert!(serve
         .try_create(
             autonomous(),
@@ -727,6 +733,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         )
         .await
         .is_err());
+    drop(unrelated_live);
     assert_eq!(
         encoding.admissions.software_in_use(),
         0,
