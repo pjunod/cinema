@@ -471,13 +471,18 @@ static EXECUTABLE_CAPTURE_CACHE: std::sync::OnceLock<tokio::sync::Mutex<Executab
 
 impl EncodedExecutable {
     pub(crate) async fn capture_program(program: &str) -> Result<Self, String> {
-        let path =
-            resolve_executable_path(program).ok_or("cannot resolve the producer executable")?;
+        // PATH metadata and canonicalization can block on remote/cold storage.
+        // Resolve away from runtime workers so callers can enforce their own
+        // capture deadline; this read-only task owns no subprocess or media.
+        let program = program.to_owned();
+        let path = tokio::task::spawn_blocking(move || resolve_executable_path(&program))
+            .await
+            .map_err(|error| format!("executable resolution task failed: {error}"))?
+            .ok_or("cannot resolve the producer executable")?;
         Self::capture_at(path).await
     }
     pub async fn capture() -> Result<Self, String> {
-        let path = encoder_executable_path().ok_or("cannot resolve the encoder executable")?;
-        Self::capture_at(path).await
+        Self::capture_program(&ffmpeg_bin()).await
     }
 
     pub(crate) async fn capture_at(path: std::path::PathBuf) -> Result<Self, String> {
@@ -508,6 +513,14 @@ impl EncodedExecutable {
         }
         cache.executable = Some(captured.clone());
         Ok(captured)
+    }
+
+    /// Validate this captured canonical launch object; do not follow the
+    /// configured alias and silently substitute another executable here.
+    pub(crate) async fn is_current(&self) -> bool {
+        engine_objects_are_current_batch(None, vec![self.attestation_object()].into())
+            .await
+            .0
     }
 
     /// The `(path, version)` pair this executable attests.

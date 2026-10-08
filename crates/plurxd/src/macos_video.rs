@@ -31,6 +31,8 @@ pub(crate) enum ProbeReason {
     PreparationTimedOut,
     Cancelled,
     IdentityUnavailable,
+    UnsupportedDependencies,
+    DependencyInventoryUnavailable,
     ImplementationChanged,
     MissingFilter,
     GraphFailed,
@@ -49,6 +51,10 @@ impl ProbeReason {
             Self::PreparationTimedOut => "fixture_preparation_timed_out",
             Self::Cancelled => "cancelled",
             Self::IdentityUnavailable => "implementation_identity_unavailable",
+            Self::UnsupportedDependencies => "unsupported_implementation_dependencies",
+            Self::DependencyInventoryUnavailable => {
+                "implementation_dependency_inventory_unavailable"
+            }
             Self::ImplementationChanged => "implementation_changed",
             Self::MissingFilter => "missing_filter",
             Self::GraphFailed => "runtime_graph_failed",
@@ -155,6 +161,8 @@ impl MacosVideoReport {
             "sdr_scale": self.sdr_scale.diagnostics(),
             "hdr10_metal": self.hdr10_metal.diagnostics(),
             "qualification": "external_advisory",
+            "dependency_inventory_tool": "otool",
+            "supported_dependency_scope": "apple_system_only",
         })
     }
 }
@@ -752,9 +760,104 @@ struct Implementation {
     filters: String,
 }
 
+// The admitted Jellyfin distribution statically supplies its non-Apple libraries.
+// Both programs must prove that every dynamic install name belongs to macOS.
+// This avoids pretending that a direct otool listing attests arbitrary @rpath
+// or third-party transitive dependencies. The immutable Apple closure is bound
+// by the actual OS build, not by a process-local fragment-index cache key.
+fn apple_dependency_report(report: &[u8]) -> Result<String, ProbeReason> {
+    let text = std::str::from_utf8(report).map_err(|_| ProbeReason::IdentityUnavailable)?;
+    let mut lines = text.lines();
+    if !lines.next().is_some_and(|line| line.ends_with(':')) {
+        return Err(ProbeReason::IdentityUnavailable);
+    }
+    let mut dependencies = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        let (path, versions) = line
+            .split_once(" (compatibility version ")
+            .ok_or(ProbeReason::UnsupportedDependencies)?;
+        if !(path.starts_with("/usr/lib/") || path.starts_with("/System/Library/"))
+            || path
+                .split('/')
+                .skip(1)
+                .any(|part| matches!(part, "" | "." | ".."))
+            || !versions.ends_with(')')
+            || !line
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        {
+            return Err(ProbeReason::UnsupportedDependencies);
+        }
+        dependencies.push(line);
+    }
+    if dependencies.is_empty() {
+        return Err(ProbeReason::UnsupportedDependencies);
+    }
+    dependencies.sort_unstable();
+    dependencies.dedup();
+    Ok(dependencies.join("\n"))
+}
+
+fn apple_dependencies_digest(os_build: &str, ffmpeg: &str, ffprobe: &str) -> String {
+    let mut linked = Sha256::new();
+    linked.update(b"plurx/macos-processing/apple-dependencies/v1\0");
+    linked.update((os_build.len() as u64).to_be_bytes());
+    linked.update(os_build.as_bytes());
+    for (role, report) in [("ffmpeg", ffmpeg), ("ffprobe", ffprobe)] {
+        linked.update(role.as_bytes());
+        linked.update((report.len() as u64).to_be_bytes());
+        linked.update(report.as_bytes());
+    }
+    hex::encode(linked.finalize())
+}
+
+fn unmodified_dyld_environment() -> bool {
+    !std::env::vars_os().any(|(name, _)| name.to_string_lossy().starts_with("DYLD_"))
+}
+
+async fn identity_command(
+    command: tokio::process::Command,
+    deadline: tokio::time::Instant,
+    cancelled: &CancellationToken,
+    failure: ProbeReason,
+) -> Result<Vec<u8>, ProbeReason> {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(ProbeReason::IdentityUnavailable);
+    }
+    // Never wrap a live child in timeout_at: its bounded owner must kill/reap
+    // before this generation releases its serial ownership.
+    crate::ffmpeg::bounded_command_output_cancellable(
+        command,
+        remaining,
+        1024 * 1024,
+        "Mac implementation identity",
+        Some(cancelled),
+        PROBE_WORK,
+    )
+    .await
+    .map(|output| output.stdout)
+    .map_err(|_| {
+        if cancelled.is_cancelled() {
+            ProbeReason::Cancelled
+        } else {
+            if tokio::time::Instant::now() >= deadline {
+                ProbeReason::IdentityUnavailable
+            } else {
+                failure
+            }
+        }
+    })
+}
+
 async fn capture_implementation(
     cancelled: &CancellationToken,
 ) -> Result<Implementation, ProbeReason> {
+    let deadline = tokio::time::Instant::now() + IDENTITY_BUDGET;
+    if !unmodified_dyld_environment() {
+        return Err(ProbeReason::UnsupportedDependencies);
+    }
     let executable_capture = async {
         let ffmpeg = crate::ffmpeg::EncodedExecutable::capture()
             .await
@@ -765,58 +868,72 @@ async fn capture_implementation(
                 .map_err(|_| ProbeReason::IdentityUnavailable)?;
         Ok::<_, ProbeReason>((ffmpeg, ffprobe))
     };
-    // Only file capture is cancellable by dropping this future. Once a child
-    // exists, its existing bounded owner handles timeout/cancellation and reap.
-    let (ffmpeg, ffprobe) = tokio::select! {
-        biased;
-        () = cancelled.cancelled() => return Err(ProbeReason::Cancelled),
-        result = tokio::time::timeout(IDENTITY_BUDGET, executable_capture) =>
-            result.unwrap_or(Err(ProbeReason::IdentityUnavailable))?,
-    };
-    {
-        // This existing dependency collector owns bounded children internally;
-        // await its settlement rather than dropping their resource ownership.
-        let linked = crate::ffmpeg::fragment_index_engine_digest().await;
-        if !crate::ffmpeg::fragment_index_engine_is_current().await {
-            return Err(ProbeReason::IdentityUnavailable);
-        }
-        let (os_build, hardware_class) = platform_facts()?;
-        let identity = MacosProcessingIdentity::new(
-            ffmpeg.digest.clone(),
-            ffprobe.digest.clone(),
-            ffmpeg.digest.clone(),
-            linked,
-            os_build,
-            processing_architecture(std::env::consts::ARCH)?.to_owned(),
-            hardware_class,
-        )
-        .map_err(|_| ProbeReason::IdentityUnavailable)?;
-        let mut command = tokio::process::Command::new(&ffmpeg.path);
-        command.args(["-hide_banner", "-filters"]);
-        let listing = crate::ffmpeg::bounded_command_output_cancellable(
+    // These file-only operations cannot publish media or retain child ownership.
+    let (ffmpeg, ffprobe) = bounded_identity_io(deadline, cancelled, executable_capture).await?;
+    let (os_build, hardware_class) = platform_facts()?;
+    let mut reports = Vec::with_capacity(2);
+    for executable in [&ffmpeg, &ffprobe] {
+        let mut command = tokio::process::Command::new("/usr/bin/otool");
+        command.arg("-L").arg(&executable.path);
+        reports.push(apple_dependency_report(
+            &identity_command(
+                command,
+                deadline,
+                cancelled,
+                ProbeReason::DependencyInventoryUnavailable,
+            )
+            .await?,
+        )?);
+    }
+    let linked = apple_dependencies_digest(&os_build, &reports[0], &reports[1]);
+    let identity = MacosProcessingIdentity::new(
+        ffmpeg.digest.clone(),
+        ffprobe.digest.clone(),
+        ffmpeg.digest.clone(),
+        linked,
+        os_build,
+        processing_architecture(std::env::consts::ARCH)?.to_owned(),
+        hardware_class,
+    )
+    .map_err(|_| ProbeReason::IdentityUnavailable)?;
+    let mut command = tokio::process::Command::new(&ffmpeg.path);
+    command.args(["-hide_banner", "-filters"]);
+    let filters = String::from_utf8(
+        identity_command(
             command,
-            IDENTITY_BUDGET,
-            1024 * 1024,
-            "Mac filter inventory",
-            Some(cancelled),
-            PROBE_WORK,
+            deadline,
+            cancelled,
+            ProbeReason::IdentityUnavailable,
         )
-        .await
-        .map_err(|_| {
-            if cancelled.is_cancelled() {
-                ProbeReason::Cancelled
-            } else {
-                ProbeReason::IdentityUnavailable
-            }
-        })?;
-        let filters =
-            String::from_utf8(listing.stdout).map_err(|_| ProbeReason::IdentityUnavailable)?;
-        Ok(Implementation {
-            ffmpeg,
-            ffprobe,
-            identity,
-            filters,
-        })
+        .await?,
+    )
+    .map_err(|_| ProbeReason::IdentityUnavailable)?;
+    let implementation = Implementation {
+        ffmpeg,
+        ffprobe,
+        identity,
+        filters,
+    };
+    if !bounded_identity_io(deadline, cancelled, async {
+        Ok(implementation_is_current(&implementation).await)
+    })
+    .await?
+    {
+        return Err(ProbeReason::ImplementationChanged);
+    }
+    Ok(implementation)
+}
+
+async fn bounded_identity_io<T>(
+    deadline: tokio::time::Instant,
+    cancelled: &CancellationToken,
+    work: impl std::future::Future<Output = Result<T, ProbeReason>>,
+) -> Result<T, ProbeReason> {
+    tokio::select! {
+        biased;
+        () = cancelled.cancelled() => Err(ProbeReason::Cancelled),
+        result = tokio::time::timeout_at(deadline, work) =>
+            result.unwrap_or(Err(ProbeReason::IdentityUnavailable)),
     }
 }
 
@@ -867,15 +984,34 @@ fn platform_facts() -> Result<(String, String), ProbeReason> {
 }
 
 async fn implementation_is_current(implementation: &Implementation) -> bool {
-    let objects: Arc<[(PathBuf, String)]> = vec![
-        implementation.ffmpeg.attestation_object(),
-        implementation.ffprobe.attestation_object(),
-    ]
-    .into();
-    crate::ffmpeg::engine_objects_are_current_batch(None, objects)
-        .await
-        .0
-        && crate::ffmpeg::fragment_index_engine_is_current().await
+    // Resolve the CURRENT configuration again. Merely statting the captured
+    // canonical path misses a configured symlink moving A -> B while A survives.
+    let Ok(ffmpeg) = crate::ffmpeg::EncodedExecutable::capture().await else {
+        return false;
+    };
+    let Ok(ffprobe) =
+        crate::ffmpeg::EncodedExecutable::capture_program(&crate::ffmpeg::bound_ffprobe_bin())
+            .await
+    else {
+        return false;
+    };
+    same_executable(&ffmpeg, &implementation.ffmpeg)
+        && same_executable(&ffprobe, &implementation.ffprobe)
+        && ffmpeg.is_current().await
+        && ffprobe.is_current().await
+        && unmodified_dyld_environment()
+        && platform_facts().is_ok_and(|(os_build, hardware_class)| {
+            os_build == implementation.identity.os_build()
+                && hardware_class == implementation.identity.hardware_class()
+        })
+}
+
+fn same_executable(
+    current: &crate::ffmpeg::EncodedExecutable,
+    captured: &crate::ffmpeg::EncodedExecutable,
+) -> bool {
+    current.attestation_object() == captured.attestation_object()
+        && current.digest == captured.digest
 }
 
 async fn run_generation(
@@ -1040,6 +1176,47 @@ async fn bounded_graph_io<T>(
     }
 }
 
+// Cancellation/deadline is a request to stop this writer, never permission to
+// drop its blocking JoinHandle. In particular it may have passed its final
+// cooperative check already. Settle first, then the caller can remove any
+// committed output without racing a late rename from a detached writer.
+async fn settle_graph_write(
+    deadline: tokio::time::Instant,
+    cancelled: &CancellationToken,
+    write: impl std::future::Future<Output = std::io::Result<()>>,
+) -> Result<(), ProbeReason> {
+    tokio::pin!(write);
+    let stopped = tokio::select! {
+        biased;
+        () = cancelled.cancelled() => ProbeReason::Cancelled,
+        () = tokio::time::sleep_until(deadline) => ProbeReason::GraphTimedOut,
+        result = &mut write => return result.map_err(|_| ProbeReason::CacheUnavailable),
+    };
+    let _ = write.await;
+    Err(stopped)
+}
+
+async fn settle_probe_publication(
+    directory: &plurx_core::fs_secure::SecureDirectory,
+    name: &str,
+    deadline: tokio::time::Instant,
+    cancelled: &CancellationToken,
+    write: impl std::future::Future<Output = std::io::Result<()>>,
+) -> Result<(), ProbeReason> {
+    let result = settle_graph_write(deadline, cancelled, write).await;
+    if result.is_err() {
+        // The writer is settled, so even a rename after its last cooperative
+        // check cannot race this unlink. A filesystem syscall already in flight
+        // cannot be interrupted: settlement may extend past the probe budget.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            directory.unlink_child(name),
+        )
+        .await;
+    }
+    result
+}
+
 async fn run_smoke(
     prepared: &PreparedCorpus,
     fixture: &Fixture,
@@ -1123,24 +1300,18 @@ async fn run_smoke(
     }
     let name = format!("probe-{}.mp4", uuid::Uuid::new_v4().simple());
     let token = cancelled.clone();
-    let publication = bounded_graph_io(deadline, cancelled, async {
+    settle_probe_publication(
+        &prepared.directory,
+        &name,
+        deadline,
+        cancelled,
         prepared
             .directory
             .atomic_write_child_cooperative(&name, &encoded, move || {
                 !token.is_cancelled() && tokio::time::Instant::now() < deadline
-            })
-            .await
-            .map_err(|_| ProbeReason::CacheUnavailable)
-    })
-    .await;
-    if let Err(reason) = publication {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            prepared.directory.unlink_child(&name),
-        )
-        .await;
-        return Err(reason);
-    }
+            }),
+    )
+    .await?;
     let observe = async {
         let output_path = prepared.path.join(&name);
         let output = bounded_graph_io(deadline, cancelled, async {
@@ -1531,6 +1702,11 @@ mod tests {
         assert!(report.context(true).is_none());
         assert!(report.context(false).is_none());
         assert_eq!(report.diagnostics()["qualification"], "external_advisory");
+        assert_eq!(report.diagnostics()["dependency_inventory_tool"], "otool");
+        assert_eq!(
+            report.diagnostics()["supported_dependency_scope"],
+            "apple_system_only"
+        );
     }
 
     #[cfg(unix)]
@@ -1643,6 +1819,174 @@ mod tests {
             Err(ProbeReason::Cancelled)
         ));
         assert!(!root.path().join("macos-processing").exists());
+    }
+
+    #[test]
+    fn admitted_dependency_identity_covers_both_programs_and_os_build() {
+        let report = b"/candidate:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.2.3)\n";
+        let admitted = apple_dependency_report(report).expect("Apple dependency admitted");
+        let original = apple_dependencies_digest("OS-build-a", &admitted, &admitted);
+        let changed = admitted.replace("1.2.3", "1.2.4");
+        assert_ne!(
+            original,
+            apple_dependencies_digest("OS-build-a", &changed, &admitted)
+        );
+        assert_ne!(
+            original,
+            apple_dependencies_digest("OS-build-a", &admitted, &changed)
+        );
+        assert_ne!(
+            original,
+            apple_dependencies_digest("OS-build-b", &admitted, &admitted)
+        );
+        for install_name in [
+            "@rpath/libffprobe-only.dylib",
+            "/opt/local/lib/library.dylib",
+            "/usr/lib/../local/library.dylib",
+            "/System/Library/./Frameworks/A",
+            "/usr/lib//A",
+        ] {
+            let report = format!("/candidate:\n\t{install_name} (compatibility version 1.0.0, current version 1.0.0)\n");
+            assert_eq!(
+                apple_dependency_report(report.as_bytes()),
+                Err(ProbeReason::UnsupportedDependencies)
+            );
+        }
+        assert_eq!(
+            ProbeReason::UnsupportedDependencies.as_str(),
+            "unsupported_implementation_dependencies"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn identity_filesystem_wait_observes_deadline_and_cancellation() {
+        let token = CancellationToken::new();
+        let result: Result<(), ProbeReason> = bounded_identity_io(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            &token,
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(result, Err(ProbeReason::IdentityUnavailable));
+        token.cancel();
+        let result: Result<(), ProbeReason> = bounded_identity_io(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            &token,
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(result, Err(ProbeReason::Cancelled));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_symlink_retarget_cannot_reuse_old_executable_attestation() {
+        let root = temporary_root();
+        let a = root.path().join("program-a");
+        let b = root.path().join("program-b");
+        let configured = root.path().join("configured");
+        tokio::fs::write(&a, b"implementation a")
+            .await
+            .expect("first implementation");
+        tokio::fs::write(&b, b"implementation b")
+            .await
+            .expect("second implementation");
+        std::os::unix::fs::symlink(&a, &configured).expect("configured alias to A");
+        let captured = crate::ffmpeg::EncodedExecutable::capture_program(
+            configured.to_str().expect("UTF-8 test path"),
+        )
+        .await
+        .expect("capture configured implementation A");
+        tokio::fs::remove_file(&configured)
+            .await
+            .expect("remove configured alias");
+        std::os::unix::fs::symlink(&b, &configured).expect("retarget configured alias to B");
+        let current = crate::ffmpeg::EncodedExecutable::capture_program(
+            configured.to_str().expect("UTF-8 test path"),
+        )
+        .await
+        .expect("capture configured implementation B");
+        assert!(a.exists(), "the old canonical executable remains present");
+        assert!(!same_executable(&current, &captured));
+    }
+
+    #[cfg(unix)]
+    async fn paused_publication_is_settled_before_cleanup(reason: ProbeReason) {
+        let root = temporary_root();
+        let directory = plurx_core::fs_secure::SecureDirectory::open(root.path())
+            .await
+            .expect("secure test authority");
+        let (paused, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let writer_directory = directory.clone();
+        let writer = tokio::spawn(async move {
+            writer_directory
+                .atomic_write_child_with_commit(
+                    "probe-paused.mp4",
+                    b"encoded probe",
+                    move |rename| {
+                        paused.send(()).expect("notify final pre-rename pause");
+                        released.recv().expect("test releases paused writer");
+                        rename()
+                    },
+                )
+                .await
+        });
+        ready.await.expect("writer reached final pre-rename pause");
+        let token = CancellationToken::new();
+        let deadline = if reason == ProbeReason::Cancelled {
+            token.cancel();
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10)
+        } else {
+            tokio::time::Instant::now()
+        };
+        let (settling, joined) = tokio::sync::oneshot::channel();
+        let publication = tokio::spawn(async move {
+            settle_probe_publication(
+                &directory,
+                "probe-paused.mp4",
+                deadline,
+                &token,
+                async move {
+                    settling
+                        .send(())
+                        .expect("observe retained writer settlement");
+                    writer.await.map_err(std::io::Error::other)?
+                },
+            )
+            .await
+        });
+        joined
+            .await
+            .expect("publication owner awaits the paused writer after stop");
+        assert!(
+            !publication.is_finished(),
+            "cancellation/deadline must retain writer settlement"
+        );
+        release.send(()).expect("release final rename");
+        assert_eq!(
+            publication.await.expect("join publication owner"),
+            Err(reason)
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .expect("settled cache directory")
+                .count(),
+            0,
+            "late rename and staging file must both be cleaned before owner returns"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graph_deadline_settles_paused_writer_before_removing_output() {
+        paused_publication_is_settled_before_cleanup(ProbeReason::GraphTimedOut).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graph_cancellation_settles_paused_writer_before_removing_output() {
+        paused_publication_is_settled_before_cleanup(ProbeReason::Cancelled).await;
     }
 
     #[cfg(unix)]
