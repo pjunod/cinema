@@ -889,3 +889,11 @@ on 2026-10-07. All three execution-contract findings have author corrections
 in these documents; see the [review record](MACOS-VIDEO-PROCESSING-REVIEW.md).
 No second independent approval is claimed. The user may still hand the
 revised documents and this record to Opus.
+
+The shared media-tool resolver in `plurx_core::process` governs normal library
+scanning, local/book metadata extraction and daemon processing. Nonempty
+`PLURX_FFMPEG`/`PLURX_FFPROBE` overrides remain first; packaged macOS/Windows
+processes then use executable siblings before PATH. This prevents catalog and
+held-parser facts from being produced by different default toolchains. Source
+attestation remains strict; normal reanalysis is required for stale catalog
+facts created by an older or explicitly different parser.

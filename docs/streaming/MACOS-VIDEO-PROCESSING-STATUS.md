@@ -29,6 +29,15 @@ accepted repairs, including three terminal-NAL runtime fixtures at
 `54c3a3fe8`. The candidate is ready for final source freeze. Final daemon qualification remains
 active; source completion is not final acceptance.
 
+Final normal-API SDR/HDR10, finite HEVC, ordinary Auto and strict P5 delivery
+passed on the signed `a2ee4a221` package. AC-4 then exposed a real integration
+defect: core scanning resolved PATH FFprobe while the packaged daemon and held
+parser used Jellyfin. Their differing facts correctly triggered source
+attestation refusal. Shared executable-resolution repair `4adb34c0` now covers scanning,
+metadata extraction and daemon processing and is independently accepted. A
+new release and actual AC-4 requalification are required before the draft PR
+can enter the merge queue.
+
 No deployed FFmpeg package or live service has changed. The matching Apple
 Metal compiler component was temporarily installed for the private package
 build; ownership is recorded and cleanup will remove that exact component
@@ -39,7 +48,7 @@ after review. Missing qualification stays explicitly open.
 | Integration and status | Manager | final candidate preparation | Main `c746b6c9b` union and five review repairs integrated; all scopes accepted through terminal registration `54c3a3fe8` |
 | M0/M1 Jellyfin package and harness | Sol builders | source complete; package controls recorded | Final strict terminal-NAL package `c8c4b525…`; pinned source offer, AC-4 byte preservation and prior synthetic benefit evidence |
 | M2/M3 typed routes and observations | Sol route builder | source complete | Twenty-two supported graph classes; final embedded inventory pending |
-| Native parser and symbols | Sol native builder | source complete | Bounded held-descriptor WASM/JIT, signed-kernel preflight, matched dSYM packaging; final daemon build pending |
+| Native parser and symbols | Sol native builder | resolver repair reviewed; new package building | Bounded held-descriptor WASM/JIT, signed-kernel preflight, matched dSYM packaging; final daemon build pending |
 | M4 normalized VOD | Sol native and route builders | source complete; earlier daemon delivery demonstrated | Earlier 120-second lifetime and CPU/native pixel comparison retained; final SDR/HDR10, timing and soak pending |
 | E1 strict Dolby P5 | Sol Dolby and route builders | source complete; sixty controls pass | Sixty selected-graph controls and sixteen observer mutations pass; terminal-NAL fixture registration independently accepted. Final normal-API proof pending |
 | E2–E4 HLG, burns, BWDIF, HEVC and Live | Sol builders | source complete within demonstrated scope | HLG text/bitmap controls pass; actual HDR High10 interlace decode fails and keeps incumbent. HEVC init binding fixed; final master, Auto and Live API proof pending |

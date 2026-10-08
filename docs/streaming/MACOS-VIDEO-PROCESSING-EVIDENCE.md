@@ -790,3 +790,70 @@ compressed, SHA-256
 Every manifest member's size and hash was verified after writing. The narrow
 independent review accepted this registration without new findings. Final
 packaged-daemon inventory and normal-API delivery remain separate checks.
+
+## 21. Final source compilation and regression references
+
+Frozen source `3269bbcd984fe08a554c330d01d0a6a0fdf7e7a0` passes Linux
+Rust 1.97.1 workspace all-target check (269.79 seconds) and Clippy with denied
+lints (275.69 seconds), including `plurx-core/hiqlite-store`. Only committed
+source entered the compiler container. The compiler's known `fullfp16`
+target-feature warnings are retained in the logs. No units were executed.
+
+The complete Apple subtree is unchanged from its successful iOS/tvOS build,
+and the Android subtree is unchanged from its successful app, instrumentation
+and JVM regression-source compilation after C1. These passes are retained by
+source equivalence, not re-executed. All 67 unique final regression references
+resolve through the repository's actual static resolver. One internal Python
+class-qualified trailer was normalized to the supported `path::test_name`
+spelling in the final PR/landing packet; the valid anchor already existed.
+
+[Final compilation evidence](evidence/macos-video-20261008/final-compilation-evidence.tar.gz)
+contains 13 receipts/logs/driver records, 32,052 compressed bytes, SHA-256
+`53736d72778003b39aa0d153b77eee00cd3d604264d3b8d04430f415569afcfa`.
+All manifest member hashes and sizes were verified after writing. This is
+compile/lint and static-reference evidence, not unit execution, physical
+client playback, or a complete promotion-policy receipt.
+
+## 22. Normal API delivery and the scanner resolver defect
+
+The signed `a2ee4a221` daemon with final Jellyfin FFmpeg `c8c4b525…` reached
+all 22 graph classes through embedded runtime observations. Its normal API
+checks passed normalized 1440p SDR, 120.003 seconds/60 objects of paced HTTP
+delivery, source-aligned seek/resume timestamps, cancellation, finite HEVC
+Main output and ordinary Auto AVC/HEVC preference. Forty-eight paired decoded
+CPU/native frames have at most one code value of patch difference, minimum
+PSNR 51.92 dB and mean 53.23 dB. Genuine 4K PQ input also produced normalized
+1440p SDR and separate 1080p Main10 PQ/BT.2020 HEVC with matching master codec
+information. These are media/API observations, not client presentation.
+
+Normal finite P5 delivery passed with the strict captured package policy and
+all 24 served 256×144 SDR frames. This finite manual route legitimately has
+no canonical normalized candidate binding. Two initial driver failures are
+retained: an incorrect binding assertion and an incorrect report-field name.
+Neither required application changes or relaxed strict-route checks.
+
+AC-4 exposed a real application defect. The normal scanner used ambient
+FFprobe 9.0.1, yielding zero/unknown AC-4 channels and HEVC extradata size 102.
+The same source, probed by bundled Jellyfin, yields six channels and extradata
+size 99. Playback's held parser used Jellyfin, so source attestation correctly
+refused the inconsistent catalog facts with `vod_source_rescan_required`.
+Reanalyzing through the same incorrect resolver would repeat the mismatch.
+The ambient tool is evidence of the defect, not an accepted package baseline.
+
+Repair `4adb34c022fda0168dc9d766988ae9a258c0c53a` moves executable selection
+into the existing core process layer. Scanner, local/book artwork and daemon
+wrappers share nonempty explicit override → macOS/Windows executable sibling
+→ PATH fallback. Linux defaults remain unchanged. Source confinement and
+attestation checks are untouched. Pinned compilation and the normal hook
+passed; targeted independent review accepted the repair. New-artifact AC-4
+qualification is still required. Existing `is_file()` behavior follows a
+symlink to a regular target; this repair introduces no no-symlink guarantee.
+
+[Normal API and resolver evidence](evidence/macos-video-20261008/normal-api-a2ee-evidence.tar.gz)
+contains 24 allowlisted sanitized receipt/driver/frame-fact records, including
+both harness failures, the actual AC-4 refusal and paired probe facts. It is
+139,784 compressed bytes, SHA-256
+`56132c88121f2e682389e1f0daf30f87370848494a45d64f4a07bf3e84db848d`.
+Every manifest member was verified. No AC-4 media, authentication, private
+state or active session URLs are redistributed. These receipts remain bound
+to `a2ee4a221`; they are not relabeled as results from the repaired daemon.

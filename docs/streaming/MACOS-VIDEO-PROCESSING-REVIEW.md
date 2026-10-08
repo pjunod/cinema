@@ -265,3 +265,20 @@ sources across five graph controls produce sixty checks, including all
 original strict-loss negatives. Fixture hashes match the independently
 accepted native controls. No acceptance shortcut, subprocess owner, larger
 corpus cap or longer aggregate deadline was introduced.
+
+### 7.4 Runtime-discovered shared executable resolver
+
+After the source review, normal AC-4 playback on `a2ee4a221` exposed a concrete
+scanner/held-parser mismatch. Paired probes on the identical input establish
+the cause: core scanning selected ambient FFprobe instead of the packaged
+Jellyfin companion. Source attestation correctly rejected the differing facts.
+
+Repair `4adb34c022fda0168dc9d766988ae9a258c0c53a` is independently accepted by
+`macos_final_review_security`. One resolver in the existing core process layer
+now serves scanner, local/book metadata extraction and daemon wrappers.
+Nonempty explicit overrides remain first; empty overrides select packaged
+macOS/Windows siblings or PATH, and Linux defaults remain PATH. The existing
+regular-target `is_file()` behavior is retained, including symlink following.
+No source-integrity or held-source confinement check changes. Both regression
+references resolve; compile and the normal hook pass, with no units run.
+Actual AC-4 acceptance on the repaired package remains the next requirement.
