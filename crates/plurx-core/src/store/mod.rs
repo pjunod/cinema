@@ -2178,6 +2178,12 @@ pub mod keys {
     /// for the same reason as the overlay above: an operator turning off work
     /// their GPU is doing should be able to find the switch, and see it is off.
     pub const DV_CONVERT: &str = "playback.dolby_vision_convert";
+    /// Opt-in preference for qualified DV rendering to HDR output. Missing is
+    /// off. Saving the preference does not establish a worker capability.
+    pub const DV_HDR_PROCESSING: &str = "playback.dolby_vision_hdr_processing";
+    /// Opt-in preference for qualified FEL reconstruction and P8.1 encoding.
+    /// Missing is off; this never overrides the separate DV_CONVERT permission.
+    pub const DV_FEL_REENCODE: &str = "playback.dolby_vision_fel_reencode";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite
