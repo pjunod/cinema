@@ -311,6 +311,9 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md](streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md) | Why copied HEVC turns pink and green, the matched-pixel reproduction, and the implemented proof-before-stripping containment with an unrestricted Developer override. | open |
 | [HEVC-COLOR-CORRUPTION-REVIEW.md](streaming/HEVC-COLOR-CORRUPTION-REVIEW.md) | Independent adversarial review of the HEVC color diagnosis and implementation, with objections, amendments and remaining delivery gates. | open |
 | [DV-DELIVERY-FINDINGS.md](streaming/DV-DELIVERY-FINDINGS.md) | Why Dolby Vision titles arrive as HDR10 or lower. | open |
+| [DV_HDR_PROCESSING_PLAN.md](streaming/DV_HDR_PROCESSING_PLAN.md) | FEL-aware DV to HDR10 and Profile 7 to 8.1 proposal: quality measurements, controls and fallbacks. | open |
+| [DV_HDR_PROCESSING_BUILD.md](streaming/DV_HDR_PROCESSING_BUILD.md) | Sol 6.1 implementation handoff: backend feasibility, integration contracts, benchmarks and qualification. | open |
+| [DV_HDR_PROCESSING_REVIEW.md](streaming/DV_HDR_PROCESSING_REVIEW.md) | Adversarial findings and dispositions for the DV processing proposal and build handoff; cleared for M0 feasibility only. | done |
 | [DV-DISK-CONVERSION-DIAGNOSIS.md](streaming/DV-DISK-CONVERSION-DIAGNOSIS.md) | Why the on-disk conversion never completes, and a proposal. | open |
 | [QUEUE-REPAIR-VERIFICATION-PROMPT.md](streaming/QUEUE-REPAIR-VERIFICATION-PROMPT.md) | Did the fragment-index queue come back, and stay back? | open |
 | [DECODER_SELECTION_AND_RECOVERY_PLAN.md](streaming/DECODER_SELECTION_AND_RECOVERY_PLAN.md) | An explicit decoder choice and recovery path for each producer. | open |
