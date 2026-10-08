@@ -312,6 +312,11 @@ async fn run(
         _cpu: cpu,
         directory,
     });
+    // /dev/fd on macOS shares the description's offset. A fresh demuxer
+    // starts at the segment beginning while this graph owns the lane.
+    (&resources.source.handle)
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| e.to_string())?;
     let held_directory =
         plurx_core::fs_secure::open_directory_nofollow_blocking(resources.directory.path())
             .map_err(|e| e.to_string())?;
@@ -381,7 +386,7 @@ async fn run(
     }
     (&nut).seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     (&resources.source.handle)
-        .seek(SeekFrom::Start(original_offset))
+        .seek(SeekFrom::Start(0))
         .map_err(|e| e.to_string())?;
     check_source(&resources.source)?;
     if cancel.is_cancelled() || Instant::now() >= request.deadline {
@@ -693,6 +698,9 @@ mod tests {
                 .await
                 .expect("held actual source"),
         );
+        (&source.handle)
+            .seek(SeekFrom::Start(7))
+            .expect("nonzero borrowed offset");
         let original = (&source.handle).stream_position().expect("original offset");
         let offsets = Arc::new(Semaphore::new(1));
         let admissions = Admissions::new();
