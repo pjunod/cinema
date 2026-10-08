@@ -2,7 +2,7 @@
 //! Runtime probes populate this context; the existing decoder resolver owns
 //! selection. Availability is compatibility evidence, not a benchmark score.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -117,6 +117,31 @@ impl MacosProcessingIdentity {
     }
 }
 
+/// Complete independently observed graph tuples. Components do not imply
+/// support for another color, subtitle or cadence combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacosProcessingGraph {
+    SdrScale,
+    Hdr10Metal,
+    HlgMetal,
+    SdrTextBurn,
+    Hdr10TextBurn,
+    HlgTextBurn,
+    SdrBitmapBurn,
+    Hdr10BitmapBurn,
+    HlgBitmapBurn,
+    SdrBwdifFrame,
+    Hdr10BwdifFrame,
+    HlgBwdifFrame,
+    SdrBwdifField,
+    HevcSdr,
+    HevcHdr10,
+    P5VtTonemapx,
+    P5VtMetal,
+    P5SoftwareMetal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacosProcessingContext {
     enabled: bool,
@@ -124,6 +149,7 @@ pub struct MacosProcessingContext {
     sdr_scale: MacosProcessingAvailability,
     hdr10_metal: MacosProcessingAvailability,
     excluded_pipelines: BTreeSet<Pipeline>,
+    graphs: BTreeMap<MacosProcessingGraph, MacosProcessingAvailability>,
 }
 
 impl MacosProcessingContext {
@@ -139,6 +165,39 @@ impl MacosProcessingContext {
             sdr_scale,
             hdr10_metal,
             excluded_pipelines: BTreeSet::new(),
+            graphs: BTreeMap::new(),
+        }
+    }
+
+    /// Runtime evidence for one complete extension tuple. No offline
+    /// qualification receipt or operator preference enters this observation.
+    #[must_use]
+    pub fn with_graph(
+        mut self,
+        graph: MacosProcessingGraph,
+        availability: MacosProcessingAvailability,
+    ) -> Self {
+        self.graphs.insert(graph, availability);
+        self
+    }
+
+    pub fn observed_graphs(
+        &self,
+    ) -> impl Iterator<Item = (MacosProcessingGraph, MacosProcessingAvailability)> + '_ {
+        self.graphs
+            .iter()
+            .map(|(graph, availability)| (*graph, *availability))
+    }
+
+    pub fn graph(&self, graph: MacosProcessingGraph) -> MacosProcessingAvailability {
+        match graph {
+            MacosProcessingGraph::SdrScale => self.sdr_scale,
+            MacosProcessingGraph::Hdr10Metal => self.hdr10_metal,
+            _ => self
+                .graphs
+                .get(&graph)
+                .copied()
+                .unwrap_or(MacosProcessingAvailability::Unavailable),
         }
     }
 

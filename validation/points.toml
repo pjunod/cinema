@@ -890,6 +890,7 @@ paths = [
   "docs/streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md",
   "scripts/dv-evidence",
   "scripts/generate-macos-video-fixtures",
+  "scripts/generate-macos-video-extensions",
   "scripts/decoder-media-baseline",
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",

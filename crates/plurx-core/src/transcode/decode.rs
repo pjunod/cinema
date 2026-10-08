@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     EffectiveRateControl, Encoder, MacosProcessingAvailability, MacosProcessingContext,
-    MacosProcessingIdentity, MacosProcessingSelection, OutputGrade, Pipeline, SubtitleBurn,
-    ToneMap, TranscodeOptions,
+    MacosProcessingGraph, MacosProcessingIdentity, MacosProcessingSelection, OutputGrade, Pipeline,
+    SubtitleBurn, ToneMap, TranscodeOptions,
 };
 use crate::domain::{
     ContinuationDecodeRestriction, DecodeRestrictionError, DolbyVisionFacts, MediaFile, ScanType,
@@ -3117,7 +3117,7 @@ pub fn resolve_transcode(
     if macos_processing_selection == Some(MacosProcessingSelection::Selected) {
         options.pipeline = match facts.dynamic_range_class() {
             Some(DynamicRangeClass::Sdr) => Pipeline::VtScaleSdr,
-            Some(DynamicRangeClass::Hdr10) => Pipeline::VtToneMapMetal,
+            Some(DynamicRangeClass::Hdr10 | DynamicRangeClass::Hlg) => Pipeline::VtToneMapMetal,
             _ => unreachable!("macOS selection validates the exact color class"),
         };
     } else if matches!(
@@ -3563,7 +3563,6 @@ fn select_macos_processing(
             options.pipeline,
             Pipeline::Cpu | Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal
         )
-        || options.subtitle_burn.is_some()
         || request.rate_profile.is_some()
         || !matches!(
             options.video_sample_envelope,
@@ -3578,7 +3577,11 @@ fn select_macos_processing(
     // Opaque VT frames do not inherit CPU rotation/SAR/rate normalization.
     // Initial graphs preserve only a proved progressive, upright, even raster
     // with square pixels and a known constant cadence.
-    if facts.scan_type() != ScanType::Progressive
+    if !matches!(
+        facts.scan_type(),
+        ScanType::Progressive | ScanType::Interlaced(_)
+    ) || (matches!(facts.scan_type(), ScanType::Interlaced(_))
+        && options.subtitle_burn.is_some())
         || !facts.normalization_transform_known()
         || facts.rotation_degrees() != Some(0)
         || facts.sample_aspect_ratio() != Rational::new(1, 1)
@@ -3591,6 +3594,14 @@ fn select_macos_processing(
         || facts.frame_rate().provenance() != FrameRateProvenance::Average
     {
         return Selection::PresentationConstraint;
+    }
+    // The interlace extension observes H.2648-bit TFF/BFF. MPEG-2/A53
+    // recordings and unobserved interlaced HEVC remain incumbent routes;
+    // the live-only caption suppression is not copied into file output.
+    if matches!(facts.scan_type(), ScanType::Interlaced(_))
+        && (facts.codec() != Some("h264") || facts.bit_depth() != Some(8))
+    {
+        return Selection::IncompatibleInput;
     }
     let codec_supported = matches!(
         (
@@ -3616,7 +3627,15 @@ fn select_macos_processing(
                 && facts.color_primaries() == Some("bt709")
                 && facts.color_transfer() == Some("bt709") =>
         {
-            (Pipeline::VtScaleSdr, context.sdr_scale())
+            let graph = match options.subtitle_burn.as_ref() {
+                None if matches!(facts.scan_type(), ScanType::Interlaced(_)) => {
+                    MacosProcessingGraph::SdrBwdifFrame
+                }
+                None => MacosProcessingGraph::SdrScale,
+                Some(burn) if burn.bitmap => MacosProcessingGraph::SdrBitmapBurn,
+                Some(_) => MacosProcessingGraph::SdrTextBurn,
+            };
+            (Pipeline::VtScaleSdr, context.graph(graph))
         }
         Some(DynamicRangeClass::Hdr10)
             if facts.bit_depth() == Some(10)
@@ -3627,7 +3646,34 @@ fn select_macos_processing(
             if options.tone_map == ToneMap::None {
                 return Selection::PresentationConstraint;
             }
-            (Pipeline::VtToneMapMetal, context.hdr10_metal())
+            let graph = match options.subtitle_burn.as_ref() {
+                None if matches!(facts.scan_type(), ScanType::Interlaced(_)) => {
+                    MacosProcessingGraph::Hdr10BwdifFrame
+                }
+                None => MacosProcessingGraph::Hdr10Metal,
+                Some(burn) if burn.bitmap => MacosProcessingGraph::Hdr10BitmapBurn,
+                Some(_) => MacosProcessingGraph::Hdr10TextBurn,
+            };
+            (Pipeline::VtToneMapMetal, context.graph(graph))
+        }
+        Some(DynamicRangeClass::Hlg)
+            if facts.bit_depth() == Some(10)
+                && facts.color_space() == Some("bt2020nc")
+                && facts.color_primaries() == Some("bt2020")
+                && facts.color_transfer() == Some("arib-std-b67") =>
+        {
+            if options.tone_map == ToneMap::None {
+                return Selection::PresentationConstraint;
+            }
+            let graph = match options.subtitle_burn.as_ref() {
+                None if matches!(facts.scan_type(), ScanType::Interlaced(_)) => {
+                    MacosProcessingGraph::HlgBwdifFrame
+                }
+                None => MacosProcessingGraph::HlgMetal,
+                Some(burn) if burn.bitmap => MacosProcessingGraph::HlgBitmapBurn,
+                Some(_) => MacosProcessingGraph::HlgTextBurn,
+            };
+            (Pipeline::VtToneMapMetal, context.graph(graph))
         }
         _ => return Selection::IncompatibleInput,
     };
