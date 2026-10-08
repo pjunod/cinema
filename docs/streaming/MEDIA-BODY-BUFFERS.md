@@ -1,11 +1,11 @@
 # Media body buffers — size the read, then, separately, the acknowledgement
 
 **Status:** open — M1 and M2 (`ResidentBatch`) on `main` since 2026-10-04
-(#793). §5.1 before/after measured 2026-09-24 (§5.1.1). Decision 1 taken on
-Paul's behalf and his to overturn: the shared read is 128 KiB, and
+(#793). §5.1 before/after measured 2026-09-24 (§5.1.1). Decisions 1 and 6 are
+retained under delegated authority; Paul may overturn either: the shared
+read is 128 KiB, and
 `TCP_NODELAY` is set on accepted connections, which removed the HLS p50
-regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6); both
-await Paul's ratification (see the 2026-10-04 relevance pass §2.15). The
+regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6). The
 controlled acceptance and the packet-rate check are owed: the 2026-10-03
 controlled cell failed 151.6 s into the run, during the software 2160p
 first-segment warm-up (`502 producer_failed` at the 30 s materialisation
@@ -176,6 +176,28 @@ The properties, each with the line that implements it:
    (`transcode.rs:260`) and emits one "stalled on storage" warning per body.
    **This changes meaning with a larger buffer**: a 256 KiB read at 1 MiB/s
    takes 250 ms, a 4 KiB read at the same rate takes 4 ms. §3.1 handles it.
+
+### 2.3 Current causal boundary — the demand clock is not total startup
+
+Source checked 2026-10-08 at `b3ac74a161a3a0d1b9836ac98d356a9aaea51de6`.
+The default 30 s materialisation budget starts with the admitted missing-entry
+demand, not at Create or encoder launch; the default 8 s blocked-GET budget
+is separate. Typed pending retries retain that same episode rather than
+granting another 30 s. See the watchdog in
+[vod/shared.rs](../../crates/plurxd/src/vod/shared.rs) and wait admission in
+[vod/serve/serve.rs](../../crates/plurxd/src/vod/serve/serve.rs).
+
+Sealed source-probe sharing and post-start complete-output enqueue ownership
+are already present in
+[manager/create.rs](../../crates/plurxd/src/transcode/manager/create.rs) and
+[manager/plan.rs](../../crates/plurxd/src/transcode/manager/plan.rs); they are
+not new S-02 repairs or evidence that the failed cell now passes. Preparation
+before demand is distinct from admission, generation setup, encoding and
+publication within its episode. The historical 502 does not identify which
+phase was slow, or establish an OOM or encoder crash. No current cold-cell
+pass, whole-performance comparison, packet-rate result or qualification is
+claimed. Controlled acceptance remains open; keep the deadline, encoder
+defaults and independent 128 KiB read / 4 KiB proof unchanged.
 
 ## 3. Change
 
@@ -847,3 +869,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 §5.1 measurement | evidence PR (this row's commit) | Before/after measured on lab3 with three release builds of `886fc8bd4`, identical except `MEDIA_BODY_READ_BUFFER` at 4/128/256 KiB, and three rotated trials. lab4 was only inspected: it already runs M1 (`99d4abf8c`), so it has no before side, and it carries production load. Results (§5.1.1, raw record in `docs/evidence/media-body-buffers-m1-measurement-2026-09-24.md`): single-viewer direct play 373 → 3172 MB/s median; HLS p99 65–72 → 51–58 ms (met) and p50 24–25 → 48–50 ms; group A RSS growth 1.0–1.3 → 14.3–16.1 MiB; group B median 44.8 → 53.1 MiB, with the veto not reached. Acceptance **not met as written**: both peak-RSS figures grew. Decision 1 (256 or 128 KiB) is waiting on Paul. The §5.1 photo URL is now the real route, `/api/v1/items/{id}/photo`. `make unit`: #454's integration record ran its `cargo test --workspace --exclude plurx-cluster-check` half on the integrated tree (4051 passed, 0 failed). Its `vodencode-restart-check` half is not recorded there. Still owed: Paul's Decision 1, a lab4 re-run only if the quiet-host condition is wanted, and M2's media1 week. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Decision 1 + HLS p50 | `7eea547fe`, `dbcb1168f` / [#487](http://forge.lan:3000/noirr/plurx/pulls/487) | **Decision 1 taken on Paul's behalf; he can overturn it:** the shared read is now 128 KiB (`7eea547fe`). `MEDIA_BODY_ACK_GRANULARITY` is unchanged at 4 KiB. The new `the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib` pins both values. The pin fails with the read reverted to 256 KiB (`left: 262144, right: 131072`). Defining the acknowledgement unit *as* the read (`= MEDIA_BODY_READ_BUFFER`) stops the test binary compiling; defining it *from* the read (`MEDIA_BODY_READ_BUFFER / 32`) was not caught until the review row below. Re-coupling the pump split still fails `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` (`left: 65536, right: 4096`). The HLS p50 Nagle hypothesis was tested on lab3 (§5.1.2): 128 KiB with and without `TCP_NODELAY`, three rotated trials. p50 went from 49–51 to 15–16 ms, with nothing else moving, so `dbcb1168f` sets it on accepted connections. `accepted_http_connections_have_nagle_disabled` pins it and fails with the call removed. Final state against 4 KiB, full §5.1 re-run: direct play 373 → 2747 MB/s median; HLS p50/p95/p99 25–26 / 61–64 / 66–76 → 15 / 18 / 19–20 ms; group A growth 0.9–1.2 → 9.0–11.5 MiB, a difference of 8–10 MiB or 1.0–1.3 MiB per body, above the §2.1 upper bound (see the review row below); group B median 33.2 → 38.7 MiB, at higher concurrency, far from the veto. Gates: fmt, clippy `-D warnings`, `cargo test -p plurxd` (2717 passed, 0 failed, 11 ignored), history-check, validation-lint, validation unittests, operations-check, spike-lock-check, all exit 0 (PR body). Still owed: Paul's confirmation or reversal of Decision 1, M2's media1 week, and the §6 post-deploy telemetry for both changes. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Decision 1 review disposition | [#487](http://forge.lan:3000/noirr/plurx/pulls/487) | Addressed the single adversarial review ([comment 4265](http://forge.lan:3000/noirr/plurx/pulls/487#issuecomment-4265)), three P2 findings. (1) The claim that `TCP_NODELAY` does not turn a response into many small packets was false for HLS: the pump flushes each 4 KiB piece as its own write. The `disable_nagle` doc comment and Decision 6 now state the packet cost. It was measured on loopback (§5.1.2, the packet cost): 8.7× the data packets per segment at MTU 65536, no difference at MTU 1500, and at most about 6% on a real 1500-MTU link (not measured). §6 now watches packet rate. Coalescing the writes is a follow-up: it belongs to M2, and §3.2's M2 must first be reconciled with Decision 5, because acknowledging a whole batch raises the proof unit. (2) The pin's doc had been spliced onto the behavioural test's, and it claimed that defining the acknowledgement unit from the read fails there. With `MEDIA_BODY_READ_BUFFER / 32`, both tests passed. Each test now has its own doc. The pin also requires `MEDIA_BODY_ACK_GRANULARITY` to be defined as a literal, and it fails with `READ / 32`. `media_sessions.rs` now names the internal fragment-index blob endpoint, not "the internal media relay". (3) §5.1.2's group A sentence mixed up growth and difference, and it called a figure above the §2.1 upper bound "at" it. It now gives the per-trial difference (8–10 MiB, 1.0–1.3 MiB per body) and says the per-body model underestimates by about 2×. The same phrase was changed in the row above, the work board and the PR body. Main moved during the work. `origin/main` @ `995b60f3e` (#489) was merged cleanly in `38fba7c12`, with no conflicts. Gates after the merge: `make history-check`, `make validation-lint`, validation unittests, `make operations-check`, `make spike-lock-check`, `cargo fmt --check` and `cargo clippy --workspace --all-targets -D warnings` all exit 0. `cargo test --locked --no-fail-fast -p plurxd` ran after touching every `.rs` file and exited 0: 2721 passed, 0 failed, 11 ignored. Before the merge, one run had a single failure. `vodserve::tests::every_terminal_cause_answers_gone_and_supersession_spares_the_keeper` timed out waiting for telemetry to persist (`Elapsed`) at host load about 10. It passed 3 of 3 re-runs on its own and in the post-merge run. Still owed: Paul's Decision 1, the §6 telemetry and packet-rate checks after deploy, reconciling M2 with Decision 5, and M2's media1 week. |
+| 2026-10-08 | gpt-6.1-sol | agent:/root/ci_reconcile_sol61 | Current causal documentation only | pending: uncommitted review handoff | Read immutable `b3ac74a161a3a0d1b9836ac98d356a9aaea51de6`; §2.3 distinguishes the admitted-entry deadline from Create/GET waiting and records already-present probe sharing/post-start enqueue. Decisions 1/6 remain retained under delegated authority, overturnable by Paul. Historical authors, measurements and execution rows unchanged. No source/runtime repair, cold-cell pass, unit/gate, controlled comparison, packet-rate or qualification claimed. Independent review and batched focused checks/handoff remain pending. |

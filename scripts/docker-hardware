@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
+import importlib.machinery
+import importlib.util
 import os
 from pathlib import Path
 import platform
@@ -179,6 +182,67 @@ def gpu_overlay(service: dict, *, dri: Path, nvidia: bool) -> dict:
     return {"services": {"plurxd": additions}}
 
 
+def raspberry_pi_host(compatible: Path = Path('/sys/firmware/devicetree/base/compatible')) -> bool:
+    if platform.system() != 'Linux' or platform.machine() not in ('aarch64', 'arm64'):
+        return False
+    try:
+        return any(token.startswith(b'raspberrypi,') for token in compatible.read_bytes().split(b'\0'))
+    except OSError:
+        return False
+
+
+def pi_security_options(service: dict) -> list[str]:
+    if service.get('privileged') or service.get('cap_add'):
+        raise HardwareError('Pi runtime requires protected Compose privilege settings')
+    retained = []
+    for option in service.get('security_opt') or []:
+        if not str(option).startswith(('seccomp=', 'seccomp:')):
+            retained.append(option)
+            continue
+        filename = str(option)[8:]
+        path = Path(filename)
+        expected = Path(__file__).resolve().parents[1] / 'deploy/pi-runtime-assets/pi-worker-seccomp.json'
+        try:
+            protected = all(not p.is_symlink() and p.stat().st_uid == 0 and not p.stat().st_mode & 0o022 for p in (path, *path.parents))
+            exact = hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(expected.read_bytes()).digest()
+        except OSError:
+            protected = exact = False
+        if not protected or not exact:
+            raise HardwareError('Pi runtime cannot replace an operator seccomp profile; reconcile it before startup')
+        retained.append(option)
+    return retained
+
+
+def pi_runtime_overlay(service: dict, runtime: dict, manual_gpu: bool = False) -> dict:
+    additions = dict(runtime['service'])
+    image = additions['image']
+    explicit_gpu, _ = gpu_selection(service, Path('/dev/dri'))
+    devices = additions.get('devices', [])
+    if (manual_gpu or explicit_gpu) and any(device_source(device).startswith('/dev/dri/') for device in devices):
+        retained_devices = [device for device in devices if not device_source(device).startswith('/dev/dri/')]
+        additions['devices'] = retained_devices
+        additions['group_add'] = sorted({str(Path(device_source(device)).stat().st_gid) for device in retained_devices}, key=int)
+    # Compose's unique-resource merge retains unrelated host devices, mounts,
+    # networks and data; the readonly platform proof is one additional mount.
+    additions['volumes'] = [{'type': 'bind', 'source': '/sys/firmware/devicetree/base/compatible',
+                            'target': '/run/plurx-platform/compatible', 'read_only': True,
+                            'bind': {'create_host_path': False}}]
+    options = pi_security_options(service)
+    existing = [str(option) for option in options if str(option).startswith(('seccomp=', 'seccomp:'))]
+    additions['security_opt'] = options if existing else [*options, 'seccomp=' + runtime['profile']]
+    additions['cap_drop'] = ['ALL']
+    return {'services': {'plurxd': additions, 'plurx-discovery': {'image': image}}}
+
+
+def prepare_pi_runtime(profile: str | None = None) -> dict:
+    path = Path(__file__).resolve().parents[1] / 'deploy/pi-setup'
+    loader = importlib.machinery.SourceFileLoader('pi_compose_setup', str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module.prepare_compose_runtime(Path(profile) if profile else None)
+
+
 def resolved_compose_inputs() -> tuple[dict[str, str], dict]:
     """Use Compose itself for interpolation, including pre-2.27 clients."""
     try:
@@ -230,7 +294,7 @@ def resolved_compose_inputs() -> tuple[dict[str, str], dict]:
     return environment, json.loads(run("docker", "compose", "config", "--format", "json"))
 
 
-def prepare(output: Path) -> str:
+def prepare(output: Path, prepare_pi: bool = False) -> str:
     # Ask Compose for precedence, rather than implementing an .env parser.
     environment, document = resolved_compose_inputs()
     mode = environment.get("PLURX_DOCKER_GPU", "auto")
@@ -241,7 +305,12 @@ def prepare(output: Path) -> str:
     if not isinstance(service, dict):
         raise HardwareError("resolved Compose configuration has no plurxd service")
     overlay = {"services": {"plurxd": {}}}
-    if mode == "auto" and local_linux_engine():
+    local = local_linux_engine() if prepare_pi or mode == "auto" else False
+    if prepare_pi and local and raspberry_pi_host():
+        options = pi_security_options(service)  # Reject conflicts before runtime/profile mutations.
+        profiles = [str(option)[8:] for option in options if str(option).startswith(('seccomp=', 'seccomp:'))]
+        overlay = pi_runtime_overlay(service, prepare_pi_runtime(profiles[0] if profiles else None), manual_gpu=mode == 'manual')
+    elif mode == "auto" and local:
         dri = Path("/dev/dri")
         explicit_gpu, _ = gpu_selection(service, dri)
         # Existing selections (including hook-free CDI) need no legacy probe.
@@ -276,12 +345,13 @@ def prepare(output: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--prepare-pi", action="store_true", help="prepare the verified local Pi runtime before Compose startup")
     args = parser.parse_args()
     try:
-        print(prepare(args.output))
+        print(prepare(args.output, args.prepare_pi))
     except (HardwareError, OSError, ValueError, subprocess.TimeoutExpired) as error:
         print(
-            f"docker hardware preflight failed; nothing was changed: {error}",
+            f"docker hardware preparation failed; this helper did not start Compose: {error}",
             file=sys.stderr,
         )
         return 2

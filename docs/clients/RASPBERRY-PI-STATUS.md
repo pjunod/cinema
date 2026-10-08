@@ -1,33 +1,167 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
-**Status:** open — Pi-only namespace isolation implemented; focused and physical qualification in progress; initial implementation merged;
-PR #843 merged; Docker-default setup and its live qualification are tracked on PR #851 · **Updated:** 2026-10-07
+**Status:** built — software implementation and bounded Pi physical acceptance
+complete; final candidate CI and merge pending.
+**Updated:** 2026-10-08
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This
 page records software progress separately from physical-device acceptance.
 The existing daemon and web player remain the product.
 
-[PR #832](http://forge.lan:3000/noirr/plurx/pulls/832) batches all
-implementation commits. Its checks and PR description carry the live final
-validation receipt and merge result. Physical acceptance remains separate.
+## Current acceptance — implementation complete, final CI pending
 
-## Current installation qualification blocker
+[PR #889](http://forge.lan:3000/noirr/plurx/pulls/889) holds the authoritative
+candidate, review, retained regression journals and final merge disposition.
+The Docker entry point, protected probe, exclusive idle-family admission and
+software-frame Vulkan pipeline are implemented. Physical source `a72212b5b`
+passed the bounded application checks below on the Pi 5.
+
+| Application check | Physical result |
+|---|---|
+| Automatic direct 1080p Main10 | Chromium used `V4L2VideoDecoder`; forward seek to 10 s resumed at 10.35 s, backward seek to 3 s at 3.41 s |
+| Continuous playback at default CPU pool 3 | The complete 720p/480p/shared-AAC family started with actual non-root HEVC request decoding and x264; the selected output was 1280×720; seeks resumed at 10.27 s and 3.33 s; cold start took 25.25 s |
+| Daemon-selected GPU tone mapping | 4K HDR10 to 1080p used `libplacebo_software`; picture and output tags passed; the bounded comparison measured 1.57× CPU speed |
+
+These are functional, bounded results. Sustained real-time throughput,
+concurrency/soak, HDR HDMI output and Dolby Vision HDMI qualification are not
+established. The GPU comparison does not qualify every source or long session.
+[Physical evidence](http://forge.lan:3000/attachments/221bc723-202d-4737-bd7d-6aaf01f6e8c9)
+retains the application and cleanup receipts.
+
+All task Pi containers, browsers, compiler processes, native test paths and
+test roots were removed. The user's containers were preserved. Account UID
+999 is used by the user's discovery service and was retained, together with
+only the image alias retaining the user's older image.
+
+The [main integration review and compiler receipt](http://forge.lan:3000/attachments/a79aa4b9-1169-4b69-9065-cdb035d4539f)
+describes earlier candidate `52eaf6566`; it is not an exact-source receipt for
+a later candidate. Run 4432 (display 4411) passed preflight, Rust and web on its
+candidate while Windows was pending. Main advanced, so the base guard requires
+a new candidate and final CI. No final promotion gate pass is claimed.
+
+## Historical installation blockers and their resolution
+
+The chronology below records earlier snapshots. Its pending work and failures
+are historical; current acceptance and remaining limits are recorded above.
 
 The Docker-default installation and managed browser passed physical Main/Main10
 request decoding, software-reference frame hashes, planar transfer, browser
 presentation and seeking. Actual Plurx session creation exposed a separate
 kernel prerequisite: the tested Pi kernel omits `CONFIG_SECURITY_LANDLOCK` and
-its Landlock ABI query returns `ENOSYS`. The bound FFprobe identity cannot be
-established, so server playback is blocked. No protection has been bypassed and
-PR #851 remains unmerged while the accepted Pi-only namespace backend is qualified. Landlock remains the preferred backend wherever the kernel supports it.
+its Landlock ABI query returns `ENOSYS`. The Pi-only namespace backend preserves
+the protected identity boundary and passed its focused regressions. Paul
+authorized merging PR #851 immediately and stopping the remaining unit-test
+work; the merge is `6340f24ac5a75a887371e6c54b6f105730ae5e76`. Its promotion
+guard rejected an advanced main base, so this was an explicit override, not a
+passing promotion receipt. Another session owns unit-test failures. Landlock remains the preferred backend
+wherever the kernel supports it.
+
+Actual Docker app probing then failed at Bubblewrap's fresh procfs mount:
+`Can't mount proc ... Operation not permitted`. The kernel logged `Mount too
+revealing` in the same second as both the startup failure and diagnostic replay;
+no matching AppArmor denial was found. [Linux 6.18 mount
+source](https://github.com/torvalds/linux/blob/v6.18/fs/namespace.c#L5820)
+supports locked masked proc children as the explanation, but the exact call
+stack remains inferred.
+Exact launcher replay succeeded
+with an empty `/proc` and a read-only bind of only the namespace child's task
+directory at `/proc/self`, keeping seccomp and `cap_drop: ALL` unchanged.
+The narrow follow-up `a167607f4` applies this view and strengthens the existing
+hostile probe regression. Adversarial review, pinned Linux compilation, Clippy,
+formatting and the focused seccomp-policy assertion passed. The main-integrated
+source `6724efdbe` then passed compilation and actual Docker app startup,
+cataloguing and direct 1080p Main10 HEVC playback at the default settings.
+Chromium reported `V4L2VideoDecoder` and platform decoding; playback advanced
+to 2.33 seconds with 57 total frames, 13 dropped and none corrupt. This short check is
+not a sustained throughput result. A forward seek to 10 seconds resumed at
+10.63. The backward-seek assertion accepted too broad a window and is being
+tightened before final qualification. Both test containers and the test
+browser were stopped and removed; the user's running container was preserved.
+
+Native app probing reached a separate continuous-session refusal:
+`vod_family_capacity`. The actual frozen 720p video, 480p companion and shared
+AAC recipes reserve 3 + 2 + 3 CPU units against the Pi's default pool of 3.
+An admission correction is being implemented in the existing family and
+permit ownership path: one oversized family may exclusively use an otherwise
+idle software pool, with its full resource accounting retained until workers
+are reaped. No budget default is raised. A temporary pool of 8 in the isolated
+diagnostic app produced 3.24 seconds and 81 presented frames with actual HEVC
+request decoding and CPU encoding. The seek step did not run because the test
+helper expected an outdated request envelope. This is not default playback
+acceptance. The default pool was restored and the diagnostic service stopped.
+
+The user's subsequent `make docker-up` selected the generic image without Pi
+decoder or GPU devices. That entry point is being integrated with the existing
+Pi runtime provider while preserving the user's Compose overrides, data and
+media mounts. That integration is committed in `9133eace3` and awaiting final
+review. The same commit adds the separately probed software-frame Vulkan
+pipeline and its truthful CPU transfer and GPU rendering labels.
+The custom Pi FFmpeg build also lacks Vulkan/libplacebo. An isolated
+Bookworm-backports Mesa 25.0.7 check reached real V3DV and produced three
+distinct frames through libplacebo using packed 16-bit RGB input. Explicit
+FFmpeg Vulkan frame upload failed semaphore interoperability; planar 10-bit
+libplacebo input failed framebuffer setup despite exit zero. The working
+route uses CPU format conversion and frame copies around GPU tone mapping;
+full-size output quality and speed remain unqualified. Pinned dependency
+packaging and an independently probed software-frame pipeline are being built.
+Pi 5
+has no fixed-function video encoder: direct playback needs no encoding, while
+server video transcoding still uses a CPU encoder.
+
+The user now has a real `plurxd` container and depends on Docker. Earlier test
+cleanup assumptions that Docker was unused no longer apply. Tests must use
+unique container names and isolated data, and must remove their own containers
+afterward. The abandoned test container that reserved `plurxd` was removed;
+the user's running container and data were preserved.
+
+The follow-up is [PR #885](http://forge.lan:3000/noirr/plurx/pulls/885), held
+as a draft for its final review and verification. One adversarial audit of
+`e87f85388` found two P2 issues: ordinary presentations sharing AAC inherited
+an unnecessarily fixed family ceiling, and Vulkan device validation rejected
+unselected CPU drivers listed in the inventory. Both findings are addressed
+with focused regression cases. Exclusive families retain their original
+ceiling; ordinary sharing remains bounded by current global capacity. GPU
+validation reads the selected device-properties block. Corrected source
+`bad8ceca4` passed pinned Linux all-target checking, Clippy, formatting and
+ARM64 linking. Fast-lane run 4391 stopped before tests because the earlier
+canceled run 4389 has no final journal; its stored Forgejo task steps confirm
+cancellation during the history audit before Python or Node execution.
+The authenticated zero-test task evidence is retained on PR #885.
+[PR #889](http://forge.lan:3000/noirr/plurx/pulls/889) continues the same batch
+with a fresh ordinary fast lane; no gate is waived and no passing test is
+repeated. Run 4399 retained its successful method journals and found two
+contract expectations requiring correction: the newly reviewed finite test
+threads/Barrier wait, and read-only budget derivation before Pi preparation.
+
+The complete Pi FFmpeg build passed its decoder, AC-4, Dolby Vision, DRM,
+Vulkan and libplacebo capability checks. The final image executed real V3DV
+shaders. A physical color-conversion check found that a plain final YUV format
+conversion retained RGB matrix metadata; the shared pipeline now explicitly
+converts to limited-range BT.709 YUV. A red-pixel coefficient control and
+ffprobe tags confirmed actual conversion, rather than only retagging.
+Both isolated app modes reached `/readyz` successfully. Candidate `a72212b5b`
+passed automatic 1080p Main10 direct playback using platform
+`V4L2VideoDecoder`, with forward seek10 resuming at10.35s and backward seek3
+at3.41s. The actual daemon selected GPU tone mapping after its 4K-to-1080p
+HDR10 picture/tag comparison measured1.57x CPU speed; sustained throughput
+and Dolby Vision HDMI remain unqualified. The default three-thread software
+pool started the720p/480p/AAC family with actual HEVC request decoder workers
+and720p browser presentation. Its fragment check selected the480p companion
+instead of the advertised720p variant; the helper is corrected and only
+continuous playback/seeking is being retried. Completed test containers and
+browsers were removed; the user's installation remains untouched.
+
+The initial PR creation API ignored its draft flag and scheduled run 4389.
+The PR was converted to draft and that run was cancelled before Rust or
+platform jobs started. It is not the post-review validation receipt.
 
 Physical testing also exposed two deployment defects. Compose 2.26 lacks
 `config --environment`; hardware configuration now uses Compose's own label
 interpolation on that version. The isolated native service lacked writable
 temporary storage; systemd now owns a mode-0700 runtime directory and provides
 `TMPDIR` without making system files writable or hiding media under `/var/tmp`.
-Each correction has a focused regression. Live physical results, package
-changes, cleanup and CI receipts remain on PR #851.
+Each correction has a focused regression. The historical installation receipts remain on PR #851; final physical
+results, cleanup and current CI are recorded on PR #889.
 
 ## Initial implementation — PR #832 (merged)
 
@@ -145,7 +279,7 @@ Both now pass; no unit execution preceded review. The existing actor still owns
 one in-process retry; its separately budgeted classified-health wrapper does
 not introduce another attempt or a new watchdog.
 
-## Physical acceptance — 2026-10-07
+## Historical physical acceptance — 2026-10-07
 
 Paul supplied a Pi 5 for cinema testing. Tests use an independent clone and
 isolated data/browser profiles; the existing desktop and system media tools
@@ -341,13 +475,11 @@ still require their original authenticated provenance; skips are never passes.
 The live PR records final qualification and merge. No Pi process was restarted.
 
 
-## Docker-default setup — 2026-10-07
+## Historical Docker-default setup — 2026-10-07
 
-[PR #851](http://forge.lan:3000/noirr/plurx/pulls/851) is the live execution
-status for this installation effort, including its final hardware receipts,
-cleanup and merge disposition. The table below records the source-development
-snapshot; later acceptance evidence is retained on that PR without relabeling
-earlier compiler or unit results as hardware proof.
+[PR #851](http://forge.lan:3000/noirr/plurx/pulls/851) records the earlier
+installation stage. The table below preserves that historical source-development
+snapshot; its pending entries are superseded by current acceptance above.
 
 [The installation plan](RASPBERRY-PI-INSTALLATION.md) continues the work after
 PR #843 merged with every required fast-lane job green. Docker will be the

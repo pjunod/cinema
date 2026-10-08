@@ -2785,11 +2785,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
 # terminal status and retains its admission guard through measurement.
+# 884 -> 885 for racing_continuous_families_have_one_exclusive_idle_owner:
+# admission.rs has one std::thread::spawn site creating two finite admission
+# racers. Both JoinHandles are joined before inspecting and dropping their
+# retained admission results; no production task or media process is added.
 # #870 adds seven reviewed owners: joined executable-path resolution; admin
 # and startup worker-local reprobes using shutdown cancellation; joined private
 # cache-directory stat; two joined late-publication fixture drivers; and a
 # joined child-cancellation fixture trigger. No rolling/media owner is added.
-expected_occurrences = 891
+expected_occurrences = 892
 # Promotion union: final count is measured after architectural conflict resolution.
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -5458,7 +5462,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
 # One bounded fixture wait follows actual Raft watch changes until the
 # real Source peer publishes bounded-read readiness; no polling owner.
-expected_occurrences = 316
+# 316 -> 317 for the same continuous-family admission race regression:
+# its barrier.wait() synchronizes the two finite threads before acquisition.
+# This broad .wait() sentinel matches a Barrier, not a process lifecycle;
+# both racers are joined and their retained permits dropped in the test.
+expected_occurrences = 317
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
