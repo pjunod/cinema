@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "inventory_date": "2026-10-08",
-  "candidate_head": "f1a71d136f37094726fb9c595b93dd2187f29c0c",
+  "candidate_head": "60c0f0f00197b36c03c1ba342970776ccf16831b",
   "runtime_source": "909e0c7b7",
-  "inventory_scope": "615 top-level JSON files parsed for report source/outcome;185 have server.build, and exactly one attests909e0c7b7. Original192-report inventory and its historical receipt hashes retained; fresh selected lifecycle/native sidecars independently SHA256-bound. This is not whole-tree or platform acceptance.",
+  "inventory_scope": "622 top-level JSON files parsed for report source/outcome; 186 have server.build, 2 explicitly attest909e0c7b7. Historical references retained. Fresh selected native/fixture/readiness artifacts independently SHA256-bound; no whole-tree/platform acceptance.",
   "acceptance": "incomplete",
   "rows": [
     {
@@ -43,8 +43,8 @@
     {
       "row": "Desktop Chrome",
       "classification": "older evidence",
-      "observed": "Earlier full campaigns described in build ledger; no 67520f7a8 Chrome report among 192 parsed playback reports.",
-      "remaining": "Current-source full campaign and independent display/audio evidence.",
+      "observed": "Older campaigns retain their source scopes. Portable Chrome155.0.8059.39 and runtime dependency readiness prepared; no60c0 Chrome playback receipt exists.",
+      "remaining": "After failed source-path diagnosis is fixed, one exact-current Chrome baseline and required20-transition series with calibrated independent output evidence. Version/ldd readiness is not playback.",
       "evidence": []
     },
     {
@@ -70,9 +70,9 @@
     },
     {
       "row": "Subtitles",
-      "classification": "fixture/tooling prepared; playback absent",
-      "observed": "Owned caption remux proof is verified: 450 deterministic text cues; all 43,200 video and 84,376 audio packet payloads/timestamps/time bases equal the incumbent, with source/output file hashes. Shipped selector Off/On/Off helper is authored; no subtitle playback receipt inspected.",
-      "remaining": "Run bounded text cue/clock/identity diagnostic after pause lane; retain remux proof. Cue metadata cannot prove visible pixels. Subtitle-plus-switch and physical/audio remain open.",
+      "classification": "909 prior-source scoped pass",
+      "observed": "Explicit server.build909e0c7b7: actual caption fixture and trusted Off/On/Off selectors; three eight-second windows1.002252/1.002294/0.999273x; retained gap85.58ms; actual cue timing/identity observed; End0/0/0/0. No quality request or pixel/audio capture.",
+      "remaining": "Keep909 scoped pass; do not repeat that unchanged scenario as a blind retry. New candidate and subtitle-plus-switch/visible-caption/physical-audio acceptance remain unmeasured.",
       "evidence": [
         {
           "receipt": "caption-fixture-f1a71d136-source-packets.json",
@@ -81,6 +81,12 @@
           "reported_source": null,
           "reported_outcome": "verified;450cues;AVpacket equality",
           "source_binding": "fixture construction/owned cleanup scope only; no playback qualification"
+        },
+        {
+          "receipt": "firefox-909e0c7b7-subtitles-current1.json",
+          "sha256": "93e6382c364c3f2c9374cb60b4112ea8fd48e0201b55f2db7650e8ab5fdcfb7d",
+          "reported_source": "909e0c7b7",
+          "reported_outcome": "passed"
         }
       ]
     },
@@ -153,7 +159,7 @@
     },
     {
       "row": "Pause / resume",
-      "classification": "current failed",
+      "classification": "prior-source failed",
       "observed": "Explicit server.build 909e0c7b7: eight-second pause keeps clock/identity; resume reports one held counter. Subsequent eight-second moving window 1.0032975x/gap 83.78ms has no window errors; End counts 0/0/0/0. Overall failed: whole lifecycle hitches 1.",
       "remaining": "Parent owns held-on-resume diagnosis and focused changed-code check. Clean moving window or End must not erase the retained failure. Pending-switch pause/resume and physical/audio remain open.",
       "evidence": [
@@ -345,9 +351,9 @@
     },
     {
       "row": "iOS normal-selection full series",
-      "classification": "current method-path full-series failed",
-      "observed": "Lab 236 fresh namespace binds server 909e0c7b7 through launch controller/build ledger; SDK receipt has no server.build field. Fifteen manual requests each observed; 346 playback probes; zero actual Auto changes; series terminal native_failure/app_script_stopped. No UI taps or physical/audio capture.",
-      "remaining": "Parent owns Auto failure diagnosis. Fifteen manual observations do not satisfy fifteen-manual/five-actual-Auto acceptance; no twenty-transition or platform-readiness assertion.",
+      "classification": "prior-source method-path full-series failed",
+      "observed": "Lab 236 fresh namespace binds server 909e0c7b7 through launch controller/build ledger; SDK receipt has no server.build field. Fifteen manual requests each observed; 346 playback probes; zero actual Auto changes; series terminal native_failure/app_script_stopped. No UI taps or physical/audio capture. Later lab238 on71d7f2ba4 reports145 Auto fact rows and79 SDK playback probes. Binding observer repaired, but156 completed200 segments have no link receipt; planned cliff did not apply; zero actual Auto changes. This diagnostic does not erase236 full-series failure.",
+      "remaining": "First verify accepted Auto control/successor registration and one real applied cliff on new exact source. Only after that blocker is fixed start a fresh required20-transition series; no repeated15-manual diagnostic just to reconfirm prior success.",
       "evidence": [
         {
           "receipt": "ios-236-series1-full-control-sdk1.json",
@@ -386,41 +392,122 @@
           "reported_source": null,
           "reported_outcome": "owned runtime guard final",
           "source_binding": "fixture construction/owned cleanup scope only; no playback qualification"
+        },
+        {
+          "receipt": "ios-238-auto-cliff-control-sdk1.json",
+          "sha256": "f7da680f40e3d13fdbf1310afb163d6329a996a67f3614fe27a52e386a783a7e",
+          "reported_source": "71d7f2ba4",
+          "reported_outcome": "diagnostic_complete;79 probes;Auto0",
+          "source_binding": "parent exact-source build ledger and QA run namespace; SDK has no server.build"
+        },
+        {
+          "receipt": "ios-238-auto-cliff-control-context1.json",
+          "sha256": "fa234be0f4a1e3a86356dcc8a292ef4102fd8167edd3de6a2a4df4ff6a4b66d4",
+          "reported_source": "71d7f2ba4",
+          "reported_outcome": "diagnostic_complete;cliff not applied;0 receipts",
+          "source_binding": "paired context/proof-wire projection"
+        },
+        {
+          "receipt": "ios-238-auto-cliff-app-receipt.json",
+          "sha256": "fd0584206d65b1ca496219f08d6cc15797fba74d8c0555f66befb60c8d2db929",
+          "reported_source": "71d7f2ba4",
+          "reported_outcome": "auto_diagnostic_complete;145 facts",
+          "receipt_directory": "target/cq-acceptance-runtime/",
+          "source_binding": "QA namespace and parent exact-source build ledger"
         }
       ]
     }
   ],
   "prior_runtime_source": "67520f7a8",
-  "inventory_updated_at": "2026-10-08T17:39:52.025399+00:00",
+  "inventory_updated_at": "2026-10-08T19:08:44.763516+00:00",
   "next_software_cases": [
     {
       "priority": 1,
-      "case": "pause resume diagnosis",
-      "action": "Parent preserves current failure and runs only focused case after justified change; no blind retry"
+      "case": "native Auto single cliff",
+      "scope": "only failed receipt/registration path on exact new source; accepted control and own completed-body receipts before one applied cliff; no repeatedmanual15 yet"
     },
     {
       "priority": 2,
-      "case": "subtitles",
-      "helper": "scripts/continuous-quality-subtitles",
-      "scope": "three8-second Off/On/Off cue/clock/identity windows; actual fixture; no quality requests"
+      "case": "Android failed fixture selector and720/1080",
+      "scope": "fresh lab and currentAPK153; normal manual origin/login prerequisites only; exact fixture/ASCII-trimmed Play role; SDK corroboration; no historicalcase retry aggregation"
     },
     {
       "priority": 3,
-      "case": "mute-cycle",
-      "helper": "scripts/continuous-quality-lifecycle",
-      "scope": "two8-second mute state windows; no audio-output proof or quality requests"
+      "case": "mute and2x state windows",
+      "scope": "both remain unmeasured; existing helpers one named case per receipt; no quality/audio-output claim"
     },
     {
       "priority": 4,
-      "case": "rate-2",
-      "helper": "scripts/continuous-quality-lifecycle",
-      "scope": "one8-second2x clock window; no quality request or audio-output proof"
+      "case": "current browser full20 with lifecycle observations",
+      "scope": "after source freeze/focused blocker fixes: integrate normal/fullscreen/mute/caption state observations into required current-source series where tooling actually supports it; no repeatedhistorical675/909 passes merely to reconfirm; missing plus-switch tooling still required"
     },
     {
       "priority": 5,
-      "case": "fullscreen current-source repeat",
-      "helper": "scripts/continuous-quality-presentation",
-      "scope": "three8-second normal/full/normal windows; prior675 scopedpass remains historical; no quality request"
+      "case": "physical/platform/source-pressure gaps",
+      "scope": "TV initial startup only, actualSafari nativeHLS readiness, then separately authorizedreal-source/VFR/shared-reader/disk; no pause-as-background or emulation-as-lowend substitution"
+    }
+  ],
+  "native_diagnostic_source": "71d7f2ba4",
+  "candidate_qualification": "60c0f0f00 exact compile/runtime pending; prior source receipts do not qualify moved candidate",
+  "android_source": "b234bd09047ba17a773ff821fd212b270e69959e",
+  "android_source_identical_to_candidate": true,
+  "runtime_prerequisites": [
+    {
+      "kind": "portable Chrome version/dependency preparation",
+      "status": "ready for bounded launch only; no playback qualification",
+      "evidence": {
+        "receipt": "chrome155-portable-provenance.json",
+        "sha256": "724ab14b7ba5bcfdb0344aa7e6564c0248c308d802dc3930479591d824caf3c3",
+        "reported_source": null,
+        "reported_outcome": "Chrome155.0.8059.39 isolated version readiness",
+        "receipt_directory": "target/cq-acceptance-runtime/"
+      }
+    },
+    {
+      "kind": "signed TV239 compile/install",
+      "status": "compiled and installed only; no startup/awake/physical proof",
+      "source": "dfb9e2a03 Apple bytes unchanged at60c0",
+      "evidence": [
+        {
+          "receipt": "tv239-build-provenance.json",
+          "sha256": "301dc8edbb4ede0050c22328a0da562f3651514d99a675f192b2e152dcbcca48",
+          "reported_source": "dfb9e2a03",
+          "reported_outcome": "signed compile",
+          "receipt_directory": "target/cq-acceptance-runtime/",
+          "source_binding": "83 copied production Apple files, read-only QA observer additions removed for equivalence"
+        },
+        {
+          "receipt": "tv239-owned-install-result.json",
+          "sha256": "8ab8214ff4d2998f49e8017d70c44f638eacdb835e15fc57d6d2b3c39d65b9be",
+          "reported_source": null,
+          "reported_outcome": "owned lab install; no launch",
+          "receipt_directory": "target/cq-acceptance-runtime/"
+        }
+      ]
+    },
+    {
+      "kind": "phone connectivity/DDI preparation",
+      "status": "paired/connected/DDI available; lock state unmeasured",
+      "evidence": {
+        "receipt": "phone239-filtered-readiness.json",
+        "sha256": "f56d1d8b3c4643a2ea73017671df8ef620f2797d94ff40b908c52163ab1b53c2",
+        "reported_source": null,
+        "reported_outcome": "read-only connectivity",
+        "receipt_directory": "/private/tmp/cq-matrix-runtime-preparation/target/cq-android-current-ui2/"
+      }
+    },
+    {
+      "kind": "Android153 exact merged compile/APK",
+      "status": "app/unit-test sources compile, signed debug APK; installed by parent on owned emulator; no test or playback execution qualification",
+      "source": "b234bd090 Android bytes unchanged atdfb9/60c0",
+      "evidence": {
+        "receipt": "provenance.json",
+        "sha256": "b81d5eff9ad7d89bbd4a81d914b919500d2bf41a17974bb837145a0fb28615d9",
+        "reported_source": "b234bd090",
+        "reported_outcome": "compile only;APK153;no units",
+        "receipt_directory": "/private/tmp/cq-matrix-runtime-preparation/target/cq-android-b234bd090/",
+        "source_binding": "345 tracked Android file hashes; b234..HEAD Android diff empty"
+      }
     }
   ]
 }

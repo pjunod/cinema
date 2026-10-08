@@ -1,8 +1,9 @@
 # Continuous-quality matrix — what the retained receipts establish
 
 **Status:** incomplete · **Inventoried:** 2026-10-08 ·
-**Candidate baseline:** `f1a71d136` ·
-**Latest measured server:** `909e0c7b7` · **Prior server:** `67520f7a8`
+**Candidate baseline:** `60c0f0f00` ·
+**Measured browser source:** `909e0c7b7` · **Prior browser:** `67520f7a8` ·
+**Native diagnostic source:** `71d7f2ba4` · **Current qualification:** pending
 
 Companion to [CONTINUOUS-QUALITY-BUILD.md](CONTINUOUS-QUALITY-BUILD.md#83-acceptance-is-a-per-switch-result-not-an-average).
 This inventory separates current component evidence from older or missing
@@ -12,8 +13,9 @@ and the final platform-wide acceptance decision.
 
 ## 1. Read source and scope before a pass
 
-This update parsed 615 top-level JSON files for report source/outcome; 185
-contain `server.build`, and exactly one explicitly attests `909e0c7b7`.
+This update parsed 622 top-level JSON files for report source/outcome; 186
+contain `server.build`, and 2 explicitly attest `909e0c7b7`. No report in
+that set qualifies the new `60c0f0f00` candidate.
 The original 192-report inventory and its historical hashes remain intact.
 "Absent" means no qualifying receipt was located in the inspected set or
 ledger, not that none can exist elsewhere. A filename does not attest source.
@@ -33,15 +35,15 @@ ends its series; no diagnostic helper aggregates retries into a pass.
 |---|---|---|---|
 | Desktop Firefox / normal / 1x | prior-source scoped pass | Source 67520f7a8: fifteen manual and five actual Auto transitions; one session/player; zero reported hitches/stalls. | Callback/transport only; normal/fullscreen and mute state are not separately attested. Full pixel/audio acceptance remains open. |
 | Headed Firefox / capture campaign | prior-source failed | Source 67520f7a8: Fifteen manual; p95 video gap 169.62 ms > 100 ms; Auto absent. Capture incomplete: 221 holes, 76 skipped counters; upper hold 299.988 ms. | Keep failed. Browser optical session owns diagnosis; this inventory does not erase it. |
-| Desktop Chrome | older evidence | Earlier full campaigns described in build ledger; no 67520f7a8 Chrome report among 192 parsed playback reports. | Current-source full campaign and independent display/audio evidence. |
+| Desktop Chrome | older evidence | Older campaigns retain their source scopes. Portable Chrome 155.0.8059.39 and runtime dependency readiness prepared; no60c0 Chrome playback receipt exists. | After failed source-path diagnosis is fixed, one exact-current Chrome baseline and required20-transition series with calibrated independent output evidence. Version/ldd readiness is not playback. |
 | Fullscreen | prior-source scoped pass | Explicit server.build67520f7a8: trusted shipped fullscreen control, actual #player normal/full/normal; three eight-second windows 0.997545/0.997550/0.998229x; max retained frame gap 84.94ms; End counts 2/0/0/0. No quality requests. | 909e0c7b7 state repeat remains unmeasured. Switch in each presentation state and independent physical/pixel/audio evidence still required. |
 | Muted / unmuted | absent explicit row | Current continuous fixture has AAC, but presence of audio is not mute-state or captured-audio evidence. | Existing mute-cycle helper supports explicit muted/unmuted state windows, unrun on909e0c7b7. Switching in both states and independent unmuted audio capture remain open. |
-| Subtitles | fixture/tooling prepared; playback absent | Owned caption remux proof is verified: 450 deterministic text cues; all 43,200 video and 84,376 audio packet payloads/timestamps/time bases equal the incumbent, with source/output file hashes. Shipped selector Off/On/Off helper is authored; no subtitle playback receipt inspected. | Run bounded text cue/clock/identity diagnostic after pause lane; retain remux proof. Cue metadata cannot prove visible pixels. Subtitle-plus-switch and physical/audio remain open. |
+| Subtitles | 909 prior-source scoped pass | Explicit server.build 909e0c7b7: actual caption fixture and trusted Off/On/Off selectors; three eight-second windows 1.002252/1.002294/0.999273x; retained gap 85.58ms; actual cue timing/identity observed; End 0/0/0/0. No quality request or pixel/audio capture. | Keep909 scoped pass; do not repeat that unchanged scenario as a blind retry. New candidate and subtitle-plus-switch/visible-caption/physical-audio acceptance remain unmeasured. |
 | 0.5x rate | prior-source mixed/failed | Source 67520f7a8 no-D3 short pixel capture passes 95.876 ms upper hold; same report fails one callback hitch. D3-enabled current capture fails 162.572 ms. No quality request in these windows. | Keep every result scoped; current rate-plus-switch and audio evidence absent. |
 | 2x rate | older steady pass | Source eab5fceb8: measured 2.00546× over 12 s; zero reported stall/hitch/reopen. | Existing current helper supports one rate-2 state/clock window, unrun on909e0c7b7. Quality transition in rate window and audio evidence remain open. |
 | Long prebuffer | older/mixed diagnostic | Older eab5fceb8/0e778892d source prebuffer diagnostics and full campaigns have buffering observations; no explicit current long-prebuffer acceptance row. | Record retained frontier/runway, delayed target boundary and bounded physical work without treating preparation expiry as presentation expiry. |
 | Rapid choices | prior-source scoped pass | Source 67520f7a8: 720→480→720 final 720p presents in 4,056 ms; same session/player/family; zero reported hitches/stalls. | Focused lifecycle evidence only; no pixel/audio acceptance. |
-| Pause / resume | current failed | Explicit server.build 909e0c7b7: eight-second pause keeps clock/identity; resume reports one held counter. Subsequent eight-second moving window 1.0032975x/gap 83.78ms has no window errors; End counts 0/0/0/0. Overall failed: whole lifecycle hitches 1. | Parent owns held-on-resume diagnosis and focused changed-code check. Clean moving window or End must not erase the retained failure. Pending-switch pause/resume and physical/audio remain open. |
+| Pause / resume | prior-source failed | Explicit server.build 909e0c7b7: eight-second pause keeps clock/identity; resume reports one held counter. Subsequent eight-second moving window 1.0032975x/gap 83.78ms has no window errors; End counts 0/0/0/0. Overall failed: whole lifecycle hitches 1. | Parent owns held-on-resume diagnosis and focused changed-code check. Clean moving window or End must not erase the retained failure. Pending-switch pause/resume and physical/audio remain open. |
 | Seek collision | prior-source scoped pass | Source 67520f7a8: Final 720p presents in 2,756 ms; same session/player/family; zero reported hitches/stalls. | Separate receipt because harness deduplicates identical fixture/quality/operation names; no physical acceptance. |
 | Background / foreground | absent actual lifecycle row | scripts/playback-lab suspend-resume calls media.pause()/play() and labels surrogate=paused-media-element. | Actual app/tab visibility lifecycle and restored control ownership required; paused media is not background. |
 | Explicit End | prior-source process-scoped pass | Source 67520f7a8 full headless campaign producer_end samples have zero child FFmpeg processes at 0/1/3/5 s. | Does not prove physical queues, all private reader leases or pending callbacks have retired. |
@@ -57,7 +59,7 @@ ends its series; no diagnostic helper aggregates retries into a pass.
 | Shared-reader fairness | absent | Existing two-viewer pressure pass does not measure ownership/fairness of a shared source reader. | Concurrent reader identity, progress per consumer, cancellation of one without starvation of the other. |
 | Physical disk pressure | absent | Retained CPU/read probe recorded zero physical read_bytes. | Bounded owned-file I/O with actual physical read/write evidence and incumbent continuity; no user caches or global settings. |
 | Safari / iOS / tvOS / Android matrix | separately owned/incomplete | Platform owners retain native receipts and failures; desktop evidence cannot qualify these rows. | Obtain their source/device-specific runtime evidence through parent; full acceptance remains open. |
-| iOS normal-selection full series | current method-path full-series failed | Lab 236 fresh namespace binds server 909e0c7b7 through launch controller/build ledger; SDK receipt has no server.build field. Fifteen manual requests each observed; 346 playback probes; zero actual Auto changes; series terminal native_failure/app_script_stopped. No UI taps or physical/audio capture. | Parent owns Auto failure diagnosis. Fifteen manual observations do not satisfy fifteen-manual/five-actual-Auto acceptance; no twenty-transition or platform-readiness assertion. |
+| iOS normal-selection full series | prior-source method-path full-series failed | Lab 236 fresh namespace binds server 909e0c7b7 through launch controller/build ledger; SDK receipt has no server.build field. Fifteen manual requests each observed; 346 playback probes; zero actual Auto changes; series terminal native_failure/app_script_stopped. No UI taps or physical/audio capture. Later lab238 on71d7f2ba4 reports 145 Auto fact rows and 79 SDK playback probes. Binding observer repaired, but 156 completed 200 segments have no link receipt; planned cliff did not apply; zero actual Auto changes. This diagnostic does not erase236 full-series failure. | First verify accepted Auto control/successor registration and one real applied cliff on new exact source. Only after that blocker is fixed start a fresh required20-transition series; no repeated15-manual diagnostic just to reconfirm prior success. |
 
 ## 3. Exact receipts behind the matrix
 
@@ -134,9 +136,10 @@ lifetime acceptance. `metrics` describes the initial baseline;
 
 ## 5. Execution boundaries
 
-The pause helper has the failed 909e0c7b7 receipt described above. Rate/mute
-and subtitle state cases remain unmeasured; fullscreen has only the earlier
-67520f7a8 scoped pass. Coordinate a lab slot before starting a daemon, because the
+The pause helper has the failed 909 receipt described above. Rate/mute cases
+remain unmeasured; subtitle state has the scoped 909 pass, and fullscreen
+has only the earlier 675 pass. Both keep their measured source. Coordinate
+a lab slot before starting a daemon, because the
 browser and native investigations share the lab host. Use an owned source
 extraction, report directory and exact process guards. Never change global
 CPU affinity, device/trust/network policy, production applications or user
@@ -147,59 +150,74 @@ Unit execution and final adversarial review remain deferred. The parent
 owns final readiness, the human Fable pause, and handoff to the designated
 merge session.
 
-## 6. Next software cases — use one named receipt per observation
+## 6. Small runtime batches — fix the failed path before a new series
 
-The parent owns the pause failure lane first. After its justified change and
-focused verification, run these cases one at a time on the owned lab. A
-failure stays failed; do not rerun unrelated cases. Each helper refuses an
-existing report path. Supply the actual new server build when source moves.
-These commands are preparation only; this inventory ran none of them.
+The parent owns source freeze, exact compilation and the shared lab lane.
+The current `60c0f0f00` candidate contains the merged geometry/panel work and
+receipt-registration repair. Compile/readiness preparation does not qualify
+it. Android 153 has the same 345 tracked source files at `b234bd090`, `dfb9e2a03`
+and `60c0f0f00`; a server-only change does not require rebuilding that APK.
+The receipt inventory binds the signed compile/APK provenance separately.
+
+| Order | Smallest useful batch | Evidence needed before moving on |
+|---|---|---|
+| 1 | Phone Auto registration and one actual cliff, after the diagnostic lane releases. | Accepted Auto control and correctly bound successor/body receipts, then an applied cliff with actual target progress. Native 238 repaired observer binding but observed 0 receipts and did not apply its cliff. Do not repeat 15 manual changes just to reconfirm them. |
+| 2 | Retry only Android's failed fixture/Play step and720→1080 on a fresh isolated lab. | CurrentAPK 153; explicit manual loopback lab URL/login prerequisites; exact fixture identity; unique Play control with ASCII padding trimmed; corroborate SDK target evidence. Prior909 selector failure remains recorded, with 0 playback events. UI taps alone do not prove settlement. |
+| 3 | One mute-cycle state case and one 2x clock case. | Each fresh named receipt preserves identity/counters and End census. These cases remain unmeasured and cannot supply audio or quality-plus-rate/mute proof. |
+| 4 | Required current-source browser20-transition series after focused blockers are fixed. | One frozen candidate;20 consecutive actual transitions including 5 Auto; independently calibrated output. Incorporate lifecycle states in that new series where supported rather than replaying old675/909 successes merely for reassurance. Existing state helpers do not yet implement plus-switch assertions. |
+| 5 | Remaining platform/source/pressure gaps as separate scoped cases. | TV initial startup first; actual Safari native-HLS availability; separately authorized real/VFR/source-copy families and measured shared-reader/disk work. Do not relabel pause as background, an emulator as a physical low-end device, or read_chars as disk pressure. |
+
+Fresh subtitle 909 state receipt passes Off/On/Off with actual cues and End
+counts0/0/0/0. Keep that result under 909; do not rerun the same unchanged
+scenario as a retry. Visible captions across quality switches and physical
+audio remain unmeasured. The older fullscreen 675 pass likewise stays scoped.
+When the candidate moves, the required final series must qualify its new tree.
 
 ```bash
-# Owned paths only; use the parent's source-only lab extraction and guards.
+# Prepared commands only: parent supplies exact new build and owned paths.
 CQ_SERVER=/owned/source/target/debug/plurxd
-CQ_BUILD=909e0c7b7
+CQ_BUILD=60c0f0f00
 CQ_FIXTURES=/owned/fixtures
 CQ_FIREFOX=/owned/firefox
 CQ_GECKODRIVER=/owned/geckodriver
 CQ_REPORTS=/owned/reports
 
-# Priority 2: actual text stream, Off/On/Off; requires owned headed DISPLAY.
-scripts/continuous-quality-subtitles --server "$CQ_SERVER" \
-  --source-ref "$CQ_BUILD" --browser firefox --firefox "$CQ_FIREFOX" \
-  --geckodriver "$CQ_GECKODRIVER" --fixtures "$CQ_FIXTURES" \
-  --json "$CQ_REPORTS/subtitles-current-first1.json"
-
-# Priority 3: explicit muted/unmuted state; no physical audio assertion.
+# One named mute state observation; no physical-audio or switch assertion.
 scripts/continuous-quality-lifecycle --server "$CQ_SERVER" \
   --source-ref "$CQ_BUILD" --case mute-cycle --browser firefox \
   --firefox "$CQ_FIREFOX" --geckodriver "$CQ_GECKODRIVER" \
   --fixtures "$CQ_FIXTURES" --json "$CQ_REPORTS/mute-current-first1.json"
 
-# Priority 4: eight-second 2x film-clock window; no quality request.
+# One named 2x clock observation; no quality request.
 scripts/continuous-quality-lifecycle --server "$CQ_SERVER" \
   --source-ref "$CQ_BUILD" --case rate-2 --browser firefox \
   --firefox "$CQ_FIREFOX" --geckodriver "$CQ_GECKODRIVER" \
   --fixtures "$CQ_FIXTURES" --json "$CQ_REPORTS/rate2-current-first1.json"
-
-# Priority 5: bind the earlier fullscreen state pass to the new exact build.
-scripts/continuous-quality-presentation --server "$CQ_SERVER" \
-  --source-ref "$CQ_BUILD" --browser firefox --firefox "$CQ_FIREFOX" \
-  --geckodriver "$CQ_GECKODRIVER" --fixtures "$CQ_FIXTURES" \
-  --json "$CQ_REPORTS/fullscreen-current-first1.json"
 ```
 
-The subtitle helper needs the existing encoded-clock source. Its opt-in
-recipe stream-copies video/audio, adds deterministic text captions, and
-requires matching complete packet hashes, timestamps and time bases plus
-source/output file hashes. It never recreates a missing incumbent source.
-Keep the generated fixture's `.source-packets.json` proof beside it.
+**How to read it:** a focused pass closes only its stated layer. Keep failures,
+missing capture and unknown scope visible; no schedule in this document ran.
+The separate purpose-scoped End observation may identify stable background
+caption jobs, but never removes raw children or turns an existing strict
+aggregate End failure into a pass. Reader pins, callbacks and physical queues
+still need their own evidence.
 
-**How to read it:** these small cases can close only state/clock/identity
-observations. They do not request quality, capture physical pixels/audio or
-prove background lifecycle. Subtitle cues and their timing are metadata,
-not visible-caption proof. End metadata classifies stable registered PIDs
-without removing children or relaxing retirement failures. Existing tools
-do not yet provide rate/mute/fullscreen/subtitle-plus-switch, actual tab
-visibility, shared-reader fairness or physical disk-pressure acceptance.
-Those rows need separate work; do not relabel surrogates to fill them.
+## 7. Runtime prerequisites — ready to attempt is not playback acceptance
+
+Portable Chrome 155.0.8059.39 has isolated version/dependency preparation;
+no current Chrome playback receipt is claimed. Signed TV 239 compiled from
+83 current production Apple files with only read-only QA diagnostics, and its
+owned lab installation succeeded. It has no new startup, awake or physical
+output evidence. Phone device info at 18:58UTC reports paired, connected tunnel
+and DDI services available; no lock/unlocked or awake assertion follows from
+that read. The companion inventory binds the filtered readiness artifact and
+original source hash without copying private device metadata into this tree.
+
+The Android UI preparation uses only the existing owned emulator and isolated
+ADB server. Parent-created routing belongs to its exact disposable lab. Its
+new backend/proxy templates require an explicit expected server source and
+verify `/system` before UI entry. Normal Signout may need bounded Settings
+scrolling and returns to the cached server's Login screen, so the next fresh
+connection uses the shipped **Use a different server** control first.
+No preparation enables a feature, changes a readiness threshold or starts a
+backend, device app or test suite.
