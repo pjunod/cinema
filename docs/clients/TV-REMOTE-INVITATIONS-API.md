@@ -89,7 +89,7 @@ switch is required to delete an installation.
 | --- | --- | --- |
 | POST `/invitations/consent` | `installation_id`, `receiver_id`, `expected_phone_generation`, `expected_consent_generation`, `enabled`, `grant_id:UUID|null`, `transport:null|"apns"|"fcm"|"android_resident"` | `consent` |
 | POST `/invitations/consents/list` | `installation_id`, `after_receiver_id:UUID|null`, `limit:1..20` | `consents`, `next_cursor:UUID|null` |
-| POST `/invitations/transport/start` | `installation_id`, `receiver_id`, `grant_id`, `expected_phone_generation`, `expected_consent_generation` | `consent`, `ticket:object|null`, `broker_origin:string|null` |
+| POST `/invitations/transport/start` | `installation_id`, `receiver_id`, `grant_id`, `expected_phone_generation`, `expected_consent_generation` | `consent`, `ticket:object|null` |
 | POST `/invitations/transport/confirm` | `installation_id`, `receiver_id`, `ticket_id`, `expected_phone_generation`, `expected_consent_generation`, `expected_transport_generation` | `consent` |
 
 Nullable fields may be omitted where the request does not need them (OFF).
@@ -238,7 +238,7 @@ DELETE /broker/v1/enrollments/{id}, publisher authority, empty body ->{version,s
 
 POST /broker/v1/deliveries publisher request {version,enrollment_id,installation_id,phone_generation,consent_generation,transport_generation,invitation_id,expires_at}. The immutable binding must match active enrollment/current publisher generation. invitation_id canonical 43-character base64url of installation UUID 16 bytes + event UUID 16 bytes, matching installation prefix. Expiry must be future and <=120 s; reject expired IDs before pruning. Response {version,status:"accepted"|"duplicate"|"denied"|"unknown"}. accepted means provider accepted its HTTP request, never physical delivery. Persist scoped dedupe and attempted state BEFORE provider I/O; duplicate never makes a second provider request. Unknown network outcome consumes attempt. Fixed generic visible body "A paired screen is ready", category CINEMA_REMOTE_INVITATION, opaque invitation_id only; no title, URL, grant, login or OS power action. Invalid provider token revokes its enrollment.
 
-Bounds: <=64 configured publishers; <=4096 pending tickets/publisher, expired unclaimed tickets stop counting as pending but retain their ID tombstone (unknown/expired claims always deny); <=4096 active enrollments/publisher; <=100000 durable enrollment revocation identities and <=100000 delivery dedupe identities/publisher generation. No age pruning of live-generation dedupe/revocation; capacity returns 429 retention_limit. Prefix/pages for any diagnostic listing, no unbounded arrays. Global <=16 in-flight HTTP tasks/provider calls and <=4 provider calls/publisher, with immediate rejection or a bounded queue rather than unbounded semaphore waiters; one overall 5 s provider deadline includes OAuth fetch and send, provider response 64 KiB max, Google OAuth response 16 KiB max. Bounded per-publisher admission rate and per-installation 30-minute cooldown. Unknown response/restart cannot reset attempts.
+Bounds: <=64 retained publisher IDs (including inactive); <=4096 pending tickets/publisher, expired unclaimed tickets stop counting as pending but retain their ID tombstone (unknown/expired claims always deny); <=4096 active enrollments/publisher; <=100000 durable enrollment revocation identities and <=100000 delivery dedupe identities/publisher generation. No age pruning of live-generation dedupe/revocation; capacity returns 429 retention_limit. Prefix/pages for any diagnostic listing, no unbounded arrays. Global <=16 in-flight HTTP tasks/provider calls and <=4 provider calls/publisher, with immediate rejection or a bounded queue rather than unbounded semaphore waiters; one overall 5 s provider deadline includes OAuth fetch and send, provider response 64 KiB max, Google OAuth response 16 KiB max. Bounded per-publisher admission rate and per-installation 30-minute cooldown. Unknown response/restart cannot reset attempts.
 
 At-rest device tokens encrypted ChaCha20Poly1305 with independent 32-byte broker-only master key, fresh 12-byte nonce and AAD publisher+startup generation+enrollment+platform+transport generation. Provider private keys exist only in broker-only files. Existing ring primitives sign APNs ES256 (P-256 fixed 64-byte signature), FCM RS256; fixed Apple production/sandbox HTTP2 TLS hosts/topic and fixed Google OAuth+configured project HTTPv1 hosts. No general JWT-auth parser, no client-controlled host or arbitrary notification.
 
@@ -322,9 +322,23 @@ carry broker or home origins.
 
 
 Android FCM invitations use data-only `invitation_id` and the fixed category,
-HIGH priority and bounded TTL. The native app checks local consent, installation
-identity and dedupe before displaying the fixed generic local notification; it
-makes no home fetch before display. Notification-plus-data auto-display would
+HIGH priority and bounded TTL. The native app checks the current local installation, account, login and
+permission, at least one enabled FCM consent, and dedupe before displaying the
+fixed generic local notification; it makes no home fetch before display. This
+is an installation-wide gate: the two-field payload does not identify a TV or
+consent generation. Home and broker fence unsent stale work, but a generic alert
+already accepted by the provider may arrive after one TV consent is OFF while
+another remains ON. The client must not claim exact per-TV local fencing. Notification-plus-data auto-display would
 bypass those local checks and is not used. APNs remains a visible alert. Already
 sent OS notifications cannot be recalled; every tap still reauthenticates and
 checks current home authority.
+
+
+This packet does not implement an operator-fence CLI or API for permanently
+lost broker authority. Supported recovery restores the old exact configured
+scope authority (compatible publisher-proof rotation is allowed) and drains
+its authenticated same-generation tombstones. If that authority cannot be
+restored, held and queued obligations remain retained with
+`migration_remediation`; a response from a replacement broker generation
+cannot acknowledge or discard them. An exceptional recovery surface requires
+a separate reviewed design on the daemon-owned activated store.
