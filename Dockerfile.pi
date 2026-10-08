@@ -13,19 +13,24 @@ RUN mkdir -p /usr/local/deploy \
     && apt-get install -y --no-install-recommends python3 build-essential pkg-config patch git curl ca-certificates xz-utils \
        libdrm-dev libudev-dev libx264-dev libx265-dev libass-dev libfreetype-dev \
        libfontconfig-dev libfribidi-dev libharfbuzz-dev libopus-dev libvorbis-dev \
-       libmp3lame-dev libdav1d-dev libzimg-dev libgnutls28-dev zlib1g-dev libbz2-dev liblzma-dev \
+       libmp3lame-dev libdav1d-dev libzimg-dev libgnutls28-dev zlib1g-dev libbz2-dev liblzma-dev libssl-dev \
+       cmake meson ninja-build python3-jinja2 libfast-float-dev glslang-dev spirv-tools libvulkan-dev \
     && python3 /usr/local/deploy/pi-runtime build-ffmpeg --prefix /opt/plurx-runtime --json
 
 FROM ${BASE_IMAGE} AS runtime
 USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap libudev1 libdrm2 libx264-164 libx265-199 libass9 \
+RUN printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260928T000000Z bookworm-backports main\n' > /etc/apt/sources.list.d/plurx-pi-gpu.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends bubblewrap libudev1 libx264-164 libx265-199 libass9 \
        libfreetype6 libfontconfig1 libfribidi0 libharfbuzz0b libopus0 libvorbis0a \
        libvorbisenc2 libmp3lame0 libdav1d6 libzimg2 libgnutls30 libbz2-1.0 liblzma5 zlib1g \
+       mesa-vulkan-drivers=25.0.7-2~bpo12+1 libdrm2=2.4.123-1~bpo12+1 \
+       libdrm-amdgpu1=2.4.123-1~bpo12+1 libdrm-common=2.4.123-1~bpo12+1 libvulkan1 \
     && chmod 0755 /usr/bin/bwrap \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=pi-ffmpeg-build /opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369 /opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369
-ENV PLURX_FFMPEG=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369/bin/ffmpeg \
-    PLURX_FFPROBE=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a407e98fffa4c369/bin/ffprobe
+COPY --from=pi-ffmpeg-build /opt/plurx-runtime/ffmpeg-8.1.3-pi-a1ee2f3e25c8801b /opt/plurx-runtime/ffmpeg-8.1.3-pi-a1ee2f3e25c8801b
+ENV PLURX_FFMPEG=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a1ee2f3e25c8801b/bin/ffmpeg \
+    PLURX_FFPROBE=/opt/plurx-runtime/ffmpeg-8.1.3-pi-a1ee2f3e25c8801b/bin/ffprobe \
+    VK_DRIVER_FILES=/usr/share/vulkan/icd.d/broadcom_icd.json
 COPY deploy/pi-runtime-assets/MOBY-LICENSE deploy/pi-runtime-assets/MOBY-NOTICE /usr/share/doc/plurx-pi-sandbox/
 USER plurx

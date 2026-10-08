@@ -419,8 +419,14 @@ impl TranscodeManager {
         transcode::resolve_transcode(&request, facts, &capabilities, &policy, restrictions)
             .map(|plan| {
                 if let Some(selection) = plan.macos_processing_selection() {
+                    let identity_digest = plan
+                        .macos_processing_identity()
+                        .map(|identity| identity.digest());
                     tracing::debug!(target: "plurxd::transcode", selection = selection.name(),
-                        pipeline = plan.options().pipeline.name(), "resolved Mac processing for new movie plan");
+                        pipeline = plan.options().pipeline.name(),
+                        strict_dolby = plan.options().strict_dolby.is_some(),
+                        macos_identity_digest = identity_digest.as_deref().unwrap_or("none"),
+                        "resolved Mac processing for new movie plan");
                 }
                 let frame_rate = facts.frame_rate();
                 let cadence = (frame_rate.provenance() != transcode::FrameRateProvenance::Variable)

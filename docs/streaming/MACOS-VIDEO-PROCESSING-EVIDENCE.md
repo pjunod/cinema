@@ -631,3 +631,64 @@ and temporally distinct field artwork, so they could neither satisfy nor
 prove the new motion contract. The existing genuine woven H.264 TFF/BFF
 controls now solely qualify ordinary BWDIF; its strict field-motion checks
 remain intact. Historical receipts keep the older limited evidence visible.
+
+## 16. Strict P5 shared encoder projections
+
+[The P5 projection archive](evidence/macos-video-20261008/p5-projection-correctness.tar.gz)
+retains 113 files (195,509 compressed bytes; SHA-256
+`e043104399de5b0179d99c357da4607848473f7b6e2ffaef5438b1774acf60df`).
+Unlike the earlier text-only archives, it includes the tiny original-synthetic
+encoded outputs and raw decoded/predecessor planes, alongside commands,
+probes and logs. Their CC0 provenance is the committed original synthetic
+corpus. The manifest verifies every member; textual task paths are normalized.
+An earlier encoder-variant receipt remains explicitly historical and is not
+counted as the final shared encoder projection.
+
+All 45 controls pass on the corrected `80416af2…` package: nine source cases
+across software decode/CPU render with software or VT encoding, required-VT
+decode/CPU render, software decode/upload/Metal render, and required-VT
+decode/Metal render. Positive controls use the shared encoder arguments and
+produce 24 SDR H.264 frames at 12 fps with the expected signaling, cadence
+and neutral-patch values. CPU and Metal curves are judged against their own
+expectations, not asserted pixel-identical.
+
+Negative controls inspect strict decoder/renderer raw output rather than
+encode malformed content: first/seek-start loss yields no frame; midstream
+missing or malformed RPU and omitted color metadata produce at most ten valid
+predecessor frames, a required diagnostic and nonzero exit. This preserves
+an observable boundary at the affected frame. The initial sandbox-denied
+IOSurface attempt is not accepted hardware evidence.
+
+The related production source is `f57040d83`, integrated by `3ea037239`.
+The daemon's embedded helper must additionally verify held-fixture source
+codes, access-unit/presentation metadata association and aggregation of every
+control before reporting availability. This standalone receipt does not
+substitute for that final inventory. It was collected under concurrent build
+load and makes no performance claim.
+
+## 17. HLG burn graphs and HDR interlace boundary
+
+[The HLG and interlace scope archive](evidence/macos-video-20261008/hlg-burn-interlace-scope.tar.gz)
+retains 14 files (22,995 compressed bytes; SHA-256
+`48e98704dd96c4bcc4f2e0aacf11b24c5c22da6a03d35cac2177529b76fb228c`).
+It includes complete HLG text/bitmap graph receipts, the original woven-field
+source generator and manifest, four hardware-decoder negative logs/probes,
+and the original six-second HDR/AAC API source generator and receipt.
+Every retained member is hash verified.
+
+The corrected package independently passes both HLG burn graphs: twelve
+frames preserve the expected reference-white luma 156, with scheduled text
+or bitmap cue observations. The HLG fixture explicitly encodes SAR 1:1; its
+raw ten-bit planes are unchanged by that signaling repair.
+
+Actual ten-bit woven H.264 PQ/HLG sources in both TFF and BFF order fail
+VideoToolbox decoding on this host: all four attempts exit 69, return zero
+raw bytes and report decoder error -8969 with NULL images. Consequently,
+HDR interlaced input retains the incumbent route. Unreachable HDR BWDIF
+classes were removed rather than advertised with a permanently missing
+observation. This is evidence for these exact source/package/host tuples,
+not a universal claim about all Apple hardware or HDR codecs. Ordinary SDR
+BWDIF retains its independently proven moving-field controls.
+
+The final supported inventory has 22 graphs. Standalone controls do not
+replace the final combined daemon's embedded inventory or API qualification.
