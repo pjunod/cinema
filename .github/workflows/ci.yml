@@ -325,6 +325,48 @@ jobs:
     steps:
       - name: Capture mounted runner workspace owner
         run: |
+          # Forgejo v13.1.0 provisions paired random job volumes and deletes
+          # both on cleanup (BindWorkdir=false, ReuseContainers=false).
+          # Persistent host binds still require their actual non-root owner.
+          ephemeral="$(python3 - "$GITHUB_WORKSPACE" <<'PYTHON'
+          import os
+          import re
+          import sys
+
+          def ephemeral_workspace(workspace, act_path, mountinfo, env):
+              if env.get("ACT") != "true" or env.get("FORGEJO_ACTIONS") != "true":
+                  return False
+              records = [line.split() for line in mountinfo.splitlines()]
+              def direct(path):
+                  rows = [r for r in records if len(r) >= 10 and r[4] == path]
+                  return rows[0] if len(rows) == 1 else None
+              work, act = direct(workspace), direct(act_path)
+              if work is None or act is None or work[0] == act[0]:
+                  return False
+              match = re.fullmatch(r"/var/lib/docker/volumes/([0-9a-f]{32})/_data", work[3])
+              if match is None or act[3] != "/var/lib/docker/volumes/" + match[1] + "-env/_data":
+                  return False
+              try:
+                  wi, ai = work.index("-"), act.index("-")
+                  return (wi >= 6 and ai >= 6 and wi + 3 < len(work) and ai + 3 < len(act)
+                          and work[0].isdigit() and act[0].isdigit() and work[2] == act[2]
+                          and work[wi + 1:wi + 3] == act[ai + 1:ai + 3]
+                          and "rw" in work[5].split(",") and "rw" in act[5].split(","))
+              except (ValueError, IndexError):
+                  return False
+
+          with open("/proc/self/mountinfo", encoding="utf-8") as mounted:
+              ephemeral = ephemeral_workspace(os.path.realpath(sys.argv[1]),
+                  os.path.realpath("/var/run/act"), mounted.read(), os.environ)
+          print("yes" if ephemeral else "no")
+          PYTHON
+          )"
+          if [ "$ephemeral" = yes ]; then
+            echo 'PLURX_WORKSPACE_MODE=forgejo-ephemeral' >> "$GITHUB_ENV"
+            echo 'HOST_WORKSPACE_OWNER=' >> "$GITHUB_ENV"
+            echo 'Paired Forgejo job volumes are removed by the provisioner; no host bind to restore'
+            exit 0
+          fi
           owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
           if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
             owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
@@ -334,6 +376,7 @@ jobs:
             exit 1
           fi
           echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
+          echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -361,7 +404,7 @@ jobs:
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
-          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+          if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
             chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
           fi
 
@@ -930,6 +973,48 @@ jobs:
     steps:
       - name: Capture mounted runner workspace owner
         run: |
+          # Forgejo v13.1.0 provisions paired random job volumes and deletes
+          # both on cleanup (BindWorkdir=false, ReuseContainers=false).
+          # Persistent host binds still require their actual non-root owner.
+          ephemeral="$(python3 - "$GITHUB_WORKSPACE" <<'PYTHON'
+          import os
+          import re
+          import sys
+
+          def ephemeral_workspace(workspace, act_path, mountinfo, env):
+              if env.get("ACT") != "true" or env.get("FORGEJO_ACTIONS") != "true":
+                  return False
+              records = [line.split() for line in mountinfo.splitlines()]
+              def direct(path):
+                  rows = [r for r in records if len(r) >= 10 and r[4] == path]
+                  return rows[0] if len(rows) == 1 else None
+              work, act = direct(workspace), direct(act_path)
+              if work is None or act is None or work[0] == act[0]:
+                  return False
+              match = re.fullmatch(r"/var/lib/docker/volumes/([0-9a-f]{32})/_data", work[3])
+              if match is None or act[3] != "/var/lib/docker/volumes/" + match[1] + "-env/_data":
+                  return False
+              try:
+                  wi, ai = work.index("-"), act.index("-")
+                  return (wi >= 6 and ai >= 6 and wi + 3 < len(work) and ai + 3 < len(act)
+                          and work[0].isdigit() and act[0].isdigit() and work[2] == act[2]
+                          and work[wi + 1:wi + 3] == act[ai + 1:ai + 3]
+                          and "rw" in work[5].split(",") and "rw" in act[5].split(","))
+              except (ValueError, IndexError):
+                  return False
+
+          with open("/proc/self/mountinfo", encoding="utf-8") as mounted:
+              ephemeral = ephemeral_workspace(os.path.realpath(sys.argv[1]),
+                  os.path.realpath("/var/run/act"), mounted.read(), os.environ)
+          print("yes" if ephemeral else "no")
+          PYTHON
+          )"
+          if [ "$ephemeral" = yes ]; then
+            echo 'PLURX_WORKSPACE_MODE=forgejo-ephemeral' >> "$GITHUB_ENV"
+            echo 'HOST_WORKSPACE_OWNER=' >> "$GITHUB_ENV"
+            echo 'Paired Forgejo job volumes are removed by the provisioner; no host bind to restore'
+            exit 0
+          fi
           owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
           if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
             owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
@@ -939,6 +1024,7 @@ jobs:
             exit 1
           fi
           echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
+          echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -968,7 +1054,7 @@ jobs:
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
-          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+          if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
             chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
           fi
 
@@ -988,6 +1074,48 @@ jobs:
     steps:
       - name: Capture mounted runner workspace owner
         run: |
+          # Forgejo v13.1.0 provisions paired random job volumes and deletes
+          # both on cleanup (BindWorkdir=false, ReuseContainers=false).
+          # Persistent host binds still require their actual non-root owner.
+          ephemeral="$(python3 - "$GITHUB_WORKSPACE" <<'PYTHON'
+          import os
+          import re
+          import sys
+
+          def ephemeral_workspace(workspace, act_path, mountinfo, env):
+              if env.get("ACT") != "true" or env.get("FORGEJO_ACTIONS") != "true":
+                  return False
+              records = [line.split() for line in mountinfo.splitlines()]
+              def direct(path):
+                  rows = [r for r in records if len(r) >= 10 and r[4] == path]
+                  return rows[0] if len(rows) == 1 else None
+              work, act = direct(workspace), direct(act_path)
+              if work is None or act is None or work[0] == act[0]:
+                  return False
+              match = re.fullmatch(r"/var/lib/docker/volumes/([0-9a-f]{32})/_data", work[3])
+              if match is None or act[3] != "/var/lib/docker/volumes/" + match[1] + "-env/_data":
+                  return False
+              try:
+                  wi, ai = work.index("-"), act.index("-")
+                  return (wi >= 6 and ai >= 6 and wi + 3 < len(work) and ai + 3 < len(act)
+                          and work[0].isdigit() and act[0].isdigit() and work[2] == act[2]
+                          and work[wi + 1:wi + 3] == act[ai + 1:ai + 3]
+                          and "rw" in work[5].split(",") and "rw" in act[5].split(","))
+              except (ValueError, IndexError):
+                  return False
+
+          with open("/proc/self/mountinfo", encoding="utf-8") as mounted:
+              ephemeral = ephemeral_workspace(os.path.realpath(sys.argv[1]),
+                  os.path.realpath("/var/run/act"), mounted.read(), os.environ)
+          print("yes" if ephemeral else "no")
+          PYTHON
+          )"
+          if [ "$ephemeral" = yes ]; then
+            echo 'PLURX_WORKSPACE_MODE=forgejo-ephemeral' >> "$GITHUB_ENV"
+            echo 'HOST_WORKSPACE_OWNER=' >> "$GITHUB_ENV"
+            echo 'Paired Forgejo job volumes are removed by the provisioner; no host bind to restore'
+            exit 0
+          fi
           owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
           if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
             owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
@@ -997,6 +1125,7 @@ jobs:
             exit 1
           fi
           echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
+          echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -1050,7 +1179,7 @@ jobs:
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
-          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+          if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
             chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
           fi
 
@@ -1073,6 +1202,48 @@ jobs:
     steps:
       - name: Capture mounted runner workspace owner
         run: |
+          # Forgejo v13.1.0 provisions paired random job volumes and deletes
+          # both on cleanup (BindWorkdir=false, ReuseContainers=false).
+          # Persistent host binds still require their actual non-root owner.
+          ephemeral="$(python3 - "$GITHUB_WORKSPACE" <<'PYTHON'
+          import os
+          import re
+          import sys
+
+          def ephemeral_workspace(workspace, act_path, mountinfo, env):
+              if env.get("ACT") != "true" or env.get("FORGEJO_ACTIONS") != "true":
+                  return False
+              records = [line.split() for line in mountinfo.splitlines()]
+              def direct(path):
+                  rows = [r for r in records if len(r) >= 10 and r[4] == path]
+                  return rows[0] if len(rows) == 1 else None
+              work, act = direct(workspace), direct(act_path)
+              if work is None or act is None or work[0] == act[0]:
+                  return False
+              match = re.fullmatch(r"/var/lib/docker/volumes/([0-9a-f]{32})/_data", work[3])
+              if match is None or act[3] != "/var/lib/docker/volumes/" + match[1] + "-env/_data":
+                  return False
+              try:
+                  wi, ai = work.index("-"), act.index("-")
+                  return (wi >= 6 and ai >= 6 and wi + 3 < len(work) and ai + 3 < len(act)
+                          and work[0].isdigit() and act[0].isdigit() and work[2] == act[2]
+                          and work[wi + 1:wi + 3] == act[ai + 1:ai + 3]
+                          and "rw" in work[5].split(",") and "rw" in act[5].split(","))
+              except (ValueError, IndexError):
+                  return False
+
+          with open("/proc/self/mountinfo", encoding="utf-8") as mounted:
+              ephemeral = ephemeral_workspace(os.path.realpath(sys.argv[1]),
+                  os.path.realpath("/var/run/act"), mounted.read(), os.environ)
+          print("yes" if ephemeral else "no")
+          PYTHON
+          )"
+          if [ "$ephemeral" = yes ]; then
+            echo 'PLURX_WORKSPACE_MODE=forgejo-ephemeral' >> "$GITHUB_ENV"
+            echo 'HOST_WORKSPACE_OWNER=' >> "$GITHUB_ENV"
+            echo 'Paired Forgejo job volumes are removed by the provisioner; no host bind to restore'
+            exit 0
+          fi
           owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
           if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
             owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
@@ -1082,6 +1253,7 @@ jobs:
             exit 1
           fi
           echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
+          echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -1132,7 +1304,7 @@ jobs:
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
-          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+          if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
             chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
           fi
 
