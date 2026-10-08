@@ -168,6 +168,22 @@
       "reason": "New synthetic adapter controls; first execution remains required."
     },
     {
+      "id_prefix": "validation:test_main_preflight_adoption.MainPreflightAdoptionCase.test_exact_prepare_retry_bridge_imports_no_outcomes",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/history.py",
+        "validation/main_preflight_adoption.py",
+        "validation/main_unit_receipts.py",
+        "validation/main-preflight-inputs.json",
+        "validation/python_unit_interrupted_recovery.py",
+        "validation/python_unit_receipts.py",
+        "validation/regression_field.py",
+        "validation/runner.py",
+        "validation/test_markers.py"
+      ],
+      "reason": "The bounded retry bridge control imports both receipt readers; preserve their actual input closure."
+    },
+    {
       "id_prefix": "validation:test_main_preflight_adoption.MainPreflightAdoptionCase.test_exact_upload_failure_bridge_accounts_zero_without_importing_outcomes",
       "inputs": [
         "validation/__init__.py",
