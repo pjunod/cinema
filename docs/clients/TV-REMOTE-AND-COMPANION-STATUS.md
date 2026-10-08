@@ -21,12 +21,12 @@ Main integration is handed to `01a11907-f720-71b1-8c51-89902b919e6f`.
 | B06 Apple receiver/companion | PR [#875](http://forge.lan:3000/noirr/plurx/pulls/875), `7e66c85c6f98`, composed through [#879](http://forge.lan:3000/noirr/plurx/pulls/879) | Reviewed and integrated into coordinator candidate | iOS/tvOS builds and 2 focused follow-up XCTest; earlier 19 cases passed before the narrow correction |
 | B07 Android receiver/companion | PR [#881](http://forge.lan:3000/noirr/plurx/pulls/881), `c3e2c6ab0f0e` | Released in parent review 106 | Both APKs compile; grouped 21 cases and final 2 correction cases pass; representative Router smoke passes, production native instrumentation unexecuted |
 | B08 desktop CEC | PR [#872](http://forge.lan:3000/noirr/plurx/pulls/872), `08258f51cbb4` | No blocker in standalone software packet | 16 Python + 12 Node checks and production-popup Chromium smoke with native port mocked; hardware pending |
-| B09 home invitations | Storage/authority/admission and cleanup through schema 4 built; home HTTP/worker and native adapters continue | Storage checkpoints reviewed; runtime release pending | Focused SQLite and actual three-voter contracts pass; no live home enrollment claim yet |
-| B09 Apple invitations | PR [#903](http://forge.lan:3000/noirr/plurx/pulls/903), `b77dcb3d9aed` | Released in parent review 113; handed to coordinator | iOS/tvOS builds and 22 unique focused cases across packet/final correction runs; actual home seam and signed physical APNs remain open |
+| B09 home invitations | PR [#906](http://forge.lan:3000/noirr/plurx/pulls/906), `d9de7a1655f6` | Released in parent review 114; handed to coordinator | 14 daemon cases, focused SQLite/actual three-voter cases, actual home/broker TLS flow with synthetic provider; physical delivery unqualified |
+| B09 Apple invitations | PR [#903](http://forge.lan:3000/noirr/plurx/pulls/903), `b77dcb3d9aed` | Released in parent review 113; handed to coordinator | iOS/tvOS builds and 22 unique focused cases across packet/final correction runs; captured actual home responses pass frozen decoders; live native TLS and physical APNs remain open |
 | B09 standalone broker | PR [#896](http://forge.lan:3000/noirr/plurx/pulls/896), `ea0a86f34c54` | Released in parent review 110 | 27 focused cases including real loopback Router and executable CLI; signing/provider fixtures, physical delivery unqualified |
 | Web couch completion | PR [#890](http://forge.lan:3000/noirr/plurx/pulls/890), `18ef97705920` | Released in parent review 108; coordinator integrated | 54 focused static/web checks and 6 Chromium cases; CEC native port mocked |
 | Apple couch completion | PR [#898](http://forge.lan:3000/noirr/plurx/pulls/898), `a331f7d9b17b` | Released in parent review 111 | iOS/tvOS builds; 21 focused cases plus 2 final physical arbitration cases; physical TV/VoiceOver pending |
-| Android couch completion | PR [#902](http://forge.lan:3000/noirr/plurx/pulls/902), `8077965a4554` | Released in parent review 112; handed to coordinator | Debug APK and 46 focused production-owner/navigation cases pass; physical focus and Media3 acceptance pending |
+| Android couch completion | PR [#902](http://forge.lan:3000/noirr/plurx/pulls/902), `8077965a4554` | Released in parent review 112; integrated into coordinator candidate | Debug APK and 46 focused production-owner/navigation cases pass; physical focus and Media3 acceptance pending |
 | Input observer fences | PR [#893](http://forge.lan:3000/noirr/plurx/pulls/893), `1a8fafef384c` | Released in parent review 109; coordinator integrated | 13 static cases, dedicated Android physical-input JVM regression and affected APK build |
 | B10 integration handoff | Setup/recovery guide in [#877](http://forge.lan:3000/noirr/plurx/pulls/877); complete feature handoff waits on remaining packets | Pending | Ready packets handed off individually; whole feature not yet complete |
 
@@ -288,9 +288,14 @@ Authored Apple source is `d37f77c129242`; metadata and composition on reviewed
 21 packet cases and the final two affected auth/handoff cases (22 unique cases).
 Normal hooks and exact-head history passed. Preserve all twenty-two regression
 fields on landing. Real URLSession loopback verifies duplicate broker-header
-refusal; native home/broker responses otherwise remain injected evidence. The
-parent retains actual cross-component integration validation. Signed physical
-APNs, permission UI and cold-launch device behavior are not yet qualified.
+refusal. The later actual home/broker fixture supplied seven Android/FCM
+response envelopes and eight Apple/APNs envelopes, all accepted by the frozen
+wire decoders. Apple identity/generation predicates also pass against the typed
+responses; the exact raw broker claim body and captured canonical generation
+header pass their frozen checks. Home envelopes were parsed and reserialized,
+so this does not prove original wire lexemes or duplicate-header handling. It
+does not execute the full native API over a live home socket. Signed physical
+APNs, permission UI and cold-launch device behavior remain unqualified.
 
 Android couch PR #902 is frozen at `8077965a4554c07ea6da47242fc8b6364f130b3e`.
 Parent review [112](http://forge.lan:3000/noirr/plurx/pulls/902#issuecomment-9403)
@@ -352,9 +357,30 @@ reviewed checkpoint `0ddf9390812171a7b97e516ae26ca3c153588565` preserves externa
 cleanup obligations across account cascades and portable restore, and refuses
 incompatible legacy references before destructive mutation. Eight core and nine
 SQLite/actual three-voter contract cases passed with affected compile/Clippy and
-the normal hook. Home routes, worker, native enrollment, tap handling and Android
-resident execution are still implementation work. Schema evidence is not an
-end-to-end invitation result.
+the normal hook. These were storage-only checkpoint results.
+
+Final home runtime PR #906 is frozen at
+`d9de7a1655f6fff7cd8b5e85dd283cc08dbec0b1`, tree
+`76f08d4e111867a65feff4f11bb27144e4c0943b`, reconciled with reviewed
+`7eca7ea7136a`. Parent review
+[114](http://forge.lan:3000/noirr/plurx/pulls/906#issuecomment-9422) released the
+complete home transport/worker, signed owner summaries, resident polling,
+authenticated tap lookup and independent Developer invitation preference.
+Review corrections include cleanup auditing independent of dispatch eligibility,
+exact-reference transfer before a consent-change response, separate poll
+capacity, and authority checks after awaited broker and owner work.
+
+Fourteen focused daemon cases passed, including actual production home and
+released broker routers over trusted loopback TLS with a synthetic provider.
+Three final storage cases passed; exact-reference replacement and retained
+inventory/idle expiry run on SQLite and actual three-voter Hiqlite, while the
+legacy raw JSON-order case intentionally runs on SQLite only. Two settings
+cases, static web checks, pinned compiler/Clippy, normal hooks and exact-head
+history passed. The poll-capacity test holds 64 permits; it does not claim 64
+live phone clients. Preserve all thirty-nine regression fields in the landing.
+Physical provider delivery remains unqualified. The operations guide documents
+exact old-scope cleanup recovery and the required restart after a remembered
+broker-generation mismatch.
 
 Gate #4430 failed preflight on frozen candidate `8d8a4ab3c764` before Rust
 fanout. The coordinator audited 1127 retained passing outcomes and two genuine
