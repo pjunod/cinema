@@ -8515,3 +8515,56 @@ when the phone can run. Its iOS app/UI harness compile succeeds (`apple232-caden
 no native run or unit execution is claimed. tvOS online playback deliberately avoids explicit audio
 session activation because that previously regressed startup; the blocked
 physical route does not justify restoring that behavior speculatively.
+
+### 10.277 Focused display comparison, native automation block and parallel ownership (2026-10-08)
+
+`firefox-67520f7a8-headed-no-recorder3` passes three manual changes on the
+matched 1920×1200 software display with no independent recorder. No Auto or
+physical-output result is claimed. This short comparison narrows possible
+capture contribution but does not establish causality for the longer captured
+series. Its exact guard/display retire. The full captured series' 430,790,976-byte
+remote raw duplicate is removed only after local SHA-256 preservation agrees;
+the local pixels and all receipts remain intact.
+
+17promax later reports passcodeRequired=false. Lab232 recompiles its private
+launch arguments and passes a second pre-launch unlock check. Its UI runtime
+runner then exits65 before any test case with 'Timed out while enabling
+automation mode'. There are zero playback probes/transitions. Preserve
+`ios-232-full20-series1-infrastructure-block.json`, Xcode log and result bundle.
+The controller writes its owned stop marker and clears disposable launch
+arguments; proxy/backend/guard retire. A subsequent device read still reports
+unlocked, with compatible usable Developer Disk Image services. That rules
+out simply counting this as another measured locked-device playback failure;
+OS UI automation readiness remains unresolved. No unit suite executes.
+
+The human explicitly requests separate parallel sessions. Each clones the
+acceptance branch independently and avoids the human checkout. Ownership:
+
+| Session | Work | Coordination boundary |
+|---|---|---|
+| `01a11c09-4336-7bc2-9423-848cb636eb0a` | Browser capture/observer/display attribution | No native/Rust/status edits; coordinate remote playback first |
+| `01a11c09-6210-75d3-8c44-412016ce45f3` | Apple automation and lab capture | Own copied helpers; no production/status changes without agreement |
+| `01a11c09-7e9c-77d3-97da-747c8cb2fa50` | Source/lifecycle/pressure inventory and focused helpers | Offline evidence first; coordinate lab and production file ownership |
+
+This session retains integration and the shared status/ledger. Unit execution
+still belongs to the designated merge session after readiness, final adversarial
+review and the human's external Fable pause. Parallel development is not the
+final adversarial review and does not waive any qualification scope.
+
+Parallel browser analysis validates all 106,843 raw packets and reproduces the
+retained optical metrics. It finds all 76 skipped counters across adjacent
+captures within 12.5 ms, and eleven source-counter holds whose lower bound
+exceeds 100 ms without a sampling hole. The worst such hold is counter5676,
+191.663 ms lower / 209.403 ms upper. Therefore callback coalescing and the
+221 capture holes cannot alone dismiss the pixel failure. Other callback
+windows disagree with pixels: the sixth request's 134.94 ms callback window
+has all expected counters and a 58.331 ms pixel upper bound. These are offline
+source-scoped observations, not proof of which renderer/capture layer caused
+the eleven adequately sampled holds. Preserve both classes of observation.
+
+Parallel Apple analysis finds installation, testmanagerd connection and runner
+authorization succeeded; timeout occurred after those steps while enabling
+OS automation. It is not evidence for changing trust/developer settings.
+The matrix inventory parses 192 receipts and preserves their source/scope;
+paused-media suspension is a surrogate, and the older read-pressure receipt's
+zero physical read bytes cannot prove disk pressure or shared-reader fairness.
