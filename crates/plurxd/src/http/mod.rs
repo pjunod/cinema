@@ -11883,6 +11883,7 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             [
                 "analysis",
+                "clustered",
                 "deliveries",
                 // Recording and Live TV both run on one unreplicated node, so
                 // their keys are in the base payload rather than behind the
@@ -11906,6 +11907,10 @@ mod tests {
             .map(str::to_owned)
             .collect(),
             "SQLite includes local analysis and worker health"
+        );
+        assert_eq!(
+            detail["clustered"], false,
+            "SQLite reports its standalone role"
         );
         assert_eq!(detail["analysis"]["enabled"], false);
         assert_eq!(detail["analysis"]["total"], 0);
