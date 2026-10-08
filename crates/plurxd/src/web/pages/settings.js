@@ -115,6 +115,16 @@ const SETTINGS_MANIFEST={
   integrations:{required:["settings","trakt"],secondary:[]},
   developer:{required:["settings"],secondary:["developerReadiness"]},
 };
+// The configured mode, not the current peer count or a failed status read,
+// determines whether cluster controls apply. /server is loaded before routing.
+function settingsClusterEnabled(d=SETTINGS_DATA){
+  return SERVER?.cluster_enabled??
+    !(d?.cluster?.unavailable&&d.cluster.code==="membership_unavailable");
+}
+function settingsManifest(tab){
+  return tab==="cluster"&&!settingsClusterEnabled()
+    ?{required:[],secondary:[]}:SETTINGS_MANIFEST[tab];
+}
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
   return value;
@@ -162,6 +172,7 @@ function settingsTabsHtml(tab){
 // a dot for "something here needs you". Only from data already loaded — the
 // rail never spends a request of its own.
 function settingsTabAside(id,d){
+  if(id==="cluster"&&!settingsClusterEnabled(d)) return `<span class="setn">off</span>`;
   if(id==="libraries"&&Array.isArray(d.libs)) return `<span class="setn">${d.libs.length}</span>`;
   if(id==="users"&&Array.isArray(d.users)) return `<span class="setn">${d.users.length}</span>`;
   if(id==="metadata"&&d.settings&&!d.settings.tmdb_configured&&Array.isArray(d.libs)
@@ -223,7 +234,7 @@ function patchSettingsSecondaryError(tab,key,error){
   }
 }
 async function loadSettingsTab(generation,tab){
-  const route=location.hash, manifest=SETTINGS_MANIFEST[tab];
+  const route=location.hash, manifest=settingsManifest(tab);
   try{
     await Promise.all(manifest.required.map(key=>loadSettingsKey(key,generation)));
   }catch(error){
@@ -238,7 +249,7 @@ async function loadSettingsTab(generation,tab){
   if(!settingsCurrent(generation,tab)) return false;
   renderSettings();
   setPageFailure(route,generation,null); setPagePhase(route,generation,"content");
-  const secondary=manifest.secondary.map(key=>{
+  const secondary=settingsManifest(tab).secondary.map(key=>{
     // Cluster status owns an atomic store-and-paint boundary because the
     // already-rendered roster can open a decision dialog before this secondary
     // response arrives. Other secondary data can keep the ordinary eager cache.
@@ -254,7 +265,7 @@ async function loadSettingsTab(generation,tab){
     });
   });
   if(tab==="system") secondary.push(refreshLogs());
-  if(tab==="cluster") secondary.push(refreshClusterLogs());
+  if(tab==="cluster"&&settingsClusterEnabled()) secondary.push(refreshClusterLogs());
   await Promise.allSettled(secondary);
   if(settingsCurrent(generation,tab)) setPagePhase(route,generation,"settled");
   return settingsCurrent(generation,tab);
@@ -279,5 +290,5 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   layoutChrome("settings",settingsShell(tab));
   setPagePhase(route,generation,"shell");
   const loaded=await loadSettingsTab(generation,tab);
-  if(loaded) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
+  if(loaded&&(tab!=="cluster"||settingsClusterEnabled())) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
 }
