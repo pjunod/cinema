@@ -896,25 +896,6 @@
           "arm64"
         ]
       },
-      "comment": "Pi bubblewrap 0.8: private procfs.",
-      "args": [
-        {
-          "index": 3,
-          "value": 14,
-          "op": "SCMP_CMP_EQ"
-        }
-      ]
-    },
-    {
-      "names": [
-        "mount"
-      ],
-      "action": "SCMP_ACT_ALLOW",
-      "includes": {
-        "arches": [
-          "arm64"
-        ]
-      },
       "comment": "Pi bubblewrap 0.8: private devpts.",
       "args": [
         {

@@ -364,277 +364,7 @@
       "source_class": "hdr10"
     },
     {
-      "byte_length": 12360,
-      "generation_argv": [
-        "$FFMPEG",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-y",
-        "-f",
-        "rawvideo",
-        "-pixel_format",
-        "yuv420p",
-        "-video_size",
-        "320x180",
-        "-framerate",
-        "24",
-        "-i",
-        "$OUTPUT/interlace.yuv",
-        "-vf",
-        "tinterlace=mode=interleave_top,setfield=tff",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "12",
-        "-flags",
-        "+ilme+ildct",
-        "-x264-params",
-        "interlaced=1:tff=1:colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
-        "-color_primaries",
-        "bt709",
-        "-color_trc",
-        "bt709",
-        "-colorspace",
-        "bt709",
-        "-color_range",
-        "tv",
-        "interlaced-tff.mp4"
-      ],
-      "id": "bwdif_tff",
-      "input_observed": {
-        "avg_frame_rate": "12/1",
-        "codec_name": "h264",
-        "color_primaries": "bt709",
-        "color_range": "tv",
-        "color_space": "bt709",
-        "color_transfer": "bt709",
-        "field_order": "tt",
-        "pix_fmt": "yuv420p",
-        "profile": "Main"
-      },
-      "operation": "bwdif",
-      "output_expectation": {
-        "expected": {
-          "avg_frame_rate": "12/1",
-          "codec_name": "h264",
-          "color_primaries": "bt709",
-          "color_range": "tv",
-          "color_space": "bt709",
-          "color_transfer": "bt709",
-          "field_order": "progressive",
-          "frame_count": 12,
-          "height": 90,
-          "sample_aspect_ratio": "1:1",
-          "width": 160
-        },
-        "forbidden_side_data": [
-          "DOVI configuration record",
-          "Dolby Vision RPU Data",
-          "Mastering display metadata",
-          "Content light level metadata"
-        ],
-        "graph_id": "vt_scale_sdr",
-        "pixels": {
-          "absolute_y_tolerance": 12,
-          "expected_y": [
-            16,
-            26,
-            57,
-            80,
-            123,
-            171,
-            235,
-            235
-          ],
-          "format": "decoded_yuv420p",
-          "neutral_gray_max_chroma_distance_from_128": 12,
-          "patches": [
-            {
-              "x": 10,
-              "y": 30
-            },
-            {
-              "x": 30,
-              "y": 30
-            },
-            {
-              "x": 50,
-              "y": 30
-            },
-            {
-              "x": 70,
-              "y": 30
-            },
-            {
-              "x": 90,
-              "y": 30
-            },
-            {
-              "x": 110,
-              "y": 30
-            },
-            {
-              "x": 130,
-              "y": 30
-            },
-            {
-              "x": 150,
-              "y": 30
-            }
-          ],
-          "sample_radius": 2
-        },
-        "timestamps": {
-          "absolute_tolerance_seconds": 2e-05,
-          "start_seconds": 0,
-          "step_seconds": 0.08333333333333333
-        }
-      },
-      "path": "interlaced-tff.mp4",
-      "sha256": "48b4b2ef3e56b3fd87a40db0c76d32ef2262c5e32c7058e7d5a67c592b2d923e",
-      "source_class": "sdr"
-    },
-    {
-      "byte_length": 12314,
-      "generation_argv": [
-        "$FFMPEG",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-y",
-        "-f",
-        "rawvideo",
-        "-pixel_format",
-        "yuv420p",
-        "-video_size",
-        "320x180",
-        "-framerate",
-        "24",
-        "-i",
-        "$OUTPUT/interlace.yuv",
-        "-vf",
-        "tinterlace=mode=interleave_bottom,setfield=bff",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "12",
-        "-flags",
-        "+ilme+ildct",
-        "-x264-params",
-        "interlaced=1:bff=1:colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
-        "-color_primaries",
-        "bt709",
-        "-color_trc",
-        "bt709",
-        "-colorspace",
-        "bt709",
-        "-color_range",
-        "tv",
-        "interlaced-bff.mp4"
-      ],
-      "id": "bwdif_bff",
-      "input_observed": {
-        "avg_frame_rate": "12/1",
-        "codec_name": "h264",
-        "color_primaries": "bt709",
-        "color_range": "tv",
-        "color_space": "bt709",
-        "color_transfer": "bt709",
-        "field_order": "bb",
-        "pix_fmt": "yuv420p",
-        "profile": "Main"
-      },
-      "operation": "bwdif",
-      "output_expectation": {
-        "expected": {
-          "avg_frame_rate": "12/1",
-          "codec_name": "h264",
-          "color_primaries": "bt709",
-          "color_range": "tv",
-          "color_space": "bt709",
-          "color_transfer": "bt709",
-          "field_order": "progressive",
-          "frame_count": 12,
-          "height": 90,
-          "sample_aspect_ratio": "1:1",
-          "width": 160
-        },
-        "forbidden_side_data": [
-          "DOVI configuration record",
-          "Dolby Vision RPU Data",
-          "Mastering display metadata",
-          "Content light level metadata"
-        ],
-        "graph_id": "vt_scale_sdr",
-        "pixels": {
-          "absolute_y_tolerance": 12,
-          "expected_y": [
-            16,
-            26,
-            57,
-            80,
-            123,
-            171,
-            235,
-            235
-          ],
-          "format": "decoded_yuv420p",
-          "neutral_gray_max_chroma_distance_from_128": 12,
-          "patches": [
-            {
-              "x": 10,
-              "y": 30
-            },
-            {
-              "x": 30,
-              "y": 30
-            },
-            {
-              "x": 50,
-              "y": 30
-            },
-            {
-              "x": 70,
-              "y": 30
-            },
-            {
-              "x": 90,
-              "y": 30
-            },
-            {
-              "x": 110,
-              "y": 30
-            },
-            {
-              "x": 130,
-              "y": 30
-            },
-            {
-              "x": 150,
-              "y": 30
-            }
-          ],
-          "sample_radius": 2
-        },
-        "timestamps": {
-          "absolute_tolerance_seconds": 2e-05,
-          "start_seconds": 0,
-          "step_seconds": 0.08333333333333333
-        }
-      },
-      "path": "interlaced-bff.mp4",
-      "sha256": "a2c1da21b257c74c383fc5e2ea93dae66daae0846d6a7b3946ee8d73e6ad604f",
-      "source_class": "sdr"
-    },
-    {
-      "byte_length": 9895,
+      "byte_length": 9913,
       "generation_argv": [
         "$FFMPEG",
         "-hide_banner",
@@ -654,6 +384,8 @@
         "$OUTPUT/hlg.yuv",
         "-frames:v",
         "12",
+        "-vf",
+        "setsar=1",
         "-c:v",
         "libx265",
         "-x265-params",
@@ -682,7 +414,8 @@
         "color_transfer": "arib-std-b67",
         "field_order": "progressive",
         "pix_fmt": "yuv420p10le",
-        "profile": "Main 10"
+        "profile": "Main 10",
+        "sample_aspect_ratio": "1:1"
       },
       "operation": "plain",
       "output_expectation": {
@@ -811,7 +544,125 @@
         "reference_white_signal": 0.7498773646321735,
         "system_gamma": 1.2
       },
-      "sha256": "bade980dd1dbe62586b2afce8fcd6c6ebae71555f62f8bbdfb14a2251e68b6e6",
+      "sha256": "3f90b5f07ad5e1418eca6a9450e336c8bfeaceff813a67dbb1507ae4bee6d7e0",
+      "source_class": "hlg"
+    },
+    {
+      "byte_length": 12543,
+      "generation_argv": [
+        "$FFMPEG",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        "$OUTPUT/hlg.mp4",
+        "-itsoffset",
+        "0.25",
+        "-i",
+        "$OUTPUT/cue.sup",
+        "-map",
+        "0:v",
+        "-map",
+        "1:s",
+        "-c",
+        "copy",
+        "pgs-hlg.mkv"
+      ],
+      "id": "pgs_hlg",
+      "input_observed": {
+        "avg_frame_rate": "12/1",
+        "codec_name": "hevc",
+        "color_primaries": "bt2020",
+        "color_range": "tv",
+        "color_space": "bt2020nc",
+        "color_transfer": "arib-std-b67",
+        "field_order": "progressive",
+        "pix_fmt": "yuv420p10le",
+        "profile": "Main 10",
+        "sample_aspect_ratio": "1:1"
+      },
+      "operation": "bitmap_burn",
+      "output_expectation": {
+        "expected": {
+          "avg_frame_rate": "12/1",
+          "codec_name": "h264",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "field_order": "progressive",
+          "frame_count": 12,
+          "height": 90,
+          "sample_aspect_ratio": "1:1",
+          "width": 160
+        },
+        "forbidden_side_data": [
+          "DOVI configuration record",
+          "Dolby Vision RPU Data",
+          "Mastering display metadata",
+          "Content light level metadata"
+        ],
+        "graph_id": "vt_tonemap_hlg_metal",
+        "pixels": {
+          "format": "decoded_yuv420p",
+          "minimum_black_to_peak_y_difference": 24,
+          "neutral_gray_max_chroma_distance_from_128": 12,
+          "ordered_patch_indices": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "ordering_tolerance_y": 4,
+          "patches": [
+            {
+              "x": 10,
+              "y": 30
+            },
+            {
+              "x": 30,
+              "y": 30
+            },
+            {
+              "x": 50,
+              "y": 30
+            },
+            {
+              "x": 70,
+              "y": 30
+            },
+            {
+              "x": 90,
+              "y": 30
+            },
+            {
+              "x": 110,
+              "y": 30
+            },
+            {
+              "x": 130,
+              "y": 30
+            },
+            {
+              "x": 150,
+              "y": 30
+            }
+          ],
+          "sample_radius": 2
+        },
+        "timestamps": {
+          "absolute_tolerance_seconds": 2e-05,
+          "start_seconds": 0,
+          "step_seconds": 0.08333333333333333
+        }
+      },
+      "path": "pgs-hlg.mkv",
+      "sha256": "993f8c015b662b8d08d31152509c2b71ba08394fff2c0b7b486905a9ee741983",
       "source_class": "hlg"
     }
   ],

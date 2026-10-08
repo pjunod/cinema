@@ -2841,14 +2841,38 @@ async fn bounded_command_output_with_limits(
     bounded_command_output_cancellable(command, timeout, max_bytes, label, None, work).await
 }
 
+/// Captured by the existing bounded child owner even on a nonzero exit.
+/// Pipe overflow remains an error and cannot establish frame absence.
+pub(crate) struct BoundedCommandOutcome {
+    pub(crate) status: std::process::ExitStatus,
+    pub(crate) output: Result<BoundedOutput, String>,
+}
+
 pub(crate) async fn bounded_command_output_cancellable(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     timeout: Duration,
     max_bytes: u64,
     label: &'static str,
     cancel: Option<&tokio_util::sync::CancellationToken>,
     work: crate::process_control::ChildWork,
 ) -> Result<BoundedOutput, String> {
+    let outcome =
+        bounded_command_capture_cancellable(command, timeout, max_bytes, label, cancel, work)
+            .await?;
+    if !outcome.status.success() {
+        return Err(format!("{label} exited {}", outcome.status));
+    }
+    outcome.output
+}
+
+pub(crate) async fn bounded_command_capture_cancellable(
+    mut command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+) -> Result<BoundedCommandOutcome, String> {
     if cancel.is_some_and(|token| token.is_cancelled()) {
         return Err(format!("{label} cancelled"));
     }
@@ -2875,12 +2899,10 @@ pub(crate) async fn bounded_command_output_cancellable(
                 child.wait()
             );
             let status = status.map_err(|e| e.to_string())?;
-            if !status.success() {
-                return Err(format!("{label} exited {status}"));
-            }
-            Ok(BoundedOutput {
-                stdout: stdout?,
-                stderr: stderr?,
+            Ok(BoundedCommandOutcome {
+                status,
+                output: stdout
+                    .and_then(|stdout| stderr.map(|stderr| BoundedOutput { stdout, stderr })),
             })
         };
         tokio::pin!(collect);

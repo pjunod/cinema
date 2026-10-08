@@ -700,18 +700,26 @@ assert.equal(context.ACT_TIMER, null);
         )
 
     def test_hardware_failure_stops_both_rollouts_and_removes_temporary_overlay(self):
+        from unittest.mock import patch
+
         for target, command in (
             ("docker-up", "docker compose up -d --build"),
             ("docker-image-up", "docker compose up -d --no-build --pull never"),
         ):
-            with self.subTest(target=target):
-                code, pull, derive, proof, up, _ = self._run_rollout_recipe(
-                    target, command, proof_exit=0, hardware_exit=2
-                )
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                # Inspect the real shell-owned overlay directory; positional
+                # stub arguments change when preparation flags are added.
+                with patch.dict(os.environ, {"TMPDIR": temporary}):
+                    code, pull, derive, proof, up, _ = self._run_rollout_recipe(
+                        target, command, proof_exit=0, hardware_exit=2
+                    )
                 self.assertNotEqual(code, 0)
-                self.assertFalse(any(marker.exists() for marker in (pull, derive, proof, up)))
-                generated = Path((pull.parent / "hardware-output-path").read_text())
-                self.assertFalse(generated.exists())
+                # docker-up resolves its read-only startup budget before Pi
+                # preparation; image-up performs hardware preflight first.
+                self.assertEqual(derive.exists(), target == "docker-up")
+                self.assertFalse(any(marker.exists() for marker in (pull, proof, up)))
+                self.assertTrue((pull.parent / "hardware-output-path").exists())
+                self.assertEqual(list(Path(temporary).iterdir()), [])
 
     def test_a_failed_budget_proof_stops_the_rollout_before_it_touches_a_container(
         self,

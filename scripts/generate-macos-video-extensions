@@ -52,6 +52,12 @@ Dialogue: 0,0:00:00.25,0:00:00.75,Default,,0,0,0,,{\\an2\\pos(80,86)\\fad(100,10
 """
 
 
+def validate_hlg_square_pixels(probe):
+    if (probe["streams"][0].get("sample_aspect_ratio") != "1:1"
+            or any(frame.get("sample_aspect_ratio") != "1:1" for frame in probe["frames"])):
+        raise ValueError("HLG square pixels must be encoded and retained on decoded frames")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ffmpeg", required=True)
@@ -64,8 +70,6 @@ def main():
         parser.error("explicit absolute programs required")
     args.output.mkdir(parents=True, exist_ok=False)
     initial = json.loads((args.initial / "manifest.json").read_text())
-    generator = importlib.machinery.SourceFileLoader(
-        "mac_smoke_initial", str(Path(__file__).with_name("generate-macos-video-fixtures"))).load_module()
     hlg_helper = importlib.machinery.SourceFileLoader(
         "mac_smoke_hlg", str(args.hlg_helper)).load_module()
     records = []
@@ -80,26 +84,11 @@ def main():
         records.append({"id": f"pgs_{family}", "path": filename, "source_class": "hdr10" if family == "hdr10" else "sdr",
                         "operation": "bitmap_burn", "generation_argv": argv,
                         "output_expectation": initial["fixtures"][2 if family == "hdr10" else (1 if family == "sdr10" else 0)]["output_expectations"][-1]})
-    for parity in ["tff", "bff"]:
-        filename = f"interlaced-{parity}.mp4"
-        raw = args.output / "interlace.yuv"
-        raw.write_bytes(b"".join(generator.pattern("sdr", 8, frame % 12) for frame in range(24)))
-        argv = prefix + ["-f", "rawvideo", "-pixel_format", "yuv420p", "-video_size", "320x180",
-                         "-framerate", "24", "-i", str(raw), "-vf", "tinterlace=mode=interleave_"
-                         + ("top" if parity == "tff" else "bottom") + ",setfield=" + parity,
-                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12", "-flags", "+ilme+ildct",
-                         "-x264-params", f"interlaced=1:{parity}=1:colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
-                         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv", filename]
-        run(argv[:-1] + [str(args.output / filename)])
-        records.append({"id": f"bwdif_{parity}", "path": filename, "source_class": "sdr",
-                        "operation": "bwdif", "generation_argv": argv,
-                        "output_expectation": initial["fixtures"][0]["output_expectations"][0]})
-        raw.unlink()
     raw = args.output / "hlg.yuv"
     raw.write_bytes(b"".join(hlg_helper.frame_bytes("hlg", frame) for frame in range(12)))
     filename = "hlg.mp4"
     argv = prefix + ["-f", "rawvideo", "-pix_fmt", "yuv420p10le", "-s", "320x180", "-r", "12", "-i", str(raw),
-                     "-frames:v", "12", "-c:v", "libx265", "-x265-params",
+                     "-frames:v", "12", "-vf", "setsar=1", "-c:v", "libx265", "-x265-params",
                      "lossless=1:repeat-headers=1:aud=1:keyint=12:bframes=0:pools=1:frame-threads=1:colorprim=9:transfer=18:colormatrix=9:range=limited",
                      "-color_trc", "arib-std-b67", "-color_primaries", "bt2020", "-colorspace", "bt2020nc", "-color_range", "tv",
                      "-tag:v", "hvc1", "-movflags", "+faststart", filename]
@@ -112,6 +101,14 @@ def main():
                                   "gray_source_codes": [hlg_helper.codes((n,n,n), "hlg") for n in (0,1,10,100,203,400,700,1000)],
                                   "reference_white_nits": 203,
                                   "reference_white_signal": hlg_helper.hlg_oetf((203 / 1000) ** (1 / 1.2))}})
+    filename = "pgs-hlg.mkv"
+    argv = prefix + ["-i", str(args.output / "hlg.mp4"), "-itsoffset", "0.25",
+                     "-i", str(args.output / "cue.sup"), "-map", "0:v", "-map", "1:s",
+                     "-c", "copy", filename]
+    run(argv[:-1] + [str(args.output / filename)])
+    records.append({"id": "pgs_hlg", "path": filename, "source_class": "hlg",
+                    "operation": "bitmap_burn", "generation_argv": argv,
+                    "output_expectation": expectation})
     raw.unlink()
     for record in records:
         data = (args.output / record["path"]).read_bytes()
@@ -119,8 +116,10 @@ def main():
         probe = json.loads(run([args.ffprobe, "-v", "error", "-select_streams", "v:0", "-show_streams", "-show_frames", "-of", "json", str(args.output / record["path"])]))
         if len(probe["frames"]) != 12:
             raise ValueError("fixture must decode 12 frames")
+        if record["source_class"] == "hlg":
+            validate_hlg_square_pixels(probe)
         record["input_observed"] = {key: probe["streams"][0].get(key) for key in
-                                    ["codec_name", "profile", "pix_fmt", "avg_frame_rate", "field_order", "color_range", "color_space", "color_transfer", "color_primaries"]}
+                                    ["codec_name", "profile", "pix_fmt", "avg_frame_rate", "field_order", "color_range", "color_space", "color_transfer", "color_primaries", "sample_aspect_ratio"]}
         record["generation_argv"] = [part.replace(args.ffmpeg, "$FFMPEG").replace(str(args.initial), "$INITIAL").replace(str(args.output), "$OUTPUT") for part in record["generation_argv"]]
     manifest = {"schema_version": 1, "generator_recipe_version": 1,
                 "provenance": "Original analytic CC0 media; no external fonts, images, footage or private content embedded",

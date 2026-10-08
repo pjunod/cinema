@@ -351,6 +351,82 @@ def runtime_contract(args, runtime):
         docker_files(args, runtime)
 
 
+def compose_runtime_profile(directory):
+    """Complete a declared immutable profile generation; never adopt host files."""
+    safe(directory)
+    artifacts = seccomp_artifacts()
+    contents = {path.name: value for path, value in artifacts.items()}
+    expected = {name: hashlib.sha256(value).hexdigest() for name, value in contents.items()}
+    if directory.exists() and not root_protected(directory):
+        raise ValueError('Compose Pi profile directory must be root-owned and protected')
+    ownership = directory / 'ownership.json'
+    identity = {'owner': 'plurx-compose-pi-v1', 'checkout': str(ROOT), 'uid': os.getuid(), 'files': expected}
+    for ancestor in directory.parents:
+        if ancestor.exists() and not root_protected(ancestor):
+            raise ValueError('Compose Pi profile ancestors must be root-owned and protected')
+    if ownership.exists():
+        if not root_protected(ownership) or json.loads(ownership.read_text()) != identity:
+            raise ValueError('Compose Pi profile receipt belongs to another owner or generation')
+    elif directory.exists() and any(directory.iterdir()):
+        raise ValueError('Compose Pi profile destination contains unowned files')
+    for name, digest in expected.items():
+        destination = directory / name
+        safe(destination)
+        if destination.exists() and (not ownership.exists() or not root_protected(destination) or sha(destination) != digest):
+            raise ValueError('Compose Pi profile destination was changed or is unowned')
+    # Declare exact hashes before any artifact write. Interrupted preparations can
+    # complete missing files; they cannot adopt different files or host settings.
+    if not ownership.exists():
+        write(ownership, json.dumps(identity, sort_keys=True) + '\n')
+    for name, content in contents.items():
+        if not (directory / name).exists():
+            write(directory / name, content)
+    return directory / SECCOMP.name
+
+
+def prepare_compose_runtime(existing_profile=None):
+    """Provision only runtime assets for the caller's existing Compose project."""
+    key = hashlib.sha256((str(ROOT) + ':' + str(os.getuid())).encode()).hexdigest()[:16]
+    cache = Path.home() / '.cache/plurx/compose-pi' / key
+    safe(cache)
+    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if cache.stat().st_uid != os.getuid() or cache.stat().st_mode & 0o022:
+        raise ValueError('Compose Pi cache must belong to the caller and be protected')
+    lock_path = cache / 'prepare.lock'
+    safe(lock_path)
+    with os.fdopen(os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'r+') as lock:
+        if os.fstat(lock.fileno()).st_uid != os.getuid():
+            raise ValueError('Compose Pi lock belongs to another user')
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        artifacts = seccomp_artifacts()
+        generation = hashlib.sha256(b''.join(artifacts.values())).hexdigest()[:16]
+        directory = Path('/var/lib/plurx-compose-pi') / key / generation
+        if existing_profile is not None:
+            safe(existing_profile)
+            if any(not root_protected(path) for path in (existing_profile, *existing_profile.parents)) or sha(existing_profile) != sha(ASSETS / 'pi-worker-seccomp.json'):
+                raise ValueError('existing Compose Pi profile must be protected and checksum-pinned')
+            profile = existing_profile
+        else:
+            profile = compose_runtime_profile(directory)
+        helper = ROOT / 'deploy/pi-runtime'
+        command = ['python3', helper, 'ensure', '--role', 'server', '--server-runtime', 'docker',
+                   '--prefix', cache / 'runtime', '--json']
+        value = json.loads(run(command, capture=True))
+        service = value.get('compose_service') if isinstance(value, dict) else None
+        if not isinstance(value, dict) or value.get('schema') != 1 or not isinstance(service, dict):
+            raise ValueError('Pi runtime provider omitted its versioned Compose service')
+        if service.get('build', {}).get('context') != str(ROOT) or service.get('build', {}).get('dockerfile') != 'Dockerfile.pi':
+            raise ValueError('Pi runtime provider must build the current Pi checkout')
+        if set(service) - {'image', 'build', 'devices', 'group_add', 'environment'}:
+            raise ValueError('Pi runtime provider returned unsupported Compose settings')
+        if not isinstance(service.get('image'), str) or not service['image']:
+            raise ValueError('Pi runtime provider omitted its image')
+        environment = service.get('environment', {})
+        if any(not isinstance(environment.get(name), str) or not environment[name].startswith('/opt/plurx-runtime/') for name in ('PLURX_FFMPEG', 'PLURX_FFPROBE')):
+            raise ValueError('Pi runtime provider omitted its container media paths')
+        return {'service': service, 'profile': str(profile)}
+
+
 def browser_manifest(directory):
     safe(directory)
     result = {}

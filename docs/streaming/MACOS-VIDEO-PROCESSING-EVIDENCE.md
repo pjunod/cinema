@@ -556,3 +556,139 @@ records byte-identical PCM against the retained original Jellyfin reference:
 239,999 stereo frames at 48 kHz, SHA-256
 `28e6cfb582fa02e02824583e4a4a1d12e95d1ee5a3b67725c718959c697558c7`.
 The public source sample is referenced by URL/hash and is not redistributed.
+
+## 14. Actual normalized daemon delivery on `46f31ec6e`
+
+[The normalized daemon archive](evidence/macos-video-20261008/normalized-daemon-46f31-evidence.tar.gz)
+retains nine allowlisted files (35,566 compressed bytes; SHA-256
+`ee97db715e0002d42990a3ec461a447b80d59c146c2557a3db81e0d7fa8d100a`).
+It contains the executed driver, argv, sanitized receipt, decoded frame facts,
+pixel measurements and the configured-budget diagnosis. Full daemon logs,
+configurations, state and authorization/session URLs are excluded. The manager
+verified the builder's allowlist hashes before normalizing task paths; the
+archive manifest records both versions. This older source predates the final
+combined implementation and is not final-candidate qualification.
+
+The signed isolated daemon used the normal library scan, bound source parser,
+candidate selection and HTTP delivery with the corrected `80416af2…` Jellyfin
+package. It delivered native normalized 2560×1440 output from the analytic
+3840×2160 source for 120.010 seconds of paced demand: 60 objects totaling
+2,981,519 bytes. Seek/resume requests, served-object retrieval, cancellation and resource-release
+controls passed. The periodic analytic artwork does not independently prove
+the displayed seek target or frame-accurate client presentation. Switching native processing off retained an existing session's
+captured candidate/media while a new request received a distinct CPU plan.
+No client-presented-frame or rebuffer claim follows from HTTP delivery.
+
+The CPU reference originally requested eight software threads against the
+experiment's configured pool of two. Existing admission diagnostics reported
+`over_budget=true`; no FFmpeg child started. Releasing the prior session did
+not fix that configuration error. Raising the ordinary configured budget to
+eight admitted the comparator without changing production admission or
+startup deadlines. A separate stale-lifetime 409 in the driver was corrected
+by creating a new playback lifetime through the normal protocol.
+
+Aligned 48-frame outputs use the same canvas, cadence, bitrate and VT encoder.
+The gray-patch maximum error is one code value, neutral chroma error zero,
+and the saturated color-code bound is eleven. Paired patch differences are
+at most one code value. Whole-frame PSNR is at least 51.92 dB and averages
+53.23 dB. These measurements support this synthetic comparison, not universal
+perceptual acceptance or a throughput claim under concurrent compilation.
+
+A subsequent finite HEVC request produced 48 independently decoded `hvc1`
+Main 1920×1080 frames with BT.709 limited-range signaling. Its master endpoint
+then rejected initialization data with `hls_init_invalid`. The complete
+driver is therefore correctly recorded as failed; the earlier positive M4
+phase is retained separately. The init/parser/manifest contract remains a
+blocking integration issue until repaired and demonstrated through that same
+normal endpoint.
+
+## 15. Correct the embedded HLG and text observations
+
+[The observation-repair archive](evidence/macos-video-20261008/runtime-observation-repairs.tar.gz)
+retains 16 command/probe/driver/measurement files (7,490 compressed bytes;
+SHA-256 `3a5b62121f34bd4f1763dca414869c8e834c00b0e250b3c929ea8a7f949b1d61`).
+Original and normalized member hashes are verified. These synthetic fullgraph
+controls use the corrected Jellyfin package during ongoing builds; final
+combined daemon observations and performance remain separate.
+
+The HLG source previously omitted SAR while its runtime contract requires
+known square pixels. Encoding explicit SAR 1:1 changes the source hash but
+leaves every decoded 10-bit plane byte unchanged. All twelve actual graph
+outputs now satisfy SAR and the 203-nit reference-white expectation, with
+measured output luma 156 on every frame.
+
+The text probe's old peak comparison used a bright background with luma 231;
+a correctly rendered cue peaked at 235, below the required increase of five.
+Actual cue-versus-blank differences in the stationary region above the moving
+marker average about 21 code values for SDR8 and SDR10, versus at most 0.25
+for blank controls. The repaired observation uses that scheduled difference
+and rejects both an actually absent cue and a cue retained into blank frames.
+ASS content, font rendering and production subtitle semantics are unchanged.
+
+The same source commit `21110a5`, integrated by `d92700dea`, retires the obsolete
+static interlace runtime assets and registrations. They lacked encoded SAR
+and temporally distinct field artwork, so they could neither satisfy nor
+prove the new motion contract. The existing genuine woven H.264 TFF/BFF
+controls now solely qualify ordinary BWDIF; its strict field-motion checks
+remain intact. Historical receipts keep the older limited evidence visible.
+
+## 16. Strict P5 shared encoder projections
+
+[The P5 projection archive](evidence/macos-video-20261008/p5-projection-correctness.tar.gz)
+retains 113 files (195,509 compressed bytes; SHA-256
+`e043104399de5b0179d99c357da4607848473f7b6e2ffaef5438b1774acf60df`).
+Unlike the earlier text-only archives, it includes the tiny original-synthetic
+encoded outputs and raw decoded/predecessor planes, alongside commands,
+probes and logs. Their CC0 provenance is the committed original synthetic
+corpus. The manifest verifies every member; textual task paths are normalized.
+An earlier encoder-variant receipt remains explicitly historical and is not
+counted as the final shared encoder projection.
+
+All 45 controls pass on the corrected `80416af2…` package: nine source cases
+across software decode/CPU render with software or VT encoding, required-VT
+decode/CPU render, software decode/upload/Metal render, and required-VT
+decode/Metal render. Positive controls use the shared encoder arguments and
+produce 24 SDR H.264 frames at 12 fps with the expected signaling, cadence
+and neutral-patch values. CPU and Metal curves are judged against their own
+expectations, not asserted pixel-identical.
+
+Negative controls inspect strict decoder/renderer raw output rather than
+encode malformed content: first/seek-start loss yields no frame; midstream
+missing or malformed RPU and omitted color metadata produce at most ten valid
+predecessor frames, a required diagnostic and nonzero exit. This preserves
+an observable boundary at the affected frame. The initial sandbox-denied
+IOSurface attempt is not accepted hardware evidence.
+
+The related production source is `f57040d83`, integrated by `3ea037239`.
+The daemon's embedded helper must additionally verify held-fixture source
+codes, access-unit/presentation metadata association and aggregation of every
+control before reporting availability. This standalone receipt does not
+substitute for that final inventory. It was collected under concurrent build
+load and makes no performance claim.
+
+## 17. HLG burn graphs and HDR interlace boundary
+
+[The HLG and interlace scope archive](evidence/macos-video-20261008/hlg-burn-interlace-scope.tar.gz)
+retains 14 files (22,995 compressed bytes; SHA-256
+`48e98704dd96c4bcc4f2e0aacf11b24c5c22da6a03d35cac2177529b76fb228c`).
+It includes complete HLG text/bitmap graph receipts, the original woven-field
+source generator and manifest, four hardware-decoder negative logs/probes,
+and the original six-second HDR/AAC API source generator and receipt.
+Every retained member is hash verified.
+
+The corrected package independently passes both HLG burn graphs: twelve
+frames preserve the expected reference-white luma 156, with scheduled text
+or bitmap cue observations. The HLG fixture explicitly encodes SAR 1:1; its
+raw ten-bit planes are unchanged by that signaling repair.
+
+Actual ten-bit woven H.264 PQ/HLG sources in both TFF and BFF order fail
+VideoToolbox decoding on this host: all four attempts exit 69, return zero
+raw bytes and report decoder error -8969 with NULL images. Consequently,
+HDR interlaced input retains the incumbent route. Unreachable HDR BWDIF
+classes were removed rather than advertised with a permanently missing
+observation. This is evidence for these exact source/package/host tuples,
+not a universal claim about all Apple hardware or HDR codecs. Ordinary SDR
+BWDIF retains its independently proven moving-field controls.
+
+The final supported inventory has 22 graphs. Standalone controls do not
+replace the final combined daemon's embedded inventory or API qualification.
