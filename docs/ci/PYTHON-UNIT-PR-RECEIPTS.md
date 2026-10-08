@@ -117,6 +117,15 @@ reject a first attempt that executed tests even when the retry refused early.
 means both historical attempts were proved empty. It does not grant a passing
 gate or authorize replay of previously passed IDs.
 
+**Adversarial review:** PR #900 received one independent review on
+2026-10-08 against `8445f1a3a46f463445cf117dbbbf0285e99fa1cb`. The reviewer
+confirmed both retained logs' byte counts, hashes, task identities and prepare
+refusals; all six immutable source hashes; the terminal job/task metadata;
+and the documented API attempt parameter. The review found no actionable
+issues and confirmed that the proof imports zero outcomes while unrelated
+retries remain rejected. Live API authentication and the merge gate remain
+required; this review does not replace either.
+
 ### Retained outcomes keep their original provenance
 
 The bridge returns full authenticated original provenance before filtering
