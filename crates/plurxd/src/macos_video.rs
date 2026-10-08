@@ -4,6 +4,8 @@
 //! the operator preference, selects a production plan, or schedules retries.
 //! Production graph spelling belongs to `Pipeline`, including processing order.
 
+mod live;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -341,7 +343,12 @@ fn extension_corpus() -> Result<ExtensionCorpus, ProbeReason> {
         || corpus.generator_recipe_version != 1
         || corpus.fixtures.len() != EXTENSION_MEDIA.len()
         || corpus.auxiliary.len() != 2
-        || EXTENSIONS.len()
+        || live::MANIFEST.len()
+            + live::MEDIA
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>()
+            + EXTENSIONS.len()
             + BURN_ASS.len()
             + EXTENSION_MEDIA
                 .iter()
@@ -478,6 +485,7 @@ fn embedded_corpus(
 ) -> Result<Corpus, ProbeReason> {
     let invalid = ProbeReason::InvalidEmbeddedCorpus;
     extension_corpus()?;
+    live::fixtures()?;
     if manifest.len() > 128 * 1024 {
         return Err(invalid);
     }
@@ -799,7 +807,7 @@ async fn prepare_corpus(
             .await
             .map_err(|_| ProbeReason::CacheUnavailable)?;
         verify_private_directory(&owner).await?;
-        let key = digest(&[MANIFEST, EXTENSIONS].concat());
+        let key = digest(&[MANIFEST, EXTENSIONS, live::MANIFEST].concat());
         let directory = owner
             .create_child_directory(&key)
             .await
@@ -817,6 +825,11 @@ async fn prepare_corpus(
             .chain(std::iter::once(("burn.ass".to_owned(), BURN_ASS)))
             .chain(
                 EXTENSION_MEDIA
+                    .iter()
+                    .map(|(_, bytes)| (format!("{}.mp4", digest(bytes)), *bytes)),
+            )
+            .chain(
+                live::MEDIA
                     .iter()
                     .map(|(_, bytes)| (format!("{}.mp4", digest(bytes)), *bytes)),
             )
@@ -1223,6 +1236,9 @@ async fn run_generation(
         Err(reason) => return MacosVideoReport::unavailable(generation, reason),
     };
     let mut work = Vec::new();
+    if let Err(reason) = live::add_work(&corpus, &mut work) {
+        return MacosVideoReport::unavailable(generation, reason);
+    }
     for fixture in &corpus.fixtures {
         let graph = if fixture.class == "hdr10" {
             MacosProcessingGraph::Hdr10TextBurn
@@ -1572,6 +1588,7 @@ enum SmokeOperation {
     HevcNative,
     HevcHostSoftware,
     HevcHostVideoToolbox,
+    LiveUpload(MacosProcessingGraph),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1589,6 +1606,13 @@ async fn run_smoke(
     if cancelled.is_cancelled() {
         return Err(ProbeReason::Cancelled);
     }
+    let live_graph = if let SmokeOperation::LiveUpload(graph) = operation {
+        Some(graph)
+    } else {
+        None
+    };
+    let field = operation == SmokeOperation::BwdifField
+        || live_graph == Some(MacosProcessingGraph::LiveSdrUploadBwdifField);
     let hdr = fixture.class != "sdr";
     let hevc = matches!(
         operation,
@@ -1617,6 +1641,12 @@ async fn run_smoke(
         SmokeOperation::Bitmap => required.extend(["hwdownload", "overlay", "scale"]),
         SmokeOperation::BwdifFrame | SmokeOperation::BwdifField => {
             required.push("bwdif_videotoolbox")
+        }
+        SmokeOperation::LiveUpload(graph) => {
+            required.extend(["format", "hwupload"]);
+            if graph != MacosProcessingGraph::LiveSdrUploadScale {
+                required.push("bwdif_videotoolbox");
+            }
         }
         SmokeOperation::Plain
         | SmokeOperation::HevcNative
@@ -1755,7 +1785,14 @@ async fn run_smoke(
     #[cfg(unix)]
     let _ = source_path;
     encode.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
-    if operation == SmokeOperation::HevcHostSoftware {
+    if let Some(graph) = live_graph {
+        encode.args(
+            graph
+                .live_upload_init_args()
+                .ok_or(ProbeReason::GraphFailed)?,
+        );
+        encode.args(["-hwaccel", "none"]);
+    } else if operation == SmokeOperation::HevcHostSoftware {
         encode.args(["-hwaccel", "none"]);
     } else if operation == SmokeOperation::HevcHostVideoToolbox {
         encode.args(["-hwaccel", "videotoolbox"]);
@@ -1776,6 +1813,12 @@ async fn run_smoke(
         );
     }
     match operation {
+        SmokeOperation::LiveUpload(graph) => {
+            filter = graph
+                .live_upload_filter(160, 90)
+                .ok_or(ProbeReason::GraphFailed)?;
+            encode.args(["-vf", &filter]);
+        }
         SmokeOperation::Text => {
             filter.push_str(",hwdownload,format=nv12,subtitles='/dev/fd/4'");
             encode.args(["-vf", &filter]);
@@ -1826,11 +1869,7 @@ async fn run_smoke(
         "-bf",
         "0",
         "-frames:v",
-        if operation == SmokeOperation::BwdifField {
-            "24"
-        } else {
-            "12"
-        },
+        if field { "24" } else { "12" },
         "-color_primaries",
         contract.expected.color_primaries.as_str(),
         "-color_trc",
@@ -1924,6 +1963,14 @@ async fn run_smoke(
             ]);
         let raw = bounded_probe_command(decode, deadline, 160 * 90 * 3 / 2 * 25, cancelled).await?;
         observe_output(&document, &raw, &contract)?;
+        if matches!(
+            operation,
+            SmokeOperation::BwdifFrame | SmokeOperation::BwdifField
+        ) || live_graph.is_some_and(|graph| graph != MacosProcessingGraph::LiveSdrUploadScale)
+        {
+            live::observe_motion(&raw, field)?;
+        }
+
         if let Some(expected) = &source_metadata {
             let frames = document["frames"]
                 .as_array()

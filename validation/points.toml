@@ -626,6 +626,7 @@ paths = [
   "crates/plurxd/src/transcode/**",
   "crates/plurxd/fixtures/macos-processing/**",
   "crates/plurxd/src/macos_video.rs",
+  "crates/plurxd/src/macos_video/live.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
@@ -891,6 +892,7 @@ paths = [
   "scripts/dv-evidence",
   "scripts/generate-macos-video-fixtures",
   "scripts/generate-macos-video-extensions",
+  "scripts/generate-macos-live-fixtures",
   "scripts/generate-macos-extension-fixtures",
   "scripts/macos-video-fixture-rpu.rs",
   "scripts/qualify-macos-dolby-strict",

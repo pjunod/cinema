@@ -87,3 +87,33 @@ class MacosVideoPackageCase(unittest.TestCase):
             (self.evidence / "full-help.txt").write_text("no verified hardware option")
             with self.assertRaisesRegex(ValueError, "hardware decoder enforcement"):
                 TOOL.verify_strict_options(Path("ffmpeg"), self.evidence)
+
+
+class MetalBindingContract(unittest.TestCase):
+    def test_bwdif_parameter_buffer_index_must_match_shader_not_texture_slots(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            directory = source / "libavfilter"
+            (directory / "metal").mkdir(parents=True)
+            host = directory / "vf_bwdif_videotoolbox.m"
+            shader = directory / "metal/vf_bwdif_videotoolbox.metal"
+            shader.write_text("constant params& p [[buffer(0)]]")
+            host.write_text("[encoder setTexture:next atIndex:3]; [encoder setBuffer:s->mtlParamsBuffer offset:0 atIndex:0];")
+            self.assertEqual(TOOL.verify_bwdif_metal_binding(source), 0)
+            host.write_text("[encoder setTexture:next atIndex:3]; [encoder setBuffer:s->mtlParamsBuffer offset:0 atIndex:4];")
+            with self.assertRaisesRegex(ValueError, "disagrees with shader"):
+                TOOL.verify_bwdif_metal_binding(source)
+
+    def test_svn_source_offer_uses_local_versioned_inventory_and_excludes_generated_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            tracked = source / "source.c"
+            generated = source / "native.o"
+            tracked.write_text("original source")
+            generated.write_bytes(b"native object")
+            document = f'<status><target><entry path="{tracked}"><wc-status item="normal"/></entry><entry path="{generated}"><wc-status item="unversioned"/></entry></target></status>'
+            with patch.object(TOOL.subprocess, "check_output", return_value=document) as query:
+                self.assertEqual(TOOL.local_svn_source_files(source, source / "private-config"), [(tracked, "source.c")])
+                self.assertIn("status", query.call_args.args[0])
+                self.assertNotIn("list", query.call_args.args[0])
+                self.assertNotIn("--show-updates", query.call_args.args[0])

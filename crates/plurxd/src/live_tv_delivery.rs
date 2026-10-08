@@ -199,6 +199,11 @@ pub(crate) struct LiveSourceFacts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) color_space: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) color_range: Option<String>,
+    /// Absent in older retained probes; native processing requires known upright video.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotation: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) hdr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) audio_codec: Option<String>,

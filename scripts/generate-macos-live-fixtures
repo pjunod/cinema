@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Generate original CC0 H264/MPEG2 Live upload controls, offline only."""
+import argparse
+import copy
+import hashlib
+import importlib.machinery
+import json
+from pathlib import Path
+import subprocess
+
+
+def run(argv):
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=30, check=False)
+    if result.returncode:
+        raise ValueError(result.stderr[-4096:].decode(errors="replace"))
+    return result.stdout
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ffmpeg", required=True)
+    parser.add_argument("--ffprobe", required=True)
+    parser.add_argument("--initial", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if not all(Path(program).is_absolute() for program in (args.ffmpeg, args.ffprobe)):
+        parser.error("explicit absolute programs required")
+    args.output.mkdir(parents=True, exist_ok=False)
+    initial = json.loads((args.initial / "manifest.json").read_text())
+    generator = importlib.machinery.SourceFileLoader(
+        "live_analytic", str(Path(__file__).with_name("generate-macos-video-fixtures"))).load_module()
+    records = []
+    colors = ["-color_primaries", "bt709", "-color_trc", "bt709",
+              "-colorspace", "bt709", "-color_range", "tv"]
+    for fixture_id, codec, parity in [("live_h264", "libx264", None),
+                                      ("live_mpeg2", "mpeg2video", None),
+                                      ("live_mpeg2_tff", "mpeg2video", "tff"),
+                                      ("live_mpeg2_bff", "mpeg2video", "bff"),
+                                      ("live_h264_tff", "libx264", "tff"),
+                                      ("live_h264_bff", "libx264", "bff")]:
+        raw = args.output / "input.yuv"
+        raw.write_bytes(b"".join(generator.pattern("sdr", 8, frame % 12)
+                                 for frame in range(24 if parity else 12)))
+        filename = fixture_id + (".ts" if codec == "mpeg2video" else ".mp4")
+        argv = [args.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-threads", "1", "-filter_threads", "1", "-f", "rawvideo", "-pix_fmt",
+                "yuv420p", "-s", "320x180", "-r", "24" if parity else "12", "-i", str(raw)]
+        if parity:
+            argv += ["-vf", "tinterlace=mode=interleave_" + ("top" if parity == "tff" else "bottom")
+                     + ",setfield=" + parity + ",setsar=1,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=limited", "-flags", "+ilme+ildct", "-top", "1" if parity == "tff" else "0", "-field_order", "tt" if parity == "tff" else "bb"]
+        else:
+            argv += ["-vf", "setsar=1,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=limited"]
+        argv += ["-frames:v", "12", "-an", "-c:v", codec, "-threads", "1", "-bf", "0"]
+        if codec == "libx264":
+            argv += ["-preset", "ultrafast", "-crf", "12", "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv:sar=1/1" + (f":interlaced=1:{parity}=1" if parity else "")]
+        else:
+            argv += ["-q:v", "2", "-g", "12", "-seq_disp_ext", "1"]
+        argv += colors
+        if codec == "mpeg2video":
+            argv += ["-muxdelay", "0", "-muxpreload", "0"]
+        argv += [str(args.output / filename)]
+        run(argv)
+        raw.unlink()
+        data = (args.output / filename).read_bytes()
+        probe = json.loads(run([args.ffprobe, "-v", "error", "-select_streams", "v:0",
+                               "-show_streams", "-show_frames", "-of", "json", str(args.output / filename)]))
+        stream = probe["streams"][0]
+        if len(probe["frames"]) != 12 or stream["pix_fmt"] != "yuv420p":
+            raise ValueError("live controls must decode exactly 12 8-bit 420 frames")
+        expected_scan = "tt" if parity == "tff" else "bb" if parity else "progressive"
+        if parity and not all(frame.get("interlaced_frame") == 1 and frame.get("top_field_first") == (1 if parity == "tff" else 0) for frame in probe["frames"]):
+            raise ValueError("decoded field parity disagrees with generated source")
+        if stream["field_order"] != expected_scan:
+            raise ValueError("encoded field order disagrees with generated source")
+        for key, expected in [("sample_aspect_ratio", "1:1"), ("color_primaries", "bt709"),
+                              ("color_transfer", "bt709"), ("color_space", "bt709"), ("color_range", "tv")]:
+            if stream.get(key) != expected:
+                raise ValueError(f"live source {key} is not explicitly {expected}")
+        contract = copy.deepcopy(initial["fixtures"][0]["output_expectations"][0])
+        records.append({"id": fixture_id, "path": filename, "sha256": hashlib.sha256(data).hexdigest(),
+                        "byte_length": len(data), "source_class": "sdr",
+                        "operation": "live_bwdif" if parity else "live_scale", "output_expectation": contract,
+                        "input_observed": {key: stream.get(key) for key in
+                                           ("codec_name", "profile", "pix_fmt", "field_order", "avg_frame_rate",
+                                            "sample_aspect_ratio", "color_range", "color_primaries", "color_transfer", "color_space")},
+                        "generation_argv": [part.replace(args.ffmpeg, "$FFMPEG").replace(str(args.output), "$OUTPUT") for part in argv]})
+    manifest = {"schema_version": 1, "generator_recipe_version": 1,
+                "provenance": "Original CC0 analytic media; no external footage or private content",
+                "fixtures": records, "auxiliary": []}
+    (args.output / "live.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
+if __name__ == "__main__":
+    main()

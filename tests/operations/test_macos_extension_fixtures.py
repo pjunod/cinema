@@ -13,8 +13,8 @@ class MacosExtensionFixturesCase(unittest.TestCase):
         stream = {"width": 320, "height": 180, "pix_fmt": "yuv420p10le",
                   "color_transfer": "arib-std-b67" if family == "hlg" else "smpte2084",
                   "color_primaries": "bt2020", "color_space": "bt2020nc" if family == "hlg" else "ipt-c2",
-                  "color_range": "tv" if family == "hlg" else "pc", "time_base": "1/12288"}
-        frames = [{"pts": i * 1024} for i in range(24)]
+                  "color_range": "tv" if family == "hlg" else "pc", "time_base": "1/12288", "sample_aspect_ratio": "1:1"}
+        frames = [{"pts": i * 1024, "sample_aspect_ratio": "1:1"} for i in range(24)]
         if family == "p5":
             stream["side_data_list"] = [{"side_data_type": "DOVI configuration record", "dv_profile": 5, "el_present_flag": 0}]
             for frame in frames:
@@ -80,4 +80,16 @@ class MacosExtensionFixturesCase(unittest.TestCase):
         observed["frames"][12]["side_data_list"][0].update(
             signal_eotf=39322, signal_bit_depth=14, signal_color_space=0)
         with self.assertRaisesRegex(ValueError, "supported effective Dolby metadata"):
+            TOOL["validate_observed"](observed, "p5")
+
+
+    def test_fixture_square_pixels_must_be_encoded_and_retained_on_decoded_frames(self):
+        observed = self.observation("p5")
+        TOOL["validate_observed"](observed, "p5")
+        missing_stream = deepcopy(observed)
+        missing_stream["streams"][0].pop("sample_aspect_ratio")
+        with self.assertRaisesRegex(ValueError, "signal declarations"):
+            TOOL["validate_observed"](missing_stream, "p5")
+        observed["frames"][12].pop("sample_aspect_ratio")
+        with self.assertRaisesRegex(ValueError, "decoded fixture"):
             TOOL["validate_observed"](observed, "p5")
