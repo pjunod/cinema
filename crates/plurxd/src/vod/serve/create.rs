@@ -744,6 +744,15 @@ impl VodServe {
                 "the continuous media group cannot be admitted together",
             )
         };
+        // Both create and controlled renewal supply sorted unique recipe
+        // keys. Enforce that order before acquiring any binding: overlapping
+        // groups always lock A before B, and a duplicate cannot self-deadlock.
+        if media.is_empty()
+            || media.len() > 3
+            || media.windows(2).any(|pair| pair[0].key >= pair[1].key)
+        {
+            return Err(refuse());
+        }
         let encodings = media
             .iter()
             .map(|rendition| rendition.recipe.encoding.as_ref().ok_or_else(refuse))
@@ -776,29 +785,17 @@ impl VodServe {
             .iter()
             .map(|encoding| encoding.resources())
             .collect::<Vec<_>>();
-        let total_cpu = estimates
+        // The callers hold these renditions' sorted build gates. Stabilize
+        // weak bindings as well: an ordinary worker must not substitute a
+        // newly acquired, unrelated credit after the pool decision adopts
+        // the existing roles. There are no awaits under these short locks.
+        let mut bindings = media
             .iter()
-            .try_fold(0usize, |sum, estimate| {
-                sum.checked_add(estimate.cpu_threads)
-            })
-            .ok_or_else(refuse)?;
-        if total_cpu > software_budget
-            || estimates
-                .iter()
-                .filter(|estimate| estimate.hardware_slot)
-                .count()
-                > hardware_limit
-        {
-            return Err(refuse());
-        }
-        let mut retained = media
-            .iter()
-            .map(|rendition| rendition.retained_admission.current())
+            .map(|rendition| rendition.retained_admission.lock_binding())
             .collect::<Vec<_>>();
-        let missing = estimates
+        let mut retained = bindings
             .iter()
-            .zip(&retained)
-            .filter_map(|(estimate, permit)| permit.is_none().then_some(*estimate))
+            .map(|binding| binding.current())
             .collect::<Vec<_>>();
         let priority = priority.unwrap_or_else(|| {
             if encodings
@@ -810,30 +807,41 @@ impl VodServe {
                 crate::admission::Priority::Live
             }
         });
-        let mut admitted = if missing.is_empty() {
-            Vec::new()
-        } else {
-            first
-                .admissions
-                .try_admit_bundles_claiming(
-                    hardware_limit,
-                    software_budget,
-                    &missing,
-                    priority,
-                    None,
-                )
-                .ok_or_else(refuse)?
-        }
-        .into_iter();
-        for (rendition, permit) in media.iter().zip(&mut retained) {
+        let views = retained
+            .iter()
+            .map(|permit| {
+                permit
+                    .as_ref()
+                    .map(crate::vodencode::EncodePermit::retained_resources)
+            })
+            .collect::<Vec<_>>();
+        let (family, admitted) = first
+            .admissions
+            .try_admit_family(
+                hardware_limit,
+                software_budget,
+                &estimates,
+                &views,
+                priority,
+            )
+            .ok_or_else(refuse)?;
+        let mut admitted = admitted.into_iter();
+        for (binding, permit) in bindings.iter_mut().zip(&mut retained) {
             if permit.is_none() {
                 *permit = Some(
-                    rendition
-                        .retained_admission
-                        .bind(admitted.next().expect("one permit per missing role").into()),
+                    binding.bind(admitted.next().expect("one permit per missing role").into()),
                 );
             }
         }
+        debug_assert!(
+            retained.iter().all(|permit| {
+                permit
+                    .as_ref()
+                    .and_then(crate::vodencode::EncodePermit::family_id)
+                    == Some(family)
+            }),
+            "locked bindings preserve the atomically admitted family"
+        );
         Ok(retained
             .into_iter()
             .map(|permit| permit.expect("every role admitted"))

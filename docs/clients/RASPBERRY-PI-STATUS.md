@@ -38,14 +38,23 @@ with an empty `/proc` and a read-only bind of only the namespace child's task
 directory at `/proc/self`, keeping seccomp and `cap_drop: ALL` unchanged.
 The narrow follow-up `a167607f4` applies this view and strengthens the existing
 hostile probe regression. Adversarial review, pinned Linux compilation, Clippy,
-formatting and the focused seccomp-policy assertion passed. Actual Docker app
-acceptance remains; the source has since integrated main and is being compiled
-again against that committed tree.
+formatting and the focused seccomp-policy assertion passed. The main-integrated
+source `6724efdbe` then passed compilation and actual Docker app startup,
+cataloguing and direct 1080p Main10 HEVC playback at the default settings.
+Chromium reported `V4L2VideoDecoder` and platform decoding; playback advanced
+to 2.33 seconds with 57 total frames, 13 dropped and none corrupt. This short check is
+not a sustained throughput result. A forward seek to 10 seconds resumed at
+10.63. The backward-seek assertion accepted too broad a window and is being
+tightened before final qualification. Both test containers and the test
+browser were stopped and removed; the user's running container was preserved.
 
 Native app probing reached a separate continuous-session refusal:
 `vod_family_capacity`. The actual frozen 720p video, 480p companion and shared
 AAC recipes reserve 3 + 2 + 3 CPU units against the Pi's default pool of 3.
-No admission correction has been made. A temporary pool of 8 in the isolated
+An admission correction is being implemented in the existing family and
+permit ownership path: one oversized family may exclusively use an otherwise
+idle software pool, with its full resource accounting retained until workers
+are reaped. No budget default is raised. A temporary pool of 8 in the isolated
 diagnostic app produced 3.24 seconds and 81 presented frames with actual HEVC
 request decoding and CPU encoding. The seek step did not run because the test
 helper expected an outdated request envelope. This is not default playback
@@ -54,7 +63,9 @@ acceptance. The default pool was restored and the diagnostic service stopped.
 The user's subsequent `make docker-up` selected the generic image without Pi
 decoder or GPU devices. That entry point is being integrated with the existing
 Pi runtime provider while preserving the user's Compose overrides, data and
-media mounts. That integration is implemented and awaiting final review.
+media mounts. That integration is committed in `9133eace3` and awaiting final
+review. The same commit adds the separately probed software-frame Vulkan
+pipeline and its truthful CPU transfer and GPU rendering labels.
 The custom Pi FFmpeg build also lacks Vulkan/libplacebo. An isolated
 Bookworm-backports Mesa 25.0.7 check reached real V3DV and produced three
 distinct frames through libplacebo using packed 16-bit RGB input. Explicit

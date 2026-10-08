@@ -31,6 +31,7 @@
 //! nothing else.)
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use plurx_core::domain::MediaFile;
@@ -110,6 +111,19 @@ struct PermitState {
     /// holder of the token can claim it, and it lapses on its own.
     reservations: Vec<Reservation>,
     next_reservation: u64,
+    /// Actual role guards own membership until the final worker is reaped.
+    families: HashMap<u64, FamilyUsage>,
+    next_family: u64,
+}
+
+#[derive(Debug, Default)]
+struct FamilyUsage {
+    cpu_limit: usize,
+    hardware_limit: usize,
+    cpu_used: usize,
+    hardware_used: usize,
+    guards: usize,
+    exclusive: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -121,6 +135,25 @@ struct Reservation {
 }
 
 impl PermitState {
+    fn family_blocked(&self, except: Option<u64>) -> bool {
+        self.families
+            .iter()
+            .any(|(id, family)| family.exclusive && Some(*id) != except)
+    }
+
+    fn release_family(&mut self, id: u64, hardware: bool, cpu: usize) {
+        if id == 0 {
+            return;
+        }
+        let family = self.families.get_mut(&id).expect("held family membership");
+        family.cpu_used -= cpu;
+        family.hardware_used -= usize::from(hardware);
+        family.guards -= 1;
+        if family.guards == 0 {
+            self.families.remove(&id);
+        }
+    }
+
     fn live_active(&self) -> bool {
         self.hardware_live > 0 || self.software_live_permits > 0
     }
@@ -204,6 +237,14 @@ pub struct PoolSnapshot {
 pub struct HwSlot {
     permits: Arc<Mutex<PermitState>>,
     owner: PermitOwner,
+    family: AtomicU64,
+}
+
+impl HwSlot {
+    fn family_id(&self) -> Option<u64> {
+        let id = self.family.load(Ordering::Acquire);
+        (id != 0).then_some(id)
+    }
 }
 
 impl Drop for HwSlot {
@@ -212,6 +253,7 @@ impl Drop for HwSlot {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        permits.release_family(self.family.load(Ordering::Acquire), true, 0);
         match self.owner {
             PermitOwner::Live => {
                 debug_assert!(permits.hardware_live > 0);
@@ -232,9 +274,15 @@ pub struct SwPermit {
     permits: Arc<Mutex<PermitState>>,
     owner: PermitOwner,
     weight: usize,
+    family: AtomicU64,
 }
 
 impl SwPermit {
+    fn family_id(&self) -> Option<u64> {
+        let id = self.family.load(Ordering::Acquire);
+        (id != 0).then_some(id)
+    }
+
     /// The x264 thread budget this permit reserved — what the session is
     /// allowed to spend is exactly what it reserved, one number on purpose.
     pub fn threads(&self) -> usize {
@@ -248,6 +296,7 @@ impl Drop for SwPermit {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        permits.release_family(self.family.load(Ordering::Acquire), false, self.weight);
         match self.owner {
             PermitOwner::Live => {
                 debug_assert!(permits.software_live_permits > 0);
@@ -285,6 +334,9 @@ impl SwPool {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if permits.family_blocked(None) {
+            return None;
+        }
         match priority {
             Priority::Live if permits.background_active() => return None,
             Priority::Background if permits.background_blocked() => {
@@ -314,6 +366,7 @@ impl SwPool {
             permits: Arc::clone(&self.permits),
             owner: priority.into(),
             weight,
+            family: AtomicU64::new(0),
         })
     }
 
@@ -358,6 +411,9 @@ impl SwPool {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if permits.family_blocked(None) {
+            return None;
+        }
         let live_used = permits
             .software_used()
             .saturating_sub(permits.software_background_used);
@@ -371,6 +427,7 @@ impl SwPool {
             permits: Arc::clone(&self.permits),
             owner: PermitOwner::Live,
             weight,
+            family: AtomicU64::new(0),
         })
     }
 
@@ -391,6 +448,7 @@ impl SwPool {
             permits: Arc::clone(&self.permits),
             owner: PermitOwner::Live,
             weight,
+            family: AtomicU64::new(0),
         }
     }
 }
@@ -469,6 +527,21 @@ impl TranscodePermit {
     /// and each still releases itself on drop.
     pub fn into_parts(mut self) -> (Option<HwSlot>, Option<SwPermit>) {
         (self.hardware.take(), self.software.take())
+    }
+}
+
+/// Existing immutable rendition credit, borrowed while its owner stays alive.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetainedTranscodePermit<'a> {
+    pub(crate) hardware: Option<&'a HwSlot>,
+    pub(crate) software: Option<&'a SwPermit>,
+}
+
+impl RetainedTranscodePermit<'_> {
+    pub(crate) fn family_id(&self) -> Option<u64> {
+        self.hardware
+            .and_then(HwSlot::family_id)
+            .or_else(|| self.software.and_then(SwPermit::family_id))
     }
 }
 
@@ -674,6 +747,9 @@ impl Admissions {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if permits.family_blocked(None) {
+            return None;
+        }
         permits.prune();
         let claim = claim.filter(|token| permits.holds_reservation(*token));
         match priority {
@@ -737,15 +813,212 @@ impl Admissions {
                     hardware: estimate.hardware_slot.then(|| HwSlot {
                         permits: Arc::clone(&self.permits),
                         owner: priority.into(),
+                        family: AtomicU64::new(0),
                     }),
                     software: (estimate.cpu_threads > 0).then(|| SwPermit {
                         permits: Arc::clone(&self.permits),
                         owner: priority.into(),
                         weight: estimate.cpu_threads,
+                        family: AtomicU64::new(0),
                     }),
                 })
                 .collect(),
         )
+    }
+
+    /// Admit one logical continuous presentation, adopting its retained roles.
+    /// An oversized family may exclusively own an idle pool, just as one
+    /// oversized producer may. Its original ceiling and identity survive
+    /// controlled-video releases through the retained audio/worker guards.
+    pub(crate) fn try_admit_family(
+        &self,
+        hardware_max: usize,
+        software_budget: usize,
+        estimates: &[TranscodeResourceEstimate],
+        retained: &[Option<RetainedTranscodePermit<'_>>],
+        priority: Priority,
+    ) -> Option<(u64, Vec<TranscodePermit>)> {
+        if estimates.is_empty()
+            || estimates.len() > 3
+            || estimates.len() != retained.len()
+            || estimates
+                .iter()
+                .any(|estimate| !estimate.hardware_slot && estimate.cpu_threads == 0)
+            || priority == Priority::Background
+        {
+            return None;
+        }
+        let requested_cpu = estimates.iter().try_fold(0_usize, |sum, estimate| {
+            sum.checked_add(estimate.cpu_threads)
+        })?;
+        let requested_hardware = estimates.iter().filter(|e| e.hardware_slot).count();
+        if requested_cpu == 0 && requested_hardware == 0 {
+            return None;
+        }
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        permits.prune();
+        if permits.background_active()
+            || (priority == Priority::Speculative && permits.live_waiting > 0)
+        {
+            return None;
+        }
+        let mut family_id = None;
+        let mut adopted_cpu = 0_usize;
+        let mut adopted_hardware = 0_usize;
+        let mut adopted_guards = 0_usize;
+        let mut missing_cpu = 0_usize;
+        let mut missing_hardware = 0_usize;
+        let mut seen_hardware = Vec::new();
+        let mut seen_software = Vec::new();
+        for (estimate, existing) in estimates.iter().zip(retained) {
+            let Some(existing) = existing else {
+                missing_cpu = missing_cpu.checked_add(estimate.cpu_threads)?;
+                missing_hardware += usize::from(estimate.hardware_slot);
+                continue;
+            };
+            if existing.hardware.is_some() != estimate.hardware_slot
+                || existing.software.map_or(0, |permit| permit.weight) != estimate.cpu_threads
+            {
+                return None;
+            }
+            if let Some(hardware) = existing.hardware {
+                if !Arc::ptr_eq(&self.permits, &hardware.permits)
+                    || hardware.owner != PermitOwner::Live
+                    || seen_hardware.contains(&(hardware as *const HwSlot))
+                {
+                    return None;
+                }
+                seen_hardware.push(hardware as *const HwSlot);
+            }
+            if let Some(software) = existing.software {
+                if !Arc::ptr_eq(&self.permits, &software.permits)
+                    || software.owner != PermitOwner::Live
+                    || seen_software.contains(&(software as *const SwPermit))
+                {
+                    return None;
+                }
+                seen_software.push(software as *const SwPermit);
+            }
+            let hardware_family = existing.hardware.and_then(HwSlot::family_id);
+            let software_family = existing.software.and_then(SwPermit::family_id);
+            if existing.hardware.is_some()
+                && existing.software.is_some()
+                && hardware_family != software_family
+            {
+                return None;
+            }
+            if let Some(id) = hardware_family.or(software_family) {
+                if family_id.is_some_and(|family| family != id) {
+                    return None;
+                }
+                family_id = Some(id);
+            } else {
+                adopted_cpu = adopted_cpu.checked_add(estimate.cpu_threads)?;
+                adopted_hardware += usize::from(estimate.hardware_slot);
+                adopted_guards += usize::from(existing.hardware.is_some())
+                    + usize::from(existing.software.is_some());
+            }
+        }
+        if permits.family_blocked(family_id) {
+            return None;
+        }
+        let existing_family = match family_id {
+            Some(id) => Some(permits.families.get(&id)?),
+            None => None,
+        };
+        let family_cpu = existing_family
+            .map_or(0, |family| family.cpu_used)
+            .checked_add(adopted_cpu)?
+            .checked_add(missing_cpu)?;
+        let family_hardware = existing_family
+            .map_or(0, |family| family.hardware_used)
+            .checked_add(adopted_hardware)?
+            .checked_add(missing_hardware)?;
+        if let Some(family) = existing_family {
+            if family_cpu > family.cpu_limit || family_hardware > family.hardware_limit {
+                return None;
+            }
+        }
+        let total_cpu = permits.software_used().checked_add(missing_cpu)?;
+        let total_hardware = permits.hardware_used().checked_add(missing_hardware)?;
+        if total_hardware > hardware_max {
+            return None;
+        }
+        let exclusive =
+            existing_family.is_some_and(|family| family.exclusive) || family_cpu > software_budget;
+        if (exclusive && (total_cpu != family_cpu || total_hardware != family_hardware))
+            || (!exclusive && total_cpu > software_budget)
+        {
+            return None;
+        }
+        let id = if let Some(id) = family_id {
+            id
+        } else {
+            let id = permits.next_family.checked_add(1)?;
+            permits.next_family = id;
+            permits.families.insert(
+                id,
+                FamilyUsage {
+                    cpu_limit: requested_cpu,
+                    hardware_limit: requested_hardware,
+                    ..FamilyUsage::default()
+                },
+            );
+            id
+        };
+        // No counters or membership are changed until all policy checks pass.
+        let family = permits.families.get_mut(&id).expect("admitted family");
+        family.cpu_used = family_cpu;
+        family.hardware_used = family_hardware;
+        family.exclusive = exclusive;
+        family.guards += adopted_guards;
+        for existing in retained.iter().flatten() {
+            if let Some(hardware) = existing.hardware {
+                hardware.family.store(id, Ordering::Release);
+            }
+            if let Some(software) = existing.software {
+                software.family.store(id, Ordering::Release);
+            }
+        }
+        let mut admitted = Vec::new();
+        for (estimate, existing) in estimates.iter().zip(retained) {
+            if existing.is_some() {
+                continue;
+            }
+            let hardware = estimate.hardware_slot.then(|| {
+                permits.hardware_live += 1;
+                permits
+                    .families
+                    .get_mut(&id)
+                    .expect("admitted family")
+                    .guards += 1;
+                HwSlot {
+                    permits: Arc::clone(&self.permits),
+                    owner: PermitOwner::Live,
+                    family: AtomicU64::new(id),
+                }
+            });
+            let software = (estimate.cpu_threads > 0).then(|| {
+                permits.software_live_permits += 1;
+                permits.software_live_used += estimate.cpu_threads;
+                permits
+                    .families
+                    .get_mut(&id)
+                    .expect("admitted family")
+                    .guards += 1;
+                SwPermit {
+                    permits: Arc::clone(&self.permits),
+                    owner: PermitOwner::Live,
+                    weight: estimate.cpu_threads,
+                    family: AtomicU64::new(id),
+                }
+            });
+            admitted.push(TranscodePermit { hardware, software });
+        }
+        Some((id, admitted))
     }
 
     /// Announce that a live start is queuing. Hold the guard for as long as the
@@ -899,6 +1172,9 @@ impl Admissions {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if permits.family_blocked(None) {
+            return None;
+        }
         if permits.hardware_used() >= max {
             return None;
         }
@@ -907,6 +1183,7 @@ impl Admissions {
         Some(HwSlot {
             permits: Arc::clone(&self.permits),
             owner: PermitOwner::Live,
+            family: AtomicU64::new(0),
         })
     }
 
@@ -935,6 +1212,9 @@ impl Admissions {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if permits.family_blocked(None) {
+            return None;
+        }
         match priority {
             Priority::Live if permits.background_active() => return None,
             Priority::Background if permits.background_blocked() => {
@@ -956,6 +1236,7 @@ impl Admissions {
         Some(HwSlot {
             permits: Arc::clone(&self.permits),
             owner: priority.into(),
+            family: AtomicU64::new(0),
         })
     }
 
@@ -1336,6 +1617,280 @@ mod tests {
         drop(replacement);
         assert!(binding.current().is_none());
         assert_eq!(admissions.snapshot(), before);
+    }
+
+    fn cpu_role(cpu_threads: usize) -> TranscodeResourceEstimate {
+        TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads,
+            decoder_threads: None,
+        }
+    }
+
+    #[test]
+    fn continuous_family_owns_idle_pi_budget_until_the_last_worker_is_reaped() {
+        let admissions = Admissions::new();
+        let before = admissions.snapshot();
+        let roles = [cpu_role(3), cpu_role(2), cpu_role(3)];
+        assert!(
+            admissions
+                .try_admit_bundles_claiming(2, 3, &roles, Priority::Live, None)
+                .is_none(),
+            "unrelated bounded producer groups still obey the budget"
+        );
+        let (owner, permits) = admissions
+            .try_admit_family(2, 3, &roles, &[None; 3], Priority::Live)
+            .expect("one 720p/480p/AAC family may own an idle Pi");
+        assert_eq!(
+            admissions.software_in_use(),
+            8,
+            "all pipeline cost remains visible"
+        );
+        let mut permits = permits
+            .into_iter()
+            .map(crate::vodencode::EncodePermit::from)
+            .collect::<Vec<_>>();
+        let audio = permits.pop().expect("shared AAC");
+        let worker = audio.clone().try_claim_worker().expect("AAC worker");
+        assert!(
+            audio.clone().try_claim_worker().is_none(),
+            "one process per role"
+        );
+        drop(permits);
+        assert_eq!(admissions.software_in_use(), 3);
+        assert_eq!(audio.family_id(), Some(owner));
+        assert!(
+            admissions
+                .try_admit_software(8, 1, Priority::Live)
+                .is_none(),
+            "a higher allowance does not dissolve an existing exclusive owner"
+        );
+        assert!(admissions.try_acquire(2, Priority::Live).is_none());
+        drop(audio);
+        assert_eq!(
+            admissions.software_in_use(),
+            3,
+            "an unreaped worker retains its owner"
+        );
+        assert!(admissions
+            .try_admit_software(8, 1, Priority::Live)
+            .is_none());
+        drop(worker);
+        assert_eq!(admissions.snapshot(), before);
+        assert!(admissions
+            .try_admit_software(3, 1, Priority::Live)
+            .is_some());
+    }
+
+    #[test]
+    fn continuous_family_renews_controlled_video_from_retained_audio_within_its_ceiling() {
+        let admissions = Admissions::new();
+        let roles = [cpu_role(3), cpu_role(2), cpu_role(3)];
+        let (owner, mut permits) = admissions
+            .try_admit_family(2, 3, &roles, &[None; 3], Priority::Live)
+            .expect("idle family");
+        let audio = crate::vodencode::EncodePermit::from(permits.pop().expect("AAC"));
+        drop(permits);
+        let renewal = [cpu_role(2), cpu_role(3)];
+        let retained = [None, Some(audio.retained_resources())];
+        let waiter = admissions.wait_for_slot();
+        let before = admissions.snapshot();
+        assert!(
+            admissions
+                .try_admit_family(2, 3, &renewal, &retained, Priority::Speculative)
+                .is_none(),
+            "a family identity does not bypass foreground priority"
+        );
+        assert_eq!(admissions.snapshot(), before);
+        drop(waiter);
+        let (renewed_owner, video) = admissions
+            .try_admit_family(2, 3, &renewal, &retained, Priority::Speculative)
+            .expect("its own AAC retains exclusive continuation credit");
+        assert_eq!(renewed_owner, owner);
+        assert_eq!(video.len(), 1);
+        assert_eq!(admissions.software_in_use(), 5);
+        let too_large = [cpu_role(4), cpu_role(3)];
+        let before = admissions.snapshot();
+        assert!(
+            admissions
+                .try_admit_family(2, 3, &too_large, &retained, Priority::Live)
+                .is_none(),
+            "retaining AAC cannot mint more than the original eight threads"
+        );
+        assert_eq!(admissions.snapshot(), before);
+        drop(video);
+        drop(audio);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[test]
+    fn continuous_family_adopts_real_retained_credit_but_refuses_unrelated_usage() {
+        let admissions = Admissions::new();
+        let audio = crate::vodencode::EncodePermit::from(
+            admissions
+                .try_admit_bundle(2, 8, &cpu_role(3), Priority::Live)
+                .expect("existing AAC"),
+        );
+        let unrelated = admissions
+            .try_admit_software(8, 1, Priority::Live)
+            .expect("other viewer");
+        let roles = [cpu_role(3), cpu_role(2), cpu_role(3)];
+        let retained = [None, None, Some(audio.retained_resources())];
+        let before = admissions.snapshot();
+        assert!(admissions
+            .try_admit_family(2, 3, &roles, &retained, Priority::Live)
+            .is_none());
+        assert_eq!(
+            audio.family_id(),
+            None,
+            "refusal does not adopt half a family"
+        );
+        assert_eq!(admissions.snapshot(), before);
+        drop(unrelated);
+        let reservation =
+            admissions.reserve_for_handoff(&cpu_role(1), std::time::Duration::from_secs(60));
+        let before = admissions.snapshot();
+        assert!(
+            admissions
+                .try_admit_family(2, 3, &roles, &retained, Priority::Live)
+                .is_none(),
+            "another viewer's handoff claim remains real usage"
+        );
+        assert_eq!(admissions.snapshot(), before);
+        admissions.release_reservation(reservation);
+        let (owner, video) = admissions
+            .try_admit_family(2, 3, &roles, &retained, Priority::Live)
+            .expect("existing AAC is adopted atomically beside both video roles");
+        assert_eq!(audio.family_id(), Some(owner));
+        assert_eq!(admissions.software_in_use(), 8, "AAC was counted once");
+        drop(video);
+        drop(audio);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[test]
+    fn continuous_family_rejects_conflicting_owners_foreign_pools_and_aliased_roles() {
+        let admissions = Admissions::new();
+        let roles = [cpu_role(1), cpu_role(1)];
+        let (_, first) = admissions
+            .try_admit_family(2, 12, &roles, &[None; 2], Priority::Live)
+            .expect("first ordinary-size family");
+        let (_, second) = admissions
+            .try_admit_family(2, 12, &roles, &[None; 2], Priority::Live)
+            .expect("second ordinary-size family");
+        let first = first
+            .into_iter()
+            .map(crate::vodencode::EncodePermit::from)
+            .collect::<Vec<_>>();
+        let second = second
+            .into_iter()
+            .map(crate::vodencode::EncodePermit::from)
+            .collect::<Vec<_>>();
+        let before = admissions.snapshot();
+        assert!(admissions
+            .try_admit_family(
+                2,
+                12,
+                &roles,
+                &[
+                    Some(first[0].retained_resources()),
+                    Some(second[0].retained_resources())
+                ],
+                Priority::Live
+            )
+            .is_none());
+        assert!(admissions
+            .try_admit_family(
+                2,
+                12,
+                &roles,
+                &[Some(first[0].retained_resources()); 2],
+                Priority::Live
+            )
+            .is_none());
+        let foreign = Admissions::new();
+        assert!(foreign
+            .try_admit_family(
+                2,
+                12,
+                &roles,
+                &[Some(first[0].retained_resources()), None],
+                Priority::Live
+            )
+            .is_none());
+        assert_eq!(foreign.software_in_use(), 0);
+        assert_eq!(admissions.snapshot(), before);
+        drop(first);
+        drop(second);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[test]
+    fn continuous_family_idle_exception_preserves_hardware_caps_and_background_priority() {
+        let admissions = Admissions::new();
+        let roles = [mixed(3), mixed(2), cpu_role(3)];
+        let before = admissions.snapshot();
+        assert!(admissions
+            .try_admit_family(1, 3, &roles, &[None; 3], Priority::Live)
+            .is_none());
+        assert_eq!(admissions.snapshot(), before);
+        let background = admissions
+            .try_admit_software(3, 1, Priority::Background)
+            .expect("idle producer");
+        let before = admissions.snapshot();
+        assert!(admissions
+            .try_admit_family(2, 3, &roles, &[None; 3], Priority::Live)
+            .is_none());
+        assert_eq!(admissions.snapshot(), before);
+        drop(background);
+        let (_, permits) = admissions
+            .try_admit_family(2, 3, &roles, &[None; 3], Priority::Live)
+            .expect("after producer reap");
+        assert_eq!(admissions.in_use(), 2);
+        assert_eq!(admissions.software_in_use(), 8);
+        assert!(admissions
+            .try_admit_software(12, 1, Priority::Background)
+            .is_none());
+        drop(permits);
+        assert_eq!(
+            admissions.snapshot(),
+            PoolSnapshot {
+                hardware_used: 0,
+                software_used: 0,
+                live_waiting: 0,
+                background_active: false,
+                reservations: 0
+            }
+        );
+    }
+
+    #[test]
+    fn racing_continuous_families_have_one_exclusive_idle_owner() {
+        let admissions = Arc::new(Admissions::new());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let admissions = Arc::clone(&admissions);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                admissions.try_admit_family(
+                    2,
+                    3,
+                    &[cpu_role(3), cpu_role(2), cpu_role(3)],
+                    &[None; 3],
+                    Priority::Live,
+                )
+            }));
+        }
+        let held = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("admission racer"))
+            .collect::<Vec<_>>();
+        assert_eq!(held.iter().filter(|owner| owner.is_some()).count(), 1);
+        assert_eq!(admissions.software_in_use(), 8);
+        drop(held);
+        assert_eq!(admissions.software_in_use(), 0);
     }
 
     #[test]
