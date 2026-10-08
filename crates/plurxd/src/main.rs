@@ -1,6 +1,7 @@
 // Production children go through `process_control::spawn_job_owned`; see
 // clippy.toml.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+#![cfg_attr(plurx_dv_segment_probe, allow(dead_code))]
 
 mod admission;
 mod availability;
@@ -28,6 +29,8 @@ mod decode_facts;
 mod decoder_health;
 mod delivery;
 mod dv_disk;
+#[cfg(unix)]
+mod dv_segment;
 mod dvpipe;
 mod ffmpeg;
 mod fontenv;
@@ -504,6 +507,7 @@ fn cli_exit(code: i32, message: impl Into<String>) -> anyhow::Error {
     .into()
 }
 
+#[cfg(not(plurx_dv_segment_probe))]
 fn main() -> anyhow::Result<()> {
     if let Some(result) = decode_facts::dispatch_probe_bootstrap() {
         result.context("launching namespace-bound probe")?;
@@ -511,6 +515,18 @@ fn main() -> anyhow::Result<()> {
     }
     daemon_main()
 }
+
+// Source-only validation entry: compile the real production graph without
+// unrelated unit bodies. No public command, server listener or qualification.
+#[cfg(all(unix, plurx_dv_segment_probe))]
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dv_segment::physical_probe().await;
+    Ok(())
+}
+
+#[cfg(all(not(unix), plurx_dv_segment_probe))]
+compile_error!("DV segment physical probe requires Unix descriptor custody");
 
 #[tokio::main]
 async fn daemon_main() -> anyhow::Result<()> {
