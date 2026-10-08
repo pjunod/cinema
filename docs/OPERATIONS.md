@@ -5805,17 +5805,29 @@ advisory evidence only. An unmet or unavailable row never disables the switch.
 
 **Settings → System → Transcoding backend** selects Auto, NVIDIA NVENC,
 Intel Quick Sync, VA-API, Apple VideoToolbox or CPU for the responding node.
-On a laptop with Intel and NVIDIA graphics, choose Quick Sync when you prefer
-the integrated GPU, or NVENC for the discrete GPU. Auto prefers NVIDIA when
-available. This selects a backend family, not an individual adapter among
-multiple GPUs of the same family; it does not measure or enforce a power budget.
+Only supported backends appear in the menu. Each measured option shows frames
+per second and its speed relative to CPU, where CPU is 1.00×. Auto names its
+measured winner and shows the same numbers.
 
-Save records a node-specific preference and shows whether a restart is needed.
-Restart that node to select its encoder and re-probe the matching HDR path;
-active playback is not changed by Save. A backend marked **not detected** can
-still be selected. If it remains unavailable at startup, the existing encoder
-fallback applies and **Active** shows what actually runs. Other nodes retain
-their own preferences. Nodes without an override keep the legacy
+Every startup checks encoder support and benchmarks a fixed 720p H.264 VBR
+workload: 240 frames at 4 Mb/s, one warm-up and the median of three timed runs.
+Auto chooses the fastest successful backend, including CPU when it wins. An
+explicit preference is preserved. The benchmark measures encoding, process
+startup and frame upload; it does not predict every source decoder or HDR
+workload. The startup benchmark has a 180-second total deadline; if CPU cannot
+complete or the deadline expires, startup uses the validated fallback order.
+
+**Optimize** reruns support checks, benchmarks, and each available backend's
+HDR pipeline. It runs once per node, yields to playback, and stops after ten
+minutes. Failed or interrupted reruns retain the last complete results. You
+can leave Settings while it runs; return to see its status and measurements.
+
+Save records a node-specific preference. Restart that node to activate a new
+backend and its matching HDR graph; the next startup measures speeds again.
+The card reports a pending restart when a rerun changes Auto's winner. Existing
+sessions keep their original pipeline. A saved backend that is no longer
+supported is omitted from the menu and explained separately. Other nodes
+retain their own preferences. Nodes without an override keep the legacy
 `PLURX_HWACCEL`/stored cluster preference.
 
 Speculative jobs explicitly pinned to a different encoder family remain for
