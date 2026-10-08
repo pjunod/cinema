@@ -11,6 +11,9 @@ longer than that bound. --stop-file accepts only a fresh owned marker path.
 Optional --video-map LEFT,TOP,SCALE maps the reference672x64 encoded stripe
 using independent continuous cell centers; --video-alternate-map allows a
 different measured presentation scale in the same acquisition.
+Optional --video-vertical-search searches only translations of the same four
+spaced rows between equal-scale/equal-X maps (maximum256 candidates); every
+valid counter must agree. Original strips and selected observed pixels persist.
 Optional --video-alternate X,Y samples a second calibrated video location in
 the same XGetImage request. Agreeing counters are accepted; conflicting valid
 counters fail the capture, and neither valid remains unknown.
@@ -100,17 +103,39 @@ def bits(frame):
     return [(211 >> n) & 1 for n in range(8)] + [(frame >> n) & 1 for n in range(24)] + [(checksum(frame) >> n) & 1 for n in range(8)]
 
 
-def decode(rgb):
-    result = []
-    for cell in range(40):
-        x = 1 + cell
-        average = sum(rgb[(y * READ_WIDTH + x) * 3 + channel] for y in range(HEIGHT) for channel in range(3)) / (HEIGHT * 3)
-        result.append(0 if average <= 60 else 1 if average >= 195 else None)
+def decode_sums(totals):
+    # Exact equivalent of the existing12-channel average: no new threshold.
+    result = [0 if totals[cell] <= 60 * HEIGHT * 3 else
+              1 if totals[cell] >= 195 * HEIGHT * 3 else None for cell in range(1, 41)]
     if None in result:
         return None
     word = lambda start, length: sum(result[start + n] << n for n in range(length))
     frame = word(8, 24)
     return frame if word(0, 8) == 211 and word(32, 8) == checksum(frame) else None
+
+
+def decode(rgb):
+    return decode_sums([sum(rgb[(y * READ_WIDTH + cell) * 3 + channel]
+                           for y in range(HEIGHT) for channel in range(3))
+                        for cell in range(READ_WIDTH)])
+
+
+def vertical_search_plan(mappings):
+    if set(mappings) != {"video", "video_alternate"}:
+        raise RuntimeError("Vertical search requires two calibrated video maps")
+    first, second = mappings["video"], mappings["video_alternate"]
+    offsets = [n - first["sampled_y"][0] for n in first["sampled_y"]]
+    other = [n - second["sampled_y"][0] for n in second["sampled_y"]]
+    if first["mapping"][2] != second["mapping"][2] or first["sampled_x"] != second["sampled_x"] or offsets != other:
+        raise RuntimeError("Vertical search requires equal X columns/scale/spaced-row pattern")
+    low, high = sorted([first["sampled_y"][0], second["sampled_y"][0]])
+    if high - low + 1 > 256:
+        raise RuntimeError("Vertical search exceeds256 translated candidates")
+    return {"sampled_x": first["sampled_x"], "relative_spaced_y": offsets,
+            "first_row_min": low, "first_row_max": high,
+            "candidate_count": high - low + 1,
+            "scope": "Integer translations only between measured first rows; original four spaced offsets preserved"}
+
 
 
 def resolve_video_frames(frames):
@@ -236,34 +261,86 @@ def control(x, args, emit):
         lib.XSync(display, 0)
 
 
-def strip(image, data, offset, sampling=None):
-    ox, oy = offset
+def sample_rgb(image, data, xs, ys):
+    if not all(0 <= n < image.width for n in xs) or not all(0 <= n < image.height for n in ys):
+        raise RuntimeError("Sample exceeds acquired image bounds")
+    if image.bits_per_pixel not in (16, 24, 32) or image.byte_order not in (0, 1):
+        raise RuntimeError("Unsupported XImage layout")
     bpp = image.bits_per_pixel // 8
+    if image.bytes_per_line < image.width * bpp or len(data) < image.bytes_per_line * image.height:
+        raise RuntimeError("Unsupported XImage stride/data bounds")
     order = "little" if image.byte_order == 0 else "big"
-    masks = [image.red_mask, image.green_mask, image.blue_mask]
     channels = []
-    for mask in masks:
+    used = 0
+    for mask in [image.red_mask, image.green_mask, image.blue_mask]:
         if mask == 0:
             raise RuntimeError("Unsupported zero RGB mask")
+        if mask >= 1 << image.bits_per_pixel or mask & used:
+            raise RuntimeError("Unsupported overlapping/out-of-pixel RGB mask")
+        used |= mask
         shift = (mask & -mask).bit_length() - 1
         scale = mask >> shift
         if scale & (scale + 1):
             raise RuntimeError("Unsupported noncontiguous RGB mask")
         channels.append((mask, shift, scale))
-    rgb = bytearray(READ_WIDTH * HEIGHT * 3)
-    for y in range(HEIGHT):
-        sy = sampling["sampled_y"][y] if sampling else oy + y
-        row = sy * image.bytes_per_line
-        for px in range(READ_WIDTH):
-            # Preserve each original cell center, including both quiet borders.
-            sx = sampling["sampled_x"][px] if sampling else ox + px * 16 + 8
-            index = row + sx * bpp
-            if not 0 <= sx < image.width or not 0 <= sy < image.height:
-                raise RuntimeError("Sample exceeds acquired image bounds")
-            pixel = int.from_bytes(data[index:index + bpp], order)
-            for channel, (mask, shift, scale) in enumerate(channels):
-                rgb[(y * READ_WIDTH + px) * 3 + channel] = round(((pixel & mask) >> shift) * 255 / scale)
+    rgb = bytearray(len(xs) * len(ys) * 3)
+    # Byte-exact normal8bit channels avoid float/mask work in the measured hot
+    # loop. Generic16bit/non-byte-aligned layouts retain the original rounding.
+    byte_channels = [shift // 8 if order == "little" else bpp - 1 - shift // 8
+                     for _, shift, _ in channels]
+    direct = all(scale == 255 and shift % 8 == 0 for _, shift, scale in channels)
+    for y, sy in enumerate(ys):
+        for cell, sx in enumerate(xs):
+            index = sy * image.bytes_per_line + sx * bpp
+            dest = (y * len(xs) + cell) * 3
+            if direct:
+                for channel, offset in enumerate(byte_channels):
+                    rgb[dest + channel] = data[index + offset]
+            else:
+                pixel = int.from_bytes(data[index:index + bpp], order)
+                for channel, (mask, shift, scale) in enumerate(channels):
+                    rgb[dest + channel] = round(((pixel & mask) >> shift) * 255 / scale)
     return bytes(rgb)
+
+
+def strip(image, data, offset, sampling=None):
+    ox, oy = offset
+    xs = sampling["sampled_x"] if sampling else [ox + cell * 16 + 8 for cell in range(READ_WIDTH)]
+    ys = sampling["sampled_y"] if sampling else [oy + row for row in range(HEIGHT)]
+    return sample_rgb(image, data, xs, ys)
+
+
+def search_video(image, data, plan, left, top):
+    starts = range(plan["first_row_min"], plan["first_row_max"] + 1)
+    offsets = plan["relative_spaced_y"]
+    ys = sorted({start + delta for start in starts for delta in offsets})
+    grid = sample_rgb(image, data, [n - left for n in plan["sampled_x"]], [n - top for n in ys])
+    rows = {y: grid[n * READ_WIDTH * 3:(n + 1) * READ_WIDTH * 3] for n, y in enumerate(ys)}
+    brightness = {y: [sum(row[cell * 3:cell * 3 + 3]) for cell in range(READ_WIDTH)]
+                  for y, row in rows.items()}
+    outcomes = []
+    chosen = plan["first_row_min"]
+    valid = []
+    for start in starts:
+        # Reuse sampled row sums rather than re-reading/remasking each window.
+        totals = [sum(brightness[start + delta][cell] for delta in offsets) for cell in range(READ_WIDTH)]
+        frame = decode_sums(totals)
+        outcomes.append(frame)
+        if frame is not None:
+            if not valid:
+                chosen = start
+            valid.append((start, frame))
+    rgb = b"".join(rows[chosen + delta] for delta in offsets)
+    resolution = resolve_video_frames({str(y): frame for y, frame in valid})
+    payload = {"candidate_count": len(outcomes), "valid_count": len(valid),
+               "valid_frames": sorted({frame for _, frame in valid}),
+               "chosen_first_row": chosen, "chosen_spaced_rows": [chosen + d for d in offsets],
+               "candidate_outcomes_sha256": hashlib.sha256(b"".join(
+                   (frame if frame is not None else 0xffffffff).to_bytes(4, "little") for frame in outcomes)).hexdigest(),
+               "status": resolution["status"], "frame": resolution["frame"],
+               "acquired_region_sha256": hashlib.sha256(data).hexdigest()}
+    return rgb, payload
+
 
 
 def capture(x, args, emit, output):
@@ -294,13 +371,15 @@ def capture(x, args, emit, output):
     if width * height > 1048576:
         raise RuntimeError("Bounding rectangle exceeds one million pixels")
     x.inside(left, top, width, height)
-    files = {name: (output / f"{name}.rgb").open("xb") for name in boxes}
-    hashes = {name: hashlib.sha256() for name in boxes}
+    search = vertical_search_plan(mappings) if getattr(args, "video_vertical_search", False) else None
+    names = list(boxes) + (["video_search"] if search else [])
+    files = {name: (output / f"{name}.rgb").open("xb") for name in names}
+    hashes = {name: hashlib.sha256() for name in names}
     start = time.monotonic_ns()
     end = start + int(args.seconds * 1e9)
     packet = 0
     conflicts = 0
-    emit({"type": "capture_start", "epoch_ns": start, "end_ns": end, "bounding_rectangle": [left, top, width, height], "strips": boxes, "calibrated_sampling": mappings})
+    emit({"type": "capture_start", "epoch_ns": start, "end_ns": end, "bounding_rectangle": [left, top, width, height], "strips": boxes, "calibrated_sampling": mappings, "vertical_search": search})
     try:
         while time.monotonic_ns() < end and not stopped(args):
             before = time.monotonic_ns()
@@ -325,8 +404,18 @@ def capture(x, args, emit, output):
                     hashes[name].update(rgb)
                     row["strips"][name] = {"frame": decode(rgb), "sha256": hashlib.sha256(rgb).hexdigest(),
                                            "offset": packet * READ_WIDTH * HEIGHT * 3, "size": len(rgb)}
-                row["video_counter"] = resolve_video_frames({name: strip_row["frame"]
-                    for name, strip_row in row["strips"].items() if name != "control"})
+                decoded = {name: strip_row["frame"] for name, strip_row in row["strips"].items() if name != "control"}
+                if search:
+                    rgb, details = search_video(image, data, search, left, top)
+                    files["video_search"].write(rgb)
+                    hashes["video_search"].update(rgb)
+                    row["strips"]["video_search"] = {"frame": decode(rgb), "sha256": hashlib.sha256(rgb).hexdigest(),
+                        "offset": packet * READ_WIDTH * HEIGHT * 3, "size": len(rgb)}
+                    row["vertical_search"] = details
+                    # Every valid translated candidate participates, even when
+                    # the deterministic retained first candidate differs.
+                    decoded.update({"video_search_" + str(frame): frame for frame in details["valid_frames"]})
+                row["video_counter"] = resolve_video_frames(decoded)
                 conflicts += row["video_counter"]["status"] == "conflicting"
                 row["processing_complete_ns"] = time.monotonic_ns()
                 emit(row)
@@ -368,6 +457,7 @@ def main():
             alternate = sub.add_mutually_exclusive_group()
             alternate.add_argument("--video-alternate-map", type=mapped_roi, help="Second independently calibrated reference stripe mapping")
             alternate.add_argument("--video-alternate", type=coord, help="Second calibrated video ROI in the same synchronous acquisition; valid counter conflicts fail")
+            sub.add_argument("--video-vertical-search", action="store_true", help="Translate the same four spaced sample rows between equal-scale maps; all valid counters must agree")
             sub.add_argument("--control", type=coord)
     args = parser.parse_args()
     maximum_seconds = 1800 if args.campaign else 120
