@@ -55,6 +55,43 @@ test("node transcoder selector retains an unavailable saved choice and reports p
   assert.doesNotMatch(html, /disabled/);
 });
 
+test("Mac processing card preserves enabled choice with unavailable compatibility and names graduation evidence", () => {
+  const render=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("macosVideoProcessingCard")}\nreturn macosVideoProcessingCard;`)(
+      value=>value, title=>title, (id,label,note,on)=>`TOG:${id}:${on}`,
+      ()=>"unavailable", (waiting,destination)=>`${waiting} ${destination}`, name=>`SAVE:${name}`);
+  const html=render({macos_video_processing_enabled:true},{unavailable:"not observed"});
+  assert.match(html,/TOG:pmacosvideo:true/);
+  assert.match(html,/SAVE:saveMacosVideoProcessing/);
+  assert.match(html,/visual checks on a named display/);
+  assert.match(html,/encoded VOD pass seek\/resume/);
+  assert.match(html,/Playback → Advanced server delivery/);
+  assert.doesNotMatch(html,/ disabled(?:[=>\s]|$)/);
+});
+
+test("Mac processing save writes only the operator choice despite unavailable readiness", async () => {
+  const card={outerHTML:""}, button={disabled:false,closest:()=>card}, calls=[];
+  const save=new Function("document","api","cacheSettings","macosVideoProcessingCard","DEVELOPER_READINESS","toast",
+    `${shippedSource("saveMacosVideoProcessing")}\nreturn saveMacosVideoProcessing;`)(
+      {getElementById:id=>id==="pmacosvideo"?{checked:true}:{textContent:""}},
+      async(path,options)=>{calls.push({path,options});return {macos_video_processing_enabled:true};},
+      value=>value, settings=>`SAVED:${settings.macos_video_processing_enabled}`,
+      {unavailable:"runtime unknown"},()=>{});
+  await save(button);
+  assert.deepEqual(calls,[{path:"/settings",options:{method:"PUT",body:{macos_video_processing_enabled:true}}}]);
+  assert.equal(card.outerHTML,"SAVED:true");
+});
+
+test("Mac compatibility reprobe never sends or changes the saved switch", async () => {
+  const calls=[], button={disabled:false};
+  const reprobe=new Function("document","api","applyDeveloperReadiness","toast",
+    `${shippedSource("reprobeMacosVideoProcessing")}\nreturn reprobeMacosVideoProcessing;`)(
+      {getElementById:()=>({textContent:""})},async(path,options)=>{calls.push([path,options]);return {};},()=>{},()=>{});
+  await reprobe(button);
+  assert.deepEqual(calls,[["/developer/macos-video-processing/reprobe",{method:"POST",body:{}}],["/developer/readiness",undefined]]);
+  assert.equal(button.disabled,false);
+});
+
 test("node transcoder save binds the request to the displayed node and preserves the active backend", async () => {
   const status = {textContent:""}, button = {disabled:false};
   const sys = {node_id:"rog",hwaccel_pref:"nvenc"};
@@ -537,6 +574,7 @@ function developerPanels(){
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       // D6 (2026-10-04): the network priors switch sits beside display Auto.
       shippedSource("networkPriorsCard"),
+      shippedSource("macosVideoProcessingCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
       shippedSource("rateControlCard"),

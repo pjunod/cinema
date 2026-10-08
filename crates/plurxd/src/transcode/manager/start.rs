@@ -1239,7 +1239,12 @@ impl TranscodeManager {
                     rate_control.effective_for(Encoder::Software),
                 ) {
                     Ok(prepared) => self
-                        .resolve_movie_plan(&file, &prepared.opts, prepared.encoder)
+                        .resolve_movie_processing_retry(
+                            &file,
+                            &prepared.opts,
+                            prepared.encoder,
+                            opts.pipeline,
+                        )
                         .await
                         .map(|retry_plan| (prepared, retry_plan)),
                     Err(error) => Err(error),

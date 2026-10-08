@@ -168,6 +168,9 @@ pub struct SystemDto {
     pub users: i64,
     pub libraries: usize,
     pub active_transcodes: usize,
+    /// Worker-local compatibility, separate from saved preference and external
+    /// visual/client qualification. Reading never launches a child process.
+    pub macos_video_processing: serde_json::Value,
     /// Advisory only: recent login traffic looks like an untrusted reverse
     /// proxy collapsed distinct clients onto one throttle address.
     pub login_proxy_advisory: bool,
@@ -326,6 +329,7 @@ pub async fn system_info(
         users: state.store.count_users().await?,
         libraries: state.catalogue.list_libraries().await?.len(),
         active_transcodes: state.transcode.active_sessions().await,
+        macos_video_processing: state.transcode.macos_video_diagnostics(),
         login_proxy_advisory: state.trusted_proxies.is_empty()
             && state.login_throttle.unconfigured_proxy_advisory(),
         replication,
@@ -2041,6 +2045,8 @@ pub struct SettingsDto {
     /// Off by default; applies immediately and is never overridden by the
     /// advisory qualification/readiness fields below.
     pub automatic_decoder_recovery: bool,
+    pub macos_video_processing_enabled: bool,
+    pub macos_video_processing: serde_json::Value,
     /// Whether an operator has asked this node for the health-qualified
     /// artifact identity. What the node actually does with the request is
     /// `decoder_health_qualification`, below — the two are separate fields
@@ -2526,6 +2532,11 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::AUTOMATIC_DECODER_RECOVERY).as_deref(),
             false,
         ),
+        macos_video_processing_enabled: plurx_core::store::stored_switch(
+            setting(keys::MACOS_VIDEO_PROCESSING_ENABLED).as_deref(),
+            false,
+        ),
+        macos_video_processing: state.transcode.macos_video_diagnostics(),
         decoder_health_qualified_artifacts: decoder_health_requested,
         hevc_unverified_copy: plurx_core::store::stored_switch(
             setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),
@@ -2830,6 +2841,7 @@ pub struct UpdateSettings {
     pub playback_control_protocol_v1: Option<bool>,
     pub prepared_quality_handoff: Option<bool>,
     pub automatic_decoder_recovery: Option<bool>,
+    pub macos_video_processing_enabled: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
     pub hevc_unverified_copy: Option<bool>,
     pub playback_sdr_master_codecs: Option<bool>,
@@ -3000,6 +3012,7 @@ impl UpdateSettings {
             || self.playback_control_protocol_v1.is_some()
             || self.prepared_quality_handoff.is_some()
             || self.automatic_decoder_recovery.is_some()
+            || self.macos_video_processing_enabled.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
             || self.hevc_unverified_copy.is_some()
             || self.playback_sdr_master_codecs.is_some()
@@ -3982,6 +3995,14 @@ pub async fn update_settings(
             .put_setting(keys::AUTOMATIC_DECODER_RECOVERY, if on { "1" } else { "0" })
             .await?;
         state.transcode.set_automatic_decoder_recovery(on);
+    }
+    if let Some(on) = req.macos_video_processing_enabled {
+        // Runtime capability and external qualification are advisory facts.
+        // A pending/unavailable observation never refuses or rewrites Save.
+        state
+            .transcode
+            .apply_macos_video_processing_setting(on)
+            .await?;
     }
     if let Some(on) = req.hevc_unverified_copy {
         // The saved preference is authoritative. No readiness condition is

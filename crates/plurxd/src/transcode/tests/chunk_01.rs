@@ -4043,3 +4043,56 @@ async fn vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_
         "missing cadence is not 24 fps"
     );
 }
+
+
+#[tokio::test]
+async fn macos_manager_freezes_selected_identity_and_keeps_saved_choice_on_probe_failure() {
+    use plurx_core::transcode::{MacosProcessingAvailability as Availability,
+        MacosProcessingContext, MacosProcessingIdentity};
+    let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(store.clone(), dir.path().to_owned(), EncoderCaps {
+        videotoolbox: true, ..EncoderCaps::default()
+    }, Pipeline::Cpu).with_decoders(vec!["hevc".to_owned()]);
+    let mut file = profile5_file();
+    file.hdr = None;
+    file.hdr_format = None;
+    file.video_profile = Some("Main".into());
+    file.bit_depth = Some(8);
+    let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+        "codec_name":"hevc","profile":"Main","width":3840,"height":2160,
+        "pix_fmt":"yuv420p","color_transfer":"bt709","color_primaries":"bt709",
+        "color_space":"bt709","color_range":"tv","field_order":"progressive",
+        "sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1",
+        "disposition":{"attached_pic":0}}]});
+    file.id = seed_file_with_probe_at(&store, "/media/mac-manager.mkv", plurx_core::domain::ProbeResult {
+        raw_json: Some(probe.to_string()), ..Default::default()
+    }).await;
+    let identity = MacosProcessingIdentity::new("1".repeat(64),"2".repeat(64),"3".repeat(64),
+        "4".repeat(64),"test-os".into(),"arm64".into(),"Apple test SoC".into()).expect("identity");
+    let context = MacosProcessingContext::new(false, identity.clone(), Availability::Available,
+        Availability::Available);
+    manager.macos_video_probe.publish_context_for_test(&context);
+    manager.apply_macos_video_processing_setting(true).await.expect("save independent of probe preference");
+    let options = TranscodeOptions { target_height:1080, pipeline:Pipeline::Cpu, ..Default::default() };
+    let selected = manager.resolve_movie_plan(&file, &options, Encoder::VideoToolbox).await.expect("plan");
+    assert_eq!(selected.options().pipeline, Pipeline::VtScaleSdr);
+    let frozen_digest = selected.plan_digest();
+    manager.macos_video_probe.publish_context_for_test(&MacosProcessingContext::new(false,
+        identity, Availability::Unavailable, Availability::Unavailable));
+    let fallback = manager.resolve_movie_plan(&file, &options, Encoder::VideoToolbox).await.expect("fallback");
+    assert_eq!(fallback.options().pipeline, Pipeline::Cpu);
+    assert!(fallback.macos_processing_identity().is_none());
+    assert!(manager.macos_video_processing_enabled(), "probe failure must not rewrite saved true");
+    assert_eq!(selected.options().pipeline, Pipeline::VtScaleSdr, "in-flight plan stays frozen");
+    assert_eq!(selected.plan_digest(), frozen_digest);
+    assert_ne!(fallback.plan_digest(), frozen_digest, "new CPU work cannot reuse native identity");
+    manager.macos_video_probe.publish_context_for_test(&context);
+    let retry = manager.resolve_movie_processing_retry(&file, &options, Encoder::VideoToolbox,
+        Pipeline::VtScaleSdr).await.expect("existing retry fallback");
+    assert_eq!(retry.options().pipeline, Pipeline::Cpu, "failed processing must not be reselected");
+    assert!(retry.macos_processing_identity().is_none());
+    assert!(manager.macos_video_processing_enabled());
+    let next = manager.resolve_movie_plan(&file, &options, Encoder::VideoToolbox).await.expect("new independent plan");
+    assert_eq!(next.options().pipeline, Pipeline::VtScaleSdr, "retry exclusion is attempt-local");
+}
