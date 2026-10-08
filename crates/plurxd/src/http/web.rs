@@ -130,6 +130,8 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("pages/shared-artwork.js",                WebAsset::BodyScript,  include_str!("../web/pages/shared-artwork.js")),
     ("pages/shared-libraries.js",              WebAsset::BodyScript,  include_str!("../web/pages/shared-libraries.js")),
     ("pages/sharing-management.js",            WebAsset::BodyScript,  include_str!("../web/pages/sharing-management.js")),
+    ("core/remote-navigation.js",              WebAsset::BodyScript,  include_str!("../web/core/remote-navigation.js")),
+    ("core/remote-router.js",                  WebAsset::BodyScript,  include_str!("../web/core/remote-router.js")),
     ("router.js",                              WebAsset::BodyScript,  include_str!("../web/router.js")),
 ];
 

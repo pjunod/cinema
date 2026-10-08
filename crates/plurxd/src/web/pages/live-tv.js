@@ -663,7 +663,7 @@ function liveTvNowBar(channel){
     <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
     <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
-    <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
+    <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
     <button type="button" id="live-tv-info" data-live-info-opener onclick="openLiveTvStats()" ${transport.hidden?"disabled":""}>Playback info</button>
     <div class="lt-nowtech" data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
   </div>`;
@@ -948,7 +948,7 @@ function liveTvPaint(){
       <span class="grow"><b>${at.now?esc(at.now.title):esc(channel.guide_name)}</b> · ${esc(channel.guide_number)}</span>
       <button type="button" onclick="location.hash='#/live-tv'" title="Back to Live TV" aria-label="Back to Live TV">↩</button>
       ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture" aria-label="Picture-in-picture in the dock">⧉</button>':""}
-      <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop from the dock">■</button>`:"";
+      <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop from the dock">■</button>`:"";
   }
   const overlay=document.getElementById("live-tv-overlay");
   if(!overlay||host.dataset.mode!=="full") return;
@@ -969,7 +969,7 @@ function liveTvPaint(){
         ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()">PiP</button>':""}
         <button type="button" onclick="liveTvGuideSheet()">Guide</button>
         <button type="button" data-live-info-opener onclick="openLiveTvStats()">Playback info</button>
-        <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" aria-label="Stop Live TV">Stop</button>
+        <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)" aria-label="Stop Live TV">Stop</button>
         <button type="button" onclick="exitLiveTvPresentation()">Exit</button>
       </div>
     </div>

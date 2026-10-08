@@ -315,7 +315,7 @@ function episodeRow(ep){
   const epw=ep.watch, epdur=itemDurMs(ep);
   if(epw && !epw.watched && epw.position_ms>3000 && epdur) bits.push(`<span class="epleft">${esc(fmtDur(Math.max(0,epdur-epw.position_ms))+" left")}</span>`);
   if(ep.watch&&ep.watch.watched) bits.push('<span class="epwatched">✓ Watched</span>');
-  return `<div class="eprow" onclick="location.hash='#/item/${itemId}'">
+  return `<div class="eprow" data-remote-item="${itemId}" onclick="location.hash='#/item/${itemId}'">
     ${epThumb(ep)}
     <div style="min-width:0">
       <div class="eptitle">${ep.episode_number!=null?esc(ep.episode_number+". "):""}${esc(ep.title)}</div>
