@@ -466,7 +466,7 @@ green with the updated assertions.
 
 The literal throwaway failing-unit negative was not recovered. §7.1 accepts
 that obsolete historical proof gap under delegated authority, explicitly as
-**not executed**; the real bootstrap failure is not substituted for it.
+**not claimed as executed**; the real bootstrap failure is not substituted for it.
 
 ### 5.3 M3 — `lint.yml` comment, `unit-core`, AGENTS.md rule, count floor
 
