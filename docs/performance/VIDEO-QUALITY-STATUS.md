@@ -141,6 +141,32 @@ by name. The capture does not claim that a failed removal stopped anything.
 This plumbing does not recreate the lost pixels, rerun the failed cell,
 qualify sharp edges or change the encoder, graph, recipe or source generator.
 
+**Original input recovery and diagnostic selection (2026-10-08,
+gpt-6.1-sol, `agent:/root/remaining_requirements_audit_sol61`):** a selected
+historical generator record was recovered and independently source-reviewed.
+One separately authorized, encoder-free local restoration produced the exact
+one-frame reference: 6,220,800 bytes, SHA-256
+`777e283050d76a5d51c723ee0a23d04f2abee492aa02046803441715fb6b17f9`.
+The private restoration receipt has SHA-256
+`09ed50aa1a7130b8cfabd41db791ee0955777c533a347cf80a51666a96085586`.
+This restores the original three 360-row panels (0–1000, 0–10 and 20–21 nits),
+not the lost encoded/decoded output or the `d54d3edb` source-media container.
+The historical max-35 failure remains unresolved.
+
+The existing wrapper now accepts a fixed optional second argument,
+`original-sharp-panels`, after its existing recipe argument. Omitting it
+retains the byte-identical `continuous-pq-ramp` default; no arbitrary raw path
+is accepted. Unsupported selectors fail before private-path allocation or
+Docker/HTTP work. The qualifier validates independently, pins the selected
+raw digest and reports requested/actual signal without substituting the ramp.
+Capture version 2, geometry, 96 encoded repetitions, all recipe/filter/encoder
+arguments, mean <4 / maximum <32 bars and bounded cleanup are unchanged.
+The new pure-source regression and three existing capture regressions have
+changed shared source witnesses; their current inputs require new applicable
+receipts, not reuse of old passes. No regression, encode or decode was run
+while authoring this continuation; a future failed-cell diagnostic needs its
+own reviewed runtime admission. Input recovery is not S-11 qualification.
+
 The scorer builder/image/containers/volumes and lab6 container/media/control
 scratch are removed. No production settings, queues or deployments changed.
 The batch keeps B-frames and measured per-title encoding in Developer pending

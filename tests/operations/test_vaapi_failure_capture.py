@@ -28,10 +28,52 @@ class VaapiFailureCaptureTests(unittest.TestCase):
         # Generic receipts bind this fixture AST, not transitive imports. Change
         # these witnesses with the harness so only this control family reruns.
         self.assertEqual(hashlib.sha256(CAPTURE.read_bytes()).hexdigest(),
-                         'd00241df59f8ea5f8fe0c4f33446b620ad2b937f5f0066baacc7aa1ded92802a')
+                         '7df472326256a68074b0a5f26621f50a7b03897c6183f5ed09d6667e8076cf5f')
         self.assertEqual(hashlib.sha256(WRAPPER.read_bytes()).hexdigest(),
-                         '3c5a1bb3d3308ec3460eda45f24519bcf1fd5c5e6196a8a1f68b0f94c3f11ada')
+                         '7a23d2f2953da23d2457163e38f1145da0836c652be7f3d4e6aa447f7bbcb842')
         self.capture = runpy.run_path(str(CAPTURE))
+
+    def test_fixed_signal_selection_preserves_ramp_and_original_sharp_reference(self):
+        capture = self.capture
+        ramp, width, height, count = capture['reference_frame']()
+        self.assertEqual((width, height, count, len(ramp)), (1920, 1080, 96, 6220800))
+        self.assertEqual(hashlib.sha256(ramp).hexdigest(),
+                         '3f78739c3a34985743d3070753a42c4327c54f16999b465ff9b9e83a587417a4')
+        sharp, sw, sh, sc = capture['reference_frame']('original-sharp-panels')
+        self.assertEqual((sw, sh, sc, len(sharp)), (width, height, count, len(ramp)))
+        self.assertEqual(hashlib.sha256(sharp).hexdigest(),
+                         '777e283050d76a5d51c723ee0a23d04f2abee492aa02046803441715fb6b17f9')
+        values = array.array('H')
+        values.frombytes(sharp)
+        if sys.byteorder != 'little':
+            values.byteswap()
+        def pq(nits):
+            p = (nits/10000)**(2610/16384)
+            return round(64+876*((3424/4096+2413/128*p)/(1+2392/128*p))**(2523/32))
+        for panel in range(3):
+            for y in (panel*360, panel*360+359):
+                for x in (0, 959, 1919):
+                    t = x/1919
+                    nits = 1000*t if panel == 0 else 10*t if panel == 1 else 20+t
+                    self.assertEqual(values[y*width+x], pq(nits))
+        self.assertEqual(len(values), width*height*3//2)
+        self.assertTrue(all(value == 512 for value in values[width*height:]))
+        for invalid in ('', '/tmp/source.yuv', 'sharp', 'continuous-pq-ramp '):
+            with self.subTest(signal=invalid), self.assertRaisesRegex(ValueError, 'unsupported'):
+                capture['reference_frame'](invalid)
+        wrapper = WRAPPER.read_text()
+        self.assertIn('signal=${2-continuous-pq-ramp}', wrapper)
+        self.assertNotIn('signal=${2:-', wrapper)
+        self.assertLess(wrapper.index('case "$signal" in'), wrapper.index('root=$(mktemp'))
+        self.assertLess(wrapper.index('case "$signal" in'), wrapper.index('curl -fsS'))
+        self.assertLess(wrapper.index('case "$signal" in'), wrapper.index('docker inspect'))
+        self.assertIn('recipe=${1:-', wrapper)
+        self.assertIn('"$container_id" "$signal"', wrapper)
+        source = CAPTURE.read_text()
+        self.assertLess(source.index('signal = validate_signal(sys.argv[3]'),
+                        source.index("recipe = json.loads"))
+        self.assertIn("'diagnostic_signal': {'requested': signal, 'actual': None}", source)
+        self.assertIn("report['diagnostic_signal']['actual'] = signal", source)
 
     def test_failed_luma_keeps_full_identity_coordinates_and_reference_regions(self):
         capture = self.capture
