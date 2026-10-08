@@ -5,7 +5,7 @@ import kotlinx.serialization.json.JsonObject
 /** Bridges the existing visible ExoPlayer owner; never allocates a player/session. */
 internal class RemotePlaybackAdapter {
     data class Owner(val token: String, val scope: String, val capabilities: () -> Set<String>, val summary: () -> JsonObject?,
-        val dispatch: (RemoteAction) -> RemoteOutcome, val cancelNetworkGesture: () -> Unit, val effectsEligible: () -> Boolean = { true })
+        val dispatch: (RemoteAction) -> RemoteOutcome, val cancelNetworkGesture: () -> Unit, val effectsEligible: () -> Boolean = { true }, val deferred: ((RemoteAction) -> RemoteDeferredEffect?)? = null)
     var owner: Owner? = null; private set
     fun attach(value: Owner) { if (owner?.token != value.token) owner?.cancelNetworkGesture?.invoke(); owner = value }
     fun detach(token: String) { if (owner?.token == token) { owner?.cancelNetworkGesture?.invoke(); owner = null } }

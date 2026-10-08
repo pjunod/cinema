@@ -5126,3 +5126,220 @@ source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
 source_anchor = "func performPhysicalAction(_ action: () -> Void)"
 test = "clients/apple/Tests/RemoteNavigationTests.swift"
 test_anchor = "testStationarySharedPhysicalActionRetiresNetworkAuthorityBeforeTransportEffect"
+
+# Android couch: exact owned windows/full-reference playback and bounded deferred effects.
+
+[[fixes]]
+id = "android.couch-expanded-library"
+commits = ["e9311ab776435ce6bf30e0312a4b85293ee4b816"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "RemotePresentationKind.LibraryGroup"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "expandedLibraryOwnsRealizationAndBackRestoresExactOpener"
+
+[[fixes]]
+id = "android.couch-poster-outcome"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/Common.kt"
+source_anchor = "remoteActivate?.invoke()"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "retiredExpandedDialogCannotCloseReplacementPresentation"
+
+[[fixes]]
+id = "android.couch-typed-owned-windows"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigation.kt"
+source_anchor = "ProgrammeDetails(\"details\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-owned-window-view"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigationViews.kt"
+source_anchor = "internal fun RemoteOwnedWindow"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-choice-close"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteChoiceDialog.kt"
+source_anchor = "val keys = choiceKeys + closeKey"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-shared-entry"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/HomeScreen.kt"
+source_anchor = "add(\"home:shared\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "onlyExactOwnedRoutesCanAdvertiseSemanticControls"
+
+[[fixes]]
+id = "android.couch-shared-stack"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedLibrariesScreen.kt"
+source_anchor = "stack.size >= 8"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "sharedChildExitRestoresExactOpenerAndRetiredDisposalCannotResetParent"
+
+[[fixes]]
+id = "android.couch-shared-preplay"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedRemotePreplay.kt"
+source_anchor = "if (action.type == \"select\") null else deferred(action)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "admittedSharedStartKeepsActualPlayFocusThroughOwnerBusyAndRecordsBeforeTransfer"
+
+[[fixes]]
+id = "android.couch-shared-prepare"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String?, permitted:"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "expiredRemoteStartCleansLateOfferWithoutRendererAndFreshRetryUsesNewRequest"
+
+[[fixes]]
+id = "android.couch-shared-owner"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "check(permitted())"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "expiredRemoteStartCleansLateOfferWithoutRendererAndFreshRetryUsesNewRequest"
+
+[[fixes]]
+id = "android.couch-shared-local-exit"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "fun beginStop(watched: Boolean = false): kotlinx.coroutines.Job"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "remotePauseChecksAfterControlAndLocalStopPausesBeforeCleanupRuns"
+
+[[fixes]]
+id = "android.couch-shared-incumbent"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "incumbent ?: SharedPlayerController(context, vm)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "admittedSharedStartKeepsActualPlayFocusThroughOwnerBusyAndRecordsBeforeTransfer"
+
+[[fixes]]
+id = "android.couch-deferred-binding"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteDeferredEffect.kt"
+source_anchor = "val resultDeadline: Long"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "deferredTerminalDeadlineDoesNotExtendAndGrantRetirementFencesOldWork"
+
+[[fixes]]
+id = "android.couch-deferred-guard"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteReceiverGuard.kt"
+source_anchor = "now < permit.resultDeadline"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "deferredPermitRetainsOriginalDeadlineConsumesSequenceAndBoundsCleanup"
+
+[[fixes]]
+id = "android.couch-deferred-adapter"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemotePlaybackAdapter.kt"
+source_anchor = "val deferred: ((RemoteAction) -> RemoteDeferredEffect?)?"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "deferredAckCompletesBeforeOwnerTransitionAndStaleCompletionCannotAffectReplacement"
+
+[[fixes]]
+id = "android.couch-retained-ack"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteClientModel.kt"
+source_anchor = "receiverGuard.retainedResult(command,"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "retainedDeferredAckSurvivesOwnedTransitionButRejectsOtherGrantAndOriginalDeadline"
+
+[[fixes]]
+id = "android.couch-attempt-cleanup"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteOwnedAttempt.kt"
+source_anchor = "if (busyTicket == ticket) busyTicket = null"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "retiredSharedPreparationClearsOnlyItsBusyMarkerAndAutoplayCannotRestartClosedPlayer"
+
+[[fixes]]
+id = "android.couch-channel-admission"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteChannelAdmission.kt"
+source_anchor = "if (serial != token || !permitted())"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteChannelAdmissionTest.kt"
+test_anchor = "expiredOrReplacedChannelNeverInvokesIncumbentAndPhysicalJobIsUntouched"
+
+[[fixes]]
+id = "android.couch-channel-owner"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
+source_anchor = "remoteChannels.run(LiveTvInputPolicy.CHANNEL_COALESCE_MS, permitted)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteChannelAdmissionTest.kt"
+test_anchor = "networkRetirementCancelsOnlyItsOwnUninvokedCoalescingSlot"
+
+[[fixes]]
+id = "android.couch-guide-focus"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuideUi.kt"
+source_anchor = "lastWindow != slots"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-programme-watch"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/DvrUi.kt"
+source_anchor = "watchModifier: Modifier = Modifier"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-live-programme-owner"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "RemotePresentationKind.ProgrammeDetails"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-challenge-deadline"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteChallengeExpiry.kt"
+source_anchor = "fun remaining(now: Long)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "tvChallengeUsesOriginalMonotonicDeadlineAndRejectsInvalidDuration"
+
+[[fixes]]
+id = "android.couch-challenge-retry"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteCompanionViews.kt"
+source_anchor = "This TV code expired. Get a new code to try again."
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "tvChallengeUsesOriginalMonotonicDeadlineAndRejectsInvalidDuration"
