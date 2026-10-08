@@ -3636,3 +3636,6 @@
   .library-view-toggle button[aria-pressed=true],#library-group-index button[aria-current=true]{border:2px solid Highlight}
   .library-group .poster:focus-visible{outline-color:Highlight}
 }
+
+  .sharing-invitation{margin-top:20px;padding:20px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel2)}
+  .sharing-invitation textarea{display:block;width:100%;min-height:110px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);font:13px/1.5 monospace;resize:vertical;overflow-wrap:anywhere}

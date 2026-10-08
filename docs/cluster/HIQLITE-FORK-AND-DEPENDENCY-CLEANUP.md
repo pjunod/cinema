@@ -1113,6 +1113,21 @@ upstream reproduction was executed by this correction, and no public filing
 or private-source disclosure was made. M6 and the separate M5 (d) acceptance
 remain open.
 
+**M1 ledger continuation, 2026-10-08.** The previously disclosed October 4
+source-classification gap is reconciled as owned Plurx policy: Hiqlite row 25
+names the bounded snapshot observations, RPC budgets and all configuration,
+transport, API, client and shared-handle plumbing; WAL rows 5 and 6 name runtime
+status (including the existing normal Tokio `macros` feature placement) and
+stopped-node payload-free inspection. The ledgers now have 25 and 6 rows,
+including 17 and 3 Plurx policies. All four formerly unledgered source files
+move to `patched`; both `unledgered` tables and the test's permitted-gap sets
+are empty. Formatting/upstream digest pins, Rust sources, manifests' dependency
+features and lockfiles are unchanged. This metadata continuation adds no
+runtime or upstream execution evidence: the nine incomplete generic rows in
+§5.7 and the separate pool/runtime acceptance remain open. Existing ledger
+regressions must be validated by the coordinated batch; changing their data
+constants is not a pure-documentation test waiver.
+
 ### 5.8 2026-09-21 implementation boundary
 
 The safe source-only boundary is M1 plus the locally provable portion of M2.

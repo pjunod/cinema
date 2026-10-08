@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-four patches for clustered deployments. An
+Apache-2.0. Plurx carries twenty-five patches for clustered deployments. An
 upstream release can retire the seven generic bugs and the one dependency-only
-constraint; it cannot retire the sixteen Plurx policies:
+constraint; it cannot retire the seventeen Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -35,6 +35,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 22 | Writer-fixed WAL snapshot cut, off-writer copy and bounded local storage admission | plurx policy | — | Never; Plurx owns the exact image/metadata cut, storage floor, and passive deferral evidence. |
 | 23 | K-06 staged startup, clock observation and membership admission | plurx policy | — | Never; Plurx's clock-skew guard must own the actual Raft membership proposal boundary and a learner-only start that waits for authenticated clock observation. |
 | 24 | Source layout guard rollback certificate | plurx policy | — | Never; rolling Source activation requires a definitive pre-application rollback without changing deployed transaction payloads. |
+| 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -354,6 +355,26 @@ made-up URL and prevents the fork from being declared fully tracked.
   regression covers matching zero-row guards, mismatch rollback, and refusal
   boundaries; no unknown commit is certified.
 
+- **Row 25 — Snapshot transport observations and budgets:**
+  `src/transport_status.rs` retains bounded process-local peer/attempt/socket
+  observations, byte progress, disposition and owned-task counts, not application
+  payloads or replicated state. Membership binding bounds the peer set; attempt
+  histories and retained snapshot labels are bounded independently. Outbound
+  attempts and socket epochs, inbound chunk receipt and terminal disposition,
+  and actual API/socket/executor task guards feed the shared handle. The
+  authenticated SQLite management route and the local/selected-peer client
+  accessors expose observations, not a quorum or durability certificate.
+  `src/config.rs` validates chunk, overall-transfer and install budgets; chunk
+  and transfer defaults are 30 and 1200 seconds, also carried by the
+  `src/config_toml.rs` construction path. Completing a chunk does not renew the
+  overall transfer deadline. This policy does not satisfy the generic transport
+  repairs' upstream drop conditions.
+  Files: `src/transport_status.rs`, `src/config.rs`, `src/config_toml.rs`,
+  `src/network/raft_client.rs`, `src/network/raft_server.rs`,
+  `src/network/snapshot_executor.rs`, `src/network/management.rs`,
+  `src/network/api.rs`, `src/client/mgmt.rs`, `src/start.rs`,
+  `src/store/mod.rs`, `src/app_state.rs`, `src/lib.rs`.
+
 **Partial upstream receipt, 2026-10-03:** row 1's local-node selection by
 durable id is accepted in [upstream PR 368](https://github.com/sebadob/hiqlite/pull/368),
 merged September 24 as
@@ -365,29 +386,17 @@ an exact submission/disposition, and its unchanged drop condition is not met.
 This is read-only source evidence, not a newly executed upstream reproduction
 or permission to upgrade or remove the patch.
 
-**Unledgered fork change, 2026-10-04:** `src/transport_status.rs` (bounded,
-process-local snapshot transport observations, with the snapshot chunk and
-transfer budgets in `src/config.rs`) is Plurx code no row above owns yet.
-`PLURX-FILES.toml` lists it under `unledgered` so the gap stays visible and
-cannot grow; it needs its own row before this ledger is complete. The file is
-only where the surface is defined. Its observations are threaded through
-sources the manifest classifies as `patched` because other rows name them,
-though no row describes this change: `src/network/raft_client.rs` (outbound
-snapshot attempts and per-socket observations), `src/network/raft_server.rs`
-(inbound socket epochs and the reader/writer task status clones),
-`src/network/snapshot_executor.rs` (inbound chunk receipt and the attempt's
-succeeded/retrying/failed disposition), `src/network/management.rs` (the
-SQLite snapshot-transport route), `src/client/mgmt.rs`
-(`local_snapshot_transport_status` and `snapshot_transport_status_sqlite`),
-`src/start.rs`, `src/store/mod.rs` and `src/app_state.rs` (construction,
-membership binding and the shared handle), and the `src/lib.rs` re-exports.
-Its row must name all of these.
+**M1 ledger continuation, 2026-10-08:** row 25 owns the transport surface and
+its existing plumbing previously disclosed as unledgered on October 4.
+`PLURX-FILES.toml` now classifies its defining source as `patched`; the
+`unledgered` table is empty. This is metadata reconciliation, not a new runtime
+acceptance result, upstream disposition or permission to remove a patch.
 
 Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18 and 19: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23 and 24) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24 and 25) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the

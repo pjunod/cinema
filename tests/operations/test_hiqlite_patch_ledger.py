@@ -10,11 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 24),
-    (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 4),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 25),
+    (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 6),
 )
 
-NUMBER_WORDS = {4: "four", 24: "twenty-four"}
+NUMBER_WORDS = {6: "six", 25: "twenty-five"}
 
 # A path a row bullet names, relative to the vendored crate root, written in
 # backticks: `src/writer.rs`, `Cargo.toml`. A repository path such as
@@ -33,8 +33,8 @@ K06_IDENTIFIERS = re.compile(
 # PLURX-FILES.toml `unledgered` table must stay within this set, so the gap can
 # shrink by adding a row but cannot grow without a reviewed edit here.
 KNOWN_UNLEDGERED = {
-    "hiqlite": {"src/transport_status.rs"},
-    "hiqlite-wal": {"src/inspection.rs", "src/lib.rs", "src/status.rs"},
+    "hiqlite": set(),
+    "hiqlite-wal": set(),
 }
 
 # `quick-xml` 0.39.4 is the release RUSTSEC-2026-0194 and RUSTSEC-2026-0195

@@ -445,14 +445,32 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
         &self,
         assignment: &SourceDispatchAssignment,
     ) -> Result<SourceCustodyWrite, StoreError> {
-        let Some(snapshot) = snapshot(self, assignment).await? else {
+        let Some(mut observed) = snapshot(self, assignment).await? else {
             return Ok(SourceCustodyWrite::Refused);
         };
-        let mut next = snapshot.state.clone();
-        if next.seal() == CustodyMutation::Replay {
-            return Ok(SourceCustodyWrite::ExactReplay);
+        for _ in 0..4 {
+            let mut next = observed.state.clone();
+            if next.seal() == CustodyMutation::Replay {
+                return Ok(SourceCustodyWrite::ExactReplay);
+            }
+            match replace(self, assignment, &observed, &next, "1", vec![]).await {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) => {
+                    // Natural driver closure may acknowledge a registration
+                    // between this read and the seal CAS. Retry only when the
+                    // exact ledger moved; unchanged authority/SQL faults remain
+                    // failures and no closure receipt is inferred.
+                    let Some(current) = snapshot(self, assignment).await? else {
+                        return Err(error);
+                    };
+                    if current.revision == observed.revision {
+                        return Err(error);
+                    }
+                    observed = current;
+                }
+            }
         }
-        replace(self, assignment, &snapshot, &next, "1", vec![]).await
+        Err(invalid())
     }
     async fn acknowledge_source_ingress_custody(
         &self,

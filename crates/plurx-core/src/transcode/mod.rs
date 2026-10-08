@@ -40,7 +40,7 @@ pub use decode::{
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{
-    detect_encoders, detect_video_decoders, validate_quality_rate_control,
+    benchmark_encoder, detect_encoders, detect_video_decoders, validate_quality_rate_control,
     validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
     OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
     VideoCodec,

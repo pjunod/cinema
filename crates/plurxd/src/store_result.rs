@@ -104,6 +104,7 @@ operations! {
     RevokeUnboundJellyfinMediaLink => "revoke_unbound_jellyfin_media_link",
     ObserveCandidateLink => "observe_candidate_link",
     ObserveMeasuredLinkPrior => "observe_measured_link_prior",
+    ReclaimReceiverIngress => "reclaim_receiver_ingress",
 }
 
 const OUTCOMES: [&str; 2] = ["ok", "error"];
@@ -424,7 +425,7 @@ mod tests {
         // 46 on main #793, plus the quality cancellation settlement, the
         // Jellyfin unbound media-link revocation, and the acknowledged Link
         // negative's measured-Link prior fold (D6).
-        assert_eq!(Operation::ALL.len(), 49, "one fixed label per audited site");
+        assert_eq!(Operation::ALL.len(), 50, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {

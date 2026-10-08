@@ -347,6 +347,89 @@ impl super::super::sharing::Backend for AdmissionInterleavedStore<'_> {
 }
 
 #[tokio::test]
+async fn sharing_source_ingress_seal_retries_accounting_races_without_losing_closure() {
+    use crate::sharing_ingress_custody::IngressRegistration;
+    use crate::store::sharing_source_ingress_custody::SourceCustodyWrite;
+    for (action, open) in [
+        (AdmissionInterleave::Register, 2),
+        (AdmissionInterleave::Ack, 0),
+        (AdmissionInterleave::AckAll, 0),
+        (AdmissionInterleave::Seal, 1),
+        (AdmissionInterleave::WrongOwner, 0),
+    ] {
+        let store = SqliteStore::open_in_memory().expect("actual Store");
+        let (grant, credential) = setup(&store).await;
+        install_fixture_ingress_context(&store).await;
+        let planned = intent(&store, grant, &credential, "seal-interleave").await;
+        let binding = match store
+            .claim_source_media_session(&planned, &proof())
+            .await
+            .expect("claim")
+        {
+            SourceClaimOutcome::Acquired(value) => value,
+            _ => panic!("fresh claim"),
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &credential, &proof())
+            .await
+            .expect("assignment")
+            .expect("exact owner");
+        let first = IngressRegistration {
+            node_id: "voter".into(),
+            boot_id: planned.request.ingress_registry_boot_id,
+            connection_id: Uuid::new_v4(),
+            driver_sequence: 1,
+            registration_sequence: 1,
+            closed_confirmation: None,
+        };
+        assert_eq!(
+            store
+                .register_source_ingress_custody(&assignment, &first, &proof())
+                .await
+                .expect("registration"),
+            SourceCustodyWrite::Applied
+        );
+        let interleaved = AdmissionInterleavedStore {
+            store: &store,
+            assignment: &assignment,
+            action: std::sync::Mutex::new(Some(action)),
+            second: IngressRegistration {
+                connection_id: Uuid::new_v4(),
+                driver_sequence: 2,
+                registration_sequence: 2,
+                ..first
+            },
+        };
+        let result = interleaved.seal_source_ingress_custody(&assignment).await;
+        if matches!(action, AdmissionInterleave::WrongOwner) {
+            assert!(
+                result.is_err(),
+                "a changed owner is never a retryable accounting race"
+            );
+            continue;
+        }
+        assert!(
+            matches!(
+                result,
+                Ok(SourceCustodyWrite::Applied | SourceCustodyWrite::ExactReplay)
+            ),
+            "{action:?}: {result:?}"
+        );
+        let ledger = store
+            .source_ingress_custody(&assignment)
+            .await
+            .expect("read")
+            .expect("same owner");
+        assert!(ledger.state.is_sealed());
+        assert_eq!(
+            ledger.state.open().count(),
+            open,
+            "{action:?}: seal preserves every registration and actual acknowledgement"
+        );
+    }
+}
+
+#[tokio::test]
 async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses_changed_authority()
 {
     use crate::sharing_ingress_custody::IngressRegistration;

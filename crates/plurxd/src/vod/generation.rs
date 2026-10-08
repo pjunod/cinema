@@ -318,7 +318,7 @@ pub(super) async fn spawn_generation(
                 debug_assert!(receipt.matches(&registration));
             }
             Err(error) => {
-                tracing::warn!(target:"plurxd::vodserve",%error,"generation retirement was superseded")
+                tracing::warn!(target: "plurxd::vodserve",%error,"generation retirement was superseded")
             }
         }
         let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);

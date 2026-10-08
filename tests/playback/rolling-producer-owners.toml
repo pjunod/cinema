@@ -2781,7 +2781,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # heartbeat loop and aborts/joins it before Store shutdown; Drop aborts on panic.
 # Fixture startup owns the existing production passive/quorum metrics sampler;
 # it is aborted and joined before its Store, with Drop cancellation on panic.
-expected_occurrences = 882
+# Batch001 source union: +1 main #859 namespace cancellation fixture; its
+# probe task is cancelled and awaited before checking reaped source ownership.
+# +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
+# terminal status and retains its admission guard through measurement.
+expected_occurrences = 884
 # Promotion union: final count is measured after architectural conflict resolution.
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -2991,6 +2995,8 @@ expected_occurrences = 13
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Resume repair: two graceful-drain test deadlines and a bounded polling
+# wait for the retained forwarding cleanup owner add four test-only timers.
 # Shared ingress custody adds one bounded actual-driver closure wait and two
 # finite regression bounds (independent admission and real HTTP driver closure).
 # The accepted driver owns monitors through their join; no polling owner is added.
@@ -4213,7 +4219,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +6 B known-registration coordination: one original-deadline owned mutex
 # wait in admission; five finite test waits exercise gate/monitor custody.
 # No deadline is extended and no timer or missing row supplies close proof.
-expected_occurrences = 1570
+# Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
+# timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
+# timeout); all observe exact child/source cleanup, never authorize production.
+# +3 #861: startup calibration timeout, idle optimization playback polling and
+# overall rerun timeout. Both calibration deadlines retain previous results on
+# failure; playback preempts the rerun through its existing admission owner.
+expected_occurrences = 1582
 
 
 [[module_structures]]

@@ -53,7 +53,6 @@ crates/plurxd/src/web/pages/settings-live-tv.js	TS2339	8
 crates/plurxd/src/web/pages/settings-panels.js	TS2322	1
 crates/plurxd/src/web/pages/settings-panels.js	TS2339	21
 crates/plurxd/src/web/pages/settings-playback.js	TS2339	40
-crates/plurxd/src/web/pages/settings-system.js	TS2339	1
 crates/plurxd/src/web/pages/settings.js	TS2339	1
 crates/plurxd/src/web/pages/users-admin.js	TS2339	9
 crates/plurxd/src/web/pages/users-admin.js	TS2362	1

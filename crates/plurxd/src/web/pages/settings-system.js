@@ -14,7 +14,7 @@ let USER_DRAWER=null;
 function openUserDrawer(id){
   USER_DRAWER=(USER_DRAWER===id)?null:id;
   renderSettings();
-  const first=document.querySelector(".setdrawer input"); if(first) first.focus();
+  const first=/** @type {HTMLInputElement} */(document.querySelector(".setdrawer input")); if(first) first.focus();
 }
 // The add form and the password reset are the same drawer: a password typed
 // twice. Reset used to be two prompt() dialogs; a form with a confirm field
@@ -202,14 +202,63 @@ function blockedGetsHtml(b){
 function transcoderCard(sys){
   if(!sys.node_id)return "";
   const enc=sys.encoders||{}, active=sys.hwaccel_pref||"auto", requested=sys.hwaccel_requested||active;
-  const choices=[["auto","Auto",true],["nvenc","NVIDIA NVENC",enc.nvenc],["qsv","Intel Quick Sync",enc.qsv],["vaapi","VA-API",enc.vaapi],["videotoolbox","Apple VideoToolbox",enc.videotoolbox],["software","CPU",true]];
-  return `<div class="card"><h2 class="section" style="margin-top:0">Transcoding backend</h2>
-    <p class="muted">Choose for this server node only. Intel graphics can save power on laptops; a discrete NVIDIA GPU can provide more throughput. Auto prefers NVIDIA when available.</p>
+  const optimization=sys.transcoder_optimization||{}, report=optimization.report;
+  const results=report&&Array.isArray(report.results)?report.results:[];
+  const measured=results.filter(row=>Number.isFinite(row.fps)&&row.fps>0&&Number.isFinite(row.relative_to_cpu)&&row.relative_to_cpu>0);
+  const names={software:"CPU",nvenc:"NVIDIA NVENC",qsv:"Intel Quick Sync",vaapi:"VA-API",videotoolbox:"Apple VideoToolbox"};
+  const fastest=measured.slice().sort((a,b)=>b.fps-a.fps)[0];
+  const score=row=>`${row.fps.toFixed(0)} fps · ${row.relative_to_cpu.toFixed(2)}× CPU`;
+  const choices=[["auto",fastest?`Auto — ${names[fastest.backend]||fastest.backend} · ${score(fastest)}`:"Auto — benchmark on startup"]];
+  for(const [value,label] of Object.entries(names)){
+    const row=measured.find(row=>row.backend===value);
+    if(report?!row:value!=="software"&&!enc[value])continue;
+    choices.push([value,`${label} — ${row?score(row):"not measured"}`]);
+  }
+  const available=choices.some(([value])=>value===requested);
+  const pending=sys.hwaccel_restart_required||requested!==active||optimization.restart_required;
+  return `<div class="card" id="transcoder-card"><h2 class="section" style="margin-top:0">Transcoding backend</h2>
+    <p class="muted">Benchmarked automatically at startup. Auto uses the fastest supported backend on this node; an explicit choice stays selected.</p>
     <label for="node-hwaccel">Preferred backend</label>
-    <select id="node-hwaccel" data-node-id="${esc(sys.node_id)}">${choices.map(([value,label,available])=>`<option value="${value}"${value===requested?" selected":""}>${label}${available?"":" — not detected"}</option>`).join("")}</select>
+    <select id="node-hwaccel" data-node-id="${esc(sys.node_id)}">${choices.map(([value,label])=>`<option value="${value}"${value===(available?requested:"auto")?" selected":""}>${esc(label)}</option>`).join("")}</select>
+    ${available?"":`<p class="muted">The saved backend is unavailable. Choose and save an available option.</p>`}
     <p>Active: <b>${esc(sys.encoder_selected||active)}</b> · HDR: ${toneMapHtml(sys.tone_map)}</p>
-    <p class="muted" id="node-hwaccel-status">${sys.hwaccel_restart_required||requested!==active?"Saved choice is waiting for this node to restart.":"Changes apply after restarting this node, when its HDR capabilities are tested again."} If the preferred backend is unavailable, an available backend is used; its name appears above.</p>
-    <button onclick="saveNodeHwaccel(this)">Save</button></div>`;
+    <p class="muted" id="node-hwaccel-status">${pending?"Saved choice or new benchmark is waiting for this node to restart.":"Changes apply after restarting this node, when its HDR capabilities are tested again."}</p>
+    <p class="muted">720p H.264 encoding, 4 Mb/s, 240 frames; median of three runs after warm-up. CPU is 1.00×. Results include encoder startup and frame upload; HDR and source decoding can change real playback speeds.${report?` Last measured: ${esc(new Date(report.measured_at*1000).toLocaleString())}.`:""}</p>
+    <p class="muted" role="status" aria-live="polite">${optimization.running?"Checking capabilities and benchmarking… Playback will stop the benchmark.":optimization.error?esc(optimization.error):"Optimize reruns support checks, benchmarks each backend and checks HDR pipelines. Run while the node is idle."}</p>
+    <button onclick="saveNodeHwaccel(this)">Save</button>
+    <button class="ghost" onclick="optimizeNodeTranscoder(this)"${optimization.running?" disabled":""}>${optimization.running?"Optimizing…":"Optimize"}</button></div>`;
+}
+async function optimizeNodeTranscoder(button){
+  const field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")), node_id=field.dataset.nodeId;
+  button.disabled=true;
+  try{
+    await api("/system/transcoder",{method:"POST",body:JSON.stringify({node_id})});
+    if(SETTINGS_DATA.sys&&SETTINGS_DATA.sys.node_id===node_id){
+      SETTINGS_DATA.sys.transcoder_optimization={...(SETTINGS_DATA.sys.transcoder_optimization||{}),running:true,error:null};
+      const card=document.getElementById("transcoder-card");
+      if(card){const draft=field.value;card.outerHTML=transcoderCard(SETTINGS_DATA.sys);/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")).value=draft;}
+    }
+
+  }catch(error){toast(error.message||"Could not start optimization");button.disabled=false;}
+}
+async function pollTranscoderOptimization(node_id,generation){
+  if(!settingsCurrent(generation,"system"))return;
+  try{
+    const sys=await api("/system");
+    if(!settingsCurrent(generation,"system")||!SETTINGS_DATA.sys||SETTINGS_DATA.sys.node_id!==node_id||sys.node_id!==node_id)return;
+    SETTINGS_DATA.sys=sys;
+    const card=document.getElementById("transcoder-card"), field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel"));
+    if(card&&field&&field.dataset.nodeId===node_id){
+      const draft=field.value;
+      card.outerHTML=transcoderCard(sys);
+      const next=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel"));
+      if(Array.from(next.options).some(option=>option.value===draft))next.value=draft;
+    }
+
+  }catch(error){
+    if(error&&error.status===401)throw error;
+    // The Settings timer retries transient reads; retain the running state.
+  }
 }
 async function saveNodeHwaccel(button){
   const field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")), preference=field.value, node_id=field.dataset.nodeId;
@@ -225,7 +274,7 @@ async function saveNodeHwaccel(button){
 function systemPanel(sys,playbackEvents){
   const enc=sys.encoders||{};
   const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
-    .map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
+    .filter(([,ok])=>ok).map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
   return `${setHead("System",`${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}${systemAttentionHtml(sys)}${transcoderCard(sys)}<div class="card"><h2 class="section" style="margin-top:0">This node</h2>
       <dl class="kvgrid system-grid">
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
