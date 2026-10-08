@@ -8267,3 +8267,118 @@ successor control presence/protocol/path/generation shape, plus fixed known
 or credentials. These observations are prepared, not measured outcomes.
 The tvOS SDK identifies AudioQueue -66681 as CannotStart; the previous route
 metadata does not establish a working audible output. Keep that failure open.
+
+### 10.269 Committed-worker Firefox twenty-transition runtime pass (2026-10-08)
+
+`firefox-67520f7a8-worker-full20-quota-retry3` completes in 1,483,269 ms
+and passes: fifteen manual and five actual Auto transitions, one session,
+one player generation, zero keeper fires, hitches, stalls and case errors.
+The measured server build is `67520f7a8`; TTFF is 2,764 ms and the final
+observed clock ratio is 0.998. Manual callback/video gap maximum is
+84.14 ms; the five Auto changes reach a maximum 84.08 ms. Preserve the
+complete JSON/JUnit, ownership guard and cache-cleanup receipts.
+
+This is the committed shipped-browser callback/transport scope. The receipt
+explicitly calls its video evidence partial; there is no whole-window optical
+or audio capture here. Earlier half-speed optical failures remain failed.
+The two quota interruptions have no campaign verdict and do not contribute
+to the success count. No unit test runs.
+
+The shipped successful harness already removes its runtime/cache and closes
+the browser. The exact guard reports retired_by_harness; the daemon, tracked
+driver and guard-identified runtime are absent. No broad temporary-directory
+or user-cache cleanup occurs. A subsequent separate phone lab backend starts
+on the same compiled server component only after that retirement. Lab build
+228 pairs two requested quality changes with the bounded current-app recorder
+and token-free control-shape diagnostics; its runtime result is still pending.
+The branch's newer `3eae20c61` commit changes documentation only; this remains
+a component-scoped receipt, not a final main promotion receipt.
+
+### 10.270 Native app pixels, missing captured audio and telemetry counting (2026-10-08)
+
+Lab 228 records 23 seconds of actual synthetic AVPlayer video, but its UI
+probe stops before any quality request. Its activity trace shows the initial
+app tap invokes automatic handling of the app-capture system prompt; the
+subsequent explicit prompt wait fails, and accessibility-description collection
+raises a JSON-decoding error. Preserve that failed setup attempt and video.
+The lab harness now handles only the named capture prompt before tapping the
+app and avoids collecting that problematic description during capture.
+
+Lab 229 then passes its two-request UI case against server component
+`67520f7a8`: 41 SDK probes over three sessions observe 720p → 1080p → 720p,
+zero access stalls and no reported prepared/item failure. Its finalized
+77-second own-app movie visibly contains the burned-in source clock. The
+strict clock ROI is calibrated against independently visible counter 269
+in the earlier recording; guard and checksum agree. The preserved whole
+movie analysis has zero observed backwards/skipped counter values where
+readable, but 161 unknown samples and 2,133 capture gaps under the unchanged
+12.5 ms sampling limit. It is incomplete, including menu/startup/background
+regions, and does not qualify physical display continuity. The conservative
+upper hold spans unknown intervals and is not an observed 45-second freeze.
+
+App-audio output registration succeeds but delivers zero buffers/samples;
+the movie contains video only. This narrows missing audio to the capture
+feed, without proving whether physical playback was audible. Camera and
+microphone remain excluded; no normal production audio routing changes.
+Preserve `ios-229-capture-two-requests2*`, the container receipt/movie, optical
+receipt and SDK/control-context receipts.
+
+Four bounded 425 observations classify as publication-or-lease; all fourteen
+observed prepared offers carry valid successor-control shapes. Repeated
+`surface_log_only` reasons are suppressed per attached generation by
+`noteSurfaceLogOnly`. Therefore one emitted control-rebind note is not a
+count of handoffs and cannot establish that the second handoff failed to
+settle. Earlier comments about only one measured rebind retain that limited
+telemetry scope; treat second settlement as not directly counted, rather
+than diagnosing failure from the missing repeated note. A bounded lab 230
+three-request probe is prepared to count actual accepted control responses
+by hashed canonical session namespace. No production fix or unit run is
+justified by the deduplicated note count.
+
+### 10.271 Three native requests and independently accepted control namespaces (2026-10-08)
+
+Lab 230 passes three consecutive requested changes: 720p → 1080p → 720p →
+1080p, 58 SDK probes and no reported failure. The owned proxy separately
+counts successful protocol-valid control responses by SHA-256 of canonical
+session namespace. All four SDK-observed sessions have accepted controls,
+with 12, 15, 16 and 7 replies respectively. Six temporary publication-or-lease
+425 responses do not prevent those accepted exchanges. This confirms the
+reporter reaches each successor; repeated log-note counts were not a reliable
+settlement counter. No speculative production control patch is added.
+
+The bounded movie finalizes at 111 seconds; app-audio registration succeeds
+but again yields zero samples. Preserve `ios-230-capture-three-requests3*`,
+SDK/control-context receipts and the exact retired native230 backend/guard
+receipts. This remains a three-request SDK/app-video scope, not twenty
+transitions or physical audio/display acceptance.
+
+Lab 231 compiles a full fifteen-manual/five-Auto UI series. It starts at
+1080p in landscape, alternates fifteen manual choices down/up, then uses the
+existing Auto choice. A lab-only authenticated coordinator derives link
+stages from the same runtime's observed positive encoded-candidate peaks,
+waits for two advancing SDK probes at each Auto target and ends on failure
+or a 240-second stage timeout. Catalog and initial measured 1080p are checked
+before spending time on the series. Ordinary production policy remains.
+Its app-only recorder is bounded to 1,800 recorded seconds / 1.5 GiB, with
+camera/microphone excluded; read-only numeric route/player audio metadata
+helps distinguish missing capture from mute/volume state. The prior runtime
+retires before the new forty-minute guarded runtime starts. Units remain
+owned by the designated merge session after review and the Fable pause.
+
+### 10.272 Full native startup blocked; continue independent optical work (2026-10-08)
+
+The signed lab 231 full-series app/UI harness compiles. Before any test case
+starts, Xcode reports that 17promax is locked. There are zero playback probes
+and zero transitions; preserve `ios-231-full20-series1-infrastructure-block.json`
+and the launch log instead of assigning a product verdict. The exact waiting
+Xcode process is retired, the proxy receives its owned stop marker, disposable
+launch arguments are cleared, and the forty-minute native backend/guard retire.
+The phone-unlock request remains pending; no unrelated device settings change.
+
+Independent Firefox follow-up keeps shipped source `67520f7a8`, normal
+producers and the unchanged strict optical criteria. It stops only the
+existing D3 acquisition observer before the independent pixel window, to
+measure its contribution rather than speculate about it. Ordinary player
+frame probes remain; this is an observer comparison, not a fully uninstrumented
+shipping qualification. The owned virtual display and exact daemon are bounded
+and guarded. Preserve the separately named d3-stopped1 results. No units run.
