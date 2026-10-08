@@ -8866,3 +8866,40 @@ not playback qualification. TV lab237 compiles/signs with read-only startup
 app/scene/audio-route metadata, preserving production controller equivalence.
 The TV is paired, connected, booted and unlocked; display/audio readiness
 and historical−66681 causality remain unmeasured. No unit tests run.
+
+
+### 10.286 Bracketed pause observations and focused device diagnostics (2026-10-08)
+
+A single fresh Firefox pause capture on909e0c7b7 verifies the actual1:1 ROI,
+1529 bounded callback records without drops, and all4200 pixel packet hashes.
+The post-resume moving window has1022 samples, no unreadable/skipped counters,
+12.400525 ms conservative maximum sampling interval and75.129096 ms hold
+upper bound. Zero lifecycle hitches/stalls are reported: the earlier one-held
+fault does not reproduce, which is not evidence for another fix. The strict
+original result remains failed because raw End samples contain FFmpeg children.
+Stable process/registry joins classify all four samples as background Live TV
+caption probes, not demonstrated lingering VOD writers. Those exact processes
+are absent after owned daemon retirement. Preserve raw census, advisory purpose
+classification and failed verdict; all display/driver/configuration cleanup
+receipts are retained. No physical/audio or full-series acceptance is claimed.
+
+The native236 coordinator's first Auto stage expects1080p independent of
+actual display dimensions. Production Auto chooses the smallest display-fitting
+candidate;720p can be legitimate on a phone. Actual target dimensions and Auto
+predicates were not retained, so this remains a harness hypothesis. Its bounded
+wire observer exhausts64 entries before Auto, and app reporting reclassifies
+coordinator timeout as native_failure before the coordinator overwrites its
+reason. These are evidence/provenance defects, not established decoder faults.
+Lab237 adds bounded read-only Auto facts and an Auto-only method diagnostic,
+starting720p and calling ordinary selectQuality(nil), with no forced target.
+The new observer separately preserves first64/latest128 projected exchanges.
+It never claims full acceptance. Install/launch succeeds after a fresh unlocked
+preflight; a150-second observation is underway on exact server909e0c7b7.
+
+TV lab237 installs successfully, but foreground launch is refused by tvOS:
+System is asleep - foreground app launch forbidden. Preserve sanitized OS
+error and zero-probe SDK setup receipt. Its backend/guard retire before the
+phone campaign. Ask the human to wake the TV; no settings/audio policy change
+is made. The refreshed evidence matrix integrates as7db67e604, with27 rows
+and28 hash-bound references, retaining historical source scopes. Unit tests,
+final adversarial review, Fable pause and merge handoff remain deferred.
