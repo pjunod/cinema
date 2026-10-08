@@ -8568,3 +8568,126 @@ OS automation. It is not evidence for changing trust/developer settings.
 The matrix inventory parses 192 receipts and preserves their source/scope;
 paused-media suspension is a surrogate, and the older read-pressure receipt's
 zero physical read bytes cannot prove disk pressure or shared-reader fairness.
+
+The browser session additionally identifies an acquisition-timestamp limit:
+upstream FFmpeg8.0.1 xcbgrab timestamps before its synchronous image request,
+not after image completion. The retained pipeline uses `x11grab -copyts`,
+120 Hz, the measured cropped ROI, RGB24 nearest-neighbor 336×4, rawvideo and
+framemd5 tee outputs with a 1/1,000,000 encoder timebase. Its closed command
+provenance is preserved in `full20-optical2-recorder-provenance.json` under
+the owned runtime artifacts. It did not separately bracket image acquisition.
+Therefore the eleven point-timestamp lower/upper estimates remain algorithm
+outputs, not latency-corrected actual display-hold bounds. No failed receipt
+is removed or changed. A future bounded acquisition should preserve request
+and reply timing brackets rather than assume the image instant equals PTS.
+
+### 10.278 Parallel integration and app-owned SDK series preparation (2026-10-08)
+
+Integrate the browser session's `629bfbf62` as `31b9ba39d`: standalone offline
+attribution validates every raw packet and exactly reproduces retained metric
+values, without changing verdicts or thresholds. Integrate the source session's
+`e488eb1d8` and `b60c218fc` as `aa2bc875d` and `ed23482d7`: focused lifecycle
+helper, one catalog source-glob, indexed 26-row matrix and SHA-bound inventory.
+Normal child hooks pass pinned compiler/format/JS checks; no units run. The
+helper's runtime is still unrun and does not claim switches, app backgrounding
+or physical/audio proof.
+
+The Apple session's backend-free lab233 readiness reproduces the same OS
+automation-enable timeout with zero cases, while the phone remains unlocked
+and its DDI usable. Runner installation/authorization succeeds and the exact
+owned runner retires. No full native campaign retry or OS trust/developer/route
+change follows. Its copied capture helper and readiness harness compile.
+
+Prepare a fresh ignored lab234 app-owned runner. An owned copy of PlayerView
+adds one registration call and a QA-only task that invokes the unchanged
+`PlayerController.selectQuality` entry point; the primary production source
+is untouched. It waits on the authenticated isolated coordinator for two
+advancing SDK probes at each target, fifteen manual requests spaced at least
+thirty seconds, then the existing catalog-derived five-Auto coordinator.
+Retained/failure outcomes end the series; deadlines stay bounded. CoreDevice
+can launch an authorized own app without XCTest's UI automation mode. This
+is SDK/normal selection-method scope, not menu-tap or physical/audio evidence.
+Compile before any launch; no result is claimed while preparing. No unit
+suite or final adversarial review begins.
+
+Lab234's app-owned runner now compiles and its signed app identity verifies
+as `tv.plurx.cq.qual216`, version234. A fresh phone read still reports
+passcodeRequired=false. Install only this own app and prepare a fresh isolated
+backend/guard; the disposable launch JSON is mode0600 and never printed.
+The app task reports terminal failure back to its authenticated coordinator
+and stops the normal player, so a failed setup/retained outcome cannot leave
+the coordinator waiting silently. Do not count any transitions before
+actual SDK observations. No app-video/audio recorder is enabled for this
+first method-path series; it cannot fill physical/capture acceptance rows.
+
+CoreDevice launch succeeds for own lab234 (exit0), without XCTest automation.
+Initial actual SDK probes advance at 1080p with zero reported failure. The
+series is now active; wait for target observations before counting any
+manual or Auto changes. No UI-tap, capture or physical-output claim follows
+from the successful app launch.
+
+### 10.279 First app-owned request safely retained during startup (2026-10-08)
+
+Lab234 launches normally and emits three advancing initial 1080p SDK probes.
+Its first 720p request then retains current. The actual player reports
+`prepared_offer_ended:reason=declined:seek_pending=true`; the app-owned receipt
+classifies retained_current and the coordinator ends failed. Preserve
+`ios-234-full20-control-{sdk1,context1}.json` and the own-app receipt. Zero
+transitions are completed; do not count a callback/launch as a successful
+series. The old QA receipt's empty manual_requests list contains completed
+observations only and omits this sent intent; record that limitation here.
+Backend/guard retire and the private launch configuration is removed.
+
+Prepare fresh lab235 one-request startup preflight. An owned source copy adds
+a read-only predicate using the existing healthy-incumbent check, no pending
+seek and no retained choice; no production source or guard changes. Its task
+requires advancing initial SDK probes, the predicate and five seconds of
+stable startup before selecting 720p. It logs the request before awaiting
+target observation, so a failed intent remains recorded. The one-request
+receipt explicitly cannot replace the fifteen-manual/five-Auto requirement.
+Compile first; do not rerun the full campaign to discover startup readiness.
+
+Clarify the decline diagnostic: `selectQuality` itself creates a quality-owned
+progress/seek pin before asking for an offer, and `offerPreparedQualityChange`
+logs seek_pending only after the await returns. The post-request flag does
+not establish that a pre-existing startup seek caused the decline. The fresh
+preflight records an explicitly healthy pre-request baseline to distinguish
+that uncertainty; it clears or overrides no pending state and is not a
+production fix. The lab235 compile catches an overbroad copied-view edit
+before any device launch. Restrict it to the appended QA runner, verify
+normal PlayerView and PlayerController byte-equivalence after removing the
+registration/read-only predicate, then compile successfully. Preserve the
+failed compile log and repaired build provenance.
+
+Lab235's repaired compile succeeds and the signed own app installs. The
+focused proxy/backend are prepared, but a fresh pre-launch lock-state read
+reports passcodeRequired=true; do not launch or assign a transition result.
+The unlock request remains pending. Unlike the earlier XCTest automation
+timeout, this is a directly observed lock before the CoreDevice launch.
+Continue independent software work if the device cannot remain ready.
+
+### 10.280 Parallel follow-up diagnostics and focused lifecycle setup (2026-10-08)
+
+Three additional agents work in independent temporary clones: acquisition
+request/reply timing with an independent X11 control counter; native declined
+offer attribution; and shipped fullscreen lifecycle controls. These are
+implementation/diagnostic tasks, not the final adversarial readiness review.
+No unit suites run and no ready merge handoff is sent.
+
+The first invocation of the integrated lifecycle helper ends before server
+startup with `no cases match pause`. Its diagnostic kind collided with the
+playback lab's manifest-name filter. Preserve
+`firefox-67520f7a8-pause-current1.json`; zero playback observations occurred.
+Save the kind separately and remove the reserved filter option before invoking
+the lab. The normal commit hook also finds the optical attribution helper's
+missing functionality-point registration; add its exact path to the existing
+playback point. These are tooling setup repairs, not production fixes.
+
+The fresh phone query still reports passcodeRequired=true. Lab235 remains
+installed but unlaunched. Its unused backend/proxy/guard retire; no native
+transition is claimed. The independent native analysis identifies missing
+bounded control-wire fields in earlier receipts: accepted sequences alone
+cannot distinguish a Source control route from a prepared transcode offer.
+The post-await seek_pending flag still does not establish decline causality.
+A fresh projection should preserve request selection/capability and response
+preparation/action without credentials or raw session identifiers.
