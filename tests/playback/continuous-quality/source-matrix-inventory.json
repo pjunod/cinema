@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "inventory_date": "2026-10-08",
-  "candidate_head": "fe0ed00962d963691d31e5929dd96df4fd0a2b71",
-  "runtime_source": "67520f7a8",
-  "inventory_scope": "192 top-level playback-lab report JSON files plus named sidecars and build ledger \u00a78.3/\u00a710; absence means not located in this inspected set, not proof that no receipt exists elsewhere",
+  "candidate_head": "f1a71d136f37094726fb9c595b93dd2187f29c0c",
+  "runtime_source": "909e0c7b7",
+  "inventory_scope": "615 top-level JSON files parsed for report source/outcome;185 have server.build, and exactly one attests909e0c7b7. Original192-report inventory and its historical receipt hashes retained; fresh selected lifecycle/native sidecars independently SHA256-bound. This is not whole-tree or platform acceptance.",
   "acceptance": "incomplete",
   "rows": [
     {
       "row": "Desktop Firefox / normal / 1x",
-      "classification": "current scoped pass",
+      "classification": "prior-source scoped pass",
       "observed": "Source 67520f7a8: fifteen manual and five actual Auto transitions; one session/player; zero reported hitches/stalls.",
       "remaining": "Callback/transport only; normal/fullscreen and mute state are not separately attested. Full pixel/audio acceptance remains open.",
       "evidence": [
@@ -22,8 +22,8 @@
     },
     {
       "row": "Headed Firefox / capture campaign",
-      "classification": "current failed",
-      "observed": "Fifteen manual; p95 video gap 169.62 ms > 100 ms; Auto absent. Capture incomplete: 221 holes, 76 skipped counters; upper hold 299.988 ms.",
+      "classification": "prior-source failed",
+      "observed": "Source 67520f7a8: Fifteen manual; p95 video gap 169.62 ms > 100 ms; Auto absent. Capture incomplete: 221 holes, 76 skipped counters; upper hold 299.988 ms.",
       "remaining": "Keep failed. Browser optical session owns diagnosis; this inventory does not erase it.",
       "evidence": [
         {
@@ -49,29 +49,45 @@
     },
     {
       "row": "Fullscreen",
-      "classification": "absent explicit row",
-      "observed": "No explicit fullscreen-state continuous-quality receipt located. Headed viewport size alone does not prove fullscreen.",
-      "remaining": "Normal\u2192fullscreen\u2192normal with actual fullscreen element and same attachment; switch in each state.",
-      "evidence": []
+      "classification": "prior-source scoped pass",
+      "observed": "Explicit server.build67520f7a8: trusted shipped fullscreen control, actual #player normal/full/normal; three eight-second windows 0.997545/0.997550/0.998229x; max retained frame gap 84.94ms; End counts 2/0/0/0. No quality requests.",
+      "remaining": "909e0c7b7 state repeat remains unmeasured. Switch in each presentation state and independent physical/pixel/audio evidence still required.",
+      "evidence": [
+        {
+          "receipt": "firefox-67520f7a8-fullscreen-current1.json",
+          "sha256": "0306cf88140a681bd0b5ab40b7469cadbb37624d24004c19499be174e994c924",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "passed"
+        }
+      ]
     },
     {
       "row": "Muted / unmuted",
       "classification": "absent explicit row",
       "observed": "Current continuous fixture has AAC, but presence of audio is not mute-state or captured-audio evidence.",
-      "remaining": "Record actual muted/volume state, switching in both states and independent audio capture for unmuted.",
+      "remaining": "Existing mute-cycle helper supports explicit muted/unmuted state windows, unrun on909e0c7b7. Switching in both states and independent unmuted audio capture remain open.",
       "evidence": []
     },
     {
       "row": "Subtitles",
-      "classification": "absent continuous-family row",
-      "observed": "Current MPEG4/AAC source metadata says subtitles=[]. Existing subtitle-toggle only checks selected/showing text track.",
-      "remaining": "Caption-bearing family; visible cue/time across switches; text-track showing alone cannot prove pixels.",
-      "evidence": []
+      "classification": "fixture/tooling prepared; playback absent",
+      "observed": "Owned caption remux proof is verified: 450 deterministic text cues; all 43,200 video and 84,376 audio packet payloads/timestamps/time bases equal the incumbent, with source/output file hashes. Shipped selector Off/On/Off helper is authored; no subtitle playback receipt inspected.",
+      "remaining": "Run bounded text cue/clock/identity diagnostic after pause lane; retain remux proof. Cue metadata cannot prove visible pixels. Subtitle-plus-switch and physical/audio remain open.",
+      "evidence": [
+        {
+          "receipt": "caption-fixture-f1a71d136-source-packets.json",
+          "receipt_directory": "target/cq-acceptance-runtime/",
+          "sha256": "2b9240ec60c6aac1a67ba54fc74a59c61c3fcb495a1710f00fa8fc5efe040cb8",
+          "reported_source": null,
+          "reported_outcome": "verified;450cues;AVpacket equality",
+          "source_binding": "fixture construction/owned cleanup scope only; no playback qualification"
+        }
+      ]
     },
     {
       "row": "0.5x rate",
-      "classification": "current mixed/failed",
-      "observed": "Current no-D3 short pixel capture passes 95.876 ms upper hold; same report fails one callback hitch. D3-enabled current capture fails 162.572 ms. No quality request in these windows.",
+      "classification": "prior-source mixed/failed",
+      "observed": "Source 67520f7a8 no-D3 short pixel capture passes 95.876 ms upper hold; same report fails one callback hitch. D3-enabled current capture fails 162.572 ms. No quality request in these windows.",
       "remaining": "Keep every result scoped; current rate-plus-switch and audio evidence absent.",
       "evidence": [
         {
@@ -97,8 +113,8 @@
     {
       "row": "2x rate",
       "classification": "older steady pass",
-      "observed": "Source eab5fceb8: measured 2.00546× over 12 s; zero reported stall/hitch/reopen.",
-      "remaining": "No quality transition in rate window; current-source rate-plus-switch evidence absent.",
+      "observed": "Source eab5fceb8: measured 2.00546\u00d7 over 12 s; zero reported stall/hitch/reopen.",
+      "remaining": "Existing current helper supports one rate-2 state/clock window, unrun on909e0c7b7. Quality transition in rate window and audio evidence remain open.",
       "evidence": [
         {
           "receipt": "firefox-eab5fceb8-rate-windows12-first1.json",
@@ -123,8 +139,8 @@
     },
     {
       "row": "Rapid choices",
-      "classification": "current scoped pass",
-      "observed": "720\u2192480\u2192720 final 720p presents in 4,056 ms; same session/player/family; zero reported hitches/stalls.",
+      "classification": "prior-source scoped pass",
+      "observed": "Source 67520f7a8: 720\u2192480\u2192720 final 720p presents in 4,056 ms; same session/player/family; zero reported hitches/stalls.",
       "remaining": "Focused lifecycle evidence only; no pixel/audio acceptance.",
       "evidence": [
         {
@@ -137,9 +153,9 @@
     },
     {
       "row": "Pause / resume",
-      "classification": "older scoped pass",
-      "observed": "Source 25ecd16f4: eight-second pause; Parsed readiness; same session/player; observed 0.999×; zero reported hitches/stalls.",
-      "remaining": "Current-source repeat and pending-switch pause/resume. Do not relabel as app background.",
+      "classification": "current failed",
+      "observed": "Explicit server.build 909e0c7b7: eight-second pause keeps clock/identity; resume reports one held counter. Subsequent eight-second moving window 1.0032975x/gap 83.78ms has no window errors; End counts 0/0/0/0. Overall failed: whole lifecycle hitches 1.",
+      "remaining": "Parent owns held-on-resume diagnosis and focused changed-code check. Clean moving window or End must not erase the retained failure. Pending-switch pause/resume and physical/audio remain open.",
       "evidence": [
         {
           "receipt": "firefox-25ecd16f4-pause-fixed1.json",
@@ -152,13 +168,25 @@
           "sha256": "161e603eaf0d60995a51c57dd672068ad388acdc7570e9cd901a96fbb18301aa",
           "reported_source": null,
           "reported_outcome": null
+        },
+        {
+          "receipt": "firefox-909e0c7b7-pause-current1.json",
+          "sha256": "ec00debe140958d334ec01a87021192ba60d4641c2e845a8d39682edb61c0041",
+          "reported_source": "909e0c7b7",
+          "reported_outcome": "browser_playback"
+        },
+        {
+          "receipt": "firefox-67520f7a8-pause-current2.json",
+          "sha256": "db70935bd72b596d5b00b81d8e728f51e43d273f2b329c3509663a84b7dc0fee",
+          "reported_source": "67520f7a8",
+          "reported_outcome": "browser_playback"
         }
       ]
     },
     {
       "row": "Seek collision",
-      "classification": "current scoped pass",
-      "observed": "Final 720p presents in 2,756 ms; same session/player/family; zero reported hitches/stalls.",
+      "classification": "prior-source scoped pass",
+      "observed": "Source 67520f7a8: Final 720p presents in 2,756 ms; same session/player/family; zero reported hitches/stalls.",
       "remaining": "Separate receipt because harness deduplicates identical fixture/quality/operation names; no physical acceptance.",
       "evidence": [
         {
@@ -178,8 +206,8 @@
     },
     {
       "row": "Explicit End",
-      "classification": "current process-scoped pass",
-      "observed": "Current full headless campaign producer_end samples have zero child FFmpeg processes at 0/1/3/5 s.",
+      "classification": "prior-source process-scoped pass",
+      "observed": "Source 67520f7a8 full headless campaign producer_end samples have zero child FFmpeg processes at 0/1/3/5 s.",
       "remaining": "Does not prove physical queues, all private reader leases or pending callbacks have retired.",
       "evidence": [
         {
@@ -254,8 +282,8 @@
     },
     {
       "row": "Network cliff / recovery",
-      "classification": "current scoped pass",
-      "observed": "Full current Firefox campaign has five actual Auto transitions with catalog-derived shaping.",
+      "classification": "prior-source scoped pass",
+      "observed": "Source 67520f7a8 full Firefox campaign has five actual Auto transitions with catalog-derived shaping.",
       "remaining": "Callback/transport evidence only; physical output and other source/device cases still open.",
       "evidence": [
         {
@@ -314,6 +342,85 @@
       "observed": "Platform owners retain native receipts and failures; desktop evidence cannot qualify these rows.",
       "remaining": "Obtain their source/device-specific runtime evidence through parent; full acceptance remains open.",
       "evidence": []
+    },
+    {
+      "row": "iOS normal-selection full series",
+      "classification": "current method-path full-series failed",
+      "observed": "Lab 236 fresh namespace binds server 909e0c7b7 through launch controller/build ledger; SDK receipt has no server.build field. Fifteen manual requests each observed; 346 playback probes; zero actual Auto changes; series terminal native_failure/app_script_stopped. No UI taps or physical/audio capture.",
+      "remaining": "Parent owns Auto failure diagnosis. Fifteen manual observations do not satisfy fifteen-manual/five-actual-Auto acceptance; no twenty-transition or platform-readiness assertion.",
+      "evidence": [
+        {
+          "receipt": "ios-236-series1-full-control-sdk1.json",
+          "sha256": "227b416a71768b6955d2a95b6914d3c3b7d13f2a47b0ea6b328d799821ae6d28",
+          "reported_source": "909e0c7b7",
+          "reported_outcome": "native-script-series-failed",
+          "source_binding": "launch-controller server_source and exact-source build ledger; SDK itself lacks server.build"
+        },
+        {
+          "receipt": "ios-236-series1-full-control-context1.json",
+          "sha256": "bf6651ac588c6a1397e241cf25b5d0c66f51060d32a2b279af72e6b4b2a2c39c",
+          "reported_source": "909e0c7b7",
+          "reported_outcome": "failed;manual15;Auto0",
+          "source_binding": "paired namespace/coordinator sidecar"
+        },
+        {
+          "receipt": "ios-236-series1-full-app-receipt.json",
+          "sha256": "9860bf818b2bfd7f0856e1cde00893d10997b467b7da9a32c3a1e52d837c6b75",
+          "reported_source": "909e0c7b7",
+          "reported_outcome": "failed;15 observed manual requests",
+          "receipt_directory": "target/cq-acceptance-runtime/",
+          "source_binding": "fresh run namespace and launch-controller binding"
+        },
+        {
+          "receipt": "ios236series1-launch-controller.json",
+          "sha256": "c018eb181364c4139ed76f72a3bcbfab6033c8b4335d84a3cdf59b09b81eeabe",
+          "reported_source": "909e0c7b7",
+          "reported_outcome": "launch metadata",
+          "receipt_directory": "target/cq-acceptance-runtime/",
+          "source_binding": "explicit server_source field; not server.build"
+        },
+        {
+          "receipt": "native236series1-owned-runtime-guard-final.json",
+          "receipt_directory": "target/cq-acceptance-runtime/",
+          "sha256": "0f5716e26f59171db446574dee8b543181ae1aef34572c00f741e3a5ebbb2047",
+          "reported_source": null,
+          "reported_outcome": "owned runtime guard final",
+          "source_binding": "fixture construction/owned cleanup scope only; no playback qualification"
+        }
+      ]
+    }
+  ],
+  "prior_runtime_source": "67520f7a8",
+  "inventory_updated_at": "2026-10-08T17:39:52.025399+00:00",
+  "next_software_cases": [
+    {
+      "priority": 1,
+      "case": "pause resume diagnosis",
+      "action": "Parent preserves current failure and runs only focused case after justified change; no blind retry"
+    },
+    {
+      "priority": 2,
+      "case": "subtitles",
+      "helper": "scripts/continuous-quality-subtitles",
+      "scope": "three8-second Off/On/Off cue/clock/identity windows; actual fixture; no quality requests"
+    },
+    {
+      "priority": 3,
+      "case": "mute-cycle",
+      "helper": "scripts/continuous-quality-lifecycle",
+      "scope": "two8-second mute state windows; no audio-output proof or quality requests"
+    },
+    {
+      "priority": 4,
+      "case": "rate-2",
+      "helper": "scripts/continuous-quality-lifecycle",
+      "scope": "one8-second2x clock window; no quality request or audio-output proof"
+    },
+    {
+      "priority": 5,
+      "case": "fullscreen current-source repeat",
+      "helper": "scripts/continuous-quality-presentation",
+      "scope": "three8-second normal/full/normal windows; prior675 scopedpass remains historical; no quality request"
     }
   ]
 }
