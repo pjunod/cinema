@@ -807,6 +807,19 @@ function verifyFixtureFrameClock(file) {
 }
 
 function verifyFixture(fixture, file) {
+  if (fixture.builder === "mpeg4_aac_mp4_caption_copy") {
+    const recipe = require("./continuous-quality-caption-fixture");
+    const receipt = JSON.parse(fs.readFileSync(`${file}.source-packets.json`, "utf8"));
+    const incumbent = loadManifest().fixtures.find(row => row.id === fixture.source_fixture);
+    if (!incumbent) throw new Error("caption fixture declared source absent");
+    const source = path.join(path.dirname(file), incumbent.filename);
+    if (receipt.status !== "verified" || receipt.source_sha256 !== recipe.fileHash(source)
+        || receipt.output_sha256 !== recipe.fileHash(file)
+        || !Array.isArray(receipt.checks) || receipt.checks.length !== 2
+        || !receipt.checks.every(row => row.identical === true)) {
+      throw new Error("caption fixture has no matching verified stream-copy receipt");
+    }
+  }
   const probe = ffprobe(file);
   const video = probe.streams.find((stream) => stream.codec_type === "video");
   const audio = probe.streams.filter((stream) => stream.codec_type === "audio");
@@ -815,6 +828,7 @@ function verifyFixture(fixture, file) {
   if (!video) failures.push("no video stream");
   const want = {
     h264_aac_mp4: { video: "h264", audio: ["aac"], width: 1920, height: 1080, minDuration: 20 },
+    mpeg4_aac_mp4_caption_copy: { video: "mpeg4", audio: ["aac"], subtitles: 1, width: 1920, height: 1080, minDuration: 1800 },
     mpeg4_aac_mp4_continuous: { video: "mpeg4", audio: ["aac"], width: 1920, height: 1080, minDuration: 1800 },
     h264_multitrack_mkv: { video: "h264", audio: ["aac", "ac3"], subtitles: 1, width: 1920, height: 1080, minDuration: 20 },
     mpeg4_mp3_avi: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 20 },
@@ -880,8 +894,17 @@ async function buildFixtures(manifest, options, wanted) {
     }
     if (!valid) {
       process.stdout.write(`BUILD   ${fixture.id} — ${fixture.description}\n`);
-      const args = fixtureCommand(fixture, output, directory, fixtures);
-      await runProcess("ffmpeg", args, { quiet: true });
+      if (fixture.builder === "mpeg4_aac_mp4_caption_copy") {
+        const incumbent = fixtures.get(fixture.source_fixture);
+        if (!incumbent) throw new Error("caption fixture has no declared source");
+        const source = path.join(directory, incumbent.filename);
+        if (!fs.existsSync(source)) throw new Error("existing encoded-clock source required; caption recipe never rebuilds it");
+        verifyFixture(incumbent, source);
+        await require("./continuous-quality-caption-fixture").remuxFixture(source, output, `${output}.source-packets.json`);
+      } else {
+        const args = fixtureCommand(fixture, output, directory, fixtures);
+        await runProcess("ffmpeg", args, { quiet: true });
+      }
       metadata[fixture.id] = verifyFixture(fixture, output);
     }
     const item = metadata[fixture.id];

@@ -894,6 +894,8 @@ paths = [
   "scripts/continuous-quality-qualification",
   "scripts/continuous-quality-lifecycle",
   "scripts/continuous-quality-presentation",
+  "scripts/continuous-quality-caption-fixture",
+  "scripts/continuous-quality-subtitles",
   "scripts/continuous-quality-lab.mjs",
   "scripts/audio-downmix-qualification/**",
   "tests/fixtures/audio-downmix/**",
