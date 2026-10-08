@@ -36,7 +36,13 @@ notifications. Serialize phone generation, consent generation and transport gene
 changes; snapshot profile/account/phone and generation around every await, dropping
 stale completions. No recovery of a lost one-time phone proof: offer same-user
 delete/new installation. Login rebind is explicit and disables consent per API; never
-silently bind an old consent to a new login.
+silently bind an old consent to a new login. Provide the bounded same-human home
+installation list and explicit selected-installation deletion independently of local
+phone proof, pairing grants and the foreground remote switch. This recovers an orphan
+after local metadata or its one-time proof is lost. Fence list/delete replies to the
+current account; never automatically revoke unknown installations. Corrupt local
+metadata needs a separate explicit local reset whose copy explains that unreachable
+home installations remain until removed while signed in.
 
 Transport rotation: explicit Start -> direct verified HTTPS broker claim (ticket Bearer
 only) -> home Confirm. The authenticated home Start response supplies the ticket
@@ -62,7 +68,13 @@ Add didRegisterForRemoteNotifications/didFail callbacks to the existing
 UIApplicationDelegate, dispatching to the invitation model with identity/generation
 fences. Register APNs only for the explicit notification opt-in flow. Configure
 documented aps-environment entitlement/signing prerequisites without pretending an
-unsigned/simulator build has a delivered provider token.
+unsigned/simulator build has a delivered provider token. The implementation uses
+`clients/apple/iOS.entitlements` and the existing `tv.plurx.app` bundle identifier.
+The broker APNs topic must match that exact signed app identifier. Debug sets
+`APNS_ENVIRONMENT=development` and needs the broker sandbox endpoint; Release sets
+`APNS_ENVIRONMENT=production` and needs production. Use a provisioning profile with
+Push Notifications enabled. The broker README's illustrative topic is not the app's
+actual topic. No new background mode is required for visible APNs invitations.
 
 APNs callbacks carry an app-installation token and no request/account identifier.
 Do not claim they can be correlated to a particular account's registration call.
