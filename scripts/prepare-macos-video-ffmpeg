@@ -97,7 +97,8 @@ def prepare(archive, output, jobs):
              "local_patches": {p.name: package.digest(p) for p in local},
              "contract": {"renderer": "require_dovi=1", "decoder": "hwaccel_flags=+require_hardware",
                           "parse_errors": "err_detect=explode", "decode_metadata": "strict_dovi=1", "tool_failure": "xerror",
-                          "color": "P5 IPT-PQ-C2; no generic default color"},
+                          "color": "P5 IPT-PQ-C2; no generic default color",
+                          "bwdif": "Metal shader parameter buffer index 0"},
              "qualification": "source-prepared-only", "jobs": jobs}
     (output / "prepared-source.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
     return facts

@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import xml.etree.ElementTree as ET
 
 
 TAG = "v8.1.3-1"
@@ -101,8 +102,40 @@ def source_provenance(archive, destination):
     return files
 
 
+def local_svn_source_files(path, config):
+    """Read the already-built working-copy inventory without a remote SVN query."""
+    document = subprocess.check_output(["svn", "--non-interactive", "--no-auth-cache", "--config-dir",
+        str(config), "status", "--verbose", "--xml", str(path)], text=True, timeout=30)
+    root = path.resolve()
+    files = []
+    for entry in ET.fromstring(document).iter("entry"):
+        state = entry.find("wc-status")
+        if state is None or state.get("item") in {"unversioned", "ignored", "external", "missing", "deleted"}:
+            continue
+        item = Path(entry.attrib["path"]).resolve()
+        if not item.is_relative_to(root):
+            raise ValueError("SVN source inventory escapes its working copy")
+        if item.is_file() and not item.is_symlink():
+            files.append((item, str(item.relative_to(root))))
+    if not files:
+        raise ValueError("SVN source inventory contains no tracked files")
+    return sorted(files)
+
+
+def verify_bwdif_metal_binding(source):
+    """Match separate Metal buffer namespaces in the exact compiled source."""
+    host = (source / "libavfilter/vf_bwdif_videotoolbox.m").read_text()
+    shader = (source / "libavfilter/metal/vf_bwdif_videotoolbox.metal").read_text()
+    host_indices = re.findall(r"setBuffer:s->mtlParamsBuffer\s+offset:0\s+atIndex:(\d+)", host)
+    shader_indices = re.findall(r"constant\s+params\s*&\s*p\s*\[\[buffer\((\d+)\)\]\]", shader)
+    if len(host_indices) != 1 or len(shader_indices) != 1 or host_indices != shader_indices:
+        raise ValueError("native BWDIF Metal parameter buffer binding disagrees with shader")
+    return int(host_indices[0])
+
+
 def retain_compiled_source(prepared, evidence):
     """Retain exact local patch inputs and every built dependency's source."""
+    verify_bwdif_metal_binding(prepared / "source")
     manifest = json.loads((prepared / "prepared-source.json").read_text())
     if manifest.get("source_commit") != COMMIT or manifest.get("source_sha256") != SOURCE_SHA256:
         raise ValueError("prepared build does not match pinned Jellyfin source")
@@ -163,12 +196,8 @@ def retain_compiled_source(prepared, evidence):
             with tarfile.open(target, "w:gz") as archive:
                 # LAME source has already been configured; retain original SVN
                 # content with exact revision, not generated native objects.
-                entries = subprocess.check_output(["svn", "--non-interactive", "--no-auth-cache", "--config-dir",
-                    str(prepared / "svn-config"), "list", "--recursive", str(path)], text=True).splitlines()
-                for entry in entries:
-                    item = path / entry
-                    if item.is_file() and not item.is_symlink():
-                        archive.add(item, arcname=entry)
+                for item, name in local_svn_source_files(path, prepared / "svn-config"):
+                    archive.add(item, arcname=name)
             info = subprocess.check_output(["svn", "--non-interactive", "--no-auth-cache", "--config-dir",
                 str(prepared / "svn-config"), "info", "--show-item", "revision", str(path)], text=True).strip()
             facts[path.name] = {"sha256": digest(target), "revision": info, "kind": "svn-source-archive"}

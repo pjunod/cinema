@@ -1850,3 +1850,18 @@ test("Cinema sharing lists endpoint setup and unverified host network without ga
 });
 
 
+test("Mac processing exposes every independent implemented graph while preserving the enabled choice", () => {
+  const requirements=[];let enabled;let graduation;
+  const card=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("macosVideoProcessingCard")} return macosVideoProcessingCard;`)(
+      value=>value,()=>"",(id,title,detail,choice)=>{enabled=choice;return detail;},
+      (readiness,item,id,title,detail)=>{requirements.push({id,title,detail});return detail;},
+      waiting=>{graduation=waiting;return waiting;},()=>"");
+  const html=card({macos_video_processing_enabled:true},{items:[]});
+  assert.equal(enabled,true,"missing compatibility never overrides saved enable");
+  for(const id of ["effective_encoder","sdr_scale","hdr10_metal","hlg_metal","subtitle_burns","deinterlace","dolby_vision","live_upload"])
+    assert.ok(requirements.some(row=>row.id===id),id);
+  assert.match(graduation,/moving-field deinterlacing, strict Dolby Vision and Live TV/);
+  assert.match(html,/Live TV keeps H264 output/);
+  assert.doesNotMatch(html,/Dolby Vision, HLG, burns and interlaced sources retain their existing routes/);
+});

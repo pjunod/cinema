@@ -249,7 +249,18 @@ pub(crate) async fn reprobe_macos_video(
     )
 }
 
-fn macos_video_processing(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+fn macos_effective_encoder_requirement(state: &AppState, preference: &str) -> DeveloperRequirement {
+    let encoder = state.transcode.encoder_for_preference(preference);
+    DeveloperRequirement { id: "effective_encoder", title: "Effective VideoToolbox encoder",
+        status: if encoder == plurx_core::transcode::Encoder::VideoToolbox { RequirementStatus::Met } else { RequirementStatus::Unmet },
+        evidence: format!("The existing Hardware acceleration choice {} resolves on this worker to {}. Mac processing and HEVC output preserve that selection. Auto's startup encode benchmark can select Software even when VideoToolbox graphs work; it does not measure the complete processing cost. Choose VideoToolbox through the existing Hardware acceleration setting when wanted. This advisory result never disables Save or overrides explicit Software.", if preference.is_empty() { "auto" } else { preference }, encoder.label()) }
+}
+
+fn macos_video_processing(
+    state: &AppState,
+    enabled: bool,
+    preference: &str,
+) -> DeveloperEnableItem {
     let report = state.transcode.macos_video_report();
     let requirement = |id, title, observation: &crate::macos_video::GraphObservation| {
         DeveloperRequirement {
@@ -262,20 +273,60 @@ fn macos_video_processing(state: &AppState, enabled: bool) -> DeveloperEnableIte
         evidence: format!("This worker's bounded runtime observation is {} (generation {}). Compatibility requires a working /usr/bin/otool dependency inventory (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both tools, and no DYLD override. It is separate from performance, visual and client qualification.", observation.reason.as_str(), report.generation),
     }
     };
+    let diagnostics = state.transcode.macos_video_diagnostics();
+    let graph_requirement = |id, title, graphs: &[&str]| {
+        let observations: Vec<_> = graphs
+            .iter()
+            .map(|graph| {
+                let row = diagnostics.get("graphs").and_then(|rows| rows.get(*graph));
+                (
+                    row.and_then(|row| row.get("availability"))
+                        .and_then(serde_json::Value::as_str),
+                    format!(
+                        "{graph}: {}",
+                        row.and_then(|row| row.get("reason"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("not_observed")
+                    ),
+                )
+            })
+            .collect();
+        let status = if observations
+            .iter()
+            .all(|(value, _)| *value == Some("available"))
+        {
+            RequirementStatus::Met
+        } else if observations
+            .iter()
+            .any(|(value, _)| value.is_none() || *value == Some("unavailable"))
+        {
+            RequirementStatus::Unmet
+        } else {
+            RequirementStatus::Unknown
+        };
+        DeveloperRequirement { id, title, status,
+            evidence: format!("Independent complete graph observations: {}. A missing or failed graph retains the compatible existing route; this advisory result never changes the saved choice or establishes display/client qualification.", observations.iter().map(|(_, reason)| reason.as_str()).collect::<Vec<_>>().join("; ")) }
+    };
     DeveloperEnableItem {
         id: "macos_video_processing", title: "Mac video processing", enabled: Some(enabled),
         setting: Some("macos_video_processing_enabled"),
         requirements: vec![
+            macos_effective_encoder_requirement(state, preference),
             requirement("sdr_scale", "Progressive SDR scaling", &report.sdr_scale),
             requirement("hdr10_metal", "HDR10 to SDR processing", &report.hdr10_metal),
+            graph_requirement("hlg_metal", "HLG to SDR processing", &["hlg_metal"]),
+            graph_requirement("subtitle_burns", "SDR and HDR10 subtitle burns", &["sdr_text_burn", "hdr10_text_burn", "sdr_bitmap_burn", "hdr10_bitmap_burn"]),
+            graph_requirement("deinterlace", "SDR frame and field deinterlacing", &["sdr_bwdif_frame", "sdr_bwdif_field"]),
+            graph_requirement("dolby_vision", "Strict Dolby Vision profile 5", &["p5_software_cpu", "p5_vt_tonemapx", "p5_software_metal", "p5_vt_metal"]),
+            graph_requirement("live_upload", "Live TV software decode and native processing", &["live_sdr_upload_scale", "live_sdr_upload_bwdif_frame", "live_sdr_upload_bwdif_field"]),
             DeveloperRequirement { id: "delivery_qualification", title: "Visual and streaming qualification",
                 status: RequirementStatus::Unobservable,
-                evidence: "This daemon does not hold an exact-implementation display/client, startup, concurrency or soak qualification receipt. Normalized continuous VOD also requires platform-supported bound source and decoder planning; the production bound decoder-probe path is currently unavailable on Mac. Runtime smoke availability never claims these checks passed and never overrides the saved choice.".into() },
+                evidence: "This daemon does not hold an exact-implementation display/client, startup, concurrency or soak qualification receipt. Normalized continuous VOD also requires platform-bound source facts and compatible decoder/encoder ceilings for each source. Runtime smoke availability never claims these checks passed and never overrides the saved choice.".into() },
         ],
     }
 }
 
-fn macos_hevc_output(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+fn macos_hevc_output(state: &AppState, enabled: bool, preference: &str) -> DeveloperEnableItem {
     let diagnostics = state.transcode.macos_video_diagnostics();
     let requirement = |id, title, graphs: &[&str]| {
         let observations: Vec<_> = graphs
@@ -317,6 +368,7 @@ fn macos_hevc_output(state: &AppState, enabled: bool) -> DeveloperEnableItem {
         id: "macos_hevc_output", title: "Mac HEVC output", enabled: Some(enabled),
         setting: Some("macos_hevc_output_enabled"),
         requirements: vec![
+            macos_effective_encoder_requirement(state, preference),
             requirement("hevc_sdr", "Negotiated SDR HEVC", &["hevc_sdr", "hevc_sdr_host"]),
             requirement("hevc_hdr10", "Negotiated HDR10 Main10 HEVC", &["hevc_hdr10", "hevc_hdr10_host"]),
             DeveloperRequirement { id: "delivery_qualification", title: "Client and HDR presentation qualification",
@@ -448,9 +500,9 @@ pub(crate) async fn readiness(
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
             macos_video_processing(&state, plurx_core::store::stored_switch(
-                settings.get(plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED).map(String::as_str), false)),
+                settings.get(plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED).map(String::as_str), false), settings.get(plurx_core::store::keys::HWACCEL).map(String::as_str).unwrap_or_default()),
             macos_hevc_output(&state, plurx_core::store::stored_switch(
-                settings.get(plurx_core::store::keys::MACOS_HEVC_OUTPUT_ENABLED).map(String::as_str), false)),
+                settings.get(plurx_core::store::keys::MACOS_HEVC_OUTPUT_ENABLED).map(String::as_str), false), settings.get(plurx_core::store::keys::HWACCEL).map(String::as_str).unwrap_or_default()),
             cinema_sharing(
                 &state,
                 plurx_core::store::stored_switch(
