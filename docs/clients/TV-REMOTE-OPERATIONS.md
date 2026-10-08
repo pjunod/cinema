@@ -1,7 +1,7 @@
 # Cinema remotes — setup, recovery and acceptance
 
 **Status:** implementation setup guide; end-to-end and physical acceptance open ·
-**Updated:** 2026-10-07.
+**Updated:** 2026-10-08.
 
 Use the [status ledger](TV-REMOTE-AND-COMPANION-STATUS.md) to identify reviewed
 source and remaining work. These instructions describe the implementation
@@ -79,6 +79,13 @@ The foreground remote remains useful without them. Do not expect a browser
 page or a suspended iPhone app to poll continuously. Final background setup
 instructions must name the implemented broker, consent and permission flows
 before that packet graduates from Developer.
+
+The notification is only a generic invitation. A provider alert already sent can
+arrive after a screen's invitation choice changes. Android's offline check can
+recognize the local installation and whether invitations are still enabled there;
+the opaque payload does not identify an individual screen's consent. A tap always
+checks the exact current screen, consent, login and pairing with the home server.
+It never acquires control or starts playback automatically.
 
 ## Recover without confusing saved pairing and current control
 
