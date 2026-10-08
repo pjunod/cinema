@@ -418,9 +418,101 @@ def install_shipping_package(package, destination):
     shutil.copy2(package / "sealed-ffprobe", Path("/usr/local/lib/plurx/ffprobe"))
 
 
+def package_pipeline(root, jobs, seconds):
+    """Real Bookworm export owner; nothing is emitted from declarations."""
+    import subprocess
+    import urllib.request
+    host()
+    if jobs not in [1, 2] or not 1 <= seconds <= 600:
+        raise ValueError("package export requires at most two jobs and 600 seconds per phase")
+    root = new_private_output(root)
+    root.mkdir(parents=True)  # Never consume a preceding failed generation/build as fresh.
+    inputs = root / "inputs"
+    inputs.mkdir()
+    lock_path = Path(__file__).with_name("linux-video-ffmpeg-sdk-sources.json")
+    lock = json.loads(lock_path.read_text())
+    downloads, embedded_patches = {}, {}
+    def add(name, url, digest):
+        if Path(name).name != name or not url.startswith("https://"):
+            raise ValueError("public source role must use a plain name and HTTPS")
+        claim = (url, digest)
+        if name in downloads and downloads[name] != claim:
+            raise ValueError("colliding immutable input role")
+        downloads[name] = claim
+    for role in [*lock["sources"].values(), *lock.get("build_tools", {}).values()]:
+        add(role["archive"], role["url"], role["archive_sha256"])
+        for patch in role.get("patches", []):
+            if "url" in patch:
+                add(patch["archive"], patch["url"], patch["sha256"])
+            else:
+                embedded_patches[patch["archive"]] = patch
+    for role in lock["distribution_packages"].values():
+        add(role["archive"], role["url"], role["archive_sha256"])
+        for name, member in role["source_offer"]["files"].items():
+            add(name, member["url"], member["sha256"])
+    add("jellyfin-source.tar.gz", "https://codeload.github.com/jellyfin/jellyfin-ffmpeg/tar.gz/refs/tags/v8.1.3-1",
+        "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140")
+    add("jellyfin-bookworm-amd64.deb", "https://repo.jellyfin.org/debian/pool/main/j/jellyfin-ffmpeg/jellyfin-ffmpeg8_8.1.3-1-bookworm_amd64.deb",
+        "4829b34df16843ecf1aca8b1a600874b5c767396e1d1990c889c761fd143d928")
+    deadline = time.monotonic() + seconds
+    total = 0
+    for name, (url, expected) in sorted(downloads.items()):
+        if time.monotonic() >= deadline:
+            raise ValueError("immutable source download deadline exceeded")
+        path = inputs / name
+        with urllib.request.urlopen(url, timeout=min(60, max(1, deadline-time.monotonic()))) as response, path.open("xb") as output:
+            size = 0
+            while chunk := response.read(1024 * 1024):
+                size += len(chunk)
+                total += len(chunk)
+                if size > 256 * 1024**2 or total > 2 * 1024**3 or time.monotonic() >= deadline:
+                    raise ValueError("immutable input download exceeds bounded source budget")
+                output.write(chunk)
+        if sha(path) != expected:
+            raise ValueError("immutable source download checksum mismatch")
+    helper = load("prepare-linux-dolby-sdk")
+    source_members, _ = helper.tar_members((inputs / "jellyfin-source.tar.gz").read_bytes())
+    for name, patch in embedded_patches.items():
+        contents = source_members[patch["member"]]
+        if hashlib.sha256(contents).hexdigest() != patch["sha256"] or Path(name).name != name:
+            raise ValueError("embedded pinned recipe patch differs from authenticated source")
+        (inputs / name).write_bytes(contents)
+    (inputs / "download-manifest.json").write_text(json.dumps(downloads, sort_keys=True, indent=2) + "\n")
+    # This is the authenticated official binary from runtime-assets, before
+    # replacement. Observe its full configuration instead of manufacturing it.
+    buildconf = root / "official-buildconf.txt"
+    helper = load("prepare-linux-dolby-sdk")
+    (official_members, _), _ = helper.package_members((inputs / "jellyfin-bookworm-amd64.deb").read_bytes())
+    official_binary = official_members["usr/lib/jellyfin-ffmpeg/ffmpeg"]
+    if sha(Path("/usr/lib/jellyfin-ffmpeg/ffmpeg")) != hashlib.sha256(official_binary).hexdigest():
+        raise ValueError("official configuration reporter differs from authenticated package")
+    helper.bounded_generator(["/usr/lib/jellyfin-ffmpeg/ffmpeg", "-version"], root,
+                             os.environ.copy(), buildconf, time.monotonic() + 60)
+    sdk = root / "sdk-stage"
+    helper.prepare(inputs / "jellyfin-source.tar.gz", inputs / "jellyfin-bookworm-amd64.deb",
+                   buildconf, lock_path, sha(lock_path), sdk, inputs)
+    helper.generate(sdk, jobs, seconds)
+    build = root / "producer"
+    prepare(inputs / "jellyfin-source.tar.gz", sdk, build)
+    for step in ["configure", "compile", "install"]:
+        build_step(build, step, jobs, seconds)
+    sealed = root / "sealed-ffprobe"
+    sealed_offer = root / "sealed-source"
+    retained_binary = Path("/usr/local/lib/plurx/ffprobe")
+    retained_offer = Path("/usr/share/doc/plurx/ffprobe")
+    # runtime-assets already built this exact sealed probe. Reuse only after
+    # validating actual image/configuration/recipe and the full producer union.
+    validate_parser_union(read_facts(build)["source"], retained_binary, retained_offer)
+    shutil.copy2(retained_binary, sealed)
+    shutil.copytree(retained_offer, sealed_offer)
+    output = root / "package"
+    assemble(build, sealed, sealed_offer, output)
+    return verify_closure(output, seconds)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--step", required=True, choices=["prepare", "configure", "compile", "install", "assemble", "verify-closure", "docker-build", "install-shipping"])
+    parser.add_argument("--step", required=True, choices=["prepare", "configure", "compile", "install", "assemble", "verify-closure", "docker-build", "install-shipping", "pipeline"])
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--sdk", type=Path)
     parser.add_argument("--source-archive", type=Path)
@@ -433,7 +525,9 @@ def main():
     for argument in ["PLURX_BUILD_REF", "PLURX_BUILD_SHA", "SOURCE_DATE_EPOCH"]:
         parser.add_argument("--" + argument.lower().replace("_", "-"), default="")
     args = parser.parse_args()
-    if args.step in ["docker-build", "install-shipping"]:
+    if args.step == "pipeline":
+        facts = package_pipeline(args.root, args.jobs, args.deadline_seconds)
+    elif args.step in ["docker-build", "install-shipping"]:
         if args.output is None:
             parser.error("shipping requires --output actual audited package")
         facts = validate_shipping_package(args.output)

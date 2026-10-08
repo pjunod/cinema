@@ -169,13 +169,36 @@ jobs:
           registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           username: fleet
           password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+      - name: Select the tagged media source contract
+        id: media-contract
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          required=false
+          if test "$ARCH" = amd64 && grep -qx 'FROM scratch AS linux-dolby-package-export' release-source/Dockerfile; then
+            required=true
+          fi
+          echo "dolby_required=$required" >> "$GITHUB_OUTPUT"
+      - name: Build and export the exact audited Bookworm media package
+        if: steps.media-contract.outputs.dolby_required == 'true'
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: release-source
+          file: release-source/Dockerfile
+          target: linux-dolby-package-export
+          platforms: linux/amd64
+          outputs: type=local,dest=linux-dolby-export
+          provenance: false
+          sbom: false
       - name: Publish the reviewed platform runtime by immutable digest
         id: runtime
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: release-source
           file: release-source/Dockerfile
-          target: runtime-assets
+          target: ${{ steps.media-contract.outputs.dolby_required == 'true' && 'runtime-assets-dolby-amd64' || 'runtime-assets' }}
+          build-contexts: ${{ steps.media-contract.outputs.dolby_required == 'true' && 'linux-dolby-package=./linux-dolby-export/package' || '' }}
           platforms: linux/${{ matrix.arch }}
           provenance: false
           sbom: false

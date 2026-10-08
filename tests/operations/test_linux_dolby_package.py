@@ -153,3 +153,22 @@ def test_docker_install_tools_are_temporary_and_build_identity_arguments_survive
     builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()
     assert '*build_arguments' in builder
     assert 'argument + "=" + getattr(args, argument.lower())' in builder
+
+
+def test_package_export_observes_official_configuration_and_reuses_only_matched_parser():
+    root = Path(__file__).resolve().parents[2]
+    builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()
+    pipeline = builder.split("def package_pipeline", 1)[1].split("def main", 1)[0]
+    assert 'helper.package_members' in pipeline
+    assert 'official configuration reporter differs from authenticated package' in pipeline
+    assert '["/usr/lib/jellyfin-ffmpeg/ffmpeg", "-version"]' in pipeline
+    assert pipeline.index('helper.generate(') < pipeline.index('for step in ["configure", "compile", "install"]')
+    assert pipeline.index('validate_parser_union(') < pipeline.index('shutil.copy2(retained_binary')
+    assert pipeline.index('assemble(') < pipeline.index('return verify_closure(')
+    docker = (root / "Dockerfile").read_text()
+    stage = docker.split('FROM runtime-assets AS linux-dolby-package-build', 1)[1].split('FROM runtime-assets AS linux-dolby-install', 1)[0]
+    assert 'test "$TARGETARCH" = amd64' in stage
+    assert '--step pipeline' in stage
+    assert 'FROM scratch AS linux-dolby-package-export' in stage
+    assert 'COPY --from=linux-dolby-package-build /work/linux-dolby/package /package' in stage
+    assert 'cargo' not in stage and 'rust:' not in stage

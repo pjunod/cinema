@@ -247,11 +247,15 @@ pinned Fontconfig requires Meson at least 1.6.1, while the retained Bookworm
 bootstrap has 1.0.1. A private pinned Meson 1.12.1 provider is now prepared
 without global installation; its isolated launcher and retained source tree
 have static identity evidence, but Meson has not run. Further concrete
-prerequisites bring the source lock to 75 roles; the latest executed static
-staging covered 73. The frozen shipping draft still requires a fresh stage,
-actual Bookworm generators, unchanged full producer configure/link closure,
-sealed-parser build and Docker installation qualification. No shipping-ready
-claim follows from these source preparations.
+prerequisites bring the source lock to 75 roles. Static staging now passes
+for all 75 after correcting authenticated Debian source-format handling. The
+first actual Bookworm generator attempt stopped after 21.60 seconds because
+the FFTW recipe omitted its upstream metadata target. The source repair invokes
+`make fftw3f.pc` after float configure; it does not manufacture the file or
+weaken missing-output checks. Fresh static staging passes in 6.59 seconds.
+Actual generation must be retried before producer configure/link, parser and
+shipping qualification. [Evidence §33](MACOS-VIDEO-PROCESSING-EVIDENCE.md#33-linux-sdk-generation-and-release-integration--2026-10-08)
+records the failure, authentic rule and current input identity.
 
 Shipping source `6cdd3755f780bfef215ebd09e190ada2504d3ef1` now connects
 ordinary amd64 `make docker` to the audited package output through a named
@@ -260,8 +264,16 @@ the final image restores `USER plurx`, excludes the installer tools, and retains
 build ref, SHA and source-epoch arguments. ARM and existing default/CI targets
 retain their incumbent paths. The real package is still a build prerequisite:
 no producer image, link closure or hardware route is qualified by this source
-integration alone. The runtime source has also been ported onto `c0691d5ff`,
-preserving the same captured engine and font authority before plan selection.
+integration alone. Combined commit `070ac8814` integrates the Linux runtime
+and shipping source, preserving the same captured engine and font authority.
+Its portable source check and corrected normal hook passed without unit tests.
+
+The local build seam did not cover published images or CI smoke images: both
+used a separate runtime-assets/renderer path. The current shipping candidate
+adds one reusable Bookworm package-export stage and connects both paths to
+its audited output. Media-asset publication does not compile daemon Rust;
+ARM retains its incumbent path. This is source integration, not a claim that
+the package or final image has built successfully.
 
 
 Corrected normal API caption delivery now passes on the signed debug package:
@@ -340,9 +352,13 @@ landing ownership.
 The coordinator admitted two sequential, bounded native commit hooks. The
 manager integration `c0691d5ff` passed in 186 seconds and shipping source
 `6cdd3755f` passed in 172 seconds; both compiler leases are released. Linux
-runtime changes are being combined with that shipping source before the next
-check and release build. Remote generation, GPU and performance windows remain
-held; no unit tests ran in these builder hooks.
+runtime changes were combined in `070ac8814`: source compilation passed in
+263.84 seconds; a catalog-only hook failure was corrected without changing
+Rust or replaying that check, and the normal hook passed in 319.05 seconds.
+The bounded phase used 583.66 seconds in total and released its target. The
+first Bookworm generator phase also settled and released its container. GPU,
+Linux-specific compilation and native release windows remain separately
+controlled; no unit tests ran in these builder hooks.
 
 The coordinator has returned a separate earlier-batch HEVC publication
 failure for priority repair. Its hvcC parser discards `array_completeness`

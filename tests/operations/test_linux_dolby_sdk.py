@@ -254,3 +254,14 @@ def test_debian_source_formats_require_descriptor_bound_archive_and_patch_identi
     del missing["libpciaccess_0.17-2.diff.gz"]
     with unittest.TestCase().assertRaises(ValueError):
         module.validate_debian_source_offer(facts, missing)
+
+
+def test_fftw_float_pkgconfig_is_generated_by_its_upstream_make_target():
+    root = Path(__file__).resolve().parents[2]
+    lock = json.loads((root / "scripts/linux-video-ffmpeg-sdk-sources.json").read_text())
+    generator = lock["sources"]["fftw3"]["generator"]
+    assert generator["commands"][0]["argv"][0] == "./configure"
+    assert "--enable-single" in generator["commands"][0]["argv"]
+    assert generator["commands"][1] == {"cwd": "source", "argv": ["make", "-j{jobs}", "fftw3f.pc"]}
+    assert generator["outputs"]["lib/pkgconfig/fftw3f.pc"] == {"root": "source", "path": "fftw3f.pc"}
+    assert "--enable-threads" in generator["commands"][0]["argv"]

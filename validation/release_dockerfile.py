@@ -43,6 +43,9 @@ def _runtime(source: str) -> str:
     if runtime.count(final_stage) != 1:
         raise ValueError("tagged Dockerfile must contain one final runtime stage")
     assets, final = runtime.split(final_stage, 1)
+    # Later build/export/installer stages are independent targets, never the
+    # default release runtime. Select them explicitly only for audited amd64.
+    final = re.split(r"(?m)^FROM ", final, maxsplit=1)[0]
     # CI-only stages may sit between runtime-assets and the shipped runtime.
     # The release packager needs the assets and final stage, never their
     # toolchains; the default Dockerfile still ends in the shipped runtime.
@@ -90,7 +93,7 @@ def required_debug_binaries(source: str) -> tuple[str, ...]:
     return tuple(debug)
 
 
-def render(source: str, runtime_image: str | None = None) -> str:
+def render(source: str, runtime_image: str | None = None, linux_dolby_package: bool = False) -> str:
     runtime = _runtime(source)
     binaries = required_binaries(source)
     debug = required_debug_binaries(source)
@@ -104,6 +107,16 @@ def render(source: str, runtime_image: str | None = None) -> str:
             + RUNTIME_FINAL_STAGE
             + runtime.split(RUNTIME_FINAL_STAGE, 1)[1]
         )
+    if linux_dolby_package:
+        if runtime_image is not None:
+            raise ValueError("audited package context and immutable runtime image are separate modes")
+        start = "FROM runtime-assets AS linux-dolby-install"
+        end = "FROM runtime AS runtime-dolby-amd64"
+        if source.count(start) != 1 or source.count(end) != 1:
+            raise ValueError("tagged source lacks the audited amd64 package installer")
+        installer = start + source.split(start, 1)[1].split(end, 1)[0]
+        assets, final = runtime.split(RUNTIME_FINAL_STAGE, 1)
+        runtime = assets + installer + "FROM runtime-assets-dolby-amd64 AS runtime" + final
     for name, source_copy, artifact_copy in SUPPORTED_BINARY_COPIES:
         if name in binaries:
             runtime = runtime.replace(source_copy, artifact_copy)
@@ -161,10 +174,13 @@ def main() -> int:
     mode.add_argument("--list-debug-binaries", action="store_true")
     mode.add_argument("--binary-export", action="store_true")
     parser.add_argument("--runtime-image")
+    parser.add_argument("--linux-dolby-package", action="store_true")
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path, nargs="?")
     args = parser.parse_args()
     source = args.source.read_text(encoding="utf-8")
+    if args.linux_dolby_package and (args.binary_export or args.list_binaries or args.list_debug_binaries):
+        parser.error("--linux-dolby-package is only valid when rendering packaging")
     if args.runtime_image and (args.binary_export or args.list_binaries or args.list_debug_binaries):
         parser.error("--runtime-image is only valid when rendering packaging")
     if args.list_binaries or args.list_debug_binaries:
@@ -178,7 +194,7 @@ def main() -> int:
     generated = (
         render_binary_export(source)
         if args.binary_export
-        else render(source, args.runtime_image)
+        else render(source, args.runtime_image, args.linux_dolby_package)
     )
     args.output.write_text(generated, encoding="utf-8")
     return 0

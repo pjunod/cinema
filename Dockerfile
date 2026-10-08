@@ -310,6 +310,22 @@ CMD ["run"]
 # Coherent amd64 shipping entrypoint: scripts/build-linux-dolby-ffmpeg
 # --step docker-build --root CHECKOUT --output AUDITED_PACKAGE --image IMAGE.
 # It rechecks actual bytes before passing this context; ARM uses runtime unchanged.
+FROM runtime-assets AS linux-dolby-package-build
+USER root
+ARG TARGETARCH
+RUN test "$TARGETARCH" = amd64 \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        build-essential python3 pkg-config cmake ninja-build nasm patch curl \
+        autoconf automake libtool libtool-bin gettext texinfo git bison flex clang \
+        zlib1g-dev libbz2-dev liblzma-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-linux-dolby-ffmpeg scripts/prepare-linux-dolby-sdk scripts/prepare-linux-dolby-ffmpeg scripts/build-static-ffprobe scripts/linux-video-ffmpeg-sdk-sources.json /opt/plurx-media/scripts/
+COPY scripts/linux-video-ffmpeg-patches /opt/plurx-media/scripts/linux-video-ffmpeg-patches
+RUN python3 /opt/plurx-media/scripts/build-linux-dolby-ffmpeg --step pipeline \
+    --root /work/linux-dolby --jobs 2 --deadline-seconds 600
+FROM scratch AS linux-dolby-package-export
+COPY --from=linux-dolby-package-build /work/linux-dolby/package /package
+
 FROM runtime-assets AS linux-dolby-install
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
@@ -319,6 +335,12 @@ RUN --mount=from=linux-dolby-package,target=/tmp/linux-dolby-package,ro \
     python3 /usr/local/libexec/build-linux-dolby-ffmpeg --step install-shipping \
         --root /usr/lib/jellyfin-ffmpeg --output /tmp/linux-dolby-package \
     && rm /usr/local/libexec/build-linux-dolby-ffmpeg
+
+FROM runtime-assets AS runtime-assets-dolby-amd64
+USER root
+RUN rm -rf /usr/lib/jellyfin-ffmpeg/lib
+COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg /usr/lib/jellyfin-ffmpeg
+COPY --from=linux-dolby-install /usr/local/lib/plurx/ffprobe /usr/local/lib/plurx/ffprobe
 
 FROM runtime AS runtime-dolby-amd64
 USER root

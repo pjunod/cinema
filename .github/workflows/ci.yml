@@ -1451,11 +1451,23 @@ jobs:
               exit 1
             }
           done
+      - name: Build and export the exact audited Bookworm media package
+        if: matrix.arch == 'amd64'
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          target: linux-dolby-package-export
+          platforms: linux/amd64
+          outputs: type=local,dest=linux-dolby-export
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,scope=package-media-amd64' || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,mode=max,scope=package-media-amd64' || '' }}
       - name: Build the runtime from only the verified binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile.release
+          build-contexts: ${{ matrix.arch == 'amd64' && 'linux-dolby-package=./linux-dolby-export/package' || '' }}
           push: false
           load: true
           platforms: linux/${{ matrix.arch }}

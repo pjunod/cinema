@@ -595,3 +595,37 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_audited_amd64_release_render_excludes_export_tools_and_keeps_arm_incumbent():
+    source = (ROOT / "Dockerfile").read_text()
+    arm = render(source)
+    assert "FROM runtime-assets AS runtime" in arm
+    assert "linux-dolby-package-export" not in arm
+    assert "linux-dolby-install" not in arm
+    amd64 = render(source, linux_dolby_package=True)
+    assert "FROM runtime-assets-dolby-amd64 AS runtime" in amd64
+    assert "--mount=from=linux-dolby-package" in amd64
+    assert "linux-dolby-package-build" not in amd64
+    assert "linux-dolby-package-export" not in amd64
+    assert "cargo build" not in amd64
+    assert "USER plurx" in amd64
+    published = render(source, runtime_image="example.invalid/media@sha256:" + "a" * 64)
+    assert "linux-dolby-install" not in published
+    assert "FROM example.invalid/media@sha256:" in published
+    with unittest.TestCase().assertRaises(ValueError):
+        render(source, runtime_image="example.invalid/media@sha256:" + "a" * 64, linux_dolby_package=True)
+
+
+def test_publish_and_ci_produce_and_consume_same_audited_media_export():
+    publication = WORKFLOW.read_text()
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    for workflow in [publication, ci]:
+        assert "target: linux-dolby-package-export" in workflow
+        assert "outputs: type=local,dest=linux-dolby-export" in workflow
+        assert "linux-dolby-package=./linux-dolby-export/package" in workflow
+    assert "runtime-assets-dolby-amd64" in publication
+    candidate = (ROOT / "scripts/release-package-candidate").read_text()
+    assert '"$target" == x86_64-unknown-linux-gnu' in candidate
+    assert 'media_args+=(--linux-dolby-package)' in candidate
+    assert '"${media_args[@]}"' in candidate

@@ -1274,3 +1274,55 @@ driver identities, and explicitly separate compile-only evidence. It excludes
 media, paths, raw commands, session identifiers, credentials and runtime state.
 The curator is
 `e04fb3b735a5c347b00ededf549f537eb2a9e41309841ecd1a634a79dfcd569d`.
+
+
+## 33. Linux SDK generation and release integration — 2026-10-08
+
+Static staging and actual generation are distinct. The first 75-role static
+stage required a source-format correction: authenticated Debian format 1.0
+uses an original archive plus a declared `.diff.gz`, whereas 3.0 (quilt) uses
+an original archive plus a Debian archive. The helper now checks the genuine
+DSC source/version, exact SHA-256 member set and sizes for each format. The
+original refusal and a blank-continuation parser failure remain retained.
+
+The actual generator used committed source
+`070ac88142ffd2c473e2149dea34371d272e9c1b` and static manifest
+`5898c47a16ad92cf71ac71354b38b269eb90c7556eec7f981ac9f4e81e4a2316`.
+Its source-only helper/lock archive is
+`8823e91a2d40213898db293674c8d2c7be7e43e662f6df876b338e7ab2b16ae7`.
+Fresh preflight observed Debian 12 amd64, GCC 12.2 and Python 3.11.2; input
+hashes passed. The isolated container had two CPUs, 2 GiB, no swap, no GPU
+and no network during generation. No repository metadata or credentials were
+transferred. The attempt failed after 21.60 seconds, without an OOM or timeout;
+its container stopped and its original network configuration was restored.
+
+The failure was an omitted upstream FFTW metadata target. Float configure
+produced `fftw.pc` with `Libs: -lfftw3f`. The authentic Makefile declares
+`PREC_SUFFIX=f`, `pkgconfig_DATA=fftw3f.pc`, and copies `fftw.pc` through the
+`fftw3f.pc` target. Configure alone therefore cannot satisfy that selector.
+
+| Evidence | SHA-256 |
+|---|---|
+| Authenticated FFTW source archive | `5630c24cdeb33b131612f7eb4b1a9934234754f9f388ff8617458d0be6f239a1` |
+| Original `Makefile.am` | `0f4b72d870b6f532de6ca06ae1a97a8be2feec50ac37afd7c4e0e899e02875e4` |
+| Actual generated Makefile | `d1ea4e50ecdca5be544355581563d4e71b183f36dc8cf64f152061b2fb90e1d4` |
+| Actual float `fftw.pc` | `6e8b35f3d26ee0e7f15d9a17d85636e3106ee723e0213b7f6067eebec24f17e6` |
+
+The repair adds the genuine `make -j{jobs} fftw3f.pc` step. Float options,
+expected installed module and missing-output refusal remain unchanged.
+Fresh local static staging passes in 6.59 seconds with approximately 764 MiB
+peak RSS. The new role lock is
+`dd3309c482684114a69a788f104f69ae49a527ef78efa59e9ddd4a87a18d76bb`;
+the new static manifest is
+`68e6a4b63a4e33328e48f4127a298ca5a023800681b2041eca1417ac70be6f2b`.
+It retains 25 upstream dependency sources, 49 distribution roles, one pinned
+Meson provider and all 57 Jellyfin configure tokens. The corrected generator
+has not yet run; generation, linking and runtime qualification remain open.
+
+The shipping source also closes a separate integration gap: published and CI
+smoke images bypassed the local `make docker` seam. Both now have a shared
+Bookworm package-export contract and consume its audited output; the renderer
+selects the architecture-specific runtime while excluding build-tool stages.
+The assets-only publication path does not require daemon Rust compilation.
+No successful export, image build or physical-backend qualification is claimed
+from source or syntax checks alone.

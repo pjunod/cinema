@@ -4995,6 +4995,14 @@
               "--with-combined-threads",
               "--with-incoming-stack-boundary=2"
             ]
+          },
+          {
+            "cwd": "source",
+            "argv": [
+              "make",
+              "-j{jobs}",
+              "fftw3f.pc"
+            ]
           }
         ],
         "outputs": {
