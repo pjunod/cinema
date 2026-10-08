@@ -88,6 +88,46 @@ the opaque payload does not identify an individual screen's consent. A tap alway
 checks the exact current screen, consent, login and pairing with the home server.
 It never acquires control or starts playback automatically.
 
+## Connect home to the invitation broker
+
+This is the B09 configuration contract being integrated, not a provider-delivery
+qualification. Build and initialize the separate broker using its
+[operator guide](../../crates/plurx-notification-broker/README.md), publish its
+loopback listener through verified HTTPS, and configure only the intended home
+publisher. The home daemon never stores APNs/FCM device tokens or provider keys.
+
+Set `PLURX_INVITATION_PUBLISHER_CONFIG` in the home daemon's service environment
+to an operator-owned JSON file with this exact shape. Values below are examples;
+use the identities and generation from the actual broker manifest and home.
+
+```json
+{
+  "broker_origin": "https://broker.example.com",
+  "publisher_id": "f482d5c0-12a4-4b07-9082-7484b60d7c58",
+  "broker_generation": "a640bd62-1a69-4f06-8809-b725310bfad5",
+  "server_instance_id": "your-exact-home-instance",
+  "publisher_secret_file": "/srv/cinema/private/publisher-proof.txt"
+}
+```
+
+Use an HTTPS origin with no path, query, fragment or user information. Keep the
+publisher proof in a separate protected file, containing its canonical
+43-character unpadded base64url text. It must match the broker manifest's
+SHA-256 hash of those text bytes. Use absolute file paths. Keep this proof and
+all provider keys out of the repository and client builds. Restart the home
+daemon after changing the configuration or proof; it loads them once per run.
+A restart does not discard retained broker cleanup.
+
+Enable the independent server invitation switch in Developer and save the
+phone's per-screen invitation choice. Provider or permission readiness remains
+advisory and must not reject that saved choice. Apple signing must match the
+actual `tv.plurx.app` topic and APNs environment described in the
+[native build contract](TV-REMOTE-NATIVE-INVITATIONS-BUILD.md#apple). The phone
+claims its short-lived ticket directly with the broker; the home login and
+pairing proof never accompany that claim. Home confirmation is required before
+provider dispatch becomes eligible. A ready response means setup is eligible,
+not proof that a physical notification arrived.
+
 ## Recover without confusing saved pairing and current control
 
 | Symptom | What to check or do |
