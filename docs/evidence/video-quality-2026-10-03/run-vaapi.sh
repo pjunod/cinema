@@ -20,7 +20,8 @@ container_attempted=false
 watcher=''
 watcher_running() {
  local job
- for job in $(jobs -p); do [ "$job" != "$watcher" ] || return 0; done
+ # Completed jobs may remain in jobs -p until wait; stopped jobs still need KILL.
+ for job in $(jobs -pr) $(jobs -ps); do [ "$job" != "$watcher" ] || return 0; done
  return 1
 }
 cleanup() {
@@ -30,7 +31,7 @@ cleanup() {
  # Bounded TERM (3 s), then KILL (2 s); never wait on a still-running job.
  local watcher_state=not_started watcher_wait_exit='' attempt
  if [ -n "$watcher" ]; then
-  kill "$watcher" 2>/dev/null || true
+  if watcher_running; then kill "$watcher" 2>/dev/null || true; fi
   for ((attempt=0; attempt<30; attempt++)); do
    watcher_running || break
    sleep 0.1

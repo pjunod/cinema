@@ -167,6 +167,43 @@ receipts, not reuse of old passes. No regression, encode or decode was run
 while authoring this continuation; a future failed-cell diagnostic needs its
 own reviewed runtime admission. Input recovery is not S-11 qualification.
 
+**One original-sharp diagnostic and watcher correction (2026-10-08,
+gpt-6.1-sol, `agent:/root/remaining_requirements_audit_sol61`):** one separately
+admitted case used the freshly exported `4a737e92` recipe projection on
+lab6's actual older `8e242787` image/Jellyfin FFmpeg 8.1.3. The reference raw
+SHA-256 is the original `777e283050d76a5d51c723ee0a23d04f2abee492aa02046803441715fb6b17f9`.
+All six media commands returned 0, but the unchanged quality bar **failed**:
+mean error 0.368015, maximum 35 ten-bit codes. Capture version 2 records one
+maximum at x=7, y=360, reference=99, decoded=134; the reference-constant
+interior maximum is 5 (mean 0.28236), versus 35 in transitions/frame borders.
+This locates the observed worst pixel; it does not establish encoder cause,
+fix it, qualify current daemon output, or close physical/client/S-11 bars.
+Output SHA-256 is `9807fc7be12652a8b44f5b13ffb732cfba90333e0699382179a27903aa9a2198`;
+decoded raw SHA-256 is `6c3a33672cb1e21ea7c49dbbdcbd0003c40aba9d48e84eb1db225bd05e982147`.
+These are the new failed-case bytes, not recovered historical d54d/encoded/
+decoded outputs.
+
+The original retention receipt reports watcher `stop_not_confirmed`; the
+outer and read-only recovery receipts also preserved unsuccessful absence
+interpretations; their negative flags remain unchanged. Offline interpretation
+of the recovery's raw Docker exit 1, whitespace-only stdout and exact lowercase
+no-such-object error supports a separate exact-container absence observation;
+its recorded wrapper-group query also found absence. That is not retroactive
+helper success. Recovery did not rerun the case or kill any such group.
+The wrapper's `jobs -p` included completed jobs
+until wait, causing a false unconfirmed watcher status and a five-second
+delay. Its helper now counts running **and stopped** jobs (`jobs -pr` plus
+`jobs -ps`), excludes completed jobs and does not signal a watcher already
+known complete before retrieving its actual wait status. TERM/KILL budgets,
+owned CID recovery, media retention, signals, defaults and quality bars are
+unchanged. One bounded Bash-process regression is authored but not executed
+here; shared source witnesses change the applicable capture control family.
+The batching owner owns those five focused receipts and all broader input
+applicability. No old passing control or media case was replayed by this
+source-only correction; historical failures remain failed.
+The seven failed-case media/report files are retained privately. The original
+batch-cleanup paragraph below retains its #766 scope, not this new case.
+
 The scorer builder/image/containers/volumes and lab6 container/media/control
 scratch are removed. No production settings, queues or deployments changed.
 The batch keeps B-frames and measured per-title encoding in Developer pending

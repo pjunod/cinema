@@ -249,9 +249,13 @@ pub(crate) async fn reprobe_macos_video(
     )
 }
 
-fn macos_effective_encoder_requirement(state: &AppState, preference: &str) -> DeveloperRequirement {
+fn macos_effective_encoder_requirement(
+    id: &'static str,
+    state: &AppState,
+    preference: &str,
+) -> DeveloperRequirement {
     let encoder = state.transcode.encoder_for_preference(preference);
-    DeveloperRequirement { id: "effective_encoder", title: "Effective VideoToolbox encoder",
+    DeveloperRequirement { id, title: "Effective VideoToolbox encoder",
         status: if encoder == plurx_core::transcode::Encoder::VideoToolbox { RequirementStatus::Met } else { RequirementStatus::Unmet },
         evidence: format!("The existing Hardware acceleration choice {} resolves on this worker to {}. Mac processing and HEVC output preserve that selection. Auto's startup encode benchmark can select Software even when VideoToolbox graphs work; it does not measure the complete processing cost. Choose VideoToolbox through the existing Hardware acceleration setting when wanted. This advisory result never disables Save or overrides explicit Software.", if preference.is_empty() { "auto" } else { preference }, encoder.label()) }
 }
@@ -311,7 +315,7 @@ fn macos_video_processing(
         id: "macos_video_processing", title: "Mac video processing", enabled: Some(enabled),
         setting: Some("macos_video_processing_enabled"),
         requirements: vec![
-            macos_effective_encoder_requirement(state, preference),
+            macos_effective_encoder_requirement("effective_encoder", state, preference),
             requirement("sdr_scale", "Progressive SDR scaling", &report.sdr_scale),
             requirement("hdr10_metal", "HDR10 to SDR processing", &report.hdr10_metal),
             graph_requirement("hlg_metal", "HLG to SDR processing", &["hlg_metal"]),
@@ -368,10 +372,10 @@ fn macos_hevc_output(state: &AppState, enabled: bool, preference: &str) -> Devel
         id: "macos_hevc_output", title: "Mac HEVC output", enabled: Some(enabled),
         setting: Some("macos_hevc_output_enabled"),
         requirements: vec![
-            macos_effective_encoder_requirement(state, preference),
+            macos_effective_encoder_requirement("hevc_effective_encoder", state, preference),
             requirement("hevc_sdr", "Negotiated SDR HEVC", &["hevc_sdr", "hevc_sdr_host"]),
             requirement("hevc_hdr10", "Negotiated HDR10 Main10 HEVC", &["hevc_hdr10", "hevc_hdr10_host"]),
-            DeveloperRequirement { id: "delivery_qualification", title: "Client and HDR presentation qualification",
+            DeveloperRequirement { id: "hevc_delivery_qualification", title: "Client and HDR presentation qualification",
                 status: RequirementStatus::Unobservable,
                 evidence: "Independent HEVC negotiation, produced segments, seek/resume, fallback and target clients still require qualification. HDR10 preservation also requires an HDR display and retained effective static metadata. The saved choice is always accepted.".into() },
         ],
