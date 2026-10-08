@@ -525,6 +525,40 @@ async fn run(
     })
 }
 
+/// Exact original-source presentation interval. This is a processing window,
+/// never a replacement source identity or backend qualification.
+#[cfg(target_os = "linux")]
+pub(crate) struct SegmentWindow {
+    pub(crate) start: (i64, u32),
+    pub(crate) end: (i64, u32),
+    pub(crate) max_preroll: u16,
+}
+#[cfg(target_os = "linux")]
+impl SegmentWindow {
+    fn args(&self) -> Result<[String; 3], String> {
+        let (start, sd) = self.start;
+        let (end, ed) = self.end;
+        if start < 0
+            || end < 0
+            || sd == 0
+            || ed == 0
+            || sd > i32::MAX as u32
+            || ed > i32::MAX as u32
+            || i128::from(start) * i128::from(ed) >= i128::from(end) * i128::from(sd)
+            || i128::from(end) * i128::from(sd) - i128::from(start) * i128::from(ed)
+                > 2 * i128::from(sd) * i128::from(ed)
+            || self.max_preroll > 512
+        {
+            return Err("invalid bounded original-source interval".into());
+        }
+        Ok([
+            format!("{start}/{sd}"),
+            format!("{end}/{ed}"),
+            self.max_preroll.to_string(),
+        ])
+    }
+}
+
 /// Direct timestamped NUT transport. The renderer and encoder run concurrently
 /// under one GPU slot and the sum of their concrete CPU budgets. This still
 /// requires a finite fenced segment; it does not seek or qualify a movie.
@@ -533,6 +567,7 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) request: SegmentRequest,
     /// Renderer completion must be bounded even after encoder handoff.
     pub(crate) renderer_deadline: Instant,
+    pub(crate) window: Option<SegmentWindow>,
 }
 
 #[cfg(target_os = "linux")]
@@ -566,6 +601,11 @@ async fn run_streaming(
     stream: StreamingSegmentRequest,
     cancel: CancellationToken,
 ) -> Result<SegmentProducer, String> {
+    let window_args = stream
+        .window
+        .as_ref()
+        .map(SegmentWindow::args)
+        .transpose()?;
     let request = stream.request;
     request.shape.frame_bytes()?;
     let (hardware, cpu) = request.admission.into_parts();
@@ -598,7 +638,9 @@ async fn run_streaming(
         .metadata()
         .map_err(|e| e.to_string())?
         .len();
-    if bytes == 0 || bytes > SOURCE_LIMIT {
+    // Window mode keeps the original movie descriptor. The helper bounds all
+    // header/probe/preroll/window reads together at 128MiB; seeks never reset it.
+    if bytes == 0 || (!windowed && bytes > SOURCE_LIMIT) {
         return Err("finite streaming source exceeds byte envelope".into());
     }
     let original_offset = (&request.source.handle)
@@ -627,6 +669,9 @@ async fn run_streaming(
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
     let mut args = request.shape.renderer_args();
     args.push(fd(5));
+    if let Some(window_args) = window_args {
+        args.extend(window_args);
+    }
     let render = producer_spawn::spawn(
         &request.renderer,
         &args,
@@ -801,6 +846,24 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
         return spawn_streaming(StreamingSegmentRequest {
             request,
             renderer_deadline: Instant::now() + Duration::from_secs(30),
+            window: std::env::var("PLURX_DV_SEGMENT_WINDOW_START")
+                .ok()
+                .map(|start| {
+                    let time = |value: &str| {
+                        let (n, d) = value.split_once('/').expect("exact rational window");
+                        (
+                            n.parse().expect("window numerator"),
+                            d.parse().expect("window denominator"),
+                        )
+                    };
+                    SegmentWindow {
+                        start: time(&start),
+                        end: time(
+                            &std::env::var("PLURX_DV_SEGMENT_WINDOW_END").expect("window end"),
+                        ),
+                        max_preroll: 512,
+                    }
+                }),
         })
         .await;
         #[cfg(not(target_os = "linux"))]
@@ -809,9 +872,44 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
     spawn(request).await
 }
 
+#[cfg(all(target_os = "linux", any(test, plurx_dv_segment_probe)))]
+fn window_argument_regression() {
+    let mut window = SegmentWindow {
+        start: (42, 1000),
+        end: (167, 1000),
+        max_preroll: 512,
+    };
+    assert_eq!(
+        window.args().expect("bounded original-source window"),
+        ["42/1000", "167/1000", "512"]
+    );
+    window.end = (2043, 1000);
+    assert!(
+        window.args().is_err(),
+        "more than two seconds refused exactly"
+    );
+    window.end = (42, 1000);
+    assert!(window.args().is_err());
+    window.end = (167, 1000);
+    window.start = (-1, 1000);
+    assert!(window.args().is_err());
+    window.start = (42, 0);
+    assert!(window.args().is_err());
+    window.start = (42, 1000);
+    window.max_preroll = 513;
+    assert!(window.args().is_err());
+    window.max_preroll = 0;
+    assert!(
+        window.args().is_ok(),
+        "zero preroll is a meaningful strict budget"
+    );
+}
+
 /// Explicit compile-time physical probe, never a daemon route or receipt.
 #[cfg(any(test, plurx_dv_segment_probe))]
 pub(crate) async fn physical_probe() {
+    #[cfg(target_os = "linux")]
+    window_argument_regression();
     use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
     use plurx_core::domain::MediaFile;
     let streaming = std::env::var("PLURX_DV_SEGMENT_STREAMING").is_ok_and(|v| v == "1");
@@ -1270,6 +1368,12 @@ mod tests {
             shape.validate().is_err(),
             "independent layer declarations require supported ratio"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_movie_window_uses_exact_bounded_rationals() {
+        window_argument_regression();
     }
 
     #[test]
