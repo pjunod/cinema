@@ -12,17 +12,17 @@ Main integration is handed to `01a11907-f720-71b1-8c51-89902b919e6f`.
 
 | Packet | Build | Parent review | Evidence |
 |---|---|---|---|
-| Build docs | PR [#862](http://192.168.4.7:3000/noirr/plurx/pulls/862) | Ready; handed to batch coordinator | Documentation only; no unit suite |
-| B01 wire/receiver guard | PR [#864](http://192.168.4.7:3000/noirr/plurx/pulls/864), `3fa57aa1ba80` | No blocker in foundation scope | 11 focused regressions; pinned core compile/Clippy |
-| B02 web semantic router | PR [#865](http://192.168.4.7:3000/noirr/plurx/pulls/865), `502c98761f97` | No blocker in foundation scope | 22 remote + 7 existing keyboard checks; pinned daemon compile |
-| B03 Apple navigation | PR [#863](http://192.168.4.7:3000/noirr/plurx/pulls/863), `93f821c0f320` | No blocker in foundation scope | iOS/tvOS builds, 7 focused XCTest; physical walkthrough pending |
-| B04 storage/server relay | PR [#878](http://192.168.4.7:3000/noirr/plurx/pulls/878), `5d78eee7ace4` | Released to coordinator after exact-head review and static history pass | 16 focused checks; actual two-node signed HTTP and separate three-voter storage evidence |
-| B05 web companion | PR [#883](http://192.168.4.7:3000/noirr/plurx/pulls/883), `f4d8ac12b502` | Released in parent review 107 | Actual browser/server pairing, explicit acquire, playback ACK, owner replacement, offline Pause/Stop, revocation and compact phone layout pass; physical CEC remains open |
-| B06 Apple receiver/companion | PR [#875](http://192.168.4.7:3000/noirr/plurx/pulls/875), `7e66c85c6f98`, composed through [#879](http://192.168.4.7:3000/noirr/plurx/pulls/879) | Reviewed and integrated into coordinator candidate | iOS/tvOS builds and 2 focused follow-up XCTest; earlier 19 cases passed before the narrow correction |
-| B07 Android receiver/companion | PR [#881](http://192.168.4.7:3000/noirr/plurx/pulls/881), `c3e2c6ab0f0e` | Released in parent review 106 | Both APKs compile; grouped 21 cases and final 2 correction cases pass; representative Router smoke passes, production native instrumentation unexecuted |
-| B08 desktop CEC | PR [#872](http://192.168.4.7:3000/noirr/plurx/pulls/872), `08258f51cbb4` | No blocker in standalone software packet | 16 Python + 12 Node checks and production-popup Chromium smoke with native port mocked; hardware pending |
+| Build docs | PR [#862](http://forge.lan:3000/noirr/plurx/pulls/862) | Ready; handed to batch coordinator | Documentation only; no unit suite |
+| B01 wire/receiver guard | PR [#864](http://forge.lan:3000/noirr/plurx/pulls/864), `3fa57aa1ba80` | No blocker in foundation scope | 11 focused regressions; pinned core compile/Clippy |
+| B02 web semantic router | PR [#865](http://forge.lan:3000/noirr/plurx/pulls/865), `502c98761f97` | No blocker in foundation scope | 22 remote + 7 existing keyboard checks; pinned daemon compile |
+| B03 Apple navigation | PR [#863](http://forge.lan:3000/noirr/plurx/pulls/863), `93f821c0f320` | No blocker in foundation scope | iOS/tvOS builds, 7 focused XCTest; physical walkthrough pending |
+| B04 storage/server relay | PR [#878](http://forge.lan:3000/noirr/plurx/pulls/878), `5d78eee7ace4` | Released to coordinator after exact-head review and static history pass | 16 focused checks; actual two-node signed HTTP and separate three-voter storage evidence |
+| B05 web companion | PR [#883](http://forge.lan:3000/noirr/plurx/pulls/883), `f4d8ac12b502` | Released in parent review 107 | Actual browser/server pairing, explicit acquire, playback ACK, owner replacement, offline Pause/Stop, revocation and compact phone layout pass; physical CEC remains open |
+| B06 Apple receiver/companion | PR [#875](http://forge.lan:3000/noirr/plurx/pulls/875), `7e66c85c6f98`, composed through [#879](http://forge.lan:3000/noirr/plurx/pulls/879) | Reviewed and integrated into coordinator candidate | iOS/tvOS builds and 2 focused follow-up XCTest; earlier 19 cases passed before the narrow correction |
+| B07 Android receiver/companion | PR [#881](http://forge.lan:3000/noirr/plurx/pulls/881), `c3e2c6ab0f0e` | Released in parent review 106 | Both APKs compile; grouped 21 cases and final 2 correction cases pass; representative Router smoke passes, production native instrumentation unexecuted |
+| B08 desktop CEC | PR [#872](http://forge.lan:3000/noirr/plurx/pulls/872), `08258f51cbb4` | No blocker in standalone software packet | 16 Python + 12 Node checks and production-popup Chromium smoke with native port mocked; hardware pending |
 | B09 invitations | Storage/authority/admission slice built; home routes, broker and native adapters continue | Design reviewed; early restore/transaction findings corrected | Focused SQLite and actual three-voter contracts pass; provider delivery and resident-service eligibility remain open |
-| B10 integration handoff | Setup/recovery guide in [#877](http://192.168.4.7:3000/noirr/plurx/pulls/877); complete feature handoff waits on remaining packets | Pending | Ready packets handed off individually; whole feature not yet complete |
+| B10 integration handoff | Setup/recovery guide in [#877](http://forge.lan:3000/noirr/plurx/pulls/877); complete feature handoff waits on remaining packets | Pending | Ready packets handed off individually; whole feature not yet complete |
 
 ## Baseline and review record
 
@@ -43,10 +43,10 @@ findings remain evidence-open, with corrections specified in implementation
 
 All three task heads are based on `f6de43cd9df10e20816f49ab83c5542e73f194ab`.
 They retain normal commit hooks and have not merged into the effort. Parent
-reviews are recorded on the exact heads: [B01 review](http://192.168.4.7:3000/noirr/plurx/pulls/864#issuecomment-9159),
-[B02 review](http://192.168.4.7:3000/noirr/plurx/pulls/865#issuecomment-9161),
-[B03 review](http://192.168.4.7:3000/noirr/plurx/pulls/863#issuecomment-9157).
-Combined draft PR [#869](http://192.168.4.7:3000/noirr/plurx/pulls/869) preserves
+reviews are recorded on the exact heads: [B01 review](http://forge.lan:3000/noirr/plurx/pulls/864#issuecomment-9159),
+[B02 review](http://forge.lan:3000/noirr/plurx/pulls/865#issuecomment-9161),
+[B03 review](http://forge.lan:3000/noirr/plurx/pulls/863#issuecomment-9157).
+Combined draft PR [#869](http://forge.lan:3000/noirr/plurx/pulls/869) preserves
 all three task histories. The initial reviewed handoff was
 `1041d72407d937efe265f7263926cacf332e6b22` (tree
 `5cea422aacfcdb78d9385fb0451947263b1ac270`); the batching coordinator now
@@ -67,7 +67,7 @@ lacked recognized PR subjects. The manager recorded exact tree, parent and
 title identities with the existing landing metadata, preserving original
 trailer checks, and two precise immutable trailer errata. Reviewed B08 is
 included in corrected composition PR
-[#876](http://192.168.4.7:3000/noirr/plurx/pulls/876), head
+[#876](http://forge.lan:3000/noirr/plurx/pulls/876), head
 `29f8603bf02284eb80c7fa494effd53ae5fb5a10`, tree
 `f141a366810603f9c6bf395c881c1db86201b388`. Its normal hook and
 committed-head history audit pass: 3356 corrective commits, 482 client
@@ -79,7 +79,7 @@ The foundations' combined Rust 1.97.1 daemon all-target check and complete web
 static target pass.
 Workspace Clippy and iOS/tvOS builds passed before a web-only generated
 manifest/type-annotation correction; the relevant native sources did not
-change. The follow-up [B02 review](http://192.168.4.7:3000/noirr/plurx/pulls/865#issuecomment-9173)
+change. The follow-up [B02 review](http://forge.lan:3000/noirr/plurx/pulls/865#issuecomment-9173)
 records that correction and the unchanged TypeScript diagnostic baseline.
 Dependent task branches may merge these reviewed commits locally while
 integration remains pending; this does not merge the shared effort.
@@ -116,10 +116,10 @@ open.
 
 ## Reviewed desktop packet — source and browser evidence
 
-B08 PR [#872](http://192.168.4.7:3000/noirr/plurx/pulls/872) is frozen at
+B08 PR [#872](http://forge.lan:3000/noirr/plurx/pulls/872) is frozen at
 `08258f51cbb488e4773a7985b12884315bc82157`, tree
 `d4194e8300be9c5f21392f87c24878b9468aaa3c`. The
-[parent review](http://192.168.4.7:3000/noirr/plurx/pulls/872#issuecomment-9195)
+[parent review](http://forge.lan:3000/noirr/plurx/pulls/872#issuecomment-9195)
 records no blocker in the standalone software packet. It does not claim
 physical CEC or complete feature acceptance.
 
@@ -149,11 +149,11 @@ license decision.
 
 ## Reviewed Apple packet — lifecycle and control recovery
 
-B06 PR [#875](http://192.168.4.7:3000/noirr/plurx/pulls/875) is frozen at
+B06 PR [#875](http://forge.lan:3000/noirr/plurx/pulls/875) is frozen at
 `7e66c85c6f98cf59d393d6b9b23f8ce4a0d1da84`, tree
 `2b5e81fd7728beb8dadb64a3934af9cb70dc62df`.
-The [parent review](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9209)
-was followed by a [pairing-lifetime finding](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9213): a late approved result could reopen a closed or replaced target. The correction now binds each pairing operation to its generation, receiver and target, retires it on close/switch and saves an approved proof before selection. The [release review](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9218) removes that hold. A second state-null finding was [withdrawn](http://192.168.4.7:3000/noirr/plurx/pulls/875#issuecomment-9214) after verifying that the API explicitly uses null to mean unchanged. Generic iOS/tvOS simulator
+The [parent review](http://forge.lan:3000/noirr/plurx/pulls/875#issuecomment-9209)
+was followed by a [pairing-lifetime finding](http://forge.lan:3000/noirr/plurx/pulls/875#issuecomment-9213): a late approved result could reopen a closed or replaced target. The correction now binds each pairing operation to its generation, receiver and target, retires it on close/switch and saves an approved proof before selection. The [release review](http://forge.lan:3000/noirr/plurx/pulls/875#issuecomment-9218) removes that hold. A second state-null finding was [withdrawn](http://forge.lan:3000/noirr/plurx/pulls/875#issuecomment-9214) after verifying that the API explicitly uses null to mean unchanged. Generic iOS/tvOS simulator
 builds and two focused pairing/null-timeout checks pass after the correction; nineteen navigation/receiver checks passed on the preceding reviewed source. Final history audit and all normal commit hooks pass on the new head.
 
 The implementation includes scoped Keychain proofs, strict nested command
@@ -183,7 +183,7 @@ preserved, with one exactly identical B03 row deduplicated. Apple source and
 tests remained identical to reviewed B06. No native tests were repeated for
 this metadata composition.
 
-Composition PR [#879](http://192.168.4.7:3000/noirr/plurx/pulls/879), head
+Composition PR [#879](http://forge.lan:3000/noirr/plurx/pulls/879), head
 `859383df8f098993f978e54aebf9d34cce9ac964`, tree
 `d7dff0ede1d0f37fd91565e4f3b47ad5f991a788`, passed normal hooks and final
 history validation: 3361 corrective commits, 487 client anchors, 319 recognized
@@ -194,7 +194,7 @@ landing it into its candidate at `5458a0323bd98732c61a2cb1af21c4cfb669598f`.
 That is candidate integration, not promotion into main. Mobile version counters
 and combined gates remain coordinator-owned.
 
-B04 PR #878 is released in [parent review 105](http://192.168.4.7:3000/noirr/plurx/pulls/878#issuecomment-9252).
+B04 PR #878 is released in [parent review 105](http://forge.lan:3000/noirr/plurx/pulls/878#issuecomment-9252).
 Its final static history audit passes with 3350 corrective commits, 477 client
 anchors, 309 recognized landings and three source changes awaiting their
 intended landing. All twenty-two regression fields resolve. The coordinator
@@ -224,8 +224,8 @@ on it for physical acceptance.
 
 ## Released web and Android composition
 
-The parent released Android in [review 106](http://192.168.4.7:3000/noirr/plurx/pulls/881#issuecomment-9265)
-and web in [review 107](http://192.168.4.7:3000/noirr/plurx/pulls/883#issuecomment-9273),
+The parent released Android in [review 106](http://forge.lan:3000/noirr/plurx/pulls/881#issuecomment-9265)
+and web in [review 107](http://forge.lan:3000/noirr/plurx/pulls/883#issuecomment-9273),
 then handed both frozen heads to the batch coordinator. Android's final review
 corrected claim-start monotonic pairing expiry and preserved an exact command
 ACK across a later queued response. Web's final correction enabled trusted
@@ -285,8 +285,8 @@ The direct command was:
 
 ```bash
 cd clients/android
-ANDROID_HOME=/Users/pjunod/Library/Android/sdk \
-JAVA_HOME=/Users/pjunod/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home \
+ANDROID_HOME=~/Library/Android/sdk \
+JAVA_HOME=~/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home \
 ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest
 ```
 

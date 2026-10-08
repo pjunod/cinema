@@ -111,7 +111,31 @@ class KnownRedContractTest(unittest.TestCase):
         # #811 adds three operator-run ffmpeg 8 fixture checks (captured
         # generations, a captured output and a captured copy pipe), each
         # needing the capture its ignore reason names: 21 -> 24.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 24)
+        # Main #859 adds three explicit Linux namespace controls; Cinema B04
+        # adds a loopback-only synthetic acceptance server. Bind their identities
+        # and environment reasons rather than silently admitting unknown ignores.
+        additional_fixture_reasons = {
+            "crates/plurxd/src/decode_facts.rs::decode_facts::tests::" + name:
+                "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"
+            for name in (
+                "namespace_probe_executes_bound_source_and_denies_secondary_images",
+                "namespace_probe_hides_parent_files_and_reaps_descendants",
+                "namespace_probe_cancellation_kills_started_descendants",
+            )
+        }
+        additional_fixture_reasons[
+            "crates/plurxd/src/http/remote/live_fixture.rs::http::remote::live_fixture::"
+            "remote_live_server_fixture"
+        ] = "explicit loopback-only synthetic acceptance server; stops by file, Ctrl-C or one hour"
+        additional_fixtures = tuple(
+            item for item in ignored if item.identity in additional_fixture_reasons
+        )
+        self.assertEqual(
+            {item.identity: item.reason for item in additional_fixtures},
+            additional_fixture_reasons,
+        )
+        self.assertEqual(len(additional_fixtures), 4)
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 28)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())
