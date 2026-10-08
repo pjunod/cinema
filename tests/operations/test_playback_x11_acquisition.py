@@ -113,3 +113,85 @@ class PlaybackX11DualRoiIntegrityTests(unittest.TestCase):
         self.assertIsNone(failure)  # Existing capture preserves unknown; acceptance rejects it.
         self.assertEqual(next(row for row in rows if row["type"] == "sample")["video_counter"],
                          {"status": "unknown", "frame": None, "valid_rois": []})
+
+class RenderedMappedX(FakeX):
+    def __init__(self, strips):
+        super().__init__(None)
+        self.strips = strips
+
+    def XGetImage(self, display, root, left, top, width, height, *_):
+        self.calls.append((left, top, width, height))
+        raw = bytearray(width * height * 4)
+        # Rasterize the encoded reference cells independently of roi_sampling:
+        # a device pixel center is projected back into the source rectangle.
+        for mapping, frame in self.strips:
+            origin_x, origin_y, scale = mapping
+            cells = [0] + ACQUISITION.bits(frame) + [0]
+            for y in range(height):
+                source_y = (top + y + .5 - origin_y) / scale
+                if not 0 <= source_y < 64:
+                    continue
+                for x in range(width):
+                    source_x = (left + x + .5 - origin_x) / scale
+                    if not 0 <= source_x < 672:
+                        continue
+                    value = 255 * cells[int(source_x // 16)]
+                    offset = (y * width + x) * 4
+                    raw[offset:offset + 3] = bytes([value] * 3)
+        self.buffer = ctypes.create_string_buffer(bytes(raw))
+        self.image = ACQUISITION.XImage(width=width, height=height,
+            data=ctypes.cast(self.buffer, ctypes.c_void_p), byte_order=0,
+            bits_per_pixel=32, bytes_per_line=width * 4,
+            red_mask=255, green_mask=65280, blue_mask=16711680)
+        return ctypes.pointer(self.image)
+
+
+def acquire_mapped(strips):
+    x = RenderedMappedX(strips)
+    args = SimpleNamespace(video=None, video_alternate=None, video_map=strips[0][0],
+        video_alternate_map=strips[1][0] if len(strips) > 1 else None,
+        control=None, seconds=.01, rate=120, stop_file=None)
+    rows = []
+    with TemporaryDirectory() as directory:
+        with patch.object(ACQUISITION.time, "monotonic_ns", side_effect=[0, 0, 100, 200, 300, 400, 1_000_000_000]), \
+             patch.object(ACQUISITION, "paced", return_value=None):
+            failure = None
+            try:
+                ACQUISITION.capture(x, args, rows.append, Path(directory))
+            except RuntimeError as error:
+                failure = str(error)
+        streams = {p.name: p.read_bytes() for p in Path(directory).glob("*.rgb")}
+    return x, rows, streams, failure
+
+
+class PlaybackX11MappedRoiTests(unittest.TestCase):
+    def test_fractional_compact_geometry_preserves_encoded_counter(self):
+        mapping = (10.375, 2.625, .3125)
+        x, rows, streams, failure = acquire_mapped([(mapping, 0x123456)])
+        self.assertIsNone(failure)
+        self.assertEqual(x.calls, [(10, 2, 211, 21)])
+        self.assertEqual(x.destroyed, 1)
+        calibration = rows[0]["calibrated_sampling"]["video"]
+        self.assertEqual(calibration["sampled_x"][:3], [12, 17, 22])
+        self.assertEqual(calibration["sampled_y"], [5, 10, 15, 20])
+        self.assertEqual(streams["video.rgb"], encoded_pixels(0x123456))
+        sample = next(row for row in rows if row["type"] == "sample")
+        self.assertEqual(sample["video_counter"]["frame"], 0x123456)
+        self.assertEqual((sample["request_ns"], sample["reply_ns"]), (100, 200))
+
+    def test_different_scale_conflict_cannot_be_hidden(self):
+        _, rows, streams, failure = acquire_mapped([((.25, .5, .25), 42), ((200.5, 30.25, 1), 43)])
+        sample = next(row for row in rows if row["type"] == "sample")
+        self.assertEqual(sample["video_counter"]["status"], "conflicting")
+        self.assertIn("Conflicting valid video counters", failure)
+        self.assertEqual(streams["video.rgb"], encoded_pixels(42))
+        self.assertEqual(streams["video_alternate.rgb"], encoded_pixels(43))
+        self.assertEqual(rows[-1]["video_counter_conflicts"], 1)
+
+    def test_minimum_cell_pitch_and_invalid_maps_are_explicit(self):
+        _, rows, _, failure = acquire_mapped([((.25, .5, .125), 123)])
+        self.assertIsNone(failure)
+        self.assertEqual(next(row for row in rows if row["type"] == "sample")["video_counter"]["frame"], 123)
+        for mapping in [(0, 0, .1249), (0, 0, float("nan")), (-.1, 0, 1), (0, 0, 4.01)]:
+            with self.subTest(mapping=mapping), self.assertRaises(RuntimeError):
+                ACQUISITION.roi_sampling(mapping)

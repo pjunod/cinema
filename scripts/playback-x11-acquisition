@@ -8,6 +8,9 @@ Wrap each invocation in an owned external timeout (e.g. 130 seconds with a
 5-second kill grace): a hung X server can block synchronous Xlib calls.
 Use --campaign explicitly for up to 1800 seconds, with an external timeout
 longer than that bound. --stop-file accepts only a fresh owned marker path.
+Optional --video-map LEFT,TOP,SCALE maps the reference672x64 encoded stripe
+using independent continuous cell centers; --video-alternate-map allows a
+different measured presentation scale in the same acquisition.
 Optional --video-alternate X,Y samples a second calibrated video location in
 the same XGetImage request. Agreeing counters are accepted; conflicting valid
 counters fail the capture, and neither valid remains unknown.
@@ -53,6 +56,40 @@ def coord(value):
     except ValueError:
         pass
     raise argparse.ArgumentTypeError("Expected nonnegative X,Y coordinates <= 16384")
+
+
+def mapped_roi(value):
+    try:
+        values = tuple(float(part) for part in value.split(","))
+        if len(values) == 3 and all(math.isfinite(n) for n in values):
+            px, py, scale = values
+            if 0 <= px <= 16384 and 0 <= py <= 16384 and .125 <= scale <= 4:
+                return values
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("Expected finite LEFT,TOP,SCALE; origin0..16384, scale1/8..4")
+
+
+def roi_sampling(mapping):
+    """Map the reference672x64 stripe into containing device pixels.
+
+    floor selects the pixel containing each continuous cell-center coordinate;
+    no rounded origin/pitch is accumulated. Four interior rows are independent.
+    """
+    px, py, scale = mapping
+    if not all(math.isfinite(n) for n in mapping) or px < 0 or py < 0 or not .125 <= scale <= 4:
+        raise RuntimeError("Invalid calibrated ROI mapping")
+    xs = [math.floor(px + (8 + 16 * cell) * scale) for cell in range(READ_WIDTH)]
+    ys = [math.floor(py + row * scale) for row in (8, 24, 40, 56)]
+    if len(set(xs)) != READ_WIDTH or len(set(ys)) != HEIGHT:
+        raise RuntimeError("Calibrated cell centers alias device pixels")
+    left, top = math.floor(px), math.floor(py)
+    width, height = math.ceil(px + WIDTH * scale) - left, math.ceil(py + 64 * scale) - top
+    if not all(left <= n < left + width for n in xs) or not all(top <= n < top + height for n in ys):
+        raise RuntimeError("Calibrated samples escape stripe bounds")
+    return {"mapping": list(mapping), "rectangle": [left, top, width, height],
+            "sampled_x": xs, "sampled_y": ys, "rounding": "floor continuous coordinate to containing device pixel",
+            "reference_stripe": [672, 64], "reference_sample_y": [8, 24, 40, 56]}
 
 
 def checksum(frame):
@@ -199,7 +236,7 @@ def control(x, args, emit):
         lib.XSync(display, 0)
 
 
-def strip(image, data, offset):
+def strip(image, data, offset, sampling=None):
     ox, oy = offset
     bpp = image.bits_per_pixel // 8
     order = "little" if image.byte_order == 0 else "big"
@@ -215,10 +252,14 @@ def strip(image, data, offset):
         channels.append((mask, shift, scale))
     rgb = bytearray(READ_WIDTH * HEIGHT * 3)
     for y in range(HEIGHT):
-        row = (oy + y) * image.bytes_per_line + ox * bpp
+        sy = sampling["sampled_y"][y] if sampling else oy + y
+        row = sy * image.bytes_per_line
         for px in range(READ_WIDTH):
             # Preserve each original cell center, including both quiet borders.
-            index = row + (px * 16 + 8) * bpp
+            sx = sampling["sampled_x"][px] if sampling else ox + px * 16 + 8
+            index = row + sx * bpp
+            if not 0 <= sx < image.width or not 0 <= sy < image.height:
+                raise RuntimeError("Sample exceeds acquired image bounds")
             pixel = int.from_bytes(data[index:index + bpp], order)
             for channel, (mask, shift, scale) in enumerate(channels):
                 rgb[(y * READ_WIDTH + px) * 3 + channel] = round(((pixel & mask) >> shift) * 255 / scale)
@@ -227,20 +268,29 @@ def strip(image, data, offset):
 
 def capture(x, args, emit, output):
     boxes = {"video": args.video}
+    mappings = {}
+    for name, option in (("video", "video_map"), ("video_alternate", "video_alternate_map")):
+        mapping = getattr(args, option, None)
+        if mapping is not None:
+            mappings[name] = roi_sampling(mapping)
+            boxes[name] = tuple(mappings[name]["rectangle"][:2])
     if args.video_alternate is not None:
-        if args.video_alternate == args.video:
-            raise RuntimeError("Alternate video strip must use a distinct calibrated location")
         boxes["video_alternate"] = args.video_alternate
     if args.control is not None:
         boxes["control"] = args.control
-        cx, cy = args.control
-        for name, (vx, vy) in boxes.items():
-            if name != "control" and abs(vx - cx) < WIDTH and abs(vy - cy) < HEIGHT:
+    rectangles = {name: mappings[name]["rectangle"] if name in mappings else [*point, WIDTH, HEIGHT]
+                  for name, point in boxes.items()}
+    if "video_alternate" in rectangles and rectangles["video_alternate"] == rectangles["video"] and mappings.get("video") == mappings.get("video_alternate"):
+        raise RuntimeError("Alternate video strip must use a distinct calibrated mapping")
+    if "control" in rectangles:
+        cx, cy, cw, ch = rectangles["control"]
+        for name, (vx, vy, vw, vh) in rectangles.items():
+            if name != "control" and vx < cx + cw and cx < vx + vw and vy < cy + ch and cy < vy + vh:
                 raise RuntimeError("Control and video strips overlap")
-    left = min(p[0] for p in boxes.values())
-    top = min(p[1] for p in boxes.values())
-    width = max(p[0] + WIDTH for p in boxes.values()) - left
-    height = max(p[1] + HEIGHT for p in boxes.values()) - top
+    left = min(r[0] for r in rectangles.values())
+    top = min(r[1] for r in rectangles.values())
+    width = max(r[0] + r[2] for r in rectangles.values()) - left
+    height = max(r[1] + r[3] for r in rectangles.values()) - top
     if width * height > 1048576:
         raise RuntimeError("Bounding rectangle exceeds one million pixels")
     x.inside(left, top, width, height)
@@ -250,7 +300,7 @@ def capture(x, args, emit, output):
     end = start + int(args.seconds * 1e9)
     packet = 0
     conflicts = 0
-    emit({"type": "capture_start", "epoch_ns": start, "end_ns": end, "bounding_rectangle": [left, top, width, height], "strips": boxes})
+    emit({"type": "capture_start", "epoch_ns": start, "end_ns": end, "bounding_rectangle": [left, top, width, height], "strips": boxes, "calibrated_sampling": mappings})
     try:
         while time.monotonic_ns() < end and not stopped(args):
             before = time.monotonic_ns()
@@ -266,7 +316,11 @@ def capture(x, args, emit, output):
                 row = {"type": "sample", "packet": packet, "request_ns": before, "reply_ns": after,
                        "acquisition_ms": (after - before) / 1e6, "strips": {}}
                 for name, (px, py) in boxes.items():
-                    rgb = strip(image, data, (px - left, py - top))
+                    sampling = None
+                    if name in mappings:
+                        sampling = {"sampled_x": [n - left for n in mappings[name]["sampled_x"]],
+                                    "sampled_y": [n - top for n in mappings[name]["sampled_y"]]}
+                    rgb = strip(image, data, (px - left, py - top), sampling)
                     files[name].write(rgb)
                     hashes[name].update(rgb)
                     row["strips"][name] = {"frame": decode(rgb), "sha256": hashlib.sha256(rgb).hexdigest(),
@@ -308,8 +362,12 @@ def main():
         if command == "control":
             sub.add_argument("--at", required=True, type=coord)
         else:
-            sub.add_argument("--video", required=True, type=coord)
-            sub.add_argument("--video-alternate", type=coord, help="Second calibrated video ROI in the same synchronous acquisition; valid counter conflicts fail")
+            primary = sub.add_mutually_exclusive_group(required=True)
+            primary.add_argument("--video", type=coord)
+            primary.add_argument("--video-map", type=mapped_roi, help="Measured stripe LEFT,TOP,SCALE; reference672x64 cell-center sampling")
+            alternate = sub.add_mutually_exclusive_group()
+            alternate.add_argument("--video-alternate-map", type=mapped_roi, help="Second independently calibrated reference stripe mapping")
+            alternate.add_argument("--video-alternate", type=coord, help="Second calibrated video ROI in the same synchronous acquisition; valid counter conflicts fail")
             sub.add_argument("--control", type=coord)
     args = parser.parse_args()
     maximum_seconds = 1800 if args.campaign else 120
