@@ -8903,3 +8903,65 @@ phone campaign. Ask the human to wake the TV; no settings/audio policy change
 is made. The refreshed evidence matrix integrates as7db67e604, with27 rows
 and28 hash-bound references, retaining historical source scopes. Unit tests,
 final adversarial review, Fable pause and merge handoff remain deferred.
+
+
+### 10.287 Real captions pass; Auto facts identify a successor binding defect (2026-10-08)
+
+The caption-bearing909e Firefox diagnostic passes all three shipped selector
+windows: Off→On→Off, active deterministic cues aligned with the film clock,
+clock rates1.00225/1.00229/0.99927, zero reported hitches/stalls and unchanged
+attachment identity. End direct-child census is0/0/0/0. Preserve the original
+passed receipt and exact daemon/display retirement receipts. This is text-track
+state/clock/identity evidence, not quality-plus-subtitle, pixel cue visibility
+or physical/audio acceptance.
+
+Phone lab237 finishes its150-second Auto-only diagnostic with145 read-only
+fact rows and no app error. Actual portrait target is1125×2436, aspect-fitted
+need1125×632.8125; display policy prefers720p. Thus the earlier unconditional
+high-stage1080 expectation is invalid for this target. Preserve the failed
+full-series receipt rather than changing its verdict. After entering Auto,
+fresh transfers report installed_session_current=false and
+installed_candidate_current=false. Source inspection identifies a causal
+binding order: prepared commit installs its observer before assigning the
+successor sessionId, and the later Auto-driven reinstall is skipped for a
+manual→Auto transition. The native agent prepares a minimal product fix;
+receipt absence is investigated separately. No link authority is fabricated.
+The bounded wire observer preserves56 requests/replies in both early/tail
+arrays without eviction. Backend/proxy/guard/private metadata retire.
+
+Long-campaign acquisition support integrates as4defd5e09: explicit campaign
+capture up to1800 seconds and fresh graceful stop marker; focused120-second
+limit remains. Ignored coordinators stream bounded callbacks/clock brackets,
+and the verifier requires actual15-manual/five-Auto original evidence plus
+unchanged100 ms hold/12.5 ms sampling bounds. No full campaign run is claimed.
+An isolated Android UI backend starts on909e and its guarded emulator reaches
+only an explicit localhost reverse port. Normal login/fixture/quality actions
+are delegated; readiness is not a completed transition. Units remain deferred.
+
+
+### 10.288 Android selector diagnosis and display-fitting Auto sequence (2026-10-08)
+
+Android normal UI Connect and Sign in succeed against the explicit owned
+localhost proxy. Exact fixture search/result selection succeeds, then the
+helper's exact Play selector times out: the production detail label contains
+two leading spaces. No playback event or720/1080 request is reported. Preserve
+first fixture failure and the first offscreen Signout selector failure.
+Two bounded Settings swipes expose normal Signout; authentication screen is
+observed, then the app stops and its exact XML dump is removed. The proxy
+finishes its500-second bound, the exact reverse port is removed and backend/
+guard retire. Parent had initially queued instructions to an idle agent rather
+than restarting its task; correct dispatch with followup_task before actual
+UI execution. The ignored helper now trims ASCII padding for Play/Signout
+roles while exact fixture identity and unique-match requirements stay intact.
+No unit tests or production Android changes are made.
+
+Plan§8.3 requires twenty alternating completed changes with at least five
+actual Auto changes; it does not fix the pair to1080/720. The native viewport's
+720 preference is confirmed. Choose720/480 for a later fresh campaign:
+start480, fifteen alternating manual requests end720, then five policy-driven
+low/high/low/high/low changes yield480/720/480/720/480. Mode entry with an
+unchanged height is not counted. Catalog peaks6.16/3.16 Mbps define a3758 kbps
+low stage inside the existing upgrade/downgrade bounds; high remains100 Mbps.
+First verify a single actual cliff after successor identity and receipt proof
+are measured. The failed236 series cannot be extended into a pass. Preserve
+all original continuity limits and unresolved physical/audio scope.
