@@ -32,7 +32,7 @@ export class DesktopWorker{
   async bind(tab){
     // Own the operation before the first await, including cleanup/permissions.
     const generation=++this.generation,epoch=this.nonce();
-    const operationWindow={generation,windowId:tab.windowId};this.operationWindow=operationWindow;
+    const operationWindow={generation,windowId:tab.windowId,tabId:tab.id};this.operationWindow=operationWindow;
     let binding=null,port=null;
     const fence=()=>{if(generation!==this.generation)throw new Error("binding_superseded");};
     try{
@@ -45,10 +45,13 @@ export class DesktopWorker{
       // An explicit popup Bind closes the popup. Give focus restoration a
       // bounded setup window; no input or automatic rebind exists in this state.
       const focusDeadline=this.clock()+500;
-      let result;
+      let result,pinnedDocument=null;
       for(let attempt=0;attempt<11;attempt++){
-        const results=await this.browser.scripting.executeScript({target:{tabId:tab.id,frameIds:[0]},world:"MAIN",func:installBridge,args:[epoch,this.workerId,generation]});
+        const target=pinnedDocument?{tabId:tab.id,documentIds:[pinnedDocument]}:{tabId:tab.id,frameIds:[0]};
+        const results=await this.browser.scripting.executeScript({target,world:"MAIN",func:installBridge,args:[epoch,this.workerId,generation]});
         result=results.find(value=>value.frameId===0);
+        if(!result?.documentId||(pinnedDocument&&result.documentId!==pinnedDocument))throw new Error("document_replaced");
+        pinnedDocument=result.documentId;
         if(result?.documentId)binding={origin,tabId:tab.id,windowId:tab.windowId,documentId:result.documentId,epoch};
         fence();
         if(!result?.result?.focus_pending||this.clock()>=focusDeadline||attempt===10)break;
@@ -146,10 +149,10 @@ export class DesktopWorker{
       run().then(respond,error=>respond({error:error.message}));return true;
     });
     b.webNavigation.onCommitted.addListener(details=>{
-      if(details.frameId===0&&details.tabId===this.binding?.tabId&&details.documentId!==this.binding.documentId)this.unbind("document_replaced");
+      if(details.frameId===0&&(details.tabId===this.operationWindow?.tabId||(details.tabId===this.binding?.tabId&&details.documentId!==this.binding.documentId)))this.unbind("document_replaced");
     });
     b.tabs.onRemoved.addListener(id=>{if(id===this.binding?.tabId)this.unbind("tab_closed");});
-    b.tabs.onActivated.addListener(info=>{if(this.binding&&info.windowId===this.binding.windowId&&info.tabId!==this.binding.tabId)this.unbind("tab_inactive");});
+    b.tabs.onActivated.addListener(info=>{const selected=this.operationWindow||this.binding;if(selected&&info.windowId===selected.windowId&&info.tabId!==selected.tabId)this.unbind("tab_inactive");});
     b.windows.onFocusChanged.addListener(id=>{const windowId=this.operationWindow?.windowId??this.binding?.windowId;if(windowId!==undefined&&(id===b.windows.WINDOW_ID_NONE||id!==windowId))this.unbind("window_inactive");});
     b.runtime.onStartup.addListener(()=>this.unbind("browser_restarted"));
   }

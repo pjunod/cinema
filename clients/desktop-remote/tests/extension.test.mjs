@@ -94,3 +94,15 @@ test("explicit popup setup waits for focus and remains cancellable without openi
   const pending=f.w.bind(tab(1)).catch(e=>e.message);await settle();f.permissions[0].resolve(true);await settle();assert.equal(f.ports.length,0);
   await f.w.unbind();assert.equal(await pending,"binding_superseded");assert.equal(f.ports.length,0);assert.equal(f.w.binding,null);
 });
+
+test("focus setup pins its first document and pending navigation invalidates the operation",async()=>{
+  const f=bindFixture();let attempts=0;const targets=[];
+  f.w.browser.scripting.executeScript=async value=>{
+    if(value.func!==installBridge)return [{frameId:0,documentId:value.target.documentIds[0],result:true}];
+    targets.push(value.target);attempts++;
+    return [{frameId:0,documentId:attempts===1?"document-1":"replacement",result:attempts===1?{ready:false,focus_pending:true}:{ready:true,epoch:value.args[0]}}];
+  };
+  const pending=f.w.bind(tab(1)).catch(e=>e.message);await settle();f.permissions[0].resolve(true);assert.equal(await pending,"document_replaced");
+  assert.deepEqual(targets[1],{tabId:1,documentIds:["document-1"]});assert.equal(f.ports.length,0);assert.equal(f.w.binding,null);
+  const g=bindFixture();g.w.start();await settle();const navigation=g.w.bind(tab(1)).catch(e=>e.message);await settle();g.listeners.committed({frameId:0,tabId:1,documentId:"replacement"});g.permissions[0].resolve(true);assert.equal(await navigation,"binding_superseded");assert.equal(g.ports.length,0);
+});
