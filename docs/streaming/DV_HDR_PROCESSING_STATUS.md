@@ -45,7 +45,7 @@ DV-off validation. Current playback keeps its compatible fallback.
 | M1 typed contracts | Merged in #933: 25 focused and six compatibility tests passed; production registry empty | Runtime integration and qualification in M2/M3 |
 | M2 processing and lifecycle | In progress: combined bounded P7/FEL to timestamped HDR10 helper | Persistent bounded-segment graph, producer ownership/admission and output evidence |
 | M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
-| M4 settings and HDR10-E badge | Settings merged in #937: two default-off preferences persist independently with advisory Developer cards; receipt-backed client presentation in progress | Effective-generation reporting, runtime integration and route qualification |
+| M4 settings and HDR10-E badge | Settings merged in #937: two default-off preferences persist independently with advisory Developer cards; receipt-backed web/Apple/Android presentation built and reviewed | Effective-generation reporting, runtime integration and route qualification |
 | M5 quality and performance | Not started; M0 supplies the measurement foundation | Held-out corpus, matched bitrate, physical playback and full graph performance |
 | M6 release qualification | Not started | Exact-tree gates and separate acceptance for each proposed route |
 
@@ -343,3 +343,36 @@ No production registry entry or route is enabled by this finite proof.
 
 Settings merged in PR #937 at `a23d550401da292c9c19c9da3e1e213603ff0b1a`,
 with all five named landing regressions retained and no broad CI dispatch.
+
+
+## 12. Effective processing report and HDR10-E presentation
+
+The additive `effective_processing` sidecar carries the active playback control
+generation, `hdr10_enhanced`, separate FEL contribution and applied operations.
+Its only core constructor derives the M1 generation digest from the canonical
+UUID using the fixed `plurx.dv.playback-generation.v1` domain plus a zero byte
+and the UUID's 16 bytes. It then checks the unchanged production registry,
+plan, generation and current object shape. There is no caller-supplied
+independent digest/UUID pairing. The registry remains empty and every current
+production response constructor supplies no report.
+
+The sidecar is omitted when absent and ignored when deserializing a durable
+response, preventing stored JSON from restoring processing authority. Web,
+Apple and Android require delivered HDR10, a valid matching active generation
+and an accepted report before displaying **HDR10-E**, expanded as
+“Dolby Vision–enhanced HDR10.” FEL details are separate. Source metadata,
+preferences and intended plans are insufficient. Display output remains
+unverified independently of server processing.
+
+Missing reports, replacement, failure and seek clear the presentation. Review
+caught Apple relative and manual/automatic marker jumps bypassing the public
+seek method; clearing at the shared seek boundary now covers those paths,
+with an actual-controller regression. This is reviewed reporting and client
+plumbing, not backend admission or proof that current playback is enhanced.
+
+Focused checks passed: two core regressions, one HLS omission/durable-discard
+regression, four web badge controls, four Apple presentation/controller tests
+and 20 Android MediaFacts checks. Affected Rust checking/Clippy, iOS and tvOS
+compilation, Android compilation and JavaScript syntax passed. No broad suite
+or CI dispatch was run. The finite combined proof merged in PR #940 at
+`75cb8f80b58febe2aaddfd3fee2017c9bf1bf760`.

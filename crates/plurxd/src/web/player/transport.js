@@ -209,6 +209,7 @@ function watchPlaybackSeekTelemetry(p,pending,v){
 function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry=null,
   {preserveContinuousManualQuality=false}={}){
   if(!p) return null;
+  clearEffectiveProcessing(p);
   const intentGeneration=supersedeIntent
     ? supersedePlaybackControlIntent(p,{preserveContinuousManualQuality}) : (p.controlIntentGeneration||0);
   const sequence=(p.controlSeekSequence||0)+1;

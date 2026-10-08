@@ -398,6 +398,7 @@ class PlaybackControlSession(
         linkReceipt: () -> String? = { null },
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
         onSubtitleReady: () -> Unit = {},
+        onProcessingGeneration: (String?) -> Unit = {},
         /** The server has given up on the selected track, not merely not got to it. */
         onSubtitleUnavailable: () -> Unit = {},
         onPrepare: (ControlAction) -> Unit = {},
@@ -456,6 +457,7 @@ class PlaybackControlSession(
                 // exchange that has already come back with nothing.
                 synchronized(answerLock) {
                     if (generation == answerGeneration) {
+                        onProcessingGeneration(if (exchange.response == null) null else exchange.request.generation)
                         answersSeen += 1
                         if (exchange.failure == "transport:409:owner_changed") {
                             ownerChangesSeen += 1

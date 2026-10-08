@@ -867,3 +867,42 @@ fn exhausted_episode_stays_exhausted_and_failure_requires_an_active_attempt() {
         assert_eq!(episode.failures, 1);
     }
 }
+
+#[test]
+fn playback_generation_digest_is_domain_separated_and_validates_uuid() {
+    let generation = "00000000-0000-0000-0000-000000000001";
+    let digest = dv_playback_generation_digest(generation).expect("valid UUID");
+    assert_eq!(
+        digest.as_str(),
+        "5b04dd287bde74e654bbe2dffbe1c5558891f277f10c9fabe215a2a9eb4eff68"
+    );
+    assert_ne!(
+        digest,
+        dv_playback_generation_digest("00000000-0000-0000-0000-000000000002").expect("valid UUID")
+    );
+    assert!(dv_playback_generation_digest("not-a-generation").is_err());
+}
+
+#[test]
+fn effective_report_cannot_turn_synthetic_receipt_into_hdr10_enhancement() {
+    let plan = plan(DvDestination::Hdr10);
+    let mut observer = make_observer(plan.clone(), 0, 1);
+    observer
+        .record_decoded(key(0), duration())
+        .expect("decoded");
+    observer.accept(frame(&plan, 0)).expect("accepted");
+    observer.emit(&key(0)).expect("emitted");
+    let receipt = settle(&observer, &[key(0)]).expect("settled synthetic receipt");
+    assert!(receipt
+        .hdr10_effective_report(
+            &DvProductionRegistry,
+            &plan,
+            "00000000-0000-0000-0000-000000000001",
+            &digest('c')
+        )
+        .expect("valid playback identity")
+        .is_none());
+    assert!(receipt
+        .hdr10_effective_report(&DvProductionRegistry, &plan, "invalid", &digest('c'))
+        .is_err());
+}

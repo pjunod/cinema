@@ -953,6 +953,7 @@
             },
         };
         let start = StartResponse {
+            effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
@@ -1812,6 +1813,7 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+            effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
@@ -2135,6 +2137,7 @@
             },
         };
         let start = StartResponse {
+            effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
@@ -2413,6 +2416,7 @@
                 },
             };
             let start = StartResponse {
+            effective_processing: None,
                 delivered_audio: None,
         quality_catalog_status: None,
                 display_aware_auto_protocol: Some("route-v1".to_owned()),
@@ -2734,4 +2738,23 @@ async fn passive_vod_owner_loop_retains_dormant_route_and_http_terminal_fences_e
     assert!(matches!(vod_resurrected_before(&fixture.state, &id, Instant::now() + Duration::from_secs(2)).await, VodResurrection::Ended));
     loop_task.abort();
     let _ = loop_task.await;
+}
+
+#[test]
+fn effective_processing_report_is_omitted_and_cannot_be_restored_from_wire() {
+    let mut wire = serde_json::json!({
+        "session_id": "00000000-0000-0000-0000-000000000001",
+        "playlist_url": "/api/v1/hls/test/master.m3u8", "duration_ms": null,
+        "start_seconds": 0.0, "height": 1080, "encoder": "software", "vod": false,
+        "ladder": [], "prior_kbps": null, "delivered_dynamic_range": "hdr10"
+    });
+    let old: StartResponse = serde_json::from_value(wire.clone()).expect("legacy response");
+    assert!(old.effective_processing.is_none());
+    assert!(serde_json::to_value(old).expect("serialize").get("effective_processing").is_none());
+    wire["effective_processing"] = serde_json::json!({
+        "generation": "00000000-0000-0000-0000-000000000001", "hdr10_enhanced": true,
+        "fel_contributed": true, "applied_operations": ["RpuColorConversion"]
+    });
+    let retained: StartResponse = serde_json::from_value(wire).expect("additive response");
+    assert!(retained.effective_processing.is_none(), "durable JSON cannot grant current authority");
 }

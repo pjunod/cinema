@@ -3667,6 +3667,7 @@ async fn create_with_purpose_inner(
         None
     };
     let response = StartResponse {
+        effective_processing: None,
         delivered_audio: info.audio_delivery.clone(),
         display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
         quality_candidate_id: request
@@ -5395,6 +5396,7 @@ impl PreparedSourcePlayback {
             info.playlist_url.clone()
         };
         Ok(StartResponse {
+            effective_processing: None,
             delivered_audio: info.audio_delivery.clone(),
             measured_candidate_outputs: None,
             quality_catalog_status: self.resolved.quality_catalog.as_ref().map(

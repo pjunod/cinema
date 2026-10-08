@@ -1203,6 +1203,7 @@ mod tests {
 
     fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
         serde_json::to_string(&crate::http::hls::StartResponse {
+            effective_processing: None,
             delivered_audio: None,
             quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),

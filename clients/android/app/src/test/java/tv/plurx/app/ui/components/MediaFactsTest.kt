@@ -12,6 +12,32 @@ import tv.plurx.app.player.renderedRange
 
 class MediaFactsTest {
     @Test
+    fun hdr10EnhancedRequiresCurrentReportAndKeepsFelDetailSeparate() {
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val report = tv.plurx.app.data.EffectiveProcessingReport(generation, true, true,
+            listOf("PolynomialReshape", "RpuColorConversion"))
+        val file = MediaFileDto(id = 1, filename = "fixture.mkv", hdr = "dolby_vision", hdr_format = "Dolby Vision Profile 7")
+        fun fact(value: tv.plurx.app.data.EffectiveProcessingReport?, active: String?, delivered: String = "hdr10") =
+            playerMediaFacts(file, null, delivered = delivered, rendered = delivered,
+                effectiveProcessing = value, activeGeneration = active).first { it.kind == MediaFactKind.DynamicRange }
+        assertEquals("HDR10-E", fact(report, generation).activeLabel)
+        org.junit.Assert.assertTrue(fact(report, generation).accessibilityLabel.contains("FEL used: yes"))
+        assertEquals("HDR10-E", fact(report.copy(felContributed = false), generation).activeLabel)
+        assertEquals("HDR10", fact(null, generation).activeLabel)
+        assertEquals("HDR10", fact(report, "22222222-2222-4222-8222-222222222222").activeLabel)
+        assertNull(fact(report, generation, "dolby_vision").activeLabel)
+    }
+
+    @Test
+    fun malformedOrOmittedAdditiveReportCannotAwardEnhancement() {
+        val generation = "11111111-1111-4111-8111-111111111111"
+        for (text in listOf("true", "{\"generation\":\"$generation\",\"hdr10_enhanced\":\"true\",\"fel_contributed\":false,\"applied_operations\":[\"RpuColorConversion\"]}")) {
+            val report = tv.plurx.app.data.EffectiveProcessingReport.fromJson(kotlinx.serialization.json.Json.parseToJsonElement(text))
+            org.junit.Assert.assertFalse(report?.matches(generation, "hdr10") ?: false)
+        }
+    }
+
+    @Test
     fun portraitDimensionsUseTheShortEdgeAndCompactPlaybackFacts() {
         val file = MediaFileDto(
             id = 1,

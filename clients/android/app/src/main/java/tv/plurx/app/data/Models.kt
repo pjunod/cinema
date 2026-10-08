@@ -694,8 +694,44 @@ data class DolbyVisionFactsDto(
     val rpu_present: Boolean? = null,
 )
 
+data class EffectiveProcessingReport(
+    val generation: String,
+    val hdr10Enhanced: Boolean,
+    val felContributed: Boolean,
+    val appliedOperations: List<String>,
+) {
+    fun matches(active: String?, delivered: String?): Boolean = hdr10Enhanced && delivered == "hdr10" &&
+        active == generation && tv.plurx.app.player.PlaybackControl.isUuid(generation) &&
+        appliedOperations.isNotEmpty() && appliedOperations.size <= 16 &&
+        appliedOperations.all { it.isNotEmpty() && it.length <= 64 }
+
+    val detail: String get() {
+        val names = mapOf("PolynomialReshape" to "RPU polynomial mapping", "MmrReshape" to "RPU MMR mapping",
+            "RpuColorConversion" to "RPU color conversion", "TargetMapping" to "target mapping",
+            "CreativeTrimApplication" to "creative trims")
+        val metadata = appliedOperations.mapNotNull { names[it] }.joinToString(", ")
+        return "Dolby Vision–enhanced HDR10 · FEL used: ${if (felContributed) "yes" else "no"}" +
+            if (metadata.isEmpty()) "" else " · Applied: $metadata"
+    }
+
+    companion object {
+        fun fromJson(value: kotlinx.serialization.json.JsonElement?): EffectiveProcessingReport? {
+            val objectValue = value as? kotlinx.serialization.json.JsonObject ?: return null
+            fun string(key: String): String? = (objectValue[key] as? kotlinx.serialization.json.JsonPrimitive)
+                ?.takeIf { it.isString }?.content
+            fun boolean(key: String): Boolean? = (objectValue[key] as? kotlinx.serialization.json.JsonPrimitive)
+                ?.takeIf { !it.isString }?.content?.let { when (it) { "true" -> true; "false" -> false; else -> null } }
+            val operations = objectValue["applied_operations"] as? kotlinx.serialization.json.JsonArray ?: return null
+            val names = operations.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { item -> item.isString }?.content ?: return null }
+            return EffectiveProcessingReport(string("generation") ?: return null, boolean("hdr10_enhanced") ?: return null,
+                boolean("fel_contributed") ?: return null, names)
+        }
+    }
+}
+
 @Serializable
 data class HlsStart(
+    val effective_processing: kotlinx.serialization.json.JsonElement? = null,
     val session_id: String,
     val playlist_url: String,
     /**
