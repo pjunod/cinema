@@ -60,3 +60,22 @@ Validation on the documentation tree:
 
 No quality harness, feature code, full FEL output or enhanced P8.1 output was
 built in this documentation task. There is no measured FEL quality gain yet.
+
+
+## 4. Expanded documentation review — 2026-10-08
+
+The user subsequently requested a committed/merged PR, a central project
+backlog, the HDR10-E badge, and existing-tool reuse investigation for both
+output routes. The same adversarial reviewer inspected the expanded scope
+without running tests or approving implementation.
+
+The added P2 finding was a stale Mac landing claim in backlog A01. Main already
+contains #882 (`339abbced`); A01 now records that landing and preserves the
+actual package/runtime/physical limits, explicit Windows waiver and absence
+of a full-green promotion claim. The old PR #870 status is superseded.
+
+The reviewer found the remaining backlog categories/maintenance, badge receipt
+and generation rules, and tooling reuse boundaries suitable for a documentation
+merge. Local link/index inspection and diff hygiene cover the additions; no
+unit tests were run for this docs update. Earlier test results in section 3
+remain historical results from before the user's no-unit-test instruction.

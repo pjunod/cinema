@@ -237,6 +237,7 @@ Windows, systemd, launchd, Unraid, storage, GPU access, and ports. The
 | Connect an application | [API](docs/API.md) · [Integrations](docs/INTEGRATION.md) |
 | Understand authentication and exposure | [Security](docs/SECURITY.md) |
 | Contribute and validate a change | [Development pipeline](docs/DEVELOPMENT_PIPELINE.md) · [Validation](docs/VALIDATION.md) |
+| Find designed projects and unfinished work | [Project backlog](docs/features/PROJECT-BACKLOG.md) |
 | Find plans, delivery status, or test evidence | [Documentation index](docs/README.md) |
 | Follow releases and changes | [Releasing](docs/RELEASING.md) · [Changelog](CHANGELOG.md) |
 

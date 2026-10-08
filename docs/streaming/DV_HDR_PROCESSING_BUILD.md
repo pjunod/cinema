@@ -10,6 +10,10 @@ resolved objections. This document tells the builder what to inspect, build,
 prove and stop claiming when a capability is absent. No commands below imply
 that a new renderer or quality harness already exists.
 
+The [M0 reuse findings](DV_HDR_PROCESSING_FEASIBILITY.md) record existing
+implementations worth reusing for both destinations and their unresolved
+correctness, packaging and reference boundaries.
+
 ## 1. Start here: scope, compiler and integration
 
 Build two independently qualified playback improvements: DV-aware HDR10 and
@@ -245,6 +249,17 @@ quality results and physical playback validation. Graduate each independently
 to Playback when its complete matrix is met; do not move the HDR card merely
 because P8.1 still needs work, or vice versa.
 
+Implement the user-requested **HDR10-E** badge on web, Apple and Android
+quality/playback surfaces, expanding to “Dolby Vision–enhanced HDR10” in
+accessible details/tooltips. Drive it from actual processing receipts for the
+effective generation, not from source metadata, settings, probe availability
+or intended pipeline. Until confirmation, and on base-only fallback, show
+HDR10. Native DV and new P8.1 output retain their DV format labels. The badge
+covers qualified metadata-only or FEL-plus-metadata processing; details must
+separately report FEL contribution and supported metadata levels. Reset it on
+failed/replaced generations and confirm cross-client consistency. Include
+identity-RPU cases: actual application can be valid without changing pixels.
+
 Playback detail reports numeric profile, MEL/FEL/unknown, whether EL actually
 contributed, applied metadata subset, target policy, output format and fallback
 reason. It must not call L1-only mapping “all DV processing.” Reuse existing
@@ -364,7 +379,7 @@ command and `Regression-Test:` anchors in each implementation PR:
 | Output contracts | PQ/BT.2020/Main10/range/static metadata consistency; no leaked DV config in HDR10; P5 and HLG controls cannot be mislabeled |
 | Timing/lifecycle | B frames/VFR/seek/audio/subtitles; bounded queues; cancellation and child cleanup; pre/post-publication failure restart; no retry cycle |
 | Identity/fleet | Old cache isolation; changed target/backend invalidation; worker-specific capabilities; stale proof and mixed-version fleet; source mutation fence |
-| Product UI | Developer readiness stays advisory; graduation entries; requested/effective details; existing `tests/web/settings-sections.test.js` contracts |
+| Product UI | HDR10-E only after actual DV-processing receipt; base fallback/unconfirmed stays HDR10; native DV unchanged; reset on generation changes; identity-RPU and FEL/no-FEL details; Developer readiness stays advisory; graduation entries; requested/effective details; existing `tests/web/settings-sections.test.js` contracts |
 | Quality/performance | Held-out corpus at matched rates, negative controls, physical HDR and DV playback, concurrent workload and resource budget |
 
 Use separate task ownership, but integrate serially where paths overlap:
@@ -375,7 +390,7 @@ Use separate task ownership, but integrate serially where paths overlap:
 | M1 contracts | Core playback, decode, encoder, recipe types and unit tests | M0 capability boundaries |
 | M2 processing | Pipeline, daemon producer/manager lifecycle, adapter and timing tests | M1; backend proof for each supported operation |
 | M3 routing/cache | Core policy, manager plan/start/publication, HTTP decisions and recipe | M2 end-to-end graph |
-| M4 settings/UI | Store, system/developer HTTP, settings and playback detail scripts | M1 contracts, M3 effective-route reporting |
+| M4 settings/UI | Store, system/developer HTTP, web settings/detail scripts, Apple and Android playback/quality presentation | M1 contracts, M3 effective-route reporting |
 | M5 benchmark | Offline harness, metrics fixtures, corpus manifests and receipts | M2/M3 functional outputs; reference selection in M0 |
 | M6 qualification | Regression catalog, packaging, operations docs and rollout evidence | All routes proposed for release pass their own gates |
 

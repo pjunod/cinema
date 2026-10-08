@@ -12,6 +12,10 @@ tracks adversarial findings. Existing behavior is documented in
 [DV delivery findings](DV-DELIVERY-FINDINGS.md) and
 [permanent conversion status](M5B_STATUS.md).
 
+The [M0 reuse findings](DV_HDR_PROCESSING_FEASIBILITY.md) record existing
+implementations worth reusing for both destinations and their unresolved
+correctness, packaging and reference boundaries.
+
 ## 1. Decisions and scope
 
 Prefer the original picture information, including Profile 7 full enhancement
@@ -152,6 +156,26 @@ Put both controls in Settings → Developer while incomplete, with a
 destination. Readiness is advisory: never disable the switch, reject Save or
 rewrite a saved choice because one worker cannot honor it. Runtime capability
 checks select safe fallbacks without acting as a hidden feature gate.
+
+**Badge decision, 2026-10-08:** use **HDR10-E** for qualified Dolby
+Vision-enhanced HDR10 output. Its tooltip/accessibility expansion is
+“Dolby Vision–enhanced HDR10.” This is a Plurx processing label, not a new
+HDR transport standard or native Dolby Vision signaling. Display it only when
+the effective generation's receipt confirms supported DV processing was
+actually applied. Source tags, a saved preference, selected arguments or a
+queued plan are insufficient. Until confirmed, show the ordinary delivered
+format. Base-only fallback remains **HDR10**; native DV remains **Dolby
+Vision**; enhanced P8.1 remains a DV output with separate processing detail.
+
+Both qualified base/RPU and FEL/RPU HDR paths may carry HDR10-E, but the
+badge must not imply FEL reconstruction or support for every creative trim.
+Details explicitly name the applied metadata subset and whether FEL was used,
+dropped or unavailable. Clear/recompute the badge on generation replacement,
+seek/restart, failure and fallback so a stale enhanced badge cannot survive a
+base-only successor. Apply one shared semantic contract across web, Apple and
+Android quality/playback surfaces; platform layout may shorten only the
+presentation, not change its meaning. Track this in the
+[project backlog](../features/PROJECT-BACKLOG.md).
 
 Playback details must distinguish source, applied processing and output:
 “Source: DV P7 FEL; processing: FEL reconstructed, supported RPU mapping;

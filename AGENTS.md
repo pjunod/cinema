@@ -19,6 +19,11 @@ needs a row on that index **in the same commit**;
 `tests/operations/test_docs_index.py` fails the build otherwise, and the same
 test refuses any reference in the repo to a `docs/` path that does not exist.
 
+Substantial proposals and unfinished projects also need a row in
+[the project backlog](docs/features/PROJECT-BACKLOG.md). Update that row with
+the canonical project ledger when work is claimed, built, qualified, deferred
+or superseded; distinguish missing implementation from missing acceptance.
+
 ## Where the web app is
 
 `crates/plurxd/src/web/index.html` is a 97-line shell of markup and tags. The
