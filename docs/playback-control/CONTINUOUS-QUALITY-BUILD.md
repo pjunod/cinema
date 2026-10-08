@@ -8084,3 +8084,30 @@ final adversarial review here, then preserve the requested Fable review pause.
 After release of that pause, send the exact candidate, regression fields,
 receipts and independent-clone constraint to that session. Do not merge or
 run final units here. The work remains a draft and is not ready for handoff.
+
+### 10.265 Build-226 device measurements (2026-10-08)
+
+The fresh TV runtime again stops before any quality request with CoreMedia
+−66681, after six SDK probes. At item failure it reports one output and a
+48 kHz audio sample rate. This proves route metadata exists, not that physical
+audio is working. The isolated UI case fails and its own-app attachments and
+`tv-0e778892d-audio-route-diagnostic226.json` preserve that failure.
+
+The phone's two-request case gives each request thirty seconds of observation.
+It reaches three sessions (720p, 1080p, 720p) within one viewer attempt and
+records thirty-seven SDK probes. The first control rebind is accepted, but
+`425 owner_transition` follows; no second accepted rebind is measured. Preserve
+`ios-226-presentation-control-sdk1.json`. Longer observation therefore does
+not yet qualify repeated settlement. A bounded proxy-only refusal classifier
+is prepared to distinguish publication/lease, missing worker and admission
+authority changes without modifying shipping code or retaining credentials.
+No fast-lane unit test runs; the designated merger owns that phase after
+qualification, adversarial review and release of the Fable pause.
+
+The one-handoff proxy classifier finishes with twenty SDK probes and records
+two `publication-or-lease` responses. No worker-unavailable or changed-admission
+classification is recorded in that run. It preserves
+`ios-226-control-refusal-{sdk1,context1}.json`. This narrows the first successor's
+425 source; it does not establish a second prepared commit or physical display
+continuity. The exact native helper and daemon retire through their guard;
+private control copies and launch arguments are cleared.
