@@ -478,3 +478,81 @@ They do not establish mastered-content coverage, production performance,
 client presentation, or qualification on another Mac. Runtime observation and
 immutable production recipe integration remain separate from this standalone
 package evidence.
+
+## 12. Independently observed host-memory HEVC graphs
+
+[The HEVC host archive](evidence/macos-video-20261008/hevc-host-evidence.tar.gz)
+retains 27 driver, command-receipt, frame-probe and pixel-observation files
+(7,931 compressed bytes; SHA-256
+`90c2b937b1ea48c42814c2fd30f78a68051595d0f76a151f56ab67efca561ea6`).
+Its manifest verifies each retained file and records its original hash before
+task-path normalization. The exact baseline Jellyfin binary hashes and all
+21 bounded commands are preserved. This supports the separately observed
+host graphs introduced by `432a617c2`; it is not evidence for the final daemon.
+
+Six tuples cover software or VideoToolbox system-memory decode with CPU
+scaling and required HEVC VideoToolbox encoding, each for SDR 8-bit, SDR
+10-bit and HDR10. Twelve decoded frames per tuple have the promised Main or
+Main10 profile, `hvc1` sample entry, canvas, rational cadence, range and color
+facts. Gray patches remain within six 8-bit code values of the source;
+HDR10 mastering/content-light metadata matches across the decoded frames.
+These observations do not borrow native Metal graph acceptance and remain
+usable when the native-processing preference is off. They establish synthetic
+correctness under concurrent compilation, not throughput, energy use or
+client presentation.
+
+## 13. Combined package: moving fields and explicit-SAR P5
+
+[The combined correctness archive](evidence/macos-video-20261008/combined-package-correctness.tar.gz)
+retains 90 command, driver, probe and observation files (44,477 compressed
+bytes; SHA-256
+`7e256e6b1e87927d65a0026a09c61d56cdc369789760aa12da1aa1a57257a966`).
+Every retained member has original and normalized hashes in its manifest.
+It binds positive controls to FFmpeg
+`80416af20a3fa4055b0460cda5deb5a2b59da6abf0e760d98f282e70a09b6708`
+and negative BWDIF controls to the earlier `85b1ab41…` binary. Binary encoded
+media and raw planes are excluded; their hashes and sampled measurements are
+retained. These bounded experiments ran during compilation and establish
+correctness, not performance.
+
+### 13.1 BWDIF parameter-buffer repair
+
+The pinned native filter supplied its parameters at Metal buffer index 4;
+the shader read buffer index 0. Texture indices 0–3 occupy another namespace.
+Correcting that binding preserves the intended algorithm and field association.
+Static gray/cadence receipts from the older binary remain execution evidence,
+but are explicitly insufficient motion evidence.
+
+Eight raw comparisons cover H.264/MPEG-2, TFF/BFF and frame/field output.
+H.264 maximum CPU/native differences are one code value for frame output and
+two for field output, with mean differences about 0.001. MPEG-2 maxima are
+five to seven codes with means about 0.004. Twelve encoded controls then
+verify the actual output: eight software-decode/upload Live graphs and four
+H.264 VT-surface file graphs. Moving white markers retain the correct field
+association and the expected 12/24-frame cadence. Four targeted controls on
+the old package fail the same marker acceptance threshold despite successful
+encoding. VT surfaces in these controls alone do not establish physical
+hardware decoding.
+
+### 13.2 Square-pixel P5 controls
+
+The synthetic generator now explicitly records SAR 1:1, verified in the
+stream and all 24 decoded frames. Production admission requires known square
+pixels; the experiment must meet that same contract. Regeneration changes
+container/source hashes but preserves every decoded plane for both fresh and
+varying-DM sources: 4,147,200 bytes each, byte-identical to the earlier corpus.
+
+The corrected combined package passes 24 selected cases across all four
+strict decoder/renderer graphs: fresh metadata, varying presentation-bound DM,
+valid seek, renderer metadata removal, missing midstream RPU and omitted
+first color metadata. Required-hardware raw-plane equality, same-CPU-renderer
+equality and RPU pixel influence controls pass again. This is a targeted
+refresh, not a claim that all 48 historical cases and eight flush cases were
+rerun on the new binary. Those earlier receipts retain their exact hashes.
+
+The manager also independently repeated the five-second AC-4 candidate decode
+on this combined package. [Its receipt](evidence/macos-video-20261008/ac4-combined-package-preservation.json)
+records byte-identical PCM against the retained original Jellyfin reference:
+239,999 stereo frames at 48 kHz, SHA-256
+`28e6cfb582fa02e02824583e4a4a1d12e95d1ee5a3b67725c718959c697558c7`.
+The public source sample is referenced by URL/hash and is not redistributed.
